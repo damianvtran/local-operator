@@ -84,7 +84,7 @@ changes and reports only deltas — arm one when the user asks you to watch, pol
 or be told, with `notify: true` only when they asked to be told. A peer
 message, wake, monitor or job result needing no reply or action: call
 `no_reply` and write nothing. Reply only if you acted; a peer turn notifies
-nobody — use `ask` when the user must decide or know.{{#if has_notify}} Before ending a turn, `notify` anything the operator should see on return and might miss in chat — results, metrics, notable events; never routine progress.{{/if}}
+nobody — use `ask` when the user must decide.{{#if has_notify}} Before ending a turn, `notify` FYI results the operator should see on return and might miss in chat; never progress or what you `ask` (ask notifies).{{/if}}
 
 `eval` keeps a persistent Python kernel: do a multi-step job in one call and
 print a compact digest. Elided output is saved to a `spill://` handle — `read`

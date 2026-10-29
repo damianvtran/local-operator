@@ -94,7 +94,7 @@ from local_operator.operator.trust import (
     AnchorLoad,
     OperatorAnchor,
     anchor_path,
-    device_is_revoked,
+    device_is_admitted,
 )
 from local_operator.paths import config_dir
 from local_operator.session.attachments import AttachmentStore
@@ -1411,6 +1411,13 @@ _ANCHOR_REFRESH_S = ANCHOR_REFRESH_S
 #: How long a verified device certificate is remembered. The certificate is
 #: checked lazily and per certificate string; a TTL rather than a permanent cache
 #: because the anchor's revocation list can change under a long-running session.
+#:
+#: IT DOES NOT BOUND A REFUSAL. Everything the anchor decides in the ADMITTING
+#: direction — a phone the human has just confirmed — has to become visible inside
+#: ``ANCHOR_REFRESH_S``, so a cached ``point=None`` expires with that window rather
+#: than with this one (``_device_cert_point``); otherwise the confirmation copy tells
+#: a human to do something the runtime then ignores for five minutes (agent review
+#: round 1, m2).
 _DEVICE_CERT_TTL_S = 300.0
 
 #: Bound on the device-certificate cache. Keyed by an attacker-chosen string, so
@@ -2252,9 +2259,13 @@ class RuntimeServer:
         )
         #: Verified device certificates, by certificate string, with a TTL — see
         #: ``_device_cert_point`` for why this is lazy, bounded and short-lived.
-        #: ``(point, deadline, device_id)``: the id is kept so REVOCATION can be
-        #: re-checked on a cache hit — see the method, and R6-1.
-        self._device_certs: dict[str, tuple[bytes | None, float, str]] = {}
+        #: ``(point, deadline, device_id, device_key)``: the id AND the key the
+        #: certificate carries are kept so ADMISSION — which is revocation plus the
+        #: id-is-the-key binding plus the anchor's list — can be re-checked on a
+        #: cache hit. What is cached is the expensive half (the signature and the
+        #: expiry, which cannot change); whether the anchor still admits the device
+        #: can, because it is the operator's own action.
+        self._device_certs: dict[str, tuple[bytes | None, float, str, bytes]] = {}
         #: Every unspent operator challenge in this runtime, by challenge string,
         #: with its deadline — the AGGREGATE bound the per-connection maximum
         #: cannot be (see ``_MAX_LIVE_CHALLENGES``). Pruned on mint and on
@@ -6055,6 +6066,18 @@ class RuntimeServer:
         lifetime of a session that can run for days. The cache is keyed by the
         certificate string, so a different certificate is always verified rather
         than matched against a stale answer.
+
+        TWO WINDOWS, ONE ENTRY. What the anchor decides survives the entry for
+        ``ANCHOR_REFRESH_S`` at most: an ADMITTED point is re-checked against the
+        anchor on every use (so a revocation or a de-listing made after that entry was
+        filled takes effect within one anchor window, not only on a restart — the
+        anchor it is checked against is the caller's snapshot, refreshed every
+        ``ANCHOR_REFRESH_S``), and a REFUSAL expires after the same window rather than after
+        ``_DEVICE_CERT_TTL_S``, because listing is the transition a HUMAN causes and
+        the phone has to be admitted within the time the confirming copy promises
+        (agent review round 1, m2). Only the expensive half — the operator signature
+        and the expiry, which cannot change — is reused for the full certificate
+        TTL.
         """
         if not isinstance(certificate, str) or not certificate:
             return None
@@ -6063,32 +6086,51 @@ class RuntimeServer:
         cached = self._device_certs.get(certificate)
         now = time.monotonic()
         if cached is not None and cached[1] > now:
-            # REVOCATION IS RE-CHECKED ON EVERY USE, even on a cache hit (agent
+            # ADMISSION IS RE-CHECKED ON EVERY USE, even on a cache hit (agent
             # review round 6, R6-1 — the second half of it, and the half the
             # certificate TTL alone does not cover). What is cached is the
             # EXPENSIVE half: the signature and expiry verification, which cannot
-            # change. Whether the certificate's device is REVOKED can, and it is
-            # the operator's own action — so it is read from the anchor every time
+            # change. Whether the anchor ADMITS the certificate's device can, and it
+            # is the operator's own action — so it is read from the anchor every time
             # rather than frozen for `_DEVICE_CERT_TTL_S`. Without this, a device
-            # revoked while a runtime was running kept acting for up to five
-            # minutes after the anchor re-read that was meant to stop it.
-            point, _deadline, device_id = cached
+            # revoked (or de-listed) while a runtime was running kept acting for up
+            # to five minutes after the anchor re-read that was meant to stop it.
+            point, _deadline, device_id, device_key = cached
             if point is None:
                 return None
-            return None if device_is_revoked(anchor, device_id) else point
+            return None if not device_is_admitted(anchor, device_id, device_key) else point
         parsed = operator_verify.read_device_cert(certificate)
         point = operator_verify.verify_device_cert(
             certificate, operator_spki=anchor.spki, now=int(time.time()), parsed=parsed
         )
         device_id = parsed.device_id if parsed is not None else ""
+        device_key = parsed.spki if parsed is not None else b""
         if point is not None:
-            # A certificate that names a REVOKED device is refused here, at the
-            # point its identity is known: ``verify_device_cert`` deliberately
-            # knows nothing about revocation (it checks a signature and an
-            # expiry), and the revocation list is a property of the anchor.
-            if device_is_revoked(anchor, device_id):
+            # A certificate that does not ADMIT its device is refused here, at the
+            # point its identity is known: ``verify_device_cert`` deliberately knows
+            # nothing about admission (it checks a signature and an expiry), and
+            # whether the anchor lists — or has revoked — this device is a property
+            # of the anchor, while whether the declared id is the KEY's id is a
+            # property of the statement the signature just covered.
+            if not device_is_admitted(anchor, device_id, device_key):
                 point = None
-        self._device_certs[certificate] = (point, now + _DEVICE_CERT_TTL_S, device_id)
+        deadline = now + (
+            _DEVICE_CERT_TTL_S
+            if point is not None
+            # A REFUSAL IS CACHED FOR THE ANCHOR WINDOW, NOT THE CERTIFICATE TTL
+            # (agent review round 1, m2). What was cached as "this certificate is
+            # refused" was safe while the only anchor-driven transition was
+            # admit -> revoked; listing introduced the REVERSE, and the human's own
+            # gesture is what causes it. Frozen for five minutes, a phone the person
+            # had just confirmed kept being refused with the very copy telling them
+            # to confirm it — against the split's "accepted within 30 s" cell
+            # (``ANCHOR_REFRESH_S``). The two directions now cost their own
+            # window: a refusal expires with the anchor re-read it depends on, a
+            # verified point keeps the certificate TTL, because re-verifying it on
+            # every frame would buy nothing (a signature does not become valid).
+            else min(_DEVICE_CERT_TTL_S, _ANCHOR_REFRESH_S)
+        )
+        self._device_certs[certificate] = (point, deadline, device_id, device_key)
         if len(self._device_certs) > _MAX_CACHED_DEVICE_CERTS:
             # Bounded: a client can present a new certificate string on every
             # frame, and an unbounded cache keyed by attacker-chosen strings is a

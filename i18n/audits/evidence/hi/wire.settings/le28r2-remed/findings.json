@@ -1,0 +1,57 @@
+{
+  "schema": 1,
+  "audit_id": "le28r2-remed",
+  "locale": "hi",
+  "namespace": "wire.settings",
+  "audit_date": "2026-10-28",
+  "scope": "delta: the corrected keys only, plus their direct sentence",
+  "remediation_commit": "4d38a1d4b8e9a36fa0a38f4833ecf86263da45db",
+  "parent_revision": "9495f8a6c3bf2b5438ef5c33d7274cf519435dda",
+  "previous_target_sha256": "01dd65f601e84c69728cf6104609f3e5487bf7026579c5fa5c11026d487286f7",
+  "target_sha256": "c99c7f088fe7b836f7610fb67215ba9701712d6ffd886d38dbe15cce52f42155",
+  "en_sha256": "a31ff23241581dddb24f3cd2b93444a408734bbcb0957b0068a97806bf7c36d3",
+  "key_count_in_namespace": 820,
+  "keys_reaudited": 2,
+  "routed_receipt": {
+    "path": "local_operator/i18n/catalogues/hi/wire.settings.json",
+    "session": "c754bf63ab2a",
+    "ts": "2026-10-29T00:24:38Z",
+    "tool": "read_public_copy",
+    "policy": "docs/security/redaction-policy.md",
+    "chars": 83451,
+    "sha256": "e40740d559baffb4c9b8d2e11e9ee54f6a404f5301f9bafe5e6b23f966786825"
+  },
+  "routed_receipt_digest_recomputed": "e40740d559baffb4c9b8d2e11e9ee54f6a404f5301f9bafe5e6b23f966786825",
+  "findings": [
+    {
+      "key": "wire.settings.proactive_patience_episode_ttl_ms.help",
+      "severity_raised": "major",
+      "disposition": "fixed",
+      "resolved": true,
+      "new_value": "एक चक्र की कड़ी सीमा, इंतज़ार चाहे कैसे भी तय हुए हों (मिलीसेकंड; 7200000 = 2 h)। इसके बाद आने वाली जागृति चुपचाप बंद हो जाती है।",
+      "en": "Hard stop for one cycle however the waits were sized (milliseconds; 7200000 = 2 h). A fire past it retires silently.",
+      "note": "wake → «जागृति» (glossary + hi guide); feminine agreement with the feminine noun."
+    },
+    {
+      "key": "wire.settings.shell_environment_exclude.help",
+      "severity_raised": "minor",
+      "disposition": "fixed",
+      "resolved": true,
+      "new_value": "खाली = कुछ नहीं हटाया जाता। ऐसे नाम जो एजेंट के चलाए कमांड को किसी भी मोड में कभी नहीं दिए जाते — सत्र क्रेडेंशियल स्टोर के अपने इंजेक्शन समेत, यानी किसी वेरिएबल को सीधे मना करने का यही तरीक़ा है। सिर्फ़ bash और eval की चाइल्ड प्रोसेस पर लागू; MCP सर्वर और हार्नेस की अपनी प्रक्रियाएँ इसके दायरे में नहीं आतीं।",
+      "en": "Empty = nothing removed. Names never handed to a command the agent runs, in either mode — including the session credential store's own injections, so this is how a variable is denied outright. Covers the bash and eval children only; MCP servers and the harness's own processes are not governed by it.",
+      "note": "child processes named as processes; the abandoned «चिल्ड्रन» transliteration is gone."
+    }
+  ],
+  "verdict": "PASS",
+  "auditor": {
+    "agent": "translation-reviewer (independent; did not translate)",
+    "session": "bc5209588225",
+    "models": "anthropic/claude-sonnet-5-5 for the original wire.settings audits; openai/gpt-6-astra for reconciliation and packaging; provider fallbacks disclosed in the pair record",
+    "independence": "The remediation was authored in a separate translator session (c57356a6dc11 lane); this audit only judged the resulting bytes."
+  },
+  "limitations": [
+    "Delta scope only: the 809 unchanged keys keep their le28r2 judgement.",
+    "No native-speaker certification; Hindi idiom would need one.",
+    "Scalar text/ICU checks, not a rendered frame."
+  ]
+}

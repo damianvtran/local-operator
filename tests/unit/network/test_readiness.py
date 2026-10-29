@@ -1969,8 +1969,13 @@ def _composed_model_credential_row(
     provider: str,
     *,
     peer_holds: bool = False,
+    framed: bool = False,
 ) -> dict[str, Any]:
-    """Compose one model row from real network, placement and AuthStore state."""
+    """Compose one model row from real network, placement and AuthStore state.
+
+    ``framed`` publishes the current peer's ``credential_required`` fact; without
+    it the facts are an older peer's, which must keep the legacy sentences.
+    """
     from local_operator.network import identity, relay, store, types
     from local_operator.network.credentials import placement as placement_mod
     from local_operator.providers.auth_store import AuthStore
@@ -2046,6 +2051,7 @@ def _composed_model_credential_row(
             "model_name": "synthetic-model",
             "resolved": True,
             "reason": "",
+            **({"credential_required": True} if framed else {}),
         },
     )
     facts = readiness.collect_peer_facts(peer_root, home=peer_root)
@@ -2103,6 +2109,102 @@ def test_model_credential_healthy_peer_is_unchanged(
         "ok  readiness model_credential cloud-node-1: "
         "cloud-node-1 serves synthetic-provider from its own login"
     ]
+
+
+# ---------------------------------------------------------------------------
+# The DEFAULT model, framed as the create preflight will meet it
+# ---------------------------------------------------------------------------
+
+
+def test_an_unservable_default_names_the_default_and_the_create_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The live node-2 shape: default radient, the peer not among radient's holders.
+
+    The create preflight refuses ``model_credential_missing`` here; the row must
+    say THAT (the default, and a create without --model refused), keep the
+    holder fact, and remedy with a model choice -- never a share, never
+    "declined" (no decline is persisted to read). Composed from real network,
+    placement and AuthStore state; only the peer's default pair is pinned.
+    """
+    for cell in ("legacy", "framed"):
+        (tmp_path / cell).mkdir()
+    legacy = _composed_model_credential_row(tmp_path / "legacy", monkeypatch, "radient")
+    row = _composed_model_credential_row(tmp_path / "framed", monkeypatch, "radient", framed=True)
+
+    assert row["ok"] is False and row["code"] == readiness.CODE_NOT_SHARED
+    assert row["detail"] == (
+        "cloud-node-1's default model radient/synthetic-model cannot be served "
+        f"({legacy['detail']}); a create there without --model is refused"
+    )
+    assert row["remedies"] == [
+        "set cloud-node-1's default to a model it holds (`/model default` in its window), "
+        "or create with --model <provider>/<model-id> naming a provider cloud-node-1 holds instead"
+    ]
+    rendered = "\n".join(readiness.render_check_lines([row]))
+    for forbidden in ("credential share", "share it with", "as a holder", "declin"):
+        assert forbidden not in rendered
+    # An older peer (no ``credential_required``) keeps today's sentence exactly.
+    assert legacy["detail"].startswith("radient is shared in this network")
+    assert legacy["remedies"] == [
+        "create with --model <provider>/<model-id> naming a provider cloud-node-1 holds instead"
+    ]
+
+
+def test_a_servable_default_is_unchanged_when_framed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    row = _composed_model_credential_row(
+        tmp_path, monkeypatch, "deepseek", peer_holds=True, framed=True
+    )
+    assert row["ok"] is True
+    assert row["detail"] == "cloud-node-1 serves deepseek from its own login"
+
+
+def _default_root(root: Path, hosting: str, model_name: str) -> Path:
+    root.mkdir(parents=True)
+    (root / "config.yml").write_text(
+        f'version: "0.0.0"\nvalues:\n  hosting: {hosting}\n  model_name: {model_name}\n',
+        encoding="utf-8",
+    )
+    return root
+
+
+def test_a_keyless_default_is_ready_because_create_needs_no_credential(tmp_path: Path) -> None:
+    """Ready used to FAIL a local-server default the create preflight accepts."""
+    from local_operator.network import relay
+    from local_operator.providers import registry
+
+    keyless = next(
+        d.id for d in registry.PROVIDER_REGISTRY if d.allows_missing_api_key and d.wire != "mock"
+    )
+    root = _default_root(tmp_path / "peer", keyless, "local-model")
+    before = sorted(p.name for p in root.iterdir())
+    facts = readiness.collect_peer_facts(root, home=root)
+    assert sorted(p.name for p in root.iterdir()) == before  # a report writes nothing
+    assert facts["default_model"]["credential_required"] is False
+    row = readiness.model_credential_row(
+        _member(), facts, viewer=_FakeViewer(rows=[]), peer_label="cloud-node-1"
+    )
+    assert row["ok"] is True
+    assert (
+        row["detail"] == f"cloud-node-1's default model {keyless}/local-model needs no credential"
+    )
+    # The prediction: the create preflight on the same root does not refuse.
+    assert relay._model_credential_refusal(root, None, None) == ""
+
+
+def test_an_unreadable_store_stays_unknown_for_a_framed_default(tmp_path: Path) -> None:
+    """Create's fail-open on "cannot tell" is not proof; the row stays UNKNOWN."""
+    root = _default_root(tmp_path / "peer", "radient", "auto")
+    (root / "auth.db").write_bytes(b"not a database")
+    facts = readiness.collect_peer_facts(root, home=root)
+    assert facts["default_model"]["credential_required"] is True
+    row = readiness.model_credential_row(
+        _member(), facts, viewer=_FakeViewer(rows=[]), peer_label="cloud-node-1"
+    )
+    assert row["ok"] is False and row["code"] == readiness.CODE_UNKNOWN
+    assert "default model" not in row["detail"]
 
 
 def test_a_share_that_has_not_been_pulled_is_not_denied() -> None:
@@ -2964,6 +3066,160 @@ def test_equipment_note_names_failed_mcp_rows_and_nothing_else() -> None:
 # ---------------------------------------------------------------------------
 # Degradation rows and sanitisation
 # ---------------------------------------------------------------------------
+
+
+def test_peer_restart_row_is_unknown_offline_and_uses_only_receiver_evidence() -> None:
+    """Viewer-local grants cannot create either a false pass or a false denial."""
+    own = SimpleNamespace(device_id=VIEWER, active=True, capabilities=["list"])
+    record = SimpleNamespace(
+        network_id="n_restart_grant",
+        self_device_id=VIEWER,
+        self_member=lambda: own,
+    )
+    row = readiness.peer_restart_row(_member(), {}, record=record, peer_label="cloud-node-1")
+    assert row["ok"] is False, row
+    assert row["code"] == readiness.CODE_UNKNOWN, row
+    assert "cannot confirm" in row["detail"], row
+    assert row["source"] == readiness.SOURCE_UNKNOWN, row
+    assert row["remedies"] == [
+        f"if restart is refused, on cloud-node-1, run "
+        f"`lop network member grant n_restart_grant {VIEWER} update`"
+    ]
+    assert readiness.row_state(row) == "warn", row
+    rendered = "\n".join(readiness.render_check_lines([row]))
+    assert "peer_restart" in rendered, rendered
+    assert row["remedies"][0] in rendered, rendered
+
+    no_record = readiness.peer_restart_row(_member(), {}, record=None, peer_label="cloud-node-1")
+    assert no_record["code"] == readiness.CODE_UNKNOWN, no_record
+    assert no_record["source"] == readiness.SOURCE_UNKNOWN, no_record
+    assert "<network> <this-device-id> update" in no_record["remedies"][0]
+
+    def receiver_fact(granted: bool) -> dict[str, Any]:
+        return {
+            "restart_authority": {
+                "network_id": record.network_id,
+                "device_id": VIEWER,
+                "update_granted": granted,
+            }
+        }
+
+    # Counterexample 1: the viewer's local self row says update, but the
+    # receiver explicitly denies it. The receiver must win.
+    own.capabilities.append("update")
+    denied = readiness.peer_restart_row(
+        _member(), receiver_fact(False), record=record, peer_label="cloud-node-1"
+    )
+    assert denied["ok"] is False and denied["code"] == "update_grant_missing", denied
+    assert denied["source"] == readiness.SOURCE_PEER, denied
+    assert denied["remedies"] == [
+        f"on cloud-node-1, run `lop network member grant n_restart_grant {VIEWER} update`"
+    ]
+
+    # Counterexample 2: the viewer lacks its own update row, while the receiver
+    # explicitly grants it. Again only the receiver's evidence matters.
+    own.capabilities.clear()
+    allowed = readiness.peer_restart_row(
+        _member(), receiver_fact(True), record=record, peer_label="cloud-node-1"
+    )
+    assert allowed["ok"] is True, allowed
+    assert allowed["source"] == readiness.SOURCE_PEER, allowed
+    assert allowed["remedies"] == [], allowed
+
+
+def test_net_readiness_tracks_the_same_receiver_grant_as_the_authorizer(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A real receiver-side grant mutation flips readiness and net_restart together."""
+    from local_operator.network import authorizer as authorizer_mod
+    from local_operator.network import identity, relay, store, types
+
+    receiver_root = root / "receiver"
+    viewer_root = root / "viewer"
+    receiver_root.mkdir()
+    viewer_root.mkdir()
+    receiver = identity.mint(receiver_root, name="receiver")
+    viewer = identity.mint(viewer_root, name="viewer")
+    server = relay.RelayServer(
+        root=receiver_root,
+        identity=receiver,
+        settings=relay.NetworkSettings(port=0, listen_address="127.0.0.1"),
+    )
+    record = types.NetworkRecord(
+        network_id="n_receiver_grant",
+        name="receiver-grants",
+        created_by=receiver.device_id,
+        self_device_id=receiver.device_id,
+        self_role="admin",
+        self_capabilities=sorted(types.capabilities_for_role("admin")),
+    )
+    relay.admit(
+        record,
+        device_id=receiver.device_id,
+        public_key=receiver.public_key,
+        name=receiver.name,
+        role="admin",
+        added_by=receiver.device_id,
+        added_via="self",
+        persist=False,
+    )
+    relay.admit(
+        record,
+        device_id=viewer.device_id,
+        public_key=viewer.public_key,
+        name=viewer.name,
+        role="read",
+        added_by=receiver.device_id,
+        added_via="invite",
+        persist=False,
+    )
+    store.save(record, receiver_root)
+    monkeypatch.setattr(readiness, "collect_peer_facts", lambda *a, **k: {})
+    handler = readiness.make_handler(server)
+    link = SimpleNamespace(network_id=record.network_id, device_id=viewer.device_id)
+    viewer_record = SimpleNamespace(
+        network_id=record.network_id,
+        self_device_id=viewer.device_id,
+    )
+
+    def current_row() -> dict[str, Any]:
+        facts = handler(link, {})
+        return readiness.peer_restart_row(
+            _member(receiver.device_id, receiver.name),
+            facts,
+            record=viewer_record,
+            peer_label=receiver.name,
+        )
+
+    def authorizer_allows() -> bool:
+        current = store.load(record.network_id, receiver_root)
+        member = current.member(viewer.device_id)
+        assert member is not None
+        context = types.LinkContext(
+            link_id="receiver-grant-test",
+            device_id=viewer.device_id,
+            instance_id="i_receiver_grant_test",
+            network_id=current.network_id,
+            epoch=current.epoch,
+            capabilities=frozenset(member.capabilities),
+            phase="member",
+        )
+        try:
+            server.authorizer.check(context, {"op": "net_restart"})
+        except authorizer_mod.Refusal:
+            return False
+        return True
+
+    assert current_row()["code"] == "update_grant_missing"
+    assert authorizer_allows() is False
+
+    with store.mutate(record.network_id, receiver_root) as current:
+        relay.set_member_capabilities(current, device_id=viewer.device_id, grant=("update",))
+        store.save(current, receiver_root)
+
+    granted_row = current_row()
+    assert granted_row["ok"] is True, granted_row
+    assert authorizer_allows() is True
 
 
 def test_not_asked_and_too_old_rows_cover_the_checklist() -> None:

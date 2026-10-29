@@ -706,9 +706,12 @@ async def test_cancel_on_a_session_without_the_seam_errors(isolated_config: Path
 
 
 @pytest.mark.asyncio
-async def test_steer_reaches_the_session(isolated_config: Path) -> None:
+async def test_steer_reaches_the_session(isolated_config: Path, tmp_path: Path) -> None:
     """The existing control vocabulary works unchanged over an exec runtime."""
     session = FakeSession()
+    # A steer is spooled for a successor before it is acknowledged, so the
+    # session needs somewhere to write (the same shape the seed tests above use).
+    session.transcript = SimpleNamespace(directory=tmp_path / "session")
     steered: list[str] = []
 
     def _steer(text: str, images: Any = None, **kwargs: Any) -> None:

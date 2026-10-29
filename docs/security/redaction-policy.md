@@ -23,6 +23,7 @@ narrow rule patch, and the class survived both:
 | 2026-10-16, session `03b9caa1027e` | Do not mask key names or package/crate names | PR **#2504** fixed one rule (`client-inline-password` anchoring on a filename stem) | Its own PR body deferred the `credential-assignment` strong-name class and the `is_registerable_component` amplifier as "pre-existing and orthogonal". Both are the class the operator reported. |
 | 2026-10-18, LOH-28, session `aefe6e48b331` | Identifier fields (project key/name, session title/id, agent/team key/name, skill name) must never be masked | PR **#2628** added identifier-span markers at render sites; PR **#2751** released keywords/identifiers from the argument pass and the registration gate | The fix was scoped to *rendered* identifiers and to the argument pass. A raw `key: <slug>` from an unmarked render site, and a store name after `--secret`, still masked. |
 | 2026-10-19, i18n audit, commit `ebb70df3a8` | Read the public catalogue key `wire.slash.credential` to audit its translation | The catalogue was withheld at 51/52 and the commit records "no redaction bypass was used" | There was no sanctioned route for redacted-but-public copy, so an auditor's only options were to work around the control or to stop. |
+| 2026-10-28, mobile i18n, `local-operator-mobile` commit `8b384da` | Read `mobile.home.greeting` from the mobile app's own catalogue to audit the translation | Refused: the app's `src/i18n/` tree had no recognised identity, and the sentence named the **UI** repository, so the mobile checkout's own committed copy was unreachable | The identity list was written when there was one consumer checkout, so the second app arrived as "which repository may serve this path" — answered in §4 by binding each consumer root to the app that ships it, not by a path rule (**#3122**). |
 
 The common cause is not a regex. It is that the policy had **no owner, no prose
 definition and no negative-test table**, so every report became an instance fix
@@ -124,42 +125,61 @@ is **not** a redaction toggle:
 * It opens only these roots: `local_operator/i18n/catalogues/*/*.json`,
   `local_operator/i18n/keys/*.py`,
   `local_operator/mobile/web/src/i18n/keys.gen.ts`,
-  `local_operator/mobile/web/src/i18n/bundled.gen.ts`, and — in the companion
-  UI checkout — `src/i18n/catalogues/*/*.json` and `src/i18n/keys.gen.ts`.
-  The UI repository is a separate checkout, but its committed product copy is
-  equally public, so an auditor must be able to read a catalogue key where it
-  lives. There is no directory rule and no extension rule for either checkout;
-  adding a root is an amendment under §5, and the commit-clean/`HEAD`-blob and
-  audit-record requirements below apply identically in both.
+  `local_operator/mobile/web/src/i18n/bundled.gen.ts`, and — in the consumer
+  checkouts — `src/i18n/catalogues/*/*.json` plus the generated map that app
+  ships: `src/i18n/keys.gen.ts` in the companion UI checkout,
+  `src/i18n/catalogue.gen.ts` in the companion mobile checkout.
+  The consumer repositories are separate checkouts, but their committed product
+  copy is equally public, so an auditor must be able to read a catalogue key
+  where it lives. There is no directory rule and no extension rule for any
+  checkout; adding a root is an amendment under §5, and the commit-clean/`HEAD`-blob
+  and audit-record requirements below apply identically in all three.
 * `repo_root` is an optional per-call checkout selector. Omitted or null keeps
   the session's cwd as the root; selecting a root changes neither session cwd nor
-  configuration/approval state. Explicit roots must be exact checkout or linked
-  worktree roots whose origin names `damianvtran/local-operator` or
-  `damianvtran/local-operator-ui` **on github.com** (SSH or HTTPS), and only that
-  repository's existing path family is exposed. Local origins, other hosts,
-  unrelated repositories and core/UI path-family mismatches refuse. Relative
+  configuration/approval state. An explicit root must be an exact checkout or
+  linked worktree root — not a subdirectory — whose origin names one of the
+  three reviewed identities (`damianvtran/local-operator`,
+  `damianvtran/local-operator-ui`, `damianvtran/local-operator-mobile`) by the
+  same last-two-path-components rule the per-root gate below uses: **one notion
+  of "our repository", never a second one that can disagree with it**. Relative
   selectors resolve against the session cwd, never the process cwd. The selector
-  chooses where to read and grants no access: it is not a permission.
-* A refusal is `refused: <code>` followed by one JSON line of technical repair
-  fields (the accepted repositories and their path families, plus the one
-  requirement that failed: the checkout that was found against the one the path
-  needs, the path or driver at fault, the confinement root, the pinned commit).
-  The same object is in the result `details`, but providers never see
-  `details`, so the text line is the model's only copy. The prose explaining the
-  fields lives in the `repo_root` schema description; the route adds no new
-  human-facing sentence, in keeping with AGENTS.md "Internationalization is
-  mandatory". The pre-existing refusal sentences are unchanged.
-* The default-root UI roots are keyed to **checkout identity, not path shape**: a
+  chooses where to read and grants no access — it is not a permission, and it
+  widens neither the root list above nor any path family.
+* The consumer roots are keyed to **checkout identity, not path shape**: a
   `src/i18n/...` path is served only when the workspace root is the checkout
   root and the **last two path components** of `git remote get-url origin`,
-  compared case-insensitively, are `damianvtran/local-operator-ui`. The host is
-  not compared, so an SSH alias or mirror URL with that repository path
-  qualifies; a different `owner/repo` does not. Any repository can contain a
-  `src/i18n/` tree — a contributor's project, or one the agent creates in a
-  single command — so a matching spelling alone must not lift redaction. A
-  checkout with no origin, a different `owner/repo`, or an unusable origin is
-  refused with a sentence naming the expected identity (never the raw URL,
-  which can embed a credential).
+  compared case-insensitively, name the repository that ships that root —
+  `damianvtran/local-operator-ui` for `src/i18n/keys.gen.ts`,
+  `damianvtran/local-operator-mobile` for `src/i18n/catalogue.gen.ts`, and
+  either for `src/i18n/catalogues/*/*.json`, which both apps keep under the same
+  spelling. The binding is per root, so **neither consumer checkout can serve
+  the other's generated map**: the catalogue root is shared by construction, the
+  compiled manifest is not. The host is not compared, so an SSH alias or mirror
+  URL with that repository path qualifies; a different `owner/repo` does not —
+  including the *other* consumer repository for a map it does not ship. Any
+  repository can contain a `src/i18n/` tree — a contributor's project, or one
+  the agent creates in a single command — so a matching spelling alone must not
+  lift redaction. A checkout with no origin, a different `owner/repo`, or an
+  unusable origin is refused with a sentence naming the expected identity (both,
+  for the shared catalogue root), never the raw URL, which can embed a
+  credential. This repository's own roots carry no identity gate of their own:
+  they are gated by the committed-blob rule below, though an explicit
+  `repo_root` still names which checkout serves them, so a core root asked of a
+  consumer checkout is reported as the wrong checkout rather than as an
+  uncommitted file. Either way a consumer checkout has no route to a core
+  catalogue it does not itself commit.
+* A refusal is `refused: <code>` followed by one JSON line of technical repair
+  fields (the accepted repositories and their path families, plus the one
+  requirement that failed: the checkout that was found against the checkout the
+  path needs, the path or driver at fault, the confinement root, the pinned
+  commit). The same object is in the result `details`, but providers never see
+  `details`, so the text line is the model's only copy. The prose explaining
+  those fields is a comment above `ReadPublicCopyParams`, not the published
+  schema: every request pays for schema characters and a context-budget gate
+  measures them, so the schema states the rule tersely and the comment carries
+  it in full. The route adds no new human-facing sentence, in keeping with
+  AGENTS.md "Internationalization is mandatory". The pre-existing refusal
+  sentences are unchanged.
 * It serves **the committed blob only**: the file must be tracked and its
   working tree clean against one captured `HEAD` commit (`git ls-files
   --error-unmatch` plus `git diff --quiet <commit> --`). The immutable commit
@@ -275,8 +295,9 @@ comment.
   does not change `HEAD`; it is served for the same reason.
 * The checkout-identity rule reads the checkout's own `origin` configuration;
   it is not a signature. A process running as the same user can rewrite
-  `remote.origin.url` and claim the UI identity, just as it can reach the files
-  with `bash`. The rule removes the accidental/unreviewed-tree class — a
+  `remote.origin.url` and claim the UI or the mobile identity (either opens
+  the shared `src/i18n/catalogues/` root), just as it can reach the files with
+  `bash`. The rule removes the accidental/unreviewed-tree class — a
   `src/i18n/` tree in an unrelated project no longer qualifies — and the audit
   log records use; it is not a sandbox against a same-user process.
 * The audit log is append-only by construction, not tamper-proof: a process

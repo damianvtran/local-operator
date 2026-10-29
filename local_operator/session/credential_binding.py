@@ -464,6 +464,17 @@ class CredentialBindingRecorder:
         self._rows: dict[str, CredentialBinding | None] = {}
         self._task: asyncio.Task[None] | None = None
         self._dirty = False
+        #: ``credential_id -> sign-in label`` for a LOCAL serve, installed at
+        #: attach time beside :attr:`_account_for`. Read ONLY to word the
+        #: account-change notice (see :meth:`_labelled`); it never reaches the
+        #: row, so a row's write rule and its bytes are unchanged by it.
+        self._label_for: Callable[[int], str] | None = None
+        #: Set by the first failed row write. WHY A LATCH: the write runs after
+        #: every serve that carries news, and a full disk fails every one of
+        #: them; a warning per resolve is a log flood on exactly the machine
+        #: that has no room for one. One warning per recorder says it; the
+        #: in-memory state still advances so the same account is not retried.
+        self._write_failure_warned = False
 
     def set_change_handler(
         self,
@@ -481,6 +492,31 @@ class CredentialBindingRecorder:
     def set_account_resolver(self, resolver: Callable[[int], str] | None) -> None:
         """Install the local row -> stable account lookup (best effort, never raises)."""
         self._account_for = resolver
+
+    def set_label_resolver(self, resolver: Callable[[int], str] | None) -> None:
+        """Install the local row -> sign-in label lookup (best effort, never raises)."""
+        self._label_for = resolver
+
+    def _labelled(self, binding: CredentialBinding) -> CredentialBinding:
+        """``binding`` with its sign-in label filled in, for the NOTICE only.
+
+        A local row carries no label (see :meth:`_local_binding`), so before
+        this every local account change rendered the same sentence — "now
+        using the <provider> login on <device>" — whichever account it named,
+        and a real switch could not be told from a spurious one. The label is
+        resolved here, at notice time, from the row it names; the stored row
+        is untouched, so its write rule (and every existing transcript) reads
+        exactly as before. A borrow already carries the grant's label.
+        """
+        resolver = self._label_for
+        if binding.identity_label or resolver is None or binding.owner_device != self.device_id:
+            return binding
+        try:
+            label = str(resolver(binding.credential_id) or "")
+        except Exception:  # noqa: BLE001 — a notice's wording must not fail the write
+            logger.debug("credential binding label lookup failed", exc_info=True)
+            return binding
+        return replace(binding, identity_label=label) if label else binding
 
     def _account(self, credential_id: int) -> str:
         resolver = self._account_for
@@ -512,6 +548,7 @@ class CredentialBindingRecorder:
         provider: str,
         owner_device: str,
         credential_id: int | None,
+        session_id: str = "",
         owner_device_name: str = "",
         identity: Mapping[str, str] | None = None,
     ) -> None:
@@ -521,9 +558,20 @@ class CredentialBindingRecorder:
         store answered): the owner is then this device. A borrow passes the
         grant ref's owner and its identity dict.
 
+        ``session_id`` is the session whose resolve served, and a report for
+        any OTHER session is dropped. The sink is one slot on a store that the
+        session SHARES with its in-process subagents (``SessionStreamFn.fork``
+        reuses the parent's store), so without this filter a child pinned to
+        another account wrote that account into the parent's binding and the
+        parent's next resolve wrote its own back — thousands of alternating
+        rows, each announced as an account change, while the parent never moved.
+        A report without an id cannot be attributed and is dropped too.
+
         Never raises and never blocks: a malformed report is debug-logged and
         dropped, because this runs inside a serve that must not fail with it.
         """
+        if not session_id or session_id != self.session_id:
+            return
         try:
             if owner_device:
                 if credential_id is None:
@@ -646,6 +694,24 @@ class CredentialBindingRecorder:
                         continue
                 await record(self._transcript, candidate)
                 self._rows[provider] = candidate
+            except OSError:
+                # ENOSPC, EROFS, a vanished directory: the row is lost, the turn
+                # is not. The newest state still advances IN MEMORY, so the
+                # same account served again is no news and is not re-written on
+                # every resolve; only a genuinely different account tries the
+                # disk again. Surfaced once per recorder (see the latch), and
+                # never announced — a notice for a change that could not be
+                # recorded would be journaled onto the same full disk.
+                self._rows[provider] = candidate
+                if not self._write_failure_warned:
+                    self._write_failure_warned = True
+                    logger.warning(
+                        "could not record the credential binding for session %s; "
+                        "account changes will not be journaled until the write succeeds",
+                        self.session_id,
+                        exc_info=True,
+                    )
+                continue
             except Exception:  # noqa: BLE001 — a lost row is not a failed turn
                 logger.debug("credential binding record write failed", exc_info=True)
                 continue
@@ -668,7 +734,10 @@ class CredentialBindingRecorder:
         if callback is None:
             return
         try:
-            callback(binding, previous)
+            callback(
+                self._labelled(binding),
+                self._labelled(previous) if previous is not None else None,
+            )
         except Exception:  # noqa: BLE001 — a notice must never fail the write
             logger.debug("credential binding change callback failed", exc_info=True)
 

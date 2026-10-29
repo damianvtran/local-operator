@@ -91,6 +91,70 @@ RETRY_MAX_ATTEMPTS = 11
 RETRY_BATCH_LIMIT = 8
 _RETRY_ATTEMPTS: dict[str, int] = {}
 
+#: STALE CLAIM RECOVERY (PR #3038 review R2-3). A connector killed mid-spine
+#: (launchd bootout, reboot, OOM — anything that skips the spine's ``finally``)
+#: leaves its claim ``held`` for up to ``wake.CLAIM_TTL_S``. The restarted
+#: connector's spine is refused ``claimed_elsewhere``, and the loop used to
+#: consume the feed ref anyway with no hold row: once the lease lapsed nothing
+#: referenced the message and it was never delivered. The loop now parks such
+#: a message under this hold code, due at the claim's expiry, and decides at
+#: that point from the claim row alone (``Store.claim_status``):
+#:
+#: * still ``held`` and unexpired — wait for the expiry (nothing renews a
+#:   claim, so every held connector claim expires);
+#: * still ``held`` but EXPIRED — the holder died mid-handoff: re-drive;
+#: * ``released`` by a connector — some spine reached its ``finally``, so ITS
+#:   outcome stands (delivered, terminal, or its own durable retry): retire;
+#: * held/released by a SESSION (``ack working``) — a session already has
+#:   the message: retire, as the ref consumption always did.
+#:
+#: WHAT "HELD PAST EXPIRY ⇒ DIED" RESTS ON: ``ConnectorLock`` (flock) admits
+#: one connector per config dir and its spines run one after another, so no
+#: LIVE spine of another connector can hold a claim this loop sees, and
+#: ``CLAIM_TTL_S`` (900 s) outlives any one spine (screening is bounded by
+#: its own deadline). Without the lock, a spine slower than the lease would
+#: be re-driven while still running.
+#:
+#: WHAT "RELEASED ⇒ RETIRE" RESTS ON: a spine also releases when it is
+#: CANCELLED (the clean stop), with no outcome at all. That is safe only
+#: because every cancelled spine leaves its own durable retry: a feed ref is
+#: deleted only after its pass completes (cancellation skips the delete), and
+#: a re-driven hold is first re-coded to :data:`STALE_CLAIM_REDRIVE_CODE`, so
+#: an interrupted re-drive is an ordinary retry, never a park that retires
+#: itself on its own release (PR #3063 review M1). Inferring "delivered" from
+#: the ack ledger instead would be wrong: the ``read`` ack is confirmed BEFORE
+#: the handoff, and only requests carry a delivery-phase row.
+#:
+#: DELIVERY IS AT-LEAST-ONCE, not exactly-once: a holder killed after the
+#: handoff but before its ``finally`` leaves a held claim, and the re-drive
+#: replays the confirmed ack and wakes the session a second time. That window
+#: is one handoff wide; the loss it replaces was the whole message.
+HOLD_STALE_CLAIM = "stale_claim"
+
+#: The code a ``stale_claim`` row is re-coded to before its re-drive starts
+#: (see above): an ORDINARY retry — never retired on a released claim — but a
+#: code of its own, because a replayed admission commits no new receipt and so
+#: nothing else deletes the row once the re-drive delivers; the retry pass
+#: retires it on a terminal outcome by this code. In ``screening.HOLD_CODES``.
+STALE_CLAIM_REDRIVE_CODE = "stale_claim_retry"
+
+#: Re-drive outcomes after which nothing is owed for the row — the actions the
+#: spines actually return (review n3): handed off (``delivered``, and the
+#: conversation recovery card's ``delivered_unadmitted``), refused for good
+#: with the hub told (``bounce`` only after a confirmed ``blocked`` ACK,
+#: review m7; ``rejected``), or a replay of an admission whose card already
+#: went out (``duplicate``: a reservation exists and the card-owed marker was
+#: cleared, review m6). ``retry_due_holds`` deletes the row on each of these
+#: (PR #3063 review B1/M2).
+_TERMINAL_REDRIVE_ACTIONS = frozenset(
+    {"delivered", "delivered_unadmitted", "bounce", "rejected", "duplicate"}
+)
+
+#: Slack past the lease expiry before the parked message comes due, so the
+#: re-drive's claim lands strictly after ``expires_at`` (``claim`` refuses a
+#: row whose expiry is still ``> now``).
+STALE_CLAIM_MARGIN_S = 1.0
+
 #: OWNER WATCH (D2b, Team Bridge post-0.90.17). The connector used to resolve
 #: its owner ONCE: after a re-enrolment (generation bump, new endpoint,
 #: credential rebind) every iteration refused ``owner_mismatch`` and backed off
@@ -288,12 +352,17 @@ async def retry_due_holds(
     spine (``handle_message_available``), whose fetch performs the single
     documented message-bytes re-read per due item. Outcomes:
 
-    * delivered / bounced — the receipt commit deletes the hold row; the
-      in-process attempt counter resets;
+    * terminal (``_TERMINAL_REDRIVE_ACTIONS``: delivered, delivered_unadmitted,
+      bounce, rejected, duplicate) — the pass deletes the row by its own key (a
+      cache hit commits no receipt to do it); the attempt counter resets;
     * held AGAIN — ``retry_at`` advances by a bounded doubling gap (60 s →
       3600 s cap; counter capped at RETRY_MAX_ATTEMPTS);
-    * ``badge_only`` / ``claimed_elsewhere`` — the row is left for the next
-      due window or the other claimant;
+    * any other outcome (``badge_only``, ``claimed_elsewhere``) — the row
+      stays, re-coded to that outcome, and ``retry_at`` advances on the same
+      bounded doubling gap as a hold, so no row is ever due on every pass;
+    * a ``stale_claim`` park — re-driven only when its connector claim is
+      held past expiry (the holder died); ``wait`` re-arms it at the current
+      expiry, ``retire`` deletes it (see ``HOLD_STALE_CLAIM``);
     * ``retired`` — the row cannot be re-driven (a bare ``bcmsg_`` duplicate
       of a conversation hold, or a message the hub answers 404 for) and is
       deleted, so it is never re-asked on every iteration.
@@ -333,6 +402,39 @@ async def retry_due_holds(
             outcomes.append({"message_id": message_id, "action": "retired"})
             continue
         parsed = _conversation_hold_ref(message_id)
+        # The spines claim by the bare message id, whichever key the hold uses.
+        claim_id = parsed.message_id if parsed is not None else message_id
+        if row["hold_code"] == HOLD_STALE_CLAIM:
+            # A parked stale claim is re-driven ONLY once its holder provably
+            # died (held past expiry); see HOLD_STALE_CLAIM for the cases.
+            now = _time.time()
+            action, due_at = _stale_claim_disposition(store, owner, claim_id, now=now)
+            try:
+                if action == "retire":
+                    store.delete_hold(owner, message_id)
+                elif action == "wait" and due_at is not None:
+                    store.advance_hold_retry(owner, message_id, retry_at=due_at)
+                else:
+                    # M1: re-code BEFORE the spine runs. A stop that cancels
+                    # this re-drive releases the spine's own claim; under the
+                    # park code that release would read as "done" and retire
+                    # the only reference to the message.
+                    store.persist_hold(
+                        owner,
+                        message_id,
+                        STALE_CLAIM_REDRIVE_CODE,
+                        retry_at=now + RETRY_BASE_S,
+                    )
+            except StoreRefused:
+                # Fenced or unreadable: the row stays as it is. A re-drive
+                # that could not be re-coded must not run (M1).
+                outcomes.append({"message_id": message_id, "action": "waiting"})
+                continue
+            if action != "redrive":
+                # ``retired`` is the pass's existing word for a deleted row.
+                reported = "retired" if action == "retire" else "waiting"
+                outcomes.append({"message_id": message_id, "action": reported})
+                continue
         try:
             if parsed is not None:
                 # A conversation hold is keyed by its encoded feed ref, because
@@ -375,29 +477,63 @@ async def retry_due_holds(
         except Exception:  # noqa: BLE001 — one row never stops the connector
             outcome = {"action": "hold", "message_id": message_id, "code": "retry_failed"}
         action = outcome.get("action")
-        if action in ("delivered", "bounce", "rejected", "skipped"):
-            # A pre-upgrade conversation hold may still use the seven-part
-            # label-bearing key. The spine clears the canonical locator; retire
-            # the exact consumed row too, rather than replaying it forever.
-            if parsed is not None and message_id != parsed.encode():
-                try:
-                    store.delete_hold(owner, message_id)
-                except StoreRefused:
-                    pass
+        if action in _TERMINAL_REDRIVE_ACTIONS:
+            # The pass retires the row it re-drove, by its OWN key, whatever
+            # its code (PR #3063 review B1). "The receipt commit deletes the
+            # hold" holds only for a FRESH screen: a re-drive served from the
+            # screening cache commits no receipt, so a hold written after the
+            # commit (``delivery_failed``, a fence such as ``bridge_off`` that
+            # closed after screening, ``phase_refused:*``) stayed due and —
+            # now that the confirmed ACK replays — woke the session on every
+            # pass. The same delete also retires a pre-upgrade conversation
+            # row under its seven-part key, which the spine never clears.
+            try:
+                store.delete_hold(owner, message_id)
+            except StoreRefused:
+                pass
             _RETRY_ATTEMPTS.pop(message_id, None)
-        elif action == "hold":
+        elif action != "hold":
+            # Neither terminal nor a hold (``badge_only``, ``claimed_elsewhere``
+            # or anything a spine adds later): the reason is real but outside
+            # this row, so it waits on the SAME bounded doubling backoff a hold
+            # gets. Leaving ``retry_at`` alone kept the row due on every pass
+            # (PR #3063 review M2: 141 re-drives in 200 s). The code becomes
+            # the outcome (review n4): the owner sees the REASON it waits, not
+            # the mechanism (``stale_claim_retry``) that re-drove it. In place
+            # (review m9: the row keeps its age) and conditional on the row
+            # existing, like the hold arm below.
+            attempts = _RETRY_ATTEMPTS.get(message_id, 0)
+            gap = min(RETRY_BASE_S * (2**attempts), RETRY_MAX_S)
+            reason = str(action or "")[:64]
+            try:
+                store.advance_hold_retry(
+                    owner, message_id, retry_at=_time.time() + gap, hold_code=reason or None
+                )
+            except StoreRefused:
+                pass  # fenced owner: the next live pass owns the row
+            _RETRY_ATTEMPTS[message_id] = min(attempts + 1, RETRY_MAX_ATTEMPTS)
+        if action == "hold":
             attempts = _RETRY_ATTEMPTS.get(message_id, 0)
             gap = min(RETRY_BASE_S * (2**attempts), RETRY_MAX_S)
             new_code = str(outcome.get("code") or "")[:64]
             try:
-                advanced = store.advance_hold_retry(owner, message_id, retry_at=_time.time() + gap)
-                if advanced and new_code and new_code != row["hold_code"]:
-                    # The row's code is what the owner sees (F8): a message
-                    # first held ``open_chief_of_staff`` and then held for a
-                    # NEW reason once the owner messaged the session must not
-                    # keep telling them to message it. Still conditional on the
-                    # row existing (``advanced``), so nothing is resurrected.
-                    store.persist_hold(owner, message_id, new_code, retry_at=_time.time() + gap)
+                # The row's code is what the owner sees (F8): a message first
+                # held ``open_chief_of_staff`` and then held for a NEW reason
+                # once the owner messaged the session must not keep telling
+                # them to message it. The row keeps its ``created_at`` (m9).
+                #
+                # An UPSERT, the same writer the ordinary ref path uses — not
+                # a conditional UPDATE (PR #3063 r7 matrix,
+                # ``cache_hit/none/rename+revoked/kill``): a re-drive that
+                # re-screens commits a receipt, and the receipt commit DELETES
+                # this message's hold row; the ACK the hub then refuses (a
+                # sender revoked while the device was off) came back as a hold
+                # with no row left to update, and the message was never
+                # retried. The spine said "hold" THIS pass, so writing the row
+                # can never resurrect a delivered message.
+                store.persist_hold(
+                    owner, message_id, new_code or "hold", retry_at=_time.time() + gap
+                )
             except StoreRefused:
                 pass  # fenced owner: the next live pass owns the row
             _RETRY_ATTEMPTS[message_id] = min(attempts + 1, RETRY_MAX_ATTEMPTS)
@@ -406,6 +542,75 @@ async def retry_due_holds(
         # Bound the counter map: it is a scheduling aid, not state worth growth.
         _RETRY_ATTEMPTS.clear()
     return {"due": len(due), "outcomes": outcomes}
+
+
+def _stale_claim_disposition(
+    store: Any, owner: Any, claim_id: str, *, now: float
+) -> tuple[str, float | None]:
+    """What a ``stale_claim``-parked message needs, from its claim row alone.
+
+    ``("wait", due_at)`` — a connector claim is still held and unexpired (a
+    dead holder whose lease has not lapsed): due again just past the expiry.
+    Also returned, due one ``RETRY_BASE_S`` later, when the claim row cannot
+    be read: an unknown claim must neither retire nor re-drive the message.
+    ``("redrive", None)`` — a connector claim is held but EXPIRED (its holder
+    died before ``finally``) or was fenced by a generation change: re-drive
+    through the spine, whose own CAS claim replaces the dead row.
+    ``("retire", None)`` — the claim was released (a spine finished, and its
+    outcome — delivered, terminal or its own hold row — stands), a session
+    holds it (the message already reached a session), or no row exists.
+    Never ``redrive`` a released claim: that is what keeps a live second
+    holder's delivery from being repeated.
+    """
+
+    from local_operator.team_bridge.store import StoreRefused
+
+    try:
+        status = store.claim_status(owner, claim_id)
+    except StoreRefused:
+        return "wait", now + RETRY_BASE_S
+    if status is None or not status["connector"]:
+        return "retire", None
+    if status["state"] == "held":
+        if status["expires_at"] > now:
+            return "wait", float(status["expires_at"]) + STALE_CLAIM_MARGIN_S
+        return "redrive", None
+    if status["state"] == "fenced":
+        return "redrive", None
+    return "retire", None
+
+
+def _park_stale_claim(
+    store: Any, owner: Any, hold_key: str, claim_id: str, outcome: dict[str, Any]
+) -> None:
+    """Give a ``claimed_elsewhere`` outcome a durable retry instead of none.
+
+    Only a refusal by a held connector claim is parked (code ``claimed``
+    and a held ``connector:`` row): a session's own claim means
+    the message already reached a session, and any other refusal code is an
+    owner/identity fence the next live generation re-derives on its own. The
+    row comes due at the lease expiry, when ``retry_due_holds`` decides from
+    the claim row whether the holder finished or died. ``keep_existing``: a
+    durable retry already there (a ``bridge_off`` or screening hold) is never
+    overwritten by this park.
+    """
+
+    import time as _time
+
+    from local_operator.team_bridge.store import StoreRefused
+
+    if outcome.get("code") != "claimed":
+        return
+    now = _time.time()
+    action, due_at = _stale_claim_disposition(store, owner, claim_id, now=now)
+    if action == "retire":
+        return  # released in between: the holder's own outcome stands
+    retry_at = due_at if due_at is not None else now + STALE_CLAIM_MARGIN_S
+    try:
+        store.persist_hold(owner, hold_key, HOLD_STALE_CLAIM, retry_at=retry_at, keep_existing=True)
+    except StoreRefused:
+        pass  # fenced owner: the next live generation owns its own rows
+    logger.info("bridge connector parked: stage=claim code=%s", HOLD_STALE_CLAIM)
 
 
 def _persist_hold_backoff(store: Any, owner: Any, message_id: str, code: str) -> None:
@@ -508,6 +713,10 @@ async def run_iteration(
             # screening_holds schedule is the re-drive path now that refs are
             # consumed once-only, so a stuck delivery is never silently lost.
             _persist_hold_backoff(store, owner, message_id, str(outcome.get("code") or "hold"))
+        elif outcome.get("action") == "claimed_elsewhere":
+            # R2-3: the ref is consumed below, so a claim left by a connector
+            # that died mid-spine must leave a durable retry behind.
+            _park_stale_claim(store, owner, message_id, message_id, outcome)
     for conversation_ref in plan.conversation_deliveries:
         # Conversation deliveries have their OWN card path; the pair inbox
         # reader above must never see one.
@@ -529,11 +738,19 @@ async def run_iteration(
             _persist_hold_backoff(
                 store, owner, conversation_ref.encode(), str(outcome.get("code") or "hold")
             )
+        elif outcome.get("action") == "claimed_elsewhere":
+            # Same R2-3 park, keyed like every conversation hold (by ref).
+            _park_stale_claim(
+                store, owner, conversation_ref.encode(), conversation_ref.message_id, outcome
+            )
     # TB-01: ONCE-ONLY consumption — the drained refs were just handled
     # (deliveries) or are state hints the drain itself consumes; deleting them
     # here is what stops the quadratic re-wake/ACK growth across polls and
-    # restarts. A crash before this point replays the batch (at-least-once);
-    # the receiver's own dedupe absorbs the replay.
+    # restarts. A crash before this point replays the batch (at-least-once).
+    # Only the CONVERSATION lane absorbs that replay (its body reservation is
+    # the dedupe witness); a replayed PAIR wake mints a fresh peer-message id
+    # (and a fresh ``dref_`` for a request), so it is a second card and a
+    # second turn — the window is one batch wide (PR #3063 review m5).
     # Retire only outcomes actually handled. Failed refs stay durable, while
     # successful neighbours do not repeat merely because a later ref failed.
     # One attempt per ref per iteration; re-raising preserves run_forever's

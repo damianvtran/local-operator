@@ -551,6 +551,13 @@ export interface SessionProjection {
 	    absent on an older daemon and on a disk rebuild — absence is "not
 	    reported", never stale (`lib/session-health.ts`). */
 	heartbeat_stale?: boolean | null;
+	/** Whether `transcript[0]` is the conversation's opening user message PINNED
+	    ahead of a disjoint tail (`SessionProjection.transcript_head_pinned`).
+	    The first history cursor must be the oldest TAIL row, and the pinned
+	    opener is not it. OPTIONAL: absent on an older daemon and on an uncapped
+	    projection, both of which mean false. Length is not a proxy — the frame
+	    cap can publish a pinned tail of 16 rows. */
+	transcript_head_pinned?: boolean;
 	transcript: TranscriptEntry[];
 	/** Todos grouped into phases. One implicit `"Todos"` phase carries a flat
 	    list and renders without a header. */

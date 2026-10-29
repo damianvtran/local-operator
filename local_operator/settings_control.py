@@ -46,6 +46,7 @@ if TYPE_CHECKING:
     from local_operator.settings_io import Setting
 
 __all__ = [
+    "OPERATOR_ONLY",
     "ConfigUnreadableError",
     "apply",
     "is_default",
@@ -69,6 +70,16 @@ def is_default(manager: "ConfigManager", setting: "Setting") -> bool:
     return settings_io.is_default(manager, setting)
 
 
+#: Rows the agent write path refuses outright: the operator's own consent, which
+#: the model (or content the model reads) must never grant. ``radient.saver.mode``
+#: is consent to upload conversation history to Radient (contract §8, D3: the
+#: first enable is an operator decision with mandatory disclosure copy). A
+#: write-tier approval card does not name that data flow, and a host with
+#: standing approval has no human in the loop at all (security review S-5), so
+#: the row is refused here, before any approval could be asked for.
+OPERATOR_ONLY = frozenset({"radient.saver.mode"})
+
+
 def apply(manager: "ConfigManager", setting: "Setting", value: Any) -> None:
     """Perform one agent-origin settings write, UNATTRIBUTED (see module doc).
 
@@ -78,6 +89,12 @@ def apply(manager: "ConfigManager", setting: "Setting", value: Any) -> None:
     ``write_setting``. Raises ``ConfigUnreadableError`` (file unreadable) and
     ``ValueError`` (the registry's own refusal), so callers catch one surface.
     """
+    if setting.key in OPERATOR_ONLY:
+        raise ValueError(
+            f"Setting '{setting.key}' is operator-only: it is consent to send this "
+            "conversation's history to Radient, which only the operator can give. "
+            "Change it on the /settings page or with `lop config edit`."
+        )
     if setting.kind is settings_io.Kind.CASCADE:
         # The route edits chains under an original-snapshot contract
         # (`SettingEdit.base`): an unchanged chain from a stale screen must

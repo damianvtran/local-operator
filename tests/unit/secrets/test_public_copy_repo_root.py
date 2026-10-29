@@ -81,10 +81,6 @@ async def test_core_and_linked_worktree_from_home_context(tmp_path):
     [
         None,
         "https://github.com/other/repo.git",
-        "https://example.test/damianvtran/local-operator-ui.git",
-        "/local/damianvtran/local-operator-ui.git",
-        "git@other.test:damianvtran/local-operator-ui.git",
-        "https://github.com/extra/damianvtran/local-operator-ui.git",
         "https://github.com/damianvtran/local-operator.git",
     ],
 )
@@ -632,26 +628,62 @@ async def test_wrong_checkout_for_path_names_the_repository_to_use(tmp_path):
     assert body["code"] == "public_copy_repository_not_allowed"
     assert body["reason"] == "wrong_checkout_for_path"
     assert body["checkout_is"] == "damianvtran/local-operator-ui"
-    assert body["path_needs"] == "damianvtran/local-operator"
+    assert body["path_needs"] == ["damianvtran/local-operator"]
+    # ONE registry (#3122's `_CONSUMER_CHECKOUTS` plus this repository), so the
+    # mobile app checkout is accepted too: it publishes its own `src/` roots.
     assert body["accepted_repositories"] == [
         "damianvtran/local-operator",
         "damianvtran/local-operator-ui",
+        "damianvtran/local-operator-mobile",
     ]
     assert set(body["path_families"]) == set(body["accepted_repositories"])
 
 
 @pytest.mark.asyncio
 async def test_untrusted_origin_is_told_apart_from_a_wrong_checkout(tmp_path):
-    """U1/L: a lookalike origin is 'never allowed', and its URL is not echoed."""
-    secret_host = "https://token123:hunter2@example.invalid/damianvtran/local-operator-ui.git"
+    """U1/L: an identity that is not ours is "never allowed"; URL never echoed."""
+    secret_host = "https://token123:[redacted]@example.invalid/someone-else/dotfiles.git"
     root = _ui_repo(tmp_path, origin=secret_host)
     result = await execute_read_public_copy(
         "x", {"path": UI_CATALOGUE, "repo_root": str(root)}, context=_context(tmp_path, tmp_path)
     )
     body = _refusal_body(result)
     assert body["reason"] == "origin_not_accepted"
-    assert body["checkout_is"] is None
+    # Only the parsed identity is named, never the raw URL or its host.
+    assert body["checkout_is"] == "someone-else/dotfiles"
     assert "token123" not in result.text and "example.invalid" not in result.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "https://example.test/damianvtran/local-operator-ui.git",
+        "/local/damianvtran/local-operator-ui.git",
+        "git@other.test:damianvtran/local-operator-ui.git",
+        "https://github.com/extra/damianvtran/local-operator-ui.git",
+    ],
+)
+async def test_a_mirror_root_is_that_checkout_but_provenance_is_not_verified(tmp_path, origin):
+    """ONE identity rule: #3122's last-two-components match, applied to repo_root.
+
+    Before the merge the selector additionally required a github.com host and
+    refused every origin here. The merged route has ONE notion of "our
+    repository" -- :func:`_origin_identity` plus :data:`_CONSUMER_CHECKOUTS` --
+    so the selector and the default-root gate cannot disagree about which
+    checkout a root is. What still bounds the looser match: the root list and
+    path families are unchanged, the bytes must be the captured ``HEAD`` blob of
+    a committed file, and provenance never NAMES a reviewed GitHub repository
+    unless the host is github.com (design D1/D4), so a lookalike checkout cannot
+    manufacture a verified identity.
+    """
+    root = _ui_repo(tmp_path, origin=origin)
+    result = await execute_read_public_copy(
+        "x", {"path": UI_CATALOGUE, "repo_root": str(root)}, context=_context(tmp_path, tmp_path)
+    )
+    assert not result.is_error, result.text
+    assert _details(result)["repository"] is None
+    assert _details(result)["repository_verified"] is False
 
 
 @pytest.mark.asyncio

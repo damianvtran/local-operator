@@ -1,0 +1,42 @@
+{
+  "affected_historical_row_index": 203,
+  "affected_historical_row": {
+    "locale": "hi",
+    "namespace": "tui.palette",
+    "source_sha256": "e3bf15fd1036f7e4aeed39dbc3800e0dd1e6736f0e0ad211cac6d6f0ada9a95f",
+    "translator": {
+      "agent": "translator",
+      "model": "deepseek/deepseek-flash",
+      "date": "2026-10-23"
+    },
+    "auditor": {
+      "agent": "translation-auditor",
+      "model": "deepseek/deepseek-flash",
+      "date": "2026-10-23",
+      "result": "passed",
+      "findings": 0
+    },
+    "status": "passed",
+    "note": "Independent audit passed: 7 keys, 0 findings. Audited target sha256 1103bd85cc6bce50ae5fa1754639046135fac188088df2c23c3ecb29fd9ed854. Report: sessions/e8351da7b481/scratchpad/audit-hi.json."
+  },
+  "previous_current_row_index": 203,
+  "previous_current_row": {
+    "locale": "hi",
+    "namespace": "tui.palette",
+    "source_sha256": "e3bf15fd1036f7e4aeed39dbc3800e0dd1e6736f0e0ad211cac6d6f0ada9a95f",
+    "translator": {
+      "agent": "translator",
+      "model": "deepseek/deepseek-flash",
+      "date": "2026-10-23"
+    },
+    "auditor": {
+      "agent": "translation-auditor",
+      "model": "deepseek/deepseek-flash",
+      "date": "2026-10-23",
+      "result": "passed",
+      "findings": 0
+    },
+    "status": "passed",
+    "note": "Independent audit passed: 7 keys, 0 findings. Audited target sha256 1103bd85cc6bce50ae5fa1754639046135fac188088df2c23c3ecb29fd9ed854. Report: sessions/e8351da7b481/scratchpad/audit-hi.json."
+  }
+}

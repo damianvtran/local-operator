@@ -1,0 +1,31 @@
+{
+  "locale": "vi",
+  "namespace": "tui.team_authoring",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 1,
+    "nit": 0
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "id": "T1",
+      "key": "tui.team_authoring.promote_hint",
+      "severity": "minor",
+      "category": "overflow risk",
+      "en": "Copy this conversation's team into your account",
+      "current": "Sao chép nhóm của cuộc trò chuyện này vào tài khoản của bạn",
+      "problem": "Rich cell_len is 59 before row chrome in a 60-column one-line argument-picker hint; context says keep one line at 60 columns. This is text-measured risk, not observed clipping. Proposed shorter wording measures 47 cells.",
+      "proposed": "Sao chép nhóm cuộc trò chuyện này vào tài khoản",
+      "source": "Sonnet width probe; GPT final adjudication"
+    }
+  ],
+  "adjudication": [],
+  "linguistic_gate_status": "passed",
+  "publication_hold_reasons": [
+    "en context sidecar not routable"
+  ]
+}

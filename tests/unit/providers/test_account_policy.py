@@ -181,3 +181,50 @@ def test_five_hour_fallback_and_no_fabricated_paid_period():
     assert reset_ranked_ids(rows, "x") == [2, 1]
     paid = reset_candidate(1, report(limit("lifetime", None, paid=True)), "m", NOW)
     assert paid.weekly_ms is None and paid.five_hour_ms is None
+
+
+def test_a_fresh_depletion_states_when_every_spent_window_reopens():
+    """2026-10-28: the broker's ``quota_blocked`` remainder is the LATEST spent reset.
+
+    Both spent windows must reopen before the account can serve, so the earliest
+    of them would be a time the account can still refuse; a window with headroom
+    does not gate the reopening at all.
+    """
+    both = reset_candidate(
+        1,
+        report(limit("5 hour", 600_000, 1), limit("7 day", 900_000, 1), limit("7 day", 50_000)),
+        "m",
+        NOW,
+    )
+    assert both.state == "depleted"
+    assert both.reopens_at_ms == NOW + 900_000
+
+
+def test_a_reopening_is_never_stated_without_fresh_proof():
+    """Stale evidence, a spent window with no reset, or any non-depleted verdict: None."""
+    stale = reset_candidate(1, report(limit("5 hour", 600_000, 1), age=1_800_001), "m", NOW)
+    assert stale.state == "depleted" and stale.reopens_at_ms is None
+    unstated = reset_candidate(1, report(limit("5 hour", None, 1)), "m", NOW)
+    assert unstated.state == "depleted" and unstated.reopens_at_ms is None
+    healthy = reset_candidate(1, report(limit("5 hour", 600_000, 0.2)), "m", NOW)
+    assert healthy.state == "healthy" and healthy.reopens_at_ms is None
+    assert reset_candidate(1, None, "m", NOW).reopens_at_ms is None
+
+
+def test_a_garbled_far_future_reset_never_becomes_a_proven_reopening():
+    """#3108 review m2: the ranking path's sanity window bounds the reopening too.
+
+    A 5-hour window that claims to reset two years out is garbled evidence. The
+    verdict stays ``depleted`` (the account is spent), but no reopening is proven,
+    so the owner cannot turn the garbage into its retry figure. The tolerance edge
+    still counts, and an unrecognised window proves nothing.
+    """
+    garbled = reset_candidate(1, report(limit("5 hour", 2 * 365 * 86_400_000, 1)), "m", NOW)
+    assert garbled.state == "depleted" and garbled.reopens_at_ms is None
+    edge = 5 * 3_600_000 + 60_000
+    assert reset_candidate(1, report(limit("5 hour", edge, 1)), "m", NOW).reopens_at_ms == (
+        NOW + edge
+    )
+    assert reset_candidate(1, report(limit("5 hour", edge + 1, 1)), "m", NOW).reopens_at_ms is None
+    odd = reset_candidate(1, report(limit("lifetime", 600_000, 1)), "m", NOW)
+    assert odd.state == "depleted" and odd.reopens_at_ms is None

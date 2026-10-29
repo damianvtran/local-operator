@@ -29,24 +29,31 @@ an argument the caller supplies, so another tool cannot borrow it.
 
 WHICH CHECKOUTS
 ---------------
-Two separate checkouts publish copy through this route: this repository
-(``local_operator/i18n/...`` plus the mobile web key maps) and the companion
-UI repository (``src/i18n/catalogues/*/*.json`` and ``src/i18n/keys.gen.ts``).
-The UI checkout is a different repository, but its committed product copy is
-equally public — an auditor has to be able to read a catalogue key where it
-lives, and the alternative is the workaround this route exists to replace. The
-roots stay an EXACT GLOB LIST in both checkouts: no directory rule
-(``src/i18n/*``) and no extension rule (``*.json`` under any root), because
-either would admit files nobody reviewed as public copy. The commit-clean /
-``HEAD``-blob / audit-log requirements below apply equally to both.
+Three separate checkouts publish copy through this route: this repository
+(``local_operator/i18n/...`` plus the mobile web key maps) and the two consumer
+apps that ship their own translated copy — the companion UI repository
+(``src/i18n/catalogues/*/*.json`` and ``src/i18n/keys.gen.ts``) and the companion
+mobile repository (``src/i18n/catalogues/*/*.json`` and
+``src/i18n/catalogue.gen.ts``). A consumer checkout is a different repository,
+but its committed product copy is equally public — an auditor has to be able to
+read a catalogue key where it lives, and the alternative is the workaround this
+route exists to replace. The roots stay an EXACT GLOB LIST in all three
+checkouts: no directory rule (``src/i18n/*``) and no extension rule (``*.json``
+under any root), because either would admit files nobody reviewed as public
+copy. The commit-clean / ``HEAD``-blob / audit-log requirements below apply
+equally to all three.
 
 The ``src/`` roots are additionally bound to checkout identity: they are
-exposed only when the workspace's ``origin`` remote names the UI repository and
-the workspace is the root of its checkout. A path is not an identity — any
-repository, including one created on the spot, can hold a ``src/i18n/`` tree —
-so ``git remote get-url origin`` must resolve to :data:`UI_REPOSITORY`. The gate
-lives in :func:`_committed_public_copy`; ``docs/security/redaction-policy.md``
-states the exact rule and the same-UID residual.
+exposed only when the workspace's ``origin`` remote names the consumer
+repository that OWNS that root, and the workspace is the root of its checkout.
+A path is not an identity — any repository, including one created on the spot,
+can hold a ``src/i18n/`` tree — so ``git remote get-url origin`` must parse to
+the identity :data:`_CONSUMER_CHECKOUTS` binds to the path. The binding is per
+checkout, not one shared list, because both apps generated compiled manifests
+under ``src/i18n/`` and the UI's map must not be served from a mobile checkout
+nor the reverse; the gate lives in :func:`_committed_public_copy`;
+``docs/security/redaction-policy.md`` states the exact rule and the same-UID
+residual.
 
 THE TRUST BOUNDARY
 ------------------
@@ -87,41 +94,51 @@ TOOL_NAME = "read_public_copy"
 #: Public-copy roots, relative to the selected checkout (session cwd by default).
 #: These are the only paths this reader will open.  No directory rule and no
 #: extension rule: an exact glob list, so adding a root is a reviewed policy
-#: change rather than an accident.  The list spans two checkouts — this
-#: repository and the companion UI repository — because both publish committed
-#: product copy. Explicit selectors additionally bind the checkout to the
-#: reviewed GitHub origin and corresponding core/UI path family.
+#: change rather than an accident.  The list spans three checkouts — this
+#: repository and the two consumer apps — because all publish committed product
+#: copy; a session resolves the roots against its chosen checkout (cwd unless
+#: ``repo_root`` names another), so each checkout only ever exposes its own copy.
 #:
-#: The `src/` roots additionally require checkout IDENTITY (:data:`UI_REPOSITORY`):
-#: a path shape is not an identity, and any repository — including one the agent
-#: creates itself — can contain a `src/i18n/` tree (review S-1).
+#: This tuple is the reviewed INVENTORY, not the binding: which checkout may
+#: serve which `src/` root lives in :data:`_CONSUMER_CHECKOUTS`.
+#:
+#: The `src/` roots additionally require checkout IDENTITY
+#: (:data:`_CONSUMER_CHECKOUTS`): a path shape is not an identity, and any
+#: repository — including one the agent creates itself — can contain a
+#: `src/i18n/` tree (review S-1).
 PUBLIC_COPY_GLOBS: tuple[str, ...] = (
     # This repository: TUI/server catalogues, key modules and mobile web maps.
     "local_operator/i18n/catalogues/*/*.json",
     "local_operator/i18n/keys/*.py",
     "local_operator/mobile/web/src/i18n/keys.gen.ts",
     "local_operator/mobile/web/src/i18n/bundled.gen.ts",
-    # The companion UI checkout: a separate repository whose committed product
-    # copy is equally public.  Its roots are spelled from that checkout's own
-    # root, so they cannot alias a path inside this repository.
+    # The consumer checkouts: separate repositories whose committed product copy
+    # is equally public.  Their roots are spelled from each checkout's own root,
+    # so they cannot alias a path inside this repository.  The catalogue root is
+    # shared — both apps keep `catalogues/<locale>/<key>.json` — while the
+    # generated map differs per app and is bound per app below.
     "src/i18n/catalogues/*/*.json",
     "src/i18n/keys.gen.ts",
+    "src/i18n/catalogue.gen.ts",
 )
 
-#: The companion UI checkout's repository identity.  The `src/` roots are served
-#: only when the workspace's `origin` remote names this repository: any checkout
-#: can contain a `src/i18n/` tree, so the path alone must not lift redaction
-#: (review S-1).  A fork that wants the same treatment belongs in this list, in
-#: review — not in a path rule.
+#: The consumer checkouts' repository identities.  A `src/` root is served only
+#: when the workspace's `origin` remote parses to the identity that owns it: any
+#: checkout can contain a `src/i18n/` tree, so the path alone must not lift
+#: redaction (review S-1).  A fork that wants the same treatment belongs in this
+#: list, in review — not in a path rule.
 UI_REPOSITORY = "damianvtran/local-operator-ui"
+MOBILE_REPOSITORY = "damianvtran/local-operator-mobile"
 CORE_REPOSITORY = "damianvtran/local-operator"
 
 #: The same list as anchored patterns. ``fnmatch``'s ``*`` crosses ``/``, which
 #: would admit ``catalogues/a/b/c.json``; these do not. Kept beside the globs so
-#: the human-readable list and the enforcement list are edited together.  The
-#: UI patterns are a separate tuple because they carry the identity requirement
-#: above; :data:`_PUBLIC_COPY_PATTERNS` is their concatenation and no call site
-#: matches against the UI tuple alone except the identity gate itself.
+#: the human-readable list and the enforcement list are edited together.
+#:
+#: The `src/` patterns are grouped per checkout because the identity gate is per
+#: checkout: a mobile checkout must not serve the UI's generated map, and the
+#: reverse.  The shapes are defined once and referenced from both groups, so the
+#: catalogue root cannot drift between the two apps.
 _CORE_PUBLIC_COPY_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"local_operator/i18n/catalogues/[^/]+/[^/]+\.json"),
     re.compile(r"local_operator/i18n/keys/[^/]+\.py"),
@@ -129,16 +146,59 @@ _CORE_PUBLIC_COPY_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"local_operator/mobile/web/src/i18n/bundled\.gen\.ts"),
 )
 
+#: Anchored at ``src/``, so a lookalike deeper in a tree
+#: (``vendor/src/i18n/keys.gen.ts``) is still refused.
+_SRC_CATALOGUE_PATTERN = re.compile(r"src/i18n/catalogues/[^/]+/[^/]+\.json")
+_UI_MAP_PATTERN = re.compile(r"src/i18n/keys\.gen\.ts")
+_MOBILE_MAP_PATTERN = re.compile(r"src/i18n/catalogue\.gen\.ts")
+
 _UI_PUBLIC_COPY_PATTERNS: tuple[re.Pattern[str], ...] = (
-    # Anchored at ``src/``, so a lookalike deeper in a tree
-    # (``vendor/src/i18n/keys.gen.ts``) is still refused.
-    re.compile(r"src/i18n/catalogues/[^/]+/[^/]+\.json"),
-    re.compile(r"src/i18n/keys\.gen\.ts"),
+    _SRC_CATALOGUE_PATTERN,
+    _UI_MAP_PATTERN,
 )
 
-_PUBLIC_COPY_PATTERNS: tuple[re.Pattern[str], ...] = (
-    _CORE_PUBLIC_COPY_PATTERNS + _UI_PUBLIC_COPY_PATTERNS
+_MOBILE_PUBLIC_COPY_PATTERNS: tuple[re.Pattern[str], ...] = (
+    _SRC_CATALOGUE_PATTERN,
+    _MOBILE_MAP_PATTERN,
 )
+
+#: Which identity may publish which `src/` root.  ``(identity, description,
+#: patterns)``: the description is what the refusal sentence names, so a caller
+#: who used the wrong checkout is told which checkout the root belongs to without
+#: the raw URL (which can embed a credential).  Ordered, so a refusal for a root
+#: two checkouts share names them in a stable order.
+_CONSUMER_CHECKOUTS: tuple[tuple[str, str, tuple[re.Pattern[str], ...]], ...] = (
+    (UI_REPOSITORY, "companion UI checkout", _UI_PUBLIC_COPY_PATTERNS),
+    (MOBILE_REPOSITORY, "mobile app checkout", _MOBILE_PUBLIC_COPY_PATTERNS),
+)
+
+_PUBLIC_COPY_PATTERNS: tuple[re.Pattern[str], ...] = _CORE_PUBLIC_COPY_PATTERNS + (
+    _SRC_CATALOGUE_PATTERN,
+    _UI_MAP_PATTERN,
+    _MOBILE_MAP_PATTERN,
+)
+
+#: The three reviewed checkouts, derived from :data:`_CONSUMER_CHECKOUTS` so a
+#: new consumer app is ONE edit to the registry.  This is the single answer to
+#: "is this origin one of ours": the default root and an explicit ``repo_root``
+#: both read it, so the two cannot drift apart (#3122 + the ``repo_root`` lane
+#: merged as one mechanism).
+ACCEPTED_REPOSITORIES: tuple[str, ...] = (
+    CORE_REPOSITORY,
+    *(identity for identity, _description, _patterns in _CONSUMER_CHECKOUTS),
+)
+
+#: The same binding as the repair fields a refusal carries: the roots each
+#: checkout may publish.  Derived from :data:`PUBLIC_COPY_GLOBS` and the same
+#: per-app rule the pattern groups encode — both apps keep the catalogue root,
+#: the compiled manifest is each app's own — so there is no second list to keep
+#: in step.
+_SRC_GLOBS: tuple[str, ...] = tuple(glob for glob in PUBLIC_COPY_GLOBS if glob.startswith("src/"))
+_FAMILY_GLOBS: dict[str, list[str]] = {
+    CORE_REPOSITORY: [glob for glob in PUBLIC_COPY_GLOBS if not glob.startswith("src/")],
+    UI_REPOSITORY: [glob for glob in _SRC_GLOBS if glob != "src/i18n/catalogue.gen.ts"],
+    MOBILE_REPOSITORY: [glob for glob in _SRC_GLOBS if glob != "src/i18n/keys.gen.ts"],
+}
 
 #: The policy document this route cites.  The tool's details carry it so a
 #: transcript reader can find the rule that permitted the read.
@@ -176,8 +236,8 @@ class ReadPublicCopyParams(BaseModel):
     repo_root: str | None = Field(
         default=None,
         description=(
-            "Checkout/worktree root, not a subdir; origin damianvtran/local-operator or "
-            "damianvtran/local-operator-ui. Read-only."
+            "Checkout/worktree root, not a subdir; origin damianvtran/local-operator, "
+            "-ui or -mobile. Read-only."
         ),
     )
     key: str | None = Field(
@@ -185,15 +245,6 @@ class ReadPublicCopyParams(BaseModel):
         description="Message key; required for key modules/maps.",
     )
 
-
-#: The two reviewed repositories and the exact path family each one may serve.
-#: Spelled once so a refusal can tell the caller which checkout a path needs
-#: without a second list drifting from :data:`PUBLIC_COPY_GLOBS`.
-ACCEPTED_REPOSITORIES: tuple[str, ...] = (CORE_REPOSITORY, UI_REPOSITORY)
-_FAMILY_GLOBS: dict[str, list[str]] = {
-    CORE_REPOSITORY: [glob for glob in PUBLIC_COPY_GLOBS if not glob.startswith("src/")],
-    UI_REPOSITORY: [glob for glob in PUBLIC_COPY_GLOBS if glob.startswith("src/")],
-}
 
 #: Line one of the legacy "run it from a checkout" refusal; the structured hint
 #: below is appended to it only when the caller did not pass ``repo_root``.
@@ -277,9 +328,34 @@ def _matches_public_copy(relative: str) -> bool:
     return any(pattern.fullmatch(relative) for pattern in _PUBLIC_COPY_PATTERNS)
 
 
-def _requires_ui_checkout(relative: str) -> bool:
-    """Whether ``relative`` belongs to the companion UI checkout's roots."""
-    return any(pattern.fullmatch(relative) for pattern in _UI_PUBLIC_COPY_PATTERNS)
+def _publishing_checkouts(relative: str) -> tuple[tuple[str, str], ...]:
+    """The ``(identity, description)`` pairs whose checkout publishes ``relative``.
+
+    Empty for this repository's own roots: they carry no identity gate.  A root
+    shaped like a consumer app's is bound to the identity that owns it, so the
+    UI's generated map is never served from a mobile checkout and the reverse.
+    """
+    return tuple(
+        (identity, description)
+        for identity, description, patterns in _CONSUMER_CHECKOUTS
+        if any(pattern.fullmatch(relative) for pattern in patterns)
+    )
+
+
+def _checkout_refusal(relative: str, required: tuple[tuple[str, str], ...], identity: str) -> str:
+    """The refusal sentence for a ``src/`` root served from the wrong checkout.
+
+    Names the expected identity (or both, when two checkouts publish the same
+    relative root) and the parsed identity of this workspace — never the raw
+    URL, which can embed a credential and whose text reaches the model.
+    """
+    sources = " or ".join(f"the {description}'s copy" for _, description in required)
+    identities = [name for name, _ in required]
+    if len(identities) == 1:
+        requirement = f"this workspace is not {identities[0]}"
+    else:
+        requirement = f"this workspace is neither {' nor '.join(identities)}"
+    return f"{relative} is {sources}; {requirement} (origin: {identity or 'unusable'})"
 
 
 def _origin_identity(url: str) -> str:
@@ -287,10 +363,10 @@ def _origin_identity(url: str) -> str:
 
     Git hands back three shapes for a GitHub remote: the scp form
     (``git@github.com:owner/repo.git``), an ssh/https URL, or a local path.  Only
-    the last two path components matter, and only :data:`UI_REPOSITORY` matches
-    them, so a lookalike repository in another namespace does not qualify.  The
-    raw URL is never echoed: it can embed a credential, and this string reaches
-    the model-visible refusal sentence.
+    the last two path components matter, and only the identities in
+    :data:`_CONSUMER_CHECKOUTS` match them, so a lookalike repository in another
+    namespace does not qualify.  The raw URL is never echoed: it can embed a
+    credential, and this string reaches the model-visible refusal sentence.
     """
     value = url.strip().rstrip("/")
     if value.endswith(".git"):
@@ -309,11 +385,15 @@ def _origin_identity(url: str) -> str:
 
 
 def _trusted_origin_identity(url: str) -> str:
-    """Known-host origin for explicit selectors; never return credentials/URLs.
+    """The same identity, but only when the origin is hosted on github.com.
 
-    Origin is a repository-policy assertion, not cryptographic attestation. The
-    same-UID residual remains, but a lookalike path on an arbitrary host or on
-    disk must not borrow the reviewed GitHub repository's identity.
+    ACCESS IS NOT DECIDED HERE. :func:`_origin_identity` answers "which
+    ``owner/repo`` does this origin name" for every gate, so an alias or a mirror
+    is the same repository (#3122). This helper answers the narrower question the
+    audit record asks — may provenance NAME a reviewed GitHub repository? — and
+    returns ``""`` when the host is not github.com. Origin is a repository-policy
+    assertion, not cryptographic attestation: the same-UID residual remains, so
+    the served bytes are the ``HEAD`` blob and this label never widens access.
     """
     value = url.strip()
     if "://" in value:
@@ -323,15 +403,18 @@ def _trusted_origin_identity(url: str) -> str:
             return ""
         if parsed.scheme not in ("ssh", "https") or parsed.hostname != "github.com":
             return ""
-        path = parsed.path.strip("/")
+        repo_path = parsed.path
     else:
-        match = re.fullmatch(r"git@github\.com:([^\s]+)", value, flags=re.IGNORECASE)
-        if match is None:
+        scp = re.fullmatch(r"[^@/]*@?github\.com:(.+)", value, flags=re.IGNORECASE)
+        if scp is None:
             return ""
-        path = match.group(1).rstrip("/")
-    if path.endswith(".git"):
-        path = path[:-4]
-    return path.lower() if re.fullmatch(r"[^/]+/[^/]+", path) else ""
+        repo_path = scp.group(1)
+    # EXACTLY ``owner/repo``: a nested path (``extra/owner/repo``) has the same
+    # tail the parser reports but is a different repository, so it must not
+    # claim the reviewed name.
+    if not re.fullmatch(r"/?[^/]+/[^/]+/?", repo_path):
+        return ""
+    return _origin_identity(value)
 
 
 #: The audit log's open flags.  ``O_NONBLOCK`` is for the FIFO case: with
@@ -544,7 +627,6 @@ def _committed_public_copy(
     root: Path,
     relative: str,
     *,
-    requires_ui_identity: bool = False,
     explicit_root: bool = False,
     confinement: ToolConfinement | None = None,
 ) -> tuple[bytes, dict[str, Any], str | dict[str, Any] | None]:
@@ -568,9 +650,10 @@ def _committed_public_copy(
       and ``diff`` are cwd-relative while ``show HEAD:<path>`` is
       toplevel-relative, so a workspace below the toplevel could validate one
       file and serve another;
-    * the UI roots need checkout identity, not path shape (review S-1);
-      ``requires_ui_identity`` gates that check here so all git probing shares
-      one wrapper.
+    * a consumer checkout's roots need checkout identity, not path shape (review
+      S-1); :func:`_publishing_checkouts` says which checkouts may publish the
+      root, and that check happens inside this function so all Git probing
+      shares one wrapper.
 
     The helper is synchronous and runs off the event loop
     (:func:`execute_read_public_copy` awaits it in a thread).
@@ -635,39 +718,57 @@ def _committed_public_copy(
         origin = _git("remote", "get-url", "origin")
         origin_url = origin.stdout.decode("utf-8", "replace") if origin.returncode == 0 else ""
         identity = _origin_identity(origin_url)
-        # RECORD ONLY WHAT THE STRICT CHECK PROVED. The default-root gate below
-        # keeps its historical loose match (last two path components, any host)
-        # so that path reads exactly the files it always did; but provenance is
-        # a trust claim, so ``repository`` comes from the GitHub-only check and
-        # is ``None`` when that check did not pass (design D1/D4).
+        # ONE IDENTITY, ONE REGISTRY. This parser plus ``_CONSUMER_CHECKOUTS``
+        # answer every origin question in the module: the default root's
+        # per-path binding and an explicit ``repo_root``'s acceptance. A second
+        # parser for "our repositories" would be a second mechanism that can
+        # disagree with this one, so ``repo_root`` reads the same helpers.
+        publishers = _publishing_checkouts(relative)
+        core_publishes = any(pattern.fullmatch(relative) for pattern in _CORE_PUBLIC_COPY_PATTERNS)
+        # RECORD ONLY WHAT THE STRICT CHECK PROVED. Provenance is a trust claim,
+        # so ``repository`` comes from the GitHub-only spelling of the SAME
+        # identity and is ``None`` when that check did not pass (design D1/D4).
+        # It labels the audit record and never decides access.
         verified = _trusted_origin_identity(origin_url) or None
-        if explicit_root:
-            expected = UI_REPOSITORY if requires_ui_identity else CORE_REPOSITORY
-            if verified != expected:
+        if explicit_root and identity not in ACCEPTED_REPOSITORIES:
+            return (
+                b"",
+                {},
+                {
+                    "code": "public_copy_repository_not_allowed",
+                    # Only a parsed identity is ever named, never the raw origin
+                    # (it can embed a credential).
+                    "reason": "origin_not_accepted",
+                    "checkout_is": identity or None,
+                    "path_needs": [name for name, _ in publishers]
+                    or ([CORE_REPOSITORY] if core_publishes else []),
+                },
+            )
+        if publishers and identity not in {name for name, _ in publishers}:
+            if explicit_root:
                 return (
                     b"",
                     {},
                     {
                         "code": "public_copy_repository_not_allowed",
-                        # Only a reviewed constant is ever named, never the raw
-                        # origin (it can embed a credential).
-                        "reason": (
-                            "wrong_checkout_for_path"
-                            if verified in ACCEPTED_REPOSITORIES
-                            else "origin_not_accepted"
-                        ),
-                        "checkout_is": verified,
-                        "path_needs": expected,
+                        "reason": "wrong_checkout_for_path",
+                        "checkout_is": identity or None,
+                        "path_needs": [name for name, _ in publishers],
                     },
                 )
-        elif requires_ui_identity and identity != UI_REPOSITORY:
+            return b"", {}, _checkout_refusal(relative, publishers, identity)
+        if explicit_root and core_publishes and identity != CORE_REPOSITORY:
+            # A core root asked of a consumer checkout names the checkout that
+            # serves it instead of reporting the file as uncommitted (U1/J).
             return (
                 b"",
                 {},
-                (
-                    f"{relative} is the companion UI checkout's copy; this workspace"
-                    f" is not {UI_REPOSITORY} (origin: {identity or 'unusable'})"
-                ),
+                {
+                    "code": "public_copy_repository_not_allowed",
+                    "reason": "wrong_checkout_for_path",
+                    "checkout_is": identity or None,
+                    "path_needs": [CORE_REPOSITORY],
+                },
             )
         # Capture once: a concurrent branch switch may make the cleanliness
         # comparison refuse, but can never relabel bytes from another commit.
@@ -865,7 +966,6 @@ async def execute_read_public_copy(
         _committed_public_copy,
         root,
         relative,
-        requires_ui_identity=_requires_ui_checkout(relative),
         explicit_root=explicit_root,
         confinement=confinement,
     )
