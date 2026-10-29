@@ -313,50 +313,194 @@ def _fold(text: str) -> str:
 # is therefore UPPERCASE-ONLY here (`MR`, `MRs`); the lowercase form is never a tracker
 # word. GitLab work uses `!N`, which is matched absolutely.
 #
+# Live global-bank evidence (5 rows an agent stored as "durable" while it was
+# really session work): every miss was ONE missing shape, not a missing classifier,
+# and each fix below is scoped to the shape that let its row through —
+#   `Saver releases so far: agent-server #233 live`  → the word list was singular-only,
+#     so a real tracker ref had no work word beside it;
+#   `PR3078 R1 remediation: …`                        → an unspaced ref (see _WORK_REF);
+#   `Session todo: query …`, `next action is mcp__cloudflare_whoami`,
+#     `task progress on this workstream`               → plan/progress phrases with no
+#     status verb and no locator to sit beside (see _SESSION_TODO/_TASK_PROGRESS).
+#
 # KNOWN BOUNDARY (documented, not debt): this is a bounded SHAPE rule, so prose work
 # text with no locator (`Fleet scratchpad purge 2026-10-15/16: …`) and hyphenated keys
 # (`LOH-13`, `PR34`) still pass. Catching those needs a classifier, which the design
 # deliberately rejects; the guide states this bound rather than overclaiming.
+#
+# Round 1 review (B-1/M-1) and QA (Q-1..Q-4) narrowed this widening in one
+# direction: a word list is not a shape. Every arm below now needs the SAME work
+# context its neighbours always needed, and the person-level nouns a widening swept
+# in (`tickets`, `issues`, `branches`) are work only beside a work VERB or a REVIEW
+# state — `tickets` is a box office, `issues` a medical file, `branches` a storm's
+# damage. Every boundary has a negative test drawn from ordinary prose (and, where
+# one exists, from the live global bank's personal rows), and each arm below was
+# measured against that bank.
+#
+# THE BIAS IN DOUBT IS "STORE THE FACT", and the asymmetry is NOT covered by a safety
+# net: `lop memory triage` decides with the same `fact_markers` this guard uses (see
+# `memory_triage`), so it cannot surface a note the guard let through. A slip is
+# therefore found only by a human reading `lop memory show`, and the remedy is a manual
+# `lop memory move` or a re-worded note. A personal fact a shape rule refuses, by
+# contrast, is silent data loss — the writer is told to rephrase and the fact is gone if
+# they do not. Both sides are expensive; the refusal is the irreversible one, so when a
+# candidate arm needs a new English word to catch one more work row, the answer is
+# usually no. That is why `push`, `squash`, `check`, `ticket`, `issue`, `sprint`,
+# `milestone` and `deliverable` are not work context anywhere below — each was measured
+# refusing ordinary prose.
+#
+#: Nouns that are work vocabulary in ANY sentence: nobody keeps a "PR", a "release"
+#: or a "deploy" in the ordinary-prose sense. The label is what a refusal reports.
+_WORK_NOUN_PARTS: tuple[tuple[str, str], ...] = (
+    ("pr", r"prs?"),
+    ("MR", r"(?-i:MRs?)"),
+    ("release", r"releases?"),
+    ("merge", r"merges?"),
+    ("ci", r"ci"),
+    ("deploy", r"deploys?"),
+    ("rollout", r"rollouts?"),
+    ("pipeline", r"pipelines?"),
+    ("worktree", r"worktrees?"),
+    ("lane", r"lanes?"),
+)
+_WORK_NOUN = "|".join(part for _, part in _WORK_NOUN_PARTS)
+#: A person-level noun that is a work subject only beside a review state: `branch` is
+#: also a tree's, and QA round 1 (Q-1) is why the singular must stay matchable while
+#: `Heavy snow can hold the branches down` must not be.
+_BRANCH_NOUN = r"branch(?:es)?"
+#: Unambiguous work context: no ordinary-English meaning, so one of these next to a
+#: `next step`/`next action` phrase IS work text. There is deliberately NO verb list
+#: here. `push`, `squash`, `merge`, `deploy` and `cherry-pick` are English verbs —
+#: `push the pram`, `squash the tomatoes`, `cherry-pick the ripe fruit`, `merge the
+#: two jars of jam` — and two review rounds proved the point by refusing exactly that
+#: prose (review round 2, M-1; QA round 2, QA2-1). A word list cannot tell work from
+#: cooking, so the dimension is gone rather than widened again. `rebase`, `worktree`,
+#: `pipeline` and `mcp__…` are safe because no personal sentence uses them.
+_WORK_TOKEN = (
+    r"\b(?:prs?|(?-i:MRs?)|commits?|sha|ci|pipelines?|worktrees?|rebase[sd]?|deploys?|"
+    r"rollouts?)\b"
+    r"|\bmcp__\w+\b"
+    r"|(?<![\w#])#\d{1,6}\b"
+)
+#: A review state, the one cue that makes a person-level noun a work subject.
+_REVIEW_STATE = r"pending|review|reviewed|awaiting|blocked|approved|checks"
+
 _WORK_WORD = (
-    r"pr|pull request|merge request|(?-i:MRs?)|issue|ticket|ci|pipeline|build|commit|"
-    r"sha|branch|rebase|squash|deploy|release|rollout|lane|backlog|sprint|milestone|"
-    r"tracker|jira|linear|holding|blocked|pending|awaiting|drivable|wip"
+    r"prs?|pull requests?|merge requests?|(?-i:MRs?)|issue|ticket|ci|pipelines?|"
+    r"builds?|commits?|sha|branch(?:es)?|rebase[sd]?|squash(?:ed)?|deploys?|releases?|"
+    r"rollouts?|lane|backlogs?|sprints?|milestones?|tracker|jira|linear|holding|blocked|"
+    r"pending|awaiting|drivable|wip"
 )
 _WORK_REF = re.compile(
     r"\b(?:" + _WORK_WORD + r")\b[^.\n]{0,24}(?<![\w#])#\d{1,6}\b"
     r"|(?<![\w#])#\d{1,6}\b[^.\n]{0,24}\b(?:" + _WORK_WORD + r")\b"
-    r"|(?<![\w!])!\d{1,6}\b",
-    re.I,
+    r"|(?<![\w!])!\d{1,6}\b"
+    # Unspaced shorthand needs the shape a status line has — `PR3078` at the START of
+    # a line — not just the token. Ungated, `PR` + 3-6 digits is also how personal
+    # identifiers are written: `PR` is Philippine Airlines' IATA code (`Flight PR102
+    # Manila to Sydney`), and policy, medical-record and bay numbers are written the
+    # same way (review round 1, B-1). The row this arm exists for opens with it:
+    # `PR3078 R1 remediation: all source edits done`, including the list form an agent
+    # writes a note in (`- PR3078 …`, `1. PR3078 …`). A mid-sentence `PR3078` is
+    # therefore NOT a marker, and a personal identifier that OPENS a line
+    # (`PR1234 is the bay I use`) IS refused — the cost of keying on position, stated
+    # in the guide as well as here so it is not only in a PR thread.
+    r"|^[ \t]*(?:[-*+][ \t]+|\d+[.)][ \t]+)?(?-i:PR|MR)\d{3,6}\b",
+    re.I | re.M,
 )
 # A named commit needs a LETTER in the hash: `commit 5000000` is ordinary prose, an
 # all-letter abbreviation (`cafebabe`) is not.
-_WORK_NOUN = r"pr|(?-i:MRs?)|release|merge|ci|branch|tag|deploy|lane|ticket|issue"
 _WORK_SHA = re.compile(r"\b(?:commit|sha|head)\s+(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\b", re.I)
-_WORK_STATUS = re.compile(
-    r"\b(?:ci|pipeline|build|checks)\b[^.\n]{0,24}\b(?:green|red|pass(?:ed|ing)?|fail(?:ed|ing)?)"
-    r"\b"
-    r"|\b(?:merged|merge[sd]?|rebase[sd]?|squash(?:ed)?)\b[^.\n]{0,20}"
-    r"\b(?:pr|(?-i:MRs?)|#\d|into main)\b"
-    # Noun-then-verb needs TIGHT adjacency, or only a copula/auxiliary between:
-    # `PR`/`MR` are also permanent residency, public relations and a person
-    # (`My PR application merged into the family one`, `The PR agency merged with a rival`),
-    # while `the PR was merged` / `MRs rebased onto main` are real work text.
-    r"|\b(?:pr|(?-i:MRs?))\b(?:\s+(?:was|is|are|were|been|has|had|gets?|got|now))?\s{0,4}"
-    r"(?:merged|merge[sd]?|rebase[sd]?|squash(?:ed)?)\b"
-    r"|\b(?:cut|land|ship|tag)\b[^.\n]{0,20}\b(?:(?:the )?release|v\d)"
-    r"|\bnext (?:step|lane)\b[^.\n]{0,40}\b(?:" + _WORK_NOUN + r")\b"
-    r"|\b(?:the )?(?:" + _WORK_NOUN + r")\b[^.\n]{0,24}\bnext (?:step|lane)\b"
-    r"|\bremaining work\b",
+_CI_STATUS = re.compile(
+    r"\b(?:ci|pipeline|build|checks)\b[^.\n]{0,24}"
+    r"\b(?:green|red|pass(?:ed|ing)?|fail(?:ed|ing)?)\b",
     re.I,
 )
-# A work-context HOLD: the token must concern a PR/MR/release/lane/merge/CI, not a
-# bank/parcel/dry-cleaner hold an ordinary person records.
-_WORK_HOLD = re.compile(
-    r"(?<![\w-])HOLD(?![\w-])[^.\n]{0,30}\b(?:" + _WORK_NOUN + r")\b"
-    r"|\b(?:" + _WORK_NOUN + r")\b[^.\n]{0,30}(?<![\w-])HOLD(?![\w-])",
+# `PR`/`MR` are also permanent residency, public relations and a person
+# (`My PR application merged into the family one`, `The PR agency merged with a rival`),
+# so noun-then-verb needs TIGHT adjacency, or only a copula/auxiliary between.
+_MERGE_STATUS = re.compile(
+    r"\b(?:merged|merge[sd]?|rebase[sd]?|squash(?:ed)?)\b[^.\n]{0,20}"
+    r"\b(?:prs?|(?-i:MRs?)|#\d|into main)\b"
+    r"|\b(?:prs?|(?-i:MRs?))\b(?:\s+(?:was|is|are|were|been|has|had|gets?|got|now))?\s{0,4}"
+    r"(?:merged|merge[sd]?|rebase[sd]?|squash(?:ed)?)\b",
     re.I,
 )
+_RELEASE_CUT = re.compile(r"\b(?:cut|land|ship|tag)\b[^.\n]{0,20}\b(?:(?:the )?release|v\d)", re.I)
+# `next action` needs the SAME work context as `next step`, never standing alone (QA
+# round 1, M-1: `next step is to fold in the flour` is personal prose), and that
+# context must be a token with no ordinary-English meaning — see `_WORK_TOKEN`. The
+# REVERSE order (`the release lane next step is the merge`) keeps the work-noun set:
+# there the noun is the locator and `next step` only confirms it, and no ordinary
+# sentence puts a household noun in front of that phrase.
+_NEXT_STEP = re.compile(
+    r"\bnext (?:step|lane|action)\b[^.\n]{0,40}(?:" + _WORK_TOKEN + r")"
+    r"|\b(?:the )?(?:" + _WORK_NOUN + r")\b[^.\n]{0,24}\bnext (?:step|lane)\b",
+    re.I,
+)
+# `session todo` is the phrase an agent uses for its own queue; `todo` alone is
+# ordinary prose (`the todo list for the trip is on the fridge`). Operator decision
+# on QA round 1 Q-3: KEEP refusing it — a global fact should never carry
+# session-narration framing — but the refusal has to be actionable, which is why
+# `scope_fit` now points the writer at the fact itself without the prefix.
+_SESSION_TODO = re.compile(r"\bsession todos?\b", re.I)
+# The live row that motivated the plan/progress widening reads `task progress on this
+# workstream`, and the noun list beside it is gone (review round 2, m-1: `sprint
+# training`, `marathon milestones` and `wedding deliverables` are ordinary prose).
+# What is left is the REPORT shape, never the bare phrase: the operator's own stored
+# boundaries preference reads `… not task progress, release status, transient approvals
+# …`, a prohibition list rather than a report, and refusing it is the silent data loss
+# this guard exists to prevent (live row 01a141b9). The arms are exactly a colon or
+# `is`/`was`/`on` after the phrase — those four, no more. `for` was tried and dropped
+# (review round 3, r3-1): `my task progress for the 10k plan is fine` is a personal
+# statement, so the arm is enumerated, not guessed, and each arm has a test.
+_TASK_PROGRESS = re.compile(r"\btask progress\b\s*(?::|\bis\b|\bwas\b|\bon\b)", re.I)
+_REMAINING_WORK = re.compile(r"\bremaining work\b", re.I)
 
+
+def _hold_shape(noun: str) -> re.Pattern[str]:
+    """`HOLD` next to ONE work noun, either order — the arm that names that noun."""
+    return re.compile(
+        r"(?<![\w-])HOLD(?![\w-])[^.\n]{0,30}\b(?:" + noun + r")\b"
+        r"|\b(?:" + noun + r")\b[^.\n]{0,30}(?<![\w-])HOLD(?![\w-])",
+        re.I,
+    )
+
+
+#: A work-context HOLD: the token must concern a PR/MR/release/lane/merge/CI/deploy,
+#: not a bank/parcel/dry-cleaner hold an ordinary person records. `lane` stays
+#: SINGULAR here: with `lanes` a stored disk-reclaim rule (`while other lanes hold the
+#: uv cache lock`) became a match on the plural alone. Person-level nouns are absent
+#: for the same reason (`a HOLD on the concert tickets`, `a hold on all issues of the
+#: newsletter`) — a branch reaches this arm only through its review-state cue below.
+_HOLD_NOUN_PARTS: tuple[tuple[str, str], ...] = (
+    ("pr", r"prs?"),
+    ("MR", r"(?-i:MRs?)"),
+    ("release", r"releases?"),
+    ("merge", r"merges?"),
+    ("ci", r"ci"),
+    ("deploy", r"deploys?"),
+    ("rollout", r"rollouts?"),
+    ("lane", r"lane"),
+)
+# `HOLD pending review on the branch` is work text (base refused it and must keep
+# refusing it, QA round 1 Q-1), while `Heavy snow can hold the branches down` is not:
+# the branch needs a review state to be a work subject. Only `branch` gets this arm —
+# `tickets` and `issues` are box-office and medical-file words, so they stay out of
+# every HOLD arm (review round 1, m-1).
+_HOLD_BRANCH = re.compile(
+    r"(?<![\w-])HOLD(?![\w-])[^.\n]{0,20}\b(?:"
+    + _REVIEW_STATE
+    + r")\b[^.\n]{0,30}\b"
+    + _BRANCH_NOUN
+    + r"\b"
+    r"|\b"
+    + _BRANCH_NOUN
+    + r"\b[^.\n]{0,20}\b(?:"
+    + _REVIEW_STATE
+    + r")\b[^.\n]{0,30}(?<![\w-])HOLD(?![\w-])",
+    re.I,
+)
 
 # Three narrow SHAPES the original four missed on the live global bank (2026-10-27:
 # they flagged 2 of 78 rows, while 28 were plainly one session's work). Each is a
@@ -390,23 +534,38 @@ _DATED_WORK_LOG = re.compile(
     re.I,
 )
 
+#: The closed vocabulary a refusal reports, one row per SHAPE. Splitting them is what
+#: lets a refusal name the shape that matched (`session-todo`, `hold-branch`) instead
+#: of a coarse bucket (QA round 1, Q-4), and `memory_inspect`/`memory triage` read the
+#: names straight out of this table.
+_WORK_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("tracker-ref", _WORK_REF),
+    ("named-commit", _WORK_SHA),
+    ("ci-status", _CI_STATUS),
+    ("merge-status", _MERGE_STATUS),
+    ("release-cut", _RELEASE_CUT),
+    ("next-step", _NEXT_STEP),
+    ("session-todo", _SESSION_TODO),
+    ("task-progress", _TASK_PROGRESS),
+    ("remaining-work", _REMAINING_WORK),
+    ("hold-branch", _HOLD_BRANCH),
+    *tuple((f"hold-{name}", _hold_shape(noun)) for name, noun in _HOLD_NOUN_PARTS),
+    ("session-self-reference", _SESSION_SELF_REF),
+    ("goal-statement", _GOAL_STATEMENT),
+    ("dated-work-log", _DATED_WORK_LOG),
+)
+
 
 def work_progress_markers(text: str) -> list[str]:
-    """Names of work/lane/progress markers in ``text`` — value-free, never the match."""
+    """Names of work/lane/progress shapes in ``text`` — value-free, never the match.
+
+    One name per SHAPE out of the closed vocabulary in :data:`_WORK_SHAPES`, so a
+    refusal can say which shape fired (``session-todo``, ``hold-branch``) instead of a
+    coarse bucket that mixes a plan phrase with a CI status (QA round 1, Q-4). The
+    names are the whole output; no matched text leaves this function.
+    """
     folded = _fold(text)
-    found: list[str] = []
-    for name, pattern in (
-        ("tracker-ref", _WORK_REF),
-        ("named-commit", _WORK_SHA),
-        ("ci-release-status", _WORK_STATUS),
-        ("hold-token", _WORK_HOLD),
-        ("session-self-reference", _SESSION_SELF_REF),
-        ("goal-statement", _GOAL_STATEMENT),
-        ("dated-work-log", _DATED_WORK_LOG),
-    ):
-        if pattern.search(folded):
-            found.append(name)
-    return found
+    return [name for name, pattern in _WORK_SHAPES if pattern.search(folded)]
 
 
 def fact_markers(fact: dict[str, Any]) -> list[str]:
@@ -427,11 +586,18 @@ def fact_markers(fact: dict[str, Any]) -> list[str]:
 def scope_fit(scope: str, fact: dict[str, Any]) -> None:
     """Refuse work/lane/progress content in the GLOBAL bank, before any write.
 
-    A bounded SHAPE rule, not a classifier: it catches a tracker ref, a named commit,
-    a CI/release status verb or a `next step` phrase. Global is for durable personal
-    facts, contacts, preferences, environment; work state belongs in a session bank.
-    Value-free refusal (no offending text echoed); explicit session/team/agent writes
-    and every wire/import path are untouched, and forget is never reached here.
+    A bounded SHAPE rule, not a classifier. It refuses, and NAMES, a tracker ref
+    (``PR #12``, ``!1234``, a line that OPENS with ``PR3078``), a named commit, a
+    CI/merge/release status verb, a ``next step``/``next action`` phrase carrying work
+    context, a ``session todo`` line, a ``task progress`` report (``task progress:``,
+    ``task progress on …``, ``task progress is …``), a
+    work-context ``HOLD``, a session self-reference, a goal statement and a dated work
+    log — see :data:`_WORK_SHAPES`. Global is for durable personal facts, contacts,
+    preferences, environment; work state belongs in a session bank.
+
+    Value-free refusal (no offending text echoed, only the shape names); explicit
+    session/team/agent writes and every wire/import path are untouched, and forget is
+    never reached here.
     """
     if scope != "global" or not isinstance(fact, dict):
         return
@@ -439,10 +605,17 @@ def scope_fit(scope: str, fact: dict[str, Any]) -> None:
     if markers:
         # Marker NAMES only (a closed vocabulary), never the matched text, and both
         # routes that work: the tool's scope and the URL form.
+        # Actionable, not just a refusal (QA round 1, Q-3): the shape is named, and
+        # the writer is told to keep the FACT and drop the session framing. Sending a
+        # personal reminder to `session` alone would let it die with the conversation,
+        # which is the harm; a global fact should simply not carry `Session todo:`.
         raise MemoryError(
             f"This looks like session work ({', '.join(markers)}). It was not stored. "
-            'Store it with scope="session" (the default), or as memory://session; '
-            "global is for durable personal facts, contacts, preferences and environment."
+            "Store the fact itself in global — drop the session framing (a "
+            "`Session todo:` or `next step:` prefix) and keep the reminder body; for "
+            'state that should live with the conversation use `scope="session"` '
+            "(memory://session) instead. Global is for durable personal facts, contacts, "
+            "preferences and environment."
         )
 
 
@@ -664,10 +837,13 @@ def guard(value: Any, *, opaque: bool = False) -> None:
 
 
 def origin_label(fact: dict[str, Any]) -> str:
-    """``captured`` = automatic compaction capture still awaiting a human or an explicit
-    store; ``stated`` = anything a user or agent deliberately wrote or corrected.
+    """``captured`` = the fact's status is ``candidate``; ``stated`` = anything else.
+
     Shown everywhere a fact is listed so unreviewed candidates are never mistaken for
-    verified knowledge (UX round 1: U1)."""
+    verified knowledge (UX round 1: U1). WHY the test is the STATUS and not "who touched
+    it": a deliberateness act that is not an edit (a move, an agent edit) keeps
+    ``candidate``, so a deliberate capture still lists as ``captured`` — the guide says
+    so, and this is the one place that decides it."""
     return "captured" if fact.get("status") == "candidate" else "stated"
 
 
@@ -2625,9 +2801,11 @@ class MemoryStore:
         a move cannot rewrite an entity in place. It is represented as two ordinary
         ops that OLD PEERS ALREADY UNDERSTAND (no protocol bump): a ``put`` at the
         destination whose first revision PARENTS the source head, and a ``tombstone``
-        at the source. The destination fact is byte-identical (text, provenance,
-        created_at and every other timestamp), ``show`` reports ``moved_from`` from
-        the cross-entity root parent, and the ordinary op stream replicates it. A new
+        at the source. The destination fact is byte-identical (text, created_at and every
+        other timestamp — an automatic capture is the one exception, because a move is a
+        deliberate act: its deadline goes and its author becomes the mover, D2),
+        ``show`` reports ``moved_from`` from the cross-entity root parent, and the
+        ordinary op stream replicates it. A new
         op kind was rejected deliberately: a peer running an older release would
         refuse the whole batch and then sit behind a permanent sequence gap.
 
@@ -2743,11 +2921,21 @@ class MemoryStore:
                     )
                 fact = dict(head["fact"])
                 if fact["source"].get("author") == CAPTURE_AUTHOR:
-                    # Moving a capture is a deliberate act (D2), so its expiry
-                    # deadline goes; provenance is otherwise kept as-is, and
-                    # ``unreviewed_capture`` treats a capture outside its own
-                    # session as deliberate.
+                    # Moving a capture is a deliberate act (D2). TWO stamps are needed,
+                    # and the author is the load-bearing one: every deliberateness
+                    # predicate reads it (``unreviewed_capture``, the expiry sweep's
+                    # ``source.session = owner`` clause, ``_evict``'s author filter), so
+                    # nulling the deadline alone was only true while the fact sat
+                    # outside its own session. A capture moved A -> global -> A matched
+                    # ``unreviewed_capture`` again and the expiry sweep derived a legacy
+                    # deadline from ``source_time``, so the round trip still expired
+                    # (and a session delete still forgot it) — #3086 review r2, m1. The
+                    # rewrite is the same one ``put`` performs on every deliberate
+                    # revision; provenance is otherwise kept as-is.
                     fact["expires_at"] = None
+                    fact["source"] = dict(
+                        fact["source"], author=self.identity.agent_id or "anonymous"
+                    )
                 # A move must never be a route around the guards ``put`` enforces.
                 # The strongest of them is scope-fit: work/lane/progress content is
                 # refused in the global bank, and moving it there would defeat it.

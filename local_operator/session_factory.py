@@ -5193,10 +5193,16 @@ async def _prepare(
         # see local_operator.tools.confinement for the mechanism and limits.
         session_kwargs["confinement_root"] = str(world_root)
     # H5 (Team Bridge): the runtime resolved above is the same object the tool
-    # table was built against. It is still attached ONLY to the persisted,
-    # account-bound designated session — and subagent children are built
-    # elsewhere and never receive it (see the parameter's comment on
-    # ``Session``).
+    # table was built against. It is attached to EVERY writer session of the
+    # enrolled owner: the collaboration surface (directory/dm/channel_post and
+    # the endpoint-addressed room reads) belongs to any of them, while the
+    # inbound mailbox and the owner-shared reads are gated per call by the
+    # strict authority fence (``not_designated``). The designation is therefore
+    # no longer what decides whether a session has the tool, so an enrolled
+    # machine pays the bridge schema in each session — that is the cost of the
+    # capability, stated here rather than left to be inferred from the diff
+    # (review round 1 MAJOR 1/2). Subagent children are built elsewhere and
+    # never receive it (see the parameter's comment on ``Session``).
     if bridge_runtime is not None:
         session_kwargs["bridge_runtime"] = bridge_runtime
     return _SessionPlan(
