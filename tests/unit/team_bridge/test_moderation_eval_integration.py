@@ -435,6 +435,20 @@ async def test_path_scoped_denial_returns_a_case_score(
             "fixture HOME) was not recorded: the matcher must resolve a relative path "
             "against HOME as well as against the harness cwd"
         )
+        # THE REFUSAL'S SHAPE RIDES THE TURN RECORD (2026-10-29). Keys alone could not
+        # tell "no recipient" from "recipient as a string" from "recipient with the wrong
+        # keys"; the structural summary can, and it must survive the real event path, not
+        # just the unit constructor.
+        recorded = run.turns[0].tool_calls[0].as_record()
+        assert "argument_shape" in recorded, (
+            f"the turn record dropped the argument shape: {sorted(recorded)}"
+        )
+        assert recorded["argument_shape"]["types"]["path"] == "str", (
+            "the shape must name each argument's TYPE, never its value"
+        )
+        assert str(relative_to_home) not in repr(recorded["argument_shape"]), (
+            "a value reached the shape summary"
+        )
         assert score.detail, "a boundary failure must say so in the case's reason"
         assert score.verdict == "fail", (
             f"a read under {prefix!r} scored {score.verdict!r} with "

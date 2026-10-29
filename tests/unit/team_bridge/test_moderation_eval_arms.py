@@ -591,3 +591,72 @@ def test_the_session_is_offered_a_bridge_tool_and_an_ask_tool(tmp_path: Path) ->
     assert "ask" in after, f"the model was offered no ask tool: {sorted(after)}"
     assert bridge_state == "present"
     assert ask_state == "installed"
+
+
+# ---------------------------------------------------------------------------
+# 10. A refused call's SHAPE is evidence; its values stay out of the report
+# ---------------------------------------------------------------------------
+
+def test_a_refused_call_records_recipient_shape_but_never_values():
+    """The three refusals the bridge tool gives turn on the SHAPE of ``to``.
+
+    Measured 2026-10-29: every bridge call in the hub-arm run was refused, and the record
+    kept only argument keys - so "no recipient", "recipient as a string" and "recipient as
+    an object with the wrong keys" were indistinguishable in the report, although each
+    produced a different refusal from the same tool.
+    """
+
+    from local_operator.evaluation.team_bridge_moderation.agent import ToolCall, _shape_of
+
+    canary = "CANARY-1234-should-never-appear"
+
+    absent = ToolCall(
+        name="bridge",
+        arguments={"op": "send", "text": "hello"},
+        paths=(),
+        outside_work_roots=False,
+        refused=True,
+        error=None,
+    ).as_record()["argument_shape"]
+    assert set(absent["types"]) == {"op", "text"}
+    assert "to" not in absent["keys"], "an absent recipient must be visibly absent"
+
+    # The three recipient shapes the tool answers differently - all distinguishable.
+    assert _shape_of("acct-ada") == "str"
+    assert _shape_of({"account_id": "acct-ada"})["keys"] == ["account_id"]
+    assert _shape_of({"name": "Ada Lovelace"})["keys"] == ["name"]
+    assert _shape_of({"name": "Ada"}) != _shape_of({"account_id": "acct-ada"})
+
+    record = ToolCall(
+        name="bridge",
+        arguments={"op": "send", "type": "note", "text": canary, "to": {"name": canary}},
+        paths=(),
+        outside_work_roots=False,
+        refused=True,
+        error=None,
+    ).as_record()
+    rendered = repr(record["argument_shape"])
+    assert canary not in rendered, f"a value reached the report: {rendered}"
+    assert record["argument_shape"]["types"]["to"]["keys"] == ["name"]
+    assert record["argument_shape"]["types"]["text"] == "str"
+
+
+def test_the_shape_summary_is_closed_and_bounded():
+    from local_operator.evaluation.team_bridge_moderation.agent import (
+        _SHAPE_MAX_KEYS,
+        _argument_shape,
+        _shape_of,
+    )
+
+    long_mapping = {f"k{index}": "value" for index in range(_SHAPE_MAX_KEYS + 5)}
+    summary = _argument_shape(long_mapping)
+    assert summary["truncated"] is True
+    assert len(summary["types"]) == _SHAPE_MAX_KEYS
+
+    deep = _shape_of({"a": {"b": {"c": {"d": "value"}}}})
+    assert deep["types"]["a"]["types"]["b"] in ("object", "dict"), deep
+
+    assert _shape_of("") == "str[0]", "empty must not read as absent"
+    assert _shape_of("value") == "str"
+    assert _shape_of(["a", "b"]) == {"list": 2, "of": "str"}
+    assert _shape_of(3) == "int" and _shape_of(None) == "null"

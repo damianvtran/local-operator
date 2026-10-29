@@ -121,12 +121,80 @@ class ToolCall:
         return {
             "tool": self.name,
             "argument_keys": sorted(self.arguments),
+            # THE SHAPE, SO A REFUSAL CAN BE READ RATHER THAN GUESSED AT. Keys alone could
+            # not distinguish "no recipient given" from "recipient given as a string" from
+            # "recipient given as an object" - the three shapes that produce three
+            # different refusals from the same tool. Types and key names only; values are
+            # never stored (see ``_shape_of``).
+            "argument_shape": _argument_shape(self.arguments),
             "paths": list(self.paths),
             "outside_work_roots": self.outside_work_roots,
             "refused": self.refused,
             "error": self.error,
             "duration_s": self.duration_s,
         }
+
+
+#: Type words the structural summary may use. A closed vocabulary on purpose: the summary
+#: describes SHAPE, so anything outside this list would be a value smuggling itself in.
+_SHAPE_TYPES = ("str", "int", "float", "bool", "null", "list", "object", "unknown")
+_SHAPE_MAX_KEYS = 12
+_SHAPE_MAX_DEPTH = 2
+
+
+def _shape_of(value: Any, depth: int = 0) -> Any:
+    """A redacted STRUCTURAL summary of one argument: key names and types, never values.
+
+    WHY THIS EXISTS. Measured 2026-10-29: the first hub-arm run recorded a refused
+    ``bridge`` call as ``refused: true`` with its argument KEYS (``op``, ``text``,
+    ``to``, ``type``) and nothing else. The refusal was almost certainly the tool's own
+    input validation - a well-formed ``to: {account_id}`` sends fine through the same
+    runtime - but "the model omitted or mis-typed the recipient" could only be INFERRED.
+    Shape turns that inference into evidence: was ``to`` absent, a bare string, or an
+    object with which keys?
+
+    WHAT IT MAY NOT CARRY. Never a value, never the body, never a path, never a length in
+    characters (length is a side channel on a secret). A string is "str"; an empty one is
+    "str[0]" so "provided but empty" stays distinguishable from "absent". Keys are capped
+    and depth is capped, so a hostile or accidental deep structure cannot grow the report.
+    """
+
+    if depth >= _SHAPE_MAX_DEPTH:
+        return "object" if isinstance(value, Mapping) else type(value).__name__
+    if isinstance(value, str):
+        return "str[0]" if value == "" else "str"
+    if isinstance(value, bool):
+        return "bool"
+    if isinstance(value, int):
+        return "int"
+    if isinstance(value, float):
+        return "float"
+    if value is None:
+        return "null"
+    if isinstance(value, Mapping):
+        keys = sorted(str(key) for key in value)
+        return {
+            "keys": keys[:_SHAPE_MAX_KEYS],
+            "types": {
+                str(key): _shape_of(value[key], depth + 1) for key in keys[:_SHAPE_MAX_KEYS]
+            },
+            "truncated": len(keys) > _SHAPE_MAX_KEYS,
+        }
+    if isinstance(value, (list, tuple)):
+        first = value[0] if value else None
+        return {"list": len(value), "of": _shape_of(first, depth + 1)}
+    return "unknown"
+
+
+def _argument_shape(arguments: Mapping[str, Any]) -> Mapping[str, Any]:
+    """The structural summary of a whole argument mapping, keys in sorted order."""
+
+    keys = sorted(str(key) for key in arguments)
+    return {
+        "keys": keys,
+        "types": {str(key): _shape_of(arguments[key]) for key in keys[:_SHAPE_MAX_KEYS]},
+        "truncated": len(keys) > _SHAPE_MAX_KEYS,
+    }
 
 
 def _sha256(text: str) -> str:
