@@ -435,10 +435,36 @@ def static_feature_flags() -> dict[str, Any]:
         # (including retry), join/read+notify/consent/admit, archive/unarchive,
         # member add/remove and leave. New renderers require this capability AND
         # supply expected_account_id + explicit target tenant_id on every write.
-        # Legacy omission remains compatible. Threads/reactions are not present
-        # in this runtime: feature branches must adopt the same guard before
-        # advertising their mutations alongside this capability.
+        # Legacy omission remains compatible on THESE routes. The thread and
+        # reaction routes are covered by their own keys below, where the receipt
+        # is REQUIRED rather than optional.
         "team_bridge_conversation_owner_guard": 1,
+        # THREADS: `GET .../conversations/{id}/messages/{message_id}/replies`
+        # (read one thread) plus `thread_root_id` on the send above. BOTH halves
+        # REQUIRE the captured-owner receipt (`expected_account_id` + explicit
+        # `tenant_id`), compared atomically against the exact dispatch bearer,
+        # and both answer `409 account_mismatch` when the machine has since
+        # signed in as someone else: a thread read (or a delayed retry of one)
+        # started as account A can never answer B's thread, and a reply composed
+        # as A is never posted as B. The UI held threads closed until this guard
+        # existed (`TEAM_BRIDGE_THREADS_SHIPPED_IN_THIS_BUILD`, the #1304
+        # cache/retry isolation defects), so this key PROMISES the guard, not
+        # only the route: never advertise it on a build whose replies read or
+        # threaded send accepts a receipt-less call. An ordinary top-level send
+        # keeps the legacy optional receipt under the owner-guard key above.
+        # `test_conversation_owner_guard.py` pins the pair.
+        # Its own key by the `radient_org` rule: a renderer that does not see it
+        # mounts no thread affordance and sends no thread request.
+        "team_bridge_threads": 1,
+        # REACTIONS: `PUT`/`DELETE .../messages/{message_id}/reactions/{emoji}`,
+        # the signed-in HUMAN's reaction only (no actor endpoint on this plane).
+        # Both REQUIRE the captured-owner receipt (PUT in the body, DELETE in
+        # the query) under the same atomic compare and the same coded refusal.
+        # Same promise as threads: this key means "reaction routes exist AND
+        # they refuse an unguarded or mismatched call", never route presence
+        # alone, because the UI's reaction hold was lifted on exactly that
+        # condition. A renderer that does not see it shows no reaction controls.
+        "team_bridge_reactions": 1,
         # The OWNER AUDIT ("{chief of staff}'s messages"): the read-only
         # `/v1/desktop/team-bridge/owner-audit/...` family over agent-server
         # #221, where the signed-in owner reads every conversation their own
@@ -453,6 +479,13 @@ def static_feature_flags() -> dict[str, Any]:
         # the section over one conversation (#3022 R1-N2). A hub that predates
         # #221 is detected on the LIST route only (its 404 there).
         "team_bridge_owner_audit": 1,
+        # The chief-of-staff read grant (agent-server §17): `PUT`/`DELETE
+        # /v1/desktop/team-bridge/conversations/{id}/cos-read`, both guarded
+        # (tenant_id + expected_account_id required). The renderer shows
+        # "Share with my chief of staff" only when this key is present; a hub
+        # that predates §17 answers the PUT 404/405, which the UI reports as
+        # unsupported rather than hiding the conversation.
+        "team_bridge_cos_read": 1,
         # The owner's agent-invitation surface over agent-server #227: the
         # `GET /v1/desktop/team-bridge/agents/owned/invitations` read (metadata
         # only, receipt required, `private, no-store`) and `decision=withdraw`

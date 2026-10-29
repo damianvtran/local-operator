@@ -303,6 +303,18 @@ _AMBIENT_VARS = (
     # the suite observes. Tests that need it set it through
     # `tests/notification_opt_in.notification_path_opt_in`.
     "LOCAL_OPERATOR_NOTIFY_TEST_HOSTING",
+    # The escape hatch over the session store's LIVE-STORE guard
+    # (``session/cleanup.py::ALLOW_TEST_STORE_DELETIONS_ENV``): a test process may
+    # not delete a session directory, a pad's content or the handoff quarantine
+    # from the operator's own ``~/.local-operator``, and this variable waives
+    # that. An inherited value is the ALLOW_NESTED_SESSION failure exactly —
+    # every refusal cell in ``test_cleanup_live_store_guard.py`` (and every
+    # future one) would take the allow path while looking like it tested the
+    # refusal, and the guard that exists because a lane's pytest run deleted a
+    # real session would be proven by nothing. Scrubbed for the whole run; a
+    # cell that means to exercise the opt-in sets it through ``monkeypatch``,
+    # which is also where the reason is written down.
+    "LOCAL_OPERATOR_ALLOW_TEST_STORE_DELETIONS",
     # Tests launched from a detached operator inherit these runtime-only flags.
     # They turn strict --resume validation into adoption of a brand-new id.
     "LOP_RUNTIME_ADOPT_SESSION",

@@ -1,0 +1,7 @@
+{
+  "cli.install_help.install": "Gestionar las generaciones de la instalación local (estructura para el runtime `lop` estable)",
+  "cli.install_help.prune": "Eliminar generaciones de instalación desde las que no se ejecuta nada",
+  "cli.install_help.keep": "Cuántas generaciones sin referencias conservar (predeterminado: %(default)s; 0 o más). Nunca se elimina una generación referenciada por una sesión activa o guardada, ni aquella a la que apunta `current`",
+  "cli.install_help.migrate": "Copiar esta instalación a la estructura de generaciones y hacer que `current` apunte a ella",
+  "cli.install_help.status": "Mostrar la estructura de instalación: puntero, generaciones y qué cargaría un nuevo `lop`"
+}

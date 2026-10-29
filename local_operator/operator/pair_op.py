@@ -775,8 +775,30 @@ def _apply(approval_id: str, expected_block: dict[str, Any], root: Path | None) 
     # prompt and no write at all. Nothing in the admit needs the lease.
     run_id = approvals.new_run_id()
     approvals.begin_run(approval_id, run_id=run_id, runner_pid=os.getpid(), root=config_root)
+    created_pending = False
     try:
         approvals.verify_for_run(approval_id, root=config_root)
+        # THE PENDING REQUEST IS DERIVED FROM THIS RECORD, AT APPLY TIME (C3 QA round 1,
+        # Q1). ``admit_device`` refuses a phone with no stored certificate and no pending
+        # pairing request, and the phone-side filer writes none -- so every filed-and-
+        # approved pairing stopped at ``pair_device_not_admitted``. It is written HERE and
+        # not at filing because the legacy ``lop pair`` watcher signs the OLDEST pending
+        # row it finds: a row written at filing would let an unrelated ``lop pair`` run
+        # install a phone whose typed card nobody has approved yet. Written under the run
+        # lease, after ``verify_for_run``, so only a card that has already been decided can
+        # produce it; dropped again if this apply does not reach the install.
+        if (
+            devices.read_device(config_root, device_id) is None
+            and devices.read_pending(config_root, device_id) is None
+        ):
+            devices.write_pending(
+                config_root,
+                device_id=device_id,
+                name=_plain(device["name"]),
+                spki=str(device["spki"]),
+                code="",
+            )
+            created_pending = True
         admitted = admit_device(config_root, device_id)
         if admitted != ADMIT_OK:
             raise _refuse(ADMIT_REFUSED[admitted][0], ADMIT_REFUSED[admitted][1])
@@ -828,6 +850,8 @@ def _apply(approval_id: str, expected_block: dict[str, Any], root: Path | None) 
             root=config_root,
         )
     except Exception as exc:
+        if created_pending:
+            devices.drop_pending(config_root, device_id)
         _release_run(
             approval_id,
             run_id,
@@ -1025,8 +1049,8 @@ def card_lines(record: Mapping[str, Any]) -> list[str]:
 
     WHY IT CANNOT FALL THROUGH TO THE ONBOARDING CARD: the fallback calls this an anchor
     install and lists "definitions, MCP servers, git identity and logins", which is a
-    different action entirely. Nothing here names the approve command: this kind is refused
-    on the terminal, so a command would be an instruction that cannot work.
+    different action entirely. The GENERIC terminal approver stays refused: the dedicated
+    operator command carries the code, whereas it has no acknowledgement field.
     """
     facts = disclosure(dict(record))
     lines = [
@@ -1038,8 +1062,9 @@ def card_lines(record: Mapping[str, Any]) -> list[str]:
         f"It reaches this computer {facts['via_words']}, and its certificate would last "
         f"{facts['lifetime_days']} days.",
         f"Requested from {facts['requested_from']}; signed by key {facts['signing_principal']}.",
-        "Type the six digits the phone shows on this computer's approval sheet to finish. "
-        "The terminal and the TUI cannot approve a pairing.",
+        "Type the six digits the phone shows with `lop operator devices --approve "
+        "<approval-id> --code <six digits>` on this computer to finish. The in-conversation "
+        "approval card is not available yet.",
         "Anything that runs programs as you on this computer can work out those digits, so "
         "the sheet warns when this computer cannot prove a person approved.",
     ]
@@ -1057,8 +1082,9 @@ class _PairOp:
     ``file_only_signing = True`` is the operator's decision, not a default (a-2a8b: "Allow,
     with the warning and a 'Set up Touch ID' offer"), which is why the row carries
     ``unproven_human`` and the sheet offers the upgrade. ``cli_approvable = False`` is the
-    first lock: the six digits have to be typed, and neither the terminal verb nor the TUI
-    can show the code check, so both refuse this kind (deny stays available).
+    first lock on the GENERIC approvers: the six digits have to be typed, and neither the
+    generic terminal verb nor the TUI can carry the code check, so both refuse this kind
+    (deny stays available). The dedicated `operator devices --code` path is typed instead.
     """
 
     op = OP

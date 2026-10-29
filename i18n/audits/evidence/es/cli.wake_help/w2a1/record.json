@@ -1,0 +1,71 @@
+{
+  "schema": 1,
+  "audit_id": "w2a1",
+  "audit_round": 1,
+  "locale": "es",
+  "namespace": "cli.wake_help",
+  "audit_date": "2026-10-29",
+  "audited_revision": "088699bfea0fc33d6b2f0748037dd7e89d85627d",
+  "audited_revision_note": "Target es file is UNTRACKED at this revision; HEAD does not bind its bytes. The exact audited on-disk target sha256 is below and in the final checks output.",
+  "key_count": {
+    "en": 17,
+    "target": 17,
+    "context": 17
+  },
+  "verdict": "passed",
+  "result": "passed — 0 blocker, 0 major, 0 minor, 0 nit",
+  "verdict_reason": "All 17 keys read; clean. {max} is preserved and renders; supervisor installation/removal, default quiet and errored-turn notification, recurrence, time examples and LaunchAgent behaviour remain truthful.",
+  "auditor": {
+    "agent": "translation-auditor (lopdev team), es-w2-auditor-a",
+    "session_or_instance": "d2377f5f44ec",
+    "model": "kimi/k3.1-pro (self-reported from the current session model-switch notice)",
+    "model_note": "Primary header: anthropic/claude-sonnet-5-5. Temporary provider-failure fallback: quota HTTP 429 via openai/gpt-6-astra to current kimi/k3.1-pro. All six namespace judgements were completed under the disclosed current fallback; no primary-model audit claim.",
+    "date": "2026-10-29",
+    "independence": "I authored none of this copy and repaired none. I compared every key against en source/context, shipped es terminology and the runtime parser/implementation. No catalogue, sidecar, ledger, allowance or generated file was edited."
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/cli.wake_help.json",
+      "revision": "088699bfea0fc33d6b2f0748037dd7e89d85627d",
+      "sha256": "eff6775fe3ad39c228dd4c360b22011d9a95c887fa5b7839744f4b532a31ac8a"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/es/cli.wake_help.json",
+      "sha256": "63ab3617615587d40be899aa854ff812958b2f9e5c0546cdf36c80ec04e0813c",
+      "tracked": false
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/cli.wake_help.context.json",
+      "sha256": "5ba382086e76863859f02482a80ff17f41779b2ee8ca1fe495b9f76b4d8bc970"
+    }
+  },
+  "findings": [],
+  "check_output": [
+    {
+      "cmd": "git rev-parse HEAD; git status --porcelain -- <target>; sha256sum <inputs>",
+      "result": "HEAD 088699bfea0fc33d6b2f0748037dd7e89d85627d; each target ?? (untracked); all hashes listed in input_hashes"
+    },
+    {
+      "cmd": "isolated HOME/config, PYTHONPATH=$PWD python3 i18n/audits/evidence/es/cli.agents_help/w2a1/checks.py.txt",
+      "result": "exit 0; 155 keys; ordered en/es/context key parity; parser parse_message accepted all targets; ICU argument and plural-selector parity; no select arguments in these namespaces; flag, backtick-code-span and argparse printf parity; no maxCells declared; no few/zero/two"
+    },
+    {
+      "cmd": "render cli.wake_help.create_message with max=4000",
+      "result": "prompt automático que se entrega al activarse (como máximo 4000 caracteres)"
+    },
+    {
+      "cmd": "explicit ICU select-label negative control",
+      "result": "source action=start renders Start the daemon; translated branch labels fall through to other and render start el daemon"
+    },
+    {
+      "cmd": "read_public_copy (sanctioned reader)",
+      "result": "refused: workspace is not a git checkout; additionally untracked targets and context sidecars are unsupported. No masked value observed; no workaround used."
+    }
+  ],
+  "display_side_risk": "No value displayed as a redaction marker. The sanctioned reader was attempted and refused because this delegated workspace is not recognized as a git checkout; it also refuses untracked working-tree files and context sidecars. No workaround was used; this limitation is recorded.",
+  "limitations": [
+    "LLM semantic judgement; no native-speaker attestation.",
+    "No rendered CLI frames were captured because the host is loaded and repo-wide/heavy runs were forbidden. No maxCells is declared; length changes were assessed but not labelled clipping defects.",
+    "No repo-wide tests or generator commands were run; the narrow parser probe is the mechanical check."
+  ]
+}

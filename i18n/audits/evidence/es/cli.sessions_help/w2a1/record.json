@@ -1,0 +1,102 @@
+{
+  "schema": 1,
+  "audit_id": "w2a1",
+  "audit_round": 1,
+  "locale": "es",
+  "namespace": "cli.sessions_help",
+  "audit_date": "2026-10-29",
+  "audited_revision": "088699bfea0fc33d6b2f0748037dd7e89d85627d",
+  "audited_revision_note": "Target es file is UNTRACKED at this revision; HEAD does not bind its bytes. The exact audited on-disk target sha256 is below and in the final checks output.",
+  "key_count": {
+    "en": 47,
+    "target": 47,
+    "context": 47
+  },
+  "verdict": "failed",
+  "result": "failed — 2 blocker, 1 major, 0 minor, 0 nit",
+  "verdict_reason": "All 47 keys read. Two reclaim strings incorrectly promise recovery where the command previews termination or removes scratchpad content; pads also violates the explicit sidecar terminology instruction.",
+  "auditor": {
+    "agent": "translation-auditor (lopdev team), es-w2-auditor-a",
+    "session_or_instance": "d2377f5f44ec",
+    "model": "kimi/k3.1-pro (self-reported from the current session model-switch notice)",
+    "model_note": "Primary header: anthropic/claude-sonnet-5-5. Temporary provider-failure fallback: quota HTTP 429 via openai/gpt-6-astra to current kimi/k3.1-pro. All six namespace judgements were completed under the disclosed current fallback; no primary-model audit claim.",
+    "date": "2026-10-29",
+    "independence": "I authored none of this copy and repaired none. I compared every key against en source/context, shipped es terminology and the runtime parser/implementation. No catalogue, sidecar, ledger, allowance or generated file was edited."
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/cli.sessions_help.json",
+      "revision": "088699bfea0fc33d6b2f0748037dd7e89d85627d",
+      "sha256": "a250a185a780ab330187560c23dfe5e8d95956da24d417b22e1fc8bb121c2a6a"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/es/cli.sessions_help.json",
+      "sha256": "27f21f00b13e15320ce3f989c7cca51738bf0951600a296dd5840a1e6376dd0b",
+      "tracked": false
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/cli.sessions_help.context.json",
+      "sha256": "0b1f7b4fc04b7d033d9b2a495415b115bca204ce4b38f641aa42ead4bf7151bb"
+    }
+  },
+  "findings": [
+    {
+      "id": "es-w2-A03",
+      "severity": "major",
+      "status": "open",
+      "keys": [
+        "cli.sessions_help.cleanup_scratchpads_only"
+      ],
+      "detail": "Current text: 'Auditar pads con --dry-run; si no, recuperar solo el contenido de compilación y caché de scratchpad (nunca transcripciones ni tus conversaciones).' The sidecar explicitly says to use settled 'scratchpad', not 'pad'; 'pads' violates that instruction and the shipped es scratchpad terminology.",
+      "remediation": "Replace 'Auditar pads' with 'Auditar scratchpads' and keep 'scratchpad' as the product noun throughout."
+    },
+    {
+      "id": "es-w2-A04",
+      "severity": "blocker",
+      "status": "open",
+      "keys": [
+        "cli.sessions_help.cleanup_scratchpads_only"
+      ],
+      "detail": "Current 'recuperar solo el contenido de compilación y caché de scratchpad' tells the operator content would be recovered/restored. The implementation removes scratchpad files/trees (session/cleanup.py:1622-1656); --dry-run audits without removing, otherwise this is destructive cleanup, with transcripts/conversations preserved.",
+      "remediation": "Use 'eliminar solo el contenido de compilación y caché de scratchpad (nunca transcripciones ni tus conversaciones)'."
+    },
+    {
+      "id": "es-w2-A05",
+      "severity": "blocker",
+      "status": "open",
+      "keys": [
+        "cli.sessions_help.reclaim_dry_run"
+      ],
+      "detail": "Current text: 'listar qué se recuperaría, sin enviar señales'. English says 'list what would be reclaimed, without signalling anything'; the namespace's reclaim command ends unreachable runtimes with SIGTERM after draining, not recovering sessions. 'Recuperaría' reverses the dry-run's destructive preview meaning.",
+      "remediation": "Use 'listar qué runtimes se finalizarían, sin enviar señales'."
+    }
+  ],
+  "check_output": [
+    {
+      "cmd": "git rev-parse HEAD; git status --porcelain -- <target>; sha256sum <inputs>",
+      "result": "HEAD 088699bfea0fc33d6b2f0748037dd7e89d85627d; each target ?? (untracked); all hashes listed in input_hashes"
+    },
+    {
+      "cmd": "isolated HOME/config, PYTHONPATH=$PWD python3 i18n/audits/evidence/es/cli.agents_help/w2a1/checks.py.txt",
+      "result": "exit 0; 155 keys; ordered en/es/context key parity; parser parse_message accepted all targets; ICU argument and plural-selector parity; no select arguments in these namespaces; flag, backtick-code-span and argparse printf parity; no maxCells declared; no few/zero/two"
+    },
+    {
+      "cmd": "render cli.wake_help.create_message with max=4000",
+      "result": "prompt automático que se entrega al activarse (como máximo 4000 caracteres)"
+    },
+    {
+      "cmd": "explicit ICU select-label negative control",
+      "result": "source action=start renders Start the daemon; translated branch labels fall through to other and render start el daemon"
+    },
+    {
+      "cmd": "read_public_copy (sanctioned reader)",
+      "result": "refused: workspace is not a git checkout; additionally untracked targets and context sidecars are unsupported. No masked value observed; no workaround used."
+    }
+  ],
+  "display_side_risk": "No value displayed as a redaction marker. The sanctioned reader was attempted and refused because this delegated workspace is not recognized as a git checkout; it also refuses untracked working-tree files and context sidecars. No workaround was used; this limitation is recorded.",
+  "limitations": [
+    "LLM semantic judgement; no native-speaker attestation.",
+    "No rendered CLI frames were captured because the host is loaded and repo-wide/heavy runs were forbidden. No maxCells is declared; length changes were assessed but not labelled clipping defects.",
+    "No repo-wide tests or generator commands were run; the narrow parser probe is the mechanical check."
+  ]
+}

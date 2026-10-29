@@ -92,7 +92,7 @@ def _runtime(client: object) -> BridgeRuntime:
 
 @pytest.fixture(autouse=True)
 def _fence_clean(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(fence_mod, "authority_fence", lambda runtime: None)
+    monkeypatch.setattr(fence_mod, "outbound_authority_fence", lambda runtime: None)
 
 
 async def test_two_boundaries_share_one_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -122,13 +122,13 @@ async def test_drift_refusal_performs_zero_fetches_and_cancels_inflight() -> Non
     client = _Client(_payload())
     runtime = _runtime(client)
     fence = _ScriptedFence(_REFUSAL)
-    original = fence_mod.authority_fence
-    fence_mod.authority_fence = fence
+    original = fence_mod.outbound_authority_fence
+    fence_mod.outbound_authority_fence = fence
     try:
         runtime._admission_task = starting
         state = await admit_bridge_runtime(runtime)
     finally:
-        fence_mod.authority_fence = original
+        fence_mod.outbound_authority_fence = original
     assert state == "pending"
     assert client.calls == 0
     # ``cancel()`` only REQUESTS cancellation; the loop has to run once before
@@ -142,12 +142,12 @@ async def test_revocation_after_await_discards_the_result() -> None:
     client = _Client(_payload())
     runtime = _runtime(client)
     fence = _ScriptedFence(None, None, _REFUSAL)  # entry / pre-GET / post-await
-    original = fence_mod.authority_fence
-    fence_mod.authority_fence = fence
+    original = fence_mod.outbound_authority_fence
+    fence_mod.outbound_authority_fence = fence
     try:
         state = await admit_bridge_runtime(runtime)
     finally:
-        fence_mod.authority_fence = original
+        fence_mod.outbound_authority_fence = original
     assert client.calls == 1
     assert state == "pending"  # the awaited answer was DISCARDED, never promoted
     assert runtime.admission == "pending"
@@ -163,12 +163,12 @@ async def test_admit_soon_is_bounded_and_fenced() -> None:
     # A drifted runtime schedules nothing at all.
     blocked_client = _Client(_payload())
     blocked = _runtime(blocked_client)
-    original = fence_mod.authority_fence
-    fence_mod.authority_fence = _ScriptedFence(_REFUSAL)
+    original = fence_mod.outbound_authority_fence
+    fence_mod.outbound_authority_fence = _ScriptedFence(_REFUSAL)
     try:
         admit_soon(blocked)
     finally:
-        fence_mod.authority_fence = original
+        fence_mod.outbound_authority_fence = original
     assert blocked._admission_task is None
     # The claim is made on the client FAKE, which is where ``calls`` lives;
     # ``runtime.client`` is the cast seam (see test_h5_remediation_doors).
