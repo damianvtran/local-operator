@@ -766,9 +766,20 @@ def admit_device(
     A phone this computer revoked is refused FIRST (agent review round 2, M1): a
     revocation that lands while a pairing card is open used to be rewritten by the
     admission that followed, so the phone was signed, installed and honoured.
-    """
-    from local_operator.operator.devices import list_devices
 
+    AND BEFORE THE ANCHOR IS READ AT ALL (CI red on PR #3118). The local revocation
+    record needs no privileged read, so that half of the answer exists even on a host
+    whose statement cannot be read — and a revocation is the MORE SPECIFIC cause.
+    Reading the anchor first reported ``pair_device_not_admitted`` ("this computer
+    could not read its own operator statement ... pair the phone again") for a phone
+    whose only route back is ``--authorise``: a remedy that cannot work, offered to a
+    phone the host would refuse again on the retry it just recommended.
+    """
+    from local_operator.operator.devices import is_revoked_here, list_devices
+
+    if is_revoked_here(root, device_id):
+        _print_revoked_refusal([device_id])
+        return ADMIT_REVOKED
     current = _installed_admission_anchor()
     if current is None:
         print(_UNREADABLE_SETUP, file=sys.stderr)
