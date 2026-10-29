@@ -1,0 +1,72 @@
+{
+  "tui.transcript.attach.receipt": {
+    "0": "↑ 0 ảnh đã đính kèm",
+    "1": "↑ 1 ảnh đã đính kèm",
+    "2": "↑ 2 ảnh đã đính kèm",
+    "3": "↑ 3 ảnh đã đính kèm",
+    "4": "↑ 4 ảnh đã đính kèm",
+    "5": "↑ 5 ảnh đã đính kèm",
+    "11": "↑ 11 ảnh đã đính kèm",
+    "21": "↑ 21 ảnh đã đính kèm",
+    "22": "↑ 22 ảnh đã đính kèm",
+    "25": "↑ 25 ảnh đã đính kèm",
+    "1000000": "↑ 1.000.000 ảnh đã đính kèm",
+    "1500000": "↑ 1.500.000 ảnh đã đính kèm"
+  },
+  "tui.transcript.catchup.missed": {
+    "0": "0 lần thức dậy bị lỡ",
+    "1": "1 lần thức dậy bị lỡ",
+    "2": "2 lần thức dậy bị lỡ",
+    "3": "3 lần thức dậy bị lỡ",
+    "4": "4 lần thức dậy bị lỡ",
+    "5": "5 lần thức dậy bị lỡ",
+    "11": "11 lần thức dậy bị lỡ",
+    "21": "21 lần thức dậy bị lỡ",
+    "22": "22 lần thức dậy bị lỡ",
+    "25": "25 lần thức dậy bị lỡ",
+    "1000000": "1.000.000 lần thức dậy bị lỡ",
+    "1500000": "1.500.000 lần thức dậy bị lỡ"
+  },
+  "tui.transcript.group.actions": {
+    "0": "0 thao tác",
+    "1": "1 thao tác",
+    "2": "2 thao tác",
+    "3": "3 thao tác",
+    "4": "4 thao tác",
+    "5": "5 thao tác",
+    "11": "11 thao tác",
+    "21": "21 thao tác",
+    "22": "22 thao tác",
+    "25": "25 thao tác",
+    "1000000": "1.000.000 thao tác",
+    "1500000": "1.500.000 thao tác"
+  },
+  "tui.transcript.group.reply_requested": {
+    "0": "0 yêu cầu trả lời",
+    "1": "1 yêu cầu trả lời",
+    "2": "2 yêu cầu trả lời",
+    "3": "3 yêu cầu trả lời",
+    "4": "4 yêu cầu trả lời",
+    "5": "5 yêu cầu trả lời",
+    "11": "11 yêu cầu trả lời",
+    "21": "21 yêu cầu trả lời",
+    "22": "22 yêu cầu trả lời",
+    "25": "25 yêu cầu trả lời",
+    "1000000": "1.000.000 yêu cầu trả lời",
+    "1500000": "1.500.000 yêu cầu trả lời"
+  },
+  "tui.transcript.group.steered": {
+    "0": "0 lần đổi chỉ dẫn",
+    "1": "1 lần đổi chỉ dẫn",
+    "2": "2 lần đổi chỉ dẫn",
+    "3": "3 lần đổi chỉ dẫn",
+    "4": "4 lần đổi chỉ dẫn",
+    "5": "5 lần đổi chỉ dẫn",
+    "11": "11 lần đổi chỉ dẫn",
+    "21": "21 lần đổi chỉ dẫn",
+    "22": "22 lần đổi chỉ dẫn",
+    "25": "25 lần đổi chỉ dẫn",
+    "1000000": "1.000.000 lần đổi chỉ dẫn",
+    "1500000": "1.500.000 lần đổi chỉ dẫn"
+  }
+}

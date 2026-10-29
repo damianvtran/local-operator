@@ -790,9 +790,10 @@ def test_the_command_route_refuses_a_revoked_devices_certificate(
     assert reply.status_code == 403, reply.text
     assert reply.json() == {
         "error": (
-            "This phone's approval access was removed on the computer, and only that "
-            "machine can restore it — pairing again will be refused until then. Ask Local "
-            "Operator on that machine to allow this phone again, then pair this phone again."
+            "This phone was removed on the computer it is connected to, and only that "
+            "computer can bring it back — pairing again is refused until then. Bring it "
+            "back there, then pair this phone again. Removing it on one computer does not "
+            "remove it on your other computers."
         ),
         "code": "operator_device_revoked",
     }

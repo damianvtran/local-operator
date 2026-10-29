@@ -1,0 +1,17 @@
+{
+  "wire.radient_saver.section.title": "Radient Saver (бета)",
+  "wire.radient_saver.section.description": "Сокращает историю разговора, которую ваш агент заново отправляет на каждом ходе. Saver никогда не отправляет в Radient учётные данные вашего ИИ-провайдера. Изменения действуют со следующего хода.",
+  "wire.radient_saver.mode.label": "Radient Saver (бета)",
+  "wire.radient_saver.mode.help": "Бета. Отправляет в Radient историю, готовую к сокращению; Radient ничего из неё не сохраняет. Saver никогда не отправляет в Radient учётные данные вашего ИИ-провайдера. Плата за Saver списывается только с ваших кредитов Radient, исходя из удалённых им токенов, и никогда — с аккаунта провайдера; нужны вход в Radient и положительный баланс. Провайдер по-прежнему выставляет вам счёт за полученное по своим условиям. LOP_RADIENT_SAVER переопределяет эту настройку.",
+  "wire.radient_saver.mode.choice.off.label": "отключено",
+  "wire.radient_saver.mode.choice.off.description": "история никогда не отправляется в Radient (по умолчанию)",
+  "wire.radient_saver.mode.choice.opt_in.label": "по желанию",
+  "wire.radient_saver.mode.choice.opt_in.description": "доступен, но отключён, пока сессия его не включит",
+  "wire.radient_saver.notice.unavailable": "Radient Saver сейчас недоступен, поэтому на этом ходе отправляется вся история. Больше это ни на что не влияет.",
+  "wire.radient_saver.notice.rejected": "Ответ Radient Saver не прошёл проверки безопасности и был отброшен, поэтому на этом ходе отправляется вся история.",
+  "wire.radient_saver.notice.signed_out": "Radient Saver приостановлен в этой сессии, потому что вы не вошли в Radient. Введите /login radient, чтобы пользоваться Saver.",
+  "wire.radient_saver.notice.no_credit": "Radient Saver приостановлен в этой сессии, потому что на балансе Radient нет средств. Пополните баланс на console.radienthq.com, чтобы пользоваться Saver.",
+  "wire.radient_saver.notice.rate_limited": "Radient Saver занят, поэтому вся история отправляется, пока он снова не начнёт принимать запросы.",
+  "wire.radient_saver.notice.disabled": "Radient Saver недоступен при текущей конфигурации, поэтому отправляется вся история.",
+  "wire.radient_saver.notice.oversize": "Одно сообщение в этом разговоре слишком велико для Radient Saver, поэтому оно остаётся без сокращения. Saver продолжает сокращать остальную часть разговора."
+}

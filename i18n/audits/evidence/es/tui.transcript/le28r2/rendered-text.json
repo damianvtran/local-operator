@@ -1,0 +1,72 @@
+{
+  "tui.transcript.attach.receipt": {
+    "0": "↑ 0 imágenes adjuntas",
+    "1": "↑ 1 imagen adjunta",
+    "2": "↑ 2 imágenes adjuntas",
+    "3": "↑ 3 imágenes adjuntas",
+    "4": "↑ 4 imágenes adjuntas",
+    "5": "↑ 5 imágenes adjuntas",
+    "11": "↑ 11 imágenes adjuntas",
+    "21": "↑ 21 imágenes adjuntas",
+    "22": "↑ 22 imágenes adjuntas",
+    "25": "↑ 25 imágenes adjuntas",
+    "1000000": "↑ 1.000.000 de imágenes adjuntas",
+    "1500000": "↑ 1.500.000 imágenes adjuntas"
+  },
+  "tui.transcript.catchup.missed": {
+    "0": "0 despertares perdidos",
+    "1": "1 despertar perdido",
+    "2": "2 despertares perdidos",
+    "3": "3 despertares perdidos",
+    "4": "4 despertares perdidos",
+    "5": "5 despertares perdidos",
+    "11": "11 despertares perdidos",
+    "21": "21 despertares perdidos",
+    "22": "22 despertares perdidos",
+    "25": "25 despertares perdidos",
+    "1000000": "1.000.000 de despertares perdidos",
+    "1500000": "1.500.000 despertares perdidos"
+  },
+  "tui.transcript.group.actions": {
+    "0": "0 acciones",
+    "1": "1 acción",
+    "2": "2 acciones",
+    "3": "3 acciones",
+    "4": "4 acciones",
+    "5": "5 acciones",
+    "11": "11 acciones",
+    "21": "21 acciones",
+    "22": "22 acciones",
+    "25": "25 acciones",
+    "1000000": "1.000.000 acciones",
+    "1500000": "1.500.000 acciones"
+  },
+  "tui.transcript.group.reply_requested": {
+    "0": "0 solicitudes de respuesta",
+    "1": "1 solicitud de respuesta",
+    "2": "2 solicitudes de respuesta",
+    "3": "3 solicitudes de respuesta",
+    "4": "4 solicitudes de respuesta",
+    "5": "5 solicitudes de respuesta",
+    "11": "11 solicitudes de respuesta",
+    "21": "21 solicitudes de respuesta",
+    "22": "22 solicitudes de respuesta",
+    "25": "25 solicitudes de respuesta",
+    "1000000": "1.000.000 solicitudes de respuesta",
+    "1500000": "1.500.000 solicitudes de respuesta"
+  },
+  "tui.transcript.group.steered": {
+    "0": "0 redirecciones",
+    "1": "1 redirección",
+    "2": "2 redirecciones",
+    "3": "3 redirecciones",
+    "4": "4 redirecciones",
+    "5": "5 redirecciones",
+    "11": "11 redirecciones",
+    "21": "21 redirecciones",
+    "22": "22 redirecciones",
+    "25": "25 redirecciones",
+    "1000000": "1.000.000 redirecciones",
+    "1500000": "1.500.000 redirecciones"
+  }
+}

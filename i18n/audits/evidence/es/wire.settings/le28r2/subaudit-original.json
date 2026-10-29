@@ -1,0 +1,220 @@
+{
+ "locale": "es",
+ "namespace": "wire.settings",
+ "keys_total": 820,
+ "keys_read": 820,
+ "coverage_statement": "Read all 820 keys side by side (en/es) in ordinal chunks 0-26,26-80,80-112,112-167,167-199 (first dump),200-270,270-340,340-395,395-450,450-500,500-555,555-615,615-660,660-720,720-770,770-820; re-printed every range that the tool output elided (52-60, 296-318, 367-377, 406-427, 579-596, 594-597, 615-634, 688-693, 738-744). Plus scripted checks over all 820: placeholder ({name}) parity, ICU quote parity ('{' '}'), numbers/digits parity, backtick spans, command tokens (/slash, `lop …`), plural categories (no plural messages exist), glossary term scan, label-cell lengths vs 29 budget and sidecar maxCells for the 32 sidecar keys.",
+ "auditor_model": "anthropic/claude-sonnet-5-5 (session fell back from deepseek/deepseek-flash mid-task due to quota 402; the reading/judging was done under claude-sonnet-5-5)",
+ "findings": [
+  {
+   "id": "F1",
+   "key": "wire.settings.speech_voice_tone.choice.warm.label",
+   "severity": "minor",
+   "category": "untranslated-label",
+   "en": "warm",
+   "current": "warm",
+   "problem": "Voice enum labels are left in English (also speech_voice_tone.choice.{authoritative,bright,calm,neutral}.label, speech_voice_gender.choice.{female,male}.label, speech_voice_expressiveness.choice.{high,low,medium}.label) while their descriptions ('Cercana y afable.', 'Usar siempre una voz femenina.') are Spanish and other enum labels in the same namespace ARE translated ('desactivado', 'oculto', 'izquierda'). es style guide has no keep-English entry for these. Borderline: if the labels are the literal values sent to the voice hub, keep; coordinator/policy call (fr and ru make the same choice). Also speech_transcription_cleanup.choice.off.label is 'off' while compaction_strategy.choice.off.label is 'desactivado'.",
+   "proposed": "warm→cálida, authoritative→autoritaria (or firme), bright→animada, calm→serena, neutral→neutra; female→femenina, male→masculina; high→alta, low→baja, medium→media; speech cleanup 'off'→'desactivado' (only if labels are display-only, not config values)"
+  },
+  {
+   "id": "F2",
+   "key": "wire.settings.providers_anthropic_cache_ttl_1h_min_context_tokens.label",
+   "severity": "minor",
+   "category": "overflow",
+   "en": "Anthropic 1h cache above (tokens)",
+   "current": "Caché de 1 h de Anthropic a partir de (tokens)",
+   "problem": "Many row labels exceed the 29-cell settings label budget (_LABEL_BUDGET; sidecar notes name 29) and are truncated with '…'; es style guide: 'shorter synonyms over truncation, always'. 57 es labels >29 cells vs 6 in en. Worst where en FITS: network_sync_tick_s (47 vs 23), network_audit_max_age_days (40/20), monitor_normalizetimestamps (40/22), network_rollout_on_update (40/29), wakes_triggers_project_staleness_enabled (40/25), model_effort (39/24), network_sync_debounce_s (38/21), network_audit_generations (37/22), network_credentials_grant_ttl_s (42/27), compaction_wire_bytes_budget/trigger (39/26,28), retry_connectivitybackoffcapms (39/29), tui_sidebar_show_subagents (38/22), tool_approval_mode (34/18), display_composer_rate (34/17), runtime_unattended_gate_timeout (42/31 en also over). Counts are string length (≈cells; accents are single-cell).",
+   "proposed": "network_sync_tick_s→'Comprobar sincronización (s)'; network_audit_max_age_days→'Edad máx. de auditoría (días)'; monitor_normalizetimestamps→'Ignorar marcas de tiempo'; network_rollout_on_update→'Propagar tras actualizar'; wakes_triggers_project_staleness_enabled→'Disparador: proyecto inactivo'; model_effort→'Razonamiento predeterminado'; network_sync_debounce_s→'Calma de sincronización (s)'; network_audit_generations→'Generaciones conservadas'; network_credentials_grant_ttl_s→'Vigencia inicio prestado (s)'; compaction_wire_bytes_budget→'Límite de petición (bytes)'; compaction_wire_bytes_trigger→'Umbral de petición (bytes)'; retry_connectivitybackoffcapms→'Tope backoff conexión (ms)'; tui_sidebar_show_subagents→'Subagentes en barra lateral'; tool_approval_mode→'Modo de aprobación'; display_composer_rate→'Banda: velocidad decod.'; aida_onboarding_nudge_days→'Recordar integración (días)'; runtime_keep_alive_seconds→'Cerradas en caliente (s)'; tools_defer→'Cargar esquemas a demanda'; providers_anthropic_cache_ttl_1h_min_context_tokens→'Anthropic 1 h desde (tokens)'"
+  },
+  {
+   "id": "F3",
+   "key": "wire.settings.remote_compute_enabled.choice.true.description",
+   "severity": "minor",
+   "category": "overflow",
+   "en": "remote runs allowed",
+   "current": "se permiten ejecuciones remotas",
+   "problem": "Sidecar: 'about 20 cells' (lowercase). Current is 31 cells (en 19). Other two entries of the family are within budget (help 72 ≤ 74; false 10/10).",
+   "proposed": "ejecución remota permitida (25) or 'permite lo remoto' ; shortest faithful: 'ejecuciones remotas' (19)"
+  },
+  {
+   "id": "F4",
+   "key": "wire.settings.session_compression_enabled.help",
+   "severity": "minor",
+   "category": "overflow",
+   "en": "Off: transcripts stay plain; compressed sessions stay readable. On: old transcripts compress at launch.",
+   "current": "Desactivado: no se comprime nada nuevo; las sesiones ya comprimidas siguen legibles. Activado: las transcripciones antiguas se comprimen al arrancar.",
+   "problem": "Sidecar: help stays inside the ~100-cell help budget. es is 149 cells (en 103); content matches the sidecar's OFF-first shape but can be tightened.",
+   "proposed": "Desactivado: no se comprime nada; lo ya comprimido sigue legible. Activado: al arrancar se comprimen las antiguas."
+  },
+  {
+   "id": "F5",
+   "key": "wire.settings.session_compression_enabled.label",
+   "severity": "minor",
+   "category": "accuracy",
+   "en": "Compress old transcripts",
+   "current": "Comprimir las antiguas",
+   "problem": "'Comprimir las antiguas' drops the noun ('transcripts'); as a standalone row label ('las antiguas' = ?) the object is not recoverable. Budget is 29; 'Comprimir transcripciones' is 25.",
+   "proposed": "Comprimir transcripciones"
+  },
+  {
+   "id": "F6",
+   "key": "wire.settings.session_cleanup_enabled.help",
+   "severity": "minor",
+   "category": "idiom",
+   "en": "Off: nothing is ever removed. On: limits below run at launch, sparing the newest 10 + live.",
+   "current": "Desactivado: nunca se elimina nada. Activado: los límites de abajo se aplican al arrancar y se libran los 10 más recientes + las sesiones activas.",
+   "problem": "'se libran los 10 más recientes + las sesiones activas' — 'librar' (spare) is a calque; without 'de' it does not mean 'spare' in Spanish.",
+   "proposed": "Desactivado: nunca se elimina nada. Activado: los límites de abajo se aplican al arrancar, sin tocar las 10 más recientes ni las sesiones activas."
+  },
+  {
+   "id": "F7",
+   "key": "wire.settings.session_cleanup_max_inactive_days.help",
+   "severity": "minor",
+   "category": "idiom",
+   "en": "Needs cleanup on. Remove sessions idle this many days; 0 = never.",
+   "current": "Requiere la limpieza activada. Elimina las sesiones inactivas estos días; 0 = nunca.",
+   "problem": "'inactivas estos días' reads as the idiom 'these days'; en means 'idle for this many days'.",
+   "proposed": "Requiere la limpieza activada. Elimina las sesiones tras estos días de inactividad; 0 = nunca."
+  },
+  {
+   "id": "F8",
+   "key": "wire.settings.aida_onboarding_nudge_days.help",
+   "severity": "minor",
+   "category": "naturalness",
+   "en": "How rarely she may nudge about setting up an integration. Read from the onboarding slice.",
+   "current": "Con qué poca frecuencia puede recordarte configurar una integración. Se lee del bloque de incorporación.",
+   "problem": "'Con qué poca frecuencia puede recordarte…' is a literal calque of 'How rarely she may nudge'; the value is a minimum interval in days. 'slice' rendered as 'bloque' obscures the config section.",
+   "proposed": "Intervalo mínimo, en días, entre recordatorios para configurar una integración. Se lee de la sección de incorporación."
+  },
+  {
+   "id": "F9",
+   "key": "wire.settings.bash_query_budget_seconds.help",
+   "severity": "minor",
+   "category": "accuracy",
+   "en": "Wall-clock budget for one shell query. The advisory fires at 10 s whatever this says; this is the stop. A per-command prefix of LOCAL_OPERATOR_ALLOW_SLOW_QUERY=1 skips the stop for a justified run.",
+   "current": "Presupuesto de tiempo real para una consulta de shell. El aviso se dispara a los 10 s sea cual sea este valor; este valor es el punto de parada. Un prefijo por comando LOCAL_OPERATOR_ALLOW_SLOW_QUERY=1 omite la parada para una ejecución justificada.",
+   "problem": "'Presupuesto de tiempo real' — 'wall-clock' in Spanish tech register is 'tiempo de reloj'; 'tiempo real' reads as 'real-time'.",
+   "proposed": "Presupuesto de tiempo de reloj (wall-clock) para una consulta de shell. …"
+  },
+  {
+   "id": "F10",
+   "key": "wire.settings.web_fetch.title",
+   "severity": "minor",
+   "category": "terminology",
+   "en": "Web fetch",
+   "current": "Consulta web",
+   "problem": "'Consulta web' (and web_fetch_enabled.choice.*.description 'consulta desactivada/disponible', web_fetch_enabled.help) renders fetch as 'consulta' (query), which collides with 'Búsqueda web' and 'consultas de shell' elsewhere; elsewhere in the same namespace fetch is 'descarga' (web_fetch_max_bytes).",
+   "proposed": "Descarga web (choices: 'descarga desactivada' / 'descarga disponible')"
+  },
+  {
+   "id": "F11",
+   "key": "wire.settings.failover.title",
+   "severity": "minor",
+   "category": "terminology",
+   "en": "Failover and retry",
+   "current": "Conmutación y reintentos",
+   "problem": "'Conmutación' alone is ambiguous (switching); the standard term for failover is 'conmutación por error'. Same for retry_fallbackchains.label 'Cascada de conmutación'. Title budget is tight, so keep short.",
+   "proposed": "Conmutación por error y reintentos (title); label 'Cascada de conmutación por error' or 'Cascada de respaldo'"
+  },
+  {
+   "id": "F12",
+   "key": "wire.settings.projects_stale_after_hours.label",
+   "severity": "minor",
+   "category": "terminology",
+   "en": "Stale after (hours)",
+   "current": "Obsoleto tras (horas)",
+   "problem": "'stale' rendered 'obsoleto/obsolescencia' (projects_stale_after_hours.help/label, projects.description, wakes_triggers_project_staleness_enabled.label, wakes.description 'queda obsoleta'): 'obsoleto' means outdated/deprecated, stronger than 'no progress for N hours'.",
+   "proposed": "Sin avances tras (horas); help: '…se considera desactualizado…'; 'Disparador de proyectos sin avances'"
+  },
+  {
+   "id": "F13",
+   "key": "wire.settings.wakes_triggers_project_staleness_enabled.help",
+   "severity": "minor",
+   "category": "idiom",
+   "en": "Wake to check in on projects whose progress went stale. Settled (done/paused/archived) projects are never watched.",
+   "current": "Despertar para revisar proyectos cuyo progreso quedó obsoleto. Los proyectos asentados (done/paused/archived) nunca se vigilan.",
+   "problem": "'proyectos asentados' calques 'settled'; reads as 'settled/established', not 'finished'.",
+   "proposed": "Los proyectos en estado final o en pausa (done/paused/archived) nunca se vigilan."
+  },
+  {
+   "id": "F14",
+   "key": "wire.settings.librarian_cadence_paused.help",
+   "severity": "minor",
+   "category": "consistency",
+   "en": "Pausing removes her scheduled rows; resuming re-arms the next pass. The desktop and /librarian write the same key.",
+   "current": "Pausar elimina sus filas programadas; reanudar arma la siguiente pasada. El escritorio y /librarian escriben la misma clave.",
+   "problem": "'arma la siguiente pasada' / librarian_cadence_at.help 'próximo armado' use the jargon 'armar'; aida_cadence_at.help for the same 'arm' says 'programación' and uses 'recurre a' where librarian uses 'vuelve a'.",
+   "proposed": "reanudar programa la siguiente pasada; 'Un valor no válido vuelve a 03:30 en la próxima programación' (and same wording for aida_cadence_at.help)"
+  },
+  {
+   "id": "F15",
+   "key": "wire.settings.subagents_models_hi.help",
+   "severity": "minor",
+   "category": "untranslated",
+   "en": "Bills at that model's rates; 'default': session; empty removes the tier",
+   "current": "Se factura a las tarifas de ese modelo; 'default': session; vacío elimina el nivel",
+   "problem": "'default': session — 'session' is English prose here (explains the effect of 'default'), duplicated for _lo/_med.",
+   "proposed": "Se factura a las tarifas de ese modelo; 'default': el de la sesión; vacío elimina el nivel"
+  },
+  {
+   "id": "F16",
+   "key": "wire.settings.retry_pinnedfallback.help",
+   "severity": "minor",
+   "category": "terminology",
+   "en": "What a pinned child may fall back to: same-family hops only, or any vendor (announced).",
+   "current": "A qué puede recurrir un hijo fijado: solo saltos de la misma familia, o cualquier proveedor (anunciado).",
+   "problem": "Bare 'hijo fijado' (also retry_pinnedfallback.label 'Alternativa del hijo fijado', subagents_slim_child_knowledge.*, display_dock 'por hijo') drops 'agent'; glossary term is subagente. 'hijo' alone is ambiguous with a child process (used legitimately in shell_environment_exclude.help).",
+   "proposed": "A qué puede recurrir un subagente fijado…; label 'Alternativa del subagente fijado'"
+  },
+  {
+   "id": "F17",
+   "key": "wire.settings.monitor_classifymaxchars.help",
+   "severity": "nit",
+   "category": "naturalness",
+   "en": "Bound on the changed lines the materiality check receives (the monitor's name and purpose ride along, clipped separately).",
+   "current": "Límite de las líneas modificadas que recibe la comprobación de materialidad (el nombre y el propósito de la monitorización viajan aparte, recortados por separado).",
+   "problem": "'comprobación de materialidad' is a calque of 'materiality check'.",
+   "proposed": "Límite de las líneas modificadas que recibe la comprobación de relevancia (…)"
+  },
+  {
+   "id": "F18",
+   "key": "wire.settings.session_scratchpad.description",
+   "severity": "nit",
+   "category": "consistency",
+   "en": "What one session's own scratch area may hold. The cap is checked on every write and applies immediately.",
+   "current": "Cuánto puede guardar el área de borrador propia de una sesión. El límite se comprueba en cada escritura y se aplica al instante.",
+   "problem": "Title keeps 'Scratchpad' but description says 'área de borrador' and session_delegated.description says 'carpetas de trabajo temporal' for the same concept; one term would be cleaner.",
+   "proposed": "Use 'scratchpad' consistently, e.g. 'Cuánto puede guardar el scratchpad propio de una sesión.'"
+  },
+  {
+   "id": "F19",
+   "key": "wire.settings.librarian.title",
+   "severity": "nit",
+   "category": "gender-consistency",
+   "en": "Librarian",
+   "current": "Bibliotecario",
+   "problem": "Source refers to the Librarian as 'she/her'; Aida is rendered feminine ('Jefa de gabinete') but the Librarian is masculine ('Bibliotecario', 'activado'). Changing needs the same edit in wire.errors.desktop.*; fine to defer.",
+   "proposed": "Bibliotecaria / 'Bibliotecaria activada' (cross-namespace edit) — or leave as epicene-masculine"
+  },
+  {
+   "id": "F20",
+   "key": "wire.settings.providers_openrouter_provider_affinity.help",
+   "severity": "nit",
+   "category": "naturalness",
+   "en": "Reuses the host that served the previous turn so the prompt cache stays warm. Off = OpenRouter's price-weighted load balancing.",
+   "current": "Reutiliza el host que sirvió el turno anterior para que la caché de prompts siga en caliente. Desactivado = el balanceo de carga ponderado por precio de OpenRouter.",
+   "problem": "'sticky routing' rendered 'enrutamiento fijo' throughout (openrouter.description, *_ignore/_only/_order help, sort.unset): 'fijo' suggests pinned; sticky means persistent affinity.",
+   "proposed": "enrutamiento persistente (or 'con afinidad')"
+  },
+  {
+   "id": "F21",
+   "key": "wire.settings.web_fetch_enrich.help",
+   "severity": "nit",
+   "category": "consistency",
+   "en": "Try .md, llms.txt and content negotiation before scraping HTML.",
+   "current": "Probar .md, llms.txt y la negociación de contenido antes de extraer el HTML.",
+   "problem": "Help voice switches between 3rd-person present ('Ofrece…', 'Hace merge…') and bare infinitive ('Probar .md…', web_fetch_blocked_retry.help 'reintentar…').",
+   "proposed": "Prueba .md, llms.txt y la negociación de contenido antes de extraer el HTML."
+  }
+ ]
+}

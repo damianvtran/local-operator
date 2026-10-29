@@ -4494,8 +4494,15 @@ class TestTheStreamCompletedStopBoundary:
         *,
         script: list[list[tuple[str, dict[str, Any]]]],
         max_steps: int,
+        progress_guards: Any = None,
+        frozen: bool = False,
     ) -> tuple[list[dict[str, Any]], Any, str]:
-        """One real episode; returns (wire calls, outcome, record text)."""
+        """One real episode; returns (wire calls, outcome, record text).
+
+        ``frozen`` makes every executed batch return the SAME public state
+        (the FakeAdapter's default text changes per step, which is progress);
+        ``progress_guards`` is passed straight to ``run_session_episode``.
+        """
 
         import local_operator.providers.clients as clients_mod
 
@@ -4514,6 +4521,23 @@ class TestTheStreamCompletedStopBoundary:
         (world / "note.txt").write_text("synthetic world note", encoding="utf-8")
 
         calls, transport = self._wire(script)
+        if frozen:
+            # The FakeAdapter's screen text is ``state-<sequence>`` -- it
+            # changes every step, which is progress. Freezing the PUBLIC text
+            # (the content id still moves with the sequence) is the clock-only
+            # shape task030 recorded.
+            import tests.unit.evaluation.runner.conftest as runner_fakes
+
+            real_observation = runner_fakes.observation
+
+            def frozen_observation(episode_id: str, sequence: int, **kw: Any) -> Any:
+                draft = real_observation(episode_id, sequence, **kw)
+                if sequence == 0:
+                    return draft
+                fixed = draft.model_copy(update={"text": "frozen", "observation_id": "p"})
+                return fixed.model_copy(update={"observation_id": observation_content_id(fixed)})
+
+            monkeypatch.setattr(runner_fakes, "observation", frozen_observation)
         original = clients_mod.client_for_spec
 
         def patched(spec: Any, **kwargs: Any) -> Any:
@@ -4577,6 +4601,7 @@ class TestTheStreamCompletedStopBoundary:
             secrets=(),
             launch=launch,
             rescue=rescue,
+            progress_guards=progress_guards,
         )
         record = outcome.record_root / "events.jsonl" if outcome.record_root else None
         text = ""
@@ -4655,6 +4680,233 @@ class TestTheStreamCompletedStopBoundary:
         assert outcome.attempted_groups == 1
         assert outcome.steps == 0
         assert text.count("tool_execution_end") == 2  # both paired
+
+    @staticmethod
+    def _policy_stamp_from_record(outcome: Any) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        """The opt-in stamp as the SEALED record carries it (F1 / Q-1).
+
+        Both places a later reader looks without the launcher log: the
+        ``progress_guards`` row in ``events.jsonl`` and the field in
+        ``outcome.json``. Returned as ``(outcome.json value, events rows)``.
+        """
+
+        root = outcome.record_root
+        assert root is not None
+        stamped = json.loads((root / "outcome.json").read_text(encoding="utf-8"))["progress_guards"]
+        rows = [
+            json.loads(line)
+            for line in (root / "events.jsonl").read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        return stamped, [row for row in rows if row.get("kind") == "progress_guards"]
+
+    #: The task030 shape on the REAL stack: one no-op chord per turn, forever.
+    _NOOP_CALL = (
+        "mcp__episode_actions_apply_actions",
+        {"actions": [{"kind": "key", "keys": ["ctrl", "l"]}]},
+    )
+
+    @pytest.mark.asyncio
+    async def test_progress_guards_stop_a_frozen_repeat_on_the_real_stack(
+        self, real_arm_scratch: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Opt-in parity, end to end: SDK session -> MCP tool -> bridge -> guard.
+
+        ``RepeatedBatchGuard(4)``: the batch completing the window runs, the
+        guard reads its result, the session is stopped before the next root
+        request, and the outcome is a scored truncation named by the guard.
+        """
+
+        from local_operator.evaluation.runner.guards import progress_guards
+
+        calls, outcome, text = await self._run(
+            real_arm_scratch,
+            monkeypatch,
+            script=[[self._NOOP_CALL]],
+            max_steps=20,
+            progress_guards=progress_guards(),
+            frozen=True,
+        )
+        # The reset screen (``state-0``) differs from the frozen one, and the
+        # guard's span includes the screen each batch was decided on -- so the
+        # first all-unchanged window of 4 is batches 2-5, not 1-4.
+        assert outcome.steps == 5
+        assert outcome.status == "truncated"
+        assert outcome.terminal_reason == "repeated-batch"
+        assert outcome.diagnostic is not None and "4 times" in outcome.diagnostic
+        assert len(calls) == 5  # the graceful stop: no 6th root request
+        assert '"progress_stop"' in text or "action_progress_stop" in text
+        stamped, rows = self._policy_stamp_from_record(outcome)
+        assert (
+            stamped
+            == outcome.progress_guards
+            == {
+                "on": True,
+                "guards": [
+                    {"code": "repeated-batch", "threshold": 4},
+                    {"code": "no-change", "threshold": 6},
+                    {"code": "ask-loop", "threshold": 3},
+                ],
+            }
+        )
+        assert len(rows) == 1
+        assert rows[0]["on"] is True and rows[0]["guards"] == stamped["guards"]
+
+    @pytest.mark.asyncio
+    async def test_a_failed_episode_still_carries_the_policy_stamp(
+        self, real_arm_scratch: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The exception construction seals the same policy as a normal ending."""
+
+        import local_operator.evaluation.session_arm as session_arm_module
+        from local_operator.evaluation.runner.guards import progress_guards
+
+        async def fail_open(*args: Any, **kwargs: Any) -> Any:
+            del args, kwargs
+            raise RuntimeError("synthetic session open failure")
+
+        monkeypatch.setattr(session_arm_module, "open_episode_session", fail_open)
+        _calls, outcome, _text = await self._run(
+            real_arm_scratch,
+            monkeypatch,
+            script=[[self._NOOP_CALL]],
+            max_steps=5,
+            progress_guards=progress_guards(),
+        )
+        assert outcome.status == "failed"
+        assert outcome.terminal_reason == "runtime-error"
+        stamped, rows = self._policy_stamp_from_record(outcome)
+        assert stamped == outcome.progress_guards
+        assert stamped["on"] is True
+        assert stamped["guards"] == [
+            {"code": "repeated-batch", "threshold": 4},
+            {"code": "no-change", "threshold": 6},
+            {"code": "ask-loop", "threshold": 3},
+        ]
+        assert len(rows) == 1
+        assert rows[0]["on"] is True and rows[0]["guards"] == stamped["guards"]
+
+    @pytest.mark.asyncio
+    async def test_an_undescribable_guard_is_a_recorded_session_arm_refusal(
+        self, real_arm_scratch: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A programmatic bad guard gets the arm's outcome, never a bare TypeError."""
+
+        from local_operator.evaluation.runner.guards import BudgetCapGuard
+
+        _calls, outcome, text = await self._run(
+            real_arm_scratch,
+            monkeypatch,
+            script=[[self._NOOP_CALL]],
+            max_steps=5,
+            progress_guards=(BudgetCapGuard(),),
+        )
+        assert outcome.status == "failed"
+        assert outcome.terminal_reason == "session-arm"
+        assert outcome.diagnostic is not None
+        assert "SessionArmError" in outcome.diagnostic
+        assert "cannot feed cost or budget counters" in outcome.diagnostic
+        assert "BudgetCapGuard" in outcome.diagnostic
+        assert len(outcome.diagnostic) <= 500
+        sealed = json.loads((outcome.record_root / "outcome.json").read_text(encoding="utf-8"))
+        assert sealed["status"] == "failed"
+        assert sealed["terminal_reason"] == "session-arm"
+        assert "SessionArmError" in text
+
+    @pytest.mark.asyncio
+    async def test_without_the_policy_the_frozen_repeat_runs_to_the_budget(
+        self, real_arm_scratch: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The control: same script, same stack, policy unset -- the old shape."""
+
+        calls, outcome, text = await self._run(
+            real_arm_scratch,
+            monkeypatch,
+            script=[[self._NOOP_CALL]],
+            max_steps=8,
+            frozen=True,
+        )
+        assert outcome.steps == 8
+        assert outcome.terminal_reason == "max-steps"
+        assert "progress_stop" not in text
+        # F1's other half: OFF is a STATED absence, not a missing key -- an
+        # off-policy run has to be classifiable too, or the stamp only prevents
+        # half the pooling it exists for.
+        stamped, rows = self._policy_stamp_from_record(outcome)
+        assert stamped == {"on": False, "guards": []}
+        assert stamped == outcome.progress_guards
+        assert len(rows) == 1
+        assert rows[0]["on"] is False and rows[0]["guards"] == []
+
+    @pytest.mark.asyncio
+    async def test_progress_guards_never_stop_an_advancing_screen(
+        self, real_arm_scratch: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Advancing-observation control: identical batches, changing state."""
+
+        from local_operator.evaluation.runner.guards import progress_guards
+
+        calls, outcome, text = await self._run(
+            real_arm_scratch,
+            monkeypatch,
+            script=[[self._NOOP_CALL]],
+            max_steps=8,
+            progress_guards=progress_guards(),
+        )
+        assert outcome.steps == 8
+        assert outcome.terminal_reason == "max-steps"
+        assert "progress_stop" not in text
+        # F1: a run that ENDS AT THE BUDGET with the flag on must be tellable
+        # from the same run with it off -- that ending is where the flag leaves
+        # no other trace, and the record is the only place it can be read.
+        stamped, rows = self._policy_stamp_from_record(outcome)
+        assert stamped == outcome.progress_guards
+        assert stamped["on"] is True
+        assert [guard["code"] for guard in stamped["guards"]] == [
+            "repeated-batch",
+            "no-change",
+            "ask-loop",
+        ]
+        assert stamped["guards"] == [
+            {"code": "repeated-batch", "threshold": 4},
+            {"code": "no-change", "threshold": 6},
+            {"code": "ask-loop", "threshold": 3},
+        ]
+        assert len(rows) == 1
+        assert rows[0]["on"] is True and rows[0]["guards"] == stamped["guards"]
+
+    @pytest.mark.asyncio
+    async def test_the_budget_names_the_ending_on_the_guards_final_step(
+        self, real_arm_scratch: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """F2: one terminal reason per step -- the runner's ``max-steps`` wins.
+
+        The frozen repeat completes its window on the episode's LAST allowed
+        step (``max_steps=5``; the window closes at batch 5). The runner folds
+        ``steps_taken >= max_steps`` into ``truncated`` before it evaluates any
+        guard, so the same stop is a budget truncation there. The bridge used to
+        report the guard's code instead, and the two arms then disagreed on the
+        label of one identical ending.
+        """
+
+        from local_operator.evaluation.runner.guards import progress_guards
+
+        calls, outcome, text = await self._run(
+            real_arm_scratch,
+            monkeypatch,
+            script=[[self._NOOP_CALL]],
+            max_steps=5,
+            progress_guards=progress_guards(),
+            frozen=True,
+        )
+        assert outcome.steps == 5
+        assert outcome.status == "truncated"
+        assert outcome.terminal_reason == "max-steps"
+        assert "progress_stop" not in text
+        # The policy that produced this ending -- the one that used to be
+        # indistinguishable from an off-policy run -- is still stamped.
+        stamped, _rows = self._policy_stamp_from_record(outcome)
+        assert stamped["on"] is True
 
 
 def test_identical_read_only_pixels_are_neutral_and_do_not_escalate_action_streak(

@@ -362,7 +362,7 @@ def test_an_unresolved_root_prints_no_command(tmp_path: Path) -> None:
         pytest.skip("this host resolved ProgramData without SystemDrive")
     assert "RC 1" in result.stdout
     assert "RunAs" not in out and "powershell" not in out.lower()
-    assert "cannot be installed on this machine" in result.stderr
+    assert "cannot be installed on this computer" in result.stderr
 
 
 def test_the_elevated_script_refuses_a_drive_root_target(tmp_path: Path) -> None:
