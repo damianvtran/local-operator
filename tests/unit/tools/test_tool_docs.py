@@ -495,7 +495,17 @@ MEASURED_TOKENS: dict[str, int] = {
     # NEW (redaction policy, PR #2796): the sanctioned public-copy reader.
     # 237 tokens measured through this test's own table; deliberately small —
     # it exists to avoid a bypass, not to be a second file browser.
-    "read_public_copy": 121,
+    # RE-MEASURED: 121 -> 162 (#3106, repo_root added) -> 135 (#3106 trim) ->
+    # 133 (merge of #3122, whose `_CONSUMER_CHECKOUTS` registry makes the
+    # `repo_root` description name three checkouts; the same cut still fits the
+    # `--kind child` budget arm, 30,380, which is the tighter ratchet).
+    # Measured through this test's own assertion table after each change, never
+    # carried from CI or guessed:
+    #   .venv/bin/python scripts/run_bounded.py --timeout 300 -- \
+    #     .venv/bin/python -m pytest
+    #     tests/unit/tools/test_tool_docs.py::test_docs_stay_within_the_soft_cap_and_the_token_ledger_is_current
+    # No other entry moved.
+    "read_public_copy": 133,
     "read_variable": 67,
     "secret": 186,
     # Advertised surface re-measured: explicit repeat + confirmed-reuse detail
