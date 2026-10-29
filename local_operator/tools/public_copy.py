@@ -246,8 +246,9 @@ class ReadPublicCopyParams(BaseModel):
     repo_root: str | None = Field(
         default=None,
         description=(
-            "Optional checkout directory to read from, when the session cwd is not"
-            " that checkout; its git origin must be a publishing repository."
+            "Absolute path of a publishing-repository checkout to read from, when the"
+            " session cwd is not that checkout; `~` is expanded, a relative spelling is"
+            " refused."
         ),
     )
 

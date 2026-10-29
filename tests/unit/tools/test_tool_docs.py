@@ -501,7 +501,11 @@ MEASURED_TOKENS: dict[str, int] = {
     # because a caller whose clone is a fork needs to know before it calls.
     # Measured through this test's own printed table; every other entry is
     # byte-identical.
-    "read_public_copy": 206,
+    # RE-MEASURED 2026-10-29 (QA round 2, Q2-1): 206 -> 214. The ``repo_root``
+    # description now states the spelling rule the code enforces — absolute, with
+    # ``~`` expanded before the check — because a relative spelling is refused.
+    # Re-measured through this test's own printed table, not assumed.
+    "read_public_copy": 214,
     "read_variable": 67,
     "secret": 186,
     # Advertised surface re-measured: explicit repeat + confirmed-reuse detail

@@ -1759,3 +1759,43 @@ async def test_a_named_subdirectory_is_refused_with_actionable_advice(
     assert "run read_public_copy from the checkout root" not in result.text
     assert "workspace" not in result.text
     assert "a committed copy below the root" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_a_home_relative_repo_root_expands_before_the_absolute_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Q2-2: ``~/...`` must keep working, which pins the ORDER of the two checks.
+
+    ``~`` is not an absolute spelling until it is expanded, so a reader that
+    checked ``is_absolute()`` first would refuse every home-relative caller — a
+    silent break, because the refusal looks like a policy decision. The negative
+    control in the same call is a genuinely relative spelling, refused next to it.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    workspace = _public_repo(tmp_path / "outside-home", name="workspace", origin=CORE_ORIGIN_SSH)
+    audited = _public_repo(
+        home, name="named", value="the named tree's copy", origin=CORE_ORIGIN_SSH
+    )
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    context = _context(workspace, tmp_path)
+    request = {"path": CORE_CATALOGUE, "key": "wire.slash.credential"}
+
+    expanded = await execute_read_public_copy(
+        "call-tilde", {**request, "repo_root": "~/named"}, None, None, context
+    )
+
+    assert not expanded.is_error, expanded.text
+    assert "the named tree's copy" in expanded.text
+    assert expanded.details is not None
+    assert Path(expanded.details["checkout_root"]) == audited.resolve()
+
+    # The control: the same relative shape WITHOUT ``~`` is refused, so the pass
+    # above is the expansion and not a laxer absolute check.
+    refused = await execute_read_public_copy(
+        "call-bare-relative", {**request, "repo_root": "named"}, None, None, context
+    )
+    assert refused.is_error
+    assert "repo_root must be an absolute path" in refused.text
