@@ -8561,7 +8561,10 @@ class ServingSessionHandle(SessionHandle):
                     text=str(tr("wire.radient_saver")(wire_radient_saver.command_usage())),
                     style="warning",
                 )
-            result = await saver_slash(session, rest, SlashResult)
+            # Same rule as the app host: a bare `/radient saver` REPORTS rather
+            # than toggles, so a namespace command completed by return keys cannot
+            # change state (QA round 3, Q1).
+            result = await saver_slash(session, rest or "status", SlashResult)
             self._notify()
             return result
         if command == "approvals":

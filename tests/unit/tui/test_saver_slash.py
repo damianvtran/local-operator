@@ -246,13 +246,56 @@ async def test_the_routed_path_paints_through_apply_frontend_state(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_one_enter_on_a_bare_radient_fills_only_what_was_typed(tmp_path: Path) -> None:
-    """UX round 2, U9: Enter used to expand `/radient` into `saver status`.
+async def test_bare_radient_never_changes_state_however_many_enters(tmp_path: Path) -> None:
+    """QA round 3, Q1: two Enters on a bare `/radient` turned Saver ON.
 
-    The old test pressed Escape first, which hid the expansion. This presses
-    Enter on the first row and asserts the buffer is exactly `/radient saver` —
-    the word the handler parses — and that a second Enter is what runs it.
+    `/radient` completes to a subject-less `/radient saver`, and that used to land
+    on the bare-toggle path — a money-affecting feature enabled by return keys
+    alone, from a fresh session where the user had typed one word. It now reports:
+    the assertion is on the OUTCOME and the JOURNAL, not the intermediate buffer,
+    because a buffer assertion is exactly what let the previous version pass while
+    the feature flipped (QA Q2).
     """
+    session = FakeSession()
+    session.routing_settings = SETTINGS
+    session.radient_saver_choice = None
+    journal_dir = tmp_path / "sessions" / "saver"
+    session._transcript = Transcript(journal_dir)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        app._editor().text = ""
+        await pilot.pause()
+        await pilot.press(*["space" if char == " " else char for char in "/radient"])
+        await pilot.pause()
+        for _ in range(2):
+            await pilot.press("enter")
+            for _ in range(40):
+                await pilot.pause()
+
+        # NOTHING WAS WRITTEN: no choice, no journal row.
+        assert session.radient_saver_choice is None
+        rows = [
+            entry.payload["details"]["enabled"]
+            for entry in Transcript(journal_dir).entries()
+            if entry.payload.get("custom_type") == "radient_saver_choice_v1"
+        ]
+        assert rows == [], rows
+        # AND THE USER WAS TOLD WHAT IS TRUE, rather than shown an enable.
+        from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView
+
+        text = "\n".join(
+            block._text
+            for block in app.query_one(TranscriptView).blocks()
+            if isinstance(block, NoticeBlock)
+        )
+        assert "Radient Saver: off for this session" in text, text
+        assert "is on for this session" not in text, text
+
+
+@pytest.mark.asyncio
+async def test_an_explicit_radient_saver_value_still_writes(tmp_path: Path) -> None:
+    """The rule is about the BARE form; an explicit value is honoured."""
     session = FakeSession()
     session.routing_settings = SETTINGS
     session.radient_saver_choice = None
@@ -262,24 +305,13 @@ async def test_one_enter_on_a_bare_radient_fills_only_what_was_typed(tmp_path: P
         await _boot(pilot, app)
         app._editor().text = ""
         await pilot.pause()
-        await pilot.press(*["space" if char == " " else char for char in "/radient "])
+        await pilot.press(*["space" if char == " " else char for char in "/radient saver on"])
         await pilot.pause()
-        assert [row.name for row in app._editor().picker._choices] == ["saver"]
-
-        received: list[str] = []
-        inner = app._run_slash_command
-
-        def spy(*args, **kwargs):
-            received.append(args[0] if args else kwargs.get("command", ""))
-            return inner(*args, **kwargs)
-
-        app._run_slash_command = spy  # type: ignore[method-assign]
+        await pilot.press("escape")
         await pilot.press("enter")
         for _ in range(40):
             await pilot.pause()
-        # The ONE word the row offered, and nothing the user did not choose:
-        # this used to arrive as `/radient saver status` (UX round 2, U9).
-        assert received and received[-1] == "/radient saver", received[-3:]
+        assert session.radient_saver_choice is True
 
 
 @pytest.mark.asyncio

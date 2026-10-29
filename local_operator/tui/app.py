@@ -44350,7 +44350,14 @@ class OperatorApp(App[None]):
 
                     self._system_notice(str(tr("wire.radient_saver")(wire_radient_saver.command_usage())), "warning")
                     return
-                arg = rest
+                # A BARE NAMESPACE FORM REPORTS, IT NEVER TOGGLES (QA round 3, Q1).
+                # `/radient` accepts only `saver <value>`, and the picker completes
+                # it to a subject-less `/radient saver` — so two Enters on a bare
+                # `/radient` used to land on the bare-toggle path and turn a
+                # money-affecting feature ON from nothing but return keys. The
+                # alias may toggle when typed whole (`/saver`), because typing the
+                # whole word is the intent; the namespace needs its value said.
+                arg = rest or "status"
             self._cmd_saver(arg, notice)
         elif command == "/theme":
             self._cmd_theme(arg, notice)
