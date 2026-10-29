@@ -327,6 +327,18 @@ MEASURED_TOKENS: dict[str, int] = {
     # repeated op roster left the description and the thread-reply clause moved
     # to thread_root_id's own field note. Every op is still discoverable.
     # Neither the document soft cap nor the start-context budget changes.
+    # 777 -> 1674: the doc now covers the OP SET THE TOOL ACTUALLY HAS. Before this
+    # branch it documented four ops (take_up/ack/send/reply) while main's tool shipped
+    # ten and this branch adds four more; `directory`, `dm`,
+    # `shared_conversations`/`shared_history` and the six
+    # room ops (`channels`, `channel_create`, `channel_post`, `channel_history`,
+    # `channel_thread`, `react`) had no entry at all, so a model reading the reference
+    # had to guess, and the new `dm` blurb forward-references `channel_history` for
+    # reading the reply. Measured by this test's own ledger print ON THIS HEAD (1674),
+    # never carried across. The pair-lane caveat on `send` earns its tokens: without it
+    # an agent answers a DM with `send`, which no Team Bridge UI shows.
+    # Independently, main's #3133 adds the recipient description below; the
+    # converged ledger must include BOTH changes and was measured by this test.
     # 777 -> 839 (tb-send-recipient-ergonomics): the ``to`` parameter publishes
     # its own DESCRIPTION now — both accepted object shapes, the bare account id
     # and where the ids come from — because the schema is the model's first
@@ -334,7 +346,9 @@ MEASURED_TOKENS: dict[str, int] = {
     # nothing. +62 on this opt-in reference; the paired start-context raise is
     # stated in scripts/bench_context_budget.py. Measured by this test's printed
     # table, no other tool's bytes moved.
-    "bridge": 839,
+    # Converged directory/dm + recipient-description ledger: 1,736 tokens,
+    # measured by this test's canonical renderer on the merged tree.
+    "bridge": 1736,
     # Re-measured with this test's canonical isolated renderer: the read-only
     # inspect_ownership operation adds 19 opt-in tokens, not wire prompt cost.
     # 1327 -> 1424 (2026-10-16): the browser `type` secret_ref convention adds

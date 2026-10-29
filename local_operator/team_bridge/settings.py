@@ -374,6 +374,53 @@ def record_local_enabled_if_unset(config_dir: "Path") -> bool:
         return True
 
 
+def record_local_session_if_unset(config_dir: "Path") -> bool:
+    """Designate the account's chief-of-staff session ONLY while none is chosen.
+
+    WHY (operator incident, 2026-10-28). A teammate's bridge delivered to a task
+    session ("Hyundai POC") instead of her chief of staff: whatever session was
+    on screen when Team Bridge was switched on became the wake destination, and
+    nothing on the enrolment paths ever looked up the chief of staff. The
+    designation is the wake consent (§13.6), so it must name a session the
+    person would expect to be woken — and the one durable answer to "who is my
+    chief of staff on this machine" is Aida's own record
+    (:func:`local_operator.aida.state.session_id_of`), which survives renames.
+
+    THE RULE. Write ``team_bridge.session`` = that session id when the key is
+    ABSENT, under the config write lock, and never over an explicit choice: a
+    person who picked a session in Settings keeps it. A person who CLEARED it is
+    also an explicit choice, and that is why the key is stored empty rather than
+    deleted (``settings_io``'s ``empty_unsets=False``): "absent" can only then
+    mean "never touched", so a withdrawn wake consent is never re-granted by a
+    later enable. A key deleted by an older build (before that change) is
+    indistinguishable from one never set; the next enable defaults it once, which
+    is the same default a fresh machine gets. It writes the SETTING, not the
+    store, because the status read's ``_sync_designation`` mirrors the setting
+    into the native record and
+    would clear a store-only value on the next read. No Aida session on this
+    machine → nothing is written (badge only, as before). Returns whether it
+    wrote; best-effort at the call sites, like its siblings.
+    """
+
+    from local_operator import settings_io
+    from local_operator.aida.state import session_id_of
+    from local_operator.config import CONFIG_FILE_NAME, ConfigManager
+    from local_operator.config_writer import config_write_lock
+
+    chief = session_id_of(config_dir)
+    if not chief:
+        return False
+    with config_write_lock(Path(config_dir)):
+        settings_io.require_readable_config_path(Path(config_dir) / CONFIG_FILE_NAME)
+        manager = ConfigManager(config_dir)
+        # Presence matters: an explicit empty/null is badge-only consent, not
+        # an invitation to choose a wake destination on the person's behalf.
+        if manager.get_nested_value(SESSION_PATH, _MISSING) is not _MISSING:
+            return False
+        settings_io._store(manager, SESSION_PATH, chief)
+        return True
+
+
 def record_onboarding_seen(config_dir: "Path") -> None:
     """Mark the one-time notice dismissed on this machine (never un-set here)."""
 

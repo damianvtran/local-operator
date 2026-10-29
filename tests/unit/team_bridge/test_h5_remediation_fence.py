@@ -181,7 +181,9 @@ async def test_tenant_inconsistency_and_designation_change_refuse(
         )(),
     )
     refusal = authority_fence(_runtime())
-    assert refusal is not None and refusal["code"] == "owner_changed"
+    # A DESIGNATION mismatch is not account drift: the binding is intact and
+    # this session is simply not the inbox reader (review round 2, MAJOR A).
+    assert refusal is not None and refusal["code"] == "not_designated"
 
 
 async def test_everything_holds_passes(_enabled: None) -> None:

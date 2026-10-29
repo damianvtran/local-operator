@@ -453,6 +453,13 @@ def static_feature_flags() -> dict[str, Any]:
         # the section over one conversation (#3022 R1-N2). A hub that predates
         # #221 is detected on the LIST route only (its 404 there).
         "team_bridge_owner_audit": 1,
+        # The chief-of-staff read grant (agent-server §17): `PUT`/`DELETE
+        # /v1/desktop/team-bridge/conversations/{id}/cos-read`, both guarded
+        # (tenant_id + expected_account_id required). The renderer shows
+        # "Share with my chief of staff" only when this key is present; a hub
+        # that predates §17 answers the PUT 404/405, which the UI reports as
+        # unsupported rather than hiding the conversation.
+        "team_bridge_cos_read": 1,
         # The owner's agent-invitation surface over agent-server #227: the
         # `GET /v1/desktop/team-bridge/agents/owned/invitations` read (metadata
         # only, receipt required, `private, no-store`) and `decision=withdraw`

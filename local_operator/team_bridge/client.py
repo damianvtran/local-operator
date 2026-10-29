@@ -97,6 +97,7 @@ from local_operator.team_bridge.settings import (
     record_default_enrollment,
     record_local_enabled,
     record_local_enabled_if_unset,
+    record_local_session_if_unset,
 )
 from local_operator.team_bridge.types import (
     ATTACHMENT_ID_PATTERN,
@@ -655,6 +656,24 @@ OWNER_AUDIT_SCOPE_SENTENCE = (  # i18n: ignore local guard; a code path, never s
 #: this class, ``_send`` with a hand-built or concatenated path, a ``getattr``
 #: with a computed name reaching something else — is refused before a byte
 #: moves (#3022 R1-1). A static scan cannot see a built string; this can.
+# Grant mutations use the same scoped-dispatch discipline as the human-only
+# audit. A hand-built `_send` URL cannot grant the model access to its owner's
+# conversations. Only the desktop-only grant/revoke methods enter this scope;
+# static reach tests keep those methods out of model-context callers.
+_COS_READ_GRANT_SCOPE: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "team_bridge_cos_read_grant_scope", default=False
+)
+
+
+@contextlib.contextmanager
+def _cos_read_grant_scope() -> Any:
+    token = _COS_READ_GRANT_SCOPE.set(True)
+    try:
+        yield
+    finally:
+        _COS_READ_GRANT_SCOPE.reset(token)
+
+
 _OWNER_AUDIT_SCOPE: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "team_bridge_owner_audit_scope", default=False
 )
@@ -669,7 +688,7 @@ def _owner_audit_scope() -> Any:
         _OWNER_AUDIT_SCOPE.reset(token)
 
 
-def _refuse_unscoped_owner_audit(path: str) -> None:
+def _refuse_unscoped_owner_audit(path: str, method: str = "GET") -> None:
     """Refuse a hub request on the owner-audit family outside its four methods.
 
     Matched after percent-decoding and collapsing slashes and case, so
@@ -707,6 +726,16 @@ def _refuse_unscoped_owner_audit(path: str) -> None:
             http_status=400,
         )
     normalized = re.sub(r"/+", "/", decoded).lower()
+    if (
+        method.upper() in ("PUT", "DELETE")
+        and normalized.rstrip("/").endswith("/cos-read")
+        and not _COS_READ_GRANT_SCOPE.get()
+    ):
+        raise BridgeRefusal(
+            "cos_read_grant_not_in_scope",
+            "A conversation share may be changed only through the desktop share routes.",
+            http_status=403,
+        )
     # The CONVERSATIONS family, not every ``/agents/owned`` path: the owner's
     # agent-invitations read (``…/agents/owned/invitations``, #3045) shares the
     # prefix and is an ordinary metadata read, so a prefix-wide check turned it
@@ -1332,7 +1361,7 @@ class TeamBridgeClient:
         # Every hub request in this class ends here, so the owner-audit path
         # gate lives here: no caller can reach `/agents/owned` by spelling the
         # path itself (#3022 R1-1).
-        _refuse_unscoped_owner_audit(path)
+        _refuse_unscoped_owner_audit(path, method)
         # ONE AsyncClient per request is H1's bounded-CRUD shape: every op is a
         # single small JSON round trip and nothing here runs on a loop. The
         # connector (H4) needs a PERSISTENT client with an owned ``aclose()``
@@ -1587,7 +1616,11 @@ class TeamBridgeClient:
         return await self._send("GET", "/messaging/settings", params=params)
 
     async def directory(
-        self, tenant_id: str, *, access: OAuthAccess | None = None
+        self,
+        tenant_id: str,
+        *,
+        access: OAuthAccess | None = None,
+        expected_account_id: str | None = None,
     ) -> dict[str, Any]:
         """The organization's member directory (§6.1): who an agent may address.
 
@@ -1596,12 +1629,18 @@ class TeamBridgeClient:
         caller's membership, and the server refuses a tenant the account cannot
         see (§6.5). The payload is the frozen desktop shape
         ``{members:[{account_id, display_label, role, bridge_enabled,
-        bridge_state}]}`` and is passed through untouched — this client never
-        re-orders, trims or renames a member row.
+        bridge_state, agent:{endpoint_id, name, state}}]}`` and is passed
+        through untouched — this client never re-orders, trims or renames a
+        member row. ``agent`` is optional per member; when present, its
+        ``endpoint_id`` is the address used to open a chief-of-staff DM.
         """
 
         return await self._send(
-            "GET", "/messaging/directory", params={"tenant_id": tenant_id}, access=access
+            "GET",
+            "/messaging/directory",
+            params={"tenant_id": tenant_id},
+            access=access,
+            expected_account_id=expected_account_id,
         )
 
     async def tenant_state(
@@ -2284,6 +2323,15 @@ class TeamBridgeClient:
             # transaction, but it fires the D2a connector hook, which runs
             # launchctl. Off the loop a first install costs one worker thread;
             # on it, it would freeze every route for the length of a bootstrap.
+            # Default the wake designation to THIS account's chief of staff when
+            # the person never chose one (settings.record_local_session_if_unset
+            # has the incident and the rule): never over an explicit choice, and
+            # never "whatever session happens to be open". In a worker thread
+            # for the same loop-freeze reason as the commit below.
+            try:
+                await asyncio.to_thread(record_local_session_if_unset, self._config_dir)
+            except Exception:  # noqa: BLE001 - no designation is badge-only, not an error
+                pass
             local = _local_settings_snapshot(self._config_dir)
             committed = await asyncio.to_thread(
                 commit_settings_enrollment,
@@ -3117,6 +3165,125 @@ class TeamBridgeClient:
             f"/messaging/conversations/{conversation_id}/messages/{message_id}/replies",
             params=params or None,
             access=access,
+        )
+
+    # -- chief-of-staff read grant ---------------------------------------------
+    #
+    # The OPERATOR-CONSENTED read (agent-server docs/TEAM-BRIDGE-CONVERSATIONS.md
+    # §17): a human grants their OWN chief of staff read access to ONE
+    # agent-capable conversation they are an active member of. Distinct from the
+    # owner audit below in both directions: the audit is the human reading their
+    # agent's rooms (human-only, unscreened); this is the agent reading a room
+    # its human explicitly shared with it.
+    #
+    # WHO CALLS WHAT. ``cos_read_grant``/``cos_read_revoke`` are HUMAN acts: the
+    # desktop route family calls them for the renderer, and the bridge tool must
+    # never (pinned in test_cos_read_grant.py) — an agent cannot widen its own
+    # access. ``cos_read_conversations``/``cos_read_messages`` are the agent's
+    # reads: they carry ``actor_endpoint_id`` and the hub checks that endpoint is
+    # the signed-in account's own chief of staff holding an active grant; every
+    # refusal is a uniform ``conversation_not_found``, and every page served is
+    # an append-only ``cos_read`` audit event on the hub. Nothing is cached here.
+
+    async def cos_read_grant(
+        self,
+        conversation_id: str,
+        *,
+        tenant_id: str,
+        expected_account_id: str,
+        access: OAuthAccess | None = None,
+    ) -> dict[str, Any]:
+        """Share one conversation with the caller's own chief of staff (human act)."""
+
+        with _cos_read_grant_scope():
+            return await self._send(
+                "PUT",
+                f"/messaging/conversations/{conversation_id}/cos-read",
+                body={"tenant_id": tenant_id},
+                access=access,
+                expected_account_id=expected_account_id,
+            )
+
+    async def cos_read_revoke(
+        self,
+        conversation_id: str,
+        *,
+        tenant_id: str,
+        expected_account_id: str,
+        access: OAuthAccess | None = None,
+    ) -> dict[str, Any]:
+        """Withdraw that share; idempotent (human act)."""
+
+        with _cos_read_grant_scope():
+            return await self._send(
+                "DELETE",
+                f"/messaging/conversations/{conversation_id}/cos-read",
+                params={"tenant_id": tenant_id},
+                access=access,
+                expected_account_id=expected_account_id,
+            )
+
+    async def cos_read_conversations(
+        self,
+        *,
+        actor_endpoint_id: str,
+        expected_account_id: str,
+        tenant_id: str | None = None,
+        limit: int | None = None,
+        cursor: str | None = None,
+        access: OAuthAccess | None = None,
+    ) -> dict[str, Any]:
+        """The conversations the owner shared with this chief of staff (metadata)."""
+
+        params: dict[str, Any] = {"actor_endpoint_id": actor_endpoint_id}
+        if tenant_id:
+            params["tenant_id"] = tenant_id
+        if limit is not None:
+            params["limit"] = int(limit)
+        if cursor:
+            params["cursor"] = cursor
+        return await self._send(
+            "GET",
+            "/messaging/cos-read/conversations",
+            params=params,
+            access=access,
+            expected_account_id=expected_account_id,
+        )
+
+    async def cos_read_messages(
+        self,
+        conversation_id: str,
+        *,
+        actor_endpoint_id: str,
+        expected_account_id: str,
+        tenant_id: str | None = None,
+        thread_root_id: str | None = None,
+        limit: int | None = None,
+        before_seq: int | None = None,
+        after_seq: int | None = None,
+        access: OAuthAccess | None = None,
+    ) -> dict[str, Any]:
+        """One page of a shared conversation (or one thread with ``thread_root_id``).
+
+        Bodies are the granting HUMAN's view, not screened for the agent: the
+        caller (the bridge tool) wraps them as untrusted data, and nothing here
+        stores them.
+        """
+
+        params: dict[str, Any] = {"actor_endpoint_id": actor_endpoint_id}
+        if tenant_id:
+            params["tenant_id"] = tenant_id
+        if limit is not None:
+            params["limit"] = int(limit)
+        if before_seq is not None:
+            params["before_seq"] = int(before_seq)
+        if after_seq is not None:
+            params["after_seq"] = int(after_seq)
+        path = f"/messaging/conversations/{conversation_id}/cos-read/messages"
+        if thread_root_id:
+            path = f"{path}/{thread_root_id}/replies"
+        return await self._send(
+            "GET", path, params=params, access=access, expected_account_id=expected_account_id
         )
 
     # -- owner audit (HUMAN-ONLY) --------------------------------------------
@@ -4649,6 +4816,11 @@ class StatusDiscipline:
                 # Never over an explicit value: a Turn off / settings edit that
                 # landed after the commit above keeps its ``false``.
                 record_local_enabled_if_unset(config_dir)
+                # The default-on enrolment never had a designation to commit
+                # (nobody chose one), so it was badge-only; point it at the
+                # chief of staff, the account's expected wake destination. The
+                # next status read mirrors the setting into the native record.
+                record_local_session_if_unset(config_dir)
         except Exception:  # noqa: BLE001 - no local authority beats a loud failure
             pass
         # Adopt the post-enrolment answer: returning B after enrolling would
@@ -4794,7 +4966,10 @@ class StatusDiscipline:
         committed owner: the setting the user chose must reach the native record
         on the next fresh answer without reopening the consent dialog. Clearing
         the row withdraws wake consent (§13.6: empty stays badge-only), and the
-        designation is never guessed from "the current session".
+        designation is never guessed from "the current session". The ONE
+        default is the account's chief-of-staff session, written into the
+        setting by the enable paths only while it is empty
+        (``settings.record_local_session_if_unset``).
         """
 
         if self._config_dir is None or check.state != STATE_READY:
