@@ -26,6 +26,13 @@ def _rows(first: str, lines: int = 6) -> list[dict]:
     ]
 
 
+def _accept(rows: list[dict], record: str) -> None:
+    """The epoch must be ACCEPTED: a guard that refuses everything is no guard."""
+    from local_operator.saver.validate import check_provenance
+
+    check_provenance(HEADER + "\n" + record, rows)
+
+
 def _reject(rows: list[dict], record: str) -> None:
     with pytest.raises(SaverRejected):
         check_provenance(HEADER + "\n" + record, rows)
@@ -74,7 +81,7 @@ def test_a_one_character_fragment_must_be_a_whole_word() -> None:
 
 
 def test_a_pool_token_must_be_a_span_identifier() -> None:
-    """M4: EXACT source-derived membership, isolated from the one-use budget.
+    """M4: source-derived membership — a token must be material of the span.
 
     The span holds one identifier and each payload lists one token, so neither
     the count nor the character budget can refuse it; the token is either absent
@@ -84,12 +91,20 @@ def test_a_pool_token_must_be_a_span_identifier() -> None:
         _rows("the deployment finished " + _PAD + "\nsrc/app/views.py"),
         "user: [radient:ids mentioned in this part] invented_identifier",
     )
-    # A FRAGMENT of a real identifier is refused too, and that is the round-5
-    # blocker: prefix, suffix and slice admission let one unit of a count budget
-    # buy up to 2,400 characters of a path it did not delete.
-    _reject(
+    # A TAIL of a span identifier is ADMITTED and charged, because the
+    # reducer pools exactly that shape (`/daemon.py` from
+    # `local_operator/mobile/daemon.py`); refusing it refused the reference
+    # reducer's own output and cost every response in the corpus (R6-1). What
+    # bounds it is characters, not provenance: a token that is no substring of
+    # the span at all is still refused, and the payload/character budgets cap
+    # how much of a span one pool line can spend.
+    _accept(
         _rows("local_operator/mobile/daemon.py " + _PAD),
         "user: [radient:ids mentioned in this part] /daemon.py",
+    )
+    _reject(
+        _rows("local_operator/mobile/daemon.py " + _PAD),
+        "user: [radient:ids mentioned in this part] invented_identifier",
     )
 
 

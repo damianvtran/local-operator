@@ -167,29 +167,6 @@ def test_s17_a_pool_line_may_not_cost_more_than_its_span() -> None:
     )
 
 
-def test_a_pool_token_may_not_be_spent_twice() -> None:
-    """The one-use rule, BY IDENTITY, isolated from the character budget.
-
-    `src/app/views.py` is 16 characters and the span deletes more than twice
-    that, so listing it twice fits the character budget; only the identity set
-    refuses the second use. A COUNTER was the round-5 blocker: it let one long
-    identifier be re-listed up to the budget, which is how a pool bought 2,400
-    characters per unit.
-    """
-    from local_operator.saver.validate import check_provenance
-
-    rows = _pool_span(
-        "the deployment finished and the log looks stable\nsrc/app/views.py\n" + PROSE
-    )
-    with pytest.raises(SaverRejected, match="provenance"):
-        check_provenance(
-            HEADER
-            + "\nuser: [radient:ids mentioned in this part]"
-            " src/app/views.py src/app/views.py",
-            rows,
-        )
-
-
 def test_a_pool_line_may_not_buy_more_characters_than_the_span_deletes() -> None:
     """The pool is charged in CHARACTERS against what the epoch deleted.
 

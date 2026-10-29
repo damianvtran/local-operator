@@ -260,6 +260,16 @@ class SaverChain:
             return request
 
     async def _apply(self, request: "ChatRequest") -> "ChatRequest":
+        # BEFORE ANYTHING IS UPLOADED (R6-3): adoption is all-or-nothing and
+        # the spend is recorded before validation, so an epoch refused for want
+        # of a ruler bills the user for an upload it could never accept. No
+        # notice: "unavailable" is not a protocol event, and the copy for it
+        # does not exist yet (the copy stream owns that string).
+        from local_operator.saver.provenance import estimator_available
+
+        if not estimator_available():
+            logger.debug("saver: no token estimator; sending unreduced")
+            return request
         source = list(request.messages)
         # Off the loop (R-7): a cold projection of a resumed long session with
         # registered values measured 3.25 s. ``to_thread`` is safe because the
