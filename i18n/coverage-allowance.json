@@ -380,9 +380,9 @@
     {
       "locale": "ru",
       "namespace": "cli.exec_help",
-      "reason": "No carried CLI-help catalogue for this locale; the new --saver help uses English fallback until the manager-arranged independent translation/audit is complete (docs/I18N.md step 3 not met by coder).",
-      "owner": "radientdev manager independent i18n audit",
-      "payoff": "2026-11-05",
+      "reason": "No audited Russian catalogue yet; English source fallback is in effect (docs/I18N.md).",
+      "owner": "i18n-translator lane",
+      "payoff": "2027-01-31",
       "missing": [
         "cli.exec_help.agent_id",
         "cli.exec_help.background",
@@ -399,7 +399,6 @@
         "cli.exec_help.output_retries",
         "cli.exec_help.output_schema",
         "cli.exec_help.profile",
-        "cli.exec_help.saver",
         "cli.exec_help.status",
         "cli.exec_help.supervisor_fd",
         "cli.exec_help.team",
@@ -2196,9 +2195,9 @@
     {
       "locale": "vi",
       "namespace": "cli.exec_help",
-      "reason": "No carried CLI-help catalogue for this locale; the new --saver help uses English fallback until the manager-arranged independent translation/audit is complete (docs/I18N.md step 3 not met by coder).",
-      "owner": "radientdev manager independent i18n audit",
-      "payoff": "2026-11-05",
+      "reason": "No audited Vietnamese catalogue yet; English source fallback is in effect (docs/I18N.md).",
+      "owner": "i18n-translator lane",
+      "payoff": "2027-01-31",
       "missing": [
         "cli.exec_help.agent_id",
         "cli.exec_help.background",
@@ -2215,7 +2214,6 @@
         "cli.exec_help.output_retries",
         "cli.exec_help.output_schema",
         "cli.exec_help.profile",
-        "cli.exec_help.saver",
         "cli.exec_help.status",
         "cli.exec_help.supervisor_fd",
         "cli.exec_help.team",
@@ -4012,9 +4010,9 @@
     {
       "locale": "ur",
       "namespace": "cli.exec_help",
-      "reason": "No carried CLI-help catalogue for this locale; the new --saver help uses English fallback until the manager-arranged independent translation/audit is complete (docs/I18N.md step 3 not met by coder).",
-      "owner": "radientdev manager independent i18n audit",
-      "payoff": "2026-11-05",
+      "reason": "No audited Urdu catalogue yet; the RTL surface pass is not delivered.",
+      "owner": "i18n-translator lane",
+      "payoff": "2027-03-31",
       "missing": [
         "cli.exec_help.agent_id",
         "cli.exec_help.background",
@@ -4031,7 +4029,6 @@
         "cli.exec_help.output_retries",
         "cli.exec_help.output_schema",
         "cli.exec_help.profile",
-        "cli.exec_help.saver",
         "cli.exec_help.status",
         "cli.exec_help.supervisor_fd",
         "cli.exec_help.team",
@@ -5854,9 +5851,9 @@
     {
       "locale": "hi",
       "namespace": "cli.exec_help",
-      "reason": "No carried CLI-help catalogue for this locale; the new --saver help uses English fallback until the manager-arranged independent translation/audit is complete (docs/I18N.md step 3 not met by coder).",
-      "owner": "radientdev manager independent i18n audit",
-      "payoff": "2026-11-05",
+      "reason": "No audited Hindi catalogue yet; English source fallback is in effect (docs/I18N.md).",
+      "owner": "i18n-translator lane",
+      "payoff": "2027-02-28",
       "missing": [
         "cli.exec_help.agent_id",
         "cli.exec_help.background",
@@ -5873,7 +5870,6 @@
         "cli.exec_help.output_retries",
         "cli.exec_help.output_schema",
         "cli.exec_help.profile",
-        "cli.exec_help.saver",
         "cli.exec_help.status",
         "cli.exec_help.supervisor_fd",
         "cli.exec_help.team",
@@ -7485,16 +7481,6 @@
         "wire.settings.account_policy.legacy.label",
         "wire.settings.account_policy.reset_soonest.description",
         "wire.settings.account_policy.reset_soonest.label"
-      ]
-    },
-    {
-      "locale": "es",
-      "namespace": "cli.exec_help",
-      "reason": "No carried CLI-help catalogue for this locale; the new --saver help uses English fallback until the manager-arranged independent translation/audit is complete (docs/I18N.md step 3 not met by coder).",
-      "owner": "radientdev manager independent i18n audit",
-      "payoff": "2026-11-05",
-      "missing": [
-        "cli.exec_help.saver"
       ]
     }
   ]

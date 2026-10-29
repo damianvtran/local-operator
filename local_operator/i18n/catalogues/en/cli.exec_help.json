@@ -14,7 +14,6 @@
   "cli.exec_help.output_retries": "Max retries after a failed final response (0-5; default 2). Requires --output-format.",
   "cli.exec_help.output_schema": "JSON Schema file the decoded JSON/YAML/TOML payload must satisfy. For --output-format markdown: a JSON object '{'''required_sections'': [...]'}'. Requires --output-format.",
   "cli.exec_help.profile": "Attach a reusable role/specialist (/agent counterpart; not legacy --agent)",
-  "cli.exec_help.saver": "Enable Radient Saver for this session (on by default when the flag is present; also off or inherit)",
   "cli.exec_help.status": "Read a durable background-job status as JSON; does not start a session",
   "cli.exec_help.supervisor_fd": "Write this run''s operator capability to this inherited descriptor so the supervisor holding the other end can APPROVE the cards this run parks (stage E). Requires --control; refused with --background. Descriptor numbers only — the value never touches argv, the environment or a file.",
   "cli.exec_help.team": "Attach a saved team with its manager, roster and briefs",
