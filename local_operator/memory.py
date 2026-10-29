@@ -697,10 +697,13 @@ def guard(value: Any, *, opaque: bool = False) -> None:
 
 
 def origin_label(fact: dict[str, Any]) -> str:
-    """``captured`` = automatic compaction capture still awaiting a human or an explicit
-    store; ``stated`` = anything a user or agent deliberately wrote or corrected.
+    """``captured`` = the fact's status is ``candidate``; ``stated`` = anything else.
+
     Shown everywhere a fact is listed so unreviewed candidates are never mistaken for
-    verified knowledge (UX round 1: U1)."""
+    verified knowledge (UX round 1: U1). WHY the test is the STATUS and not "who touched
+    it": a deliberateness act that is not an edit (a move, an agent edit) keeps
+    ``candidate``, so a deliberate capture still lists as ``captured`` — the guide says
+    so, and this is the one place that decides it."""
     return "captured" if fact.get("status") == "candidate" else "stated"
 
 
@@ -2658,9 +2661,11 @@ class MemoryStore:
         a move cannot rewrite an entity in place. It is represented as two ordinary
         ops that OLD PEERS ALREADY UNDERSTAND (no protocol bump): a ``put`` at the
         destination whose first revision PARENTS the source head, and a ``tombstone``
-        at the source. The destination fact is byte-identical (text, provenance,
-        created_at and every other timestamp), ``show`` reports ``moved_from`` from
-        the cross-entity root parent, and the ordinary op stream replicates it. A new
+        at the source. The destination fact is byte-identical (text, created_at and every
+        other timestamp — an automatic capture is the one exception, because a move is a
+        deliberate act: its deadline goes and its author becomes the mover, D2),
+        ``show`` reports ``moved_from`` from the cross-entity root parent, and the
+        ordinary op stream replicates it. A new
         op kind was rejected deliberately: a peer running an older release would
         refuse the whole batch and then sit behind a permanent sequence gap.
 
@@ -2776,11 +2781,21 @@ class MemoryStore:
                     )
                 fact = dict(head["fact"])
                 if fact["source"].get("author") == CAPTURE_AUTHOR:
-                    # Moving a capture is a deliberate act (D2), so its expiry
-                    # deadline goes; provenance is otherwise kept as-is, and
-                    # ``unreviewed_capture`` treats a capture outside its own
-                    # session as deliberate.
+                    # Moving a capture is a deliberate act (D2). TWO stamps are needed,
+                    # and the author is the load-bearing one: every deliberateness
+                    # predicate reads it (``unreviewed_capture``, the expiry sweep's
+                    # ``source.session = owner`` clause, ``_evict``'s author filter), so
+                    # nulling the deadline alone was only true while the fact sat
+                    # outside its own session. A capture moved A -> global -> A matched
+                    # ``unreviewed_capture`` again and the expiry sweep derived a legacy
+                    # deadline from ``source_time``, so the round trip still expired
+                    # (and a session delete still forgot it) — #3086 review r2, m1. The
+                    # rewrite is the same one ``put`` performs on every deliberate
+                    # revision; provenance is otherwise kept as-is.
                     fact["expires_at"] = None
+                    fact["source"] = dict(
+                        fact["source"], author=self.identity.agent_id or "anonymous"
+                    )
                 # A move must never be a route around the guards ``put`` enforces.
                 # The strongest of them is scope-fit: work/lane/progress content is
                 # refused in the global bank, and moving it there would defeat it.
