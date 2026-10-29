@@ -89,6 +89,13 @@ and it takes no owner receipt. No renderer op reaches it (the desktop contract
 has no `team_bridge.messages.body`), so it feeds no human thread surface today;
 closing it is follow-up work, not part of this promise.
 
+A second pre-existing hole is named here for the same reason: `POST
+/v1/desktop/team-bridge/scheduled` accepts `thread_root_id` (`ScheduledCreateIn`)
+and carries **no** `expected_account_id` at all, so a scheduled thread reply is
+created as one account and fires against whoever is signed in when it comes due.
+Neither capability promises anything about that path; it needs its own change
+and is listed so nobody reads `team_bridge_threads` as covering it.
+
 ## Validation boundaries
 
 `tests/unit/server/test_conversation_owner_guard.py` drives the actual ASGI
