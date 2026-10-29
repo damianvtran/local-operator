@@ -2334,13 +2334,26 @@ class ServingSessionHandle(SessionHandle):
         read as an invitation.
         """
         if getattr(self, "_disposing", False):
+            self._retire_refusal = "already disposing"
             return False
         try:
             reason = str(self.may_refresh() or "")
         except Exception:  # noqa: BLE001 — uncertainty keeps the runtime
             reason = "busy probe failed"
         if reason:
+            # THE REFUSAL'S CAUSE, KEPT FOR THE CALLER THAT ASKED. The reasons
+            # ``may_refresh`` gives have different next steps — work in flight
+            # clears on its own, a wake due in the warm window clears when it
+            # fires, and an unevaluable probe may not clear at all — and the
+            # stop ladder's receipt names one step, not three. Recorded here
+            # rather than re-probed by the caller, because a second sample would
+            # describe state this decision did not see (agent review round 1 D2,
+            # UX round 1 U2). Read back by
+            # ``server._idle_refusal_reason``; this attribute is that field's
+            # only reader.
+            self._retire_refusal = reason
             return False
+        self._retire_refusal = ""
         self._retiring_cause = cause or "retiring"
         self._retiring_detail = detail
         self._exit_committed = True

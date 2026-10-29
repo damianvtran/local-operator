@@ -723,6 +723,15 @@ export type MessageParams = {
   "wire.remote_compute.unknown_run": undefined;
   "wire.remote_compute.unreachable": undefined;
   "wire.remote_compute.unreadable_envelope": undefined;
+  "wire.sessions.approval_stop_local": { "address": string };
+  "wire.sessions.approval_stop_peer": { "address": string; "peer": string };
+  "wire.sessions.stop_pending": { "name": string; "seconds": string };
+  "wire.sessions.stop_refused_busy": { "name": string };
+  "wire.sessions.stop_refused_old_owner": { "name": string };
+  "wire.sessions.stop_refused_unanswered": { "name": string };
+  "wire.sessions.stop_refused_wake": { "name": string };
+  "wire.sessions.stop_remote_refused": undefined;
+  "wire.sessions.stop_self_refused": undefined;
   "wire.settings.agents.description": undefined;
   "wire.settings.agents.title": undefined;
   "wire.settings.agents_auto_update_seeds.choice.false.description": undefined;
