@@ -30,6 +30,7 @@ from fastapi import FastAPI
 
 from local_operator.server.routes.desktop_notifications import router
 from tests.unit.notifications.test_bulk import seed
+from tests.unit.notifications.test_bulk_asks import queue
 from tests.unit.notifications.test_inbox import SYNTHETIC_TOKEN
 
 URL = "/v1/desktop/notifications"
@@ -101,10 +102,17 @@ def _exchange(port: int, payload: bytes, *, stop_at: int | None = None) -> tuple
     return int(status_line.split()[1]), rest.partition(b"\r\n\r\n")[2]
 
 
-def _preview(port: int) -> dict[str, Any]:
-    status, body = _exchange(port, _head("GET", URL + "?preview=true", port))
+def _preview(port: int, query: str = "") -> dict[str, Any]:
+    status, body = _exchange(port, _head("GET", URL + "?preview=true" + query, port))
     assert status == 200, body
     return json.loads(body)["result"]["selection"]
+
+
+def _body_recount(port: int, token: str, excluded: list[str]) -> tuple[int, bytes]:
+    body = json.dumps({"op": "preview", "selection_token": token, "excluded_ids": excluded})
+    assert len(body) > 40_000  # well past h11's 16 KiB head limit, as a body
+    extra = f"Content-Type: application/json\r\nContent-Length: {len(body)}\r\n"
+    return _exchange(port, _head("PATCH", URL, port, extra) + body.encode())
 
 
 def test_500_ask_shaped_exclusions_recount_in_a_chunked_body(server, tmp_path):
@@ -113,23 +121,32 @@ def test_500_ask_shaped_exclusions_recount_in_a_chunked_body(server, tmp_path):
     assert selection["eligible_count"] == 3
     excluded = [ids[0], *ASK_IDS]
     assert len(excluded) == 500
-    body = json.dumps(
-        {"op": "preview", "selection_token": selection["token"], "excluded_ids": excluded}
-    ).encode()
-    assert len(body) > 40_000  # well past h11's 16 KiB head limit, as a body
-    request = (
-        _head(
-            "PATCH",
-            URL,
-            server,
-            f"Content-Type: application/json\r\nContent-Length: {len(body)}\r\n",
-        )
-        + body
-    )
-    status, answer = _exchange(server, request)
+    status, answer = _body_recount(server, selection["token"], excluded)
     assert status == 200, answer
     refreshed = json.loads(answer)["result"]["selection"]
     assert refreshed["eligible_count"] == 2
+    for key in ("token", "through_seq", "expires_at"):
+        assert refreshed[key] == selection[key]
+
+
+def test_v2_ask_selection_recounts_500_real_and_padded_ask_refs_in_a_body(server, tmp_path):
+    """#3105's v2 (``include_ask_reads``) selection through the same body form.
+
+    V2 is the selection whose exclusions are mostly ask refs, so it is the one
+    that most needs the body form. Real captured asks are excluded alongside
+    maximum-length padding refs; only the real ones may change the ask count.
+    """
+    refs = queue(tmp_path, 3)
+    seed(tmp_path, 2)
+    selection = _preview(server, "&include_ask_reads=true&state=all")
+    assert selection["selection_version"] == 2
+    assert selection["eligible_ask_count"] == 3
+    excluded = [refs[0], refs[1], *ASK_IDS[:498]]
+    assert len(excluded) == 500
+    status, answer = _body_recount(server, selection["token"], excluded)
+    assert status == 200, answer
+    refreshed = json.loads(answer)["result"]["selection"]
+    assert refreshed["eligible_ask_count"] == 1 and refreshed["eligible_update_count"] == 2
     for key in ("token", "through_seq", "expires_at"):
         assert refreshed[key] == selection[key]
 

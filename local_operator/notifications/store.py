@@ -60,7 +60,7 @@ NOTIFICATIONS_DB_NAME = "notifications.db"
 
 #: ``PRAGMA user_version`` of the shipped schema. Migrations are ADDITIVE only
 #: (the ``attention.py`` rule): an older build must still read a newer file.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 #: Copied from ``session/attention.py`` (``_BUSY_TIMEOUT_MS``,
 #: ``_CONNECT_TIMEOUT_S``, ``_CONTENTION_ATTEMPTS``, ``_CONTENTION_BACKOFF_S``)
@@ -408,6 +408,19 @@ _SCHEMA = (
     )
     """,
     "CREATE INDEX IF NOT EXISTS bulk_tokens_expiry ON bulk_tokens(expires_at)",
+    # Asks originate outside the notification sequence. A frozen acknowledgement
+    # therefore needs explicit identities, unlike seq-bounded update selections.
+    """
+    CREATE TABLE IF NOT EXISTS bulk_ask_refs (
+      token TEXT NOT NULL,
+      ref TEXT NOT NULL,
+      lifecycle TEXT NOT NULL,
+      expected_seq INTEGER NOT NULL DEFAULT 0,
+      read_at INTEGER,
+      post_seq INTEGER,
+      PRIMARY KEY (token, ref)
+    )
+    """,
 )
 
 _ITEM_COLUMNS = (
@@ -1087,6 +1100,17 @@ class NotificationStore:
 
         return self._write(body, f"apply:{op}")
 
+    @classmethod
+    def write_ref(cls, conn: sqlite3.Connection, ref: str, read_at: int | None) -> int:
+        """Share the read-mark primitive with atomic bulk receipts, never ask logs."""
+        seq = cls._next_seq(conn)
+        conn.execute(
+            "INSERT INTO ref_state(ref, read_at, seq) VALUES (?, ?, ?) "
+            "ON CONFLICT(ref) DO UPDATE SET read_at=excluded.read_at, seq=excluded.seq",
+            (ref, read_at, seq),
+        )
+        return seq
+
     def mark_refs(self, refs: Sequence[str], *, read: bool, now: int | None = None) -> list[str]:
         """Set or clear the reel-side read mark of refs (open asks). Never touches the ask."""
         stamp = now if now is not None else now_ms()
@@ -1098,12 +1122,7 @@ class NotificationStore:
                 is_read = row is not None and row["read_at"] is not None
                 if is_read == read:
                     continue
-                seq = self._next_seq(conn)
-                conn.execute(
-                    "INSERT INTO ref_state(ref, read_at, seq) VALUES (?, ?, ?) "
-                    "ON CONFLICT(ref) DO UPDATE SET read_at=excluded.read_at, seq=excluded.seq",
-                    (ref, stamp if read else None, seq),
-                )
+                self.write_ref(conn, ref, stamp if read else None)
                 changed.append(ref)
             return changed
 

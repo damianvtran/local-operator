@@ -41,6 +41,7 @@ from local_operator.i18n.keys import wire_errors_notifications as _wn
 from local_operator.i18n.messages import render
 from local_operator.notifications import bulk
 from local_operator.notifications import items as inbox
+from local_operator.notifications import reconcile
 from local_operator.notifications.store import NotificationStore
 from local_operator.server.desktop import require_desktop
 from local_operator.server.models.schemas import CRUDResponse
@@ -141,7 +142,7 @@ def _bulk_preview(
     # Open asks are high priority and stay visible even after their read mark
     # changes. Counting the index directly avoids formatting every waiting row.
     selection = bulk.preview(
-        NotificationStore(root), filters, scope=scope, skipped_ask_count=len(asks)
+        NotificationStore(root), filters, scope=scope, skipped_ask_count=len(asks), ask_rows=asks
     )
     return {"selection": selection, **inbox.counts(root)}
 
@@ -157,6 +158,7 @@ async def list_notifications(
     through_seq: Annotated[int | None, Query(ge=0)] = None,
     limit: Annotated[int, Query(ge=1, le=inbox.LIST_LIMIT_MAX)] = inbox.LIST_LIMIT_DEFAULT,
     preview: bool = False,
+    include_ask_reads: bool = False,
     kind: Literal["all", "asks", "updates"] | None = None,
     bulk_priority: Literal["any", "high", "normal_up"] | None = None,
     count_session_ids: Annotated[list[SessionID] | None, Query(max_length=50)] = None,
@@ -181,7 +183,11 @@ async def list_notifications(
             except bulk.SelectionError as error:
                 raise HTTPException(error.status, detail={"code": error.code}) from error
             return reply({"selection": selection, **await asyncio.to_thread(inbox.counts, root)})
-        if selection_token is not None or excluded_ids is not None:
+        if (
+            selection_token is not None
+            or excluded_ids is not None
+            or (include_ask_reads and not preview)
+        ):
             raise HTTPException(422, detail={"code": "selection_preview_required"})
         if preview:
             allowed = {
@@ -191,6 +197,7 @@ async def list_notifications(
                 "bulk_priority",
                 "session_id",
                 "count_session_ids",
+                "include_ask_reads",
             }
             if set(request.query_params) - allowed:
                 raise HTTPException(422, detail={"code": "selection_filter_conflict"})
@@ -200,6 +207,7 @@ async def list_notifications(
                 "bulk_priority": bulk_priority or "any",
                 "session_id": session_id,
                 "count_session_ids": list(dict.fromkeys(count_session_ids or [])),
+                "include_ask_reads": include_ask_reads,
             }
             try:
                 return reply(
@@ -388,9 +396,18 @@ class DesktopNotificationsPatch(_NotificationTargets):
     operation_token: Annotated[str | None, Field(pattern=r"^[A-Za-z0-9_-]{43}$")] = None
     receipt: bool = False
     excluded_ids: list[ItemID] | None = Field(default=None, max_length=500)
+    reconcile_ids: list[ItemID] | None = Field(default=None, max_length=500)
 
     @model_validator(mode="after")
     def _one_target(self) -> "DesktopNotificationsPatch":
+        if self.reconcile_ids is not None and not (
+            self.selection_token is not None or self.operation_token is not None or self.receipt
+        ):
+            raise ValueError("reconcile_ids requires a receipt-backed target")
+        if self.reconcile_ids is not None and self.op == "preview":
+            # The body recount returns before reconciliation is read, so the ids
+            # would be silently dropped; a recount mints no receipt either.
+            raise ValueError("reconcile_ids is not accepted on a recount")
         if self.excluded_ids is not None and self.selection_token is None:
             raise ValueError("excluded_ids requires selection_token")
         if self.selection_token is not None or self.operation_token is not None:
@@ -460,7 +477,14 @@ async def patch_notifications(body: DesktopNotificationsPatch, request: Request)
                     )
             except bulk.SelectionError as error:
                 raise HTTPException(error.status, detail={"code": error.code}) from error
-            return reply({**result, **await asyncio.to_thread(inbox.counts, root)})
+            answer = {**result, **await asyncio.to_thread(inbox.counts, root)}
+            if body.reconcile_ids is not None:
+                # Read only AFTER receipt auth/expiry/replay fencing. These ids
+                # never enter the mutation target or its idempotency identity.
+                answer["reconciliation"] = await asyncio.to_thread(
+                    reconcile.read_rows, store, body.reconcile_ids
+                )
+            return reply(answer)
         answer = await asyncio.to_thread(
             inbox.apply_patch,
             root,

@@ -34,7 +34,11 @@ from local_operator.supplements.contract import (
 #: first page with no ``selection``, the silent first-page fallback the
 #: ``notification_bulk_selection`` key exists to rule out. The relay drops these
 #: keys rather than reshaping its validators, so its behaviour stays as it was.
-DESKTOP_ONLY_FEATURES = frozenset({"notification_bulk_selection"})
+#: ``notification_bulk_ask_read`` is listed on its own because the contract
+#: calls it a SEPARATE additive capability a client may test without also
+#: checking ``notification_bulk_selection``; the relay's ``extra="ignore"`` query
+#: drops ``include_ask_reads`` and answers the same plain first page.
+DESKTOP_ONLY_FEATURES = frozenset({"notification_bulk_selection", "notification_bulk_ask_read"})
 
 
 def feature_flags() -> dict[str, Any]:
@@ -354,6 +358,9 @@ def static_feature_flags() -> dict[str, Any]:
         # unloaded pages and carry server-side Undo receipts. Clients must not
         # silently fall back to a first-page action against an older backend.
         "notification_bulk_selection": 1,
+        # V2 freezes ask notification read marks too, but never grants ask
+        # settlement authority. Older selection tokens retain update-only counts.
+        "notification_bulk_ask_read": 1,
         "mcp": 1,
         "mcp_auth": 1,
         # Sessionless MCP management: `GET/POST /v1/desktop/mcp` and
