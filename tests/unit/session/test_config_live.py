@@ -50,6 +50,7 @@ from local_operator.model.configure import (
 )
 from local_operator.projects import stale_after_s
 from local_operator.providers.failover import RetrySettings
+from local_operator.saver.gate import configured_mode
 from local_operator.session.session import Session
 from local_operator.session.transcript import Transcript
 from local_operator.spawn.policy import fork_cmux_placement, fork_mode
@@ -614,6 +615,13 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     "providers.openrouter.retire_below_tps": (
         40.0,
         lambda s, w: _openrouter_retire_below_tps(s.routing_settings),
+    ),
+    # Radient Saver's gate: probed through the ONE reader the stream's seam
+    # (`SessionStreamFn._apply_saver`) calls per turn, over the session's LIVE
+    # routing mapping. "opt_in" differs from the "off" default.
+    "radient.saver.mode": (
+        "opt_in",
+        lambda s, w: configured_mode(s.routing_settings),
     ),
     # -- failover: what RetrySettings.from_settings reads off the stream --------
     # NOTE the odd one out below: `retry.usageAwareAccountPick` is observed on

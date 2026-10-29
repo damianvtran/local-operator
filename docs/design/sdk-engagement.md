@@ -492,6 +492,28 @@ async with open_session(spec, roots=roots) as session:
   (the campaign builds arms with ``git archive <commit>``). Pinned by the new
   unit tests and the spawned rig's ``--ending prose-claim``/``narration``
   cases (the latter the discriminating negative, verbatim from 005).
+- **No-progress guards, opt-in (landed 2026-10-28).** The reply arm always
+  runs the runner's turn-window guards (``RepeatedBatchGuard`` 4,
+  ``NoChangeGuard`` 6, ``AskLoopGuard`` 3); the session arm ran none. On a
+  sealed session episode the model repeated one no-op chord on a frozen screen
+  for 53 accepted calls and then blamed the transport; the same recorded
+  batches trip ``repeated-batch`` at step 14. ``run_session_episode(...,
+  progress_guards=runner.guards.progress_guards())`` (launcher
+  ``--progress-guards``) now runs the SAME guard objects at the same point the
+  runner does -- after an executed batch, on that batch's result -- and a
+  firing guard is the runner's truncation: the stopping call still returns its
+  screen plus a stop sentence, later calls are refused, the session gets the
+  wedge stop's graceful cancel, and the outcome is ``truncated`` with the
+  guard's code as ``terminal_reason``. Only executed batches enter the window
+  (a refusal ran nothing); a re-bind clears it (the lost read-back breaks the
+  batch→next-screen chain). Budget/cost guards are refused at build: the
+  bridge cannot feed their counters. Off by default, so an existing session
+  arm is unchanged. The reply arm's manifest stamps ``progress_guards`` either
+  way; the session arm builds no manifest, so its own ``outcome.json`` field and
+  ``events.jsonl`` row carry that stamp instead. Turning it on is a protocol
+  change for comparison purposes, the same class
+  as ``--no-completion-gate``. Pinned by ``test_session_arm_progress.py`` and
+  the real-stack cases in ``TestTheStreamCompletedStopBoundary``.
 - **Episode tool confinement (landed 2026-09-28).** A session opened by the
   episode arm is confined to the run's scratch:
   ``Session.set_tool_confinement(scratch_root)`` installs it before the first

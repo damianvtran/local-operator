@@ -56,10 +56,12 @@ def _multi_tier_projection() -> SessionProjection:
 
     Shaped so the cascade's own steps are exercised: tier 1 trims the roster
     previews, tier 1b the pending prose, tier 1c both the roster todo text and
-    then the todo lists, tier 2 the transcript expand payloads, tier 3 the
-    transcript tail, and tier 4's own loop walks the row text bound down. Traced
-    on the parent commit, the frame fits on tier 4's SECOND step and tier 5
-    (the derived roster graph) still has to fire — 7 whole-frame measurements.
+    then the todo lists, tier 3 the transcript expand payloads, tier 4 the
+    transcript tail, tier 5 the derived roster graph, and tier 6's own loop
+    walks the row text bound down. Traced on the parent commit, the frame fits
+    on tier 6's SECOND step. Tier 2 (the graph shed, tried first only when it
+    alone brings the frame under the cap) does not fire here: this roster is 60
+    wide, so its derived graph is not the whole fix.
     """
     projection = SessionProjection(session_id="s", pid=1, kind="tui")
     for i in range(60):

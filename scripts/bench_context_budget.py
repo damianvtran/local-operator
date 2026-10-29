@@ -1750,7 +1750,26 @@ CHARS_PER_BILLED_TOKEN = 2.78
 # this one's published schema are capability, not prose. The ceiling is therefore
 # the MEASURED HEAD plus this file's 55-token band (34,286 + 55), the same rule
 # the older entries above used — not a round number and not a guess.
-BUDGET_BILLED_TOKENS = 34_341
+#
+# RATCHETED DOWN 34,341 -> 34,316 (ask/notify dedupe, ``asks/dedupe.py``): the
+# ``ask`` restraint, the ``notify`` description and system.md's has_notify
+# clause now say "an ask notifies — never also notify it; notify is for FYI".
+# Reworded to be net NEGATIVE, same script, isolated HOME, this tree:
+#   queued   (default)        95,258 -> 95,186 chars / 34,265 -> 34,240 billed
+#   blocking (LOP_ASK_NONBLOCKING=0) 93,676 -> 93,604 / 33,696 -> 33,671 billed
+#   child (no ask/notify)      30,355 -> 30,355 billed, unchanged
+# The ceiling follows the measured -25 so the headroom this file keeps does not
+# silently grow into room for the next edit.
+#
+# 34,316 -> 34,327 (CI remediation, #3094): the reword had dropped phrases
+# test_ask_tool.py pins ("decide yourself", "subagent", "approved that
+# action" — the last-resort and irreversible-trigger contract). Restoring them
+# measured +11 billed on BOTH arms, same script, isolated HOME:
+#   queued   95,186 -> 95,218 chars / 34,240 -> 34,251 billed
+#   blocking 93,604 -> 93,636 chars / 33,671 -> 33,682 billed
+#   child    30,355, unchanged
+# Net of the whole PR the queued head is still -14 against main (34,265).
+BUDGET_BILLED_TOKENS = 34_327
 
 #: The SUBAGENT ceiling (``--kind child``), in billed tokens. Same ratchet rules
 #: as ``BUDGET_BILLED_TOKENS`` above. It is a separate number because a child's

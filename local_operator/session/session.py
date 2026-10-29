@@ -57,6 +57,7 @@ from collections.abc import (
     Callable,
     Collection,
     Coroutine,
+    Iterable,
     Iterator,
     Mapping,
     Sequence,
@@ -401,6 +402,28 @@ logger = logging.getLogger(__name__)
 #: is a paid turn the same failure would refuse. The card stays durable in the
 #: transcript and on the live context, so the next ordinary turn still reads it.
 BRIDGE_CARD_FALLBACK_ATTEMPTS = 3
+
+
+def _saver_redaction(variables: Any) -> Any:
+    """The session's two redaction passes as Radient Saver's ``Redaction``, or ``None``.
+
+    ``redact`` (registered values plus the credential-shape table) for text and
+    tool results, ``redact_arguments`` (the high-confidence floor that never
+    rewrites code) for tool-call arguments, and ``redaction_values`` so the
+    projection cache re-projects when a new secret is registered (contract §3.1).
+    """
+    redact: Any = getattr(variables, "redact", None)
+    redact_arguments: Any = getattr(variables, "redact_arguments", None)
+    if not callable(redact) or not callable(redact_arguments):
+        return None
+    from local_operator.saver.projection import Redaction, Redactor
+
+    values: Any = getattr(variables, "redaction_values", None)
+    return Redaction(
+        redact=cast(Redactor, redact),
+        redact_arguments=cast(Redactor, redact_arguments),
+        values=cast(Callable[[], Iterable[str]], values) if callable(values) else (lambda: ()),
+    )
 
 
 def _notice(
@@ -3786,6 +3809,18 @@ class Session:
         self._goal_state = goal_state if goal_state is not None else GoalState()
         self._variables = variables
         self._job_id = job_id
+        saver_bridge = getattr(self._stream_fn, "bind_saver", None)
+        if callable(saver_bridge):
+            # Radient Saver (contract §3.1, §7): the upload re-applies THIS
+            # session's two redaction passes, and a charged prepare lands in THIS
+            # session's channel ledger. The same division of labour as the notice
+            # bridge above — the stream owns the call, the session owns the
+            # secrets and the ledger. A session without a variable store keeps the
+            # stream's credential-shape floor.
+            saver_bridge(
+                redaction=_saver_redaction(variables),
+                spend=self.record_channel_spend,
+            )
         #: The parent link (see the ``parent_session`` parameter). The id is
         #: kept even when the OBJECT is gone — a resumed child still answers
         #: "whose child am I" for its analytics rows (QA round 1, Q3).
@@ -12344,7 +12379,13 @@ class Session:
             return {"ok": False, "error": "this session has no queued-ask engine"}
         if relay is not None:
             return queue.enqueue_relay(relay, tool_call_id=tool_call_id)
-        return queue.enqueue(questions, timeout, tool_call_id=tool_call_id)
+        outcome = queue.enqueue(questions, timeout, tool_call_id=tool_call_id)
+        # The mirror of the notify door's check (``asks/dedupe.py``): a
+        # same-topic update raised just before this question leaves Unread and
+        # rides the ask. Not on the relay arm: those questions are another
+        # session's, and this session's updates are not about them.
+        self._merge_updates_into_ask(outcome)
+        return outcome
 
     #: TB-02 P1 (PR #2378): the sentence a plain ask door refuses a bridge
     #: request with — it names the door that works (the request's own verified
@@ -16511,6 +16552,12 @@ class Session:
         """
         from local_operator.notifications.store import NotificationStore
 
+        # ONE TOPIC, ONE ENTRY (``asks/dedupe.py``): an open same-topic ask from
+        # this session already notifies the operator, so the update rides it as
+        # context instead of becoming a second item they must also clear.
+        folded = await asyncio.to_thread(self._fold_notify_into_open_ask, title, body, priority)
+        if folded is not None:
+            return folded
         root = Path(self._config_dir)
         store = NotificationStore(root)
         outcome = await asyncio.to_thread(
@@ -16533,6 +16580,79 @@ class Session:
         if outcome.priority == "high":
             await self._route_item_banner(root, store, outcome, title=title, body=body)
         return _notify_sentence(outcome)
+
+    def _fold_notify_into_open_ask(self, title: str, body: str, priority: str) -> str | None:
+        """The suppression sentence when ``notify`` duplicates an open ask, else ``None``.
+
+        Best-effort by design: any failure (no queue on the blocking arm, an
+        unreadable log, a failed append) returns ``None`` and the update is
+        delivered as before — a missed merge costs one extra click, a lost
+        update costs the operator the information.
+        """
+        try:
+            queue = self.ask_queue()
+            if queue is None:
+                return None
+            from local_operator.asks import dedupe
+
+            match = dedupe.matching_ask(
+                queue.open_records(),
+                title=title,
+                body=body,
+                now=queue.clock_ms(),
+                priority=priority,
+            )
+            if match is None:
+                return None
+            if not queue.add_context(str(match["ask_id"]), title=title, body=body, source="notify"):
+                return None
+            return dedupe.SUPPRESSED_TEXT.format(ask_id=match["ask_id"])
+        except Exception:  # noqa: BLE001 — fall through to delivering the update
+            logger.debug("notify: open-ask dedupe check failed", exc_info=True)
+            return None
+
+    def _merge_updates_into_ask(self, outcome: Mapping[str, Any]) -> None:
+        """After an ask is queued: fold same-topic unread updates into it.
+
+        The mirror of :meth:`_fold_notify_into_open_ask` (``asks/dedupe.py``).
+        The text is appended to the ask FIRST and the update is marked read
+        (``via=merged_into_ask``, never dismissed) only once that append
+        landed, so a failure can leave both entries but never neither.
+        Best-effort.
+        """
+        try:
+            if not outcome.get("ok"):
+                return
+            details = outcome.get("details") or {}
+            ask_id = str(details.get("ask_id") or "")
+            queue = self.ask_queue()
+            if not ask_id or queue is None:
+                return
+            record = queue.find(ask_id)
+            if record is None:
+                return
+            from local_operator.asks import dedupe
+            from local_operator.notifications.store import NotificationStore
+
+            store = NotificationStore(Path(self._config_dir))
+            rows, _ = store.list_items(state="unread", session_id=self.session_id, limit=100)
+            # Measured from the ask's own creation stamp: "was this update raised
+            # within the window before the question" is the duplicate pattern.
+            matches = dedupe.matching_updates(
+                rows, ask=record, now=int(record.get("created_at") or 0)
+            )
+            for row in matches:
+                if not queue.add_context(
+                    ask_id,
+                    title=str(row.get("title") or ""),
+                    body=str(row.get("body_md") or ""),
+                    source="merged",
+                    item_id=str(row["id"]),
+                ):
+                    continue
+                store.merge_into_ask([(str(row["id"]), int(row.get("revision") or 1))])
+        except Exception:  # noqa: BLE001 — both entries stay; nothing is lost
+            logger.debug("ask: merging same-topic updates failed", exc_info=True)
 
     async def _route_item_banner(
         self, root: Path, store: Any, outcome: Any, *, title: str, body: str
@@ -21899,6 +22019,15 @@ class Session:
                 "owner_device": binding.owner_device,
                 "owner_device_name": binding.owner_device_name,
                 "credential_id": binding.credential_id,
+                # NO DERIVED IDENTIFIER IS RECORDED HERE, deliberately: a digest
+                # or hash of the account label is dictionary-reversible (an
+                # email is low-entropy) and this row is copied to peers and moved
+                # between devices, so the pseudonym would be a linkable
+                # identifier for the operator's account on every replica — the
+                # leak class this notice's operator-only rule exists to stop. The
+                # transcript's fold uses ``credential_id`` above instead: a store
+                # fact, stable across restarts, not reversible, and different for
+                # two accounts.
             },
         )
         try:
@@ -23629,6 +23758,17 @@ class Session:
             # Before the render below, so the bound reads the flushed history.
             await self._flush_stale_if_due(compaction_api, settings)
             rendered = self._render_history(messages)
+            # RADIENT SAVER (contract §7, agent review R-8): the contract says the
+            # trigger "reads provider usage (now reduced), so compaction fires
+            # later". It does not, here, ON PURPOSE: the gate takes
+            # ``max(provider_reported, current_bound)`` and this bound is over
+            # the UNREDUCED render, so with Saver on compaction still fires at
+            # the unreduced size. That is the conservative side for LO1: the
+            # session never depends on a reduction that a fail-open (a 402, an
+            # outage, a rejection) can withdraw on the very next turn, which
+            # would put an unreduced request over the window with no compaction
+            # behind it. Recorded under "Where the contract did not fit" in the
+            # PR; firing later is an LO2 decision once the badge can show it.
             current_bound = compaction_api.messages_tokens_upper_bound(rendered)
             if not _should_compact(
                 compaction_api,
@@ -24190,15 +24330,33 @@ class Session:
         now_ms = int(time.time() * 1000)
         last_ms = self._last_provider_request_ms
         frames = _history_captured_browser_views(llm_history)
+        # RADIENT SAVER (contract §7): while Saver is reducing the request, both
+        # sweeps act only on messages at or after the chain's frontier. Rows
+        # before it are already frozen into epochs: blanking one saves nothing on
+        # the wire (the epoch replaces it) and costs a chain truncation and a
+        # re-upload. Both sweeps mutate the messages they are given in place, so
+        # handing them the tail restricts them without copying.
+        #
+        # The batch-flush ceiling is judged over THAT SAME TAIL (R-3): judged
+        # over the whole history, stale rows in the frozen prefix (which the
+        # sweep may not touch) kept the flush due at every tool boundary, and
+        # each due flush lifted the sent-prefix guard on the tail: one cache
+        # break per boundary instead of one per batch. Frame victims are
+        # computed over the tail too, so their indices are already the tail's.
+        # ``0`` (Saver off, bypassed, or not reducing) is main's behaviour
+        # exactly: the chain clears its frozen set whenever a request goes out
+        # unspliced (R-2).
+        frontier = self._saver_frontier(llm_history)
+        swept = llm_history[frontier:] if frontier else llm_history
         flush = False
         stale: Any = None
         compute: Any = getattr(compaction_api, "stale_set", None)
         due: Any = getattr(compaction_api, "stale_flush_due", None)
         if callable(compute) and callable(due):
-            stale = compute(llm_history, frames=frames)
+            stale = compute(swept, frames=frames)
             flush = bool(
                 due(
-                    llm_history,
+                    swept,
                     context_window=self.effective_model.context_window,
                     wire_bytes_trigger=self._wire_trigger_bytes(compaction_api, settings) or 0,
                     stale=stale,
@@ -24212,7 +24370,7 @@ class Session:
         # old signature.
         extra: dict[str, Any] = {"flush": True} if flush else {}
         try:
-            compaction_api.prune_tool_outputs(llm_history, now_ms, last_ms, **extra)
+            compaction_api.prune_tool_outputs(swept, now_ms, last_ms, **extra)
         except (ImportError, AttributeError):
             pass  # optional pruning hook absent; degrade to no pruning
         if frames:
@@ -24221,12 +24379,31 @@ class Session:
                 frame_extra["victims"] = stale.frames
             try:
                 compaction_api.prune_stale_frames_in_place(
-                    llm_history, now_ms=now_ms, last_activity_ms=last_ms, **frame_extra
+                    swept, now_ms=now_ms, last_activity_ms=last_ms, **frame_extra
                 )
             except (ImportError, AttributeError):
                 pass  # optional frame sweep absent; degrade to no sweep
         await self._journal_prunes(llm_history, pruned_before)
         return flush
+
+    def _saver_frontier(self, llm_history: Sequence[Message]) -> int:
+        """Where pruning may start while Radient Saver is on (contract §7), or 0.
+
+        The index just past the last ``llm_history`` message the stream's Saver
+        chain has frozen into an epoch. Matched by MESSAGE ID, not by the chain's
+        index: this sweep runs on ``_render_for_compaction`` (live-only
+        injections removed) while the chain counts the request's rows, so the
+        two lists are not index-aligned. ``0`` when Saver never ran for this
+        conversation or holds no epochs.
+        """
+        chain = getattr(self._stream_fn, "_saver_chain", None)
+        frozen = getattr(chain, "frozen_ids", None) if chain is not None else None
+        if not frozen:
+            return 0
+        for index in range(len(llm_history) - 1, -1, -1):
+            if llm_history[index].id in frozen:
+                return index + 1
+        return 0
 
     async def _flush_stale_if_due(self, compaction_api: Any, settings: Any) -> None:
         """Batch-flush stale outputs at a tool boundary when a ceiling is crossed.
@@ -30803,7 +30980,17 @@ class Session:
         # ``retry.*`` edit landing in the same tick, which is both arbitrary
         # and the thing that made its NEW_LAUNCH label a lie. They are all in
         # the LIVE ``providers`` section now, so the trigger matches the scope.
-        if any(key.startswith("retry.") or key.startswith("providers.") for key in changed):
+        # ``radient.saver.`` joins for the same reason: Radient Saver's gate is
+        # read per turn off this mapping (``saver.gate.configured_mode`` in
+        # ``SessionStreamFn._apply_saver``), so an operator switching it OFF from
+        # another process must stop the next upload, which is what its LIVE label
+        # promises (the cross-process probe in test_config_live.py proves it).
+        if any(
+            key.startswith("retry.")
+            or key.startswith("providers.")
+            or key.startswith("radient.saver.")
+            for key in changed
+        ):
             apply_settings = getattr(self._stream_fn, "apply_settings", None)
             if callable(apply_settings):
                 apply_settings(values)

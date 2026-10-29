@@ -87,7 +87,7 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, NoReturn
+from typing import TYPE_CHECKING, Any, Literal, NoReturn, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -521,6 +521,13 @@ _READ_REFUSALS: dict[str, tuple[int, str]] = {
     "malformed_page": (
         502,
         "the agent-messages hub answered in a shape this build cannot read",
+    ),
+    # Transient local overload of the notification-avatar renderer, kept apart
+    # from ``malformed_page`` (a bad image) so the desktop never confuses the
+    # two (QA round 2, Q2). No ``Retry-After``: the desktop does not retry it.
+    "renderer_busy": (
+        503,
+        "the notification image renderer is busy; showing initials for now",
     ),
     "wrong_tenant": (
         409,
@@ -2572,6 +2579,111 @@ async def get_account_avatar(
     return Response(
         content=data,
         media_type=mime,
+        headers={
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "default-src 'none'; sandbox",
+            "Cache-Control": "private, no-store",
+        },
+    )
+
+
+_NOTIFICATION_AVATAR_REQUIRED = frozenset(
+    {"tenant_id", "kind", "theme", "size", "initials", "expected_account_id"}
+)
+_NOTIFICATION_AVATAR_PHOTO = frozenset({"v", "avatar_account_id"})
+
+
+@router.get("/v1/desktop/team-bridge/accounts/{target_account_id}/notification-avatar")
+async def get_notification_avatar(
+    target_account_id: str,
+    request: Request,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> Response:
+    """One precomposed PNG for a Team Bridge OS notification's image slot.
+
+    Capability ``team_bridge_notification_avatar``. The desktop main process
+    calls this (never the renderer with a URL) to warm its display cache, and
+    on a miss waits at most 250 ms before posting with initials anyway (the
+    operator's bounded-wait decision), so this route can never hold a
+    notification back beyond that budget.
+
+    Closed query, every name single-valued:
+
+    * ``tenant_id`` the directory/event tenant (part of the desktop's display
+      cache key; never overrides hub authorization); ``kind`` ``person|person_agent``;
+      ``theme`` ``light|dark``; ``size``
+      ``64|256``; ``initials`` 0-2 letters/digits (may be empty);
+      ``expected_account_id`` the captured VIEWER receipt, as on ``/avatar``.
+    * ``v`` + ``avatar_account_id``: both or neither. With them, the photo is
+      read through the same closed ``/avatar`` relay; without, an initials
+      placeholder is drawn and no network is touched.
+
+    ``avatar_account_id`` must equal the path account: the Team Bridge sender
+    contract pins a ``person_agent``'s avatar to its OWNER's account (which is
+    the path id), so an avatar naming any other account is refused rather than
+    drawn under someone else's name.
+
+    ``private, no-store``: core renders statelessly and keeps no composite. The
+    desktop main process owns display retention (A0: in memory, <= 15 minutes,
+    cleared on auth transitions); an HTTP/disk cache here could not apply its
+    login fence.
+
+    Refusals specific to this route: ``502 malformed_page`` when the hub's
+    bytes are not a bounded PNG/JPEG, and ``503 renderer_busy`` when the
+    renderer's pending queue is full (a burst beyond 8 in flight). The second
+    is transient and carries no ``Retry-After``: the desktop shows initials
+    NOW, does not retry in the post path (the bounded wait has already spent
+    its budget, Team Bridge T2), and never negative-caches it as "no picture",
+    so the next notification from that sender asks again.
+    """
+
+    from local_operator.team_bridge import notification_avatar as na
+
+    query = request.query_params
+    names = set(query)
+    photo_names = names & _NOTIFICATION_AVATAR_PHOTO
+    if (
+        not _NOTIFICATION_AVATAR_REQUIRED <= names
+        or names - _NOTIFICATION_AVATAR_REQUIRED - _NOTIFICATION_AVATAR_PHOTO
+        or photo_names not in (set(), set(_NOTIFICATION_AVATAR_PHOTO))
+        or any(len(query.getlist(key)) != 1 for key in names)
+    ):
+        _raise_read("invalid_request")
+    if (
+        not is_account_id(target_account_id)
+        or not is_account_id(query["expected_account_id"])
+        or not query["tenant_id"].strip()
+        or len(query["tenant_id"]) > 128
+        or query["kind"] not in na.KINDS
+        or query["theme"] not in na.THEMES
+        or query["size"] not in {"64", "256"}
+        or not na.valid_initials(query["initials"])
+        or (photo_names and re.fullmatch(r"[0-9a-f]{16}", query["v"]) is None)
+        or (photo_names and query["avatar_account_id"] != target_account_id)
+    ):
+        _raise_read("invalid_request")
+    try:
+        data = await _conversation_reply(
+            _conversation_client(config_manager).notification_avatar(
+                target_account_id,
+                tenant_id=query["tenant_id"],
+                kind=cast(Literal["person", "person_agent"], query["kind"]),
+                theme=cast(Literal["light", "dark"], query["theme"]),
+                size=int(query["size"]),
+                initials=query["initials"],
+                v=query["v"] if photo_names else None,
+                expected_account_id=query["expected_account_id"],
+            )
+        )
+    except na.RendererBusy:
+        _raise_read("renderer_busy")
+    except na.AvatarImageRejected:
+        # The hub's bytes were not a bounded PNG/JPEG: same class as an
+        # avatar body this relay refuses to serve.
+        _raise_read("malformed_page")
+    return Response(
+        content=data,
+        media_type="image/png",
         headers={
             "X-Content-Type-Options": "nosniff",
             "Content-Security-Policy": "default-src 'none'; sandbox",
