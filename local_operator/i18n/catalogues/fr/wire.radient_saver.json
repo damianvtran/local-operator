@@ -13,5 +13,14 @@
   "wire.radient_saver.notice.no_credit": "Radient Saver est en pause pour cette session, car votre solde Radient est épuisé. Ajoutez du crédit sur console.radienthq.com pour l’utiliser.",
   "wire.radient_saver.notice.rate_limited": "Radient Saver est occupé : votre historique complet est donc envoyé jusqu’à ce qu’il accepte de nouveau des requêtes.",
   "wire.radient_saver.notice.disabled": "Radient Saver n’est pas disponible avec cette configuration : votre historique complet est donc envoyé.",
-  "wire.radient_saver.notice.oversize": "Un message de cette conversation est trop volumineux pour Radient Saver : il reste donc intact. Saver continue de raccourcir le reste de la conversation."
+  "wire.radient_saver.notice.oversize": "Un message de cette conversation est trop volumineux pour Radient Saver : il reste donc intact. Saver continue de raccourcir le reste de la conversation.",
+  "wire.radient_saver.command.description": "Définir Radient Saver pour cette session",
+  "wire.radient_saver.command.radient_description": "Contrôles de session Radient",
+  "wire.radient_saver.command.usage": "Utilisez /saver, /saver on, /saver off, /saver status ou /saver inherit. La commande /saver seule bascule l’état ; inherit suit le paramètre global.",
+  "wire.radient_saver.command.enabled": "Radient Saver est activé pour cette session. Votre paramètre global reste inchangé.",
+  "wire.radient_saver.command.disabled": "Radient Saver est désactivé pour cette session. Votre paramètre global reste inchangé.",
+  "wire.radient_saver.command.inherited": "Radient Saver suit désormais le paramètre global et la désignation de l’agent pour cette session.",
+  "wire.radient_saver.command.status.on": "Radient Saver : activé pour cette session. Utilisez /saver off pour le désactiver ou /saver inherit pour suivre le paramètre global.",
+  "wire.radient_saver.command.status.off": "Radient Saver : désactivé pour cette session. Utilisez /saver on pour l’activer.",
+  "wire.radient_saver.command.badge": "saver"
 }

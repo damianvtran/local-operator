@@ -234,6 +234,8 @@ class AgentProfile:
     instructions: str = ""
     tools: tuple[str, ...] | None = None
     effort: str | None = None
+    #: Per-role Saver choice; absent inherits the parent/global resolution.
+    saver: bool | None = None
     #: Whether a child in this role may delegate further. A reviewer that
     #: spawns its own children turns one review into a fan-out nobody is
     #: watching; a read-only role that delegates autonomous work is not
@@ -333,6 +335,12 @@ def _profile_from_text(name: str, text: str, *, agent_id: str | None = None) -> 
     # silently ENABLE proactive behaviour) rather than failing the parse.
     action_class = normalize_action_class(meta.get("class"))
 
+    raw_saver = meta.get("saver")
+    saver = (
+        raw_saver.strip().lower() in {"on", "true", "yes"}
+        if isinstance(raw_saver, str)
+        else raw_saver if isinstance(raw_saver, bool) else None
+    )
     return AgentProfile(
         name=_str("name") or name,
         # A seed's canonical label (``label: UX Reviewer``): display-only, and
@@ -344,6 +352,7 @@ def _profile_from_text(name: str, text: str, *, agent_id: str | None = None) -> 
         instructions=body[:MAX_INSTRUCTIONS_CHARS],
         tools=_as_tuple(meta.get("tools")),
         effort=_str("effort") or None,
+        saver=saver,
         may_delegate=may_delegate,
         action_class=action_class,
         agent_id=agent_id,
@@ -508,6 +517,7 @@ def profile_from_agent(registry: "AgentRegistry", agent: "AgentData") -> AgentPr
     tools: tuple[str, ...] | None = None
     effort: str | None = None
     may_delegate = False
+    saver: bool | None = None
     for tag in tags:
         key, sep, value = tag.partition(":")
         if not sep:
@@ -518,6 +528,8 @@ def profile_from_agent(registry: "AgentRegistry", agent: "AgentData") -> AgentPr
             tools = _as_tuple(value)
         elif key == "effort":
             effort = value or None
+        elif key == "saver":
+            saver = value.lower() in {"1", "true", "yes", "on"}
         elif key == "delegate":
             may_delegate = value.lower() in {"1", "true", "yes", "on"}
 
@@ -535,6 +547,7 @@ def profile_from_agent(registry: "AgentRegistry", agent: "AgentData") -> AgentPr
         instructions=_agent_instructions(registry, agent),
         tools=tools,
         effort=effort,
+        saver=saver,
         may_delegate=may_delegate,
         action_class=class_from_tags(tags),
         agent_id=agent.id,
@@ -1286,6 +1299,8 @@ def seed_tags(profile: AgentProfile) -> tuple[str, ...]:
         tags.append("tools:" + ",".join(profile.tools))
     if profile.effort:
         tags.append(f"effort:{profile.effort}")
+    if profile.saver is not None:
+        tags.append(f"saver:{'on' if profile.saver else 'off'}")
     if profile.may_delegate:
         tags.append("delegate:yes")
     # THE CLASS IS WRITTEN FOR EVERY PROFILE, ``reactive`` INCLUDED, and that is

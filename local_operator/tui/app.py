@@ -13190,6 +13190,8 @@ class OperatorApp(App[None]):
             model_name=_model_name(session),
             effort=_effort_label(session),
             fast=_fast_label(session),
+            saver=_saver_label(session),
+            reserve_saver=True,
             # The active /agent profile and /team roster segments (U2). Read
             # defensively via getattr: an embedded-SDK or test double may not
             # expose these accessors, and a missing one must leave the segment
@@ -13571,6 +13573,8 @@ class OperatorApp(App[None]):
             ),
             effort=_effort_label(state),
             fast=_fast_label(state),
+            saver=_saver_label(state),
+            reserve_saver=True,
             agent_profile=str(getattr(state, "active_agent", "") or ""),
             team=self._team_band_text(str(getattr(state, "active_team", "") or "")),
             cwd=str(getattr(state, "cwd", "") or ""),
@@ -13843,6 +13847,8 @@ class OperatorApp(App[None]):
             model_name=_model_name(session),
             effort=_effort_label(session),
             fast=_fast_label(session),
+            saver=_saver_label(session),
+            reserve_saver=True,
             # The profile/team segments must survive the swap: takeover is a
             # transport rotation, not a conversation change, so the band may
             # not drop (and later re-add) segments the canonical state never
@@ -44338,6 +44344,29 @@ class OperatorApp(App[None]):
             self._cmd_effort(arg, notice)
         elif command == "/fast":
             self._cmd_fast(arg, notice)
+        elif command in {"/saver", "/radient"}:
+            from local_operator.saver.command import saver_slash
+
+            if command == "/radient":
+                word, _, rest = arg.partition(" ")
+                if word != "saver":
+                    from local_operator.i18n.keys import wire_radient_saver
+                    from local_operator.i18n.text import tr
+
+                    self._system_notice(str(tr("wire.radient_saver")(wire_radient_saver.command_usage())), "warning")
+                    return
+                arg = rest
+            from dataclasses import dataclass
+
+            @dataclass
+            class SaverNotice:
+                kind: str
+                text: str
+                style: str
+
+            result = saver_slash(self._session, arg, SaverNotice)
+            self._system_notice(result.text, result.style)
+            self._status.update(saver=_saver_label(self._session))
         elif command == "/theme":
             self._cmd_theme(arg, notice)
         elif command == "/language":
@@ -46044,6 +46073,8 @@ class OperatorApp(App[None]):
                 model_name=_model_name(session),
                 effort=_effort_label(session),
                 fast=_fast_label(session),
+                saver=_saver_label(session),
+            reserve_saver=True,
                 context_window=_context_window(session),
             )
         # The access note answers "can I use the model I just switched to". On
@@ -63840,6 +63871,23 @@ def _read_stored_frontend_state(directory: Path, session_id: str) -> Any | None:
     except Exception:  # noqa: BLE001 — a cosmetic read must never fail an open
         logger.debug("stored frontend state unreadable for %s", session_id, exc_info=True)
         return None
+
+
+def _saver_label(session: Any) -> str:
+    """The localized Saver badge only when this session's gate resolves on."""
+    if session is None:
+        return ""
+    published = getattr(session, "radient_saver_on", None)
+    if isinstance(published, bool):
+        from local_operator.i18n.keys import wire_radient_saver
+        from local_operator.i18n.text import tr
+
+        return str(tr("wire.radient_saver")(wire_radient_saver.command_badge())) if published else ""
+    from local_operator.i18n.keys import wire_radient_saver
+    from local_operator.i18n.text import tr
+    from local_operator.saver.command import saver_on
+
+    return str(tr("wire.radient_saver")(wire_radient_saver.command_badge())) if saver_on(session) else ""
 
 
 def _fast_label(session) -> str:

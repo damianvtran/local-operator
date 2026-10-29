@@ -8,6 +8,7 @@
     "local_operator/exec_mode.py",
     "local_operator/exec_session.py",
     "local_operator/exec_startup.py",
+    "local_operator/saver/command.py",
     "local_operator/keymap.py",
     "local_operator/server/desktop.py",
     "local_operator/server/routes/agents.py",
@@ -238,8 +239,12 @@
     "local_operator/tools/tool_docs.py": 3,
     "local_operator/tools/video_tool.py": 7,
     "local_operator/tui/images.py": 2,
+    "local_operator/tui/notifications_attention.py": 0,
+    "local_operator/tui/notifications_model.py": 0,
+    "local_operator/tui/notifications_render.py": 0,
     "local_operator/tui/session_move.py": 3,
     "local_operator/tui/widgets/analytics_panel.py": 0,
+    "local_operator/tui/widgets/notifications_view.py": 0,
     "local_operator/tui/widgets/status_line.py": 0,
     "local_operator/tui/widgets/transcript.py": 0,
     "local_operator/tui/widgets/welcome.py": 1,
@@ -260,10 +265,6 @@
     "local_operator/web_search/tool.py": 2,
     "scripts/i18n/check.py": 25,
     "scripts/i18n/generate.py": 12,
-    "scripts/i18n/shard_ledger.py": 3,
-    "local_operator/tui/notifications_attention.py": 0,
-    "local_operator/tui/notifications_model.py": 0,
-    "local_operator/tui/notifications_render.py": 0,
-    "local_operator/tui/widgets/notifications_view.py": 0
+    "scripts/i18n/shard_ledger.py": 3
   }
 }

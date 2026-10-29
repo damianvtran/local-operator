@@ -189,6 +189,11 @@ class AgentParams(BaseModel):
         ),
     )
 
+    saver: Literal["on", "off", "inherit"] | None = Field(
+        default=None,
+        description="create/update: pin Radient Saver for this role; inherit clears the pin.",
+    )
+
     @field_validator("effort", mode="before")
     @classmethod
     def _legacy_empty_effort(cls, value: Any) -> Any:
@@ -1693,6 +1698,13 @@ def write_profile(
         instructions=instructions,
         tools=tools,
         effort=effort,
+        saver=(
+            None
+            if params.saver == "inherit"
+            else params.saver == "on"
+            if params.saver is not None
+            else current.saver if current is not None else None
+        ),
         # Settable, and preserved when not set, for the same reason as the
         # allowlist: a role that coordinates must not stop coordinating
         # because someone fixed a typo in its guidance — but a role authored

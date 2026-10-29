@@ -675,6 +675,15 @@ export type MessageParams = {
   "wire.memory.sync.help": undefined;
   "wire.memory.sync.label": undefined;
   "wire.memory.title": undefined;
+  "wire.radient_saver.command.badge": undefined;
+  "wire.radient_saver.command.description": undefined;
+  "wire.radient_saver.command.disabled": undefined;
+  "wire.radient_saver.command.enabled": undefined;
+  "wire.radient_saver.command.inherited": undefined;
+  "wire.radient_saver.command.radient_description": undefined;
+  "wire.radient_saver.command.status.off": undefined;
+  "wire.radient_saver.command.status.on": undefined;
+  "wire.radient_saver.command.usage": undefined;
   "wire.radient_saver.mode.choice.off.description": undefined;
   "wire.radient_saver.mode.choice.off.label": undefined;
   "wire.radient_saver.mode.choice.opt_in.description": undefined;

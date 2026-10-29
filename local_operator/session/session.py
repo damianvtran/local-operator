@@ -3472,7 +3472,14 @@ class Session:
         system_blocks_provider: Callable[..., list[str]] | Callable[..., Awaitable[list[str]]],
     ) -> None:
         self._model = model
+        # Tri-state conversation choice: None follows the global setting/agent
+        # pin; True/False are explicit overrides journaled for resume.
+        self.radient_saver_choice: bool | None = None
+        self._saver_agent_pin: bool | None = None
         self._stream_fn = stream_fn
+        saver_bridge = getattr(self._stream_fn, "bind_saver_session", None)
+        if callable(saver_bridge):
+            saver_bridge(self)
         notice_bridge = getattr(self._stream_fn, "set_notice_handler", None)
         if callable(notice_bridge):
             # The stream owns provider routing; the session owns ordered event
@@ -5192,6 +5199,9 @@ class Session:
         # that model already restored, or the pin reads as stranded and is
         # dropped.
         self._restore_selected_model()
+        from local_operator.saver.command import restore_saver_choice
+
+        restore_saver_choice(self)
         # Subagents and todos: both live only in memory during a session, so a
         # resume rebuilds them from the transcript here — the job rows and comms
         # records that make the subagent panel and ``hub op='resume'`` work, and

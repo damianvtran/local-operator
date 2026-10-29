@@ -2341,6 +2341,34 @@
       "note": "Independent i18n audit of the agent-avatar wave (relay.agent_avatar) at en source_sha256 6f48f15eeebb9e81bb36f607188f4e517b906149015f076eaaed93d5d00810fe, round 2 at head 1fb179bafd1. Auditor is independent of the translator. Independent audit, round 2 at head 1fb179bafd1 (en source_sha256 verified with catalogues.catalogue_sha256). Mechanical, re-derived this round: key parity vs en (7/7 wire.errors.agent_avatar, 11/11 cli.agents_picture, 3/3 relay.agent_avatar); placeholder name+kind identical to en and every message rendered through local_operator.i18n.runtime.render_message with sentinel arguments (0 lost, 0 added); no value byte-identical to en, so no key is left in English; no ICU plural/select, and none is required (the only counts are {bytes}, where a stored picture can never be 0 or 1 bytes, and the fixed {limit_mib}=10 / {limit_mp}=40 caps), so every locale's CLDR category set is satisfied vacuously; NFC, no BOM, no trailing space, no Cf/bidi control characters (per-string RTL isolation stays the render layer's job, per the ur guide). Locale verdict: 1 MINOR (fit). desktop_hint 49 cells against declared maxCells 48 (en 38); alt 16 and change 27 fit. Same disposition as fr: recorded exception over truncation. Non-gating. Round-2 scope: the remediation diff 8f64c072385..1fb179bafd1 (hi/ur cli.agents_picture remove.none, vi cli.agents_picture and vi wire.errors.agent_avatar agent term) plus its direct neighbours; the copy this row covers was re-read at the current bytes and the unchanged namespaces it borders keep their byte-identical audit. Translator and auditor are distinct agents in separate sessions; both ran the radient/auto route after provider quota fallbacks (disclosed, not pinned). Unresolved blocker/major: 0."
     },
     {
+      "locale": "es",
+      "namespace": "wire.radient_saver",
+      "source_sha256": "d2c78470f5117bc99248f3835e1b2d3fd41c57b4400b70d28a2f5bc4fcb233df",
+      "translator": {
+        "agent": "coder (radientdev; self-translated, no i18n-translator delegation)",
+        "model": "kimi/k3.1-pro (fallback after quota failures)",
+        "date": "2026-10-29",
+        "note": "Translated new command-surface strings; existing values retain their earlier translations."
+      },
+      "auditor": {
+        "agent": "coder (radientdev; self-audit only, NOT independent)",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "self-reviewed",
+        "findings": 0
+      },
+      "status": "pending-independent-audit",
+      "second_audit": {
+        "status": "pending",
+        "agent": "pending",
+        "model": "pending",
+        "date": null,
+        "scope": "round-3 SA-2 remediation of wire.radient_saver.mode.help (PR #3078)",
+        "note": "Second independent audit commissioned by the radientdev manager; it has NOT run. Auditor identity, model and date are deliberately unrecorded until it reports — this row is not a second-audit pass."
+      },
+      "note": "Self-translation and self-audit recorded truthfully; no independent i18n-auditor delegation is available in this bounded coder role. This is NOT an independent pass. English fallback applies for this namespace until independent audit is completed."
+    },
+    {
       "locale": "fr",
       "namespace": "tui.status",
       "source_sha256": "2403f9c4f37b40264f575929627b99a0bcabb0baf1bcb6a0b951c6c31ec6843a",
@@ -4622,6 +4650,54 @@
       "note": "Independent i18n audit of the agent-avatar wave (relay.agent_avatar) at en source_sha256 6f48f15eeebb9e81bb36f607188f4e517b906149015f076eaaed93d5d00810fe, round 2 at head 1fb179bafd1. Auditor is independent of the translator. Independent audit, round 2 at head 1fb179bafd1 (en source_sha256 verified with catalogues.catalogue_sha256). Mechanical, re-derived this round: key parity vs en (7/7 wire.errors.agent_avatar, 11/11 cli.agents_picture, 3/3 relay.agent_avatar); placeholder name+kind identical to en and every message rendered through local_operator.i18n.runtime.render_message with sentinel arguments (0 lost, 0 added); no value byte-identical to en, so no key is left in English; no ICU plural/select, and none is required (the only counts are {bytes}, where a stored picture can never be 0 or 1 bytes, and the fixed {limit_mib}=10 / {limit_mp}=40 caps), so every locale's CLDR category set is satisfied vacuously; NFC, no BOM, no trailing space, no Cf/bidi control characters (per-string RTL isolation stays the render layer's job, per the ur guide). Locale verdict: 1 MINOR (fit). desktop_hint renders 49 cells against the sidecar's declared maxCells 48 (en 38); alt 15 and change 25 fit. Recommended disposition, following the fr guide's relay.chrome precedent: record it as an accepted width exception, since shortening drops either 'application de bureau' or the imperative. Non-gating. Round-2 scope: the remediation diff 8f64c072385..1fb179bafd1 (hi/ur cli.agents_picture remove.none, vi cli.agents_picture and vi wire.errors.agent_avatar agent term) plus its direct neighbours; the copy this row covers was re-read at the current bytes and the unchanged namespaces it borders keep their byte-identical audit. Translator and auditor are distinct agents in separate sessions; both ran the radient/auto route after provider quota fallbacks (disclosed, not pinned). Unresolved blocker/major: 0."
     },
     {
+      "locale": "fr",
+      "namespace": "cli.exec_help",
+      "source_sha256": "0cf4fd220dd99750a64b79b8b679a908b1815c4c2a45415cae01c1b4e4f17d4e",
+      "translator": {
+        "agent": "coder (radientdev; self-translated, no i18n-translator delegation)",
+        "model": "kimi/k3.1-pro (fallback after quota failures)",
+        "date": "2026-10-29",
+        "note": "Translated new command-surface strings; existing values retain their earlier translations."
+      },
+      "auditor": {
+        "agent": "coder (radientdev; self-audit only, NOT independent)",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "self-reviewed",
+        "findings": 0
+      },
+      "status": "pending-independent-audit",
+      "note": "Self-translation and self-audit recorded truthfully; no independent i18n-auditor delegation is available in this bounded coder role. This is NOT an independent pass. English fallback applies for this namespace until independent audit is completed."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.radient_saver",
+      "source_sha256": "d2c78470f5117bc99248f3835e1b2d3fd41c57b4400b70d28a2f5bc4fcb233df",
+      "translator": {
+        "agent": "coder (radientdev; self-translated, no i18n-translator delegation)",
+        "model": "kimi/k3.1-pro (fallback after quota failures)",
+        "date": "2026-10-29",
+        "note": "Translated new command-surface strings; existing values retain their earlier translations."
+      },
+      "auditor": {
+        "agent": "coder (radientdev; self-audit only, NOT independent)",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "self-reviewed",
+        "findings": 0
+      },
+      "status": "pending-independent-audit",
+      "second_audit": {
+        "status": "pending",
+        "agent": "pending",
+        "model": "pending",
+        "date": null,
+        "scope": "round-3 SA-2 remediation of wire.radient_saver.mode.help (PR #3078)",
+        "note": "Second independent audit commissioned by the radientdev manager; it has NOT run. Auditor identity, model and date are deliberately unrecorded until it reports — this row is not a second-audit pass."
+      },
+      "note": "Self-translation and self-audit recorded truthfully; no independent i18n-auditor delegation is available in this bounded coder role. This is NOT an independent pass. English fallback applies for this namespace until independent audit is completed."
+    },
+    {
       "locale": "hi",
       "namespace": "tui.status",
       "source_sha256": "2403f9c4f37b40264f575929627b99a0bcabb0baf1bcb6a0b951c6c31ec6843a",
@@ -5936,6 +6012,34 @@
       "note": "Independent i18n audit of the agent-avatar wave (relay.agent_avatar) at en source_sha256 6f48f15eeebb9e81bb36f607188f4e517b906149015f076eaaed93d5d00810fe, round 2 at head 1fb179bafd1. Auditor is independent of the translator. Independent audit, round 2 at head 1fb179bafd1 (en source_sha256 verified with catalogues.catalogue_sha256). Mechanical, re-derived this round: key parity vs en (7/7 wire.errors.agent_avatar, 11/11 cli.agents_picture, 3/3 relay.agent_avatar); placeholder name+kind identical to en and every message rendered through local_operator.i18n.runtime.render_message with sentinel arguments (0 lost, 0 added); no value byte-identical to en, so no key is left in English; no ICU plural/select, and none is required (the only counts are {bytes}, where a stored picture can never be 0 or 1 bytes, and the fixed {limit_mib}=10 / {limit_mp}=40 caps), so every locale's CLDR category set is satisfied vacuously; NFC, no BOM, no trailing space, no Cf/bidi control characters (per-string RTL isolation stays the render layer's job, per the ur guide). Locale verdict: clean. 0 findings. तस्वीर is the picture term; alt 13 / change 17 / desktop_hint 22 cells against maxCells 48, all fit comfortably; imperative forms with no trailing period. Round-2 scope: the remediation diff 8f64c072385..1fb179bafd1 (hi/ur cli.agents_picture remove.none, vi cli.agents_picture and vi wire.errors.agent_avatar agent term) plus its direct neighbours; the copy this row covers was re-read at the current bytes and the unchanged namespaces it borders keep their byte-identical audit. Translator and auditor are distinct agents in separate sessions; both ran the radient/auto route after provider quota fallbacks (disclosed, not pinned). Unresolved blocker/major: 0."
     },
     {
+      "locale": "hi",
+      "namespace": "wire.radient_saver",
+      "source_sha256": "d2c78470f5117bc99248f3835e1b2d3fd41c57b4400b70d28a2f5bc4fcb233df",
+      "translator": {
+        "agent": "coder (radientdev; self-translated, no i18n-translator delegation)",
+        "model": "kimi/k3.1-pro (fallback after quota failures)",
+        "date": "2026-10-29",
+        "note": "Translated new command-surface strings; existing values retain their earlier translations."
+      },
+      "auditor": {
+        "agent": "coder (radientdev; self-audit only, NOT independent)",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "self-reviewed",
+        "findings": 0
+      },
+      "status": "pending-independent-audit",
+      "second_audit": {
+        "status": "pending",
+        "agent": "pending",
+        "model": "pending",
+        "date": null,
+        "scope": "round-3 SA-2 remediation of wire.radient_saver.mode.help (PR #3078)",
+        "note": "Second independent audit commissioned by the radientdev manager; it has NOT run. Auditor identity, model and date are deliberately unrecorded until it reports — this row is not a second-audit pass."
+      },
+      "note": "Self-translation and self-audit recorded truthfully; no independent i18n-auditor delegation is available in this bounded coder role. This is NOT an independent pass. English fallback applies for this namespace until independent audit is completed."
+    },
+    {
       "locale": "ru",
       "namespace": "tui.status",
       "source_sha256": "2403f9c4f37b40264f575929627b99a0bcabb0baf1bcb6a0b951c6c31ec6843a",
@@ -7248,6 +7352,34 @@
       "note": "Independent i18n audit of the agent-avatar wave (relay.agent_avatar) at en source_sha256 6f48f15eeebb9e81bb36f607188f4e517b906149015f076eaaed93d5d00810fe, round 2 at head 1fb179bafd1. Auditor is independent of the translator. Independent audit, round 2 at head 1fb179bafd1 (en source_sha256 verified with catalogues.catalogue_sha256). Mechanical, re-derived this round: key parity vs en (7/7 wire.errors.agent_avatar, 11/11 cli.agents_picture, 3/3 relay.agent_avatar); placeholder name+kind identical to en and every message rendered through local_operator.i18n.runtime.render_message with sentinel arguments (0 lost, 0 added); no value byte-identical to en, so no key is left in English; no ICU plural/select, and none is required (the only counts are {bytes}, where a stored picture can never be 0 or 1 bytes, and the fixed {limit_mib}=10 / {limit_mp}=40 caps), so every locale's CLDR category set is satisfied vacuously; NFC, no BOM, no trailing space, no Cf/bidi control characters (per-string RTL isolation stays the render layer's job, per the ur guide). Locale verdict: 1 MINOR (fit). desktop_hint 54 cells against declared maxCells 48 (en 38; the largest overrun in the wave — 6 cells); alt 19 and change 28 fit. Needs a short wording or a recorded exception. The 'Изображение: {name}' label colon follows the corpus's existing label:value habit (Полоса: контекст), so it is not a finding. Round-2 scope: the remediation diff 8f64c072385..1fb179bafd1 (hi/ur cli.agents_picture remove.none, vi cli.agents_picture and vi wire.errors.agent_avatar agent term) plus its direct neighbours; the copy this row covers was re-read at the current bytes and the unchanged namespaces it borders keep their byte-identical audit. Translator and auditor are distinct agents in separate sessions; both ran the radient/auto route after provider quota fallbacks (disclosed, not pinned). Unresolved blocker/major: 0."
     },
     {
+      "locale": "ru",
+      "namespace": "wire.radient_saver",
+      "source_sha256": "d2c78470f5117bc99248f3835e1b2d3fd41c57b4400b70d28a2f5bc4fcb233df",
+      "translator": {
+        "agent": "coder (radientdev; self-translated, no i18n-translator delegation)",
+        "model": "kimi/k3.1-pro (fallback after quota failures)",
+        "date": "2026-10-29",
+        "note": "Translated new command-surface strings; existing values retain their earlier translations."
+      },
+      "auditor": {
+        "agent": "coder (radientdev; self-audit only, NOT independent)",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "self-reviewed",
+        "findings": 0
+      },
+      "status": "pending-independent-audit",
+      "second_audit": {
+        "status": "pending",
+        "agent": "pending",
+        "model": "pending",
+        "date": null,
+        "scope": "round-3 SA-2 remediation of wire.radient_saver.mode.help (PR #3078)",
+        "note": "Second independent audit commissioned by the radientdev manager; it has NOT run. Auditor identity, model and date are deliberately unrecorded until it reports — this row is not a second-audit pass."
+      },
+      "note": "Self-translation and self-audit recorded truthfully; no independent i18n-auditor delegation is available in this bounded coder role. This is NOT an independent pass. English fallback applies for this namespace until independent audit is completed."
+    },
+    {
       "locale": "ur",
       "namespace": "cli.exec_remote_help",
       "source_sha256": "c555648c19dd25af507951dc828f3fffbedc44feb579192c9c3fa7c6952e365e",
@@ -8340,6 +8472,34 @@
       },
       "status": "passed",
       "note": "Independent i18n audit of the agent-avatar wave (relay.agent_avatar) at en source_sha256 6f48f15eeebb9e81bb36f607188f4e517b906149015f076eaaed93d5d00810fe, round 2 at head 1fb179bafd1. Auditor is independent of the translator. Independent audit, round 2 at head 1fb179bafd1 (en source_sha256 verified with catalogues.catalogue_sha256). Mechanical, re-derived this round: key parity vs en (7/7 wire.errors.agent_avatar, 11/11 cli.agents_picture, 3/3 relay.agent_avatar); placeholder name+kind identical to en and every message rendered through local_operator.i18n.runtime.render_message with sentinel arguments (0 lost, 0 added); no value byte-identical to en, so no key is left in English; no ICU plural/select, and none is required (the only counts are {bytes}, where a stored picture can never be 0 or 1 bytes, and the fixed {limit_mib}=10 / {limit_mp}=40 caps), so every locale's CLDR category set is satisfied vacuously; NFC, no BOM, no trailing space, no Cf/bidi control characters (per-string RTL isolation stays the render layer's job, per the ur guide). Locale verdict: clean. 0 findings. تصویر is the picture term; alt 15 / change 26 / desktop_hint 36 cells against maxCells 48, all fit; imperative forms with no trailing period, matching the en source. Round-2 scope: the remediation diff 8f64c072385..1fb179bafd1 (hi/ur cli.agents_picture remove.none, vi cli.agents_picture and vi wire.errors.agent_avatar agent term) plus its direct neighbours; the copy this row covers was re-read at the current bytes and the unchanged namespaces it borders keep their byte-identical audit. Translator and auditor are distinct agents in separate sessions; both ran the radient/auto route after provider quota fallbacks (disclosed, not pinned). Unresolved blocker/major: 0."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.radient_saver",
+      "source_sha256": "d2c78470f5117bc99248f3835e1b2d3fd41c57b4400b70d28a2f5bc4fcb233df",
+      "translator": {
+        "agent": "coder (radientdev; self-translated, no i18n-translator delegation)",
+        "model": "kimi/k3.1-pro (fallback after quota failures)",
+        "date": "2026-10-29",
+        "note": "Translated new command-surface strings; existing values retain their earlier translations."
+      },
+      "auditor": {
+        "agent": "coder (radientdev; self-audit only, NOT independent)",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "self-reviewed",
+        "findings": 0
+      },
+      "status": "pending-independent-audit",
+      "second_audit": {
+        "status": "pending",
+        "agent": "pending",
+        "model": "pending",
+        "date": null,
+        "scope": "round-3 SA-2 remediation of wire.radient_saver.mode.help (PR #3078)",
+        "note": "Second independent audit commissioned by the radientdev manager; it has NOT run. Auditor identity, model and date are deliberately unrecorded until it reports — this row is not a second-audit pass."
+      },
+      "note": "Self-translation and self-audit recorded truthfully; no independent i18n-auditor delegation is available in this bounded coder role. This is NOT an independent pass. English fallback applies for this namespace until independent audit is completed."
     },
     {
       "locale": "vi",
@@ -9653,6 +9813,34 @@
       },
       "status": "passed",
       "note": "Independent i18n audit of the agent-avatar wave (relay.agent_avatar) at en source_sha256 6f48f15eeebb9e81bb36f607188f4e517b906149015f076eaaed93d5d00810fe, round 2 at head 1fb179bafd1. Auditor is independent of the translator. Independent audit, round 2 at head 1fb179bafd1 (en source_sha256 verified with catalogues.catalogue_sha256). Mechanical, re-derived this round: key parity vs en (7/7 wire.errors.agent_avatar, 11/11 cli.agents_picture, 3/3 relay.agent_avatar); placeholder name+kind identical to en and every message rendered through local_operator.i18n.runtime.render_message with sentinel arguments (0 lost, 0 added); no value byte-identical to en, so no key is left in English; no ICU plural/select, and none is required (the only counts are {bytes}, where a stored picture can never be 0 or 1 bytes, and the fixed {limit_mib}=10 / {limit_mp}=40 caps), so every locale's CLDR category set is satisfied vacuously; NFC, no BOM, no trailing space, no Cf/bidi control characters (per-string RTL isolation stays the render layer's job, per the ur guide). Locale verdict: 1 NIT. desktop_hint says 'ứng dụng máy tính' for the desktop app; this string is shown on the phone, where 'máy tính' most readily reads 'calculator', so 'ứng dụng desktop' would be unambiguous. alt 14 / change 18 / desktop_hint 39 cells against maxCells 48, all fit. Round-2 scope: the remediation diff 8f64c072385..1fb179bafd1 (hi/ur cli.agents_picture remove.none, vi cli.agents_picture and vi wire.errors.agent_avatar agent term) plus its direct neighbours; the copy this row covers was re-read at the current bytes and the unchanged namespaces it borders keep their byte-identical audit. Translator and auditor are distinct agents in separate sessions; both ran the radient/auto route after provider quota fallbacks (disclosed, not pinned). Unresolved blocker/major: 0."
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.radient_saver",
+      "source_sha256": "d2c78470f5117bc99248f3835e1b2d3fd41c57b4400b70d28a2f5bc4fcb233df",
+      "translator": {
+        "agent": "coder (radientdev; self-translated, no i18n-translator delegation)",
+        "model": "kimi/k3.1-pro (fallback after quota failures)",
+        "date": "2026-10-29",
+        "note": "Translated new command-surface strings; existing values retain their earlier translations."
+      },
+      "auditor": {
+        "agent": "coder (radientdev; self-audit only, NOT independent)",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "self-reviewed",
+        "findings": 0
+      },
+      "status": "pending-independent-audit",
+      "second_audit": {
+        "status": "pending",
+        "agent": "pending",
+        "model": "pending",
+        "date": null,
+        "scope": "round-3 SA-2 remediation of wire.radient_saver.mode.help (PR #3078)",
+        "note": "Second independent audit commissioned by the radientdev manager; it has NOT run. Auditor identity, model and date are deliberately unrecorded until it reports — this row is not a second-audit pass."
+      },
+      "note": "Self-translation and self-audit recorded truthfully; no independent i18n-auditor delegation is available in this bounded coder role. This is NOT an independent pass. English fallback applies for this namespace until independent audit is completed."
     },
     {
       "locale": "zh-CN",
@@ -11753,6 +11941,54 @@
       },
       "status": "passed",
       "note": "Independent i18n audit of the agent-avatar wave (relay.agent_avatar) at en source_sha256 6f48f15eeebb9e81bb36f607188f4e517b906149015f076eaaed93d5d00810fe, round 2 at head 1fb179bafd1. Auditor is independent of the translator. Independent audit, round 2 at head 1fb179bafd1 (en source_sha256 verified with catalogues.catalogue_sha256). Mechanical, re-derived this round: key parity vs en (7/7 wire.errors.agent_avatar, 11/11 cli.agents_picture, 3/3 relay.agent_avatar); placeholder name+kind identical to en and every message rendered through local_operator.i18n.runtime.render_message with sentinel arguments (0 lost, 0 added); no value byte-identical to en, so no key is left in English; no ICU plural/select, and none is required (the only counts are {bytes}, where a stored picture can never be 0 or 1 bytes, and the fixed {limit_mib}=10 / {limit_mp}=40 caps), so every locale's CLDR category set is satisfied vacuously; NFC, no BOM, no trailing space, no Cf/bidi control characters (per-string RTL isolation stays the render layer's job, per the ur guide). Locale verdict: 1 MINOR. the same intra-locale spacing convention (请在桌面应用中更换此头像 carries no acronym, so only the concept-noun consistency applies); all three keys fit well inside maxCells 48 (13/18/24 cells). Non-gating. Round-2 scope: the remediation diff 8f64c072385..1fb179bafd1 (hi/ur cli.agents_picture remove.none, vi cli.agents_picture and vi wire.errors.agent_avatar agent term) plus its direct neighbours; the copy this row covers was re-read at the current bytes and the unchanged namespaces it borders keep their byte-identical audit. Translator and auditor are distinct agents in separate sessions; both ran the radient/auto route after provider quota fallbacks (disclosed, not pinned). Unresolved blocker/major: 0."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.exec_help",
+      "source_sha256": "0cf4fd220dd99750a64b79b8b679a908b1815c4c2a45415cae01c1b4e4f17d4e",
+      "translator": {
+        "agent": "coder (radientdev; self-translated, no i18n-translator delegation)",
+        "model": "kimi/k3.1-pro (fallback after quota failures)",
+        "date": "2026-10-29",
+        "note": "Translated new command-surface strings; existing values retain their earlier translations."
+      },
+      "auditor": {
+        "agent": "coder (radientdev; self-audit only, NOT independent)",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "self-reviewed",
+        "findings": 0
+      },
+      "status": "pending-independent-audit",
+      "note": "Self-translation and self-audit recorded truthfully; no independent i18n-auditor delegation is available in this bounded coder role. This is NOT an independent pass. English fallback applies for this namespace until independent audit is completed."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.radient_saver",
+      "source_sha256": "d2c78470f5117bc99248f3835e1b2d3fd41c57b4400b70d28a2f5bc4fcb233df",
+      "translator": {
+        "agent": "coder (radientdev; self-translated, no i18n-translator delegation)",
+        "model": "kimi/k3.1-pro (fallback after quota failures)",
+        "date": "2026-10-29",
+        "note": "Translated new command-surface strings; existing values retain their earlier translations."
+      },
+      "auditor": {
+        "agent": "coder (radientdev; self-audit only, NOT independent)",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "self-reviewed",
+        "findings": 0
+      },
+      "status": "pending-independent-audit",
+      "second_audit": {
+        "status": "pending",
+        "agent": "pending",
+        "model": "pending",
+        "date": null,
+        "scope": "round-3 SA-2 remediation of wire.radient_saver.mode.help (PR #3078)",
+        "note": "Second independent audit commissioned by the radientdev manager; it has NOT run. Auditor identity, model and date are deliberately unrecorded until it reports — this row is not a second-audit pass."
+      },
+      "note": "Self-translation and self-audit recorded truthfully; no independent i18n-auditor delegation is available in this bounded coder role. This is NOT an independent pass. English fallback applies for this namespace until independent audit is completed."
     }
   ]
 }
