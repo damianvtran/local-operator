@@ -1,0 +1,90 @@
+AUDIT LOG — es / wire.exec / w1a3 (round 2)
+============================================================
+
+Every command below was run in /Users/damian/lo-i18n-es and the output shown is the real
+captured output, not a reconstruction.
+
+=== provenance and the renderer's constraints ===
+$ grep -n "^_ROW_INDENT\|^_VALUE_COLUMN\|^_MARKER_WIDTH\|^_LABEL_BUDGET" local_operator/tui/widgets/settings_view.py
+396:_ROW_INDENT = 2
+400:_VALUE_COLUMN = 34
+426:_MARKER_WIDTH = 2
+434:_LABEL_BUDGET = _VALUE_COLUMN - _ROW_INDENT - _MARKER_WIDTH - 1
+$ sed -n "4018,4021p" local_operator/tui/widgets/settings_view.py
+# Fit registry source first; projection controls must never be sliced.
+        label = _paint(
+            truncate_cells(setting.label, _LABEL_BUDGET),
+            source_locale="en",
+
+=== mechanical checks and width measurements ===
+$ python3 $LOCAL_OPERATOR_SCRATCHPAD/audit_es_w1a3.py wire.exec
+# namespace wire.exec
+# en  local_operator/i18n/catalogues/en/wire.exec.json  sha256 041ca802dd4e1329cf1f1b2984311c628f314223f5941b35a7007f5b3d198c94
+# es  local_operator/i18n/catalogues/es/wire.exec.json  sha256 6f9df86c94723eb655c0deed39d298e073c2b7f120c961ac794a0ce435af96e8
+# ctx local_operator/i18n/catalogues/en/wire.exec.context.json  ABSENT (no sidecar in the source tree)
+
+PARITY en=17 es=17 identical_key_sets=True
+PARITY missing_in_target=[] extra_in_target=[]
+
+PER-KEY MECHANICAL CHECKS (failures only)
+  FAIL wire.exec.exec_epilog: newline count 20 -> 24
+  failures=1
+
+WIDTH: every .label measured with the renderer's own truncate_cells(., 29)
+
+WIDTH: help/description/note strings against declared budget and the detail band
+
+=== exec_epilog geometry — why the newline counter is not a defect ===
+$ python3 -  # measure exec_epilog line geometry, en vs es
+en total lines 21, max 84 cells
+es total lines 25, max 78 cells
+es lines over 78 cells: []
+blank-line indices en: [6]
+blank-line indices es: [6]
+identical: True
+example command lines byte-identical: True
+prose lines en 14, es 18
+DIFF  0 'Examples:' || 'Ejemplos:'
+SAME  1 "  lop exec 'Review the change' --team release --background" || "  lop exec 'Review the change' --team release --background"
+SAME  2 "  printf 'Inspect this report' | lop exec --profile reviewer" || "  printf 'Inspect this report' | lop exec --profile reviewer"
+SAME  3 "  lop exec --goal 'Finish the checklist' --loop 3 --name 'Night audit'" || "  lop exec --goal 'Finish the checklist' --loop 3 --name 'Night audit'"
+SAME  4 "  lop exec --resume SESSION_ID --loop-goal 'Verify every acceptance criterion'" || "  lop exec --resume SESSION_ID --loop-goal 'Verify every acceptance criterion'"
+SAME  5 '  lop exec --status JOB_ID' || '  lop exec --status JOB_ID'
+SAME  6 '' || ''
+DIFF  7 'Resume restores the transcript, team, profile, goal and name first; explicit' || 'Al reanudar se restauran primero la transcripción, el equipo, el perfil, el'
+
+=== negative controls ===
+$ # negative controls — the same checker, pointed at deliberately broken bytes
+$ AUDIT_DATA_ROOT=<scratch control tree> python3 audit_es_w1a3.py wire.exec
+PER-KEY MECHANICAL CHECKS (failures only)
+  FAIL wire.exec.approval_advisory: machine literal lost '--yolo'
+  FAIL wire.exec.error_preflight: placeholder ['{error}'] -> []
+  FAIL wire.exec.exec_epilog: newline count 20 -> 24
+  FAIL wire.exec.session_pointer: placeholder ['{session_id}', '{session_id}'] -> ['{session}', '{session}']; em/en dash 1/0 -> 0/0
+  failures=4
+
+$ AUDIT_DATA_ROOT=<scratch control tree> python3 audit_es_w1a3.py wire.console
+WIDTH: every .label measured with the renderer's own truncate_cells(., 29)
+  wire.console.max_live.label: 39 cells -> 'Máximo de terminales activas…'  [CLIPS -> 'Máximo de terminales activas…']  (en 21)
+  wire.console.max_owner.label: 37 cells -> 'Terminales de agente por con…'  [CLIPS -> 'Terminales de agente por con…']  (en 32)
+  wire.console.user_reserved.label: 32 cells -> 'Ranuras de terminales de usu…'  [CLIPS -> 'Ranuras de terminales de usu…']  (en 33)
+
+$ AUDIT_DATA_ROOT=<scratch control tree> python3 audit_es_w1a3.py wire.settings.hub_defaults
+  wire.settings.hub_defaults.agents.help: es 146, en 69, declared maxCells=72 -> OVER DECLARED BUDGET
+      detail band: 98 cells at 100 cols, 78 at 80 cols
+      truncates at 100 cols -> 'Desactivado pausa las actualizaciones de TODOS los vínculos de agentes y habilidades del hub; act…'
+      truncates at 80 cols  -> 'Desactivado pausa las actualizaciones de TODOS los vínculos de agentes y habi…'
+
+CONTROL VERDICT: placeholder dropped / placeholder renamed / machine literal renamed / em dash -> hyphen
+                 / label over the 29-cell budget / declared maxCells breached: ALL DETECTED.
+CONTROL LIMIT: the exec_epilog newline counter also fires on the REAL data (en 20 -> es 24); that
+               difference was judged a legitimate reflow by reading the geometry, not by trusting
+               the counter (the geometry evidence in the wire.exec log). A counter firing is a prompt to look,
+               not a finding.
+
+=== judgement notes ===
+(none beyond the report)
+
+=== writes performed by this audit ===
+Only this directory: record.json, report.md, audit.log. No catalogue, sidecar, ledger, allowance or
+generated file was edited and no git command was run.

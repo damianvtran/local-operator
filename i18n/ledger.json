@@ -8493,6 +8493,158 @@
       },
       "status": "passed",
       "note": "Independent i18n audit round 1 PASS (terminal) at target SHA-256 1df31b48794129045fa807f5f1c181d74c1054de7e068689c46989bd9f01103b, source e060aed0898c7aa9951f7abf18c6792cc4629ee490b10546aabd36aac8187f5b: https://github.com/damianvtran/local-operator/pull/3127#issuecomment-6486271247. Deletion-only hash refresh: relay.health.ended_placeholder removed (en and locale, with its en context entry); the 8 remaining keys are byte-identical in value and order to origin/main's passed row, so nothing was retranslated — this audit verifies the deletion, it does not re-review unchanged copy. Independence limit: translator (coder, session 6999135b36d2) and auditor ran on the same model (anthropic/claude-opus-5-5); separation is agent and context; no native-speaker pass. Source-semantic pass only; rendered relay geometry pending in the PR. Translation: Relay composer placeholder slice (fix/relay-composer-placeholder): deletes the now-unused relay.health.ended_placeholder; the remaining 8 values are byte-identical to the prior doubly-audited row (target SHA-256 1df31b48794129045fa807f5f1c181d74c1054de7e068689c46989bd9f01103b). A deletion-only delta, but the en hash moved, so an independent auditor must confirm the byte identity before this row passes; until then the locale stays out of shipped.json."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.aida_cadence",
+      "source_sha256": "3bb421a58f2ffa4fec089421d9cb91257fa626d66b2e215b3e120c068bb8e5dd",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "es W1 backfill: 2 keys. Translated by an `i18n-translator` agent and audited by a different `i18n-auditor` agent (both sessions on the `radient/auto` route after provider-quota fallbacks — disclosed, not pinned). Independent full-pass audit `w1a3` (round 2) binds exactly these bytes: 0 unresolved blocker/major. Round 1 (`w1a1`/`w1a2`) preceded remediation and binds superseded bytes; its findings are carried in the w1a3 report. Evidence: i18n/audits/evidence/es/wire.aida_cadence/w1a3/. Open minor/nit findings are dispositioned in that report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.console",
+      "source_sha256": "1a591fbc1f6a939651cfe9bc5c4ff619a5a4ade2099cc9cfb348534d09a0011b",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "es W1 backfill: 8 keys. Translated by an `i18n-translator` agent and audited by a different `i18n-auditor` agent (both sessions on the `radient/auto` route after provider-quota fallbacks — disclosed, not pinned). Independent full-pass audit `w1a3` (round 2) binds exactly these bytes: 0 unresolved blocker/major. Round 1 (`w1a1`/`w1a2`) preceded remediation and binds superseded bytes; its findings are carried in the w1a3 report. Evidence: i18n/audits/evidence/es/wire.console/w1a3/. Open minor/nit findings are dispositioned in that report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.exec",
+      "source_sha256": "041ca802dd4e1329cf1f1b2984311c628f314223f5941b35a7007f5b3d198c94",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "es W1 backfill: 17 keys. Translated by an `i18n-translator` agent and audited by a different `i18n-auditor` agent (both sessions on the `radient/auto` route after provider-quota fallbacks — disclosed, not pinned). This namespace's bytes did NOT move during remediation: round 1 (`w1a1`) and round 2 (`w1a3`, a full pass) both read the same file, and `w1a3` binds exactly the shipped bytes with 0 unresolved blocker/major. Evidence: i18n/audits/evidence/es/wire.exec/w1a1/ and …/w1a3/. Open minor/nit findings are dispositioned in the w1a3 report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.host_speed",
+      "source_sha256": "e193473d58c0de1779bcefab06d0e9b1734ee493aea30ea827e4499510282b8c",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "es W1 backfill: 2 keys. Translated by an `i18n-translator` agent and audited by a different `i18n-auditor` agent (both sessions on the `radient/auto` route after provider-quota fallbacks — disclosed, not pinned). Independent full-pass audit `w1a3` (round 2) binds exactly these bytes: 0 unresolved blocker/major. Round 1 (`w1a1`/`w1a2`) preceded remediation and binds superseded bytes; its findings are carried in the w1a3 report. Evidence: i18n/audits/evidence/es/wire.host_speed/w1a3/. Open minor/nit findings are dispositioned in that report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings.account_policy",
+      "source_sha256": "1ad13f8198e28cb19fe0ecb2a6ef9b2a6990bc0d047566b71f5dd5322f594b25",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "es W1 backfill: 14 keys. Translated by an `i18n-translator` agent and audited by a different `i18n-auditor` agent (both sessions on the `radient/auto` route after provider-quota fallbacks — disclosed, not pinned). Composite audit: full-pass round 2 `w1a3` over all 14 keys plus delta round 3 `w1a4` binding the two keys changed afterwards; `w1a4` supersedes `w1a3` for those keys and `w1a3` remains the audit of record for the unchanged rest. 0 unresolved blocker/major on these bytes. Evidence: i18n/audits/evidence/es/wire.settings.account_policy/w1a3/ and …/w1a4/. Open minor/nit findings are dispositioned in those report.md files."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings.hub_defaults",
+      "source_sha256": "8720b5719479b638eab24b081f76f97c44ce8d8554cb1b8280f6980182b6740c",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "es W1 backfill: 9 keys. Translated by an `i18n-translator` agent and audited by a different `i18n-auditor` agent (both sessions on the `radient/auto` route after provider-quota fallbacks — disclosed, not pinned). Composite audit: round 2 `w1a3` returned **failed** on 1 major (`es-w1-C03`, `agents.help` cut rather than wrapped at 113 cells); the remediation replaced that key and round 3 `w1a4` (delta) binds the shipped bytes and **passed** — `w1a4` supersedes `w1a3` for the two changed keys, while `w1a3` remains the audit of record for the unchanged rest and its failure is recorded, not erased. 0 unresolved blocker/major on the shipped bytes. Evidence: i18n/audits/evidence/es/wire.settings.hub_defaults/w1a3/ and …/w1a4/."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.slash.library",
+      "source_sha256": "0f8615f2ed9ffaf3aeb0288a4ff4b8fc8becd46017a931db9d4b3d9ec32fce46",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "es W1 backfill: 2 keys. Translated by an `i18n-translator` agent and audited by a different `i18n-auditor` agent (both sessions on the `radient/auto` route after provider-quota fallbacks — disclosed, not pinned). This namespace's bytes did NOT move during remediation: round 1 (`w1a2`) and round 2 (`w1a3`, a full pass) both read the same file, and `w1a3` binds exactly the shipped bytes with 0 unresolved blocker/major. Evidence: i18n/audits/evidence/es/wire.slash.library/w1a2/ and …/w1a3/. Open minor/nit findings are dispositioned in the w1a3 report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.tunnel_setup",
+      "source_sha256": "3854be7dce54dd3aeb9564921ed6a50f0560b32c7ac40955d81be93acd7e2ac1",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "es W1 backfill: 5 keys. Translated by an `i18n-translator` agent and audited by a different `i18n-auditor` agent (both sessions on the `radient/auto` route after provider-quota fallbacks — disclosed, not pinned). Independent full-pass audit `w1a3` (round 2) binds exactly these bytes: 0 unresolved blocker/major. Round 1 (`w1a1`/`w1a2`) preceded remediation and binds superseded bytes; its findings are carried in the w1a3 report. Evidence: i18n/audits/evidence/es/wire.tunnel_setup/w1a3/. Open minor/nit findings are dispositioned in that report.md."
     }
   ]
 }
