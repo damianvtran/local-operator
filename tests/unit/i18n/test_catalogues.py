@@ -112,6 +112,11 @@ def test_shipped_wire_namespaces_exist() -> None:
         # Its own namespace so no audited catalogue's hash moves; the
         # translation wave lands its seven locales in a follow-up.
         "wire.tool_rows.bridge",
+        # The sessions tool's own operator-visible stop receipts (agent review
+        # round 1 R2). Its own namespace, the `wire.host_speed` shape: the
+        # receipts are new copy, and adding them to a namespace fr/hi/vi CARRY
+        # would invalidate those locales' ledger rows.
+        "wire.sessions",
     }
     for namespace in _PENDING_EXTRACTION:
         assert catalogues.load_catalogue("en", namespace) == {}

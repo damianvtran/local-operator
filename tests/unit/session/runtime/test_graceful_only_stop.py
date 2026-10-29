@@ -117,3 +117,141 @@ async def test_legacy_force_false_is_not_a_no_signal_policy(tmp_path, monkeypatc
     await control.stop_session(_bare_record(), _root=tmp_path, force=False)
     assert sent.await_count == 2
     assert sent.await_args_list[-1].args[1] == control.procstate.hard_kill_signal()
+
+
+@pytest.mark.asyncio
+async def test_acked_late_exit_is_pending_not_refused(tmp_path, monkeypatch):
+    """An accepted stop that outlives the wait is a stop, not a refusal.
+
+    Agent review round 1 D1 / UX round 1 U1: the owner latched its retirement
+    and ran ``request_stop``, so the marker records a deliberate stop; reporting
+    "refused" made a reader plan around a session that was already leaving, and
+    withdrawing the marker recorded the user's own stop as an unexplained exit.
+    """
+    record = _bare_record()
+    monkeypatch.setattr(control, "_exchange", AsyncMock(return_value={"op": "ack", "req": 1}))
+    monkeypatch.setattr(control, "_await_stopped", AsyncMock(return_value=False))
+    marker = Mock()
+    withdraw = Mock(side_effect=AssertionError("an acked stop keeps its marker"))
+    monkeypatch.setattr(control, "_write_stop_marker", marker)
+    monkeypatch.setattr(control, "_withdraw_staged_stop_marker", withdraw)
+    # Parked, because a runtime that is leaving will not fire its schedules.
+    park = AsyncMock(return_value=2)
+    monkeypatch.setattr(control, "_park_wakes", park)
+    monkeypatch.setattr(control, "_park_monitors", park)
+    monkeypatch.setattr(registry, "pid_alive", lambda pid: True)
+    signal = AsyncMock(side_effect=AssertionError("idle-only stop must never signal"))
+    monkeypatch.setattr(control, "_signal_and_confirm", signal)
+
+    outcome = await control.stop_session(record, timeout_s=1, _root=tmp_path, graceful_only=True)
+
+    assert outcome.method == "pending"
+    assert outcome.reason == ""
+    assert outcome.wakes_dormant == 2
+    assert marker.call_count == 1
+    withdraw.assert_not_called()
+    signal.assert_not_awaited()
+    # The receipt says the act happened; it does not say it failed.
+    assert "accepted" in outcome.line
+    assert "refused" not in outcome.line
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "reply, reason",
+    [
+        (None, control.REASON_UNANSWERED),
+        ({"op": "error", "req": 1, "reason": "busy"}, control.REASON_BUSY),
+        ({"op": "error", "req": 1, "reason": "wake"}, control.REASON_WAKE),
+        ({"op": "error", "req": 1, "reason": "old_owner"}, control.REASON_OLD_OWNER),
+        # An owner too old to send the field is not invented into a cause.
+        ({"op": "error", "req": 1}, control.REASON_BUSY),
+    ],
+)
+async def test_refusal_carries_the_owner_reason(tmp_path, monkeypatch, reply, reason):
+    """One refusal sentence per cause, because each has its own next step.
+
+    UX round 1 U2 / design round 1 D2: busy, a wake inside the hold window, an
+    older owner and silence all rendered identically and named no action, even
+    though the owner already said which one applied.
+    """
+    monkeypatch.setattr(control, "_exchange", AsyncMock(return_value=reply))
+    monkeypatch.setattr(registry, "pid_alive", lambda pid: True)
+    monkeypatch.setattr(control, "_write_stop_marker", Mock())
+    monkeypatch.setattr(control, "_withdraw_staged_stop_marker", Mock())
+    signal = AsyncMock(side_effect=AssertionError("idle-only stop must never signal"))
+    monkeypatch.setattr(control, "_signal_and_confirm", signal)
+
+    outcome = await control.stop_session(
+        _bare_record(), timeout_s=1, _root=tmp_path, graceful_only=True
+    )
+
+    assert outcome.method == "refused"
+    assert outcome.reason == reason
+    signal.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_stop_if_idle_refusal_names_its_cause_on_the_wire(monkeypatch):
+    """The cause reaches the caller as a machine token, not as prose to parse.
+
+    The owner is the only party that knows WHY it refused, and a second probe by
+    the caller would describe state the deciding sample never saw.
+    """
+    handle = _IdleStopHandle(busy=True)
+    server, record = await _serve(handle)
+    try:
+        reply = await control._exchange(
+            _record_for(record), {"op": "stop_if_idle"}, reply_timeout_s=5
+        )
+    finally:
+        server.close()
+    assert reply is not None
+    assert reply["op"] == "error"
+    assert reply["reason"] == control.REASON_BUSY
+    assert handle.stops == []
+
+
+@pytest.mark.asyncio
+async def test_stop_if_idle_reports_a_wake_due_as_its_own_cause(monkeypatch):
+    """A wake inside the hold window is not "busy" and must not say so.
+
+    The owner is idle in that case, and the same stop succeeds once the wake has
+    fired, so the retry advice is different (UX round 1 U2).
+    """
+    handle = _IdleStopHandle(busy=False)
+    monkeypatch.setattr(handle, "may_refresh", lambda: "wake due within the warm window")
+    server, record = await _serve(handle)
+    try:
+        reply = await control._exchange(
+            _record_for(record), {"op": "stop_if_idle"}, reply_timeout_s=5
+        )
+    finally:
+        server.close()
+    assert reply is not None
+    assert reply["reason"] == control.REASON_WAKE
+    assert handle.stops == []
+
+
+@pytest.mark.asyncio
+async def test_draining_skip_offers_the_tool_no_force_flag(tmp_path, monkeypatch):
+    """A surface must not name an action it cannot accept.
+
+    Design round 1 D3: ``_command="sessions tool"`` does not start with "/", so
+    the draining receipt appended the CLI's ``--force`` to an agent that has no
+    such parameter and whose contract forbids the escalation.
+    """
+    record = _bare_record()
+    record.leaving = "leaves at its next turn boundary"
+    monkeypatch.setattr(registry, "pid_alive", lambda pid: True)
+    monkeypatch.setattr(control, "_drain_stalled", lambda rec: "")
+    monkeypatch.setattr(control, "_held_unconfirmed", lambda rec: "")
+    outcome = await control.stop_session(
+        record,
+        _root=tmp_path,
+        graceful_only=True,
+        _command="sessions tool",
+    )
+    assert outcome.method == "draining"
+    assert "--force" not in outcome.line
+    assert "nothing to do" in outcome.line

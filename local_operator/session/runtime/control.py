@@ -117,7 +117,7 @@ DEFAULT_BACKGROUND_ON_RESUME = True
 #: turn in flight (see :func:`stop_session`). Kept distinct so a front end can
 #: decide "partial" from the method alone rather than by parsing the receipt
 #: line.
-Method = str  # "socket" | "sigterm" | "sigkill" | "gone" | "refused" | "busy"
+Method = str  # "socket" | "sigterm" | "sigkill" | "gone" | "refused" | "busy" | "pending"
 
 
 def _from_a_shell(command: str) -> bool:
@@ -256,6 +256,42 @@ class StopOutcome:
     #: Set only for an engine-owned duty session (:func:`_engine_owner`);
     #: such a stop parks nothing, so ``wakes_dormant`` stays 0 for it.
     pass_still_runs: str = ""
+    #: The owner's own cause token for a refusal (``busy``/``wake``/
+    #: ``old_owner``/``unanswered``), or ``""`` for every other outcome.
+    #: ``method`` stays the stable machine category — a front end switches on
+    #: ``refused`` — while this narrows WHY, so a receipt can name one next step
+    #: instead of listing four possibilities (agent review round 1 R-2, UX round
+    #: 1 U2, design round 1 D2).
+    reason: str = ""
+
+
+#: Why a graceful-only stop came back unfulfilled. Each one has a DIFFERENT next
+#: step for the reader, which is the whole reason they are distinguished: a busy
+#: owner is worth retrying, an old owner never is, and a silent socket means the
+#: session may already be gone (UX round 1 U2). Stable machine tokens.
+REASON_BUSY = "busy"
+REASON_WAKE = "wake"
+REASON_OLD_OWNER = "old_owner"
+REASON_UNANSWERED = "unanswered"
+
+
+@dataclass(frozen=True, slots=True)
+class _GracefulAsk:
+    """What rung 1's request achieved, in the three states the caller needs.
+
+    A bare ``bool`` could not express the difference between "the owner never
+    took the request" and "the owner took it and is still leaving", and the
+    caller reported both as a refusal — so a stop that WAS underway read as one
+    that had not happened, its deliberate-stop marker was withdrawn, its wakes
+    stayed armed, and the eventual exit was misclassified (agent review round 1
+    D1, UX round 1 U1). ``acked`` is the fact the marker turns on; ``exited`` is
+    the fact the receipt turns on.
+    """
+
+    acked: bool
+    exited: bool
+    #: One of the ``REASON_*`` tokens when ``acked`` is False, else ``""``.
+    reason: str = ""
 
 
 @dataclass
@@ -1257,7 +1293,7 @@ async def _graceful_stop(
     command: str,
     sweep_id: str = "",
     graceful_only: bool = False,
-) -> bool:
+) -> _GracefulAsk:
     """Rung 1: ask the runtime to stop itself, wait out the clean exit.
 
     The op the runtime serves (``RuntimeServer._dispatch``'s ``stop`` case)
@@ -1287,10 +1323,17 @@ async def _graceful_stop(
     # unknown flag and run its ordinary stop (which aborts active work).
     op = "stop_if_idle" if graceful_only else "stop"
     reply = await _exchange(record, {"op": op}, reply_timeout_s=timeout_s)
-    if reply is None or reply.get("op") != "ack":
-        return False
+    if reply is None:
+        return _GracefulAsk(acked=False, exited=False, reason=REASON_UNANSWERED)
+    if reply.get("op") != "ack":
+        # An error frame is an ANSWER, and for the idle-only verb this build's
+        # owners put the cause in ``reason``. An error without one came from a
+        # build that predates the field, so it is treated as the retryable
+        # bucket rather than inventing a cause we cannot read.
+        reason = str(reply.get("reason") or "") or REASON_BUSY
+        return _GracefulAsk(acked=False, exited=False, reason=reason)
     _write_stop_marker(record, root, "socket", command=command, sweep_id=sweep_id)
-    return await _await_stopped(record, timeout_s, root)
+    return _GracefulAsk(acked=True, exited=await _await_stopped(record, timeout_s, root))
 
 
 async def _signal_and_confirm(record: SessionRecord, sig: int | None, grace_s: float) -> bool:
@@ -1534,7 +1577,8 @@ async def stop_session(
         # The CAUSE is stated only when the artifact shows it (agent review round 1 on
         # #1541, m1): "an older build" for a marker with no monotonic stamp, and
         # cause-neutral words for a current-build marker whose sibling cannot settle it.
-        remedy = _force_remedy(record.pid, _from_a_shell(_command))
+        remedy = "" if graceful_only else _force_remedy(record.pid, _from_a_shell(_command))
+        suffix = f" ({remedy})" if remedy else ""
         from local_operator.session.runtime import stall_watchdog
 
         unproven = await asyncio.to_thread(_held_unconfirmed, record)
@@ -1546,13 +1590,13 @@ async def stop_session(
             )
             line = (
                 f'skipped "{name}" (pid {record.pid}) — it {_drain_phrase(record)}; its '
-                f'"bound held" reading {source}, so it is left to finish ({remedy})'
+                f'"bound held" reading {source}, so it is left to finish{suffix}'
             )
         else:
             line = (
                 f'skipped "{name}" (pid {record.pid}) — it {_drain_phrase(record)}; stopping '
                 "it now cuts the turn it is finishing — it leaves by itself, nothing "
-                f"to do ({remedy})"
+                f"to do{suffix}"
             )
         return StopOutcome(
             pid=record.pid,
@@ -1568,7 +1612,8 @@ async def stop_session(
     graceful_args: dict[str, Any] = {"command": _command, "sweep_id": _sweep_id}
     if graceful_only:
         graceful_args["graceful_only"] = True
-    if await _graceful_stop(record, timeout_s, root, **graceful_args):
+    asked = await _graceful_stop(record, timeout_s, root, **graceful_args)
+    if asked.exited:
         wakes = await _park_wakes(record, root)
         monitors = await _park_monitors(record, root)
         still_runs = _engine_owner(root, record.session_id)
@@ -1611,15 +1656,48 @@ async def stop_session(
         )
 
     if graceful_only:
-        # No identity probe or signal is a permitted fallback. Even an ack can
-        # outlive its exit deadline; report that uncertainty without converting
-        # a bounded wait into authority to kill or discard pending work.
+        # NO IDENTITY PROBE OR SIGNAL IS A PERMITTED FALLBACK, and both shapes
+        # below must still refuse to fall through to the signal ladder.
+        if asked.acked:
+            # THE STOP LANDED, THE EXIT DID NOT. The owner latched its retirement
+            # and ran ``request_stop``, so this is not a refusal — saying
+            # "refused" was a lie in the opposite direction from a false success:
+            # the reader planned around a session that was already leaving (agent
+            # review round 1 D1, UX round 1 U1).
+            #
+            # THE MARKER STAYS. The ack is exactly when ``_graceful_stop``
+            # documents staging the deliberate-stop marker, so withdrawing it here
+            # recorded the user's own stop as an unexplained exit.
+            #
+            # AND THE WAKES PARK, for the reason the success branch parks them: a
+            # runtime that is already leaving will not fire its schedules, so
+            # leaving them armed is the difference between a wake that survives a
+            # stop and one that is silently dropped.
+            wakes = await _park_wakes(record, root)
+            monitors = await _park_monitors(record, root)
+            return StopOutcome(
+                pid=record.pid,
+                session_id=record.session_id,
+                name=name,
+                method="pending",
+                line=f'stop accepted by "{name}"; it had not exited after '
+                f"{bound_text(timeout_s)}. No signal was sent — read the session "
+                "list before retrying.",
+                wakes_dormant=wakes,
+                monitors_dormant=monitors,
+            )
+        # Nothing was committed by the owner, so nothing may be claimed. The
+        # English line here is the degrade path a wheel without catalogues takes;
+        # the tool surface renders this receipt through ``wire.sessions`` instead
+        # (see ``builtin._sessions_stop``), keyed off ``method``/``reason`` so the
+        # words can be translated while the machine category stays stable.
         _withdraw_staged_stop_marker(record, root)
         return StopOutcome(
             pid=record.pid,
             session_id=record.session_id,
             name=name,
             method="refused",
+            reason=asked.reason,
             line=f'refused "{name}" — an idle-only stop was not confirmed; the owner '
             "may be busy, unavailable, too old, or still exiting. No signal was sent; "
             "reconcile its state before retrying.",

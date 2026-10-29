@@ -135,6 +135,8 @@ from local_operator.harness.wake import (
     build_wake_schedule,
     format_duration,
 )
+from local_operator.i18n.keys import wire_sessions as _ws
+from local_operator.i18n.text import tr
 from local_operator.imaging import (
     IMAGE_INGEST_MAX_EDGE,
     IMAGE_JPEG_QUALITY,
@@ -16750,13 +16752,18 @@ _SESSIONS_OP_DOCS: dict[str, _SessionsOpDoc] = {
         ),
     ),
     "stop": _SessionsOpDoc(
-        summary="end a running session gracefully (the graceful ladder only — this"
-        " tool never SIGKILLs). With `peer`, ends it where it lives; the force"
-        " escalation stays the CLI's (`lop network sessions --stop <id> --force`).",
+        summary="end an IDLE local session and release its lease. It never signals"
+        " and never cuts work: a session that is working (a turn, an approval, a"
+        " subagent or a job), or one due a wake inside the hold window, is refused"
+        " with the reason. With `peer`, always refused — an idle-only remote stop is"
+        " not on the wire yet.",
         example="sessions(op='stop', session='a1b2c3d4e5f6')",
         refusals=(
             "needs an address; a stored (not running) session is refused; the"
-            " calling session cannot stop itself.",
+            " calling session cannot stop itself; a working or wake-due session is"
+            " refused; a remote (`peer`) target is always refused; an owner too old"
+            " to promise an idle-only stop is refused; an owner that does not answer"
+            " is refused rather than signalled.",
         ),
     ),
     "peek": _SessionsOpDoc(
@@ -17290,8 +17297,14 @@ def _describe_sessions_approval(args: dict[str, Any], cwd: str) -> str:
         )
     if op == "stop":
         if peer:
-            return f"stop {address} on {peer}: ends its run on that device"
-        return f"stop {address}: ends its current run and releases the session lease"
+            # The remote form is refused unconditionally on this build, so the
+            # prompt says that instead of asking the operator to approve an act
+            # that will not happen (UX round 1 U3, design round 1 D5).
+            return _sessions_copy(_ws.approval_stop_peer(address=address, peer=peer))
+        # The idle-only precondition is the promise now: a working session is
+        # refused, so "ends its current run" over-promised (design round 1 D5,
+        # UX round 1 U5).
+        return _sessions_copy(_ws.approval_stop_local(address=address))
     if op == "resume":
         if peer:
             # The remote form: engage (warm) or a driven turn whose reply comes
@@ -18509,6 +18522,46 @@ async def _sessions_stop_mesh(
     return _text(tool_call_id, "sessions", text, details=details)
 
 
+#: The sessions tool's own receipts, resolved at render time so a live language
+#: change moves them without a restart (``tr``'s own contract). One namespace for
+#: the whole tool's operator-visible copy: ``wire.sessions``, the ``wire.host_speed``
+#: shape of an independently-owned namespace, so adding these receipts could not
+#: move any already-audited locale's bytes (agent review round 1 R2).
+_sessions_copy = tr("wire.sessions")
+
+
+def _sessions_receipt(outcome: Any, timeout_s: float) -> str:
+    """The operator-visible line for one ``StopOutcome``, keyed by OUTCOME.
+
+    ``method`` is the machine category every front end switches on and stays
+    English; this function is the only place the human sentence is chosen, so
+    the wording can be translated without any of that logic moving. The
+    `refused` branch splits on ``reason` — the owner's own account of why —
+    because the remedies differ: busy clears on its own, an older build never
+    will, and silence means the session may already be gone (UX round 1 U2,
+    design round 1 D2).
+
+    Every branch falls back to the ladder's own English line, which is the same
+    degrade path ``messages.render`` documents: a wheel without its catalogues
+    loses the translation, never the receipt.
+    """
+    from local_operator.session.runtime import control
+
+    if outcome.method == "pending":
+        return _sessions_copy(_ws.stop_pending(name=outcome.name, seconds=f"{timeout_s:g}"))
+    if outcome.method == "refused":
+        by_reason = {
+            control.REASON_BUSY: _ws.stop_refused_busy,
+            control.REASON_WAKE: _ws.stop_refused_wake,
+            control.REASON_OLD_OWNER: _ws.stop_refused_old_owner,
+            control.REASON_UNANSWERED: _ws.stop_refused_unanswered,
+        }
+        build = by_reason.get(outcome.reason)
+        if build is not None:
+            return _sessions_copy(build(name=outcome.name))
+    return outcome.line
+
+
 async def _sessions_stop(
     tool_call_id: str, params: SessionsParams, context: "ToolContext | None" = None
 ) -> ToolResult:
@@ -18521,12 +18574,7 @@ async def _sessions_stop(
     if str(params.peer or "").strip():
         # The remote transport does not yet carry the idle-only capability.
         # Refuse rather than forwarding a weaker stop under this tool's promise.
-        return _error(
-            tool_call_id,
-            "sessions",
-            "remote stop cannot guarantee an idle-only, no-signal exit on this build; "
-            "no stop was sent. Use the operator's remote controls after reviewing its work.",
-        )
+        return _error(tool_call_id, "sessions", _sessions_copy(_ws.stop_remote_refused()))
     from local_operator.session.runtime import control
 
     target = await _sessions_target(params, context)
@@ -18548,13 +18596,7 @@ async def _sessions_stop(
         # session making the call. The ladder would socket-op (then signal)
         # our own runtime and the call would die mid-flight with no receipt —
         # refuse before the ladder (review round 1, R-2).
-        return _error(
-            tool_call_id,
-            "sessions",
-            "that target is this session; a session cannot stop itself — the ladder "
-            "would signal the very run making this call, which would die before it "
-            "could report anything back. Stop it from outside the session.",
-        )
+        return _error(tool_call_id, "sessions", _sessions_copy(_ws.stop_self_refused()))
 
     waited: list[str] = []
     outcome = await control.stop_session(
@@ -18574,8 +18616,22 @@ async def _sessions_stop(
         "wakes_dormant": outcome.wakes_dormant,
         "monitors_dormant": outcome.monitors_dormant,
     }
+    if outcome.reason:
+        # The same closed token the owner sent, carried out unchanged so a caller
+        # can switch on WHY without reading the sentence.
+        details["reason"] = outcome.reason
+    # THE RESULT LEADS. This card paints its first line as the collapsed
+    # headline (``tui/app.py``'s ``mark_failed(_first_line(text), text)``), and
+    # the wait lines describe an attempt while ``outcome.line`` describes what
+    # happened — the headline has to be the outcome, or the reader sees the
+    # interim step and has to expand to learn the result (design round 1 D4).
     render = _error if outcome.method in ("refused", "busy", "draining") else _text
-    return render(tool_call_id, "sessions", "\n".join([*waited, outcome.line]), details=details)
+    return render(
+        tool_call_id,
+        "sessions",
+        "\n".join([_sessions_receipt(outcome, control.DEFAULT_TIMEOUT_S), *waited]),
+        details=details,
+    )
 
 
 # ---------------------------------------------------------------------------

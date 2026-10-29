@@ -1090,6 +1090,43 @@ _PAYLOAD_OPS = {
 #: set exists for.
 _SYNC_PRIORITY_OPS = frozenset({"ping", "stop", "stop_if_idle", "abort", "steer", "cancel"})
 
+
+class _StopRefused(ValueError):
+    """A stop refusal that names its cause as a machine token.
+
+    ``stop_if_idle`` is the idle-only verb, and the refusals it raises are the
+    only ones whose WHY the caller acts on differently: work in flight is worth
+    retrying, a missing idle-only capability never is. So the cause rides the
+    error frame as its own field instead of being parsed back out of the
+    sentence — the sentence may be translated or reworded, the cause may not
+    (agent review round 1 R2's "stable tokens" rule).
+
+    Deliberately NOT folded into ``wire.errors.*``'s ``error_code``: that
+    vocabulary is the desktop plane's closed category set that released clients
+    switch on by equality, and these four tokens are not part of it.
+    """
+
+    def __init__(self, reason: str, message: str) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
+def _idle_refusal_reason(handle: Any) -> str:
+    """The idle-latch's recorded cause for refusing ``stop_if_idle``.
+
+    ``begin_retire`` records the reason ``may_refresh`` gave as it refuses, so
+    this reads the SAME sample that made the decision. Re-probing here would be
+    a second ``is_busy`` read against state that has moved on since.
+
+    Anything unexpected — a host that records nothing, an unknown reason
+    string — is reported as work in flight, which is the answer that says "this
+    may clear on its own" rather than the one that says "never retry".
+    """
+    if "wake" in str(getattr(handle, "_retire_refusal", "") or ""):
+        return "wake"
+    return "busy"
+
+
 #: Ops exempt from their connection's op CHAIN. A different question from
 #: :data:`_SYNC_PRIORITY_OPS`: that set decides what may run before the sync
 #: lands (ADMISSION), this one decides what may run without waiting for an
@@ -7159,6 +7196,14 @@ class RuntimeServer:
             )
 
             frame = {"op": "error", "req": req, "message": str(exc)[:400]}
+            if isinstance(exc, _StopRefused):
+                # A machine token from a closed set, never prose: the stop
+                # ladder picks its own already-catalogued sentence from it, so
+                # the SAME refusal can read in the operator's language while the
+                # category that decides behaviour stays English (docs/I18N.md
+                # ``{code, params, text}`` rule). Additive field — an older
+                # caller ignores it and keeps the ``message`` it always read.
+                frame["reason"] = exc.reason
             if isinstance(
                 exc,
                 (
@@ -8754,7 +8799,7 @@ class RuntimeServer:
             # answer the ladder is built to continue from.
             request_stop = getattr(h, "request_stop", None)
             if not callable(request_stop):
-                raise ValueError("this owner cannot stop itself gracefully")
+                raise _StopRefused("old_owner", "this owner cannot stop itself gracefully")
             if op == "stop_if_idle":
                 # The tool's narrower authority must be checked AND latched on
                 # the owner's loop. A sampled busy flag before an await races a
@@ -8763,12 +8808,23 @@ class RuntimeServer:
                 # distinct verb rather than silently ignoring a new flag.
                 begin_retire = getattr(h, "begin_retire", None)
                 if not callable(begin_retire):
-                    raise ValueError("this owner cannot guarantee an idle-only stop")
+                    raise _StopRefused("old_owner", "this owner cannot guarantee an idle-only stop")
                 accepted = await self._handle_call_on_session_loop(
                     lambda: begin_retire("user-stop", "idle-only stop")
                 )
                 if not accepted:
-                    raise ValueError("this owner is busy; no stop was requested")
+                    # THE CAUSE, NOT JUST THE FACT. The latch refuses for two
+                    # different reasons — work in flight, or a wake due inside
+                    # the warm window a runtime keeps to avoid paying it twice —
+                    # and they have different next steps for the caller: retry
+                    # when idle, versus retry after the wake fires. It records
+                    # which one on the handle as it decides, because a second
+                    # sample here could see different state (agent review round
+                    # 1 D2, UX round 1 U2).
+                    raise _StopRefused(
+                        _idle_refusal_reason(h),
+                        "this owner is busy; no stop was requested",
+                    )
             # Tell every attached viewer the disconnect they are about to see
             # is DELIBERATE, before the session goes away. Without this a
             # follower cannot distinguish a stop from owner death and its

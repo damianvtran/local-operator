@@ -1,0 +1,11 @@
+{
+  "wire.sessions.approval_stop_local": "stop {address} if it is idle: releases the session lease and never signals; refused while it is working",
+  "wire.sessions.approval_stop_peer": "stop {address} on {peer}: always refused on this build, nothing will be sent",
+  "wire.sessions.stop_pending": "stop accepted by \"{name}\", but it had not exited after {seconds} s. No signal was sent — read the session list before retrying.",
+  "wire.sessions.stop_refused_busy": "\"{name}\" is working right now (a turn, an approval, a subagent or a job), so nothing was stopped and no signal was sent. Try again once it is idle.",
+  "wire.sessions.stop_refused_old_owner": "\"{name}\" runs an older build that cannot promise an idle-only stop, so nothing was stopped and no signal was sent. Retrying will not change that — ask the operator to stop it.",
+  "wire.sessions.stop_refused_unanswered": "\"{name}\" did not answer, so an idle-only stop could not be confirmed and no signal was sent. Read the session list first — it may already be gone.",
+  "wire.sessions.stop_refused_wake": "\"{name}\" is idle, but a scheduled wake is due inside the hold window, so nothing was stopped and no signal was sent. Try again after that wake has fired.",
+  "wire.sessions.stop_remote_refused": "A session on another device cannot be stopped from here on this build: no idle-only, no-signal exit can be guaranteed, so nothing was sent. The operator can stop it on that device.",
+  "wire.sessions.stop_self_refused": "That target is this session, and a session cannot stop itself. Stop it from another session."
+}
