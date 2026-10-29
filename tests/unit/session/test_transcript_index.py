@@ -973,9 +973,21 @@ async def test_a_stale_cache_with_one_appended_row_still_waits(tmp_path, monkeyp
     monkeypatch.setattr(asyncio, "wait", spying_wait)
     view = await ti.checkpoints_view(tmp_path, SID)  # the route's own default
     assert timeouts == [ti._FIRST_PAINT_WAIT_S], "a usable previous index lost the wait"
+    # THE PROPERTY IS THE WAGER, NOT THE SCHEDULER (review round 5, MAJOR). The
+    # first-paint budget is 120 ms; a loaded host can leave the refresh running
+    # when it expires, and `building` is then the honest answer rather than a
+    # defect. Assert the wait was offered, then wait for the build this call
+    # started and read the facts from the answer that follows — the freshness
+    # assertions below are about the derivation, and racing them against a timer
+    # is what made this test fail one run in ten.
+    if view["index"]["state"] != "ready":
+        entry = ti._IN_FLIGHT.get(ti._key(tmp_path, SID))
+        if entry is not None:
+            await asyncio.wait_for(entry[1], 60)
+        view = await ti.checkpoints_view(tmp_path, SID)
     assert view["index"]["state"] == "ready"
-    # Freshness, not just state: the appended row is in the manifest this ask
-    # answered with, checked against a full scan of the same journal.
+    # Freshness, not just state: the appended row is in the manifest, checked
+    # against a full scan of the same journal.
     expected = [checkpoint.id for checkpoint in refreshed(tmp_path).checkpoints]
     assert [entry["id"] for entry in view["checkpoints"]] == expected
     assert "late" in expected

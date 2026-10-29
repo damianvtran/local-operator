@@ -1056,6 +1056,13 @@ def _publish_lock(path: Path) -> Iterator[None]:
                 handle.close()
 
 
+def _read_model() -> Any:
+    """The read-model module, imported lazily (it imports this one)."""
+    from local_operator.session import index_read_model
+
+    return index_read_model
+
+
 def write_index(
     config_dir: str | Path,
     session_id: str,
@@ -2989,8 +2996,16 @@ def refresh_index(config_dir: str | Path, session_id: str) -> TranscriptIndex | 
         # to this copy. Per-key the disk wins: an item there is the newer write
         # for its turn key, while keys only the scan carries (version-bump
         # preservation) stay put.
+        # THE NAMING SIDECAR FIRST (review round 5, MAJOR-2). This merge only
+        # needs the newest ``naming`` section, and the sidecar carries exactly that
+        # for the publication on disk — including when the journal has moved, which
+        # is the append case. Reading the document here decoded the whole index a
+        # second time on every append (measured: ~90 ms on an 11 MB document);
+        # the sidecar is a few KB. Precedence is unchanged: the section is still
+        # merged with the disk winning per turn key.
+        sidecar = _read_model().naming_for_root(config_dir, session_id)
         fresh_section = preserved_naming(
-            _read_raw(config_dir, session_id),
+            {"naming": sidecar} if sidecar is not None else _read_raw(config_dir, session_id),
             {c.id for c in index.checkpoints if c.kind == KIND_USER},
         )
         if fresh_section["items"]:

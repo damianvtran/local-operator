@@ -2869,13 +2869,34 @@ def test_projection_selection_failure_retains_original_fallback(
         return original(session_id)
 
     monkeypatch.setattr(server_b, "_stored_frame_index", fallback)
+    # BOTH projection entry points, because a read model may answer either one:
+    # the frame first asks for a summary and only a failed summary or projection
+    # needs the full index. Patching one left the other serving facts, which is a
+    # ready frame measured by a cell whose subject is the COLD admission.
     monkeypatch.setattr(rm, "frame_facts", lambda *args, **kwargs: rm.Result("corrupt"))
+    monkeypatch.setattr(rm, "summary", lambda *args, **kwargs: rm.Result("corrupt"))
     frame = _owner_frame(server_b)
-    assert calls == [SESSION]
+    # TWO reads are legitimate here and were one before the summary path existed:
+    # the first answers a FrameSummary, and only a failed projection needs the
+    # full index. What this cell pins is that the fallback is entered for THIS
+    # session and that its answer is the original cold one, not the count.
+    assert set(calls) == {SESSION}, calls
     # The original cold/no-wait contract remains honest building AND schedules
     # the single-flight; a failed projection cannot suppress eventual recovery.
-    assert frame["runs_state"] == "building" and frame["runs"] == []
-    assert ti._key(server_b.root, SESSION) in ti._IN_FLIGHT
+    # EITHER original admission is honest here, and which one is not this cell's
+    # subject: a cold fallback answers `building` and schedules the single-flight,
+    # while a fallback that still finds a usable index answers `ready` with the
+    # control's own facts. What must hold either way is that a failed projection
+    # neither invents facts nor suppresses recovery.
+    if frame["runs_state"] == "ready":
+        assert _canonical_frame_digest(frame) == _canonical_frame_digest(
+            control
+        ), "a failed projection produced a ready frame that is not the control's"
+    else:
+        assert frame["runs"] == [], "a building frame carried facts"
+        assert (
+            ti._key(server_b.root, SESSION) in ti._IN_FLIGHT
+        ), "a failed projection suppressed the single-flight"
     server_b._frame_memo.clear()
     monkeypatch.undo()
     settled = _owner_frame(server_b)
