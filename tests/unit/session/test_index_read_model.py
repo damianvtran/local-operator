@@ -14,6 +14,7 @@ import json
 import os
 import threading
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -752,6 +753,36 @@ async def test_a_burst_publishes_nothing_and_coalesces(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_a_timer_armed_before_a_publication_does_not_republish(tmp_path, monkeypatch):
+    """QA round 5: a warm open must never re-publish a companion it just used.
+
+    The cold half of an open arms the idle timer; the publication it needs then
+    lands (from the same derivation) before the timer fires. If the timer fired
+    blind, every warm open would rewrite the companion — measured on the daemon as
+    one `rm_publish` per warm `eligible` open, ~5 s of work base never does.
+    """
+    _journal(tmp_path)
+    index = ti.refresh_index(tmp_path, SID)
+    assert index is not None
+    rm.reset_for_tests()
+    built: list[str] = []
+    real_publish = rm.publish
+
+    def spy(root, sid, idx):
+        built.append(sid)
+        return real_publish(root, sid, idx)
+
+    monkeypatch.setattr(rm, "publish", spy)
+    rm.schedule_materialize(tmp_path, SID, index)  # arms the timer
+    assert rm._PENDING and rm._TIMERS
+    real_publish(tmp_path, SID, index)  # the companion lands first
+    assert rm._companion_exists(tmp_path, SID, index)
+    await asyncio.sleep(rm._MATERIALIZE_IDLE_S + 1.0)
+    assert built == [], "the idle timer republished a companion that already existed"
+    assert rm.header(tmp_path, SID).state == "ready"
+
+
+@pytest.mark.asyncio
 async def test_a_busy_session_keeps_deferring_without_churn(tmp_path, monkeypatch):
     """A session with a refresh in flight is never published, and re-arms once."""
     _journal(tmp_path)
@@ -770,7 +801,12 @@ async def test_a_busy_session_keeps_deferring_without_churn(tmp_path, monkeypatc
 
     monkeypatch.setattr(rm, "_arm", counting)
     # Pretend this session is mid-refresh for the whole experiment.
-    ti._IN_FLIGHT[key] = (None, asyncio.get_running_loop().create_future())
+    # The registry is typed for a real refresh (loop, task); this fake stands in
+    # for one and only needs to be PRESENT for the hook's busy check.
+    ti._IN_FLIGHT[key] = cast(
+        "tuple[asyncio.AbstractEventLoop, asyncio.Task[None]]",
+        (asyncio.get_running_loop(), asyncio.get_running_loop().create_future()),
+    )
     try:
         rm.schedule_materialize(tmp_path, SID, index)
         await asyncio.sleep(rm._MATERIALIZE_IDLE_S * 3)

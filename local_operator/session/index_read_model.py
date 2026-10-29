@@ -499,6 +499,13 @@ def _publish_when_idle(key: tuple[str, str], sid: str) -> None:
     if entry is None:
         return
     root, index, loop = entry
+    # A companion may have landed while this timer waited (the cold half of the
+    # same open publishes one, and the warm half then uses it). Publishing again
+    # would rewrite ~10 MB for a derivation already on disk and make a warm open
+    # pay work base never does — QA round 5 measured exactly that on the warm
+    # `eligible` open. So the state is re-read here, not trusted from the arm.
+    if _companion_exists(root, sid, index):
+        return
     if key in ti._IN_FLIGHT or not _MATERIALIZE_SLOTS.acquire(blocking=False):
         _PENDING[key] = entry
         _arm(key, sid, loop)
