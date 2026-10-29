@@ -198,6 +198,13 @@ def test_french_locale_reaches_each_owned_message_and_falls_back(monkeypatch):
 def test_wait_parameter_contract_tracks_the_actual_constant(monkeypatch):
     import local_operator.cli as cli
 
+    # The parser renders its help in the ACTIVE locale, so this test must pin
+    # the one it asserts in. Without this it passed only because the ambient
+    # locale happened to be English: after the es W2 catalogues landed, running
+    # the suite under LOP_LANG=es made `restart.format_help()` return Spanish
+    # and the English assertion below fail on a correct render (QA Q-2).
+    monkeypatch.setenv("LOP_LANG", "en")
+
     signature = inspect.signature(MODULES["_sr"].wait)
     assert list(signature.parameters) == ["wait_seconds"]
     assert signature.parameters["wait_seconds"].annotation == "str"
