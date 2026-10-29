@@ -23,6 +23,7 @@ is documented on :meth:`_ContextBuilder.build`.
 
 from __future__ import annotations
 
+import ast
 import base64
 import difflib
 import json
@@ -43,7 +44,14 @@ from local_operator.evaluation.action_surface import (
 )
 from local_operator.evaluation.adapters.supervisor import verify_artifact
 from local_operator.evaluation.evidence.models import RouteIdentity
-from local_operator.evaluation.protocol import ActionBatch, FinishAction, Observation
+from local_operator.evaluation.protocol import (
+    MAX_BATCH_SIZE,
+    ActionBatch,
+    FinishAction,
+    KeyAction,
+    Observation,
+    canonical_key,
+)
 from local_operator.evaluation.runner.completion import finish_claim
 from local_operator.evaluation.runner.model import (
     CompactionRecord,
@@ -156,6 +164,65 @@ UNCHANGED_FRAMES_NOTE = (
     "action changed nothing visible. Do not repeat it -- try a different "
     "target, a different action kind, or wait for the surface to settle."
 )
+
+
+#: What the observation markers above MEAN, for the model. ONE definition, read
+#: by both engagements: the reply arm's system prompt (``build_system_prompt``)
+#: and the session arm's first-prompt header (``session_arm.render_prompt_header``)
+#: embed this exact text, because both render observations through the same
+#: ``_ContextBuilder`` and so show the model the same markers.
+#:
+#: WHY IT IS SHARED (measured 2026-10-28). The session arm used to render the
+#: markers without ever explaining them: on a sealed screenshot-only episode
+#: the model was delivered 239 image blocks and still ended with "this
+#: session's observations contained no textual state at all, so I was working
+#: blind"; on another it read the marker as a dead channel. The reply arm's
+#: explanation existed, it just lived inside one arm's prompt.
+#:
+#: CONSTRAINTS. The text is the reply arm's pre-extraction paragraph, byte for
+#: byte: it sits in that arm's cached system prompt, pinned by digest in
+#: ``test_compact_action_binding``, and rewording it would make every reply-arm
+#: run after the change incomparable with the ones before. So edit it only as a
+#: deliberate prompt change for BOTH arms.
+#:
+#: WHICH ARM SHOWS WHICH MARKER. The text is SHARED, not universal: every marker
+#: it names is real on at least one arm, and a reader must not assume each one
+#: reaches every arm. The split, checked in code and against the sealed corpus:
+#:
+#: * ``(unchanged)``, ``(no textual state)`` and the byte-identical notice are
+#:   rendered by ``_ContextBuilder``, which BOTH arms use -- these are the three
+#:   an episode session actually shows.
+#: * ``[screenshot omitted ...]`` is the reply arm's (``STALE_FRAME_NOTICE``).
+#:   The session side emits it only from ``prune_stale_frames_in_place``, which
+#:   needs a ``browser`` tool result the episode inventory does not carry, or
+#:   from the compaction-prune pass, gated on ``keep_recent_frames is not
+#:   None`` -- ``None`` by default for an ordinary session, and the reply arm's
+#:   client is what overrides it.
+#: * ``<previous-context-summary>`` is the reply arm's too: only
+#:   ``render_compaction_marker``'s ``context-full`` branch writes it, and an
+#:   episode resolves to ``snapcompact``, whose archive is ``[User]`` /
+#:   ``[Assistant]``-tagged text.
+#:
+#: Two inert sentences on an episode are the price of byte-identity with the
+#: reply arm's pinned prompt, and deleting them is NOT the fix: the shared
+#: explanation is worth more than two lines that arm never rendered, and this is
+#: the one place both arms' vocabulary is stated. Its one generic
+#: "screenshot-only benchmark" phrase names no benchmark, so the session
+#: header's no-benchmark vocabulary rule is checked on the header's OWN text,
+#: with this guide removed.
+OBSERVATION_MARKER_GUIDE = f"""\
+"{UNCHANGED_OBSERVATION}" means the observation's TEXT repeats the
+previous one's; "{NO_TEXTUAL_STATE}" means the adapter published no text for
+this step, which is normal for a screenshot-only benchmark and means the
+screenshot is the whole state; "[screenshot omitted ...]" marks an older
+screenshot that a newer one has replaced. A message starting
+<previous-context-summary> summarises turns that are no longer shown.
+
+An observation that says the screenshot is byte-identical to the previous
+one's is telling you your last action did nothing. Treat that as evidence, not
+noise: repeating an action that already had no effect wastes the step budget.
+Change something -- a different target, a different action kind, a "wait" if
+the surface may still be painting, or a scroll to bring the target into view."""
 
 
 def unchanged_frames_note(streak: int) -> str:
@@ -710,7 +777,16 @@ _ENTRY_LOCATION = re.compile(
     re.MULTILINE,
 )
 _VALUE_ERROR_RULE = re.compile(r"Value error, (.+?) \[type=")
-_UNKNOWN_KEY_NAME = re.compile(r"unknown key: '(.*?)' \[type=")
+#: An unknown-key ENTRY: the action's index from its location line and the
+#: refused name as the validator's own ``repr``. Read whole-line and decoded
+#: with ``ast.literal_eval`` because ``repr`` switches to double quotes for a
+#: name holding ``'`` -- the old single-quote pattern skipped ``"<<'SCM'"``
+#: and quoted the NEXT bad action's key instead (round 1, Q2).
+_UNKNOWN_KEY_ENTRY = re.compile(
+    r"^actions\.(?P<index>\d+)\.[A-Za-z0-9_-]+\.keys\n"
+    r"Value error, unknown key: (?P<name>.+) \[type=value_error[,\]]",
+    re.MULTILINE,
+)
 _QUOTED_TAG = re.compile(r"Input tag '(.*?)' found using 'kind'")
 _MAX_RULE_CHARS = 200
 
@@ -1060,6 +1136,14 @@ def _action_kind_of(model: Any) -> str:
     return str(model.model_fields["kind"].default)
 
 
+def _action_index(path: tuple[str, ...]) -> str:
+    """`` (action index N)`` for an ``actions.N.<kind>`` path, else empty."""
+
+    if len(path) >= 2 and path[1].isdigit():
+        return f" (action index {path[1]})"
+    return ""
+
+
 def _field_shape(field: Any, *, name: str) -> str:
     """The accepted shape of one action field, read from its own constraints.
 
@@ -1138,14 +1222,22 @@ def _field_invalid_hint(
             # (main16 evidence: two such refusals re-sent the same shape).
             rule_text = f" The rule it broke: {quoted_rule}." if quoted_rule else ""
             return (
-                f'"{name}" in a "{kind}" action was refused: it takes '
+                f'"{name}" in a "{kind}" action was refused{_action_index(path)}: it takes '
                 f"{_field_shape(field, name=name)}.{rule_text} "
                 f"The kind's full shape is {_action_line(surface, kind, shape)}."
             )
         rule_text = f" The rule it broke: {quoted_rule}." if quoted_rule else ""
         return (
-            f'a "{kind}" action was refused.{rule_text} '
+            f'a "{kind}" action was refused{_action_index(path)}.{rule_text} '
             f"Its accepted shape is {_action_line(surface, kind, shape)}."
+        )
+    if path == ("actions",) and "[type=too_long]" in reason:
+        # The batch bound, stated: following one repair per refused action can
+        # grow a batch past it, and the shape example alone never says so
+        # (round 1, Q3).
+        return (
+            f"the batch has more than {MAX_BATCH_SIZE} actions and was refused before "
+            f"anything was executed: send at most {MAX_BATCH_SIZE}, and the rest next turn"
         )
     if quoted_rule:
         # A batch-level rule from one of the protocol's own model validators.
@@ -1357,14 +1449,24 @@ def _unknown_key_hint(reason: str, surface: ActionSurface) -> str:
     own alphabet.
     """
 
-    match = _UNKNOWN_KEY_NAME.search(reason)
-    sent = match.group(1) if match is not None else ""
+    sent, index = _unknown_key_entry(reason)
     named = {key.upper() for key in surface.named_keys}
     parts = []
+    # The index says WHICH action to fix: a long key-by-key batch otherwise
+    # reads as "some key somewhere" (round 1, Q2: 54 key actions).
+    where = f" (action index {index})" if index is not None else ""
     if sent and is_quotable_key(sent):
-        parts.append(f"{sent!r} is not an accepted key name")
+        parts.append(f"{sent!r} is not an accepted key name{where}")
         meanings = [key for key in _AMBIGUOUS_KEY_NAMES.get(sent.casefold(), ()) if key in named]
-        if len(meanings) == 2:
+        chord = _joined_chord(sent)
+        if chord is not None:
+            # ``"ctrl+t"`` is a chord written as one string. Answered BEFORE
+            # the near-match, which used to say 'use "ctrl" instead' (measured
+            # 2026-10-28) -- a real key, and the wrong repair. Not split
+            # silently: a key named ``+`` exists, so the string is the model's
+            # to restate, and the example is built from its own parts.
+            parts.append(f'a chord lists each key separately: send "keys": {json.dumps(chord)}')
+        elif len(meanings) == 2:
             parts.append(
                 f"it names no single key: use {json.dumps(meanings[0].lower())} for the "
                 "application shortcut modifier (Ctrl+A, Ctrl+C on Linux and Windows), "
@@ -1374,14 +1476,77 @@ def _unknown_key_hint(reason: str, surface: ActionSurface) -> str:
             nearest = _near_match(sent.upper(), sorted(named))
             if nearest is not None:
                 parts.append(f"use {json.dumps(nearest.lower())} instead")
+            elif len(sent) > 1:
+                # No key is near it, so it is most likely text (``"cat"``,
+                # ``"comp.scm"`` in the 2026-10-28 evidence) -- but it may be an
+                # unsupported key name (``"Next"``, ``"Control_R"``), so the
+                # repair is CONDITIONAL and never applied for the model.
+                parts.append(
+                    f'if you meant to type this text, use a "type" action: '
+                    f'{{"kind": "type", "text": {json.dumps(sent)}}}'
+                )
     else:
-        parts.append("The reply used an unknown key name")
+        parts.append(f"The reply used an unknown key name{where}")
     parts.append(
         f"the key-chord field takes {_keys_shape(surface)} written directly, "
         f"e.g. {json.dumps(_keys_example(surface))}; named keys are "
         "case-insensitive, and a single printable character is accepted as itself"
     )
     return ". ".join(parts)
+
+
+def _unknown_key_entry(reason: str) -> tuple[str, int | None]:
+    """The first refused key name and its action index, or ``("", None)``.
+
+    ``literal_eval`` decodes only the validator's ``repr`` of a string and
+    nothing else; anything that does not decode to one is treated as absent.
+    """
+
+    match = _UNKNOWN_KEY_ENTRY.search(reason)
+    if match is None:
+        return "", None
+    try:
+        name = ast.literal_eval(match.group("name"))
+    except (ValueError, SyntaxError):
+        return "", int(match.group("index"))
+    return (name if isinstance(name, str) else ""), int(match.group("index"))
+
+
+def _joined_chord(sent: str) -> list[str] | None:
+    """The chord a ``+``-joined key string spells, when that chord would be accepted.
+
+    ``+`` is both the separator and a key, so a ``+`` where a part should start
+    IS the key: ``"ctrl++"`` is Ctrl and ``+``, not Ctrl and two empty parts
+    (round 1, M1). A trailing or doubled separator anywhere else spells nothing.
+
+    The WHOLE chord is validated with ``KeyAction`` -- the validator itself --
+    so the suggestion can never be refused in turn: every part is a key AND the
+    chord passes the duplicate and typed-text rules (round 1, M2). Parts are
+    echoed in the model's own spelling, lower-cased when they are names.
+    """
+
+    parts: list[str] = []
+    index, length = 0, len(sent)
+    while index < length:
+        if sent[index] == "+":
+            parts.append("+")
+            index += 1
+        else:
+            end = sent.find("+", index)
+            end = length if end == -1 else end
+            parts.append(sent[index:end])
+            index = end
+        if index < length:
+            index += 1  # the separator
+            if index == length:
+                return None
+    if len(parts) < 2 or any(canonical_key(part) is None for part in parts):
+        return None
+    try:
+        KeyAction(observation_id="suggestion", keys=tuple(parts))
+    except ValidationError:
+        return None
+    return [part.lower() if len(part) > 1 else part for part in parts]
 
 
 def _coordinate_bounds(observation: Observation) -> str:
@@ -1579,18 +1744,7 @@ def build_system_prompt(
 Each user message is one observation of the screen: its text, and a screenshot
 when one is attached. Your own earlier replies contain the actions you already
 took and any public factual observations you recorded.
-"{UNCHANGED_OBSERVATION}" means the observation's TEXT repeats the
-previous one's; "{NO_TEXTUAL_STATE}" means the adapter published no text for
-this step, which is normal for a screenshot-only benchmark and means the
-screenshot is the whole state; "[screenshot omitted ...]" marks an older
-screenshot that a newer one has replaced. A message starting
-<previous-context-summary> summarises turns that are no longer shown.
-
-An observation that says the screenshot is byte-identical to the previous
-one's is telling you your last action did nothing. Treat that as evidence, not
-noise: repeating an action that already had no effect wastes the step budget.
-Change something -- a different target, a different action kind, a "wait" if
-the surface may still be painting, or a scroll to bring the target into view.
+{OBSERVATION_MARKER_GUIDE}
 
 Every observation lists its frames on a "Frames:" line as "<frame_id>
 (<width>x<height>)", one per attached screenshot, in order. Any action that

@@ -101,6 +101,13 @@ _DWELL_MS = {"desktop": 1000, "tui": 1, "native": 1000}
 #: was deleted (N3), rather than left available for a future accidental re-wire.
 READ_VIA = ("explicit", "in_view")
 
+#: The provenance of an update folded into a same-topic ask (``asks/dedupe.py``).
+#: Deliberately NOT in :data:`READ_VIA`: no surface may mint it as a read, and
+#: the row must never claim the operator read something they did not — it
+#: left Unread because its text now rides the ask that notifies them. It is a
+#: READ mark only; the row is never dismissed by the merge.
+MERGED_INTO_ASK_VIA = "merged_into_ask"
+
 #: Wire size caps (contract §1.3). The tool's pydantic schema enforces the same
 #: numbers; the store re-applies them so a second writer cannot exceed them.
 TITLE_MAX = 120
@@ -1110,6 +1117,39 @@ class NotificationStore:
             (ref, read_at, seq),
         )
         return seq
+
+    def merge_into_ask(
+        self, ids: Sequence[tuple[str, int]], *, now: int | None = None
+    ) -> list[str]:
+        """Mark READ (never dismiss) updates whose text was folded into an ask.
+
+        Token-bound like :meth:`apply` (R10): each id names the revision the
+        caller matched, so a keyed update written after the match keeps its new
+        revision unread. READ so it leaves Unread (the ask now carries it), but
+        NOT dismissed: it stays in All, so a surface that does not render an
+        ask's folded context (the phone's answer sheet, the TUI's narrow
+        layout) can still reach the text (design review D1, #3094).
+        """
+        stamp = now if now is not None else now_ms()
+
+        def body(conn: sqlite3.Connection) -> list[str]:
+            changed: list[str] = []
+            for item_id, revision in ids:
+                row = conn.execute(
+                    "SELECT id FROM items WHERE id=? AND revision=? AND dismissed_at IS NULL "
+                    "AND read_rev < revision",
+                    (item_id, int(revision)),
+                ).fetchone()
+                if row is None:
+                    continue
+                conn.execute(
+                    "UPDATE items SET seq=?, read_rev=revision, read_at=?, read_via=? WHERE id=?",
+                    (self._next_seq(conn), stamp, MERGED_INTO_ASK_VIA, item_id),
+                )
+                changed.append(item_id)
+            return changed
+
+        return self._write(body, "merge_into_ask")
 
     def mark_refs(self, refs: Sequence[str], *, read: bool, now: int | None = None) -> list[str]:
         """Set or clear the reel-side read mark of refs (open asks). Never touches the ask."""

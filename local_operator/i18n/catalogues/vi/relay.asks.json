@@ -15,6 +15,7 @@
   "relay.asks.card.secret_notice_persisted": "bí mật — gửi trực tiếp, không hiển thị trong bản ghi và được lưu vào kho thông tin xác thực của bạn",
   "relay.asks.card.placeholder_secret": "dán bí mật",
   "relay.asks.card.placeholder_answer": "câu trả lời của bạn",
+  "relay.asks.card.other": "Khác",
   "relay.asks.card.recommended": "· được đề xuất",
   "relay.asks.card.choose_any": "chọn tất cả mục phù hợp",
   "relay.asks.card.urgent": "· khẩn cấp",

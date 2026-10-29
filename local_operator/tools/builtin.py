@@ -25069,6 +25069,29 @@ async def _browser_download(
     )
 
 
+def _upload_scheme_refusal(
+    tool_call_id: str, raw: str, context: ToolContext | None
+) -> ToolResult | None:
+    """Refuse a ``scheme://`` upload path, naming the absolute path to use instead.
+
+    Reuses :func:`_scheme_refusal` (one rule for every path-taking tool) but passes the
+    remedy for the one case an agent actually hits: a file it wrote to its scratchpad.
+    ``upload`` never resolved ``scratchpad://``, so the remedy cannot be "read it first":
+    it is the pad's absolute path, taken from the context when there is one.
+    """
+    pad = scratchpad_dir_of(context)
+    where = f" (this session's scratchpad is {pad})" if pad else ""
+    return _scheme_refusal(
+        tool_call_id,
+        "browser",
+        raw,
+        remedy=(
+            "Pass the file's ABSOLUTE filesystem path (or one relative to the working "
+            f"directory), not a URL{where}."
+        ),
+    )
+
+
 async def _browser_upload(
     tool_call_id: str,
     state: BrowserSurfaceProtocol,
@@ -25102,11 +25125,30 @@ async def _browser_upload(
     session_id = str(getattr(context, "session_id", "") or "")
     resolved: list[Path] = []
     for raw in params.paths:
-        path, reason = files.check_upload(raw, cwd=_safe_cwd(context), policy=limits)
+        # `upload` serves NO URL scheme: without this a `scratchpad://x.png` (the spelling
+        # `read`/`write` take) would be read as the relative path `<cwd>/scratchpad:/x.png`
+        # and refused as "does not exist", with the same-turn hint pointing at a race that is
+        # not there. The remedy is the absolute path, and the pad root is printed when the
+        # context has one so the model does not have to guess it.
+        scheme_problem = _upload_scheme_refusal(tool_call_id, raw, context)
+        if scheme_problem is not None:
+            return scheme_problem
+        # `session_id` is what lets the gate recognise THIS session's own scratchpad as
+        # the agent's working area rather than as the credential store beside it (see
+        # `browser_files.own_scratchpad_root`); an empty id grants nothing.
+        path, reason = files.check_upload(
+            raw, cwd=_safe_cwd(context), policy=limits, session_id=session_id
+        )
         if path is None:
             # Refused as a whole call: attaching the rest would send a set the
             # caller did not name, and the refusal names the one rule that fired.
-            return _error(tool_call_id, "browser", f"refused: nothing was attached — {reason}")
+            # Every gate reason is itself spelled "refused: …" (it is also what other callers
+            # print bare), so the prefix is dropped here rather than doubled.
+            return _error(
+                tool_call_id,
+                "browser",
+                f"refused: nothing was attached — {reason.removeprefix('refused: ')}",
+            )
         resolved.append(path)
     wire: dict[str, Any] = {
         "tab": state.surface_id,
@@ -32123,16 +32165,16 @@ def _ask_report(
 #: it would let the two modes drift into disagreeing about what warrants asking,
 #: which is the one thing about this tool that must not vary.
 _ASK_DESCRIPTION_RESTRAINT = (
-    "Ask the user to choose. LAST RESORT, not a checkpoint: research it, run it, "
-    "or delegate it to a subagent and decide yourself, then report what you chose. "
+    "Ask the user to decide, never for FYI. LAST RESORT, not a checkpoint: research, "
+    "run or delegate it to a subagent and decide yourself, then report the choice. "
     "Ask only when: the action is destructive or irreversible and the user has not "
     "EXPLICITLY approved that action; the REQUEST ITSELF has two plausible readings "
     "and no evidence picks between them; you need something only the user has (a "
-    "credential, an access decision); or the answer is genuinely theirs to state. "
+    "credential, access); or the answer is genuinely theirs to state. "
     "Two technical approaches is not ambiguity. Work the user already asked for is "
     "authorized: do not stop to confirm it — but that never extends to an "
-    "irreversible step by implication. Never put the question in your reply text; "
-    "mechanics: `read tool://ask`."
+    "irreversible step by implication. Asking notifies: never also `notify` it or "
+    "reply with it; mechanics: `read tool://ask`."
 )
 
 #: The tail for a host whose ``ask`` BLOCKS — the KILL-SWITCH arm.
@@ -32875,11 +32917,10 @@ class NotifyParams(BaseModel):
 #: The HOW lives here; the WHEN also lives in the gated ``system.md`` clause.
 #: Published after the live deferred pilot failed reliable tool discovery.
 _NOTIFY_DESCRIPTION = (
-    "Post an item to the operator's Notifications inbox: it stays listed until "
-    "they read or dismiss it, across sessions and devices. Use for results, "
-    "metrics or events they must see on return, never routine progress. Pass a "
-    "stable `key` so a repeat (a wake tick, an updated count) updates one item "
-    "instead of adding another."
+    "Post an item to the operator's Notifications inbox; it stays until read or "
+    "dismissed, on every device. For FYI results, metrics or events to see on "
+    "return; never routine progress or a question (`ask` notifies). Pass a "
+    "stable `key` so a repeat (a wake tick, a new count) updates one item."
 )
 
 

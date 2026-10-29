@@ -276,15 +276,19 @@ def render_broker_error(
         # time for exactly this refusal. Absent (an older owner, or a value the
         # boundary dropped) keeps the old wording.
         left = render_retry_after(error.retry_after_ms)
+        # The owner's reset is LATER than the boundary lets a borrower wait (see
+        # ``BrokerError.retry_after_is_floor``): say the floor plainly, never as the
+        # reset time.
+        span = f"at least {left}" if error.retry_after_is_floor else f"another {left}"
         if accounts and left:
             return (
-                f"'{label}' on {owner} is rate-limited for another {left} "
+                f"'{label}' on {owner} is rate-limited for {span} "
                 f"({', '.join(accounts)}), so nothing was borrowed. The usual failover "
                 "to another of your own logins is already running."
             )
         if left:
             return (
-                f"'{label}' on {owner} is rate-limited for another {left}, so nothing "
+                f"'{label}' on {owner} is rate-limited for {span}, so nothing "
                 "was borrowed. The usual failover to another of your own logins is "
                 "already running."
             )

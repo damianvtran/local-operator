@@ -20,6 +20,8 @@ hide behind an import error.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from local_operator.network.credentials.client import MeshCredentialClient
@@ -189,3 +191,35 @@ def test_the_quota_refusal_without_a_remainder_keeps_for_now(tmp_path) -> None:
 
     sentence = str(detail.get("message") or "")
     assert "rate-limited for now" in sentence, sentence
+
+
+def test_a_reset_beyond_the_wire_clamp_is_rendered_as_a_floor_not_the_reset() -> None:
+    """#3108 review r2 m1: a proven 3 h reopening is clamped to 5 min on the wire.
+
+    The clamp stays (it bounds this device's cache and retry); the sentence must not
+    present the clamped figure as the owner's reset. A value inside the clamp keeps
+    the exact wording, and a cached countdown of a floor stays a floor.
+    """
+    from local_operator.network.credentials.messages import render_broker_error
+    from local_operator.network.credentials.types import (
+        MAX_PEER_RETRY_AFTER_MS,
+        BrokerError,
+    )
+
+    def sentence(detail: dict[str, Any]) -> tuple[BrokerError, str]:
+        error = BrokerError.from_detail({"code": "quota_blocked", **detail})
+        return error, render_broker_error(error, key="zai", provider="zai", owner_name="laptop")
+
+    clamped, text = sentence({"retry_after_ms": 3 * 3_600_000, "reason": "pool_depleted"})
+    assert clamped.retry_after_ms == MAX_PEER_RETRY_AFTER_MS and clamped.retry_after_is_floor
+    assert "rate-limited for at least 5 min" in text, text
+    assert "for another 5 min" not in text, text
+    assert "retry_after_is_floor" not in clamped.to_detail(), "a local fact, never on the wire"
+
+    exact, text = sentence({"retry_after_ms": 45_000})
+    assert not exact.retry_after_is_floor
+    assert "rate-limited for another 45 s" in text, text
+
+    counted = BrokerError(code="quota_blocked", retry_after_ms=240_000, retry_after_is_floor=True)
+    text = render_broker_error(counted, key="zai", provider="zai", owner_name="laptop")
+    assert "rate-limited for at least 4 min" in text, text
