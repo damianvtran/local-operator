@@ -696,9 +696,9 @@ def settle_group(
     ``None`` snapshots under four-worker test load, which silently left lines
     with no members recorded. Start tokens are the one ``ps -p`` left on this
     path and are optional (a survivor with no token is still recorded). An
-    unreadable membership keeps the line with no survivors — and
-    :func:`_leader_verdict` still proves a survivor group ours from the dead
-    creator pid plus live members, so nothing leaks.
+    unreadable membership keeps the line with no survivors, and such a line is
+    then AMBIGUOUS to :func:`_leader_verdict` (a freed pgid can be taken by
+    another session's group), so it is kept unkilled rather than reaped blind.
     """
     if not _REAPING_IS_SUPPORTED:
         return
@@ -1238,14 +1238,17 @@ def _leader_verdict(entry: dict[str, object]) -> bool | None:
     if not isinstance(pgid, int) or pgid <= 0:
         return False
     if not _process_alive(pgid):
-        # The creator pid is gone. A group's id is always the pid of the process
-        # that created it, and the kernel frees that id only once the group is
-        # EMPTY, so a pgid whose creator pid is gone cannot belong to a later
-        # group: members still present mean the leader exited first
-        # (``server & echo $!``) and the group is the original one. No members ->
-        # the group is gone. The pre-survivor code read a dead leader as "group
-        # already dead" and leaked such a group for hours.
-        return _group_has_members(pgid)
+        # The creator pid is gone, so the recorded leader token has nothing left
+        # to be compared against, and a pgid is a free number once the group that
+        # held it is EMPTY — another session's group can hold it now. Nothing in
+        # this line's own fields can tell those apart, so the answer is AMBIGUOUS,
+        # never "ours": an earlier version of this branch inferred ownership from
+        # "creator pid dead + members alive" and that inference was wrong (review
+        # round 4, B1 — it killed a third-party orphaned group in a head-vs-base
+        # probe). A group whose leader exited first (``server & echo $!``) gets its
+        # identity from the ``survivors`` recorded at settle instead, and that is
+        # the only proof this function accepts. Keeping the line costs a retry.
+        return None
     current_leader = _owner_start_token(pgid)
     if current_leader is None:
         # Alive but the leader's identity is unreadable -> ambiguous -> do NOT

@@ -1276,3 +1276,96 @@ def test_settle_records_survivors_even_when_the_token_read_fails(tmp_path, monke
     assert pid in recorded and recorded[pid] == ""  # recorded, token unavailable
     assert group_reaper.reap_session_groups("sess-a", config_dir=tmp_path) == 1
     assert _wait_dead(pid)
+
+
+# --------------------------------------------------------------------------- #
+# B1 (review round 4): a dead creator pid proves NOTHING about a pgid
+# --------------------------------------------------------------------------- #
+def _orphaned_group(cmd="sleep 600"):
+    """A group whose LEADER exits while a member stays in the same pgid.
+
+    The shape the settle snapshot records: ``sh -c "<cmd> & exit"`` leaves the
+    backgrounded child alone in the leader's group, so ``pgid`` names a live
+    group whose creator pid is gone.
+    """
+    proc = subprocess.Popen(
+        ["/bin/sh", "-c", f"{cmd} & exit 0"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    proc.wait(timeout=5)
+    return proc.pid  # the creator pid, now dead, which IS the pgid
+
+
+def test_dead_creator_pid_with_live_members_is_ambiguous_not_ours(tmp_path):
+    """B1: a freed pgid can be taken by another session's group, and with the
+    creator pid dead there is no token left to compare. Head used to answer True
+    here and kill a group this session never started. It must be ``None``."""
+    pgid = _orphaned_group()
+    try:
+        entry = {"pgid": pgid, "grp_leader_start": "SOME-OTHER-GROUPS-TOKEN", "cmd": "x"}
+        assert group_reaper._leader_verdict(entry) is None
+        assert group_reaper._reap_if_still_ours(entry) is False
+        assert _alive(pgid)  # the third-party group survives
+    finally:
+        _reap_group(pgid)
+
+
+def test_sweep_leaves_a_dead_creators_group_with_no_survivor_proof(tmp_path):
+    """The same shape through the hard-death sweep: no kill, and no drop either."""
+    pgid = _orphaned_group()
+    try:
+        dead = subprocess.Popen(["/bin/sh", "-c", "true"])
+        dead.wait()
+        _write_ledger(
+            tmp_path,
+            dead.pid,
+            "gone",
+            [
+                {
+                    "pgid": pgid,
+                    "runtime_pid": dead.pid,
+                    "runtime_start": "gone",
+                    "grp_leader_start": "SOME-OTHER-GROUPS-TOKEN",
+                    "cmd": "sleep 600",
+                    "ts": 1.0,
+                }
+            ],
+        )
+        assert sweep_orphan_groups(tmp_path).reaped_groups == 0
+        assert _alive(pgid)
+    finally:
+        _reap_group(pgid)
+
+
+def test_a_group_whose_creator_died_is_still_reaped_via_its_survivors(tmp_path):
+    """The legitimate half: our own orphaned group carries the survivor proof the
+    settle snapshot recorded, and that — not the dead creator pid — is what lets
+    the reap end it."""
+    pgid = _orphaned_group()
+    try:
+        survivors = group_reaper._group_survivors(pgid)
+        assert survivors, "the fork-free listing must see the surviving member"
+        dead = subprocess.Popen(["/bin/sh", "-c", "true"])
+        dead.wait()
+        _write_ledger(
+            tmp_path,
+            dead.pid,
+            "gone",
+            [
+                {
+                    "pgid": pgid,
+                    "runtime_pid": dead.pid,
+                    "runtime_start": "gone",
+                    "grp_leader_start": "whatever-the-leader-recorded",
+                    "survivors": survivors,
+                    "cmd": "sleep 600",
+                    "ts": 1.0,
+                }
+            ],
+        )
+        assert sweep_orphan_groups(tmp_path).reaped_groups == 1
+        assert not _alive(pgid)
+    finally:
+        _reap_group(pgid)
