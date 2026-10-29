@@ -177,12 +177,13 @@ wakes a session. A crash between commit and capture is retried idempotently.
 Capture is bounded per session: its candidates share a 16k-token budget inside the
 50k session quota, and a pass that exceeds it forgets the session's oldest untouched
 captured candidates, never stated facts. Past the session's eviction tombstone
-floor (half of the 5,000 tombstone cap) eviction stops and only the 50k quota binds.
+floor — once the session holds 2,500 tombstones, its forgets and expiries counted
+with its evictions — eviction stops and only the 50k quota binds.
 Goal, progress and next-step are each one row revised in place. Unreviewed captures
 expire 14 days after their last revision (a re-capture refreshes the deadline;
 older rows with no stored deadline use `source_time`, else `created_at`). Any edit
 or move by an agent or person makes the fact deliberate: no expiry, kept on session
-delete, and once edited never evicted. Its label turns `stated` only when its status
+delete, and never evicted again. Its label turns `stated` only when its status
 becomes `active` (`lop memory edit` does this); an agent edit or a move keeps the
 `candidate` status and still lists as `captured`. Expired text can be captured
 again; a deliberate forget stays final. Only the host that holds the session
@@ -205,8 +206,10 @@ for policy, quotas and peer exclusions. Human inspection/correction uses
 consolidate. Rows print
 a paste-ready `SCOPE/ID`; `list` and `search` cover every scope the context is
 authorized for (`--session ID` adds a session), and items are labelled `captured`
-(automatic, unreviewed) or `stated` (deliberate). `edit ID --revision REV --body …`
-changes only the named fields; `--json` prints machine-readable output.
+(status `candidate`, even when a deliberate edit or move has already taken it out of
+the automatic pass — see the capture paragraph above) or `stated` (deliberate).
+`edit ID --revision REV --body …` changes only the named fields; `--json` prints
+machine-readable output.
 
 Bulk maintenance is deliberate. `lop memory forget --scope S [--older-than 30d]
 [--unverified] [--tag T] [--title-matches RE] [--body-matches RE]` is a DRY RUN: it

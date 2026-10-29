@@ -54,3 +54,20 @@ def test_personal_helper_and_existing_privacy_limits_remain_explicit() -> None:
     assert "Explicit role allowlists are never widened" in body
     assert "secret NAME references only" in body
     assert "an unlabelled secret can still be stored, journaled and synced" in body
+
+
+def test_capture_label_and_tombstone_floor_claims_match_the_code() -> None:
+    """PR #3086 review r2, m2 + n1.
+
+    The label is the fact's STATUS, so a deliberate edit or move still lists as
+    `captured`; the old "(automatic, unreviewed)" gloss contradicted the capture
+    paragraph above it. And the eviction floor counts EVERY tombstone the session
+    holds — forgets and expiries as well as evictions — so the guide must not read as
+    if only evictions are counted.
+    """
+    body = _memory_guide()
+
+    assert "labelled `captured` (status `candidate`" in body
+    assert "(automatic, unreviewed)" not in body
+    assert "once the session holds 2,500 tombstones" in body
+    assert "its forgets and expiries counted with its evictions" in body
