@@ -75,16 +75,31 @@ async def test_core_and_linked_worktree_from_home_context(tmp_path):
         assert context.cwd == str(tmp_path)
 
 
+# THE SELECTOR HAS ITS OWN MATRIX, ON PURPOSE. Every case below passes
+# ``repo_root``; none of them reads a session's own cwd. A session's cwd keeps
+# #3122's host-insensitive identity (asserted separately in
+# ``test_repo_root_pins_the_host_that_a_session_cwd_does_not``), so a future
+# merge that re-unifies the two policies would leave these cases green if they
+# exercised the cwd path — which is exactly how ``c663b5de`` shipped an
+# acceptance rule nobody chose. Keep the two paths asserted apart.
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "origin",
+    ("origin", "reason"),
     [
-        None,
-        "https://github.com/other/repo.git",
-        "https://github.com/damianvtran/local-operator.git",
+        # No origin at all, and another owner: nothing to accept.
+        (None, "origin_not_accepted"),
+        ("https://github.com/other/repo.git", "origin_not_accepted"),
+        # A lookalike host, a bare local path, a lookalike scp host and a nested
+        # path: each keeps the reviewed tail, and each must still be refused.
+        ("https://example.test/damianvtran/local-operator-ui.git", "origin_not_accepted"),
+        ("/local/damianvtran/local-operator-ui.git", "origin_not_accepted"),
+        ("git@other.test:damianvtran/local-operator-ui.git", "origin_not_accepted"),
+        ("https://github.com/extra/damianvtran/local-operator-ui.git", "origin_not_accepted"),
+        # A PINNED repository on github.com, but the wrong one for this root.
+        ("https://github.com/damianvtran/local-operator.git", "wrong_checkout_for_path"),
     ],
 )
-async def test_explicit_root_refuses_wrong_identity_or_family(tmp_path, origin):
+async def test_repo_root_refuses_wrong_identity_or_family(tmp_path, origin, reason):
     root = _ui_repo(tmp_path, origin=origin)
     result = await execute_read_public_copy(
         "no",
@@ -94,8 +109,9 @@ async def test_explicit_root_refuses_wrong_identity_or_family(tmp_path, origin):
         },
         context=_context(tmp_path, tmp_path),
     )
-    assert result.is_error
-    assert "public_copy_repository_not_allowed" in result.text
+    body = _refusal_body(result)
+    assert body["code"] == "public_copy_repository_not_allowed"
+    assert body["reason"] == reason
 
 
 @pytest.mark.asyncio
@@ -641,16 +657,16 @@ async def test_wrong_checkout_for_path_names_the_repository_to_use(tmp_path):
 
 @pytest.mark.asyncio
 async def test_untrusted_origin_is_told_apart_from_a_wrong_checkout(tmp_path):
-    """U1/L: an identity that is not ours is "never allowed"; URL never echoed."""
-    secret_host = "https://token123:[redacted]@example.invalid/someone-else/dotfiles.git"
+    """U1/L: a lookalike origin is "never allowed", and its URL is not echoed."""
+    secret_host = "https://token123:[redacted]@example.invalid/damianvtran/local-operator-ui.git"
     root = _ui_repo(tmp_path, origin=secret_host)
     result = await execute_read_public_copy(
         "x", {"path": UI_CATALOGUE, "repo_root": str(root)}, context=_context(tmp_path, tmp_path)
     )
     body = _refusal_body(result)
     assert body["reason"] == "origin_not_accepted"
-    # Only the parsed identity is named, never the raw URL or its host.
-    assert body["checkout_is"] == "someone-else/dotfiles"
+    # No name is claimed for a host that is not github.com, and never the URL.
+    assert body["checkout_is"] is None
     assert "token123" not in result.text and "example.invalid" not in result.text
 
 
@@ -664,26 +680,35 @@ async def test_untrusted_origin_is_told_apart_from_a_wrong_checkout(tmp_path):
         "https://github.com/extra/damianvtran/local-operator-ui.git",
     ],
 )
-async def test_a_mirror_root_is_that_checkout_but_provenance_is_not_verified(tmp_path, origin):
-    """ONE identity rule: #3122's last-two-components match, applied to repo_root.
+async def test_repo_root_pins_the_host_that_a_session_cwd_does_not(tmp_path, origin):
+    """ONE PARSER, TWO POLICIES: the difference must stay visible, not smoothed.
 
-    Before the merge the selector additionally required a github.com host and
-    refused every origin here. The merged route has ONE notion of "our
-    repository" -- :func:`_origin_identity` plus :data:`_CONSUMER_CHECKOUTS` --
-    so the selector and the default-root gate cannot disagree about which
-    checkout a root is. What still bounds the looser match: the root list and
-    path families are unchanged, the bytes must be the captured ``HEAD`` blob of
-    a committed file, and provenance never NAMES a reviewed GitHub repository
-    unless the host is github.com (design D1/D4), so a lookalike checkout cannot
-    manufacture a verified identity.
+    A session's own cwd keeps #3122's host-insensitive identity — the checkout is
+    where the session already is. ``repo_root`` names an arbitrary path the
+    CALLER chose, so it must be a real github.com origin of a pinned repository:
+    a mirror, a lookalike host, a nested path or another owner is refused. Both
+    halves are asserted on the same input so neither policy can silently absorb
+    the other.
     """
     root = _ui_repo(tmp_path, origin=origin)
-    result = await execute_read_public_copy(
+    refused = await execute_read_public_copy(
         "x", {"path": UI_CATALOGUE, "repo_root": str(root)}, context=_context(tmp_path, tmp_path)
     )
-    assert not result.is_error, result.text
-    assert _details(result)["repository"] is None
-    assert _details(result)["repository_verified"] is False
+    body = _refusal_body(refused)
+    assert body["code"] == "public_copy_repository_not_allowed"
+    assert body["reason"] == "origin_not_accepted"
+    assert body["checkout_is"] is None
+    assert body["accepted_repositories"] == [
+        "damianvtran/local-operator",
+        "damianvtran/local-operator-ui",
+        "damianvtran/local-operator-mobile",
+    ]
+    served = await execute_read_public_copy(
+        "x", {"path": UI_CATALOGUE}, context=_context(root, tmp_path)
+    )
+    assert not served.is_error, served.text
+    assert _details(served)["repository"] is None
+    assert _details(served)["repository_verified"] is False
 
 
 @pytest.mark.asyncio

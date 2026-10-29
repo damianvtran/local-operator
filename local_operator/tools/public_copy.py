@@ -385,15 +385,24 @@ def _origin_identity(url: str) -> str:
 
 
 def _trusted_origin_identity(url: str) -> str:
-    """The same identity, but only when the origin is hosted on github.com.
+    """The same parse, host-pinned: ``owner/repo`` or ``""`` for a non-GitHub host.
 
-    ACCESS IS NOT DECIDED HERE. :func:`_origin_identity` answers "which
-    ``owner/repo`` does this origin name" for every gate, so an alias or a mirror
-    is the same repository (#3122). This helper answers the narrower question the
-    audit record asks — may provenance NAME a reviewed GitHub repository? — and
-    returns ``""`` when the host is not github.com. Origin is a repository-policy
-    assertion, not cryptographic attestation: the same-UID residual remains, so
-    the served bytes are the ``HEAD`` blob and this label never widens access.
+    ONE PARSER, TWO POLICIES. :func:`_origin_identity` is the only thing that
+    reads a URL; this wraps it with the host question so the two callers can hold
+    different rules without a second parser to drift:
+
+    * an explicit ``repo_root`` is an arbitrary path the CALLER chose, so it must
+      be accepted only from a real github.com origin, exactly ``owner/repo``, and
+      only if that identity is one of :data:`ACCEPTED_REPOSITORIES` — a local
+      mirror, another host, a nested path or another owner is a refusal;
+    * a session's own cwd keeps the host-insensitive identity #3122 publishes
+      (the checkout is where the session already is, and that is not this PR's
+      contract to change);
+    * provenance is labelled verified only from this host-pinned form (D1/D4).
+
+    Origin is a repository-policy assertion, not cryptographic attestation: the
+    same-UID residual remains, so the served bytes are the ``HEAD`` blob and
+    neither rule widens the allowlist.
     """
     value = url.strip()
     if "://" in value:
@@ -718,19 +727,23 @@ def _committed_public_copy(
         origin = _git("remote", "get-url", "origin")
         origin_url = origin.stdout.decode("utf-8", "replace") if origin.returncode == 0 else ""
         identity = _origin_identity(origin_url)
-        # ONE IDENTITY, ONE REGISTRY. This parser plus ``_CONSUMER_CHECKOUTS``
-        # answer every origin question in the module: the default root's
-        # per-path binding and an explicit ``repo_root``'s acceptance. A second
-        # parser for "our repositories" would be a second mechanism that can
-        # disagree with this one, so ``repo_root`` reads the same helpers.
+        # ONE PARSER, TWO POLICIES (see :func:`_trusted_origin_identity`). The
+        # SAME registry answers both questions — ``_CONSUMER_CHECKOUTS`` plus
+        # this repository, via :func:`_publishing_checkouts` — and the only
+        # difference is which spelling of the identity is asked:
+        #   * a session's own cwd keeps #3122's host-insensitive identity;
+        #   * ``repo_root`` is a path the caller chose, so it must be a real
+        #     github.com origin of a pinned repository. Accepting a mirror or a
+        #     lookalike host there would answer "read THAT repository" with
+        #     whatever directory the caller handed over.
         publishers = _publishing_checkouts(relative)
         core_publishes = any(pattern.fullmatch(relative) for pattern in _CORE_PUBLIC_COPY_PATTERNS)
-        # RECORD ONLY WHAT THE STRICT CHECK PROVED. Provenance is a trust claim,
-        # so ``repository`` comes from the GitHub-only spelling of the SAME
-        # identity and is ``None`` when that check did not pass (design D1/D4).
-        # It labels the audit record and never decides access.
+        # RECORD ONLY WHAT THE STRICT CHECK PROVED: provenance is a trust claim,
+        # so ``repository`` comes from the host-pinned spelling and is ``None``
+        # when that check did not pass (design D1/D4).
         verified = _trusted_origin_identity(origin_url) or None
-        if explicit_root and identity not in ACCEPTED_REPOSITORIES:
+        selected = verified if explicit_root else identity
+        if explicit_root and selected not in ACCEPTED_REPOSITORIES:
             return (
                 b"",
                 {},
@@ -739,12 +752,12 @@ def _committed_public_copy(
                     # Only a parsed identity is ever named, never the raw origin
                     # (it can embed a credential).
                     "reason": "origin_not_accepted",
-                    "checkout_is": identity or None,
+                    "checkout_is": selected,
                     "path_needs": [name for name, _ in publishers]
                     or ([CORE_REPOSITORY] if core_publishes else []),
                 },
             )
-        if publishers and identity not in {name for name, _ in publishers}:
+        if publishers and selected not in {name for name, _ in publishers}:
             if explicit_root:
                 return (
                     b"",
@@ -752,12 +765,12 @@ def _committed_public_copy(
                     {
                         "code": "public_copy_repository_not_allowed",
                         "reason": "wrong_checkout_for_path",
-                        "checkout_is": identity or None,
+                        "checkout_is": selected,
                         "path_needs": [name for name, _ in publishers],
                     },
                 )
             return b"", {}, _checkout_refusal(relative, publishers, identity)
-        if explicit_root and core_publishes and identity != CORE_REPOSITORY:
+        if explicit_root and core_publishes and selected != CORE_REPOSITORY:
             # A core root asked of a consumer checkout names the checkout that
             # serves it instead of reporting the file as uncommitted (U1/J).
             return (
@@ -766,7 +779,7 @@ def _committed_public_copy(
                 {
                     "code": "public_copy_repository_not_allowed",
                     "reason": "wrong_checkout_for_path",
-                    "checkout_is": identity or None,
+                    "checkout_is": selected,
                     "path_needs": [CORE_REPOSITORY],
                 },
             )

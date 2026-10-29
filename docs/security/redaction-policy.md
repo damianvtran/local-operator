@@ -137,14 +137,18 @@ is **not** a redaction toggle:
 * `repo_root` is an optional per-call checkout selector. Omitted or null keeps
   the session's cwd as the root; selecting a root changes neither session cwd nor
   configuration/approval state. An explicit root must be an exact checkout or
-  linked worktree root — not a subdirectory — whose origin names one of the
-  three reviewed identities (`damianvtran/local-operator`,
-  `damianvtran/local-operator-ui`, `damianvtran/local-operator-mobile`) by the
-  same last-two-path-components rule the per-root gate below uses: **one notion
-  of "our repository", never a second one that can disagree with it**. Relative
-  selectors resolve against the session cwd, never the process cwd. The selector
-  chooses where to read and grants no access — it is not a permission, and it
-  widens neither the root list above nor any path family.
+  linked worktree root — not a subdirectory — whose origin is
+  `damianvtran/local-operator`, `damianvtran/local-operator-ui` or
+  `damianvtran/local-operator-mobile` **on github.com**, as SSH or HTTPS and
+  exactly `owner/repo`. **One parser, two policies**: the identity is parsed by
+  the same function the per-root gate below uses, but ACCEPTANCE for a selector
+  is host-pinned, because a selector names an arbitrary path the caller chose —
+  a local mirror, another host, a nested path or another owner is refused. The
+  session's own cwd keeps the host-insensitive identity that rule already
+  publishes. Relative selectors resolve against the session cwd, never the
+  process cwd. The selector chooses where to read and grants no access — it is
+  not a permission, and it widens neither the root list above nor any path
+  family.
 * The consumer roots are keyed to **checkout identity, not path shape**: a
   `src/i18n/...` path is served only when the workspace root is the checkout
   root and the **last two path components** of `git remote get-url origin`,
@@ -223,7 +227,7 @@ is **not** a redaction toggle:
   returned: timestamp, session, path, key, character count, selected-content
   SHA-256, canonical repository root, repository identity, whether that
   identity was verified, pinned commit SHA and this document. The identity is
-  recorded only from the strict GitHub-origin check, as `null` with
+  recorded only from the host-pinned GitHub-origin check (the same parser), as `null` with
   `repository_verified: false` otherwise; the default root keeps its historical
   looser gate for admission but never claims a verified identity from it. The
   same provenance is in the result `details` (transcript and audit; not
