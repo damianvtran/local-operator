@@ -77,6 +77,8 @@
   "relay.chrome.session.resuming": "Возобновляем…",
   "relay.chrome.session.degraded": "Не отвечает — сообщения подождут",
   "relay.chrome.composer.label": "Сообщение",
+  "relay.chrome.composer.placeholder.idle": "Спросите что угодно…",
+  "relay.chrome.composer.placeholder.steer": "Направляйте агента…",
   "relay.chrome.composer.folder_label": "Рабочая папка: {name}",
   "relay.chrome.composer.model_label": "Модель: {label}",
   "relay.chrome.composer.spend_label": "Расходы и контекст: {label}",

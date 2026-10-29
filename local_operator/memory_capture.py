@@ -1325,7 +1325,9 @@ def _evict(
     eligible: author ``deterministic-capture``, status ``candidate``, source kind
     ``compaction`` and a single head — anything the agent or operator stored,
     corrected or left in conflict is deliberate and is never evicted, and is not
-    charged to the budget either. ``protected`` (this pass's rows and the live state
+    charged to the budget either. A row past its expiry deadline is neither: the
+    expiry sweep reaps it with a tombstone that stays re-capturable, so eviction
+    must not reach it first. ``protected`` (this pass's rows and the live state
     heads) is skipped. "Oldest" is the oldest ``source_time``: a refresh restamps it,
     so a fact still being restated is the newest, not the oldest.
 
@@ -1336,15 +1338,31 @@ def _evict(
     in which the budget no longer binds, so it is reported rather than silent
     (review m2).
     """
+    from local_operator.memory_maintenance import CAPTURE_TTL_S
+
     session = store.identity.session_id
+    # A row already past its deadline is OUT of both the budget and the eligible set.
+    # Every read path skips a past deadline, so a charged expired row buys nothing and
+    # would evict live text to pay for something invisible; and evicting it would be
+    # the ONE irreversible act here — an eviction is an ordinary tombstone, while the
+    # expiry sweep forgets the same row with an EXPIRY tombstone that leaves the text
+    # re-capturable when the session resumes. The sweep owns that decision, so this pass
+    # must not take it first (#3057 review r6, m1). The deadline formula is
+    # ``memory_maintenance._EXPIRED_SQL``'s, so the two passes agree on when a row is
+    # stale: the stored stamp, else a legacy deadline derived from the row's own time.
+    deadline = (
+        "coalesce(json_extract(fact,'$.expires_at'), "
+        "coalesce(json_extract(fact,'$.source_time'), json_extract(fact,'$.created_at')) + ?)"
+    )
     rows = db.execute(
         "SELECT entity_id,op_id,tokens FROM current WHERE scope='session' AND owner=? "
         "AND json_extract(fact,'$.source.author')='deterministic-capture' "
         "AND json_extract(fact,'$.status')='candidate' "
         "AND json_extract(fact,'$.source.kind')='compaction' "
+        f"AND {deadline} > ? "
         "ORDER BY coalesce(json_extract(fact,'$.source_time'),0), "
         "json_extract(fact,'$.created_at'), entity_id",
-        (session,),
+        (session, CAPTURE_TTL_S, time.time()),
     ).fetchall()
     used = sum(int(row[2]) for row in rows)
     if used <= CAPTURE_SESSION_TOKENS:

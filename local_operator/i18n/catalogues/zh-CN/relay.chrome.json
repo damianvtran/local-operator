@@ -77,6 +77,8 @@
   "relay.chrome.session.resuming": "正在恢复……",
   "relay.chrome.session.degraded": "未响应——消息将等待发送",
   "relay.chrome.composer.label": "消息",
+  "relay.chrome.composer.placeholder.idle": "有问题尽管问……",
+  "relay.chrome.composer.placeholder.steer": "引导智能体……",
   "relay.chrome.composer.folder_label": "工作目录：{name}",
   "relay.chrome.composer.model_label": "模型：{label}",
   "relay.chrome.composer.spend_label": "费用与上下文：{label}",

@@ -1751,6 +1751,13 @@ CHARS_PER_BILLED_TOKEN = 2.78
 # the MEASURED HEAD plus this file's 55-token band (34,286 + 55), the same rule
 # the older entries above used — not a round number and not a guess.
 #
+# The directory/dm branch publishes four OPS the tool did not have
+# (`directory`, `dm`, `shared_conversations`, `shared_history`) plus the six
+# merged room ops. That is CAPABILITY cost, not discretionary prose: an earlier
+# round on this same feature failed at argument validation because the
+# recipient's accepted shapes were not described where the model looked.
+# Preserve the guidance, and derive the ceiling from the CONVERGED measurement
+# below plus this file's 55-token band, never from the pre-merge branch figure.
 # RATCHETED DOWN 34,341 -> 34,316 (ask/notify dedupe, ``asks/dedupe.py``): the
 # ``ask`` restraint, the ``notify`` description and system.md's has_notify
 # clause now say "an ask notifies — never also notify it; notify is for FYI".
@@ -1783,26 +1790,29 @@ CHARS_PER_BILLED_TOKEN = 2.78
 # +306 chars is the SAME delta the child arm below reports, which is the check.
 # Ceiling = measured head + the 55-token band (34,361 + 55).
 #
-# RAISED 34,416 -> 34,502 for NAME -> MEMBER RESOLUTION on ``channel_post``
-# (tb-name-resolution). The ``to`` schema gains a third key — ``{"name": …}``,
-# the form a human actually has and the one agents were refused on seven times
-# out of seven — so the published object gains one property and the description
-# gains the ONE clause that decides which op a model reaches for: trim,
-# case-insensitivity, whole-display-name matching, and the per-op scope
-# (``channel_post`` resolves inside the room, ``send``/``reply`` take ids). It is
-# schema text rather than only executor behaviour on purpose: a model should
-# pick the right op by reading the tool, not by failing first. Measured with
-# THIS script on both trees, one host, one after the other, isolated HOME:
-#   base (origin/main 98cde255f42)  95,524 chars = ~34,361 billed  PASS, 55 headroom
-#   head (this branch)               95,762 chars = ~34,447 billed
-#   delta                              +238 chars = ~+86
-# The delta is TWO things, and both are the published schema: +194 chars of
-# description clause and +44 of the new ``name`` property (44 of the +238 is the
-# property, not prose). Nothing in the instructions block or the tool inventory
-# moves — the bridge tool already ships on every surface — so the delta is the
-# whole of it, which is why the child arm below reports the same +238.
-# Ceiling = measured head + the 55-token band (34,447 + 55).
-BUDGET_BILLED_TOKENS = 34_502
+# CONVERGED directory/dm ceiling: the two ledgers above are inputs, not a sum.
+# Re-measured on this merged tree with an isolated HOME and this script:
+#   top 95,937 chars / 34,510 billed / 37 schemas; ceiling = 34,510 + 55.
+#
+# RAISED 34,565 -> 34,860 folding origin/main 66da866475f into the name-resolution
+# branch (tb-name-resolution). Measured with THIS script, both trees, one host,
+# one after the other:
+#   main-now (origin/main 66da866475f)  96,519 chars = ~34,719 billed
+#   merged (this branch)                96,757 chars = ~34,805 billed / 37 schemas
+#   delta                                   +238 chars = ~+86
+# The +86 is EXACTLY the delta this branch measured on its own base before the
+# fold (+238 chars, the ``name`` property plus the one clause that states the
+# matching rule and the per-op scope), which is the check that the fold itself
+# added no context.
+#
+# SAID PLAINLY: main-now already measures 34,719 against its own committed
+# 34,565 — 154 tokens over, i.e. the directory/dm ledger was set before the last
+# merges landed on main and main's tree has since grown. That drift is not this
+# branch's and is not absorbed silently: the ceiling below is this tree's own
+# measurement plus the 55-token band, and main's overshoot is reported here so
+# the owner of that ledger can tighten it separately.
+# Ceiling = measured head + the 55-token band (34,805 + 55).
+BUDGET_BILLED_TOKENS = 34_860
 
 #: The SUBAGENT ceiling (``--kind child``), in billed tokens. Same ratchet rules
 #: as ``BUDGET_BILLED_TOKENS`` above. It is a separate number because a child's
@@ -1966,6 +1976,7 @@ BUDGET_BILLED_TOKENS = 34_502
 # pays the same four actions' schema. Measured on the same tree:
 #   30,329 billed   FAIL, 126 over (after the prose trim)
 #   budget 30,380 (measured head + 51 headroom, the same band the parent uses)
+
 # RAISED 30,380 -> 30,520 with the top arm above, for the same bridge ``to``
 # schema: a child surface publishes the bridge tool too, so it carries the same
 # published description and the same string arm. Measured on the same trees:
@@ -1974,15 +1985,22 @@ BUDGET_BILLED_TOKENS = 34_502
 #   delta                             +306 chars = ~+110 (the same +306)
 # Ceiling = measured head + the 55-token band (30,465 + 55, the band used today;
 # the older "51 headroom" entry above is that pass's own arithmetic).
-# RAISED 30,520 -> 30,606 with the top arm above, for the same name -> member
-# resolution on ``channel_post``: the child surface publishes the bridge tool, so
-# it carries the same new ``name`` property and the same description clause.
-# Measured on the same trees, isolated HOME:
-#   base (origin/main 98cde255f42)  84,693 chars = ~30,465 billed  PASS, 55 headroom
-#   head (this branch)               84,931 chars = ~30,551 billed
-#   delta                              +238 chars = ~+86 (the same +238)
-# Ceiling = measured head + the 55-token band (30,551 + 55).
-BUDGET_CHILD_BILLED_TOKENS = 30_606
+# The directory/dm child ceiling is likewise re-derived on the converged tree,
+# because the child inventory carries the same bridge operations and recipient
+# schema. Both ceilings preserve the 55-token headroom band. Measured on the
+# merged tree: 85,106 chars / 30,614 billed; ceiling = 30,614 + 55.
+#
+# RAISED 30,669 -> 30,964 with the top arm above, folding origin/main 66da866475f
+# into the name-resolution branch. Same trees, same script, child arm:
+#   main-now (origin/main 66da866475f)  85,688 chars = ~30,823 billed
+#   merged (this branch)                85,926 chars = ~30,909 billed / 32 schemas
+#   delta                                   +238 chars = ~+86
+# The child pays the SAME +238 as the top arm — one published ``to`` property and
+# one clause, on a surface that already carries the bridge tool — which is the
+# check that nothing child-only moved. main-now's own overshoot (30,823 against
+# its committed 30,669) is main's drift, stated in the top arm's entry.
+# Ceiling = measured head + the 55-token band (30,909 + 55).
+BUDGET_CHILD_BILLED_TOKENS = 30_964
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:

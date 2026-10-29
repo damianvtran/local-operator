@@ -183,16 +183,17 @@ def test_every_generated_message_is_zero_argument() -> None:
 def test_translated_locales_use_their_copy_and_others_fall_back_to_english() -> None:
     french = catalogues.load_catalogue("fr", NAMESPACE)
     chinese = catalogues.load_catalogue("zh-CN", NAMESPACE)
+    spanish = catalogues.load_catalogue("es", NAMESPACE)
     for function in (keys.prompt(), keys.resume(), keys.job_id()):
         english = messages.render(function.code, function.params, locale="en")
-        for locale, catalogue in (("fr", french), ("zh-CN", chinese)):
+        for locale, catalogue in (("fr", french), ("zh-CN", chinese), ("es", spanish)):
             rendered = messages.render(function.code, function.params, locale=locale)
             # The locale carries the namespace: the catalogue is the expected
             # bytes, and it must be a real translation, not the English source.
             assert rendered == render_message(catalogue[function.code], function.params, locale)
             assert rendered != english
         # Every locale without this namespace still falls back to the source.
-        for locale in ("es", "ru", "vi", "hi", "unknown"):
+        for locale in ("ru", "vi", "hi", "unknown"):
             assert messages.render(function.code, function.params, locale=locale) == english
 
 

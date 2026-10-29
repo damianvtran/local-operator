@@ -1,0 +1,22 @@
+{
+  "cli.exec_help.agent_id": "ID del agente que usar para esta ejecución (alternativa a --agent por nombre)",
+  "cli.exec_help.background": "Separar la tarea: iniciar un worker en segundo plano con un archivo de registro y salir de inmediato",
+  "cli.exec_help.clear_goal": "Borrar el objetivo permanente reanudado",
+  "cli.exec_help.command": "Prompt literal; ''-'' u omitirlo con stdin por tubería lee stdin; opcional para un bucle",
+  "cli.exec_help.control": "Dirigir aprobaciones y preguntas a un supervisor conectado (puede esperar). Sin este flag, las aprobaciones sin TTY se deniegan; la detección y la conexión en vivo están disponibles en ambos casos. --yolo sigue siendo una anulación explícita de aprobaciones.",
+  "cli.exec_help.effort": "Fijar el esfuerzo de razonamiento; se valida con el modelo seleccionado",
+  "cli.exec_help.goal": "Fijar un objetivo permanente literal. A diferencia de /goal en la TUI, esto NO envía también el texto como mensaje: combínalo con un prompt o --loop",
+  "cli.exec_help.json": "Emitir una línea JSON por evento del agente en lugar del texto final",
+  "cli.exec_help.loop": "Ejecutar N iteraciones de continuación tras el prompt opcional; requiere un objetivo permanente",
+  "cli.exec_help.loop_goal": "Continuar y evaluar este objetivo hasta lograrlo (sin un número fijo de iteraciones)",
+  "cli.exec_help.name": "Fijar el nombre persistente de la conversación",
+  "cli.exec_help.output_format": "Exigir el formato de la respuesta FINAL del asistente. La ejecución falla (exit 1) si no se produce un payload válido dentro de --output-retries. Predeterminado: sin exigencia; el comportamiento no cambia.",
+  "cli.exec_help.output_retries": "Máximo de reintentos tras una respuesta final fallida (0-5; predeterminado: 2). Requiere --output-format.",
+  "cli.exec_help.output_schema": "Archivo JSON Schema que debe cumplir el payload JSON/YAML/TOML decodificado. Para --output-format markdown: un objeto JSON '{'''required_sections'': [...]'}'. Requiere --output-format.",
+  "cli.exec_help.profile": "Asociar un rol o especialista reutilizable (equivalente a /agent; no el antiguo --agent)",
+  "cli.exec_help.status": "Leer como JSON el estado duradero de un trabajo en segundo plano; no inicia una sesión",
+  "cli.exec_help.supervisor_fd": "Escribir la capacidad de operador de esta ejecución en este descriptor heredado para que el supervisor que tiene el otro extremo pueda APROBAR las tarjetas que esta ejecución deja en espera (etapa E). Requiere --control; se rechaza con --background. Solo números de descriptor: el valor nunca pasa por argv, el entorno o un archivo.",
+  "cli.exec_help.team": "Asociar un equipo guardado con su manager, miembros e instrucciones",
+  "cli.exec_help.tools": "Herramientas separadas por comas a las que puede acceder esta ejecución, y las ÚNICAS. Las herramientas excluidas son inaccesibles, no solo no aprobadas. La declaración sirve de APROBACIÓN para sus propios miembros solo cuando nadie puede responder: una ejecución sin TTY y sin --control; en un terminal y con --control, el control de aprobaciones sigue decidiendo cada llamada de escritura o ejecución. Un nombre que no existe en esta compilación es inaccesible y se informa de ello",
+  "cli.exec_help.workstream": "Publicar esta ejecución como un WORKSTREAM paralelo y duradero solicitado por el operador: aparece en la barra lateral, /resume y la lista del teléfono, contiene la sesión que lo abrió y permite seguirlo y dirigirlo. Sin esto, una ejecución abierta por un agente queda efímera: oculta en todas partes y silenciosa. Solo cambia la visibilidad de la fila, nunca el tratamiento de aprobaciones (combínalo con --control para eso). No deja marcas fuera del shell de un agente"
+}

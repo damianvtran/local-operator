@@ -1,0 +1,34 @@
+AUDIT LOG — es / wire.settings.hub_defaults / w1a4 (round 3, delta only)
+================================================================
+
+Every command below ran in /Users/damian/lo-i18n-es; the output is this run's own.
+
+# namespace wire.settings.hub_defaults
+
+=== hashes, computed here (not copied from the delegation) ===
+  en  sha256 8720b5719479b638eab24b081f76f97c44ce8d8554cb1b8280f6980182b6740c
+  es  sha256 0816c139dda2caf2055e7b395a4bd0563c7c145a9508e9f0dc8bc757cfe01753
+  ctx sha256 a337e7394f3856476044f9accdb8daeb7a864a9a8ecfe0c579ec97ec646712ba
+
+=== byte-identity of everything OUTSIDE the delta ===
+$ python3 -  # diff current values against the values this auditor read at w1a3
+  keys on disk 9, keys read at w1a3 9
+  keys whose value differs: 2 -> ['wire.settings.hub_defaults.agents.help', 'wire.settings.hub_defaults.teams.help']
+  keys on disk not read at w1a3: []
+  unchanged keys: 7
+  => the differing set is exactly the declared delta
+
+=== label budget: truncate_cells(x, 29) must be a no-op on every label ===
+  agents          29 cells  'Autoactualizar agentes/habil.'  no-op=True
+  teams           28 cells  'Suscribir vínculos de equipo'  no-op=True
+
+=== help strings against the detail band ===
+  agents         es  68  en  69  whole@80=True  whole@100=True
+  teams          es  71  en  67  whole@80=True  whole@100=True
+
+=== mechanical parity (failures only) ===
+  failures=0
+
+=== writes performed by this round ===
+Only this directory: record.json, report.md, audit.log. No catalogue, sidecar, ledger,
+allowance or generated file was edited; no git command was run.

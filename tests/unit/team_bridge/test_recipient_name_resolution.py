@@ -84,9 +84,20 @@ def _destination_open(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture(autouse=True)
 def _gates_open(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Same shape ``test_channel_tool`` uses: the fences are not under test here."""
+    """Same shape ``test_channel_tool`` uses: the fences are not under test here.
+
+    THREE fences, not two: main moved ``channel_post`` onto the RELAXED outbound
+    fence (``host.outbound_tool_fence`` → ``authority.outbound_authority_fence``,
+    the one that lets any bridge-connected writer session of the enrolled owner
+    post). Patching only the strict ``owner_fence_refusal`` left the real relaxed
+    fence running against this test's empty config dir, which refuses
+    ``feature_off`` before resolution is ever reached — so every case here would
+    have passed for the wrong reason. Each gate is opened explicitly and the
+    tests below assert the resolution itself, not the fence.
+    """
 
     monkeypatch.setattr(host_mod, "owner_fence_refusal", lambda runtime: None)
+    monkeypatch.setattr(host_mod, "outbound_tool_fence", lambda runtime: None)
     monkeypatch.setattr(host_mod, "admission_refusal", lambda runtime, *, is_read=False: None)
 
 
@@ -203,7 +214,13 @@ async def test_an_undirected_post_stays_byte_identical_and_records_nothing(tmp_p
         {"op": "channel_post", "channel_id": CHANNEL, "body": "hello"},
     )
     assert outcome["ok"] is True
-    assert outcome["resolved_account_id"] == ""
+    # ABSENT, not empty: main's one receipt builder (``_post_receipt``, shared
+    # with ``dm``) adds ``resolved_account_id`` only when the write NAMED a
+    # member, so an undirected post carries no such key rather than an empty
+    # string pretending to be an id. The property that mattered before the fold
+    # still holds and is asserted below: nothing was resolved, nothing was
+    # mentioned, nothing was audited.
+    assert "resolved_account_id" not in outcome
     # No conversation read, no mentions key, no audit row: nothing was resolved.
     assert [call["method"] for call in client.calls] == ["conversation_send"]
     assert _sends(client)[0]["mentions"] is None

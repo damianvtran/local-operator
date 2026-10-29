@@ -133,6 +133,8 @@ export type MessageParams = {
   "relay.chrome.composer.folder_label": { "name": string };
   "relay.chrome.composer.label": undefined;
   "relay.chrome.composer.model_label": { "label": string };
+  "relay.chrome.composer.placeholder.idle": undefined;
+  "relay.chrome.composer.placeholder.steer": undefined;
   "relay.chrome.composer.spend_label": { "label": string };
   "relay.chrome.drawer.appearance": undefined;
   "relay.chrome.drawer.close": undefined;
@@ -210,7 +212,6 @@ export type MessageParams = {
   "relay.chrome.spend.title": undefined;
   "relay.health.dropped_detail": undefined;
   "relay.health.ended_detail": undefined;
-  "relay.health.ended_placeholder": undefined;
   "relay.health.ended_send_failed": undefined;
   "relay.health.live": undefined;
   "relay.health.live_detail": undefined;
