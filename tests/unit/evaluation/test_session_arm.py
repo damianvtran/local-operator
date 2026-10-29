@@ -4601,14 +4601,18 @@ class TestTheStreamCompletedStopBoundary:
         assert len(calls) == 5  # the graceful stop: no 6th root request
         assert '"progress_stop"' in text or "action_progress_stop" in text
         stamped, rows = self._policy_stamp_from_record(outcome)
-        assert stamped == outcome.progress_guards == {
-            "on": True,
-            "guards": [
-                {"code": "repeated-batch", "threshold": 4},
-                {"code": "no-change", "threshold": 6},
-                {"code": "ask-loop", "threshold": 3},
-            ],
-        }
+        assert (
+            stamped
+            == outcome.progress_guards
+            == {
+                "on": True,
+                "guards": [
+                    {"code": "repeated-batch", "threshold": 4},
+                    {"code": "no-change", "threshold": 6},
+                    {"code": "ask-loop", "threshold": 3},
+                ],
+            }
+        )
         assert len(rows) == 1
         assert rows[0]["on"] is True and rows[0]["guards"] == stamped["guards"]
 
