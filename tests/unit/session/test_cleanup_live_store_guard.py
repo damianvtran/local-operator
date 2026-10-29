@@ -34,6 +34,22 @@ from local_operator.session.cleanup import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _no_inherited_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every test in this file starts with the opt-in ABSENT.
+
+    THE HAZARD, in the ambient-isolation suite's own words: an inherited
+    ESCAPE HATCH "makes every cell take the allow path while looking like it
+    tested the refusal". ``ALLOW_TEST_STORE_DELETIONS_ENV`` is registered in
+    ``tests/conftest.py::_AMBIENT_VARS`` so the whole run scrubs it; this
+    fixture states the same guarantee beside the cells that depend on it, so
+    the file stays honest if that entry is ever removed or this file is run
+    somewhere the global fixture does not apply. The cells that DO mean the
+    opt-in set it through ``monkeypatch`` in their own body.
+    """
+    monkeypatch.delenv(ALLOW_TEST_STORE_DELETIONS_ENV, raising=False)
+
+
 def _store(root: Path, session_id: str = "abc") -> Path:
     """A marked store with one real-looking session directory; returns the target."""
     sessions = root / "sessions"
@@ -59,6 +75,19 @@ def test_pytest_is_detected_as_a_test_run() -> None:
     assert cleanup._test_run_reason() is not None
 
 
+def test_the_opt_in_cannot_be_inherited_from_the_environment() -> None:
+    """A shell that exported the opt-in cannot waive these refusal cells.
+
+    CI found the gap this pins: the variable was read by production code but
+    declared nowhere, so an operator (or a rig) with it exported made every cell
+    in this file take the ALLOW path while looking like it tested the refusal —
+    a fail-closed guard proven by nothing. It is now scrubbed for the whole run
+    (``tests/conftest.py::_AMBIENT_VARS``) and again by the autouse fixture above;
+    this asserts the second one is actually in force.
+    """
+    assert ALLOW_TEST_STORE_DELETIONS_ENV not in os.environ
+
+
 def test_a_test_run_is_refused_on_the_live_store(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -70,7 +99,6 @@ def test_a_test_run_is_refused_on_the_live_store(
     """
     target = _store(tmp_path)
     _live(monkeypatch, tmp_path)
-    monkeypatch.delenv(ALLOW_TEST_STORE_DELETIONS_ENV, raising=False)
 
     with caplog.at_level(logging.WARNING, logger="local_operator.session.cleanup"):
         done = remove_session_dir(target, config_dir=tmp_path, policy="p", reason="r", actor="test")
@@ -142,7 +170,6 @@ def test_a_temporary_store_is_not_refused_under_a_test_run(
     """
     target = _store(tmp_path)
     # NOT patched: the real live-store set is in force, and this store is not in it.
-    monkeypatch.delenv(ALLOW_TEST_STORE_DELETIONS_ENV, raising=False)
     assert (tmp_path / "sessions").resolve() not in cleanup._live_session_stores()
 
     assert (
@@ -206,7 +233,6 @@ def test_every_destructive_path_is_gated_not_just_the_directory_remover(
     os.utime(quarantine, (0, 0))
     mark_store(sessions)
     _live(monkeypatch, tmp_path)
-    monkeypatch.delenv(ALLOW_TEST_STORE_DELETIONS_ENV, raising=False)
 
     # 1. a pad's content (the delegated class's content phase)
     assert (
