@@ -1,0 +1,42 @@
+{
+  "affected_historical_row_index": 10,
+  "affected_historical_row": {
+    "locale": "es",
+    "namespace": "tui.transcript",
+    "source_sha256": "d39f5d6c42e5a4ef6885661a05da0371646ed8616718ba5f61aacf43b78f5dcf",
+    "translator": {
+      "agent": "coder/e8b8156e7ac1",
+      "model": "openai/gpt-6.1-sol (initial draft) + deepseek/deepseek-flash (R2 remediation, after the 12:22:04Z model transition)",
+      "date": "2026-10-12"
+    },
+    "auditor": {
+      "agent": "i18n-auditor/hub-es-native-audit-recovery",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-10-12",
+      "result": "passed",
+      "findings": 0
+    },
+    "status": "passed",
+    "note": "Fresh UNION ledger for the 17-key tui.transcript source. Whole-17 coverage is TRANSITIVE and changed-keys-only: old 10 carried from the prior ledger entry, 4 R1-unchanged new keys re-attested, and R2 fixed keys (actions, reply_requested, steered) freshly re-audited — no full-17 re-audit is claimed. R2 native audit passed: 96d02f38241b/scratchpad/es-native-delta-audit-r2-model-corrected.json sha256 c5340386f2fce6e1d2fd8a5921b9964bb4a2edfd192d9cb5cf5d4a6722584a15; original R2 proof retained, report metadata-corrected (model claim corrected to actual generation usage). Translator trajectory: GPT initial draft, then Deepseek remediation after the recorded 12:22:04Z transition (phase note: session e8b8156e7ac1 scratchpad media-rig/translator-provenance-correction.md)."
+  },
+  "previous_current_row_index": 13,
+  "previous_current_row": {
+    "locale": "es",
+    "namespace": "tui.transcript",
+    "source_sha256": "13915d6c6dcec0da9fd892c1cb74c23546045717c1d3400d264e8608e75876ba",
+    "translator": {
+      "agent": "i18n-translator",
+      "model": "radient/auto",
+      "date": "2026-10-16"
+    },
+    "auditor": {
+      "agent": "i18n-auditor",
+      "model": "radient/auto",
+      "date": "2026-10-16",
+      "result": "passed",
+      "findings": 0
+    },
+    "status": "passed",
+    "note": "Fresh INDEPENDENT audit of the CARRIED content against the new en source (13915d6c6dcec0da9fd892c1cb74c23546045717c1d3400d264e8608e75876ba): 17/17 keys with en key-set parity, argument tuples (name+kind) and order parity, and complete CLDR plural categories per locale; the one changed key (tui.transcript.group.actions, ICU singular noun) was verified to render correctly at count 1 in this locale, and none of the locale's own bytes were touched by this branch. Verdict passed, findings 0. Two accepted dispositions: MINOR - es/fr 'many' omits the 'de' preposition vs the guide example, documented as a deviation on the en sidecar; NIT - the guide-example mismatch is guide-side only. Re-attestation of carried translations: no retranslation, no locale byte moved; this row supersedes the prior passed row for the same (locale, namespace) and records the audit that earned the new source hash."
+  }
+}
