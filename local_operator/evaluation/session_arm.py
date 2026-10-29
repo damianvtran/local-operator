@@ -128,6 +128,7 @@ from local_operator.evaluation.lifecycle import (
     aggregate_cleanup,
 )
 from local_operator.evaluation.protocol import ActionBatch, FinishAction, Observation
+from local_operator.evaluation.receipts import BudgetAuthorization
 from local_operator.evaluation.record_sink import RecordSink, RecordSinkError
 from local_operator.evaluation.runner.action_tool import (
     ACTION_TOOL_NAME,
@@ -146,6 +147,14 @@ from local_operator.evaluation.runner.episode import (
     _observation_phase_failure,
     _rebindable_failure,
     _terminal_kind,
+)
+from local_operator.evaluation.runner.guards import (
+    RECENT_TURNS_WINDOW,
+    TURN_WINDOW_GUARD_TYPES,
+    EpisodeGuard,
+    GuardInput,
+    GuardVerdict,
+    describe_progress_policy,
 )
 from local_operator.evaluation.runner.model import EpisodeTurn
 from local_operator.evaluation.runner.provider_client import (
@@ -356,6 +365,30 @@ FINISH_ACK = (
 BUDGET_ACK = (
     "Episode step budget reached: the environment will not accept further "
     "actions and the run will be scored on the state reached. Do not call this "
+    "tool again."
+)
+
+#: The ``details["terminal"]`` of the call a progress guard stopped on. The
+#: ``terminal_reason`` is the guard's own stable code (``repeated-batch``,
+#: ``no-change``, ``ask-loop``), the same token the runner writes as
+#: ``truncation_reason``, so a campaign compares the two arms on one field.
+PROGRESS_GUARD_TERMINAL = "progress-guard"
+
+#: The model-facing half of a progress-guard truncation, appended after the
+#: screen the stopping batch produced, so the model is not left to invent a
+#: transport failure (task030's final claim).
+#:
+#: THE CAUSE COMES FROM THE GUARD, NEVER FROM THIS SENTENCE. It carries the
+#: fired guard's own ``detail`` and NOTHING about what changed, because the
+#: policy admits three guards and only two of them are about a static screen:
+#: ``repeated-batch`` and ``no-change`` are, but ``ask-loop`` stops a run of
+#: ``ask_user`` batches whose screens may all have moved. A sentence asserting
+#: "the screen and text stayed identical" would therefore tell an ask-loop run
+#: something false about its own stop, and the next reader would have to
+#: distrust the one place the arm explains itself.
+PROGRESS_STOP_ACK = (
+    "Episode stopped for lack of progress: {}. Your actions were delivered and "
+    "executed. The run will be scored on the state reached. Do not call this "
     "tool again."
 )
 
@@ -1037,6 +1070,23 @@ class ActionBridge:
     #: The channel sentence appended to the challenge -- see
     #: :data:`CHALLENGE_REPLY_GUIDANCE`.
     reply_guidance: str | None = None
+    #: The no-progress policy: the runner's OWN turn-window guards
+    #: (``runner.guards.progress_guards``), evaluated after every executed batch
+    #: exactly where ``EpisodeRunner._step`` evaluates them. ``None`` (the
+    #: default) keeps no turn window and runs no guard code, so a bridge built
+    #: without it is byte-for-byte the old one.
+    #:
+    #: WHY THE SESSION ARM NEEDS IT (OSWorld task030, 2026-10-28): the model
+    #: repeated one no-op chord on a frozen screen and the bridge accepted 53
+    #: calls; the recorded batches trip ``RepeatedBatchGuard`` at step 14 and
+    #: ``NoChangeGuard`` at step 16, so the reply arm would have stopped it.
+    #: WHY ONLY TURN-WINDOW GUARDS: the bridge cannot see the runner's cost,
+    #: cycle or wall counters, and a budget guard fed zeros would never fire
+    #: while reading as enforced -- so anything else is refused at build.
+    progress_guards: tuple[EpisodeGuard, ...] | None = None
+    #: The episode's own budget, required beside ``progress_guards`` because
+    #: ``GuardInput`` carries one. The turn-window guards never read it.
+    progress_budget: BudgetAuthorization | None = None
 
     #: Set when the bridge has decided the episode should end (``finish``, the
     #: step budget). The driver reads it after the turn: a reason here is the
@@ -1048,6 +1098,10 @@ class ActionBridge:
     #: outcome's ``diagnostic`` so the record and the driver's summary agree on
     #: WHY the run ended, instead of both saying only that it ended.
     end_diagnostic: str | None = None
+    #: The guard code when a progress guard ended the episode, else ``None``.
+    #: Kept apart from ``end_requested`` so the driver maps a guard stop to
+    #: ``truncated`` without hard-coding the guard vocabulary.
+    progress_stop_code: str | None = None
 
     def __post_init__(self) -> None:
         # The token is armed with observation zero, which only exists once the
@@ -1114,6 +1168,26 @@ class ActionBridge:
         #: successful ``execute`` only -- a re-bind of any other class is not
         #: evidence the environment accepts input again.
         self._consecutive_not_applied = 0
+        if self.progress_guards is not None:
+            foreign = [
+                type(guard).__name__
+                for guard in self.progress_guards
+                if not isinstance(guard, TURN_WINDOW_GUARD_TYPES)
+            ]
+            if foreign:
+                raise SessionArmError(
+                    "the session arm runs only turn-window progress guards "
+                    f"(it cannot feed cost or budget counters): {', '.join(foreign)}"
+                )
+            if self.progress_budget is None:
+                raise SessionArmError("progress_guards require the episode's progress_budget")
+        #: The executed turns the progress guards read, in the runner's shape:
+        #: ``EpisodeTurn(observation, batch)`` where the batch is the one the
+        #: model chose ON that observation. Only EXECUTED batches enter (a
+        #: refusal ran nothing, a recovery re-read is not a decision), and the
+        #: list is trimmed to ``RECENT_TURNS_WINDOW`` -- the runner's bound.
+        #: Stays empty when the policy is off.
+        self._progress_turns: list[EpisodeTurn] = []
 
     def arm(self, observation: Observation) -> None:
         """Arm the token with the episode's first observation.
@@ -1836,6 +1910,7 @@ class ActionBridge:
             token.record_in_flight(result.observation)
             if self.record is not None:
                 self.record("batch", {"batch": batch, "result": result})
+            verdict = self._evaluate_progress(observation, batch, result.observation)
             rendered = self.render(result.observation)
             # ``_last_shown`` holds the render WITHOUT the correction below:
             # ``_shown_blocks`` re-attaches exactly this list to a later
@@ -1857,11 +1932,77 @@ class ActionBridge:
             details: dict[str, Any] = {"receipt": result.receipt.model_dump(mode="json")}
             if self._pending_ask_receipt is not None:
                 details["ask"] = self._pending_ask_receipt
+            if verdict is not None:
+                # The runner's truncation, on this channel: the step that just
+                # ran is the last one, its result (the screen it produced) is
+                # still delivered, and the episode is scored on the state it
+                # reached. The token goes terminal so any later call is refused
+                # before execute, and ``end_requested`` carries the guard's
+                # stable code -- the driver maps it to ``truncated`` and asks
+                # the session for the same graceful stop it uses at the budget.
+                token.mark_terminal()
+                self.end_requested = verdict.code
+                self.end_diagnostic = verdict.detail
+                self.progress_stop_code = verdict.code
+                if self.record is not None:
+                    self.record(
+                        "progress_stop",
+                        {"code": verdict.code, "detail": verdict.detail, "steps": self._steps},
+                    )
+                rendered = [*rendered, TextContent(text=PROGRESS_STOP_ACK.format(verdict.detail))]
+                details["terminal"] = PROGRESS_GUARD_TERMINAL
             return {
                 "content": [*self._pending_ask_delivery, *rendered],
                 "is_error": False,
                 "details": details,
             }
+
+    def _evaluate_progress(
+        self, decided_on: Observation, batch: ActionBatch, produced: Observation
+    ) -> GuardVerdict | None:
+        """The first ``truncate`` verdict over the post-step window, if any.
+
+        The snapshot is the runner's (``EpisodeRunner._evaluate_guards``): the
+        executed turns, newest last, then the observation this step produced as
+        an undecided turn, so a frame-comparison guard sees the screen the last
+        action left behind. ``steps_taken`` is the bridge's admitted count; the
+        cost/cycle fields are zero because no guard this bridge admits reads
+        them (enforced in ``__post_init__``).
+        """
+
+        if self.progress_guards is None or self.progress_budget is None:
+            return None
+        if self._steps >= self.max_steps:
+            # THE BUDGET WINS THE BOUNDARY, as it does on the runner. The
+            # runner folds ``steps_taken >= max_steps`` into ``truncated``
+            # BEFORE it evaluates any guard, so a window that completes on the
+            # episode's final allowed step is a ``max-steps`` truncation there.
+            # The bridge charges the epoch at admission and evaluates the
+            # window after it, so without this check the same step would report
+            # the guard's code -- two readers deriving two terminal reasons for
+            # one stop, and the design asks readers to tell the two apart by
+            # ``terminal_reason`` alone. The parity is PER-COUNTER, not numeric
+            # identity: the bridge counts admitted output epochs while the runner
+            # counts executed batches, so neither counter should be "aligned" to
+            # the other. No verdict here: the next call hits the
+            # budget admission below, and the driver names ``max-steps``.
+            return None
+        self._progress_turns.append(EpisodeTurn(observation=decided_on, batch=batch))
+        del self._progress_turns[:-RECENT_TURNS_WINDOW]
+        snapshot = GuardInput(
+            steps_taken=self._steps,
+            max_steps=self.max_steps,
+            model_cycles=0,
+            provider_cost_micros=0,
+            elapsed_ms=0,
+            recent_turns=(*self._progress_turns, EpisodeTurn(observation=produced)),
+            budget=self.progress_budget,
+        )
+        for guard in self.progress_guards:
+            verdict = guard.evaluate(snapshot)
+            if verdict.kind == "truncate":
+                return verdict
+        return None
 
     async def _after_failed_execute(self, *, error: Exception) -> dict[str, Any]:
         """One bounded re-bind after an execute failure, or a legible end.
@@ -2016,6 +2157,11 @@ class ActionBridge:
         token = self._token
         if token is not None:
             token.record_in_flight(recovered)
+        # A re-bind breaks the chain the progress guards read (each turn's
+        # batch produced the NEXT turn's observation): the failed batch's own
+        # screen was lost. Start the window over rather than compare across
+        # the gap -- the conservative direction, never a stop on a guess.
+        self._progress_turns.clear()
         shown_before = self._last_observation
         content: list[Any] = [
             *self._pending_ask_delivery,
@@ -2077,6 +2223,11 @@ class ActionBridge:
         token = self._token
         if token is not None:
             token.record_in_flight(recovered)
+        # A re-bind breaks the chain the progress guards read (each turn's
+        # batch produced the NEXT turn's observation): the failed batch's own
+        # screen was lost. Start the window over rather than compare across
+        # the gap -- the conservative direction, never a stop on a guess.
+        self._progress_turns.clear()
         shown_before = self._last_observation
         content: list[Any] = [
             *self._pending_ask_delivery,
@@ -2142,6 +2293,11 @@ class ActionBridge:
         token = self._token
         if token is not None:
             token.record_in_flight(recovered)
+        # A re-bind breaks the chain the progress guards read (each turn's
+        # batch produced the NEXT turn's observation): the failed batch's own
+        # screen was lost. Start the window over rather than compare across
+        # the gap -- the conservative direction, never a stop on a guess.
+        self._progress_turns.clear()
         shown_before = self._last_observation
         content: list[Any] = [
             *self._pending_ask_delivery,
@@ -2727,6 +2883,16 @@ class SessionArmOutcome:
     #: groups the admitted epoch never charged. ADDITIVE field -- historical
     #: rows and the ``steps`` semantics stay exactly as shipped.
     attempted_groups: int = 0
+    #: The no-progress policy that was IN FORCE for this run, as
+    #: :func:`~local_operator.evaluation.runner.guards.describe_progress_policy`
+    #: states it (``{"on": bool, "guards": [{"code", "threshold"}, ...]}``).
+    #: WHY IT IS HERE: this arm builds no ``EvidenceManifest``, so the launcher's
+    #: ``EpisodeSpec.metadata`` stamp reaches the reply arm only. Without this
+    #: field an on-policy and an off-policy session run of one task are
+    #: evidence-identical -- the pooling the opt-in must never cause. A stated
+    #: ``{"on": False}`` is data; a ``None`` here would mean the stamp itself
+    #: failed, which is never a normal ending.
+    progress_guards: Mapping[str, Any] = field(default_factory=dict)
     #: The stable token naming why the run ended: ``finish`` / ``max-steps`` /
     #: ``bridge-wedged`` on the terminalled paths; for an ``agent_stop`` or a
     #: ``failed`` the reason read from the end-of-turn facts (see
@@ -2767,8 +2933,21 @@ async def run_session_episode(
     confinement_root: Path | None = None,
     session_opener: Any = None,
     owner_status: OwnerStatusChannel | None = None,
+    progress_guards: tuple[EpisodeGuard, ...] | None = None,
 ) -> SessionArmOutcome:
     """Run ONE episode as a session: launch, reset, prompt, score, clean up.
+
+    ``progress_guards`` opts the episode into the runner's no-progress policy
+    (pass ``runner.guards.progress_guards()``); see
+    :attr:`ActionBridge.progress_guards`. ``None`` keeps the arm's historical
+    behaviour. WHICHEVER ONE RAN IS STAMPED IN THE ARM'S OWN RECORD -- a
+    ``progress_guards`` row in ``events.jsonl`` and ``progress_guards`` in
+    ``outcome.json`` (see
+    :func:`~local_operator.evaluation.runner.guards.describe_progress_policy`).
+    This arm builds no manifest, so the launcher's ``EpisodeSpec.metadata``
+    stamp reaches only the reply arm: without the row here, an on-policy and an
+    off-policy session run of the same task are evidence-identical and get
+    pooled, which is the one thing the opt-in is not allowed to cause.
 
     The order of calls mirrors ``EpisodeRunner`` deliberately, comment for
     comment where the two could drift: prepare is allocation-free, the rescue
@@ -2781,6 +2960,17 @@ async def run_session_episode(
     """
 
     started_ms = int(time.time() * 1000)
+    #: The policy stamp for the arm's own record, computed ONCE here so every
+    #: ending -- including the two failure paths -- carries the same value, and
+    #: so a pre-flight refusal states the policy it refused under rather than
+    #: going silently blank. See ``SessionArmOutcome.progress_guards``.
+    try:
+        policy_stamp = describe_progress_policy(progress_guards)
+    except TypeError:
+        # An undescribable guard is not a runnable policy, so there is no truthful
+        # stamp to write. Defer to ActionBridge's admission check: its SessionArmError
+        # travels the arm's established recorded-failure path instead of escaping here.
+        policy_stamp = {}
     # Record-level failures that are not the sink's own storage failures (an
     # event-fold error, a write into a closed sink). Declared before the try so
     # the failure path can report them too.
@@ -2801,6 +2991,7 @@ async def run_session_episode(
             status="failed_pre_bundle",
             episode_id=spec.episode_id,
             record_root=record_root,
+            progress_guards=policy_stamp,
             terminal_reason="record-sink",
             diagnostic=error.sentence,
             duration_ms=int(time.time() * 1000) - started_ms,
@@ -2948,6 +3139,13 @@ async def run_session_episode(
                 "sources": {name: str(path) for name, path in resolved_sources.items()},
             },
         )
+        # THE COMPARABILITY STAMP, in the record beside the declaration it
+        # belongs with: whether the no-progress policy was in force, and its
+        # thresholds. Written from ``policy_stamp`` -- the same value the
+        # outcome carries -- so the row and the outcome cannot disagree, and
+        # early enough that it survives an episode that dies mid-turn (a run
+        # that failed still has to be classifiable as on- or off-policy).
+        record.write("progress_guards", dict(policy_stamp))
 
         renderer = ObservationRenderer(config.artifact_root)
         bridge = ActionBridge(
@@ -2976,6 +3174,8 @@ async def run_session_episode(
             completion_gate=config.completion_gate,
             completion_challenges=config.completion_challenges,
             reply_guidance=CHALLENGE_REPLY_GUIDANCE.format(tool_name=declaration.tool_name),
+            progress_guards=progress_guards,
+            progress_budget=spec.budget if progress_guards is not None else None,
         )
         bridge.arm(observation)
         await bridge.start()
@@ -2993,6 +3193,7 @@ async def run_session_episode(
         #: ``_sink``). Closes guest admission AT the budget instead of one
         #: decision later, via the loop's own graceful boundary.
         budget_stop_sent = False
+        progress_stop_sent = False
         #: Whether the wall bound fired (``_on_wall`` below). The driver's own
         #: fact -- the abort reason never rides the end event -- and the
         #: terminal-reason classifier reads it after the turn.
@@ -3014,7 +3215,7 @@ async def run_session_episode(
             # event-fold error, a write after close) -- captured here, reported
             # in the outcome, and the run continues: a torn record stays
             # visible, and a paid episode is not lost to a logging fault.
-            nonlocal wedge_stop_sent, budget_stop_sent, last_turn_end
+            nonlocal wedge_stop_sent, budget_stop_sent, progress_stop_sent, last_turn_end
             try:
                 _on_event(record, bridge, event)
             except BaseException as error:  # noqa: BLE001 - see above
@@ -3047,6 +3248,15 @@ async def run_session_episode(
                     handle.session.request_graceful_cancel(
                         bridge.end_diagnostic or "action bridge wedged"
                     )
+            if not progress_stop_sent and bridge.progress_stop_code is not None:
+                # THE PROGRESS STOP: the wedge stop's boundary, for the same
+                # reason. The bridge already refuses every later call, so
+                # without this the model would spend turns on refusals until it
+                # gave up -- the 53-call shape this policy exists to end. The
+                # stopping call's result still pairs before the cancel is read.
+                progress_stop_sent = True
+                if handle is not None:
+                    handle.session.request_graceful_cancel(bridge.end_diagnostic or "no progress")
             # CLOSE GUEST ADMISSION AT THE BUDGET, not one decision later
             # (blueprint §3): the moment the tool result that consumed the Nth
             # admitted output epoch is PAIRED into the transcript, request the
@@ -3288,6 +3498,10 @@ async def run_session_episode(
             # default ``agent_stop`` read as capability and sent every F1
             # triage back into ``events.jsonl`` by hand.
             status = "failed"
+        elif bridge.progress_stop_code is not None:
+            # The runner's guard truncation: a scored partial whose reason is
+            # the guard's stable code (``truncation_reason`` on the reply arm).
+            status = "truncated"
         elif terminal_reason == "max-steps" or steps >= config.max_steps:
             status = "truncated"
             terminal_reason = terminal_reason or "max-steps"
@@ -3442,6 +3656,7 @@ async def run_session_episode(
             score=score,
             steps=steps,
             attempted_groups=bridge.attempted_groups,
+            progress_guards=policy_stamp,
             terminal_reason=terminal_reason,
             diagnostic=diagnostic,
             record_incomplete=record_failure is not None,
@@ -3529,6 +3744,7 @@ async def run_session_episode(
             status="failed_pre_bundle" if adapter_session is None else "failed",
             episode_id=spec.episode_id,
             record_root=record_root,
+            progress_guards=policy_stamp,
             terminal_reason=_failure_terminal_reason(error),
             diagnostic=f"{type(error).__name__}: {error}",
             rescue_required=rescue_required,
@@ -4163,6 +4379,7 @@ def _outcome_json(outcome: SessionArmOutcome) -> dict[str, Any]:
         "score": score_payload,
         "steps": outcome.steps,
         "attempted_groups": outcome.attempted_groups,
+        "progress_guards": dict(outcome.progress_guards),
         "terminal_reason": outcome.terminal_reason,
         "diagnostic": outcome.diagnostic,
         "rescue_required": outcome.rescue_required,

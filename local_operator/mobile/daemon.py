@@ -2453,9 +2453,14 @@ def _feature_flags() -> dict[str, Any]:
     global _FEATURE_FLAGS_MEMO
     if _FEATURE_FLAGS_MEMO is None:
         try:
+            from local_operator.server.features import DESKTOP_ONLY_FEATURES
             from local_operator.server.features import static_feature_flags as reader
 
-            _FEATURE_FLAGS_MEMO = dict(reader())
+            # A key only the desktop routes serve must not be advertised by a
+            # relay that would answer it with a legacy fallback.
+            _FEATURE_FLAGS_MEMO = {
+                key: value for key, value in reader().items() if key not in DESKTOP_ONLY_FEATURES
+            }
         except Exception:  # noqa: BLE001 — an absent/unreadable reader is "no features"
             _FEATURE_FLAGS_MEMO = {}
     flags = dict(_FEATURE_FLAGS_MEMO)
