@@ -77,6 +77,8 @@
   "relay.chrome.session.resuming": "खुल रहा है…",
   "relay.chrome.session.degraded": "उत्तर नहीं दे रहा — भेजे संदेश रुके रहेंगे",
   "relay.chrome.composer.label": "संदेश",
+  "relay.chrome.composer.placeholder.idle": "कुछ भी पूछें…",
+  "relay.chrome.composer.placeholder.steer": "एजेंट को दिशा दें…",
   "relay.chrome.composer.folder_label": "कार्य फ़ोल्डर: {name}",
   "relay.chrome.composer.model_label": "मॉडल: {label}",
   "relay.chrome.composer.spend_label": "ख़र्च और संदर्भ: {label}",

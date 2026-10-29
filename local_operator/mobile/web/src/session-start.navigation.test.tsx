@@ -86,7 +86,7 @@ describe("session creation routes", () => {
 		await publishProjection();
 		// The focus intent crossed the route boundary: the composer mounted after
 		// the projection, and the textarea is where the next keystroke lands.
-		expect(document.activeElement).toBe(screen.getByPlaceholderText("Message…"));
+		expect(document.activeElement).toBe(screen.getByPlaceholderText("Ask anything…"));
 	});
 
 	it("resuming a past session opens the durable session stream and paints its welcome", async () => {
@@ -99,14 +99,14 @@ describe("session creation routes", () => {
 		await publishProjection();
 		// An ordinary navigation does NOT steal focus — the intent is a one-shot
 		// and this route never carried one.
-		expect(document.activeElement).not.toBe(screen.getByPlaceholderText("Message…"));
+		expect(document.activeElement).not.toBe(screen.getByPlaceholderText("Ask anything…"));
 	});
 
 	it("a deep link to an existing session does not autofocus the composer", async () => {
 		history.replaceState(null, "", `#/s/${sessionId}`);
 		render(<App />);
 		await publishProjection("Existing conversation");
-		expect(document.activeElement).not.toBe(screen.getByPlaceholderText("Message…"));
+		expect(document.activeElement).not.toBe(screen.getByPlaceholderText("Ask anything…"));
 	});
 });
 
