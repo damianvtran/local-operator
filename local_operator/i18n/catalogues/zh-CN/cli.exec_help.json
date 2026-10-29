@@ -14,7 +14,7 @@
   "cli.exec_help.output_retries": "最终回复失败后的最大重试次数（0-5；默认2）。需要--output-format。",
   "cli.exec_help.output_schema": "解码后的JSON/YAML/TOML载荷必须满足的JSON Schema文件。对于--output-format markdown：JSON对象'{'''required_sections'': [...]'}'。需要--output-format。",
   "cli.exec_help.profile": "附加可复用角色/专家（对应/agent；非旧版--agent）",
-  "cli.exec_help.saver": "为此会话启用 Radient Saver（指定此标志时默认启用；也可使用 off 或 inherit）",
+  "cli.exec_help.saver": "为此会话启用 Radient Saver（指定该选项时默认启用；也可使用 off 或 inherit）",
   "cli.exec_help.status": "以JSON读取持久化后台任务状态；不启动会话",
   "cli.exec_help.supervisor_fd": "将本次运行的操作权限写入此继承的描述符，使持有另一端的监督者能批准本次运行挂起的卡片（阶段E）。需要--control；与--background同用时拒绝。仅传描述符编号，权限值不会进入argv、环境变量或文件。",
   "cli.exec_help.team": "附加已保存的团队及其管理者、成员和简报",

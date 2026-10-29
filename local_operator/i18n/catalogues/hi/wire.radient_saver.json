@@ -16,11 +16,11 @@
   "wire.radient_saver.notice.oversize": "इस बातचीत का एक संदेश Radient Saver के लिए बहुत बड़ा है, इसलिए उसे छोटा नहीं किया जाता। Saver बाक़ी बातचीत पर काम करता रहता है।",
   "wire.radient_saver.command.description": "इस सत्र के लिए Radient Saver सेट करें",
   "wire.radient_saver.command.radient_description": "Radient सत्र नियंत्रण",
-  "wire.radient_saver.command.usage": "‏/saver, /saver on, /saver off, /saver status या /saver inherit का उपयोग करें। अकेला /saver स्थिति बदलता है; inherit वैश्विक सेटिंग का पालन करता है।",
+  "wire.radient_saver.command.usage": "/saver, /saver on, /saver off, /saver status या /saver inherit का उपयोग करें। अकेला /saver स्थिति बदलता है; inherit वैश्विक सेटिंग का पालन करता है।",
   "wire.radient_saver.command.enabled": "इस सत्र के लिए Radient Saver चालू है। आपकी वैश्विक सेटिंग नहीं बदली।",
   "wire.radient_saver.command.disabled": "इस सत्र के लिए Radient Saver बंद है। आपकी वैश्विक सेटिंग नहीं बदली।",
-  "wire.radient_saver.command.inherited": "इस सत्र में Radient Saver अब वैश्विक सेटिंग और एजेंट नामांकन का पालन करता है।",
-  "wire.radient_saver.command.status.on": "‏Radient Saver: इस सत्र के लिए चालू है। बंद करने के लिए /saver off या वैश्विक सेटिंग का पालन करने के लिए /saver inherit का उपयोग करें।",
-  "wire.radient_saver.command.status.off": "‏Radient Saver: इस सत्र के लिए बंद है। चालू करने के लिए /saver on का उपयोग करें।",
+  "wire.radient_saver.command.inherited": "इस सत्र में Radient Saver अब वैश्विक सेटिंग और एजेंट निर्धारण का पालन करता है।",
+  "wire.radient_saver.command.status.on": "Radient Saver: इस सत्र के लिए चालू है। बंद करने के लिए /saver off या वैश्विक सेटिंग का पालन करने के लिए /saver inherit का उपयोग करें।",
+  "wire.radient_saver.command.status.off": "Radient Saver: इस सत्र के लिए बंद है। चालू करने के लिए /saver on का उपयोग करें।",
   "wire.radient_saver.command.badge": "saver"
 }
