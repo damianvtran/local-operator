@@ -40,8 +40,10 @@ import pytest
 from local_operator.harness.types import ToolContext
 from local_operator.tools.public_copy import (
     _PUBLIC_COPY_PATTERNS,
+    CORE_REPOSITORY,
     MOBILE_REPOSITORY,
     PUBLIC_COPY_GLOBS,
+    PUBLISHING_REPOSITORIES,
     UI_REPOSITORY,
     _matches_public_copy,
     _origin_identity,
@@ -66,6 +68,8 @@ MOBILE_ORIGIN_HTTPS = "https://github.com/damianvtran/local-operator-mobile.git"
 MOBILE_CATALOGUE = "src/i18n/catalogues/en/mobile.home.json"
 MOBILE_MAP = "src/i18n/catalogue.gen.ts"
 MOBILE_VALUE = "What can I help you with today?"
+CORE_ORIGIN_SSH = "git@github.com:damianvtran/local-operator.git"
+CORE_CATALOGUE = "local_operator/i18n/catalogues/en/wire.slash.json"
 
 ACCEPTED_PUBLIC_COPY_GLOBS: tuple[str, ...] = (
     "local_operator/i18n/catalogues/*/*.json",
@@ -111,16 +115,28 @@ def _git(root: Path, *args: str) -> None:
     )
 
 
-def _public_repo(tmp_path: Path) -> Path:
-    """A committed miniature checkout with a catalogue and a key module."""
-    root = tmp_path / "repo"
+def _public_repo(
+    tmp_path: Path,
+    *,
+    name: str = "repo",
+    value: str = "Type or paste a secret after a space; masked",
+    origin: str | None = None,
+) -> Path:
+    """A committed miniature checkout with a catalogue and a key module.
+
+    ``name``, ``value`` and ``origin`` exist so one test can stand two DISTINCT
+    core trees side by side with different bytes for the same key — the only
+    shape in which "the named checkout was read" cannot pass by reading the
+    session's own workspace.  Every existing caller passes none of them and gets
+    the original fixture: an origin-less checkout, which is exactly what the
+    session-workspace arm must keep serving now that a NAMED checkout has to
+    prove its identity.
+    """
+    root = tmp_path / name
     catalogue = root / "local_operator/i18n/catalogues/en"
     catalogue.mkdir(parents=True)
     (catalogue / "wire.slash.json").write_text(
-        json.dumps(
-            {"wire.slash.credential": "Type or paste a secret after a space; masked"},
-            ensure_ascii=False,
-        ),
+        json.dumps({"wire.slash.credential": value}, ensure_ascii=False),
         encoding="utf-8",
     )
     keys = root / "local_operator/i18n/keys"
@@ -132,6 +148,8 @@ def _public_repo(tmp_path: Path) -> Path:
     _git(root, "init", "-q")
     _git(root, "config", "user.email", "test@example.com")
     _git(root, "config", "user.name", "Test")
+    if origin is not None:
+        _git(root, "remote", "add", "origin", origin)
     _git(root, "add", "-A")
     _git(root, "-c", "commit.gpgsign=false", "commit", "-qm", "fixture")
     return root
@@ -1159,3 +1177,332 @@ def test_a_fifo_at_the_audit_path_refuses_without_blocking(
     assert "REFUSED" in proc.stdout
     assert "audit record could not be written" in proc.stdout
     assert "Type or paste a secret" not in proc.stdout
+
+
+# --- ``repo_root``: reading copy from a NAMED checkout -----------------------
+#
+# An independent translation audit reads a SPECIFIC branch from a checkout the
+# session is not standing in — the session cwd is wherever the agent is, often
+# the home directory.  ``repo_root`` names that directory; the directory is
+# admitted only when its git origin is one of the publishing repositories.  The
+# tests below pin both halves: the named tree is the one read, and every
+# neighbouring directory is refused by name.
+
+
+@pytest.mark.asyncio
+async def test_a_named_checkout_serves_that_checkouts_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two distinct committed trees, different bytes for the same key.
+
+    The assertion cannot pass by accident: a read that quietly fell back to the
+    session's own workspace returns the OTHER string, which is asserted absent.
+    """
+    workspace = _public_repo(
+        tmp_path, name="workspace", value="the workspace's copy", origin=CORE_ORIGIN_SSH
+    )
+    audited = _public_repo(
+        tmp_path, name="audited", value="the audited branch's copy", origin=CORE_ORIGIN_SSH
+    )
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    context = _context(workspace, tmp_path)
+    request = {"path": CORE_CATALOGUE, "key": "wire.slash.credential"}
+
+    named = await execute_read_public_copy(
+        "call-root-1", {**request, "repo_root": str(audited)}, None, None, context
+    )
+
+    assert not named.is_error, named.text
+    assert "the audited branch's copy" in named.text
+    assert "the workspace's copy" not in named.text
+
+    # CONTROL: the identical request without ``repo_root`` still reads the
+    # session workspace, so the difference above is the named checkout itself.
+    own = await execute_read_public_copy("call-root-2", request, None, None, context)
+    assert not own.is_error, own.text
+    assert "the workspace's copy" in own.text
+
+
+@pytest.mark.asyncio
+async def test_a_named_consumer_checkout_still_carries_its_identity_binding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The per-checkout binding survives a named root: the UI's catalogue is
+    served from it, the mobile app's generated map is still refused."""
+    workspace = _public_repo(tmp_path, origin=CORE_ORIGIN_SSH)
+    ui = _ui_repo(tmp_path)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    context = _context(workspace, tmp_path)
+
+    served = await execute_read_public_copy(
+        "call-root-ui",
+        {"path": UI_CATALOGUE, "key": "wire.slash.credential", "repo_root": str(ui)},
+        None,
+        None,
+        context,
+    )
+    assert not served.is_error, served.text
+    assert UI_VALUE in served.text
+
+    other_app = await execute_read_public_copy(
+        "call-root-ui-mobile-map",
+        {"path": MOBILE_MAP, "key": "mobile.home.greeting", "repo_root": str(ui)},
+        None,
+        None,
+        context,
+    )
+    assert other_app.is_error
+    assert "mobile app checkout's copy" in other_app.text
+
+
+@pytest.mark.asyncio
+async def test_a_traversal_out_of_the_named_checkout_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = _public_repo(tmp_path, name="workspace", origin=CORE_ORIGIN_SSH)
+    audited = _public_repo(tmp_path, name="audited", origin=CORE_ORIGIN_SSH)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+
+    result = await execute_read_public_copy(
+        "call-root-escape-1",
+        {"path": "../../../etc/passwd", "repo_root": str(audited)},
+        None,
+        None,
+        _context(workspace, tmp_path),
+    )
+
+    assert result.is_error
+    assert "the path is not inside the named checkout" in result.text
+
+
+@pytest.mark.asyncio
+async def test_an_absolute_path_outside_the_named_checkout_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = _public_repo(tmp_path, name="workspace", origin=CORE_ORIGIN_SSH)
+    audited = _public_repo(tmp_path, name="audited", origin=CORE_ORIGIN_SSH)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+
+    result = await execute_read_public_copy(
+        "call-root-escape-2",
+        {"path": "/etc/passwd", "repo_root": str(audited)},
+        None,
+        None,
+        _context(workspace, tmp_path),
+    )
+
+    assert result.is_error
+    assert "the path is not inside the named checkout" in result.text
+
+
+@pytest.mark.asyncio
+async def test_a_symlink_out_of_the_named_checkout_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A COMMITTED symlink whose allowlist-shaped name resolves outside.
+
+    Committed deliberately: the refusal must be the confinement, not a missing
+    file at ``HEAD``, so the negative control is a link git tracks and the
+    reader would otherwise serve.
+    """
+    workspace = _public_repo(tmp_path, name="workspace", origin=CORE_ORIGIN_SSH)
+    audited = _public_repo(tmp_path, name="audited", origin=CORE_ORIGIN_SSH)
+    outside = tmp_path / "outside.json"
+    outside.write_text(json.dumps({"wire.slash.credential": "outside the tree"}), encoding="utf-8")
+    link = audited / "local_operator/i18n/catalogues/en/escape.json"
+    link.symlink_to(outside)
+    _git(audited, "add", "-A")
+    _git(audited, "-c", "commit.gpgsign=false", "commit", "-qm", "symlinked copy")
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+
+    result = await execute_read_public_copy(
+        "call-root-escape-3",
+        {
+            "path": "local_operator/i18n/catalogues/en/escape.json",
+            "key": "wire.slash.credential",
+            "repo_root": str(audited),
+        },
+        None,
+        None,
+        _context(workspace, tmp_path),
+    )
+
+    assert result.is_error
+    assert "the path is not inside the named checkout" in result.text
+    assert "outside the tree" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_a_named_directory_outside_git_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = _public_repo(tmp_path, name="workspace", origin=CORE_ORIGIN_SSH)
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+
+    result = await execute_read_public_copy(
+        "call-root-plain",
+        {"path": CORE_CATALOGUE, "key": "wire.slash.credential", "repo_root": str(plain)},
+        None,
+        None,
+        _context(workspace, tmp_path),
+    )
+
+    assert result.is_error
+    assert f"repo_root {plain.resolve()} is not inside a git working tree" in result.text
+
+
+@pytest.mark.asyncio
+async def test_a_named_checkout_without_an_origin_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = _public_repo(tmp_path, name="workspace", origin=CORE_ORIGIN_SSH)
+    originless = _public_repo(tmp_path, name="originless")
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+
+    result = await execute_read_public_copy(
+        "call-root-originless",
+        {"path": CORE_CATALOGUE, "key": "wire.slash.credential", "repo_root": str(originless)},
+        None,
+        None,
+        _context(workspace, tmp_path),
+    )
+
+    assert result.is_error
+    assert f"repo_root {originless.resolve()} has no usable git origin" in result.text
+    assert "must be a clone of one of: " + ", ".join(PUBLISHING_REPOSITORIES) in result.text
+
+
+@pytest.mark.asyncio
+async def test_a_named_checkout_of_another_repository_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = _public_repo(tmp_path, name="workspace", origin=CORE_ORIGIN_SSH)
+    lookalike = _public_repo(tmp_path, name="lookalike", origin="git@github.com:someone/else.git")
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+
+    result = await execute_read_public_copy(
+        "call-root-lookalike",
+        {"path": CORE_CATALOGUE, "key": "wire.slash.credential", "repo_root": str(lookalike)},
+        None,
+        None,
+        _context(workspace, tmp_path),
+    )
+
+    assert result.is_error
+    assert f"repo_root {lookalike.resolve()} is a checkout of someone/else" in result.text
+
+
+@pytest.mark.asyncio
+async def test_a_named_symlink_or_a_nul_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = _public_repo(tmp_path, name="workspace", origin=CORE_ORIGIN_SSH)
+    real = _public_repo(tmp_path, name="real", origin=CORE_ORIGIN_SSH)
+    link = tmp_path / "link"
+    link.symlink_to(real, target_is_directory=True)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    context = _context(workspace, tmp_path)
+
+    linked = await execute_read_public_copy(
+        "call-root-link",
+        {"path": CORE_CATALOGUE, "key": "wire.slash.credential", "repo_root": str(link)},
+        None,
+        None,
+        context,
+    )
+    assert linked.is_error
+    assert f"repo_root {link} is a symlink; name the checkout directory itself" in linked.text
+
+    nul = await execute_read_public_copy(
+        "call-root-nul",
+        {"path": CORE_CATALOGUE, "key": "wire.slash.credential", "repo_root": "a\x00b"},
+        None,
+        None,
+        context,
+    )
+    assert nul.is_error
+    assert "repo_root must not contain NUL" in nul.text
+
+
+@pytest.mark.asyncio
+async def test_an_omitted_repo_root_still_reads_the_session_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """REGRESSION: the identity admission is scoped to a NAMED checkout only.
+
+    The fixture has NO origin — an ordinary cloned workspace or worktree of an
+    unrelated repository is still the session's own tree, and the tool must keep
+    serving it without asking for a git identity it never needed.
+    """
+    workspace = _public_repo(tmp_path, name="workspace", value="the workspace's copy")
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+
+    result = await execute_read_public_copy(
+        "call-root-absent",
+        {"path": CORE_CATALOGUE, "key": "wire.slash.credential"},
+        None,
+        None,
+        _context(workspace, tmp_path),
+    )
+
+    assert not result.is_error, result.text
+    assert "the workspace's copy" in result.text
+    assert result.details is not None
+    assert "checkout" not in result.details
+    records = [
+        json.loads(line)
+        for line in (tmp_path / "config" / "audit" / "public-copy-reads.jsonl")
+        .read_text()
+        .splitlines()
+    ]
+    assert records[-1]["path"] == CORE_CATALOGUE
+    assert "checkout" not in records[-1]
+    assert "checkout_root" not in records[-1]
+
+
+@pytest.mark.asyncio
+async def test_the_audit_record_names_the_checkout_that_was_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A receipt says WHICH tree served the bytes.
+
+    Identity alone cannot: two clones of the same repository share it, which is
+    exactly the pair above, so the record carries the root path as well.
+    """
+    workspace = _public_repo(
+        tmp_path, name="workspace", value="the workspace's copy", origin=CORE_ORIGIN_SSH
+    )
+    audited = _public_repo(
+        tmp_path, name="audited", value="the audited branch's copy", origin=CORE_ORIGIN_SSH
+    )
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    context = _context(workspace, tmp_path)
+    request = {"path": CORE_CATALOGUE, "key": "wire.slash.credential"}
+
+    named = await execute_read_public_copy(
+        "call-root-audit-1", {**request, "repo_root": str(audited)}, None, None, context
+    )
+    own = await execute_read_public_copy("call-root-audit-2", request, None, None, context)
+    assert not named.is_error, named.text
+    assert not own.is_error, own.text
+
+    records = [
+        json.loads(line)
+        for line in (tmp_path / "config" / "audit" / "public-copy-reads.jsonl")
+        .read_text()
+        .splitlines()
+    ]
+    assert len(records) == 2
+    named_record, own_record = records
+    assert named_record["checkout"] == CORE_REPOSITORY
+    assert Path(named_record["checkout_root"]) == audited.resolve()
+    assert named_record["path"] == CORE_CATALOGUE
+    assert named_record["policy"] == own_record["policy"]
+    # The session-workspace read keeps exactly the fields it always had.
+    assert "checkout" not in own_record
+    assert "checkout_root" not in own_record
+    assert named.details is not None
+    assert named.details["checkout"] == CORE_REPOSITORY
+    assert Path(named.details["checkout_root"]) == audited.resolve()

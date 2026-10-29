@@ -272,6 +272,34 @@ language. `zh-CN` and `ur` have zero catalogue files today and are not shipped;
 when they ship, their bundle is the same shape and their RTL layout comes from
 that existing capability field.
 
+### 4.2 Reading copy from a named checkout
+
+An independent translation auditor must read a specific branch where it lives,
+and the session's working directory is not that tree: the agent runs wherever it
+runs (often the home directory), and no session can move its own workspace onto
+the branch under audit. Without a sanctioned way to say WHICH tree, the only
+route left is a redaction bypass — the workaround `read_public_copy` exists to
+replace.
+
+So that tool takes an optional `repo_root`: the directory of a checkout to read
+from. The directory is admitted only when its git `origin` parses to one of the
+publishing repositories (`damianvtran/local-operator`,
+`damianvtran/local-operator-ui`, `damianvtran/local-operator-mobile`) — the same
+identities its allowlisted roots are spelled for, through the same parser the
+`src/` identity binding uses. Inside an admitted root the allowlist, the
+committed-`HEAD`-blob rule and the audit record are unchanged, and the record
+adds the resolved identity and root path. The file argument stays
+repository-relative: naming a checkout changes where the allowlist is applied,
+never what may be read.
+
+This is why it is still an audited route rather than a filesystem reader: the
+caller can name a **published tree**, not a file; a directory with no origin, an
+unrecognised origin (a fork, a lookalike, a tree created on the spot), a
+non-directory or a symlinked spelling is refused with a sentence naming the
+reason; and a `..`, absolute or symlinked path that leaves the admitted root is
+refused before the allowlist is consulted. The exact rule and its residuals are
+stated in `docs/security/redaction-policy.md` §4/§6.
+
 ## 5. Do-not-key boundary
 
 | Content | Treatment |

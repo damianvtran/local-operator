@@ -154,6 +154,23 @@ is **not** a redaction toggle:
   credential. This repository's own roots carry no identity gate: they are gated
   by the committed-blob rule below, so a consumer checkout has no route to a
   core catalogue it does not itself commit.
+* `repo_root` may name a **checkout directory** to read from when the session
+  working directory is not that tree — an independent audit reads a specific
+  branch from a named clone, and the session cannot move its own workspace
+  there. The directory is admitted only when it is inside a git working tree
+  whose `origin` parses (the same last-two-components rule above) to one of
+  `damianvtran/local-operator`, `damianvtran/local-operator-ui` or
+  `damianvtran/local-operator-mobile`. Inside an admitted root the allowlisted
+  roots, the committed-blob rule, the per-checkout identity binding and the
+  audit record apply exactly as they do for the session workspace, and the
+  record additionally carries the resolved identity and root path (two clones
+  of one repository share an identity; only the path says which tree served
+  the bytes). Naming a checkout changes **where** the allowlist applies, never
+  **what** may be read: the `path` argument stays repository-relative and
+  allowlisted, a `..`, absolute or symlinked path out of the admitted root is
+  refused, and a directory with no origin, an unrecognised origin, a
+  non-directory or a symlinked spelling is refused with a sentence naming the
+  reason. The session-workspace arm is unchanged and asks for no identity.
 * It serves **the committed blob only**: the file must be tracked and its
   working tree clean against `HEAD` (`git ls-files --error-unmatch` plus
   `git diff --quiet HEAD --`). A working-tree difference or an untracked file is
@@ -242,7 +259,9 @@ comment.
   it is not a signature. A process running as the same user can rewrite
   `remote.origin.url` and claim the UI or the mobile identity (either opens
   the shared `src/i18n/catalogues/` root), just as it can reach the files with
-  `bash`. The rule removes the accidental/unreviewed-tree class — a
+  `bash`. That covers a directory named through `repo_root` too — it is the
+  same origin read, from the named root. The rule removes the
+  accidental/unreviewed-tree class — a
   `src/i18n/` tree in an unrelated project no longer qualifies — and the audit
   log records use; it is not a sandbox against a same-user process.
 * The audit log is append-only by construction, not tamper-proof: a process

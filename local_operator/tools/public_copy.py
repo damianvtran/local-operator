@@ -55,6 +55,21 @@ nor the reverse; the gate lives in :func:`_committed_public_copy`;
 ``docs/security/redaction-policy.md`` states the exact rule and the same-UID
 residual.
 
+NAMING A CHECKOUT
+-----------------
+A session's cwd is not always the tree under audit: an independent translation
+audit runs from wherever the agent is and reads a specific branch, and the
+session has no way to move its own workspace there.  So ``repo_root`` may name a
+DIRECTORY.  It is admitted only when its ``origin`` reduces to one of
+:data:`PUBLISHING_REPOSITORIES` (:func:`_admitted_checkout`) — the same
+identities the roots above are spelled for.  Inside an admitted root the
+allowlist, the per-checkout identity binding, the committed-``HEAD`` rule and
+the audit record are the ones above, unchanged, and the record gains the
+resolved identity and path.  The file argument stays repository-relative:
+naming a checkout changes WHERE the allowlist is applied, never WHAT may be
+read, and a directory with no origin, an unrecognised origin or a symlink is
+refused by name.
+
 THE TRUST BOUNDARY
 ------------------
 The allowlisted roots are public copy by repository policy
@@ -120,6 +135,12 @@ PUBLIC_COPY_GLOBS: tuple[str, ...] = (
     "src/i18n/catalogue.gen.ts",
 )
 
+#: This repository's own identity.  It decides nothing for the session's own
+#: workspace — that is trusted by being the workspace — but a directory NAMED
+#: through ``repo_root`` has to show it is a published tree, and this is the
+#: identity the core roots belong to.
+CORE_REPOSITORY = "damianvtran/local-operator"
+
 #: The consumer checkouts' repository identities.  A `src/` root is served only
 #: when the workspace's `origin` remote parses to the identity that owns it: any
 #: checkout can contain a `src/i18n/` tree, so the path alone must not lift
@@ -175,6 +196,16 @@ _PUBLIC_COPY_PATTERNS: tuple[re.Pattern[str], ...] = _CORE_PUBLIC_COPY_PATTERNS 
     _MOBILE_MAP_PATTERN,
 )
 
+#: Every checkout whose committed copy this route may serve, derived from the
+#: two tables above rather than restated: the identities a named ``repo_root`` is
+#: admitted by are exactly the identities whose roots the allowlist spells.  A
+#: lookalike repository — or one created on the spot holding a matching tree —
+#: does not qualify by shape, and adding a fork here is a reviewed policy change
+#: like adding a glob.
+PUBLISHING_REPOSITORIES: tuple[str, ...] = (CORE_REPOSITORY,) + tuple(
+    identity for identity, _, _ in _CONSUMER_CHECKOUTS
+)
+
 #: The policy document this route cites.  The tool's details carry it so a
 #: transcript reader can find the rule that permitted the read.
 POLICY_DOCUMENT = "docs/security/redaction-policy.md"
@@ -202,6 +233,13 @@ class ReadPublicCopyParams(BaseModel):
     key: str | None = Field(
         default=None,
         description="Catalogue/message key; required for key modules and maps.",
+    )
+    repo_root: str | None = Field(
+        default=None,
+        description=(
+            "Optional checkout directory to read from, when the session cwd is not"
+            " that checkout; its git origin must be a publishing repository."
+        ),
     )
 
 
@@ -283,6 +321,89 @@ def _origin_identity(url: str) -> str:
     return "/".join(parts[-2:]).lower()
 
 
+def _admitted_checkout(raw: str) -> tuple[Path, str, str | None]:
+    """The checkout ``repo_root`` names, with its identity, or a refusal sentence.
+
+    WHY A DIRECTORY ARGUMENT IS NOT A FILE ARGUMENT
+    -----------------------------------------------
+    An independent translation audit reads copy from a checkout the session is
+    not standing in: the session cwd is wherever the agent happens to be (often
+    the home directory), while the branch under audit lives in a named clone.
+    With no audited way to say which tree, that audit has only a redaction
+    bypass — the workaround this module exists to replace.
+
+    So the caller may name a DIRECTORY, admitted only when its ``origin`` remote
+    reduces (through the same :func:`_origin_identity` the ``src/`` gate uses) to
+    one of :data:`PUBLISHING_REPOSITORIES`.  Naming a checkout changes WHERE the
+    untouched allowlist is applied, never WHAT may be read: the file argument
+    stays repository-relative, :func:`_committed_public_copy` still serves the
+    ``HEAD`` blob and still re-derives the identity of the root it reads, and
+    the audit record still precedes the content.
+
+    Refusals name the reason, because the caller's next move differs: a NUL or a
+    symlink is a malformed argument, a non-directory is not a checkout, a
+    directory outside a git working tree is not a clone at all, a missing origin
+    cannot be shown to be a publishing checkout, and an unrecognised origin is a
+    DIFFERENT repository.  The raw origin URL is never echoed (it can embed a
+    credential); only the reduced identity reaches the message.
+    """
+    if "\x00" in raw:
+        return Path(), "", "repo_root must not contain NUL; it names a directory"
+    try:
+        spelled = Path(raw).expanduser()
+    except RuntimeError:
+        # ``~user`` naming nobody: ``expanduser`` raises rather than returning.
+        return Path(), "", f"repo_root {raw} names no user this platform can resolve"
+    if spelled.is_symlink():
+        # The identity check would describe the TARGET while the refusal the
+        # caller reads would name the link; ask for the directory itself.
+        return Path(), "", f"repo_root {raw} is a symlink; name the checkout directory itself"
+    try:
+        root = spelled.resolve()
+    except (OSError, ValueError) as exc:
+        return Path(), "", f"repo_root {raw} could not be resolved ({exc})"
+    if not root.is_dir():
+        return Path(), "", f"repo_root {root} is not a directory"
+
+    def _git(*args: str) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.run(
+            ["git", "-C", str(root), "--no-replace-objects", *args],
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+
+    try:
+        inside = _git("rev-parse", "--is-inside-work-tree")
+        if inside.returncode != 0 or inside.stdout.strip() != b"true":
+            return Path(), "", f"repo_root {root} is not inside a git working tree"
+        origin = _git("remote", "get-url", "origin")
+    except (OSError, subprocess.SubprocessError) as exc:
+        return Path(), "", f"repo_root {root} could not be inspected ({exc})"
+    identity = (
+        _origin_identity(origin.stdout.decode("utf-8", "replace")) if origin.returncode == 0 else ""
+    )
+    if not identity:
+        return (
+            Path(),
+            "",
+            (
+                f"repo_root {root} has no usable git origin; a named checkout must be a"
+                " clone of one of: " + ", ".join(PUBLISHING_REPOSITORIES)
+            ),
+        )
+    if identity not in PUBLISHING_REPOSITORIES:
+        return (
+            Path(),
+            "",
+            (
+                f"repo_root {root} is a checkout of {identity}, not one of the publishing"
+                " repositories: " + ", ".join(PUBLISHING_REPOSITORIES)
+            ),
+        )
+    return root, identity, None
+
+
 #: The audit log's open flags.  ``O_NONBLOCK`` is for the FIFO case: with
 #: ``O_WRONLY`` and no reader the open returns ``ENXIO`` instead of blocking, so
 #: a FIFO planted at the path is a refusal rather than a hung tool call (review
@@ -362,16 +483,24 @@ def _record_read(
     chars: int,
     digest: str,
     context: ToolContext,
+    checkout: str | None = None,
+    checkout_root: Path | None = None,
 ) -> Path:
     """Append one audit record; raise when it cannot be written.
 
     The caller turns the exception into a refused read.  Returning content
     without its record is the one outcome this route may not have: it would be
     a silent bypass with a policy name on it.
+
+    ``checkout`` is present only for a read from a NAMED checkout.  Then the
+    record also carries that root's path, because two clones of the same
+    repository share an identity and only the path says which tree served the
+    bytes.  A session-workspace read keeps exactly the fields it always had, so
+    existing consumers of this log parse it unchanged.
     """
     path = _audit_path()
     session = Path(context.session_dir).name if context.session_dir else "unknown"
-    record = {
+    record: dict[str, Any] = {
         "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "tool": TOOL_NAME,
         "session": session,
@@ -381,6 +510,9 @@ def _record_read(
         "sha256": digest,
         "policy": POLICY_DOCUMENT,
     }
+    if checkout is not None:
+        record["checkout"] = checkout
+        record["checkout_root"] = str(checkout_root) if checkout_root is not None else None
     line = json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n"
     # O_APPEND keeps concurrent readers' records whole without a lock file; a
     # single write of a short line is atomic on the local filesystem.
@@ -521,19 +653,48 @@ async def execute_read_public_copy(
             "path must be a non-empty repository-relative path",
             is_error=True,
         )
+    repo_root_arg: str | None = None
+    if arguments.get("repo_root") is not None:
+        repo_root_arg = str(arguments["repo_root"])
+        if not repo_root_arg:
+            # An empty string is a caller that meant a checkout and did not name
+            # one; falling back to the session workspace would read a tree they
+            # did not ask for.
+            return _text(tool_call_id, "repo_root must name a directory", is_error=True)
 
     root = Path(context.cwd).expanduser().resolve()
-    resolved, inside, resolvable = _resolve_workspace_path(path_arg, context.cwd)
+    checkout: str | None = None
+    if repo_root_arg is not None:
+        admitted, checkout, refusal = _admitted_checkout(repo_root_arg)
+        if refusal is not None:
+            return _text(tool_call_id, f"refused: {refusal}", is_error=True)
+        root = admitted
+    # One resolver for both arms: ``_resolve_workspace_path`` is the single
+    # normalisation (``~``, ``..``, symlinks, NUL) the rest of the tool surface
+    # uses, and the admitted checkout replaces the session cwd as its root.
+    resolved, inside, resolvable = _resolve_workspace_path(path_arg, str(root))
     if not resolvable or not inside:
         return _text(
             tool_call_id,
-            "refused: the path is not inside this session's workspace",
+            (
+                "refused: the path is not inside this session's workspace"
+                if checkout is None
+                else f"refused: the path is not inside the named checkout {root}"
+            ),
             is_error=True,
         )
     try:
         relative = resolved.relative_to(root).as_posix()
     except ValueError:
-        return _text(tool_call_id, "refused: the path escapes the workspace", is_error=True)
+        return _text(
+            tool_call_id,
+            (
+                "refused: the path escapes the workspace"
+                if checkout is None
+                else f"refused: the path escapes the named checkout {root}"
+            ),
+            is_error=True,
+        )
     if not _matches_public_copy(relative):
         return _text(
             tool_call_id,
@@ -586,7 +747,13 @@ async def execute_read_public_copy(
     digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
     try:
         audit_file = _record_read(
-            relative=relative, key=key, chars=len(body), digest=digest, context=context
+            relative=relative,
+            key=key,
+            chars=len(body),
+            digest=digest,
+            context=context,
+            checkout=checkout,
+            checkout_root=root if checkout is not None else None,
         )
     except OSError as exc:
         # FAIL CLOSED. A route whose use is not recorded is not this route.
@@ -596,7 +763,7 @@ async def execute_read_public_copy(
             is_error=True,
         )
 
-    details = {
+    details: dict[str, Any] = {
         "path": relative,
         "key": key,
         "public_copy": True,
@@ -604,6 +771,10 @@ async def execute_read_public_copy(
         "audit_log": str(audit_file),
         "sha256": digest,
     }
+    if checkout is not None:
+        # The receipt says WHICH tree served the bytes, not merely that a tree did.
+        details["checkout"] = checkout
+        details["checkout_root"] = str(root)
     return _text(tool_call_id, body, details=details)
 
 
@@ -615,7 +786,10 @@ def build_read_public_copy_tool() -> AgentTool:
         description=(
             "Read committed public i18n copy through the audited route: a catalogue "
             "key, a key-module line, or a generated key map. Allowlisted; every read "
-            "is recorded."
+            "is recorded. repo_root names a publishing repository's checkout to read "
+            "when the session cwd is not one (origin must be "
+            + ", ".join(PUBLISHING_REPOSITORIES)
+            + "); the path stays relative and allowlisted."
         ),
         parameters=ReadPublicCopyParams.model_json_schema(),
         approval_tier="read",

@@ -495,7 +495,13 @@ MEASURED_TOKENS: dict[str, int] = {
     # NEW (redaction policy, PR #2796): the sanctioned public-copy reader.
     # 237 tokens measured through this test's own table; deliberately small —
     # it exists to avoid a bypass, not to be a second file browser.
-    "read_public_copy": 121,
+    # RE-MEASURED 2026-10-29 (named-checkout reads): 121 -> 206. The whole
+    # delta is the new ``repo_root`` parameter and the sentence that makes it
+    # discoverable — the identity list a checkout must match is model-visible
+    # because a caller whose clone is a fork needs to know before it calls.
+    # Measured through this test's own printed table; every other entry is
+    # byte-identical.
+    "read_public_copy": 206,
     "read_variable": 67,
     "secret": 186,
     # Advertised surface re-measured: explicit repeat + confirmed-reuse detail
