@@ -334,7 +334,14 @@ MEASURED_TOKENS: dict[str, int] = {
     # nothing. +62 on this opt-in reference; the paired start-context raise is
     # stated in scripts/bench_context_budget.py. Measured by this test's printed
     # table, no other tool's bytes moved.
-    "bridge": 839,
+    # 839 -> 884 (tb-name-resolution): the same ``to`` description now also states
+    # the ONE per-op difference that decides which op a model should reach for —
+    # a display name is a resolution request, and the scope it resolves in is the
+    # op's own (``channel_post``: that conversation's active members; send/reply:
+    # ids). +45 opt-in tokens on this reference doc, and the paired start-context
+    # raise (+86 billed per arm) is recorded in scripts/bench_context_budget.py.
+    # Measured by this test's printed table; no other tool's bytes moved.
+    "bridge": 884,
     # Re-measured with this test's canonical isolated renderer: the read-only
     # inspect_ownership operation adds 19 opt-in tokens, not wire prompt cost.
     # 1327 -> 1424 (2026-10-16): the browser `type` secret_ref convention adds
