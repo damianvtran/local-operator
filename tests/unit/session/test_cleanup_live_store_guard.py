@@ -19,6 +19,7 @@ would be the incident, not the proof.
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
 import pytest
@@ -177,6 +178,94 @@ def test_a_redirected_home_is_not_the_live_store(
         is True
     )
     assert not target.exists()
+
+
+def test_every_destructive_path_is_gated_not_just_the_directory_remover(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review round 1, m-1: the gate reaches all three non-``sessions/`` removers.
+
+    ``_live_store_refusal`` is consulted from ``_refusal``, which carries
+    ``remove_session_dir`` and ``hand_off_session_dir``. Three other paths delete
+    store data without going through it, and each is asked the same question here:
+    a pad's content, a just-minted directory, and the aged mesh-handoff
+    quarantine. None is reachable by a test process on the live store any more.
+    """
+    sessions = tmp_path / "sessions"
+    target = sessions / "abc"
+    scratch = target / "scratchpad"
+    scratch.mkdir(parents=True)
+    (target / "transcript.jsonl").write_text('{"role": "user"}\n', encoding="utf-8")
+    pad_file = scratch / "build.bin"
+    pad_file.write_bytes(b"y" * 64)
+    fresh = sessions / "fresh"
+    fresh.mkdir()
+    quarantine = tmp_path / "network" / cleanup.HANDED_AWAY_DIRNAME / "abc.1.deadbeef"
+    quarantine.mkdir(parents=True)
+    (quarantine / "transcript.jsonl").write_text("{}\n", encoding="utf-8")
+    os.utime(quarantine, (0, 0))
+    mark_store(sessions)
+    _live(monkeypatch, tmp_path)
+    monkeypatch.delenv(ALLOW_TEST_STORE_DELETIONS_ENV, raising=False)
+
+    # 1. a pad's content (the delegated class's content phase)
+    assert (
+        cleanup.remove_scratchpad_entry(pad_file, config_dir=tmp_path, sessions_dir=sessions)
+        is False
+    )
+    assert pad_file.is_file()
+    # 2. a just-minted directory (wake-rollback / failed-create)
+    assert (
+        cleanup.remove_fresh_session_dir(
+            fresh, config_dir=tmp_path, policy="failed-create", reason="r", actor="test"
+        )
+        is False
+    )
+    assert fresh.is_dir()
+    # 3. the aged handoff quarantine (mesh move housekeeping)
+    assert cleanup.sweep_handed_away(tmp_path) == []
+    assert (quarantine / "transcript.jsonl").is_file()
+
+
+@pytest.mark.parametrize(
+    "remover",
+    ["remove_scratchpad_entry", "remove_fresh_session_dir", "sweep_handed_away"],
+)
+def test_the_opt_in_also_permits_the_other_destructive_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, remover: str
+) -> None:
+    """The escape hatch reaches every gated path, or the gate is a trap.
+
+    A deliberate run against a live-shaped store (the legitimate case: proving one
+    of these removers' own behaviour) must be able to proceed with one variable.
+    """
+    sessions = tmp_path / "sessions"
+    target = sessions / "abc"
+    scratch = target / "scratchpad"
+    scratch.mkdir(parents=True)
+    pad_file = scratch / "build.bin"
+    pad_file.write_bytes(b"y" * 64)
+    fresh = sessions / "fresh"
+    fresh.mkdir()
+    quarantine = tmp_path / "network" / cleanup.HANDED_AWAY_DIRNAME / "abc.1.deadbeef"
+    quarantine.mkdir(parents=True)
+    (quarantine / "transcript.jsonl").write_text("{}\n", encoding="utf-8")
+    os.utime(quarantine, (0, 0))
+    mark_store(sessions)
+    _live(monkeypatch, tmp_path)
+    monkeypatch.setenv(ALLOW_TEST_STORE_DELETIONS_ENV, "1")
+
+    if remover == "remove_scratchpad_entry":
+        assert cleanup.remove_scratchpad_entry(pad_file, config_dir=tmp_path, sessions_dir=sessions)
+        assert not pad_file.exists()
+    elif remover == "remove_fresh_session_dir":
+        assert cleanup.remove_fresh_session_dir(
+            fresh, config_dir=tmp_path, policy="failed-create", reason="r", actor="test"
+        )
+        assert not fresh.exists()
+    else:
+        assert cleanup.sweep_handed_away(tmp_path) == [quarantine.name]
+        assert not quarantine.exists()
 
 
 def test_an_unmarked_live_store_still_reports_the_marker_refusal(

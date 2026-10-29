@@ -1032,6 +1032,25 @@ def _live_store_refusal(store: Path) -> str | None:
     return None
 
 
+def _live_config_refusal(config_dir: Path | str) -> str | None:
+    """The live-store refusal for a remover whose target is NOT under ``sessions/``.
+
+    :func:`_live_store_refusal` compares a resolved ``sessions/`` directory with
+    the operator's own. :func:`sweep_handed_away` deletes quarantine trees under
+    ``<config>/network/handed-away/`` — store data, but OUTSIDE ``sessions/`` —
+    so it has to ask that question about the CONFIG DIR. Building the store path
+    from the config dir and reusing the one comparison keeps a single definition
+    of "the live store" and a single refusal sentence. (A pad's content is inside
+    ``sessions/`` and calls :func:`_live_store_refusal` with the resolved store
+    directly.)
+    """
+    try:
+        store = (Path(config_dir) / SESSIONS_DIRNAME).resolve()
+    except OSError:
+        return None
+    return _live_store_refusal(store)
+
+
 def _refusal(target: Path, config_dir: Path | None) -> str | None:
     """Why :func:`remove_session_dir` must not touch ``target``; ``None`` if it may.
 
@@ -1231,7 +1250,6 @@ def remove_session_dir(
         # 4,261 ``wakes/spooled/.*.lock`` files with ZERO spooled rows — pure
         # accumulation of files keyed to conversations that are gone.
         _drop_session_sidecars(config_dir, target.name)
-    if config_dir is not None:
         # The ask INDEX lives OUTSIDE the session directory (see
         # ``asks/store.py`` on why the cross-session view cannot be a scan of
         # 4,000 session dirs), so the guards above — and this removal — are the
@@ -1239,6 +1257,9 @@ def remove_session_dir(
         # session directory is gone, so this is belt-and-braces; doing it at the
         # one place a directory is destroyed is what keeps the aggregate view
         # from briefly listing a conversation nobody can open.
+        # (One ``config_dir`` guard around all three: they are the same closure
+        # over the store's outside indexes, and two adjacent identical guards
+        # invited a later edit that dropped one of them — review N-1.)
         try:
             from local_operator.asks import store as ask_store
 
@@ -1540,6 +1561,19 @@ def sweep_handed_away(config_dir: Path, *, max_age_s: float = HANDED_AWAY_MAX_AG
     """
     root = Path(config_dir) / "network" / HANDED_AWAY_DIRNAME
     swept: list[str] = []
+    # The quarantine lives OUTSIDE sessions/ but INSIDE the store's config dir, so
+    # the gate is asked about the config dir (review round 1, m-1). A test process
+    # may not sweep the operator's real handoff quarantine: those trees are whole
+    # conversations on their way out, and the 24 h age bound is not a substitute
+    # for "this process has no business here".
+    live_test_run = _live_config_refusal(config_dir)
+    if live_test_run is not None:
+        logger.warning(
+            "session cleanup: REFUSED to sweep %s (%s); nothing was removed",
+            root,
+            live_test_run,
+        )
+        return swept
     try:
         children = list(root.iterdir())
     except OSError:
@@ -1609,6 +1643,19 @@ def remove_fresh_session_dir(
     if sessions_dir != expected:
         logger.warning(
             "session cleanup: REFUSED to remove fresh %s (not this config dir's store)", target
+        )
+        return False
+    # Same test-run gate as :func:`remove_session_dir` (review round 1, m-1): a
+    # just-minted directory is still a store directory, and the incident class
+    # this guard exists for does not care whether the session had a transcript yet.
+    live_test_run = _live_store_refusal(sessions_dir)
+    if live_test_run is not None:
+        logger.warning(
+            "session cleanup: REFUSED to remove fresh %s (%s); policy=%s reason=%s",
+            target,
+            live_test_run,
+            policy,
+            reason,
         )
         return False
     if not resolved.is_dir():
@@ -1916,6 +1963,14 @@ def _scratchpad_refusal(target: Path, *, config_dir: Path | None, sessions_dir: 
         return "not a path inside a session's scratchpad/ directory"
     if not store_marker_path(store).is_file():
         return f"store carries no {STORE_MARKER_NAME} marker"
+    # The same test-run gate :func:`_refusal` applies, at the same point in the
+    # order (before the config-dir comparison, so the more actionable sentence
+    # wins when both are true). A pad's content is store data: a test process
+    # pointed at the live config dir must not strip a live session's scratchpad
+    # any more than it may delete the directory itself.
+    live_test_run = _live_store_refusal(store)
+    if live_test_run is not None:
+        return live_test_run
     if config_dir is not None:
         try:
             expected = (config_dir / SESSIONS_DIRNAME).resolve()

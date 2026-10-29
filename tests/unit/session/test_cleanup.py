@@ -614,6 +614,57 @@ def test_every_removal_is_logged_at_warning_with_policy_and_reason(
     assert "dry_run" not in row
 
 
+def test_a_failed_removal_is_annotated_and_never_reads_as_a_removal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review round 1, m-2: the ``removal-failed`` row AND its census exclusion.
+
+    The receipt is written before the ``rmtree``, so a removal that then fails
+    leaves a row describing a removal that did not happen; ``_annotate_failed_removal``
+    appends the correction as a FOLLOWING row (the log is append-only).
+
+    The POLICY matters as much as the row. The census reads any row naming a
+    session as proof its directory left the store, so a failure row carrying the
+    original policy would silently explain away a LATER, genuinely unrecorded
+    disappearance — the one class the census exists for. Both halves are pinned
+    here because that argument is the whole reason the row exists.
+    """
+    from local_operator.session import census
+
+    _session(tmp_path, "doomed", transcript=True, age_days=1)
+    mark_store(tmp_path / "sessions")
+    target = tmp_path / "sessions" / "doomed"
+
+    def exploding(_target: Path) -> None:
+        raise OSError("simulated failure inside rmtree")
+
+    monkeypatch.setattr(cleanup, "_bounded_rmtree", exploding)
+
+    with pytest.raises(OSError):
+        remove_session_dir(
+            target, config_dir=tmp_path, policy="p", reason="r", actor="test", title="T"
+        )
+
+    assert target.is_dir(), "a failed removal must leave the directory alone"
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "sessions" / CLEANUP_LOG_NAME)
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert [row["policy"] for row in rows] == ["p", cleanup.REMOVAL_FAILED_POLICY]
+    receipt, failure = rows
+    assert failure["session"] == receipt["session"] == "doomed"
+    assert failure["actor"] == receipt["actor"] == "test"
+    assert failure["receipt_at"] == receipt["at"]
+    assert failure["failed_policy"] == "p" and failure["failed_reason"] == "r"
+    assert failure["error"].startswith("OSError: simulated failure inside rmtree")
+    # The exclusion the argument depends on, against the real predicate.
+    assert census._accounts_for_removal(receipt, "doomed") is True
+    assert census._accounts_for_removal(failure, "doomed") is False
+    assert cleanup.REMOVAL_FAILED_POLICY in census._NON_REMOVAL_POLICIES
+
+
 def test_the_switch_governs_every_caller_including_the_cli(tmp_path: Path) -> None:
     """Round 1 let a caller pass ``explicit=True`` to bypass the switch; that
     was the incident's shape (Q1/U2/R1-5). There is no such flag now: with
