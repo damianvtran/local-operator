@@ -489,8 +489,8 @@ def _admit_rig(
     from types import SimpleNamespace
 
     from local_operator.operator import handlers
-    from local_operator.operator.elevate import ElevationResult
     from local_operator.operator import trust as trust_module
+    from local_operator.operator.elevate import ElevationResult
 
     staged = trust_module.load_staged_anchor(root)
     assert staged is not None, "the rig's operator key staged no statement"

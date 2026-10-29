@@ -130,7 +130,8 @@ def _existing_retry(
 def _budget(root: Path, now: float) -> None:
     records = approvals.list_records(root=root, now=now)
     live = [
-        row for row in records
+        row
+        for row in records
         if row.get("kind") == approvals.KIND_OPERATOR_DEVICE_PAIR
         and row.get("state") not in approvals.TERMINAL_STATES
         and row.get("state") != approvals.STATE_FAILED
@@ -142,7 +143,8 @@ def _budget(root: Path, now: float) -> None:
             "Finish or withdraw it first.",
         )
     recent = sum(
-        1 for row in records
+        1
+        for row in records
         if row.get("kind") == approvals.KIND_OPERATOR_DEVICE_PAIR
         and 0 <= now - float(row.get("created_at") or 0.0) < FILING_WINDOW_S
     )

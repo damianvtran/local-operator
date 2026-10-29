@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+import httpx2 as httpx
 import pytest
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
@@ -37,8 +38,10 @@ def _fresh_filer() -> Any:
 
 
 def _point() -> bytes:
-    return ec.generate_private_key(ec.SECP256R1()).public_key().public_bytes(
-        Encoding.X962, PublicFormat.UncompressedPoint
+    return (
+        ec.generate_private_key(ec.SECP256R1())
+        .public_key()
+        .public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)
     )
 
 
@@ -64,7 +67,7 @@ def _client(root: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     return client
 
 
-def _file(client: TestClient, *, request_id: str = "req_TESTPHONE01") -> dict[str, Any]:
+def _file(client: TestClient, *, request_id: str = "req_TESTPHONE01") -> httpx.Response:
     spki, nonce = _b64(_point()), os.urandom(32)
     np = _b64(nonce)
     claim = client.post(
@@ -257,7 +260,12 @@ def test_filed_record_reaches_a_certificate_through_the_typed_cli(
     """
     from local_operator.operator.pair_handlers import approve_pair_request
     from local_operator.operator.verify import verify_device_cert
-    from tests.unit.operator.test_operator_pair_op import FILE_ONLY, _admit_rig, _level, _phone_code
+    from tests.unit.operator.test_operator_pair_op import (
+        FILE_ONLY,
+        _admit_rig,
+        _level,
+        _phone_code,
+    )
 
     client = _client(root, monkeypatch)
     filed = _file(client)
