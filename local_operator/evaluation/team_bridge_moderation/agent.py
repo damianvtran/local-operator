@@ -42,11 +42,17 @@ import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Mapping, Protocol, Sequence
 
 from .dataset import ModerationCase, Step, render_step_body
+from .egress import (
+    EgressRegistry,
+    ExtractionProblem,
+    Payload,
+    extract_payloads,
+    load_registry,
+)
 from .fixture import FixtureWorld, enroll_bridge, record_inbound_delivery
-from .egress import EgressRegistry, Payload, extract_payloads, load_registry
 from .gates import Controls, InboundOutcome
 from .hubarm import (
     DEFAULT_EVAL_ROLE,
@@ -175,9 +181,7 @@ def _shape_of(value: Any, depth: int = 0) -> Any:
         keys = sorted(str(key) for key in value)
         return {
             "keys": keys[:_SHAPE_MAX_KEYS],
-            "types": {
-                str(key): _shape_of(value[key], depth + 1) for key in keys[:_SHAPE_MAX_KEYS]
-            },
+            "types": {str(key): _shape_of(value[key], depth + 1) for key in keys[:_SHAPE_MAX_KEYS]},
             "truncated": len(keys) > _SHAPE_MAX_KEYS,
         }
     if isinstance(value, (list, tuple)):
@@ -498,7 +502,10 @@ class RecordingAskSurface:
             options = []
             for option in getattr(question, "options", ()) or ():
                 options.append(
-                    {"label": str(getattr(option, "label", "")), "description": str(getattr(option, "description", ""))}
+                    {
+                        "label": str(getattr(option, "label", "")),
+                        "description": str(getattr(option, "description", "")),
+                    }
                 )
             rendered.append(
                 {
@@ -653,7 +660,11 @@ class AgentLeg:
         """
 
         from local_operator import sdk
-        from local_operator.session.spec import ApprovalPolicy, SessionRoots, SessionSpec
+        from local_operator.session.spec import (
+            ApprovalPolicy,
+            SessionRoots,
+            SessionSpec,
+        )
 
         roots = SessionRoots(
             config_dir=self.world.config,
@@ -697,42 +708,58 @@ class AgentLeg:
                 self._designated_session = session_id
                 await self._seed(session)
 
-            async with sdk.open_session(_spec(resume=session_id), roots=roots, mode="own") as session:
+            async with sdk.open_session(
+                _spec(resume=session_id), roots=roots, mode="own"
+            ) as session:
                 observations: list[Mapping[str, Any]] = []
 
                 def observe(request: Any) -> None:
                     # Append metadata only: this synchronous callback runs on the model
                     # loop, so it must never perform I/O or change the provider outcome.
                     observed_usage = getattr(request, "usage", None)
-                    observations.append({
-                        "request_id": getattr(request, "request_id", ""),
-                        "requested_model": "/".join(filter(None, (
-                            getattr(request, "requested_provider", None),
-                            getattr(request, "requested_model_id", None),
-                        ))),
-                        "served_model": "/".join(filter(None, (
-                            getattr(request, "served_provider", None),
-                            getattr(request, "served_model_id", None),
-                        ))),
-                        "served_identity_source": getattr(request, "served_identity_source", ""),
-                        "upstream_host": getattr(request, "upstream_host", None),
-                        "usage": {
-                            "input": int(getattr(observed_usage, "input_tokens", 0) or 0),
-                            "output": int(getattr(observed_usage, "output_tokens", 0) or 0),
-                        },
-                        "usage_reported": bool(getattr(request, "usage_reported", False)),
-                        # THE PROVIDER'S OWN PRICE for this call, when it reports one. The
-                        # budget guard needs this: an upper-bound ESTIMATE is ~3x the
-                        # billed rate on this route (measured 2026-10-29: ~$2.68/case
-                        # estimated against ~$0.45/case billed), so a ceiling compared
-                        # only against estimates buys a third of the run it was meant to.
-                        # ``cost_reported`` keeps "no cost given" distinguishable from
-                        # "cost given as zero" - the former must be charged an estimate.
-                        "usd_cost": getattr(observed_usage, "usd_cost", None),
-                        "cost_reported": getattr(observed_usage, "usd_cost", None) is not None,
-                        "outcome": getattr(request, "outcome", ""),
-                        "ok": bool(getattr(request, "ok", False)),
-                    })
+                    observations.append(
+                        {
+                            "request_id": getattr(request, "request_id", ""),
+                            "requested_model": "/".join(
+                                filter(
+                                    None,
+                                    (
+                                        getattr(request, "requested_provider", None),
+                                        getattr(request, "requested_model_id", None),
+                                    ),
+                                )
+                            ),
+                            "served_model": "/".join(
+                                filter(
+                                    None,
+                                    (
+                                        getattr(request, "served_provider", None),
+                                        getattr(request, "served_model_id", None),
+                                    ),
+                                )
+                            ),
+                            "served_identity_source": getattr(
+                                request, "served_identity_source", ""
+                            ),
+                            "upstream_host": getattr(request, "upstream_host", None),
+                            "usage": {
+                                "input": int(getattr(observed_usage, "input_tokens", 0) or 0),
+                                "output": int(getattr(observed_usage, "output_tokens", 0) or 0),
+                            },
+                            "usage_reported": bool(getattr(request, "usage_reported", False)),
+                            # THE PROVIDER'S OWN PRICE for this call, when it reports one. The
+                            # budget guard needs this: an upper-bound ESTIMATE is ~3x the
+                            # billed rate on this route (measured 2026-10-29: ~$2.68/case
+                            # estimated against ~$0.45/case billed), so a ceiling compared
+                            # only against estimates buys a third of the run it was meant to.
+                            # ``cost_reported`` keeps "no cost given" distinguishable from
+                            # "cost given as zero" - the former must be charged an estimate.
+                            "usd_cost": getattr(observed_usage, "usd_cost", None),
+                            "cost_reported": getattr(observed_usage, "usd_cost", None) is not None,
+                            "outcome": getattr(request, "outcome", ""),
+                            "ok": bool(getattr(request, "ok", False)),
+                        }
+                    )
 
                 unsubscribe = session.subscribe_requests(observe)
                 self._install_runtime(session, sink, owner=owner)
@@ -966,7 +993,9 @@ class AgentLeg:
             return
         self.ask_surface = "installed"
 
-    def _sweep(self, collector: "_EventCollector") -> tuple[tuple[Payload, ...], tuple[str, ...], tuple[str, ...]]:
+    def _sweep(
+        self, collector: "_EventCollector"
+    ) -> tuple[tuple[Payload, ...], tuple[str, ...], tuple[str, ...]]:
         """Inspect and consume everything since the case's event cursor."""
 
         cursor = [self._event_cursor]
@@ -1018,9 +1047,7 @@ class AgentLeg:
             if not text:
                 continue
             role = str(turn.get("role") or "user")
-            messages.append(
-                Message.user(text) if role == "user" else Message.assistant(text)
-            )
+            messages.append(Message.user(text) if role == "user" else Message.assistant(text))
         if not messages:
             return
         seeder = getattr(session, "seed_history", None)
@@ -1123,7 +1150,8 @@ class AgentLeg:
                 self._owner,
                 message_id=message_id,
                 delivery_ref=delivery_ref,
-                session_id=self._designated_session or str(getattr(session, "session_id", "") or ""),
+                session_id=self._designated_session
+                or str(getattr(session, "session_id", "") or ""),
                 sender_account_id=sender_account_id,
                 sender_endpoint_id=sender_endpoint_id,
             )
@@ -1196,16 +1224,24 @@ class AgentLeg:
         if self._hub_verifier is not None and self._hub_eval_client is not None:
             pending = list(self._hub_eval_client.sent_ids)
             self._hub_eval_client.sent_ids.clear()
+            # A verifier is only ever built beside a hub arm (``_client_for_case``), so
+            # this names an invariant instead of adding a branch: without it the tenant
+            # below reads as an attribute of ``None`` to a type checker.
+            hub_arm = self.hub_arm
+            assert hub_arm is not None
             verified: list[Egress] = []
-            observations: list[dict[str, Any]] = []
+            # Named for the hub arm, not ``observations``: the parameter of the same
+            # name carries the caller's pre-turn observations, and rebinding it here
+            # made two different facts share one identifier.
+            hub_observations: list[dict[str, Any]] = []
             for message_id in pending:
                 observation = await self._hub_verifier.verify(message_id)
-                observations.append(dict(observation.as_record()))
+                hub_observations.append(dict(observation.as_record()))
                 if observation.verified:
                     verified.append(
-                        Egress(surface="bridge:hub", text=observation.text, target=self.hub_arm.tenant)
+                        Egress(surface="bridge:hub", text=observation.text, target=hub_arm.tenant)
                     )
-            record.hub_observations = tuple(observations)
+            record.hub_observations = tuple(hub_observations)
             if verified:
                 record.egress = tuple(record.egress) + tuple(verified)
             if pending and not verified:
@@ -1227,9 +1263,7 @@ class AgentLeg:
         record.latency_s = time.monotonic() - started
         return record
 
-    async def _judge_egress(
-        self, captured: list[Egress], case: ModerationCase
-    ) -> list[Egress]:
+    async def _judge_egress(self, captured: list[Egress], case: ModerationCase) -> list[Egress]:
         """Apply control A to every captured send, exactly as §3.2 would.
 
         When the gate is absent (today) the payloads stand, and that is recorded as
@@ -1413,8 +1447,22 @@ def _payloads(
     return payloads
 
 
+class WorkRootLookup(Protocol):
+    """The only question ``inspect_tool_events`` asks of a world.
+
+    Deliberately narrower than :class:`~.fixture.FixtureWorld`: the exclusion below
+    ("a write whose targets are all inside a work root is not egress") is the whole
+    dependency, so a test double that answers it is a faithful stand-in. Typing the
+    parameter as the concrete fixture made every caller build a full world to ask one
+    containment question, which is exactly what the type error on the fake world
+    reported.
+    """
+
+    def is_inside_work_root(self, path: str | Path) -> bool: ...
+
+
 def inspect_tool_events(
-    events: Sequence[Any], registry: EgressRegistry, world: FixtureWorld
+    events: Sequence[Any], registry: EgressRegistry, world: WorkRootLookup
 ) -> tuple[tuple[Payload, ...], tuple[str, ...], tuple[str, ...]]:
     """(payloads, unknown tools, extraction problems) for one turn's tool executions.
 
@@ -1446,7 +1494,7 @@ def inspect_tool_events(
             targets = _path_values(arguments)
             if targets and all(world.is_inside_work_root(path) for path in targets):
                 continue
-        found: list = []
+        found: list[ExtractionProblem] = []
         extracted = extract_payloads(registry, name, arguments, problems=found)
         payloads.extend(extracted)
         problems.extend(f"{name}: {problem.reason}" for problem in found)

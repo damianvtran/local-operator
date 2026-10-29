@@ -246,7 +246,9 @@ class ScreenLeg:
 
         assert self._selection is not None
         try:
-            reply, identity = await runner.acall(prompt, default_model=self._selection.default_model)
+            reply, identity = await runner.acall(
+                prompt, default_model=self._selection.default_model
+            )
         except Exception as error:  # noqa: BLE001 - every provider fault is a HOLD
             return InboundOutcome(
                 disposition="hold",
@@ -436,9 +438,6 @@ class NullOutboundGate:
 
 class ToolProfile(Protocol):
     """Design §4.2's bridge-turn capability profile. Implemented in C2, NOT here."""
-
-    def allows(self, tool_name: str, arguments: Mapping[str, Any]) -> bool: ...
-
 
     def allows(self, tool_name: str, arguments: Mapping[str, Any]) -> bool: ...
 

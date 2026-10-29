@@ -110,7 +110,11 @@ class HubRigState:
         accounts = {str(k): str(v) for k, v in dict(raw["accounts"]).items()}
         endpoints = {str(k): str(v) for k, v in dict(raw["endpoints"]).items()}
         for role in (DEFAULT_EVAL_ROLE, DEFAULT_PEER_ROLE):
-            for name, table in (("tokens", tokens), ("accounts", accounts), ("endpoints", endpoints)):
+            for name, table in (
+                ("tokens", tokens),
+                ("accounts", accounts),
+                ("endpoints", endpoints),
+            ):
                 if not table.get(role):
                     raise HubArmError(
                         f"the rig state file publishes no {name} for the {role!r} rôle; the "
@@ -246,8 +250,6 @@ def install_rig_login(
 
     The row lives in the FIXTURE config dir, never the operator's store.
     """
-
-    from local_operator.providers.auth_store import AuthStore
 
     # ONE store instance shared with the clients (see ``build_arm_clients``). The client
     # resolves through a process-shared connection keyed by credential root; seeding a

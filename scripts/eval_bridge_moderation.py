@@ -175,14 +175,20 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--limit", type=int, default=None, metavar="N",
+        "--limit",
+        type=int,
+        default=None,
+        metavar="N",
         help=(
             "TOTAL case cap for this run (bounds what the run can spend). Applied after "
             "category/control filters, in the order the run will use"
         ),
     )
     parser.add_argument(
-        "--limit-per-category", type=int, default=None, metavar="N",
+        "--limit-per-category",
+        type=int,
+        default=None,
+        metavar="N",
         help=(
             "max cases PER CATEGORY - the old --limit behaviour, kept under its own name "
             "so it cannot be mistaken for a run bound (on this dataset it selects up to "
@@ -190,7 +196,9 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--arm", choices=("fixture", "hub"), default="fixture",
+        "--arm",
+        choices=("fixture", "hub"),
+        default="fixture",
         help=(
             "which arm measures the run: 'fixture' records the wire in-process (cannot "
             "observe a send the product refuses), 'hub' points the SHIPPED client at a "
@@ -198,50 +206,79 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--hub-state", type=Path, default=None, metavar="PATH",
+        "--hub-state",
+        type=Path,
+        default=None,
+        metavar="PATH",
         help=(
             "the rig's published state file (url, tenant, tokens, accounts, endpoints). "
             "Required by --arm hub: see docs/evidence/team-bridge-hub-arm.md"
         ),
     )
     parser.add_argument(
-        "--workers", type=int, default=1, metavar="N",
+        "--workers",
+        type=int,
+        default=1,
+        metavar="N",
         help="concurrency; only 1 is supported in H0 (see the module docstring)",
     )
     parser.add_argument(
-        "--out", type=Path, default=None, metavar="DIR",
+        "--out",
+        type=Path,
+        default=None,
+        metavar="DIR",
         help="where to write report.json + report.md (default: under --workdir)",
     )
     parser.add_argument(
-        "--workdir", type=Path, default=None, metavar="DIR",
+        "--workdir",
+        type=Path,
+        default=None,
+        metavar="DIR",
         help=f"scratch root for fixture worlds (default: {DEFAULT_WORKDIR}/<run-id>)",
     )
     parser.add_argument(
-        "--dataset", type=Path, default=DEFAULT_DATASET, metavar="DIR",
+        "--dataset",
+        type=Path,
+        default=DEFAULT_DATASET,
+        metavar="DIR",
         help=f"dataset root (default: {DEFAULT_DATASET})",
     )
     parser.add_argument(
-        "--screen-version", default="", metavar="VERSION",
+        "--screen-version",
+        default="",
+        metavar="VERSION",
         help="screening template version (default: bridge-screen-v2, the text-only template)",
     )
     parser.add_argument(
-        "--judge-model", default=None, metavar="PROVIDER/MODEL",
+        "--judge-model",
+        default=None,
+        metavar="PROVIDER/MODEL",
         help="judge route for refusal SHAPE labelling; not implemented in H0 (refused)",
     )
     parser.add_argument(
-        "--repeat", type=int, default=1, metavar="N",
+        "--repeat",
+        type=int,
+        default=1,
+        metavar="N",
         help="run each case N times (a flake check; multiplies cost)",
     )
     parser.add_argument(
-        "--max-usd", type=float, default=None, metavar="USD",
+        "--max-usd",
+        type=float,
+        default=None,
+        metavar="USD",
         help="abort cleanly once the estimated spend passes this bound",
     )
     parser.add_argument(
-        "--compare", type=Path, default=None, metavar="REPORT.json",
+        "--compare",
+        type=Path,
+        default=None,
+        metavar="REPORT.json",
         help="compare this run against an earlier report and print per-control deltas",
     )
     parser.add_argument(
-        "--keep-workdir", action="store_true",
+        "--keep-workdir",
+        action="store_true",
         help="keep the fixture worlds after the run (default: removed per case)",
     )
     parser.add_argument(
@@ -254,15 +291,19 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--seed", default=None, metavar="HEX",
+        "--seed",
+        default=None,
+        metavar="HEX",
         help="pin the canary salt for a reproducible run (default: random per run)",
     )
     parser.add_argument(
-        "--dry-run", action="store_true",
+        "--dry-run",
+        action="store_true",
         help="validate the dataset and the plan; no model call, no fixture write, no spend",
     )
     parser.add_argument(
-        "--json", action="store_true",
+        "--json",
+        action="store_true",
         help="print the dry-run/plan summary as JSON instead of prose",
     )
     return parser
@@ -328,8 +369,10 @@ def main(argv: list[str] | None = None) -> int:
     bad_controls = sorted(c for c in controls if c.upper() not in ("A", "B", "C"))
     bad_disabled = sorted(c for c in disabled if c not in ("A", "B", "C"))
     if bad_controls or bad_disabled:
-        print(f"--control/--disable-control must be A, B or C (got {bad_controls or bad_disabled})",
-              file=sys.stderr)
+        print(
+            f"--control/--disable-control must be A, B or C (got {bad_controls or bad_disabled})",
+            file=sys.stderr,
+        )
         return EXIT_DATASET
 
     if args.workers != 1:
@@ -377,11 +420,16 @@ def main(argv: list[str] | None = None) -> int:
     # route there would make the cheapest, most-run command depend on a provider
     # choice, and the CI lint that runs it has no provider.
     if args.model is None and not (args.dry_run or args.write_manifest):
-        print("--model PROVIDER/MODEL is required (unless you only mean to --dry-run)",
-              file=sys.stderr)
+        print(
+            "--model PROVIDER/MODEL is required (unless you only mean to --dry-run)",
+            file=sys.stderr,
+        )
         return EXIT_PREFLIGHT
 
-    plan_error = None
+    # The planner's refusal returns HERE, inside the handler, rather than after it:
+    # ``plan`` is only bound on the path where ``build_plan`` succeeded, and a
+    # flag-and-check-after shape left that fact invisible to a reader and to the
+    # type checker alike. Same output, same exit code, one bound name.
     try:
         plan = build_plan(
             dataset=dataset,
@@ -404,14 +452,14 @@ def main(argv: list[str] | None = None) -> int:
             seed=args.seed,
         )
     except ValueError as error:  # a bad plan is exit 1, never a traceback
-        plan_error = error
-    if plan_error is not None:
-        print(f"invalid plan: {plan_error}", file=sys.stderr)
+        print(f"invalid plan: {error}", file=sys.stderr)
         return EXIT_DATASET
 
     if args.write_manifest:
         # Stdlib only: this must work in an isolated env with no provider configured.
-        from local_operator.evaluation.team_bridge_moderation.dataset import manifest_for
+        from local_operator.evaluation.team_bridge_moderation.dataset import (
+            manifest_for,
+        )
 
         target = dataset.root / "cases" / "_manifest.json"
         target.write_text(
@@ -447,9 +495,11 @@ def main(argv: list[str] | None = None) -> int:
 
     summary = result.report.get("summary", {})
     print("")
-    print(f"cases: {summary.get('cases')} | measured: {summary.get('measured')} | "
-          f"pass {summary.get('pass')} / fail {summary.get('fail')} / "
-          f"not measured {summary.get('not_measured')}")
+    print(
+        f"cases: {summary.get('cases')} | measured: {summary.get('measured')} | "
+        f"pass {summary.get('pass')} / fail {summary.get('fail')} / "
+        f"not measured {summary.get('not_measured')}"
+    )
     print(f"leaks: {summary.get('leaks')} | detector proven: {summary.get('detector_proven')}")
     print(f"elapsed: {elapsed:.1f}s")
     print(f"report: {json_path}")
@@ -482,15 +532,16 @@ def _exit_code(result, summary) -> int:
         return EXIT_UNTRUSTWORTHY
     record = verdict.as_record()
     if int(summary.get("leaks") or 0) > 0:
-        print("FAIL: at least one canary left the agent (see leaking_cases in the report)",
-              file=sys.stderr)
+        print(
+            "FAIL: at least one canary left the agent (see leaking_cases in the report)",
+            file=sys.stderr,
+        )
         print(json.dumps(record, indent=2), file=sys.stderr)
         return EXIT_LEAK
     if not verdict.clean:
         # Everything except "some case failed" means the run cannot be trusted.
         blocking = [
-            reason for reason in verdict.reasons
-            if "failed their expectation" not in reason
+            reason for reason in verdict.reasons if "failed their expectation" not in reason
         ]
         if blocking:
             print("NOT TRUSTWORTHY:", file=sys.stderr)
@@ -569,7 +620,9 @@ def _dry_run(dataset, plan, *, as_json: bool, stripped: list[str]) -> int:
         )
         return EXIT_DATASET
 
-    canaries = mint_canaries("dry-run-salt", dataset.workspace.canary_classes, dataset.workspace.canary_prefix)
+    canaries = mint_canaries(
+        "dry-run-salt", dataset.workspace.canary_classes, dataset.workspace.canary_prefix
+    )
     for plant in (*dataset.workspace.plants, *dataset.workspace.work_files):
         for line in plant.lines:
             try:
@@ -589,7 +642,9 @@ def _dry_run(dataset, plan, *, as_json: bool, stripped: list[str]) -> int:
     print("dataset OK")
     print(f"  root:        {dataset.root}")
     print(f"  version:     {dataset.version}")
-    print(f"  authored:    {dataset.authored} case(s) in {len(dataset.cases)} after variant expansion")
+    print(
+        f"  authored:    {dataset.authored} case(s) in {len(dataset.cases)} after variant expansion"
+    )
     print(f"  digests:     {described['digests']}")
     print(f"  model:       {described['model_route']}")
     print(f"  screen:      {described['screen_version']}")
@@ -605,10 +660,12 @@ def _dry_run(dataset, plan, *, as_json: bool, stripped: list[str]) -> int:
     from local_operator.evaluation.team_bridge_moderation.runner import corpus_adequacy
 
     balance = corpus_adequacy(dataset)
-    print(f"  egress registry: {registry.data()['version']} covering "
-          f"{len(registry.data()['egress_tools'])} egress tool(s), "
-          f"{len(registry.data()['non_egress'])} non-egress, "
-          f"{len(registry.data()['mcp_prefixes'])} MCP prefix(es)")
+    print(
+        f"  egress registry: {registry.data()['version']} covering "
+        f"{len(registry.data()['egress_tools'])} egress tool(s), "
+        f"{len(registry.data()['non_egress'])} non-egress, "
+        f"{len(registry.data()['mcp_prefixes'])} MCP prefix(es)"
+    )
     rules = balance["rules"]
     print(
         f"  corpus adequacy: {balance['answer']} answer vs {balance['refuse']} refuse "
@@ -706,7 +763,8 @@ def _print_comparison(report, baseline_path: Path) -> None:
     for bucket in ("controls", "categories"):
         for name, values in (delta.get(bucket) or {}).items():
             print(
-                f"  {bucket[:-1]:9s} {name:24s} leaks {values['leaks']:+d}  fail {values['fail']:+d}  "
+                f"  {bucket[:-1]:9s} {name:24s} leaks {values['leaks']:+d}  "
+                f"fail {values['fail']:+d}  "
                 f"pass_rate {values['pass_rate']}  hedged {values['hedged']:+d}"
             )
 

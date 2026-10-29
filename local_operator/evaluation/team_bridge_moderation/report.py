@@ -145,7 +145,8 @@ class CaseRecord:
                 for leak in self.score.reply_leaks
             ],
             "permitted_hits": [
-                {"class": leak.leak_class, "where": leak.where} for leak in self.score.permitted_hits
+                {"class": leak.leak_class, "where": leak.where}
+                for leak in self.score.permitted_hits
             ],
             "facts_present": list(self.score.facts_present),
             "facts_missing": list(self.score.facts_missing),
@@ -157,7 +158,11 @@ class CaseRecord:
             # cause is labelled as such rather than left blank.
             "invalid_reason": (
                 self.score.invalid_reason
-                or ("unrecorded_invalidity" if self.score.verdict in ("not_measured", "invalid") else "")
+                or (
+                    "unrecorded_invalidity"
+                    if self.score.verdict in ("not_measured", "invalid")
+                    else ""
+                )
             ),
             "turns": [dict(turn) for turn in self.turns],
         }
@@ -233,17 +238,21 @@ class Validity:
         # `clean` false and never reaches here. Leaving it in `partial` stated the
         # opposite of the amendment.
         return self.clean and (
-            not self.full_dataset
-            or (not self.detector_observed and not self.detector_observable)
+            not self.full_dataset or (not self.detector_observed and not self.detector_observable)
         )
 
     @property
     def partial_reasons(self) -> tuple[str, ...]:
         reasons: list[str] = []
         if not self.full_dataset:
-            reasons.append("a category/control/limit filter was applied, so this is not a corpus result")
+            reasons.append(
+                "a category/control/limit filter was applied, so this is not a corpus result"
+            )
         if not self.detector_observed and not self.detector_observable:
-            reasons.append("no selected case can observe a permitted canary, so the pipeline half of the proof is out of scope")
+            reasons.append(
+                "no selected case can observe a permitted canary, so the pipeline half "
+                "of the proof is out of scope"
+            )
         return tuple(reasons)
 
     def as_record(self) -> Mapping[str, Any]:
@@ -296,7 +305,9 @@ def validity(
     if leaks:
         reasons.append(f"{leaks} canary hit(s) left the agent")
     if not detector_proven:
-        reasons.append("the detector did not prove itself (per-class self-test or negative control)")
+        reasons.append(
+            "the detector did not prove itself (per-class self-test or negative control)"
+        )
     if not detector_observed and detector_observable:
         reasons.append("no permitted canary was observed leaving an answer in this run")
     if not registry_audited:
@@ -382,7 +393,7 @@ def build_report(
     balance: Mapping[str, Any] | None = None,
     arm: str = "fixture",
     cost: Mapping[str, Any] | None = None,
-) -> Mapping[str, Any]:
+) -> dict[str, Any]:
     """Assemble the JSON report."""
 
     by_category: dict[str, list[CaseRecord]] = {}
@@ -444,25 +455,27 @@ def build_report(
         "agent": agent_tokens,
         "total": inbound_tokens + agent_tokens,
     }
-    estimated_usd = (
-        (inbound_tokens + agent_tokens) / 1_000_000
-    ) * 15.0 + (
+    estimated_usd = ((inbound_tokens + agent_tokens) / 1_000_000) * 15.0 + (
         (inbound_output + agent_output) / 1_000_000
     ) * 75.0
     requested_model = header.model_route
-    model_provenance = sorted({
-        str(identity)
-        for record in records
-        for turn in record.turns
-        for request in turn.get("model_requests", ())
-        if (identity := request.get("served_model"))
-    })
-    screen_provenance = sorted({
-        str(turn["inbound"]["served_model"])
-        for record in records
-        for turn in record.turns
-        if turn.get("inbound", {}).get("served_model")
-    })
+    model_provenance = sorted(
+        {
+            str(identity)
+            for record in records
+            for turn in record.turns
+            for request in turn.get("model_requests", ())
+            if (identity := request.get("served_model"))
+        }
+    )
+    screen_provenance = sorted(
+        {
+            str(turn["inbound"]["served_model"])
+            for record in records
+            for turn in record.turns
+            if turn.get("inbound", {}).get("served_model")
+        }
+    )
 
     measured = [r for r in records if r.score.verdict != "not_measured"]
     summary = _group_summary(records)
@@ -535,7 +548,8 @@ def build_report(
         "invalid_cases": [r.case_id for r in records if r.score.outcome == "invalid"],
         "skipped_cases": [
             {"id": r.case_id, "reason": r.score.detail}
-            for r in records if r.score.verdict == "skipped"
+            for r in records
+            if r.score.verdict == "skipped"
         ],
         "failed_cases": [r.case_id for r in records if r.score.verdict == "fail"],
         "hedged_cases": [r.case_id for r in records if r.score.outcome == "hedged"],
@@ -544,7 +558,9 @@ def build_report(
     }
 
 
-def write_report(report: Mapping[str, Any], *, json_path: Path, markdown_path: Path | None = None) -> None:
+def write_report(
+    report: Mapping[str, Any], *, json_path: Path, markdown_path: Path | None = None
+) -> None:
     json_path.parent.mkdir(parents=True, exist_ok=True)
     json_path.write_text(json.dumps(report, indent=2, sort_keys=False) + "\n", encoding="utf-8")
     if markdown_path is not None:
@@ -621,39 +637,64 @@ def markdown_summary(report: Mapping[str, Any]) -> str:
     provenance = header.get("model_provenance", {})
     lines.append(f"- served screen models: `{provenance.get('inbound', [])}`")
     lines.append(f"- served agent models: `{provenance.get('agent', [])}`")
-    lines.append(f"- cases: {summary.get('cases')} run, {summary.get('skipped', 0)} skipped, "
-                 f"{summary.get('measured')} measured, "
-                 f"{summary.get('pass')} pass / {summary.get('fail')} fail / "
-                 f"{summary.get('not_measured')} not measured / {summary.get('invalid')} invalid")
-    lines.append(f"- **canary hits: {summary.get('leaks')}** "
-                 f"(scanner proven: {detector.get('proven')}; pipeline observed: {detector.get('observed')})")
-    lines.append(f"- hedged answers: {len(report.get('hedged_cases', []))} "
-                 f"(an allow that did not carry its required fact)")
+    lines.append(
+        f"- cases: {summary.get('cases')} run, {summary.get('skipped', 0)} skipped, "
+        f"{summary.get('measured')} measured, "
+        f"{summary.get('pass')} pass / {summary.get('fail')} fail / "
+        f"{summary.get('not_measured')} not measured / {summary.get('invalid')} invalid"
+    )
+    lines.append(
+        f"- **canary hits: {summary.get('leaks')}** "
+        f"(scanner proven: {detector.get('proven')}; pipeline observed: {detector.get('observed')})"
+    )
+    lines.append(
+        f"- hedged answers: {len(report.get('hedged_cases', []))} "
+        f"(an allow that did not carry its required fact)"
+    )
     rules = balance.get("rules") or {}
+    # Named rather than inlined: the comparison is long enough that keeping it inside the
+    # f-string pushed the line past the lint ceiling, and a reader wants the fact, not the
+    # nesting.
+    answer_floor_met = (
+        "met" if (balance.get("answer") or 0) >= (rules.get("answer_cases_min") or 0) else "NOT met"
+    )
     lines.append(
         f"- corpus: {balance.get('answer')} answer vs {balance.get('refuse')} refuse "
         f"({balance.get('ratio')}:1, ceiling {rules.get('refuse_per_answer_max')}:1); "
         f"answer floor {rules.get('answer_cases_min')} "
-        f"({'met' if (balance.get('answer') or 0) >= (rules.get('answer_cases_min') or 0) else 'NOT met'}); "
+        f"({answer_floor_met}); "
         f"weakest category {balance.get('min_category')} "
         f"({balance.get('min_category_cases')} vs {rules.get('cases_per_category_min')} minimum); "
         f"adequate: {balance.get('ok')}"
     )
     for failure in balance.get("failures") or ():
         lines.append(f"  - corpus clause failed: {failure}")
-    lines.append(f"- latency p50/p95: {summary.get('latency_p50_s')}s / {summary.get('latency_p95_s')}s "
-                 f"| tokens: {summary.get('tokens')}")
+    lines.append(
+        f"- latency p50/p95: {summary.get('latency_p50_s')}s / {summary.get('latency_p95_s')}s "
+        f"| tokens: {summary.get('tokens')}"
+    )
     lines.append("")
     if detector.get("classes"):
         lines.append("## Detector coverage (per leak class)")
         lines.append("")
         rows = []
         for name, entry in sorted(detector["classes"].items()):
-            rows.append([name, str(entry.get("exact")), str(entry.get("base64")),
-                         str(entry.get("rot13")), str(entry.get("observed_leaving"))])
+            rows.append(
+                [
+                    name,
+                    str(entry.get("exact")),
+                    str(entry.get("base64")),
+                    str(entry.get("rot13")),
+                    str(entry.get("observed_leaving")),
+                ]
+            )
         lines.append(_table(rows, ["class", "exact", "base64", "rot13", "seen leaving"]))
         lines.append("")
-    for title, key in (("By control", "by_control"), ("By category", "by_category"), ("By label", "by_label")):
+    for title, key in (
+        ("By control", "by_control"),
+        ("By category", "by_category"),
+        ("By label", "by_label"),
+    ):
         groups = report.get(key) or {}
         if not groups:
             continue
@@ -661,19 +702,35 @@ def markdown_summary(report: Mapping[str, Any]) -> str:
         lines.append("")
         rows = []
         for name, group in groups.items():
-            rows.append([
-                str(name),
-                str(group.get("cases")),
-                str(group.get("pass")),
-                str(group.get("fail")),
-                str(group.get("not_measured")),
-                str(group.get("invalid")),
-                str(group.get("leaks")),
-                (f"{group.get('pass_rate')}" if group.get("pass_rate") is not None else "n/a"),
-                json.dumps(group.get("outcomes", {}), sort_keys=True),
-            ])
-        lines.append(_table(rows, ["group", "cases", "pass", "fail", "n/m", "invalid", "leaks",
-                                   "pass rate", "outcomes"]))
+            rows.append(
+                [
+                    str(name),
+                    str(group.get("cases")),
+                    str(group.get("pass")),
+                    str(group.get("fail")),
+                    str(group.get("not_measured")),
+                    str(group.get("invalid")),
+                    str(group.get("leaks")),
+                    (f"{group.get('pass_rate')}" if group.get("pass_rate") is not None else "n/a"),
+                    json.dumps(group.get("outcomes", {}), sort_keys=True),
+                ]
+            )
+        lines.append(
+            _table(
+                rows,
+                [
+                    "group",
+                    "cases",
+                    "pass",
+                    "fail",
+                    "n/m",
+                    "invalid",
+                    "leaks",
+                    "pass rate",
+                    "outcomes",
+                ],
+            )
+        )
         lines.append("")
     if report.get("skipped_cases"):
         lines.append("## Declared skips (outside the measured denominator)")
@@ -705,8 +762,10 @@ def markdown_summary(report: Mapping[str, Any]) -> str:
         lines.append("")
         for key, claim in claims.items():
             supported = claim.get("supported")
-            lines.append(f"- {'SUPPORTED' if supported else 'NOT SUPPORTED'}: {claim.get('claim')} "
-                         f"(evidence: {claim.get('evidence')})")
+            lines.append(
+                f"- {'SUPPORTED' if supported else 'NOT SUPPORTED'}: {claim.get('claim')} "
+                f"(evidence: {claim.get('evidence')})"
+            )
         lines.append("")
     return "\n".join(lines)
 

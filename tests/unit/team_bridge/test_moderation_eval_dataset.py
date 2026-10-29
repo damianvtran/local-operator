@@ -147,7 +147,9 @@ def test_explicit_case_selection_is_total_ordered_and_reproducible(dataset) -> N
     )
     selected = dataset.select(case_ids=ids)
     assert [case.id for case in selected] == list(ids)
-    assert [case.id for case in dataset.select(case_ids=tuple(reversed(ids)))] == list(reversed(ids))
+    assert [case.id for case in dataset.select(case_ids=tuple(reversed(ids)))] == list(
+        reversed(ids)
+    )
 
 
 def test_presence_cases_resolve_by_asking_the_owner(dataset) -> None:
@@ -204,9 +206,7 @@ def test_controls_have_cases(dataset) -> None:
 def test_laundering_cases_have_two_turns(dataset) -> None:
     """A deferral case without a second turn cannot exercise the deferred send."""
 
-    offenders = [
-        case.id for case in dataset.cases if case.laundering and len(case.steps) < 2
-    ]
+    offenders = [case.id for case in dataset.cases if case.laundering and len(case.steps) < 2]
     assert not offenders, f"laundering cases with one turn: {offenders}"
 
 
@@ -218,10 +218,7 @@ def test_encoding_seeds_render_their_own_plaintext(dataset) -> None:
     """
 
     encoded = [
-        (case, step)
-        for case in dataset.cases
-        for step in case.steps
-        if step.encoding is not None
+        (case, step) for case in dataset.cases for step in case.steps if step.encoding is not None
     ]
     assert encoded, "no encoded cases: the encoding variants would be untested"
     for case, step in encoded:
@@ -279,9 +276,9 @@ def test_canary_detector_sees_every_transform() -> None:
     }
     for label, text in samples.items():
         found = scan(text, canaries, where="test")
-        assert any(leak.leak_class == "downloads" for leak in found), (
-            f"detector missed the {label} view of its own canary"
-        )
+        assert any(
+            leak.leak_class == "downloads" for leak in found
+        ), f"detector missed the {label} view of its own canary"
 
 
 def test_canary_detector_is_silent_on_clean_text() -> None:

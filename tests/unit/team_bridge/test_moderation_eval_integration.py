@@ -29,23 +29,31 @@ ASSERTIONS ARE ABOUT THE CONTRACT THE RUNNER RELIES ON, not about pretty output:
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 import pytest
 
-from local_operator.evaluation.team_bridge_moderation import agent as agent_module
 from local_operator.evaluation.team_bridge_moderation.agent import AgentLeg, CaseRun
-from local_operator.evaluation.team_bridge_moderation.canary import mint_canaries
 from local_operator.evaluation.team_bridge_moderation.dataset import load_dataset
 from local_operator.evaluation.team_bridge_moderation.egress import Payload
-from local_operator.evaluation.team_bridge_moderation.fixture import build_fixture, teardown_fixture
-from local_operator.evaluation.team_bridge_moderation.gates import Controls, InboundOutcome
-from local_operator.evaluation.team_bridge_moderation.scoring import CaseScore, score_case
+from local_operator.evaluation.team_bridge_moderation.fixture import (
+    build_fixture,
+    teardown_fixture,
+)
+from local_operator.evaluation.team_bridge_moderation.gates import (
+    Controls,
+    InboundOutcome,
+)
+from local_operator.evaluation.team_bridge_moderation.scoring import (
+    CaseScore,
+    score_case,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DATASET_ROOT = REPO_ROOT / "evals" / "team_bridge_moderation"
+
 
 pytestmark = [
     pytest.mark.skipif(
@@ -119,7 +127,9 @@ class _FakeSession:
         # A real inventory: with an empty list the audit records "unavailable" and its
         # CHECKED branch is never exercised, so a regression that made the audit
         # permanently unavailable would pass every test (review R5 Minor 2).
-        self._tools: list[Any] = [_NamedTool(name) for name in ("read", "grep", "glob", "bash", "ask", "bridge")]
+        self._tools: list[Any] = [
+            _NamedTool(name) for name in ("read", "grep", "glob", "bash", "ask", "bridge")
+        ]
         self.seeded: list[Any] = []
 
     # -- protocol -----------------------------------------------------------
@@ -313,7 +323,9 @@ def dataset() -> Any:
 # ---------------------------------------------------------------------------
 
 
-async def test_allow_case_end_to_end(tmp_path: Path, dataset: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_allow_case_end_to_end(
+    tmp_path: Path, dataset: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A full allow case: the leg runs, egress and assistant text are recorded, and the
     scorer returns a CaseScore built from what the leg ACTUALLY produced."""
 
@@ -327,7 +339,9 @@ async def test_allow_case_end_to_end(tmp_path: Path, dataset: Any, monkeypatch: 
     reply = "Here is where that stands: " + " ".join(facts)
     script = _Script(
         reply_text=reply,
-        tool_calls=[{"name": "read", "args": {"path": str(world.root / "home/org/minerva/pr-status.md")}}],
+        tool_calls=[
+            {"name": "read", "args": {"path": str(world.root / "home/org/minerva/pr-status.md")}}
+        ],
     )
     _install_stub_session(monkeypatch, script)
     try:
@@ -358,7 +372,9 @@ async def test_allow_case_end_to_end(tmp_path: Path, dataset: Any, monkeypatch: 
             )
 
         score = score_case(case=case, run=run, dataset=dataset, canaries=world.canaries)
-        assert isinstance(score, CaseScore), f"score_case returned {type(score).__name__}, not a CaseScore"
+        assert isinstance(
+            score, CaseScore
+        ), f"score_case returned {type(score).__name__}, not a CaseScore"
         assert score.verdict in ("pass", "fail")
         assert score.leaks == ()
     finally:
@@ -395,6 +411,29 @@ async def test_prose_refusal_with_no_egress_is_refused_not_invalid(
         assert score.verdict == "pass"
     finally:
         teardown_fixture(world)
+
+
+def test_teardown_refuses_a_lookalike_world_without_builder_provenance(
+    tmp_path: Path, dataset: Any
+) -> None:
+    """A home/config-shaped directory is not proof that the harness owns it."""
+
+    case = dataset.cases[0]
+    world = _world(tmp_path, dataset, case)
+    lookalike_root = tmp_path / "lookalike"
+    home = lookalike_root / "home"
+    config = lookalike_root / "config"
+    home.mkdir(parents=True)
+    config.mkdir()
+    sentinel = home / "do-not-delete.txt"
+    sentinel.write_text("not an eval fixture", encoding="utf-8")
+    forged = replace(world, root=lookalike_root, home=home, config=config)
+
+    teardown_fixture(forged)
+    assert sentinel.read_text(encoding="utf-8") == "not an eval fixture"
+
+    teardown_fixture(world)
+    assert not world.root.exists()
 
 
 async def test_path_scoped_denial_returns_a_case_score(
@@ -440,15 +479,15 @@ async def test_path_scoped_denial_returns_a_case_score(
         # keys"; the structural summary can, and it must survive the real event path, not
         # just the unit constructor.
         recorded = run.turns[0].tool_calls[0].as_record()
-        assert "argument_shape" in recorded, (
-            f"the turn record dropped the argument shape: {sorted(recorded)}"
-        )
-        assert recorded["argument_shape"]["types"]["path"] == "str", (
-            "the shape must name each argument's TYPE, never its value"
-        )
-        assert str(relative_to_home) not in repr(recorded["argument_shape"]), (
-            "a value reached the shape summary"
-        )
+        assert (
+            "argument_shape" in recorded
+        ), f"the turn record dropped the argument shape: {sorted(recorded)}"
+        assert (
+            recorded["argument_shape"]["types"]["path"] == "str"
+        ), "the shape must name each argument's TYPE, never its value"
+        assert str(relative_to_home) not in repr(
+            recorded["argument_shape"]
+        ), "a value reached the shape summary"
         assert score.detail, "a boundary failure must say so in the case's reason"
         assert score.verdict == "fail", (
             f"a read under {prefix!r} scored {score.verdict!r} with "

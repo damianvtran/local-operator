@@ -272,9 +272,7 @@ def load_registry(path: Path) -> EgressRegistry:
     )
 
 
-def classify(
-    registry: EgressRegistry, tool_name: str, arguments: Mapping[str, Any]
-) -> str:
+def classify(registry: EgressRegistry, tool_name: str, arguments: Mapping[str, Any]) -> str:
     """Module-level convenience so callers need not hold the registry twice."""
 
     return registry.classify(tool_name, arguments)
@@ -301,12 +299,17 @@ def _walk_strings(
     found: list[tuple[str, str]] = []
     if depth > MAX_DEPTH:
         problems.append(
-            ExtractionProblem(surface=surface, reason=f"nesting deeper than {MAX_DEPTH} levels at {path or '<root>'}")
+            ExtractionProblem(
+                surface=surface,
+                reason=f"nesting deeper than {MAX_DEPTH} levels at {path or '<root>'}",
+            )
         )
         return found
     if counter[0] >= MAX_VALUES:
         problems.append(
-            ExtractionProblem(surface=surface, reason=f"more than {MAX_VALUES} values in one payload")
+            ExtractionProblem(
+                surface=surface, reason=f"more than {MAX_VALUES} values in one payload"
+            )
         )
         return found
     counter[0] += 1
@@ -327,19 +330,33 @@ def _walk_strings(
                 # A non-scalar mapping key means the blob is not JSON-shaped, so a
                 # serialisation would be lossy. Unknown shape => invalid, not skipped.
                 problems.append(
-                    ExtractionProblem(surface=surface, reason=f"non-scalar mapping key at {path or '<root>'}")
+                    ExtractionProblem(
+                        surface=surface, reason=f"non-scalar mapping key at {path or '<root>'}"
+                    )
                 )
                 continue
             found.extend(
-                _walk_strings(item, surface=surface, problems=problems, counter=counter,
-                              path=f"{path}.{key}" if path else str(key), depth=depth + 1)
+                _walk_strings(
+                    item,
+                    surface=surface,
+                    problems=problems,
+                    counter=counter,
+                    path=f"{path}.{key}" if path else str(key),
+                    depth=depth + 1,
+                )
             )
         return found
     if isinstance(value, (list, tuple)):
         for index, item in enumerate(value):
             found.extend(
-                _walk_strings(item, surface=surface, problems=problems, counter=counter,
-                              path=f"{path}[{index}]", depth=depth + 1)
+                _walk_strings(
+                    item,
+                    surface=surface,
+                    problems=problems,
+                    counter=counter,
+                    path=f"{path}[{index}]",
+                    depth=depth + 1,
+                )
             )
         return found
     if value is None or isinstance(value, (bool, int, float)):
@@ -392,8 +409,12 @@ def extract_payloads(
     for field in fields:
         if field == ALL_STRINGS:
             values.extend(
-                _walk_strings(dict(arguments), surface=f"{tool_name}:<args>",
-                              problems=local_problems, counter=counter)
+                _walk_strings(
+                    dict(arguments),
+                    surface=f"{tool_name}:<args>",
+                    problems=local_problems,
+                    counter=counter,
+                )
             )
         else:
             if field not in arguments:
@@ -402,8 +423,13 @@ def extract_payloads(
                 continue
             raw = arguments[field]
             values.extend(
-                _walk_strings(raw, surface=f"{tool_name}:{field}",
-                              problems=local_problems, counter=counter, path=field)
+                _walk_strings(
+                    raw,
+                    surface=f"{tool_name}:{field}",
+                    problems=local_problems,
+                    counter=counter,
+                    path=field,
+                )
             )
 
     total_chars = sum(len(text) for _, text in values)

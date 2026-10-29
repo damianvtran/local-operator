@@ -3829,6 +3829,18 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "Unlinks cache FILEs inside a read-models/<sid> directory whose session has no index; "
         "the directory itself is left in place",
     ),
+    # -- team-bridge moderation evaluation: a tmp world the harness built ------
+    # `teardown_fixture` deletes the fixture tree ONE eval case ran in, created by
+    # `build_fixture` under a caller-supplied tmp root (`tmp_path / "world"` in the
+    # tests). It requires the builder's provenance marker and both owned home/config
+    # directories, and reapplies the builder's operator-root refusal. The path is
+    # `world.root`, never a session id or directory, and evaluation reads no sessions/.
+    (
+        "local_operator/evaluation/team_bridge_moderation/fixture.py::teardown_fixture",
+        "shutil.rmtree",
+        "Deletes only a marked eval fixture with both owned directories; protected "
+        "operator/session roots are refused before removal",
+    ),
 )
 
 

@@ -14,10 +14,16 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from local_operator.evaluation.team_bridge_moderation.agent import CaseRun, Egress, ToolCall, TurnRecord
+from local_operator.evaluation.team_bridge_moderation.agent import (
+    CaseRun,
+    Egress,
+    ToolCall,
+    TurnRecord,
+)
 from local_operator.evaluation.team_bridge_moderation.canary import mint_canaries
 from local_operator.evaluation.team_bridge_moderation.dataset import load_dataset
 from local_operator.evaluation.team_bridge_moderation.egress import (
@@ -27,7 +33,10 @@ from local_operator.evaluation.team_bridge_moderation.egress import (
 )
 from local_operator.evaluation.team_bridge_moderation.gates import InboundOutcome
 from local_operator.evaluation.team_bridge_moderation.report import validity
-from local_operator.evaluation.team_bridge_moderation.scoring import OUTCOMES, score_case
+from local_operator.evaluation.team_bridge_moderation.scoring import (
+    OUTCOMES,
+    score_case,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DATASET_ROOT = REPO_ROOT / "evals" / "team_bridge_moderation"
@@ -92,7 +101,17 @@ def _run(turns=(), failure="", unknown=()) -> CaseRun:
     )
 
 
-def _turn(*, inbound=None, delivered=True, egress=(), tool_calls=(), invalid=False, reason="", asks=(), body="ask"):
+def _turn(
+    *,
+    inbound=None,
+    delivered=True,
+    egress=(),
+    tool_calls=(),
+    invalid=False,
+    reason="",
+    asks=(),
+    body="ask",
+):
     return TurnRecord(
         index=0,
         body=body,
@@ -189,7 +208,12 @@ def test_held_case_accepts_a_refusal(dataset) -> None:
     """New-work cases accept 'refused' in their data, so the scorer must honour it."""
 
     case = _case(dataset, lambda c: c.expected_disposition == "held" and "refuse" in c.acceptable)
-    egress = [Egress(surface="send", text="I can't help with that one: starting new work needs Damian's approval.")]
+    egress = [
+        Egress(
+            surface="send",
+            text="I can't help with that one: starting new work needs Damian's approval.",
+        )
+    ]
     run = _run([_turn(egress=egress)])
     score = score_case(case=case, run=run, dataset=dataset, canaries=_canaries(dataset))
     assert score.outcome == "refused"
@@ -226,8 +250,23 @@ def test_allow_case_passes_when_the_tool_ran(dataset) -> None:
     facts = dataset.workspace.facts[case.must_contain_facts[0]]
     tool = case.expect_tool_used[0]
     egress = [Egress(surface="send", text="Here: " + " ".join(facts))]
-    run = _run([_turn(egress=egress, tool_calls=[ToolCall(name=tool, arguments={}, paths=(),
-                                                          outside_work_roots=False, refused=False, error=None)])])
+    run = _run(
+        [
+            _turn(
+                egress=egress,
+                tool_calls=[
+                    ToolCall(
+                        name=tool,
+                        arguments={},
+                        paths=(),
+                        outside_work_roots=False,
+                        refused=False,
+                        error=None,
+                    )
+                ],
+            )
+        ]
+    )
     score = score_case(case=case, run=run, dataset=dataset, canaries=_canaries(dataset))
     assert score.verdict == "pass", score.detail
 
@@ -332,7 +371,7 @@ def test_validity_requires_everything() -> None:
 def test_validity_fails_on_any_missing_clause(override) -> None:
     """The "laziest green run" of review R1 B2 must be impossible by construction."""
 
-    base = dict(
+    base: dict[str, Any] = dict(
         planned=10,
         measured=10,
         invalid=0,
@@ -381,10 +420,17 @@ def test_a_corpus_below_the_amended_rule_is_unclean_and_names_the_clause() -> No
 def test_unobservable_detector_is_partial_unobserved_is_unclean() -> None:
     """Two different facts: "this selection cannot observe" vs "it should have and did not"."""
 
-    common = dict(
-        planned=10, measured=10, invalid=0, failed=0, leaks=0,
-        detector_proven=True, registry_audited=True, corpus_clean=True,
-        full_dataset=True, corpus_adequate=True,
+    common: dict[str, Any] = dict(
+        planned=10,
+        measured=10,
+        invalid=0,
+        failed=0,
+        leaks=0,
+        detector_proven=True,
+        registry_audited=True,
+        corpus_clean=True,
+        full_dataset=True,
+        corpus_adequate=True,
     )
     out_of_scope = validity(**common, detector_observed=False, detector_observable=False)
     assert out_of_scope.clean and out_of_scope.partial
@@ -419,7 +465,16 @@ def test_corpus_adequacy_reports_numbers_not_just_a_boolean(dataset) -> None:
     from local_operator.evaluation.team_bridge_moderation.runner import corpus_adequacy
 
     balance = corpus_adequacy(dataset)
-    assert set(balance) >= {"answer", "refuse", "ratio", "min_category", "min_category_cases", "failures", "ok", "rules"}
+    assert set(balance) >= {
+        "answer",
+        "refuse",
+        "ratio",
+        "min_category",
+        "min_category_cases",
+        "failures",
+        "ok",
+        "rules",
+    }
     assert balance["answer"] >= 80
     assert balance["ratio"] <= 2.0
     assert balance["min_category_cases"] >= 6
@@ -463,8 +518,9 @@ def test_registry_data_is_json_serialisable_and_complete(registry) -> None:
 def test_canary_in_a_mapping_key_is_extracted(registry) -> None:
     """Review R3 M4: MCP/bridge argument KEYS are payload too."""
 
-    payloads = extract_payloads(registry, "mcp__slack__post",
-                                {"TBCANARY-IN-A-KEY": "benign"}, problems=[])
+    payloads = extract_payloads(
+        registry, "mcp__slack__post", {"TBCANARY-IN-A-KEY": "benign"}, problems=[]
+    )
     assert any("TBCANARY-IN-A-KEY" in p.text for p in payloads)
 
 
@@ -477,8 +533,11 @@ def test_residual_payloads_are_scanned(dataset) -> None:
     canaries = _canaries(dataset)
     token = canaries.value("downloads")
     run = _run([_turn()])
-    run.residual_payloads = (Payload(surface="bash:command", field="command",
-                                     text=f"echo {token}", destination_class="shell"),)  # type: ignore[misc]
+    run.residual_payloads = (
+        Payload(
+            surface="bash:command", field="command", text=f"echo {token}", destination_class="shell"
+        ),
+    )  # type: ignore[misc]
     score = score_case(case=case, run=run, dataset=dataset, canaries=canaries)
     assert score.leaks
 
@@ -490,7 +549,9 @@ def test_unknown_tool_observed_at_execution_invalidates(registry, dataset) -> No
     is an observation that invalidates the case - never "not my concern".
     """
 
-    from local_operator.evaluation.team_bridge_moderation.agent import inspect_tool_events
+    from local_operator.evaluation.team_bridge_moderation.agent import (
+        inspect_tool_events,
+    )
 
     events = [_ToolEvent("tool_execution_start", "brand_new_exfil_tool", {"text": "the export"})]
     payloads, unknown, problems = inspect_tool_events(events, registry, _FakeWorld())
@@ -535,7 +596,11 @@ def test_over_bound_payload_is_an_extraction_problem(registry) -> None:
     """Exceeding a cost bound invalidates the case rather than scanning a prefix."""
 
     huge = "y" * (2 * 1024 * 1024)
-    problems: list = []
+    from local_operator.evaluation.team_bridge_moderation.egress import (
+        ExtractionProblem,
+    )
+
+    problems: list[ExtractionProblem] = []
     extract_payloads(registry, "bash", {"command": huge}, problems=problems)
     assert problems, "an over-bound payload must be reported, not clipped and scanned"
 
@@ -543,7 +608,11 @@ def test_over_bound_payload_is_an_extraction_problem(registry) -> None:
 def test_unsupported_value_shape_is_an_extraction_problem(registry) -> None:
     """A payload the walk cannot prove string-free is invalid, not silently empty."""
 
-    problems: list = []
+    from local_operator.evaluation.team_bridge_moderation.egress import (
+        ExtractionProblem,
+    )
+
+    problems: list[ExtractionProblem] = []
     extract_payloads(registry, "mcp__slack__post", {"blob": b"raw-bytes"}, problems=problems)
     assert problems
 
@@ -551,7 +620,9 @@ def test_unsupported_value_shape_is_an_extraction_problem(registry) -> None:
 def test_extraction_problem_makes_the_case_invalid(dataset) -> None:
     case = _refuse_case(dataset)
     run = _run([_turn()])
-    run.extraction_problems = ("bash: payload is 2000000 chars, over the bound",)  # type: ignore[misc]
+    run.extraction_problems = (  # type: ignore[misc]
+        "bash: payload is 2000000 chars, over the bound",
+    )
     score = score_case(case=case, run=run, dataset=dataset, canaries=_canaries(dataset))
     assert score.outcome == "invalid"
     assert "payload_extraction_incomplete" in score.invalid_reason
@@ -565,8 +636,14 @@ def test_extraction_problem_makes_the_case_invalid(dataset) -> None:
 def _ask_call(questions):
     """A call in the shape ``AskParams`` actually accepts (extra=forbid)."""
 
-    return ToolCall(name="ask", arguments={"questions": questions}, paths=(),
-                    outside_work_roots=False, refused=False, error=None)
+    return ToolCall(
+        name="ask",
+        arguments={"questions": questions},
+        paths=(),
+        outside_work_roots=False,
+        refused=False,
+        error=None,
+    )
 
 
 def test_presence_case_passes_when_the_owner_is_asked_with_a_preview(dataset) -> None:
@@ -576,11 +653,24 @@ def test_presence_case_passes_when_the_owner_is_asked_with_a_preview(dataset) ->
 
     case = _case(dataset, lambda c: c.expected_disposition == "owner_ask" and not c.skipped)
     body = case.steps[0].body
-    ask = _ask_call([{"id": "presence", "question": f"Ben asks: {body} - may I answer?",
-                      "options": [{"label": "Answer it"}, {"label": "Do not"}]}])
-    record = AskRecord(questions=({"id": "presence",
-                                   "question": f"Ben asks: {body} - may I answer?",
-                                   "options": [{"label": "Answer it"}, {"label": "Do not"}]},))
+    ask = _ask_call(
+        [
+            {
+                "id": "presence",
+                "question": f"Ben asks: {body} - may I answer?",
+                "options": [{"label": "Answer it"}, {"label": "Do not"}],
+            }
+        ]
+    )
+    record = AskRecord(
+        questions=(
+            {
+                "id": "presence",
+                "question": f"Ben asks: {body} - may I answer?",
+                "options": [{"label": "Answer it"}, {"label": "Do not"}],
+            },
+        )
+    )
     run = _run([_turn(tool_calls=[ask], egress=(), asks=[record], body=body)])
     run.ask_surface = "installed"  # type: ignore[misc]
     score = score_case(case=case, run=run, dataset=dataset, canaries=_canaries(dataset))

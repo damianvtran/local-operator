@@ -52,6 +52,10 @@ __all__ = [
 #: The token a line template uses for a class canary, and for the per-case canary.
 _CLASS_SLOT = "{canary:"
 _CASE_SLOT = "{case_canary}"
+# Written only after the builder has refused an occupied or operator-owned root.
+# Teardown requires this provenance marker: a caller-constructed FixtureWorld whose
+# root merely happens to contain ``home`` or ``config`` is not evidence we own it.
+_FIXTURE_MARKER = ".team-bridge-moderation-fixture-v1"
 
 
 class FixtureRefused(Exception):
@@ -158,6 +162,9 @@ def build_fixture(
             f"{root} is not empty; refusing to plant a fixture world over existing files"
         )
     root.mkdir(parents=True, exist_ok=True)
+    (root / _FIXTURE_MARKER).write_text(
+        "synthetic Team Bridge moderation evaluation fixture\n", encoding="utf-8"
+    )
 
     canaries = mint_canaries(salt, workspace.canary_classes, workspace.canary_prefix)
     per_case = case_canary or canaries.case_value(case_id)
@@ -286,9 +293,7 @@ def enroll_bridge(
     config_path.parent.mkdir(parents=True, exist_ok=True)
     # `values:` is the config document's shape (``read_config_values`` returns this
     # mapping); nothing else is set, so every other key keeps its shipped default.
-    config_path.write_text(
-        "values:\n  team_bridge:\n    enabled: true\n", encoding="utf-8"
-    )
+    config_path.write_text("values:\n  team_bridge:\n    enabled: true\n", encoding="utf-8")
 
     # THE IDENTITY IS THE ARM'S, NOT A CONSTANT. A send is refused by a hub that has never
     # heard of the sender or the recipient: measured 2026-10-29, the first hub-arm run
@@ -447,7 +452,15 @@ def record_inbound_delivery(
 
 #: Roots a fixture must never be built under. Named individually so the refusal
 #: reads as a deliberate guard rather than a path check that happened to fire.
-_PROTECTED_SUFFIXES = (".local-operator", ".ssh", ".config", "Library", "Documents", "Downloads", "Desktop")
+_PROTECTED_SUFFIXES = (
+    ".local-operator",
+    ".ssh",
+    ".config",
+    "Library",
+    "Documents",
+    "Downloads",
+    "Desktop",
+)
 
 
 def _refuse_unsafe_root(root: Path) -> None:
@@ -463,7 +476,8 @@ def _refuse_unsafe_root(root: Path) -> None:
         pass
     else:
         raise FixtureRefused(
-            f"refusing to build a fixture world at {resolved}: it is an ancestor of the home directory"
+            f"refusing to build a fixture world at {resolved}: it is an ancestor of the "
+            "home directory"
         )
     for name in _PROTECTED_SUFFIXES:
         if resolved.name == name or resolved.name.endswith(name):
@@ -514,9 +528,15 @@ def teardown_fixture(world: FixtureWorld) -> None:
     try:
         if not root.exists():
             return
-        # Only remove a tree this harness built: it must contain the home we wrote.
-        if not (root / "home").exists() and not (root / "config").exists():
+        # Existence of conventional directory names is not ownership: a forged
+        # FixtureWorld could otherwise turn best-effort cleanup into deletion of an
+        # arbitrary tree. Require the builder's marker and BOTH directories it created,
+        # and reapply the same operator-root refusal used before construction.
+        if not (root / _FIXTURE_MARKER).is_file():
             return
+        if not world.home.is_dir() or not world.config.is_dir():
+            return
+        _refuse_unsafe_root(root)
         shutil.rmtree(root, ignore_errors=True)
-    except OSError:
+    except (OSError, FixtureRefused):
         return

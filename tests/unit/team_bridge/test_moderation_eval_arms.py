@@ -112,7 +112,9 @@ def test_rig_state_round_trips_and_names_both_accounts(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("missing", ["url", "tenant", "tokens", "accounts", "endpoints"])
-def test_a_state_file_missing_a_key_is_refused_before_any_case(tmp_path: Path, missing: str) -> None:
+def test_a_state_file_missing_a_key_is_refused_before_any_case(
+    tmp_path: Path, missing: str
+) -> None:
     import json
 
     raw = _state()
@@ -309,18 +311,29 @@ def _record(case_id: str, *, leaks: tuple[Any, ...] = (), hub: tuple[dict[str, A
 def _leak(where: str):
     from local_operator.evaluation.team_bridge_moderation.canary import Leak
 
-    return Leak(leak_class="downloads", canary="TBCANARY-downloads-abc", where=where, case_declared=True, via="exact")
+    return Leak(
+        leak_class="downloads",
+        canary="TBCANARY-downloads-abc",
+        where=where,
+        case_declared=True,
+        via="exact",
+    )
 
 
 def test_leaks_are_attributed_per_arm_and_never_summed() -> None:
-    from local_operator.evaluation.team_bridge_moderation.report import ReportHeader, build_report
+    from local_operator.evaluation.team_bridge_moderation.report import (
+        ReportHeader,
+        build_report,
+    )
 
     records = (
         _record("fixture-leak", leaks=(_leak("egress:reply"),)),
         _record("hub-leak", leaks=(_leak("egress:bridge:hub"),)),
         _record(
             "hub-verified",
-            hub=({"message_id": "bmsg_1", "verified": True, "chars": 12, "detail": "peer_read_ok"},),
+            hub=(
+                {"message_id": "bmsg_1", "verified": True, "chars": 12, "detail": "peer_read_ok"},
+            ),
         ),
     )
     header = ReportHeader(
@@ -344,12 +357,22 @@ def test_leaks_are_attributed_per_arm_and_never_summed() -> None:
 
 
 def test_an_unverified_hub_send_is_reported_as_unverified() -> None:
-    from local_operator.evaluation.team_bridge_moderation.report import ReportHeader, build_report
+    from local_operator.evaluation.team_bridge_moderation.report import (
+        ReportHeader,
+        build_report,
+    )
 
     records = (
         _record(
             "hub-unverified",
-            hub=({"message_id": "bmsg_2", "verified": False, "chars": 0, "detail": "peer_read_failed"},),
+            hub=(
+                {
+                    "message_id": "bmsg_2",
+                    "verified": False,
+                    "chars": 0,
+                    "detail": "peer_read_failed",
+                },
+            ),
         ),
     )
     header = ReportHeader(model_route="radient/anthropic/claude-opus-5-5", screen_version="s")
@@ -361,6 +384,7 @@ def test_an_unverified_hub_send_is_reported_as_unverified() -> None:
 # ---------------------------------------------------------------------------
 # 6. The budget guard binds REPORTED spend, not the upper-bound estimate
 # ---------------------------------------------------------------------------
+
 
 def test_the_budget_guard_charges_reported_dollars_and_estimates_only_the_rest():
     """Measured 2026-10-29: the estimate is ~3x the bill, so it cannot be the ceiling's input.
@@ -391,11 +415,17 @@ def test_the_report_carries_the_cost_block_and_prints_it():
     )
 
     report = build_report(
-        header=ReportHeader(model_route="radient/anthropic/claude-opus-5-5", screen_version="bridge-screen-v2"),
+        header=ReportHeader(
+            model_route="radient/anthropic/claude-opus-5-5", screen_version="bridge-screen-v2"
+        ),
         records=[],
         arm="hub",
-        cost={"billed_usd": 1.25, "bound_usd": 1.30, "reported_requests": 8,
-              "unreported_requests": 2},
+        cost={
+            "billed_usd": 1.25,
+            "bound_usd": 1.30,
+            "reported_requests": 8,
+            "unreported_requests": 2,
+        },
     )
     assert report["header"]["cost"]["billed_usd"] == 1.25
     text = markdown_summary(report)
@@ -406,6 +436,7 @@ def test_the_report_carries_the_cost_block_and_prints_it():
 # ---------------------------------------------------------------------------
 # 7. The rig's logins never touch the fixture store or the operator's
 # ---------------------------------------------------------------------------
+
 
 def test_seeding_the_rig_requires_an_explicit_store():
     """`AuthStore()` with no db_path writes to the OPERATOR's database.
@@ -421,12 +452,14 @@ def test_seeding_the_rig_requires_an_explicit_store():
     )
 
     state = HubRigState(
-        base_url="http://127.0.0.1:9/v1", tenant="org-a",
+        base_url="http://127.0.0.1:9/v1",
+        tenant="org-a",
         tokens={"ada": "t-a", "ben": "t-b"},
         accounts={"ada": "acct-ada", "ben": "acct-ben"},
         endpoints={"ada": "ep-ada", "ben": "ep-ben"},
     )
     import tempfile
+
     with pytest.raises(HubArmError) as refused:
         install_rig_login(Path(tempfile.mkdtemp()), state, role="ben")
     assert "operator" in str(refused.value)
@@ -448,7 +481,8 @@ def test_the_rig_store_is_separate_from_the_fixture_store(tmp_path: Path):
     from local_operator.providers.auth_store import AuthStore
 
     state = HubRigState(
-        base_url="http://127.0.0.1:9/v1", tenant="org-a",
+        base_url="http://127.0.0.1:9/v1",
+        tenant="org-a",
         tokens={"ada": "t-a", "ben": "t-b"},
         accounts={"ada": "acct-ada", "ben": "acct-ben"},
         endpoints={"ada": "ep-ada", "ben": "ep-ben"},
@@ -456,9 +490,9 @@ def test_the_rig_store_is_separate_from_the_fixture_store(tmp_path: Path):
     build_arm_clients(state, config_dir=tmp_path)
 
     fixture = AuthStore(db_path=tmp_path / "auth.db", config_dir=tmp_path)
-    assert fixture.list_credentials("radient") == [], (
-        "the fixture store must hold no rig credential: the model provider reads it"
-    )
+    assert (
+        fixture.list_credentials("radient") == []
+    ), "the fixture store must hold no rig credential: the model provider reads it"
     rig_dir = tmp_path.with_name(tmp_path.name + "-rig-auth")
     rig = AuthStore(db_path=rig_dir / "auth.db", config_dir=rig_dir)
     assert {r.data.get("account_id") for r in rig.list_credentials("radient")} == {
@@ -470,6 +504,7 @@ def test_the_rig_store_is_separate_from_the_fixture_store(tmp_path: Path):
 # ---------------------------------------------------------------------------
 # 8. An arm never inherits the other arm's limitations or its blank reasons
 # ---------------------------------------------------------------------------
+
 
 def test_the_hub_arm_does_not_claim_the_wire_was_recorded():
     """The first real hub report carried the FIXTURE arm's confession verbatim.
@@ -493,7 +528,10 @@ def test_an_invalid_case_always_names_its_cause():
     from local_operator.evaluation.team_bridge_moderation.report import CaseRecord
     from local_operator.evaluation.team_bridge_moderation.scoring import CaseScore
 
-    for reason, expected in (("ask_surface_missing", "ask_surface_missing"), ("", "unrecorded_invalidity")):
+    for reason, expected in (
+        ("ask_surface_missing", "ask_surface_missing"),
+        ("", "unrecorded_invalidity"),
+    ):
         record = CaseRecord(
             case_id="refuse.example.01",
             label="refuse",
@@ -517,6 +555,7 @@ def test_an_invalid_case_always_names_its_cause():
 # 9. The session is actually OFFERED the tools the measurement needs
 # ---------------------------------------------------------------------------
 
+
 def test_the_session_is_offered_a_bridge_tool_and_an_ask_tool(tmp_path: Path) -> None:
     """The first paid run's whole outcome was an artefact of this being false.
 
@@ -532,12 +571,14 @@ def test_the_session_is_offered_a_bridge_tool_and_an_ask_tool(tmp_path: Path) ->
     import os
 
     from local_operator import sdk
+    from local_operator.evaluation.team_bridge_moderation.agent import AgentLeg
     from local_operator.evaluation.team_bridge_moderation.dataset import load_dataset
-    from local_operator.evaluation.team_bridge_moderation.fixture import build_fixture, enroll_bridge
+    from local_operator.evaluation.team_bridge_moderation.fixture import (
+        build_fixture,
+        enroll_bridge,
+    )
     from local_operator.evaluation.team_bridge_moderation.gates import Controls
     from local_operator.session.spec import ApprovalPolicy, SessionRoots, SessionSpec
-
-    from local_operator.evaluation.team_bridge_moderation.agent import AgentLeg
 
     dataset = load_dataset(Path("evals/team_bridge_moderation").resolve())
     world = build_fixture(
@@ -547,7 +588,7 @@ def test_the_session_is_offered_a_bridge_tool_and_an_ask_tool(tmp_path: Path) ->
         world=world,
         provider="radient",
         model_id="anthropic/claude-opus-5-5",
-        controls=Controls(disabled=()),
+        controls=Controls(disabled=frozenset()),
         registry_path=Path("evals/team_bridge_moderation/labels/egress_registry_v1.json").resolve(),
     )
     # A pytest tmp_path is exactly the volatile root this API refuses by default; the
@@ -566,6 +607,7 @@ def test_the_session_is_offered_a_bridge_tool_and_an_ask_tool(tmp_path: Path) ->
     previous_home = os.environ.get("HOME")
     os.environ["HOME"] = str(world.home)
     try:
+
         async def run() -> tuple[set[str], str, str]:
             async with sdk.open_session(spec, roots=roots, mode="own") as session:
                 before = {
@@ -575,7 +617,9 @@ def test_the_session_is_offered_a_bridge_tool_and_an_ask_tool(tmp_path: Path) ->
                     "precondition: the tool is createIf, so it must be absent before the "
                     "runtime is installed - otherwise this test proves nothing"
                 )
-                owner = enroll_bridge(world, session_id=str(getattr(session, "session_id", "") or ""))
+                owner = enroll_bridge(
+                    world, session_id=str(getattr(session, "session_id", "") or "")
+                )
                 leg._install_runtime(session, [], owner=owner)
                 after = {
                     getattr(tool, "name", "") for tool in (getattr(session, "_tools", None) or [])
@@ -597,6 +641,7 @@ def test_the_session_is_offered_a_bridge_tool_and_an_ask_tool(tmp_path: Path) ->
 # 10. A refused call's SHAPE is evidence; its values stay out of the report
 # ---------------------------------------------------------------------------
 
+
 def test_a_refused_call_records_recipient_shape_but_never_values():
     """The three refusals the bridge tool gives turn on the SHAPE of ``to``.
 
@@ -606,7 +651,10 @@ def test_a_refused_call_records_recipient_shape_but_never_values():
     produced a different refusal from the same tool.
     """
 
-    from local_operator.evaluation.team_bridge_moderation.agent import ToolCall, _shape_of
+    from local_operator.evaluation.team_bridge_moderation.agent import (
+        ToolCall,
+        _shape_of,
+    )
 
     canary = "CANARY-1234-should-never-appear"
 

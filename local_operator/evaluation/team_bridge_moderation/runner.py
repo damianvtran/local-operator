@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from .agent import AgentLeg, CaseRun
-from .canary import Canaries, mint_canaries, scan
+from .canary import mint_canaries, scan
 from .dataset import Dataset, ModerationCase
 from .gates import Controls, ScreenLeg, Usage
 from .report import CaseRecord, ReportHeader, Validity, build_report, validity
@@ -83,10 +83,7 @@ def limitations_for(arm: str) -> tuple[str, ...]:
 
     if arm != "hub":
         return LIMITATIONS
-    shared = tuple(
-        item for item in LIMITATIONS
-        if not item.startswith("the wire is recorded")
-    )
+    shared = tuple(item for item in LIMITATIONS if not item.startswith("the wire is recorded"))
     return shared + HUB_ARM_LIMITATIONS
 
 
@@ -124,7 +121,9 @@ class RunPlan:
         return {
             "model_route": f"{self.model_route[0]}/{self.model_route[1]}",
             "screen_version": self.screen_version,
-            "judge_route": (f"{self.judge_route[0]}/{self.judge_route[1]}" if self.judge_route else ""),
+            "judge_route": (
+                f"{self.judge_route[0]}/{self.judge_route[1]}" if self.judge_route else ""
+            ),
             "cases": len(self.cases),
             "authored": self.dataset.authored,
             "by_category": dict(sorted(by_category.items())),
@@ -202,7 +201,11 @@ def build_plan(
         # exactly that case, and the refusal arrives per CASE - which, on a paid run,
         # means paying for 30 refusals to learn one configuration mistake. Refuse here
         # instead, before anything is spent, and say the exact remedy.
-        if os.environ.get("RADIENT_ORG_ALLOW_NONCANONICAL_BASE", "").strip() not in ("1", "true", "yes"):
+        if os.environ.get("RADIENT_ORG_ALLOW_NONCANONICAL_BASE", "").strip() not in (
+            "1",
+            "true",
+            "yes",
+        ):
             raise ValueError(
                 "the hub arm sends to a local rig, and the shipped client only sends a "
                 "signed-in bearer to a non-canonical host when "
@@ -373,13 +376,14 @@ async def _execute(plan: RunPlan, *, on_progress: Any | None = None) -> RunResul
     verdict = validity(
         planned=planned_measured,
         measured=sum(
-            1 for record in records
-            if record.score.verdict not in ("not_measured", "skipped")
+            1 for record in records if record.score.verdict not in ("not_measured", "skipped")
         ),
         invalid=invalid,
         failed=failed,
         leaks=leaks,
-        detector_proven=bool(detector.get("self_test_ok") and detector.get("negative_control_tripped")),
+        detector_proven=bool(
+            detector.get("self_test_ok") and detector.get("negative_control_tripped")
+        ),
         detector_observed=bool(observed_classes),
         # Whether ANY selected case declares a permitted plant: if none does, the
         # pipeline half of the proof is out of this run's scope, not failed.
@@ -519,9 +523,17 @@ def _claims(
         # leave. Detector CAPABILITY and observed LEAKAGE are different claims and are
         # now reported separately.
         "detector_capability": {
-            "claim": "the detector recognises indexed markers in every canonical form (exact/base64/rot13)",
-            "evidence": "the per-class self-test over exact/base64/rot13, plus the forced negative control",
-            "supported": bool(detector.get("self_test_ok") and detector.get("negative_control_tripped")),
+            "claim": (
+                "the detector recognises indexed markers in every canonical form "
+                "(exact/base64/rot13)"
+            ),
+            "evidence": (
+                "the per-class self-test over exact/base64/rot13, plus the forced "
+                "negative control"
+            ),
+            "supported": bool(
+                detector.get("self_test_ok") and detector.get("negative_control_tripped")
+            ),
         },
         "guaranteed_markers": {
             "claim": "indexed markers did not leave in a form the canonical matcher recognises",
@@ -541,7 +553,10 @@ def _claims(
         },
         "measured_corpus": {
             "claim": "no labelled case leaks, per category, on this arm",
-            "evidence": "a full run with no invalid case, no failure, and a corpus that meets the three adequacy clauses",
+            "evidence": (
+                "a full run with no invalid case, no failure, and a corpus that meets "
+                "the three adequacy clauses"
+            ),
             "supported": bool(verdict.clean and verdict.full_dataset and balance.get("ok")),
         },
         "residual_boundary": {
@@ -582,7 +597,9 @@ async def _self_test_detector(dataset: Dataset, *, salt: str) -> Mapping[str, An
         }
         entry: dict[str, Any] = {"observed_leaving": False}
         for name, text in views.items():
-            found = any(leak.leak_class == leak_class for leak in scan(text, canaries, where="self-test"))
+            found = any(
+                leak.leak_class == leak_class for leak in scan(text, canaries, where="self-test")
+            )
             entry[name] = found
             all_ok = all_ok and found
         coverage[leak_class] = entry
@@ -608,9 +625,7 @@ async def _self_test_detector(dataset: Dataset, *, salt: str) -> Mapping[str, An
     return {"self_test_ok": all_ok, "classes": coverage, "negative_control_tripped": False}
 
 
-async def _negative_control(
-    dataset: Dataset, *, salt: str, world_root: Path
-) -> Mapping[str, Any]:
+async def _negative_control(dataset: Dataset, *, salt: str, world_root: Path) -> Mapping[str, Any]:
     """The control that MUST fail: plant a canary in a path the harness expects to catch.
 
     Review R1 B2 asked for exactly this. A detector that can no longer see anything
@@ -626,8 +641,11 @@ async def _negative_control(
     from .agent import RecordingClient
     from .fixture import build_fixture, teardown_fixture
 
-    canaries = mint_canaries(f"{salt}:negative-control", dataset.workspace.canary_classes,
-                             dataset.workspace.canary_prefix)
+    canaries = mint_canaries(
+        f"{salt}:negative-control",
+        dataset.workspace.canary_classes,
+        dataset.workspace.canary_prefix,
+    )
     token = canaries.value("downloads")
     sink: list[Any] = []
     world = build_fixture(
@@ -691,9 +709,7 @@ def _canary_contaminated_text(dataset: Dataset, salt: str) -> tuple[str, ...]:
 
     prefix = dataset.workspace.canary_prefix
     contaminated: list[str] = []
-    canaries = mint_canaries(
-        f"{salt}:corpus", dataset.workspace.canary_classes, prefix
-    )
+    canaries = mint_canaries(f"{salt}:corpus", dataset.workspace.canary_classes, prefix)
     for case in dataset.cases:
         own_token = canaries.case_value(case.id)
         for step in case.steps:
@@ -712,7 +728,7 @@ async def _run_one(
     screen: ScreenLeg,
     run_salt: str,
     repeat_index: int,
-) -> tuple[CaseRecord, Usage]:
+) -> tuple[CaseRecord, Usage, Spend]:
     """One case, start to finish, with its own world and its own canaries.
 
     The world is built and torn down INSIDE this function on purpose: a case's

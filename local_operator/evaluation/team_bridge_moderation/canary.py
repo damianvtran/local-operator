@@ -84,6 +84,7 @@ class Leak:
     case_declared: bool
     via: str  # "exact" | "base64" | "rot13" | "leet"
 
+
 class Canaries:
     """The run's minted tokens, keyed by leak class.
 
