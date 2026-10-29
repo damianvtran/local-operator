@@ -7,6 +7,7 @@ a fixture that assembled rows the writer would never produce.
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import time
 from pathlib import Path
@@ -1238,3 +1239,73 @@ def test_a_database_removed_under_the_process_is_migrated_before_the_next_read(
     # readiness cache by the same path and would otherwise skip its DDL.
     assert MetadataStore(root).ensure_schema() is True
     assert indexer.rebuild_now(root) >= 1
+
+
+def test_a_foreign_database_swapped_in_is_migrated_and_stays_readable(
+    tmp_path, monkeypatch
+) -> None:
+    """The durable direction of R1-1: the replacement must not become "verified".
+
+    A path-level check had an asymmetric failure the reviewer reproduced: if the
+    DDL committed and the file was replaced before the verdict was recorded, the
+    REPLACEMENT was recorded as migrated, so the bad state persisted for the life
+    of the process — three consecutive reads failed. Asking the open handle makes
+    the verdict belong to the file actually read, so this is one heal and three
+    working reads. The replacement here is a real SQLite database with no library
+    tables, i.e. the "database swapped in by another process" case.
+    """
+    root = config_root(monkeypatch, tmp_path)
+    asset = tmp_path / "kept.txt"
+    asset.write_text("x")
+    session(root, SESSION, write_rows("w1", 1.0, asset))
+    indexer.rebuild_now(root)
+    store = LibraryStore(root)
+
+    foreign = tmp_path / "foreign.sqlite3"
+    raw = sqlite3.connect(foreign)
+    try:
+        raw.execute("CREATE TABLE unrelated(x)")
+        raw.execute("INSERT INTO unrelated VALUES ('not a library table')")
+        raw.commit()
+    finally:
+        raw.close()
+    os.replace(foreign, store.path)
+
+    # Not "one read heals": durability is what the finding was about.
+    for attempt in range(3):
+        assert LibraryStore(root).sessions() == {}, f"read {attempt + 1} did not heal"
+    with LibraryStore(root).read() as connection:
+        tables = {
+            row[0]
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+    assert {"idx_sessions", "idx_state", "assets", "tags"}.issubset(tables)
+
+
+def test_a_metadata_first_read_on_a_replaced_file_does_not_raise(tmp_path, monkeypatch) -> None:
+    """R1-2: the metadata store must not claim a readiness it did not establish.
+
+    ``LibraryStore._connect`` used to be the only place a replaced file was
+    noticed, so a metadata-first caller — the mobile tags route
+    (``mobile/library.py``), ``desktop_librarian.py``, the ``library.service``
+    asset operations — read a recreated empty file with the process-wide
+    "verified" verdict still standing: ``ensure_schema()`` answered True without
+    DDL and the first statement raised a bare ``no such table: tags``. The
+    authoritative store now asks its own open handle, so it migrates that file
+    and the read is empty rather than exceptional.
+    """
+    root = config_root(monkeypatch, tmp_path)
+    assert MetadataStore(root).ensure_schema() is True
+    LibraryStore(root).ensure_schema()
+    LibraryStore(root).path.unlink()
+
+    # Metadata-store-first, exactly the ordering the finding names.
+    assert MetadataStore(root).ensure_schema() is True
+    assert MetadataStore(root).list_tags() == []
+    with MetadataStore(root)._read() as connection:  # noqa: SLF001 - the table is the claim
+        assert connection is not None
+        names = {
+            row[0]
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+    assert {"tags", "assets", "asset_tags"}.issubset(names)

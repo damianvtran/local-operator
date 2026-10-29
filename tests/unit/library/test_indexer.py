@@ -10,12 +10,11 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import threading
 import time
 import types
 from pathlib import Path
 from typing import Any
-
-import pytest
 
 from local_operator.library import indexer, service
 from local_operator.library.metadata import MetadataStore
@@ -779,7 +778,7 @@ def test_a_synchronous_rebuild_never_pauses(tmp_path, monkeypatch) -> None:
 
 
 def test_reconcile_over_a_replaced_index_heals_without_a_warning(
-    tmp_path, monkeypatch, caplog, capsys
+    tmp_path, monkeypatch, caplog
 ) -> None:
     """The reconciler must not report a recoverable, expected state as a failure.
 
@@ -807,9 +806,16 @@ def test_reconcile_over_a_replaced_index_heals_without_a_warning(
     with caplog.at_level(logging.DEBUG, logger="local_operator.library"):
         indexer.LibraryIndexer(root).reconcile()
 
-    captured = capsys.readouterr()
-    assert (captured.out, captured.err) == ("", "")
-    noisy = [record for record in caplog.records if record.levelno >= logging.WARNING]
+    # Scoped to THIS thread: the reconcile runs synchronously here, so a record
+    # from it is ours, while a worker or plugin thread from another test is not
+    # evidence about this call. Real stderr is proven end-to-end by the
+    # entrypoint test in CI and by the harness in the PR description, which is
+    # where a `capsys` assertion would have to live to mean anything.
+    noisy = [
+        record
+        for record in caplog.records
+        if record.levelno >= logging.WARNING and record.thread == threading.get_ident()
+    ]
     assert noisy == [], [record.getMessage() for record in noisy]
     # ...and it healed rather than merely keeping quiet: the recreated file is
     # migrated, which is what the next scan writes into.
@@ -821,17 +827,16 @@ def test_reconcile_over_a_replaced_index_heals_without_a_warning(
     assert "idx_sessions" in tables and "idx_state" in tables
 
 
-def test_a_missing_derived_table_is_one_actionable_line_not_a_traceback(
+def test_a_dropped_derived_table_is_migrated_rather_than_reported(
     tmp_path, monkeypatch, caplog
 ) -> None:
-    """An unmigrated index must say which table and which migration, on one line.
+    """A table missing from the OPEN file is a migration to run, not an error.
 
-    Not silence: a store whose derived schema is absent is a real condition a
-    user can hit (a restored cache, a database swapped in by another process),
-    and the warning has to name what is missing and what creates it. Not a
-    traceback either: thirty frames ending in ``IndexUnavailable`` is what the
-    CLI's stderr saw in CI, and it tells nobody which table to recreate. The
-    table is dropped here for real, so the error is SQLite's own.
+    Round 1 (R1-1) moved the readiness verdict from a ``stat`` of the path to a
+    probe of the connection about to be read, which tightens this case too: the
+    derived table can vanish under a live process (a version move in another
+    process, a partial restore, a manual ``DROP``) and the next read now
+    re-creates it in the same call instead of raising.
     """
     root = config_root(monkeypatch, tmp_path)
     store = LibraryStore(root)
@@ -843,20 +848,63 @@ def test_a_missing_derived_table_is_one_actionable_line_not_a_traceback(
     finally:
         raw.close()
 
-    with pytest.raises(IndexUnavailable) as raised:
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG, logger="local_operator.library"):
         indexer.LibraryIndexer(root).reconcile()
+
+    noisy = [
+        record
+        for record in caplog.records
+        if record.levelno >= logging.WARNING and record.thread == threading.get_ident()
+    ]
+    assert noisy == [], [record.getMessage() for record in noisy]
+    assert LibraryStore(root).sessions() == {}
+
+
+def test_a_missing_derived_table_is_one_actionable_line_not_a_traceback(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    """An unmigrated index must say which table and which migration, on one line.
+
+    Not silence: a store whose derived schema is absent is a real condition a
+    user can hit, and the warning has to name what is missing and what creates
+    it. Not a traceback either: thirty frames ending in ``IndexUnavailable`` is
+    what the CLI's stderr saw in CI, and it tells nobody which table to
+    recreate.
+
+    This pins the FORMATTER's contract for the residual window, not the common
+    path: since round 1 the store heals a missing table from the open handle
+    (above), so the only way this reaches the worker is a cross-process race —
+    another connection dropping the derived tables mid version-move after this
+    one's probe passed. Provoking that window deterministically would need a
+    mock, so the typed error the store raises is constructed directly and the
+    CONTRAST is asserted too: every other failure must keep its traceback.
+    """
+    root = config_root(monkeypatch, tmp_path)
+    store = LibraryStore(root)
+    assert store.ensure_schema()
 
     caplog.clear()
     with caplog.at_level(logging.WARNING, logger="local_operator.library.indexer"):
-        indexer._log_worker_failure("periodic reconcile failed", raised.value, store)
+        indexer._log_worker_failure(
+            "periodic reconcile failed", IndexUnavailable("no such table: idx_sessions"), store
+        )
+        indexer._log_worker_failure(
+            "periodic reconcile failed", IndexUnavailable("database disk image is malformed"), store
+        )
+        indexer._log_worker_failure("periodic reconcile failed", RuntimeError("boom"), store)
 
-    records = [record for record in caplog.records if record.levelno >= logging.WARNING]
-    assert len(records) == 1, [record.getMessage() for record in records]
-    record = records[0]
-    assert record.levelno == logging.WARNING
-    assert record.exc_info is None, "a missing derived table is not an unexpected failure"
-    message = record.getMessage()
+    missing = caplog.records[0]
+    assert missing.levelno == logging.WARNING
+    assert missing.exc_info is None, "a missing derived table is not an unexpected failure"
+    message = missing.getMessage()
     assert message.startswith("library: periodic reconcile failed")
     assert "idx_sessions" in message
     assert str(store.path) in message
     assert "LibraryStore.ensure_schema" in message and "derived schema v" in message
+
+    # Nothing silenced: a damaged file and an unknown error still say so, with
+    # the traceback that makes them diagnosable.
+    damaged, unexpected = caplog.records[1], caplog.records[2]
+    assert damaged.exc_info is not None
+    assert unexpected.exc_info is not None
