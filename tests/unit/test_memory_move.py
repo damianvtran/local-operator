@@ -7,6 +7,7 @@ scope's quota without losing the fact, its provenance or its timestamps.
 """
 
 import json
+import time
 
 import pytest
 
@@ -482,3 +483,41 @@ def test_merge_and_forget_together_are_refused(store):
             merge=True,
         )
     assert store.show("global", item["id"])["status"] == "active"
+
+
+def test_a_capture_moved_out_and_back_stays_deliberate(store):
+    """#3086 review r2, m1: the round trip used to expire the capture anyway.
+
+    Nulling ``expires_at`` was only true while the fact sat OUTSIDE its own session:
+    ``unreviewed_capture`` and the expiry sweep both key on ``source.session == owner``,
+    so moving it back made it an unreviewed capture again, and the sweep derived a
+    legacy deadline from ``source_time``. A move now stamps the author — the field every
+    deliberateness predicate reads — exactly as a deliberate ``put`` revision does.
+    """
+    from local_operator import memory_capture, memory_maintenance
+    from local_operator.memory import CAPTURE_AUTHOR, origin_label, unreviewed_capture
+
+    memory_capture.persist(
+        store,
+        "cap",
+        [{"title": "Travel note", "body": "The flock migrates in April", "tags": ["note"]}],
+        "ok",
+    )
+    with store.connection() as db:
+        entity = db.execute("SELECT entity_id FROM current").fetchone()[0]
+    out = store.move([f"session/{entity}"], "global")["moved"][0]
+    assert out["to"].startswith("global/")
+    back = store.move([out["to"]], "session")["moved"][0]
+    assert back["to"].startswith("session/")
+    with store.connection() as db:
+        (fact_json,) = db.execute("SELECT fact FROM current WHERE scope='session'").fetchone()
+    fact = json.loads(fact_json)
+    assert fact["source"]["session"] == "session-a" and fact["status"] == "candidate"
+    assert fact["expires_at"] is None
+    assert fact["source"]["author"] != CAPTURE_AUTHOR
+    # The label is unchanged (a deliberate fact can still list as `captured`) ...
+    assert origin_label(fact) == "captured"
+    # ... but no deliberateness predicate calls it an unreviewed capture any more.
+    assert unreviewed_capture(fact, "session-a") is False
+    with store._reader() as db:
+        assert memory_maintenance._expirable(store, db, time.time() + 15 * 86400) == []
