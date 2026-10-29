@@ -517,9 +517,11 @@ async def test_a_run_spanning_two_accounts_folds_to_one_row_that_names_both() ->
             for block in app.query_one(TranscriptView).blocks()
             if isinstance(block, NoticeBlock)
         ]
-    # "logins", not "accounts": the module's own noun, and 2 cells shorter, which
-    # is what keeps the marker on the sentence's first line at 100 columns (D3).
-    assert notices == [f"{same}  \u00d720 \u00b7 2 logins", named], notices
+    # "logins" is the module's own noun for one account on one owner (D3), and the
+    # marker is NBSP-joined after its single ASCII break point (D4): wrap_cells
+    # breaks on the ASCII space only, so at 100 columns the marker may move under
+    # the sentence whole, but never split — which is what the round-3 frames show.
+    assert notices == [f"{same}  \u00d720\u00a0\u00b7\u00a02\u00a0logins", named], notices
 
 
 @pytest.mark.asyncio

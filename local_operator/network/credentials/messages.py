@@ -731,22 +731,23 @@ def render_binding_notice_repeat(text: str, *, seen: int, accounts: int = 1) -> 
     names the thing the operator has two of rather than introducing a second word
     for it. It is 2 cells shorter than "accounts".
 
-    AND IT DOES NOT FIT ON ONE LINE AT 100 COLUMNS — measured, not assumed. The
-    longest flood sentence (``[session credential] This session is now using the
-    <provider> login on <device>.``, 77 cells) plus ``  ×20 · 2 logins`` (16) needs
-    93 cells; the notice's text area at 100x30 is ~91, so the last word still
-    strands on its own line, exactly as ``×20 · 2 accounts`` did. Sentences about
-    two cells shorter do fit. This is recorded rather than fixed because the
-    wording is a design decision (round 2, D3): the candidates that would fit change
-    the copy again (drop the separator, or drop the unit and lose the fact D1
-    exists to disclose).
-
+    AND THE MARKER NEVER SPLITS, EVEN WHEN THE LINE IS FULL (design round 3, D4).
+    The notice's wrapper is ``wrap_cells``, which breaks on the ASCII SPACE only,
+    so the two spaces before ``×`` are the marker's one legal break point and
+    everything after it is NBSP-joined — the same trick, and the same reason, as
+    ``SendFailureNotice._SEND_AGAIN_CONTROLS`` in ``tui/session_presentation.py``.
+    So the marker either stays inline or moves under the sentence WHOLE: at 100
+    columns the 77-cell flood sentence leaves room for ``×20 · 2`` but not for
+    ``logins`` (measured in the round-2 frame), and with NBSP that row now reads
+    ``… on my-mac.  ×20 · 2`` / ``logins`` as an unbroken unit on the second line
+    rather than a fragment stranded mid-marker. A longer device name moves the
+    whole marker down instead, which the round-3 frame shows.
     It lives HERE, beside the sentence it annotates, because this module is the
     credential copy home; the fold in ``tui/session_presentation.py`` calls it
     rather than spelling a marker of its own.
     """
     if accounts > 1:
-        return f"{text}  \u00d7{seen} \u00b7 {accounts} logins"
+        return f"{text}  \u00d7{seen}\u00a0\u00b7\u00a0{accounts}\u00a0logins"
     return f"{text}  \u00d7{seen}"
 
 
