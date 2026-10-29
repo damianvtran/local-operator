@@ -269,6 +269,12 @@ def approve_pair_request(root: Path, approval_id: str, code: str) -> int:
     This is NOT the generic CLI approver. It prints the op's own disclosure, checks
     the phone's SAS through its persistent receipt path, then pins both digests for
     ``approve_and_apply``. The generic approver stays refused because it has no code.
+
+    A card whose decision is ALREADY SIGNED takes the engine's retry shape instead
+    (C3 QA round 1, Q2): ``desktop_approval.apply`` is retryable from ``failed``, and
+    re-signing would refuse a card the apply itself accepts. So a dismissed install
+    prompt, or a post-signature refusal, is finished by re-running the same command;
+    the code is not asked for again because the acknowledgement is already recorded.
     """
     import sys
 
@@ -290,16 +296,39 @@ def approve_pair_request(root: Path, approval_id: str, code: str) -> int:
         # OS prompt; it clears the engine's cancel latch without changing the record.
         desktop_approval.refetched([approval_id])
         facts = pair_op.disclosure(record)
-        # Wrong codes are charged here, BEFORE the typed engine can reach a signer;
-        # a correct code leaves exactly the acknowledgement the store guard requires.
-        pair_op.check_ack(approval_id, code=code, root=root)
-        outcome = desktop_approval.approve_and_apply(
-            root,
-            approval_id,
-            op=pair_op.OP,
-            request_digest=str(record["request_digest"]),
-            disclosure_digest_=desktop_approval.disclosure_digest(facts),
-        )
+        digest = desktop_approval.disclosure_digest(facts)
+        state = str(record.get("state") or "")
+        if state == approvals.STATE_REQUESTED:
+            # Wrong codes are charged here, BEFORE the typed engine can reach a signer;
+            # a correct code leaves exactly the acknowledgement the store guard requires.
+            pair_op.check_ack(approval_id, code=code, root=root)
+            outcome = desktop_approval.approve_and_apply(
+                root,
+                approval_id,
+                op=pair_op.OP,
+                request_digest=str(record["request_digest"]),
+                disclosure_digest_=digest,
+            )
+        elif state in (approvals.STATE_APPROVED, approvals.STATE_FAILED):
+            print("This pairing is already approved; finishing the install.")
+            applied = desktop_approval.apply(
+                root,
+                approval_id,
+                op=pair_op.OP,
+                request_digest=str(record["request_digest"]),
+                disclosure_digest_=digest,
+            )
+            outcome = {
+                "signed": {"key_id": str((record.get("signature") or {}).get("key_id") or "")},
+                "applied": {"ok": True},
+                "state": applied["state"],
+            }
+        else:
+            raise MeshRefusal(
+                "approval_decision_conflict",
+                f"This pairing request is {state!r}, so there is nothing left to approve or "
+                "install. Ask the phone to start pairing again.",
+            )
     except MeshRefusal as exc:
         print(str(exc), file=sys.stderr)
         return 1
