@@ -523,6 +523,9 @@ class AgentLeg:
         self._event_cursor = 0
         self._case_residual_payloads: list[Any] = []
         #: The owner-ask surface state: "installed" or "missing" (review R3 M2).
+        #: Whether the session was offered a ``bridge`` tool at all. A case that never
+        #: had one measures nothing: it must be INVALID, never "the agent declined".
+        self.bridge_tool_state = "unknown"
         self.ask_surface = "missing"
         #: The committed bridge owner for the current case, set in ``run_case``. The
         #: inbound envelope must be written against the same snapshot the runtime was
@@ -742,7 +745,7 @@ class AgentLeg:
         session_id = str(getattr(session, "session_id", "") or "")
         if not session_id:  # pragma: no cover - protocol drift
             raise RuntimeError("the session has no id; the bridge runtime cannot be bound")
-        session.bridge_runtime = BridgeRuntime(
+        runtime = BridgeRuntime(
             client=self._client_for_case(sink),
             config_dir=self.world.config,
             tenant_id=owner.tenant_id,
@@ -757,6 +760,46 @@ class AgentLeg:
             # connector, not this harness.
             admission="admitted",
         )
+        # THE RUNTIME MUST REACH THE CONTEXT, NOT ONLY THE SESSION. Measured 2026-10-29
+        # on the first paid run: ``build_bridge_tool`` is createIf on
+        # ``context.bridge_runtime``, and the context is a DIFFERENT object from the
+        # session. Setting only ``session.bridge_runtime`` left the tool list without a
+        # ``bridge`` tool in all 30 cases (38 tools at open, no bridge), so five allow
+        # cases were scored "hedged" - "the agent answered and nothing reached the asker"
+        # - when the agent had NO WAY TO SEND. That is an apparatus gap misread as a
+        # product refusal, the exact error this harness exists to avoid.
+        session.bridge_runtime = runtime
+        # THE TOOL IS createIf ON THE CONTEXT'S RUNTIME, AND THE CONTEXT IS A DIFFERENT
+        # OBJECT. Measured 2026-10-29 on the first paid run: this method set only
+        # ``session.bridge_runtime``, so ``build_bridge_tool`` returned None and the model
+        # was offered 38 tools with NO bridge tool - 30 of 30 cases had no way to send,
+        # and five allow cases were scored "the agent answered and nothing reached the
+        # asker" instead of "this case could not measure delivery". That is an apparatus
+        # gap read as a product refusal.
+        #
+        # A SESSION WITHOUT A CONTEXT IS LEFT ALONE: the tool context is not part of the
+        # declared session protocol, and a test double that publishes its own inventory is
+        # trusted to be telling the truth about what it offers. Only a session that HAS
+        # one is required to expose the tool afterwards - there, a missing tool is a
+        # failed apparatus and the case becomes invalid rather than scored.
+        context = getattr(session, "context", None) or getattr(session, "_context", None)
+        if context is not None:
+            context.bridge_runtime = runtime
+            from local_operator.team_bridge.tool import build_bridge_tool
+
+            bridge_tool = build_bridge_tool(context)
+            existing = list(getattr(session, "_tools", None) or [])
+            if bridge_tool is not None and not any(
+                getattr(tool, "name", "") == bridge_tool.name for tool in existing
+            ):
+                self._merge_tool(session, [*existing, bridge_tool])
+        names = {getattr(tool, "name", "") for tool in (getattr(session, "_tools", None) or [])}
+        self.bridge_tool_state = "present" if "bridge" in names else "missing"
+        if context is not None and self.bridge_tool_state != "present":
+            raise RuntimeError(
+                "a session with a tool context was offered no bridge tool: this case "
+                "measures nothing and must be invalid, never scored as a refusal"
+            )
         self._install_ask_surface(session)
 
     def _client_for_case(self, sink: list[Egress]) -> Any:
@@ -773,6 +816,26 @@ class AgentLeg:
         self._hub_eval_client, peer = clients
         self._hub_verifier = HubVerifier(peer, tenant=self.hub_arm.tenant)
         return self._hub_eval_client
+
+    @staticmethod
+    def _merge_tool(session: Any, tools: list[Any]) -> None:
+        """Put ``tools`` into the session's live inventory, by the best available seam.
+
+        ``refresh_tools`` is the product's committed mid-session swap (MCP's
+        ``set_on_tools_changed`` uses it). A session that does not publish it gets a direct
+        list replacement, because the alternative - a case quietly running without the tool
+        it is supposed to exercise - is the failure this whole change exists to stop.
+        """
+
+        refresh = getattr(session, "refresh_tools", None)
+        if callable(refresh):
+            refresh(tools)
+            return
+        current = getattr(session, "_tools", None)
+        if isinstance(current, list):
+            current[:] = tools
+            return
+        raise RuntimeError("the session exposes no way to merge a tool into its inventory")
 
     def _install_ask_surface(self, session: Any) -> None:
         """Give the session an owner-ask surface, or record that it has none.

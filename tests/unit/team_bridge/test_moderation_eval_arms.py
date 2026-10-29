@@ -511,3 +511,83 @@ def test_an_invalid_case_always_names_its_cause():
             ),
         )
         assert record.as_record()["invalid_reason"] == expected
+
+
+# ---------------------------------------------------------------------------
+# 9. The session is actually OFFERED the tools the measurement needs
+# ---------------------------------------------------------------------------
+
+def test_the_session_is_offered_a_bridge_tool_and_an_ask_tool(tmp_path: Path) -> None:
+    """The first paid run's whole outcome was an artefact of this being false.
+
+    ``build_bridge_tool`` is createIf on ``context.bridge_runtime``, and the harness used
+    to set ``session.bridge_runtime`` only. The context is a different object, so the
+    model was offered 38 tools and NO bridge tool: five allow cases were scored "the agent
+    answered and nothing reached the asker" when the agent had no way to send anything
+    (measured 2026-10-29). This asserts the inventory, which is the thing a later reader
+    would otherwise have to infer from outcomes.
+    """
+
+    import asyncio
+    import os
+
+    from local_operator import sdk
+    from local_operator.evaluation.team_bridge_moderation.dataset import load_dataset
+    from local_operator.evaluation.team_bridge_moderation.fixture import build_fixture, enroll_bridge
+    from local_operator.evaluation.team_bridge_moderation.gates import Controls
+    from local_operator.session.spec import ApprovalPolicy, SessionRoots, SessionSpec
+
+    from local_operator.evaluation.team_bridge_moderation.agent import AgentLeg
+
+    dataset = load_dataset(Path("evals/team_bridge_moderation").resolve())
+    world = build_fixture(
+        root=tmp_path / "world", workspace=dataset.workspace, salt="tools", case_id="tools"
+    )
+    leg = AgentLeg(
+        world=world,
+        provider="radient",
+        model_id="anthropic/claude-opus-5-5",
+        controls=Controls(disabled=()),
+        registry_path=Path("evals/team_bridge_moderation/labels/egress_registry_v1.json").resolve(),
+    )
+    # A pytest tmp_path is exactly the volatile root this API refuses by default; the
+    # probe never outlives the process, so the override is the honest one.
+    roots = SessionRoots(
+        config_dir=world.config, agent_home=world.home, cwd=world.home, allow_volatile=True
+    )
+    spec = SessionSpec(
+        hosting="radient",
+        model="anthropic/claude-opus-5-5",
+        name="tools-probe",
+        tools=None,
+        approvals=ApprovalPolicy.auto(),
+    )
+
+    previous_home = os.environ.get("HOME")
+    os.environ["HOME"] = str(world.home)
+    try:
+        async def run() -> tuple[set[str], str, str]:
+            async with sdk.open_session(spec, roots=roots, mode="own") as session:
+                before = {
+                    getattr(tool, "name", "") for tool in (getattr(session, "_tools", None) or [])
+                }
+                assert "bridge" not in before, (
+                    "precondition: the tool is createIf, so it must be absent before the "
+                    "runtime is installed - otherwise this test proves nothing"
+                )
+                owner = enroll_bridge(world, session_id=str(getattr(session, "session_id", "") or ""))
+                leg._install_runtime(session, [], owner=owner)
+                after = {
+                    getattr(tool, "name", "") for tool in (getattr(session, "_tools", None) or [])
+                }
+                return after, leg.bridge_tool_state, leg.ask_surface
+
+        after, bridge_state, ask_state = asyncio.run(run())
+    finally:
+        if previous_home is not None:
+            os.environ["HOME"] = previous_home
+
+    assert "bridge" in after, f"the model was offered no bridge tool: {sorted(after)}"
+    assert "ask" in after, f"the model was offered no ask tool: {sorted(after)}"
+    assert bridge_state == "present"
+    assert ask_state == "installed"
