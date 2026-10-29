@@ -71,6 +71,7 @@ class RecordingClient:
         created: dict[str, Any] | None = None,
         sent: dict[str, Any] | None = None,
         messages: dict[str, Any] | None = None,
+        conversation: dict[str, Any] | None = None,
     ) -> None:
         self.conversations_result = conversations or {"conversations": [], "next_cursor": None}
         self.created_result = created or {
@@ -81,6 +82,7 @@ class RecordingClient:
         self.sent_result = sent or {"message": {"id": "cmsg_1", "seq": 4}}
         self.messages_result = messages or {"messages": []}
         self.replies_result: dict[str, Any] = {"root": {}, "replies": [], "has_more": False}
+        self.conversation_result: dict[str, Any] = conversation or {"id": "bcv_abcd1234"}
         self.calls: list[dict[str, Any]] = []
 
     async def conversations(self, **kwargs: Any) -> dict[str, Any]:
@@ -104,6 +106,14 @@ class RecordingClient:
         )
         return self.created_result
 
+    async def conversation(
+        self, conversation_id: str, *, tenant_id: str | None = None
+    ) -> dict[str, Any]:
+        self.calls.append(
+            {"method": "conversation", "conversation_id": conversation_id, "tenant_id": tenant_id}
+        )
+        return self.conversation_result
+
     async def conversation_send(
         self,
         conversation_id: str,
@@ -115,6 +125,7 @@ class RecordingClient:
         actor_endpoint_id: str | None = None,
         origin_session_id: str | None = None,
         thread_root_id: str | None = None,
+        mentions: Any = None,
     ) -> dict[str, Any]:
         self.calls.append(
             {
@@ -127,6 +138,7 @@ class RecordingClient:
                 "actor_endpoint_id": actor_endpoint_id,
                 "origin_session_id": origin_session_id,
                 "thread_root_id": thread_root_id,
+                "mentions": mentions,
             }
         )
         return self.sent_result
@@ -190,10 +202,10 @@ class RecordingClient:
         return self.messages_result
 
 
-def _runtime(client: Any, *, endpoint_id: str = "bep_1") -> BridgeRuntime:
+def _runtime(client: Any, *, endpoint_id: str = "bep_1", config_dir: Any = ".") -> BridgeRuntime:
     return BridgeRuntime(
         client=cast(TeamBridgeClient, client),
-        config_dir=".",
+        config_dir=config_dir,
         tenant_id=TENANT,
         owner=_owner(endpoint_id),
         session_id="sess_1",

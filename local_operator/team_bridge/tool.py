@@ -44,6 +44,18 @@ THE CHANNEL OPS work the conversation domain AS THIS SESSION'S AGENT:
   as a REPLY in that message's thread instead of at channel level — how agents
   coordinate without flooding the channel (e.g. one QA-claim thread per item
   in #agents). Threads are one level: the root must be a channel-level message.
+
+  ``to: {"name": …}`` DIRECTS the post at one member, and the name is resolved,
+  never guessed: trimmed, case-insensitive, whole DISPLAY name only (no handle,
+  no email, no substring), against THIS conversation's ACTIVE members — the
+  scope is the room the message lands in, so a colleague who exists in the
+  organization but is not in this conversation cannot be resolved to. Exactly
+  one match becomes that member's mention row on the wire (``kind`` +
+  ``account_id``), so the name itself never leaves the machine; zero matches
+  and several matches both refuse, the latter listing the candidates. The
+  attempt is written to ``recipient_resolutions.jsonl`` (requested name,
+  resolved id or null, matched count, conversation id) BEFORE the post, and on
+  a refusal too, so a misdelivery claim is reconstructable afterwards.
 - **channel_thread** — one thread, oldest-first: the root (with its reply
   count) and a bounded page of replies. Same screening rule as history — an
   unadmitted reply is metadata with ``body`` null.
@@ -63,9 +75,13 @@ returns it); a runtime with no endpoint refuses every channel op rather than
 acting as a human. Neither message bodies nor session ids are ever logged here.
 
 REFUSALS, one line each: ``not_permitted`` for ``decide``; ``invalid_request``
-for unknown ops, malformed ``channel_id``, bad history bounds/limits, and
-invalid member shapes; ``no_agent_endpoint`` when a channel op has no owner
-endpoint; ``*_failed`` when the transport does not confirm.
+for unknown ops, malformed ``channel_id``, bad history bounds/limits, invalid
+member shapes, and a display name that resolves to no member or to several;
+``no_agent_endpoint`` when a channel op has no owner endpoint; ``members_failed``
+when the conversation read that supplies the candidates does not answer;
+``audit_unavailable`` when the resolution could not be recorded (nothing is
+posted — a directed delivery that cannot be accounted for is refused);
+``*_failed`` when the transport does not confirm.
 
 THE RUNTIME BUNDLE is declared on ``ToolContext`` (``bridge_runtime``): a
 session that has no bridge runtime — unsigned, disabled, or not the designated
@@ -99,12 +115,21 @@ from local_operator.harness.types import (
 
 from .client import TeamBridgeClient
 from .outbox import Outbox, send_from_outbox
+from .recipient_resolution import (
+    ResolutionAuditUnavailable,
+    members_from_conversation,
+    resolve_for_delivery,
+)
 from .types import _CONVERSATION_MESSAGE_ID as _CANONICAL_MESSAGE_ID
 from .types import (
     CONVERSATION_ID_PATTERN,
+    RECIPIENT_NAME_SHAPE,
+    SCOPE_CONVERSATION,
     SEND_RECIPIENT_DESCRIPTION,
     InvalidSendRecipient,
+    RecipientNameRefused,
     is_conversation_message_id,
+    validate_recipient_shape,
     validate_send_recipient,
 )
 
@@ -219,11 +244,20 @@ def _closed_recipient_schema(schema: dict[str, Any]) -> None:
             branch["additionalProperties"] = False
 
 
-#: The recipient OBJECT shape as a type: exactly one of the two keys, each a
+#: The recipient OBJECT shape as a type: exactly one of the three keys, each a
 #: non-empty string. Cardinality and the closed key set live HERE (not on the
 #: field) so they still apply now that the field also accepts a bare id.
+#:
+#: ``name`` is in the closed set because ``channel_post`` accepts it, and the
+#: schema is ONE object for every op. It is not therefore addressable: the
+#: per-op check decides. ``send``/``reply`` refuse it before admission
+#: (``validate_send_recipient`` — they carry no conversation to scope a
+#: resolution to); ``channel_post`` resolves it against that conversation's
+#: active members (``resolve_for_delivery``). Advertising it at the schema and
+#: refusing it per op is deliberate: a model should be able to choose the right
+#: op by reading the tool, and the description says which op resolves a name.
 _SendRecipientObject = Annotated[
-    dict[Literal["endpoint_id", "account_id"], Annotated[str, Field(min_length=1)]],
+    dict[Literal["endpoint_id", "account_id", "name"], Annotated[str, Field(min_length=1)]],
     Field(min_length=1, max_length=1),
 ]
 
@@ -299,8 +333,12 @@ class BridgeToolParams(BaseModel):
         class of silent reinterpretation ``validate_send_recipient`` exists to stop.
         Delegating (rather than re-deriving the mapping here) is what keeps ONE
         rule for the executor, the wire client and every other caller.
+
+        The SHAPE validator, not the send one: a display name is a legal shape for
+        the op that can resolve it, and this model is shared by every op. The
+        op-specific refusal is the executor's, where the op is known.
         """
-        return None if value is None else validate_send_recipient(value)
+        return None if value is None else validate_recipient_shape(value)
 
 
 def _error(message: str, *, code: str = "invalid_request") -> dict[str, Any]:
@@ -736,6 +774,54 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         thread_root_id = params.thread_root_id.strip()
         if thread_root_id and _CONVERSATION_MESSAGE_ID.fullmatch(thread_root_id) is None:
             return _error("channel_post thread_root_id must be a message id (bcmsg_…)")
+        # WHO this post is directed at, resolved BEFORE anything is posted. The
+        # candidate set is THIS conversation's active members — the least
+        # privilege rule of this slice: a name from elsewhere in the organization
+        # is not a candidate, so it cannot resolve and cannot be delivered to.
+        # A resolved name never reaches the wire as a name; only its ids do.
+        mentions: list[dict[str, str]] = []
+        recipient_account_id = ""
+        if params.to:
+            # The ANNOTATION on ``params.to`` is the published union (object | bare
+            # id), which is what the type checker sees; the field validator has
+            # already canonicalised the value, and re-stating the shape here is
+            # the SAME rule read once more rather than a second one. It also
+            # keeps a bare id from being treated as a name by accident.
+            recipient = validate_recipient_shape(params.to)
+            if "name" not in recipient:
+                # An id is not a name: the directory read that produces ids is
+                # the caller's, and a name is the form a human actually has.
+                return _error(
+                    "channel_post addresses a member by display name "
+                    f"({RECIPIENT_NAME_SHAPE}); endpoint_id/account_id belong to send/reply"
+                )
+            try:
+                conversation = await runtime.client.conversation(
+                    channel_id, tenant_id=runtime.tenant_id
+                )
+            except Exception as failure:
+                return _error(
+                    f"could not read this conversation's members: {failure}",
+                    code="members_failed",
+                )
+            try:
+                member = resolve_for_delivery(
+                    config_dir=runtime.config_dir,
+                    scope=SCOPE_CONVERSATION,
+                    scope_id=channel_id,
+                    requested_name=recipient["name"],
+                    candidates=members_from_conversation(conversation),
+                )
+            except RecipientNameRefused as failure:
+                # The attempt is ALREADY recorded (resolve_for_delivery writes the
+                # row before the match is acted on), so a refusal leaves the same
+                # reconstructable record a delivery does — this is where a later
+                # "it went to the wrong colleague" claim gets answered from.
+                return _error(str(failure), code=failure.code)
+            except ResolutionAuditUnavailable as failure:
+                return _error(str(failure), code=failure.code)
+            mentions = [member.mention()]
+            recipient_account_id = member.account_id
         # ONE ref per CALL, minted before dispatch: the client's own 401 refresh
         # retry re-sends this exact body, so that retry is idempotent on the
         # server; a second tool call mints a second ref and is a second message.
@@ -749,6 +835,7 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
                 actor_endpoint_id=endpoint_id,
                 origin_session_id=runtime.session_id,
                 thread_root_id=thread_root_id or None,
+                mentions=mentions or None,
             )
         except Exception as failure:
             return _error(f"the post did not confirm: {failure}", code="post_failed")
@@ -762,7 +849,17 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
             content += f" (reply in thread {thread_root_id})"
         if isinstance(seq, int):
             content += f" at seq {seq}"
-        return {"ok": True, "message_id": message_id, "state": "sent", "content": content}
+        if recipient_account_id:
+            # The resolved ID is what the post was directed at; naming it keeps
+            # the confirmation a fact rather than a restatement of the ask.
+            content += f" (mentioning {recipient_account_id})"
+        return {
+            "ok": True,
+            "message_id": message_id,
+            "state": "sent",
+            "resolved_account_id": recipient_account_id,
+            "content": content,
+        }
 
     if params.op == "react":
         channel_id = params.channel_id.strip()

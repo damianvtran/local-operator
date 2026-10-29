@@ -159,9 +159,10 @@ async def test_ack_working_claims_and_done_releases_with_the_same_token(tmp_path
         {"account_id": "acc_2", "kind": "agent"},
         {"endpoint_id": "bep_9", "kind": "agent"},
         {"account_id": "acc_2", "endpoint_id": "bep_9"},
-        # A display label is NOT a destination: names are ambiguous and belong
-        # to the caller's own directory read, never to this client.
-        {"name": "Ada Lovelace"},
+        # A LABEL key is not a recipient: the shape is one of the three keys
+        # (endpoint_id, account_id, name) and nothing else, so a caller cannot
+        # smuggle a second opinion about who the destination is.
+        {"name": "Ada Lovelace", "account_id": "acc_2"},
         {"display_label": "Ada Lovelace"},
         {},
     ],
@@ -185,9 +186,11 @@ def test_tool_recipient_schema_is_closed(target):
         ({"account_id": "acc_2", "endpoint_id": "bep_9"}, False),
         ({"account_id": ""}, False),
         ({"account_id": 42}, False),
-        # A guessed name object is not an addressable destination, in the
-        # PUBLISHED schema either.
-        ({"name": "Ada Lovelace"}, False),
+        # A display name is a legal SHAPE for the one op that can resolve it
+        # (channel_post); whether an op may use it is the executor's rule, tested
+        # in ``test_recipient_name_resolution.py``. Two keys are still refused.
+        ({"name": "Ada Lovelace"}, True),
+        ({"name": "Ada Lovelace", "account_id": "acc_2"}, False),
         # The bare-string form a model reaches for: accepted, and only as an id.
         # ``" acc_2"`` is NOT listed here on purpose: padding is refused by the
         # shared validator/executor (asserted below and in the client test), not

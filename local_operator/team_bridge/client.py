@@ -100,6 +100,7 @@ from local_operator.team_bridge.settings import (
 )
 from local_operator.team_bridge.types import (
     ATTACHMENT_ID_PATTERN,
+    validate_member_mention,
     validate_send_recipient,
 )
 
@@ -3042,6 +3043,7 @@ class TeamBridgeClient:
         origin_session_id: str | None = None,
         thread_root_id: str | None = None,
         attachment_ids: Sequence[str] | None = None,
+        mentions: Sequence[Mapping[str, Any]] | None = None,
         access: OAuthAccess | None = None,
         expected_account_id: str | None = None,
     ) -> dict[str, Any]:
@@ -3061,6 +3063,17 @@ class TeamBridgeClient:
         the list is non-empty: a hub without the attachments capability
         refuses unknown fields, so a text-only send must stay byte-identical
         to the pre-attachment wire.
+
+        ``mentions`` directs the message at named members. Each row is the
+        hub's own Send-policy mention shape — the one the scheduled-send body
+        already carries (``{kind, account_id[, endpoint_id]}``) — and every row
+        is validated by
+        :func:`~local_operator.team_bridge.types.validate_member_mention` HERE,
+        at serialization, not only by the tool: a mention the tool built and
+        this body dropped would post an UNDIRECTED message that looks exactly
+        like a directed one in the server's answer. Omitted when empty, so an
+        undirected post remains byte-identical to the pre-mention wire (the same
+        capability-negotiation rule the attachments key follows).
         """
 
         body: dict[str, Any] = {"client_ref": client_ref, "body": text}
@@ -3077,6 +3090,8 @@ class TeamBridgeClient:
             body["origin_session_id"] = origin_session_id
         if thread_root_id:
             body["thread_root_id"] = thread_root_id
+        if mentions:
+            body["mentions"] = [validate_member_mention(entry) for entry in mentions]
         return await self._send(
             "POST",
             f"/messaging/conversations/{conversation_id}/messages",

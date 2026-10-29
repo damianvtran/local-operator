@@ -1782,7 +1782,27 @@ CHARS_PER_BILLED_TOKEN = 2.78
 # The published string arm and its one-line description are the whole of it:
 # +306 chars is the SAME delta the child arm below reports, which is the check.
 # Ceiling = measured head + the 55-token band (34,361 + 55).
-BUDGET_BILLED_TOKENS = 34_416
+#
+# RAISED 34,416 -> 34,502 for NAME -> MEMBER RESOLUTION on ``channel_post``
+# (tb-name-resolution). The ``to`` schema gains a third key — ``{"name": …}``,
+# the form a human actually has and the one agents were refused on seven times
+# out of seven — so the published object gains one property and the description
+# gains the ONE clause that decides which op a model reaches for: trim,
+# case-insensitivity, whole-display-name matching, and the per-op scope
+# (``channel_post`` resolves inside the room, ``send``/``reply`` take ids). It is
+# schema text rather than only executor behaviour on purpose: a model should
+# pick the right op by reading the tool, not by failing first. Measured with
+# THIS script on both trees, one host, one after the other, isolated HOME:
+#   base (origin/main 98cde255f42)  95,524 chars = ~34,361 billed  PASS, 55 headroom
+#   head (this branch)               95,762 chars = ~34,447 billed
+#   delta                              +238 chars = ~+86
+# The delta is TWO things, and both are the published schema: +194 chars of
+# description clause and +44 of the new ``name`` property (44 of the +238 is the
+# property, not prose). Nothing in the instructions block or the tool inventory
+# moves — the bridge tool already ships on every surface — so the delta is the
+# whole of it, which is why the child arm below reports the same +238.
+# Ceiling = measured head + the 55-token band (34,447 + 55).
+BUDGET_BILLED_TOKENS = 34_502
 
 #: The SUBAGENT ceiling (``--kind child``), in billed tokens. Same ratchet rules
 #: as ``BUDGET_BILLED_TOKENS`` above. It is a separate number because a child's
@@ -1954,7 +1974,15 @@ BUDGET_BILLED_TOKENS = 34_416
 #   delta                             +306 chars = ~+110 (the same +306)
 # Ceiling = measured head + the 55-token band (30,465 + 55, the band used today;
 # the older "51 headroom" entry above is that pass's own arithmetic).
-BUDGET_CHILD_BILLED_TOKENS = 30_520
+# RAISED 30,520 -> 30,606 with the top arm above, for the same name -> member
+# resolution on ``channel_post``: the child surface publishes the bridge tool, so
+# it carries the same new ``name`` property and the same description clause.
+# Measured on the same trees, isolated HOME:
+#   base (origin/main 98cde255f42)  84,693 chars = ~30,465 billed  PASS, 55 headroom
+#   head (this branch)               84,931 chars = ~30,551 billed
+#   delta                              +238 chars = ~+86 (the same +238)
+# Ceiling = measured head + the 55-token band (30,551 + 55).
+BUDGET_CHILD_BILLED_TOKENS = 30_606
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:
