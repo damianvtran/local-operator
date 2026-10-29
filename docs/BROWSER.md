@@ -109,6 +109,8 @@ mapping (the full list is the docstring of `BROWSER_ACTIONS`).
 | `network_stop` | Stop collecting; keep what was collected | not available (typed refusal) |
 | `network_read` | Read request metadata, and an approved body | not available (typed refusal) |
 | `network_clear` | Drop the buffer and its counters | not available (typed refusal) |
+| `record_start` | Record the owned tab's video to an `.mp4` | not available (typed refusal) |
+| `record_stop` | Stop and save the recording | not available (typed refusal) |
 
 One surface per session, owned by the `Session` and injected into every rebuilt
 `ToolContext` as `ToolContext.browser`. `open` called a second time navigates
@@ -171,6 +173,41 @@ browser network_start url=https://sso.example/auth/saml/acs include_request_body
 browser click selector=button[type=submit]
 browser network_read  url=https://sso.example/auth/saml/acs include_request_body=true approved=true
 browser network_stop
+```
+
+## Recording
+
+Two actions record the owned tab to an MP4: `record_start` and `record_stop`.
+They are served by the desktop app's browser host only — the extension cannot
+choose a file destination (Chrome refuses a tab-scoped debugger session the CDP
+primitives that pick one), and cmux has no capture at all. Both hosts refuse
+with a typed error rather than an empty file.
+
+The destination is composed and approved by the harness BEFORE any pixel is
+captured: `record_start` is a write-tier call whose approval prompt names the
+resolved file (or the recordings directory when the name is generated), and
+`record_stop` is a read-tier call, because a denied stop would leave an encoder
+running until its timer. `path` must end `.mp4` and must not exist — a recording
+never overwrites. Omitting it lands the clip under
+`<config>/browser/recordings/<session8>/rec-<UTC stamp>-<4hex>.mp4`, directory
+0700 and file 0600.
+
+The host writes the file at stop; bytes never cross the RPC. The harness then
+judges what landed from disk — size equal to the host's report, non-zero, and
+the MP4 `ftyp` box at bytes 4..8 — so a path is only ever reported for a
+complete file. Capture parameters are fixed at 1280x720, 10 fps, audio off; the
+clip is an MP4 with an AV1 track, which plays in QuickTime/AVFoundation but not
+in Chrome's `<video>`. Limits: `timeout_s` is the length (default 120 s, max
+600 s; the host auto-stops and saves at it), 64 MiB per clip (32 MiB under a
+scratchpad, where a larger clip is discarded rather than truncated), one
+recording per session per tab and two app-wide. Closing the tab, losing the
+debugger to another client, or quitting the app discards an in-progress
+recording; nothing is on disk before the stop.
+
+```text
+browser record_start path=/tmp/demo.mp4 timeout_s=90
+browser click selector=button[type=submit]
+browser record_stop
 ```
 
 ## Downloads and uploads

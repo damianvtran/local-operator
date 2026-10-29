@@ -1021,9 +1021,11 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "the default config dirname, as ``paths`` has it",
     ),
     "local_operator/browser_files.py": (
-        3,
-        "the browser download audit log, the downloads directory beside it, and the "
-        "fallback filename stem for a download with no name of its own",
+        4,
+        "the browser download audit log, the downloads directory beside it, the "
+        "recordings directory beside that (clips the agent asked for, never part of a "
+        "session's copy set), and the fallback filename stem for a download with no "
+        "name of its own",
     ),
     "local_operator/ui_browser/state.py": (
         2,

@@ -532,6 +532,13 @@ def format_error(
         # payload (which method, which build, whether any build could serve it),
         # so a static table entry cannot carry it.
         return _capability_message(error, host=host)
+    record = _record_reason_message(error, str(error.data.get("reason") or ""))
+    if record:
+        # Keyed by `data.reason`, not by the code: every recording failure is a
+        # distinct remedy, and the host's own English `message` is the fallback
+        # for a reason this build does not know (D9). Rendered ahead of the
+        # table so a generic `internal` sentence can never stand in for it.
+        return record
     if error.code in messages:
         return messages[error.code]
     if error.code == ErrorCode.TAB_CLOSED:
@@ -810,11 +817,22 @@ def _capability_message(error: BridgeError, *, host: str) -> str:
         CAPABILITY_MIN_EXTENSION_VERSION,
         CAPABILITY_SWITCH_LABEL,
         CAPABILITY_SWITCH_LOCATION,
+        DESKTOP_ONLY_METHODS,
     )
 
     method = str(error.data.get("method") or "that action")
     peer = str(error.data.get("extension_version") or "")
     remedy = _CAPABILITY_HOST_REMEDY.get(host, _CAPABILITY_HOST_REMEDY[HOST_EXTENSION])
+    if host == HOST_EXTENSION and method in DESKTOP_ONLY_METHODS:
+        # A desktop-only method has NO remedy inside the extension: no update,
+        # toggle or re-pair makes it servable, and the old copy sent the user to
+        # `chrome://extensions` to hunt for a switch that does not exist (D12).
+        # Checked before every other arm, including "no browser is attached":
+        # opening the extension's browser cannot help either.
+        return (
+            f"'{method}' is served only by the Local Operator desktop app's browser; "
+            "the Chrome extension cannot do it. Open the page with backend='ui'."
+        )
     if host == HOST_UI:
         return (
             f"the Local Operator desktop app's browser host does not provide '{method}' — "
@@ -884,6 +902,94 @@ def _capability_message(error: BridgeError, *, host: str) -> str:
         f"'{method}', so the command was not sent. Ask the user to toggle the Local Operator "
         "extension OFF then ON in chrome://extensions (pairing is preserved), then retry."
     )
+
+
+def _record_reason_message(error: BridgeError, reason: str) -> str:
+    """The model-facing sentence for one recording failure, or "" for none.
+
+    The host reports WHY in ``data.reason`` and its own English ``message`` as
+    context; the copy lives here because that is where every other remedy lives
+    and because the harness must be able to reword a sentence without shipping a
+    new app (D9). An unknown ``record_*`` reason is NOT rendered from this table
+    — it falls through to the host's message, so a newer app's new failure mode
+    is reported in its own words rather than as a generic internal error.
+    """
+    if not reason.startswith("record_"):
+        return ""
+    detail = str(error.message or "").strip()
+    if reason == "record_unsupported":
+        chromium = str(error.data.get("chromium") or "").strip()
+        engine = f"Chromium {chromium}" if chromium else "an older Chromium"
+        return (
+            f"the desktop app's browser engine ({engine}) has no video recording; it "
+            "needs Chromium 153 or newer. Update the desktop app and retry. "
+            "Screenshots still work. Nothing was written."
+        )
+    if reason == "record_av1_unavailable":
+        return (
+            "this browser engine build cannot encode AV1, which video recording needs. "
+            "Nothing was written."
+        )
+    if reason == "record_path":
+        asked = f" ({detail})" if detail else ""
+        return (
+            f"the recording path was refused{asked}. Nothing was written and no "
+            "recording started; choose another .mp4 path in a writable directory "
+            "that does not already exist, then retry."
+        )
+    if reason == "record_active":
+        where = str(error.data.get("path") or "").strip()
+        age = error.data.get("age_s")
+        if isinstance(age, bool) or not isinstance(age, int | float):
+            age = None
+        if where:
+            running = f" ({where}{f', started {age} s ago' if age is not None else ''})"
+        else:
+            running = ""
+        return (
+            f"a recording is already running for this session{running}; stop it with "
+            "'record_stop' before starting another. Nothing was changed."
+        )
+    if reason == "record_not_active":
+        return (
+            "no recording is running on this tab for this session, so there was nothing "
+            "to stop. A recording the browser interrupted is reported as discarded, not "
+            "as stopped; start a new one if you still need the clip."
+        )
+    if reason == "record_limit":
+        limit = error.data.get("limit")
+        ceiling = (
+            f"its maximum of {limit} recordings"
+            if isinstance(limit, int)
+            else "an app-wide recording limit"
+        )
+        return (
+            f"the desktop app is already running {ceiling}; nothing else may start until "
+            "one stops or its timer fires. Nothing was recorded."
+        )
+    if reason == "record_too_large":
+        cap = error.data.get("max_bytes")
+        size = (
+            f"larger than {int(cap) // (1024 * 1024)} MiB"
+            if isinstance(cap, int) and cap > 0
+            else "larger than the recording size limit"
+        )
+        return (
+            f"the recording is {size}, so nothing was saved: a truncated MP4 is invalid "
+            "and a partial file would be reported as a clip. Record a shorter span "
+            "(timeout_s) and retry."
+        )
+    if reason == "record_aborted":
+        return (
+            "another debugger took this tab while it was recording, so the clip was "
+            "discarded. Nothing was written. Start a new recording once the tab is "
+            "yours again."
+        )
+    if reason == "record_failed":
+        return (
+            detail or "the recording failed in the desktop app's browser and nothing was written."
+        )
+    return ""
 
 
 def client_timeout(method: str, requested_s: Any = None) -> float:

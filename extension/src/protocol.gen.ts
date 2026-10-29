@@ -62,13 +62,15 @@ export const CAPABILITY_SWITCHES: Record<string, { label: string; permission: st
   "upload": { label: 'Allow uploads', permission: '' },
 };
 
-export type Method = 'open' | 'goto' | 'read' | 'snapshot' | 'screenshot' | 'click' | 'type' | 'close' | 'status' | 'tabs' | 'scroll' | 'logs' | 'styles' | 'hit_test' | 'ancestors' | 'query' | 'request_access' | 'await_access' | 'cancel_access' | 'retitle' | 'owner_inspect' | 'owner_recover' | 'owner_finish' | 'owner_retain' | 'owner_release' | 'download' | 'upload' | 'network_start' | 'network_stop' | 'network_read' | 'network_clear';
+export type Method = 'open' | 'goto' | 'read' | 'snapshot' | 'screenshot' | 'click' | 'type' | 'close' | 'status' | 'tabs' | 'scroll' | 'logs' | 'styles' | 'hit_test' | 'ancestors' | 'query' | 'request_access' | 'await_access' | 'cancel_access' | 'retitle' | 'owner_inspect' | 'owner_recover' | 'owner_finish' | 'owner_retain' | 'owner_release' | 'download' | 'upload' | 'network_start' | 'network_stop' | 'network_read' | 'network_clear' | 'record_start' | 'record_stop';
 // Wire methods ONLY the desktop app's browser host serves. They are in `Method`
 // because the vocabulary is shared, but this build must not serve or advertise
-// them: its debugger is attached for one action, so it has no standing session a
-// `Network` subscription could live on. Generated from Python's
-// `DESKTOP_ONLY_METHODS` so the handler-parity test needs no hand-kept exemption.
-export type DesktopOnlyMethod = 'network_start' | 'network_stop' | 'network_read' | 'network_clear';
+// them: network capture needs a standing channel the extension's worker lifetime
+// does not give it, and recording must write a destination Chrome refuses a
+// tab-scoped session (D10 keeps that one desktop-only until its probe and consent
+// switch land). Generated from Python's `DESKTOP_ONLY_METHODS` so the
+// handler-parity test needs no hand-kept exemption.
+export type DesktopOnlyMethod = 'network_start' | 'network_stop' | 'network_read' | 'network_clear' | 'record_start' | 'record_stop';
 // One buffered console/runtime log line, as `logs` returns it (newest last).
 // `level` is normalized to the error/warning/info/log vocabulary the tool
 // filters on; `source` distinguishes a page console call from an uncaught

@@ -98,6 +98,18 @@ DOWNLOAD_TIMEOUT_MAX_S = 600.0
 #: Per uploaded file, and per `upload` call.
 UPLOAD_MAX_BYTES = 256 * 1024 * 1024
 UPLOAD_MAX_FILES = 10
+#: Per recording clip (D6). The host streams the encoded frames into a
+#: delete-on-close temp file and only publishes at stop, so this ceiling bounds
+#: what ONE recording may take off the host's temp volume and put on disk here.
+#: Not a session quota: recordings have no per-session ceiling in v1 (D6 says so
+#: rather than leaving the gap implicit).
+RECORD_MAX_BYTES = 64 * 1024 * 1024
+#: Recording length. `timeout_s` on `record_start` is the span in seconds, and
+#: the host's own timer auto-stops and finalises at the same value, so a caller
+#: that forgets to stop still gets a file rather than an encoder left running.
+RECORD_DEFAULT_DURATION_S = 120.0
+RECORD_MIN_DURATION_S = 1.0
+RECORD_MAX_DURATION_S = 600.0
 
 #: Fallback basename when a page-supplied name sanitises to nothing usable.
 _FALLBACK_STEM = "download"
@@ -1588,12 +1600,58 @@ def intake_landed(
 # The quarantine root, and the audit trail
 # ---------------------------------------------------------------------------
 DOWNLOADS_DIRNAME = "browser/downloads"
+RECORDINGS_DIRNAME = "browser/recordings"
 AUDIT_FILENAME = "audit.jsonl"
 
 
 def downloads_root(root: Path | None = None) -> Path:
     """``<config_dir>/browser/downloads`` — pure path arithmetic, creates nothing."""
     return (root or config_dir()) / DOWNLOADS_DIRNAME
+
+
+def recordings_root(root: Path | None = None) -> Path:
+    """``<config_dir>/browser/recordings`` — pure path arithmetic, creates nothing.
+
+    Beside the download quarantine rather than inside it: a recording is an
+    artifact the AGENT asked for and named, not bytes a page chose, so it must
+    not appear in a directory whose contract is "untrusted until classified".
+    It is also the one place a later cleanup sweep can find every clip (D5).
+    """
+    return (root or config_dir()) / RECORDINGS_DIRNAME
+
+
+def recordings_dir(session_id: str, *, root: Path | None = None) -> Path:
+    """``<config>/browser/recordings/<session8>/``, created 0700.
+
+    One directory per session, with no stamp: unlike a download call the agent
+    keeps the path it was given and may still be reading it when the next call
+    starts, so a later clip of the same session SHOULD land beside the earlier
+    ones. The 0700 mode is the file's real bound (D5): the clip shows the user's
+    screen content, and every later ``ls`` of a private directory is what keeps
+    it from being world-readable.
+    """
+    session8 = "".join(ch for ch in (session_id or ""))[:8]
+    # The fallback is spelled WHOLE rather than truncated to eight characters
+    # with the rest: a host with no session id (a unit call, an eval harness)
+    # would otherwise land every clip in `nosessio`.
+    component = _safe_component(session8) if session8 else "nosession"
+    directory = recordings_root(root) / component
+    directory.mkdir(parents=True, exist_ok=True)
+    os.chmod(directory, 0o700)
+    return directory
+
+
+def recording_name(now: float | None = None) -> str:
+    """``rec-<UTC yyyymmddThhmmss>-<4hex>.mp4`` — the composed default name.
+
+    UTC and a fixed-width stamp because the name is the only ordering a user
+    has after a session ends. The 4 hex characters make two recordings started
+    in the same second distinguishable without a counter file; 65,536 of them
+    have to collide inside one second before this returns a taken path, and
+    the tool refuses rather than overwrites when that happens.
+    """
+    stamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime(now))
+    return f"rec-{stamp}-{secrets.token_hex(2)}.mp4"
 
 
 def session_dir(session_id: str, *, root: Path | None = None, stamp: str | None = None) -> Path:

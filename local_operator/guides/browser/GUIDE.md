@@ -413,6 +413,8 @@ Same `browser` tool. Actions:
 - `upload` (attach local files to a file input; see below)
 - `network_start` / `network_stop` / `network_read` / `network_clear` (record
   and inspect the tab's own requests — desktop app host only; see below)
+- `record_start` / `record_stop` (record the tab's video to an `.mp4` — desktop
+  app host only; see below)
 - `close` (drop the surface and its tab)
 
 ### Network capture: what the tab actually sent and received
@@ -454,6 +456,32 @@ network_read url="https://sso.example.com/auth/saml/acs" \
 Start the capture BEFORE the click, and poll `network_read` for a moment: the
 body is pulled from the browser asynchronously, so a read issued the same
 millisecond as the response can legitimately arrive before the body does.
+
+### Recording the tab
+
+The desktop app's browser host can record the session's own tab to an MP4,
+which is how an agent SHOWS a flow it drove instead of describing it. The tab
+does not have to be the visible one: recording reads the same pixels
+`screenshot` does, so the user's own tab is unaffected and no window is raised.
+
+- `record_start` fixes the destination and asks for approval BEFORE anything
+  is captured. `path` must end `.mp4` and must not already exist (a recording
+  never overwrites). Omit it to land under
+  `<config>/browser/recordings/<session>/`; the result names the file.
+  `timeout_s` is the maximum length in seconds (default 120, max 600): the host
+  stops and saves at it, so a forgotten `record_stop` still leaves a file.
+- `record_stop` stops the capture, saves it and reports the path and size. It
+  is a `read`-tier call: the write was approved at start, and a stop the user
+  denied would strand a running encoder until the timer fired.
+- Capture parameters are fixed: 1280x720, 10 fps, no audio. The file is an MP4
+  with an AV1 track — it plays in QuickTime/AVFoundation; Chrome's `<video>`
+  will not play it (the probe measured that).
+- One recording per session per tab, two app-wide. A clip that would exceed
+  64 MiB (32 MiB under a scratchpad) is discarded rather than truncated: a
+  truncated MP4 is invalid, so the error says nothing was saved.
+- Closing the tab, losing the debugger to another client, or quitting the app
+  discards an in-progress recording. Nothing reaches disk before the stop, so
+  there is no half-written file to clean up.
 
 ### Typing a credential: use `secret_ref`, never `text`
 

@@ -187,6 +187,12 @@ CAPABILITY_GATED_METHODS: frozenset[str] = frozenset(
         "network_stop",
         "network_read",
         "network_clear",
+        # Video recording of the agent's own tab (design D8). Gated like the
+        # network capture: a build that predates the actions would answer a
+        # bare `internal`, which reads as "the bridge broke" instead of "this
+        # app is older than the action".
+        "record_start",
+        "record_stop",
     }
 )
 
@@ -374,23 +380,38 @@ METHODS = (
     "network_stop",
     "network_read",
     "network_clear",
+    # Video recording of the agent's own tab (design D8). The wire carries an
+    # absolute destination the harness chose and approved at start; the host
+    # writes it at stop, so bytes never cross RPC (D3). Listed in the shared
+    # vocabulary even though only the desktop host serves it yet — the per-host
+    # answer is the advertisement, never a fork of this tuple.
+    "record_start",
+    "record_stop",
 )
 
 #: Wire methods only the DESKTOP app's browser host can serve.
 #:
 #: They stay in ``METHODS`` because the wire vocabulary is shared and additive at
-#: protocol 1, but this build must neither serve nor advertise them: the
-#: extension attaches its debugger for the length of one action, so it holds no
-#: standing session a ``Network`` subscription could live on. The advertisement is
-#: already derived from the extension's handler table, so this constant exists for
-#: the one place that would otherwise grow a second hand-kept list — the
-#: extension's "every wire method has a handler" test. Generated into both
+#: protocol 1, but this build must neither serve nor advertise them: network
+#: capture needs a standing channel the extension's worker lifetime does not give
+#: it, and recording needs to write a destination Chrome refuses a tab-scoped
+#: session (D10 keeps that one desktop-only until its probe and consent switch
+#: land). The advertisement is already derived from the extension's handler
+#: table, so this constant exists for the one place that would otherwise grow a
+#: second hand-kept list — the extension's "every wire method has a handler"
+#: test. Generated into both
 #: TypeScript targets so the two sides cannot drift.
 DESKTOP_ONLY_METHODS: tuple[str, ...] = (
     "network_start",
     "network_stop",
     "network_read",
     "network_clear",
+    # Recording is desktop-only until the extension probe and D10's operator
+    # switch land (D8/D10). The extension CAN hold a standing debugger session,
+    # but Chrome refuses it the CDP primitives that choose a destination, so the
+    # wire shape differs there and this vocabulary is the desktop one.
+    "record_start",
+    "record_stop",
 )
 
 
@@ -481,6 +502,14 @@ COMMAND_TIMEOUTS = {
     "network_stop": 20.0,
     "network_read": 20.0,
     "network_clear": 20.0,
+    # start attaches the debugger and launches the encoder utility process, but
+    # captures nothing on the wire and returns as soon as the stream handle is
+    # open. stop is the long one: the host's own budget is 45 s (stop the
+    # recorder, page IO.read, publish the file), so 60 s nests above it exactly
+    # as the client chain requires — a client that timed out first would report
+    # an unreachable host while the file was being written.
+    "record_start": 20.0,
+    "record_stop": 60.0,
 }
 
 #: Extra budget granted to a command that is BLOCKED on a human origin
