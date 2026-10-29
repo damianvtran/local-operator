@@ -267,9 +267,10 @@ async def test_the_no_supervisor_refusal_is_logged_for_automatic_callers(
     # The DETAIL is what makes the log useful: it names the foreground command a
     # backend-only host can actually run. Asserting on the code token would pass
     # on a message that told the operator nothing they could act on.
-    assert any(
-        outcome.detail in message for message in messages
-    ), f"the refusal detail was not logged at INFO: {messages}"
+    assert any(outcome.detail in message for message in messages), (
+        "the refusal detail was not logged at WARNING, so the default caller "
+        f"cannot see it: {messages}"
+    )
 
 
 async def test_status_distinguishes_missing_installed_and_loaded(service) -> None:
