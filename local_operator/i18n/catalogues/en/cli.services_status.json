@@ -1,0 +1,14 @@
+{
+  "cli.services_status.supervised_by": "supervised by: {unit}",
+  "cli.services_status.unsupervised_scope": "unsupervised: {scope}; systemd cannot restart it",
+  "cli.services_status.unsupervised_unknown": "unsupervised: no systemd unit could be resolved; systemd cannot restart it",
+  "cli.services_status.install_service": "install it with `{command}`",
+  "cli.services_status.restart_supervision_limit": "`lop services restart` can reload it, but cannot supervise it",
+  "cli.services_status.serve_install_linux_only": "serve service installation requires systemd --user on Linux; macOS serve is unchanged",
+  "cli.services_status.serve_unit_written": "wrote {unit}",
+  "cli.services_status.serve_install_isolated_home": "the unit file was written, but this HOME is not the user's systemd manager home; nothing was enabled",
+  "cli.services_status.serve_unit_enabled": "enabled systemd user service: {unit}",
+  "cli.services_status.serve_linger_required": "linger is off: this unit will not survive logout until `loginctl enable-linger` succeeds",
+  "cli.services_status.serve_install_not_serving": "the serve unit was enabled but did not serve its own process: {error}",
+  "cli.services_status.serve_install_wrong_cgroup": "the serve unit answered, but its PID's cgroup did not confirm local-operator-serve.service"
+}

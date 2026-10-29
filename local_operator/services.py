@@ -40,6 +40,7 @@ requests rather than actions — a daemon that is mid-spawn refuses and says so.
 from __future__ import annotations
 
 import http.client
+import json
 import logging
 import os
 import re
@@ -90,6 +91,10 @@ RELOAD_POLL_S = 0.2
 #: the same order as ``update._mobile_healthz_answers``'s, for the same reason —
 #: the answer is either immediate or it is not an answer.
 HEALTH_TIMEOUT_S = 1.0
+
+#: A fixed user-unit name, like the relay's: one API listener per port cannot be
+#: made safe by allowing per-root units to race for the same bind.
+SERVE_SYSTEMD_UNIT = "local-operator-serve.service"
 
 
 #: The ADDRESS axis, which the shared ``live``/``wedged``/``stale`` vocabulary
@@ -1534,6 +1539,127 @@ def restart_services(
     return refreshes
 
 
+def install_linux_serve_service(port: int = 1111) -> dict[str, Any]:
+    """Install and enable the serve daemon as a systemd user unit on Linux.
+
+    Serve deliberately has its own lifecycle: a relay restart must not implicitly
+    stop or recreate the API. The shared renderer supplies the established unit
+    and quoting conventions; absolute paths are required because neither ``~``
+    nor ``$HOME`` is an environment expansion in systemd's ExecStart grammar.
+    """
+    from local_operator import procname, supervisors
+    from local_operator.i18n.keys import cli_services_status as copy
+    from local_operator.i18n.text import tr
+    from local_operator.paths import CONFIG_DIR_ENV, config_dir, log_dir
+
+    text = tr("cli.services_status")
+    if not sys.platform.startswith("linux") or supervisors.supervisor() != supervisors.SYSTEMCTL:
+        return {"ok": False, "lines": [text(copy.serve_install_linux_only())]}
+    image = procname.supervised_image() or Path(sys.executable)
+    log = log_dir() / "serve.log"
+    unit_text = supervisors.render_systemd_unit(
+        description="Local Operator API server",
+        exec_start=(
+            f"{supervisors.quoted(str(image))} -m local_operator.cli serve --port {int(port)}"
+        ),
+        # Ordering only: serve's lifecycle is independent of the relay. This is
+        # not Wants=/Requires=; a relay restart must not drag the API with it.
+        after="local-operator-network.service",
+        restart="on-failure",
+        restart_sec=3,
+        pre_lines=[
+            f"Environment={supervisors.quoted(f'{CONFIG_DIR_ENV}={config_dir()}')}",
+        ],
+        post_lines=supervisors.output_redirect_lines(log),
+    )
+    unit = supervisors.systemd_unit_path(SERVE_SYSTEMD_UNIT)
+    unit.parent.mkdir(parents=True, exist_ok=True)
+    unit.write_text(unit_text, encoding="utf-8")
+    lines = [text(copy.serve_unit_written(unit=str(unit)))]
+    if not supervisors.systemd_unit_is_addressable(SERVE_SYSTEMD_UNIT):
+        return {
+            "ok": False,
+            "unit": SERVE_SYSTEMD_UNIT,
+            "lines": [*lines, text(copy.serve_install_isolated_home())],
+        }
+    log.parent.mkdir(parents=True, exist_ok=True)
+    # Match the relay's ordering: lingering may be needed to reach a user manager.
+    # Refusal is not an install failure, but the receipt must not imply durability.
+    supervisors.enable_linger()
+    linger = supervisors.linger_enabled()
+    supervisors.systemctl_user("daemon-reload")
+    enabled = supervisors.systemctl_user("enable", "--now", SERVE_SYSTEMD_UNIT)
+    if enabled.returncode:
+        return {
+            "ok": False,
+            "unit": SERVE_SYSTEMD_UNIT,
+            "linger": linger,
+            "lines": [*lines, supervisors.translate_systemctl_error(enabled.stderr)],
+        }
+    lines.append(text(copy.serve_unit_enabled(unit=SERVE_SYSTEMD_UNIT)))
+    # ``enable --now`` returning zero is not identity: a pre-existing unsupervised
+    # daemon can still hold the port while the new unit fails to bind. Accept only
+    # a listener whose health response and cgroup identify the unit just enabled.
+    managed_pid: int | None = None
+    last_error = "the serve unit did not become active"
+    for attempt in range(40):
+        active = supervisors.systemctl_user("is-active", SERVE_SYSTEMD_UNIT)
+        if (active.stdout or "").strip() != "active":
+            last_error = (
+                f"systemd reports {((active.stdout or active.stderr or '').strip() or 'unknown')}"
+            )
+        else:
+            pid_result = supervisors.systemctl_user(
+                "show", SERVE_SYSTEMD_UNIT, "--property=MainPID", "--value"
+            )
+            try:
+                candidate = int((pid_result.stdout or "").strip())
+            except ValueError:
+                candidate = 0
+            if candidate > 0:
+                try:
+                    connection = http.client.HTTPConnection(
+                        "127.0.0.1", int(port), timeout=HEALTH_TIMEOUT_S
+                    )
+                    connection.request("GET", "/health")
+                    response = connection.getresponse()
+                    payload = json.loads(response.read().decode("utf-8"))
+                    health = payload.get("result", {})
+                    if response.status == 200 and health.get("pid") == candidate:
+                        managed_pid = candidate
+                        break
+                    last_error = "the listener is not the unit's MainPID"
+                except (OSError, ValueError, json.JSONDecodeError):
+                    last_error = "the unit has not answered its health endpoint yet"
+        if attempt < 39:
+            time.sleep(0.5)
+    if managed_pid is None:
+        return {
+            "ok": False,
+            "unit": SERVE_SYSTEMD_UNIT,
+            "linger": linger,
+            "persistent": False,
+            "lines": [*lines, text(copy.serve_install_not_serving(error=last_error))],
+        }
+    if _serve_supervision(managed_pid)[0] != SERVE_SYSTEMD_UNIT:
+        return {
+            "ok": False,
+            "unit": SERVE_SYSTEMD_UNIT,
+            "linger": linger,
+            "persistent": False,
+            "lines": [*lines, text(copy.serve_install_wrong_cgroup())],
+        }
+    if not linger:
+        lines.append(text(copy.serve_linger_required()))
+    return {
+        "ok": True,
+        "unit": SERVE_SYSTEMD_UNIT,
+        "linger": linger,
+        "persistent": linger,
+        "lines": lines,
+    }
+
+
 #: The width `status` keeps every line inside. The house budget, and the one the
 #: check in this module's tests asserts — a soft-wrapping terminal breaks mid-word, so
 #: 137 columns rendered as ``curre`` / ``nt`` (design review D6).
@@ -1643,7 +1769,9 @@ def status_lines() -> list[str]:
     # what it always printed.
     unit = _linux_supervised_unit()
     if unit is not None:
-        lines.append(f"supervised daemon: {unit.name}")
+        # Keep the relay's own installed unit visible as the RELAY, never as evidence
+        # that an independently launched serve daemon shares its supervision.
+        lines.append(f"supervised relay: {unit.name}")
     if supervised or unit is not None:
         lines.append("note: a supervised daemon resolves the install when it starts,")
         if supervised:
@@ -1715,6 +1843,64 @@ def _fleet_action_lines(daemons: Sequence[Any], stamp: Any) -> list[str]:
     ]
 
 
+def _proc_root() -> Path:
+    """The procfs mount; a function so tests can supply an unprivileged fixture."""
+    return Path("/proc")
+
+
+_CGROUP_UNIT = re.compile(r"(?:^|/)([A-Za-z0-9_.@\\-]+\.service)$")
+
+
+def _serve_supervision(pid: int) -> tuple[str | None, str | None]:
+    """``(unit, scope)`` for this serve PID, never inferred from an installed unit.
+
+    A service name anywhere other than the leaf is a parent (notably
+    ``user@UID.service``), not the process's supervisor. An unreadable procfs and
+    a transient/session scope both answer ``(None, scope-or-None)``: supervision
+    is affirmative evidence, so absence of evidence is never the relay's name.
+    """
+    if not sys.platform.startswith("linux"):
+        return None, None
+    try:
+        rows = (_proc_root() / str(pid) / "cgroup").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None, None
+    # cgroup v2 is one unified ``0::`` row. If a host exposes several hierarchies,
+    # any real service membership is still affirmative evidence of supervision.
+    rows = [row.partition("::")[2] for row in rows if "::" in row]
+    for path in rows:
+        if not path:
+            continue
+        scope = path.rsplit("/", 1)[-1]
+        match = _CGROUP_UNIT.search(path)
+        if match and not match.group(1).startswith("user@"):
+            return match.group(1), scope if scope.endswith(".scope") else None
+    leaf = rows[-1].rsplit("/", 1)[-1] if rows else ""
+    return None, leaf if leaf.endswith(".scope") else None
+
+
+def _serve_supervision_lines(record: Any) -> list[str]:
+    """The supervision this daemon actually has, plus only applicable remedies."""
+    from local_operator.i18n.keys import cli_services_status as copy
+    from local_operator.i18n.text import tr
+
+    unit, scope = _serve_supervision(record.pid)
+    if unit is not None:
+        return ["  " + tr("cli.services_status")(copy.supervised_by(unit=unit))]
+    if not sys.platform.startswith("linux"):
+        return []
+    text = tr("cli.services_status")
+    state = (
+        text(copy.unsupervised_scope(scope=scope)) if scope else text(copy.unsupervised_unknown())
+    )
+    return [
+        f"  {state}",
+        "  "
+        + text(copy.install_service(command=f"lop serve --install-service --port {record.port}")),
+        "  " + text(copy.restart_supervision_limit()),
+    ]
+
+
 def _daemon_status_lines(record: Any, stamp: Any) -> list[str]:
     """One daemon's lines: where it is, what it serves, and what that means.
 
@@ -1748,12 +1934,12 @@ def _daemon_status_lines(record: Any, stamp: Any) -> list[str]:
         # does not repeat it (design review D13) — and it is not a tautology about the
         # current build either, which is what the first version printed here because
         # `_label(None)` falls back to a phrase.
-        return [where, f"  serving {serving}"]
+        return [where, f"  serving {serving}", *_serve_supervision_lines(record)]
     if _serves_current_build(record, stamp):
         joined = f"{where} — current ({serving})"
         if len(joined) <= _LINE_BUDGET:
-            return [joined]
-        return [where, f"  current ({serving})"]
+            return [joined, *_serve_supervision_lines(record)]
+        return [where, f"  current ({serving})", *_serve_supervision_lines(record)]
     action = (
         "`lop services restart` will move it"
         if getattr(record, "reloadable", False)
@@ -1763,6 +1949,7 @@ def _daemon_status_lines(record: Any, stamp: Any) -> list[str]:
         where,
         f"  STALE: serving {serving}, current is {_label(stamp)}",
         f"  {action}",
+        *_serve_supervision_lines(record),
     ]
 
 

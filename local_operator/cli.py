@@ -996,6 +996,11 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help=_sv.reload().envelope(locale=help_locale)["text"],
     )
     serve_parser.add_argument(
+        "--install-service",
+        action="store_true",
+        help="Linux only: install and enable the serve systemd user unit",
+    )
+    serve_parser.add_argument(
         "--listener-fd",
         type=int,
         default=None,
@@ -17500,6 +17505,15 @@ def main() -> int:
                 print(f"\n\033[1;31mError: {str(e)}\033[0m", file=sys.stderr)
                 return 1
         elif args.subcommand == "serve":
+            if args.install_service:
+                # Installation returns before warming a runtime: this command's
+                # product is the user unit, not a second foreground API listener.
+                from local_operator import services
+
+                result = services.install_linux_serve_service(args.port)
+                for line in result["lines"]:
+                    print(line)
+                return 0 if result["ok"] else 1
             # The desktop daemon engages a runtime for every conversation the app
             # opens cold, so it keeps ONE pre-imported standby for its root (see
             # ``session/runtime/standby.py`` for the cost it removes and the

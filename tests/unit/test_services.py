@@ -16,6 +16,7 @@ they are so specific:
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -690,11 +691,45 @@ def test_status_lines_find_the_relay_unit_on_linux(
     )
     monkeypatch.setattr(services, "_install_may_repoint_daemons", lambda: True)
     lines = services.status_lines()
-    assert "supervised daemon: local-operator-network.service" in lines
+    assert "supervised relay: local-operator-network.service" in lines
     assert any("its build is not in the unit file" in line for line in lines)
     assert "      `lop services restart` puts them on the current build" in lines
     longest = max(len(line) for line in lines)
     assert longest <= 80, f"longest line is {longest}: {max(lines, key=len)!r}"
+
+
+def test_status_lines_describe_the_serve_pids_actual_supervision(
+    pointer: dict[str, Any], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An installed relay unit proves nothing about a separately launched serve."""
+    monkeypatch.setattr(services.sys, "platform", "linux")
+    monkeypatch.setattr(services, "serve_daemon_reports", _fleet([_record(pid=537864)]))
+    monkeypatch.setattr(services, "_supervised_daemon_plists", lambda: [])
+    monkeypatch.setattr(
+        services,
+        "_linux_supervised_unit",
+        lambda: Path("/home/x/.config/systemd/user/local-operator-network.service"),
+    )
+    monkeypatch.setattr(services, "_install_may_repoint_daemons", lambda: True)
+    proc = tmp_path / "proc" / "537864"
+    proc.mkdir(parents=True)
+    (proc / "cgroup").write_text(
+        "0::/user.slice/user-1000.slice/session-2122.scope\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(services, "_proc_root", lambda: tmp_path / "proc")
+    monkeypatch.setattr(services.sys, "platform", "linux")
+    lines = services.status_lines()
+    assert "supervised relay: local-operator-network.service" in lines
+    assert "  unsupervised: session-2122.scope; systemd cannot restart it" in lines
+    assert "  install it with `lop serve --install-service --port 1111`" in lines
+    assert "  `lop services restart` can reload it, but cannot supervise it" in lines
+
+    (proc / "cgroup").write_text(
+        "0::/user.slice/user-1000.slice/user@1000.service/app.slice/"
+        "local-operator-serve.service\n",
+        encoding="utf-8",
+    )
+    assert "  supervised by: local-operator-serve.service" in services.status_lines()
 
 
 def test_status_lines_stay_silent_about_units_that_are_not_installed(
@@ -705,6 +740,119 @@ def test_status_lines_stay_silent_about_units_that_are_not_installed(
     monkeypatch.setattr(services, "_supervised_daemon_plists", lambda: [])
     monkeypatch.setattr(services, "_linux_supervised_unit", lambda: None)
     assert services.status_lines() == ["install: 0.59.0", "serve daemons: none running"]
+
+
+def test_linux_serve_unit_installs_without_linger_or_relay_lifecycle_coupling(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The serve unit is independently supervised, but logout durability is explicit."""
+    from local_operator import procname, supervisors
+    from local_operator.paths import CONFIG_DIR_ENV
+
+    home = tmp_path / "home with space"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(home / "config%root"))
+    monkeypatch.setattr(services.sys, "platform", "linux")
+    monkeypatch.setattr(supervisors, "supervisor", lambda: supervisors.SYSTEMCTL)
+    monkeypatch.setattr(supervisors, "systemd_unit_is_addressable", lambda _unit: True)
+    monkeypatch.setattr(supervisors, "enable_linger", lambda: False)
+    monkeypatch.setattr(supervisors, "linger_enabled", lambda: False)
+    monkeypatch.setattr(supervisors, "output_redirect_lines", lambda _log: [])
+    monkeypatch.setattr(procname, "supervised_image", lambda: home / "bin" / "lop")
+    calls: list[tuple[str, ...]] = []
+
+    def systemctl(*args: str) -> Any:
+        calls.append(args)
+        if args[:1] == ("is-active",):
+            return SimpleNamespace(returncode=0, stdout="active\n", stderr="")
+        if args[:1] == ("show",):
+            return SimpleNamespace(returncode=0, stdout="4242\n", stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    class _HealthResponse:
+        status = 200
+
+        def read(self) -> bytes:
+            return b'{"result":{"pid":4242}}'
+
+    class _HealthConnection:
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            pass
+
+        def request(self, *_args: Any, **_kwargs: Any) -> None:
+            pass
+
+        def getresponse(self) -> _HealthResponse:
+            return _HealthResponse()
+
+    monkeypatch.setattr(supervisors, "systemctl_user", systemctl)
+    monkeypatch.setattr(services.http.client, "HTTPConnection", _HealthConnection)
+    monkeypatch.setattr(
+        services, "_serve_supervision", lambda _pid: (services.SERVE_SYSTEMD_UNIT, None)
+    )
+    result = services.install_linux_serve_service(8977)
+    unit = home / ".config/systemd/user/local-operator-serve.service"
+    rendered = unit.read_text(encoding="utf-8")
+    assert result["ok"] is True
+    assert result["unit"] == "local-operator-serve.service"
+    assert result["linger"] is False
+    assert result["persistent"] is False
+    assert calls == [
+        ("daemon-reload",),
+        ("enable", "--now", "local-operator-serve.service"),
+        ("is-active", "local-operator-serve.service"),
+        ("show", "local-operator-serve.service", "--property=MainPID", "--value"),
+    ]
+    assert "After=local-operator-network.service" in rendered.splitlines()
+    assert "WantedBy=default.target" in rendered.splitlines()
+    assert "Restart=on-failure" in rendered.splitlines()
+    assert "RestartSec=3" in rendered.splitlines()
+    assert "Wants=" not in rendered
+    assert "Requires=" not in rendered
+    assert "~" not in rendered
+    assert "$HOME" not in rendered
+    # #3069's config-root log-path deferral remains separate. Quoting still has
+    # to protect the config root carried by Environment and an image with spaces.
+    assert f"{CONFIG_DIR_ENV}=" in rendered
+    assert "config%%root" in rendered
+    assert '"-m"' not in rendered
+    assert " -m local_operator.cli serve --port 8977" in rendered
+    assert result["lines"][-1] == (
+        "linger is off: this unit will not survive logout until "
+        "`loginctl enable-linger` succeeds"
+    )
+
+
+def test_serve_unit_install_refuses_to_change_macos(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from local_operator import supervisors
+
+    monkeypatch.setattr(services.sys, "platform", "darwin")
+    monkeypatch.setattr(supervisors, "supervisor", lambda: supervisors.LAUNCHCTL)
+    monkeypatch.setattr(
+        supervisors,
+        "systemd_unit_path",
+        lambda _unit: (_ for _ in ()).throw(AssertionError("must not write a systemd unit")),
+    )
+    result = services.install_linux_serve_service()
+    assert result["ok"] is False
+    assert "macOS serve is unchanged" in result["lines"][0]
+
+
+def test_serve_supervision_requires_a_service_leaf_and_survives_unreadable_proc(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(services.sys, "platform", "linux")
+    monkeypatch.setattr(services, "_proc_root", lambda: tmp_path / "proc")
+    assert services._serve_supervision(42) == (None, None)
+    pid = tmp_path / "proc/42"
+    pid.mkdir(parents=True)
+    (pid / "cgroup").write_text(
+        "0::/user.slice/user-1000.slice/user@1000.service\n", encoding="utf-8"
+    )
+    assert services._serve_supervision(42) == (None, None)
 
 
 def test_the_documented_wait_default_is_the_one_used(
