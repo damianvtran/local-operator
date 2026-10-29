@@ -62,6 +62,7 @@ from tests.unit.network.test_desktop_credential_approval import (  # noqa: F401
     _row,
     rig,
 )
+from tests.unit.network.test_finite_share import _record_with_what
 
 TOKEN = "synthetic-s4a-core-bearer"
 
@@ -685,3 +686,103 @@ def test_cli_approve_still_signs_a_valid_finite_share_after_disclosing_it(
     # The full disclosure precedes the signature on stderr, as on base.
     assert finite_share.details(record)[0].split()[0] in out.err
     assert A.load_record(aid, root=rig.root)["state"] == "approved"
+
+
+# ---------------------------------------------------------------------------
+# R3-1 (#3070 review r3): never sign a field the disclosure cannot state
+# ---------------------------------------------------------------------------
+
+
+def _undisclosable(
+    rig: Any, monkeypatch: pytest.MonkeyPatch, tamper: str  # noqa: F811
+) -> dict[str, Any]:
+    """A real finite card re-filed with ONE field no disclosure shows.
+
+    Re-filed through ``create_request`` (not edited on disk), so its ``request_digest`` is
+    honest: the only thing wrong is the shape, which is what disclosure must refuse.
+    """
+    valid = _finite(rig, monkeypatch)
+    what = copy.deepcopy(valid["what"])
+    envelope = copy.deepcopy(valid)
+    if tamper == "payload":
+        what[finite_share.OP]["evil"] = 1
+    elif tamper == "what":
+        what["evil"] = 1
+    elif tamper == "anchor":
+        # #3087 r1, R1-1: one level down. Only ``key_id`` is shown, as the signing principal.
+        what["anchor"]["evil"] = "x" * 40
+    elif tamper == "deny-row":
+        what[finite_share.OP]["denies"][0]["evil"] = "x" * 40
+    elif tamper == "device":
+        # The digest-bound envelope blocks are signed too; the disclosure names only the
+        # member's display name from ``device``.
+        envelope["device"]["evil"] = "x" * 40
+    elif tamper == "long-name":
+        # #3087 r2, R2-1: ``device.name`` is signed in full, but shown only as ``_plain``'s
+        # 64-character cut, so the tail past the cut was signed unseen.
+        envelope["device"]["name"] = "Alice laptop" + " " * 60 + "HIDDEN-SIGNED-TAIL" + "x" * 300
+    elif tamper == "control-name":
+        # ... and ``_plain`` strips control characters, so an escape sequence was signed
+        # while the operator read a clean label.
+        envelope["device"]["name"] = "Alice\x1b[2K laptop"
+    else:  # "requested-by"
+        envelope["requested_by"]["evil"] = "x" * 40
+    return _record_with_what(envelope, what, rig.root)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("surface", ["cli", "desktop", "approve-credential", "approve-operation"])
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        "payload",
+        "what",
+        "anchor",
+        "deny-row",
+        "device",
+        "requested-by",
+        "long-name",
+        "control-name",
+    ],
+)
+async def test_undisclosed_field_is_refused_on_every_approver_before_the_signer(
+    rig: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    surface: str,
+    tamper: str,
+) -> None:
+    record = _undisclosable(rig, monkeypatch, tamper)
+    aid = record["approval_id"]
+    _level(monkeypatch, FILE_ONLY)
+    counters = _counted(monkeypatch)
+    capsys.readouterr()
+    if surface == "cli":
+        assert _lop_network("approvals", "approve", aid, "--json") != 0
+        body = json.loads(capsys.readouterr().out)
+        code, text = body["code"], body["message"]
+    else:
+        async with _client(rig, monkeypatch) as client:
+            if surface == "desktop":
+                response = await client.post(f"/v1/desktop/approvals/{aid}/approve")
+            else:
+                # The digests the card itself offers when it offers any: before R3-1 the
+                # row disclosed this record, so an honest client could sign it blind.
+                typed = (await _row(client, aid))["typed_approval"]
+                body = {
+                    "operation": finite_share.OP,
+                    "request_digest": record["request_digest"],
+                    "disclosure_digest": typed.get("disclosure_digest") or ZERO,
+                }
+                response = await client.post(f"/v1/desktop/approvals/{aid}/{surface}", json=body)
+        assert response.status_code == 409, response.text
+        code, text = response.json()["detail"]["code"], response.json()["detail"]["text"]
+    assert code == "finite_disclosure_invalid"
+    # QA #3087 r1, Q1: every approver gives the actionable sentence, never the generic
+    # "credential permission refused: <code>" fallback the typed routes used to return.
+    assert "request a new finite-share recovery" in text, text
+    assert counters["signer"] == 0
+    assert A.load_record(aid, root=rig.root)["state"] == A.STATE_REQUESTED
+    with pytest.raises(MeshRefusal) as refused:
+        finite_share.disclosure(record)
+    assert refused.value.code == "finite_disclosure_invalid"

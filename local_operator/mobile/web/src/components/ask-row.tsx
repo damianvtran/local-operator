@@ -116,7 +116,10 @@ function pairAnswers(entry: TranscriptEntry): { question: string; answer: string
 					const option = (question?.options ?? []).find((opt) => opt.label === label);
 					return option?.description ? `${label} — ${option.description}` : label;
 				})
-				.join(", "),
+				/* THE SAME SEPARATOR AS THE CARD'S RECEIPT (`lib/asks.ts`
+				   `answeredPairs`): an option's `label — description` must not run
+				   into a typed answer with a comma that could belong to either. */
+				.join(" · "),
 		};
 	});
 }

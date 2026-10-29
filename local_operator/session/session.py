@@ -10466,7 +10466,10 @@ class Session:
         append-only, and a retried prompt must not land twice. ``seen`` covers
         what the index cannot — two rows of one batch with the same id, where
         the first steer is still queued and has therefore not reached the index
-        yet (agent review round 1, R3).
+        yet (agent review round 1, R3). ``_steer_is_live_queued`` covers the
+        other live case: the steer this very row was spooled from is still on
+        the queue (an idle steer opens its own turn and meets its own row here),
+        and steering it again would double-deliver one message.
         """
         command_id = str(getattr(line, "command_id", "") or "")
         if command_id and command_id in seen:
@@ -10474,6 +10477,15 @@ class Session:
             return
         if command_id and self.has_admitted_command(command_id):
             logger.info("spooled prompt already in the transcript; not steering it twice")
+            return
+        if command_id and self._steer_is_live_queued(command_id):
+            # THE SAME MESSAGE, ALREADY OWED BY THIS PROCESS. ``has_admitted_command``
+            # only answers once the row is durable, and a queued steer is not
+            # durable until its next boundary drain — so without this check an
+            # idle steer that opened its own turn found its own just-spooled row
+            # here and was steered a SECOND time: two queue entries with one id,
+            # two ``MessageStartEvent``s, the text twice in the model request.
+            logger.info("spooled prompt is already on the steering queue; not steering it twice")
             return
         self.steer(
             line.text,
@@ -10487,6 +10499,25 @@ class Session:
         # 2, MINOR-2).
         if command_id:
             seen.add(command_id)
+
+    def _steer_is_live_queued(self, command_id: str) -> bool:
+        """Whether a steer with this producer id is already owed by this process.
+
+        The first-turn drain's duplicate gate, checked BEFORE ``Session.steer``
+        would queue the spooled row again. ``_steering_producers`` is where the
+        handle keeps the producer id of an admitted steer, and the queue itself
+        carries the id as the message id for the callers that supply one without
+        a producer entry. ``queued_steering`` drains and rebuilds in one
+        synchronous step, so this reads the live order without disturbing it.
+        """
+        if not command_id:
+            return False
+        if command_id in self._steering_producers.values():
+            return True
+        return any(
+            str(getattr(message, "id", "") or "") == command_id
+            for message in self.queued_steering()
+        )
 
     async def receive_peer_message(
         self,
@@ -12313,7 +12344,13 @@ class Session:
             return {"ok": False, "error": "this session has no queued-ask engine"}
         if relay is not None:
             return queue.enqueue_relay(relay, tool_call_id=tool_call_id)
-        return queue.enqueue(questions, timeout, tool_call_id=tool_call_id)
+        outcome = queue.enqueue(questions, timeout, tool_call_id=tool_call_id)
+        # The mirror of the notify door's check (``asks/dedupe.py``): a
+        # same-topic update raised just before this question leaves Unread and
+        # rides the ask. Not on the relay arm: those questions are another
+        # session's, and this session's updates are not about them.
+        self._merge_updates_into_ask(outcome)
+        return outcome
 
     #: TB-02 P1 (PR #2378): the sentence a plain ask door refuses a bridge
     #: request with — it names the door that works (the request's own verified
@@ -16480,6 +16517,12 @@ class Session:
         """
         from local_operator.notifications.store import NotificationStore
 
+        # ONE TOPIC, ONE ENTRY (``asks/dedupe.py``): an open same-topic ask from
+        # this session already notifies the operator, so the update rides it as
+        # context instead of becoming a second item they must also clear.
+        folded = await asyncio.to_thread(self._fold_notify_into_open_ask, title, body, priority)
+        if folded is not None:
+            return folded
         root = Path(self._config_dir)
         store = NotificationStore(root)
         outcome = await asyncio.to_thread(
@@ -16502,6 +16545,79 @@ class Session:
         if outcome.priority == "high":
             await self._route_item_banner(root, store, outcome, title=title, body=body)
         return _notify_sentence(outcome)
+
+    def _fold_notify_into_open_ask(self, title: str, body: str, priority: str) -> str | None:
+        """The suppression sentence when ``notify`` duplicates an open ask, else ``None``.
+
+        Best-effort by design: any failure (no queue on the blocking arm, an
+        unreadable log, a failed append) returns ``None`` and the update is
+        delivered as before — a missed merge costs one extra click, a lost
+        update costs the operator the information.
+        """
+        try:
+            queue = self.ask_queue()
+            if queue is None:
+                return None
+            from local_operator.asks import dedupe
+
+            match = dedupe.matching_ask(
+                queue.open_records(),
+                title=title,
+                body=body,
+                now=queue.clock_ms(),
+                priority=priority,
+            )
+            if match is None:
+                return None
+            if not queue.add_context(str(match["ask_id"]), title=title, body=body, source="notify"):
+                return None
+            return dedupe.SUPPRESSED_TEXT.format(ask_id=match["ask_id"])
+        except Exception:  # noqa: BLE001 — fall through to delivering the update
+            logger.debug("notify: open-ask dedupe check failed", exc_info=True)
+            return None
+
+    def _merge_updates_into_ask(self, outcome: Mapping[str, Any]) -> None:
+        """After an ask is queued: fold same-topic unread updates into it.
+
+        The mirror of :meth:`_fold_notify_into_open_ask` (``asks/dedupe.py``).
+        The text is appended to the ask FIRST and the update is marked read
+        (``via=merged_into_ask``, never dismissed) only once that append
+        landed, so a failure can leave both entries but never neither.
+        Best-effort.
+        """
+        try:
+            if not outcome.get("ok"):
+                return
+            details = outcome.get("details") or {}
+            ask_id = str(details.get("ask_id") or "")
+            queue = self.ask_queue()
+            if not ask_id or queue is None:
+                return
+            record = queue.find(ask_id)
+            if record is None:
+                return
+            from local_operator.asks import dedupe
+            from local_operator.notifications.store import NotificationStore
+
+            store = NotificationStore(Path(self._config_dir))
+            rows, _ = store.list_items(state="unread", session_id=self.session_id, limit=100)
+            # Measured from the ask's own creation stamp: "was this update raised
+            # within the window before the question" is the duplicate pattern.
+            matches = dedupe.matching_updates(
+                rows, ask=record, now=int(record.get("created_at") or 0)
+            )
+            for row in matches:
+                if not queue.add_context(
+                    ask_id,
+                    title=str(row.get("title") or ""),
+                    body=str(row.get("body_md") or ""),
+                    source="merged",
+                    item_id=str(row["id"]),
+                ):
+                    continue
+                store.merge_into_ask([(str(row["id"]), int(row.get("revision") or 1))])
+        except Exception:  # noqa: BLE001 — both entries stay; nothing is lost
+            logger.debug("ask: merging same-topic updates failed", exc_info=True)
 
     async def _route_item_banner(
         self, root: Path, store: Any, outcome: Any, *, title: str, body: str
@@ -22586,18 +22702,67 @@ class Session:
             logger.warning("deferred job delivery failed", exc_info=True)
 
     async def _reject_steering(self, command_id: str, reason: str) -> None:
-        """Terminally reject one accepted-but-undurable producer steer."""
+        """Terminally reject one accepted producer steer that reached no row.
+
+        THE NOTICE IS GATED ON THE SPOOL, and that is the half the durability
+        seam added. ``serving.ServingSessionHandle.steer`` now spools every
+        accepted steer before it acknowledges, so a steer rejected here — at
+        disposal, or by a failed journal append — is still HELD for the next
+        runtime (``process._run_owner_prompt`` replays it). Telling the user it
+        "was not saved" would then be false, and it is exactly the sentence this
+        change exists to retire. A steer that is in no spool (the TUI's own
+        handle, or a producer older than that seam) keeps the notice, which is
+        the honest answer for it.
+        """
         for handler in list(self._steering_rejection_handlers):
             try:
                 handler(command_id, reason)
             except Exception:  # noqa: BLE001 - one handler cannot hide rejection from others
                 logger.exception("steering rejection handler failed")
-        await self._emit(
-            _notice(_nt.steering_not_saved(command_id=command_id, reason=reason), kind="info")
-        )
+        if not await self._steer_is_spooled(command_id):
+            await self._emit(
+                _notice(_nt.steering_not_saved(command_id=command_id, reason=reason), kind="info")
+            )
         # Mobile projections optimistically count accepted steers. Rejection is
         # another terminal exit from that queue, even though it was not delivered.
         await self._emit(SteeringDeliveredEvent(count=1))
+
+    async def _steer_is_spooled(self, command_id: str) -> bool:
+        """Whether the successor spool still holds this owner message."""
+        directory = getattr(self._transcript, "directory", None)
+        if not command_id or directory is None:
+            return False
+        from local_operator.session.runtime.inbox import holds_owner_row
+        from local_operator.wakes.spooled import await_spool_write
+
+        try:
+            return bool(await await_spool_write(holds_owner_row, Path(directory), command_id))
+        except Exception:  # noqa: BLE001 - an unreadable spool reads as "not held"
+            logger.warning("could not read the spool for %s", command_id, exc_info=True)
+            return False
+
+    async def _forget_spooled_steer(self, command_id: str) -> None:
+        """Drop the successor-spooled copy of a steer this turn has just persisted.
+
+        The serving handle spools every accepted steer before it acknowledges
+        (``serving.ServingSessionHandle.steer``), because the steering queue dies
+        with the process. Once the row is in the transcript the spool copy is a
+        duplicate, and a successor that drained it would deliver the same message
+        twice — so it is removed here, at the one place that knows the append
+        succeeded. Never fatal: a removal lost to a crash is covered by the
+        successor's own dedupe (``has_admitted_command``, see
+        ``process._run_owner_prompt``), and bookkeeping must not fail the turn.
+        """
+        directory = getattr(self._transcript, "directory", None)
+        if not command_id or directory is None:
+            return
+        from local_operator.session.runtime.inbox import remove_owner_row
+        from local_operator.wakes.spooled import await_spool_write
+
+        try:
+            await await_spool_write(remove_owner_row, Path(directory), command_id)
+        except Exception:  # noqa: BLE001 - a stale spool row is deduped at replay
+            logger.warning("could not drop the spooled copy of steer %s", command_id, exc_info=True)
 
     async def _drain_steering(self) -> list[AgentMessage]:
         """Consume the steering queue. Steering messages are real injected
@@ -22657,6 +22822,10 @@ class Session:
                 # replayed history. Constant-time check on the transcript's id
                 # set, so the ordinary steer pays effectively nothing.
                 self._steering_producers.pop(queued_id, None)
+                if producer_command_id is not None:
+                    # Durable already, so any spooled copy is a duplicate — the
+                    # same rule the append path below applies.
+                    await self._forget_spooled_steer(producer_command_id)
                 messages.append(message)
                 continue
             try:
@@ -22672,6 +22841,9 @@ class Session:
                 continue
             finally:
                 self._steering_producers.pop(queued_id, None)
+            if producer_command_id is not None:
+                # The row is durable, so the successor's copy is a duplicate now.
+                await self._forget_spooled_steer(producer_command_id)
             # THE STEER DOOR'S AUDIO FORK, at the same point the prompt door
             # forks: strictly after THIS drain's own append made the row
             # durable (see ``_fork_audio_sidecars`` — a record for a row the
