@@ -284,30 +284,36 @@ def test_link_close_keeps_the_descriptor_until_its_reader_exits(
     assert wait_for(lambda: server_a._link_for(server_b.identity.device_id) is not None)
     link = server_a._link_for(server_b.identity.device_id)
     assert link is not None and link._reader is not None
+    # BOUND TO A LOCAL, not read through ``link._reader`` at each use: pyright
+    # discards the narrowing of an optional attribute inside a lambda, so the
+    # gate below reported reportOptionalMemberAccess on a thread that is
+    # demonstrably set (the assert above runs before the link is closed, and the
+    # reader cannot be replaced). The local is the same thread object.
+    reader = link._reader
     owner["socket"] = link.sock
     try:
         # The event, not the clock, decides when to close: the wait exists so a
         # reader that never reaches its read fails here with its own state
         # instead of being read as "shutdown did not wake it" (AGENTS.md, "Wait on
         # the event, never on the clock").
-        assert wait_for(lambda: link._reader.name in seams), (
-            f"reader {link._reader.name} never entered its socket read; "
-            f"alive={link._reader.is_alive()} closing={link.closing} "
+        assert wait_for(lambda: reader.name in seams), (
+            f"reader {reader.name} never entered its socket read; "
+            f"alive={reader.is_alive()} closing={link.closing} "
             f"closed={link._closed.is_set()} fd={link.sock.fileno()} "
             f"seams={seams}"
         )
         link.close("we-closed", flush_s=0.0)
         assert observed.wait(timeout=WAKE_S), (
-            f"shutdown did not wake retained reader {link._reader.name}; "
-            f"alive={link._reader.is_alive()} fd={link.sock.fileno()}"
+            f"shutdown did not wake retained reader {reader.name}; "
+            f"alive={reader.is_alive()} fd={link.sock.fileno()}"
         )
-        assert link._reader.is_alive(), "the gate must hold the reader before its finally"
+        assert reader.is_alive(), "the gate must hold the reader before its finally"
         assert link.sock.fileno() >= 0, "the closing thread released the reader's descriptor"
     finally:
         release.set()
         link.close("we-closed", flush_s=0.0)
-        link._reader.join(timeout=5)
-    assert not link._reader.is_alive(), link._reader.name
+        reader.join(timeout=5)
+    assert not reader.is_alive(), reader.name
     assert link.sock.fileno() == -1, "the reader must release its descriptor on exit"
 
 
