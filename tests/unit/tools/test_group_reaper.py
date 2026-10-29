@@ -1208,3 +1208,36 @@ def test_sweep_reaps_a_dead_owners_survivor(tmp_path, monkeypatch, _kill_pids):
     result = sweep_orphan_groups(tmp_path)
     assert result.reaped_groups == 1
     assert _wait_dead(pid)
+
+
+def test_recycled_pgid_line_of_another_session_never_inherits_survivors(tmp_path):
+    """Review M1: two lines, same pgid, different sessions. Session B's settle
+    must annotate only B's (newest) line, so A's dispose cannot pass the
+    ownership check against B's live group and kill it."""
+    live, pgid = _spawn_group()
+    try:
+        dead = subprocess.Popen(["/bin/sh", "-c", "true"])
+        dead.wait()
+        # Session A's stale line: its group is long gone, survivor pid is dead.
+        register_group(pgid, "old", config_dir=tmp_path, session_id="sess-a")
+        ledger = group_reaper._ledger_path(
+            tmp_path, os.getpid(), group_reaper._owner_start_token(os.getpid())
+        )
+        group_reaper._annotate_entry(
+            ledger, pgid, {"survivors": [{"pid": dead.pid, "start": "Mon Jan  1 00:00:00 2001"}]}
+        )
+        # The pgid is then handed to session B's live group, which settles.
+        register_group(pgid, "new", config_dir=tmp_path, session_id="sess-b")
+        group_reaper.settle_group(pgid, config_dir=tmp_path)
+
+        by_session = {e["session_id"]: e for e in _ledger_entries(tmp_path)}
+        assert [s["pid"] for s in by_session["sess-b"]["survivors"]] == [live.pid]
+        assert [s["pid"] for s in by_session["sess-a"]["survivors"]] == [dead.pid]
+
+        assert group_reaper.reap_session_groups("sess-a", config_dir=tmp_path) == 0
+        assert _alive(pgid)  # B's group untouched
+        remaining = _ledger_entries(tmp_path)
+        assert [e["session_id"] for e in remaining] == ["sess-b"]  # A's stale line dropped only
+    finally:
+        _reap_group(pgid)
+        live.wait(timeout=2)

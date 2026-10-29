@@ -32095,14 +32095,18 @@ class Session:
             # substitute — delivering it onto the next turn — is exactly the wrong
             # attribution the queue exists to avoid. Before the hooks, so the event
             # stream is still live when it goes out.
-            await self._flush_queued_notices()
-            # The same canonical owner teardown serves agent and subagent
-            # sessions. Console cleanup is completed-only; quitting a turn must
-            # never terminate a live prompt, REPL or background PTY.
-            from local_operator.ui_console.backend import cleanup_owner_completed
+            try:
+                await self._flush_queued_notices()
+                # The same canonical owner teardown serves agent and subagent
+                # sessions. Console cleanup is completed-only; quitting a turn must
+                # never terminate a live prompt, REPL or background PTY.
+                from local_operator.ui_console.backend import cleanup_owner_completed
 
-            await cleanup_owner_completed(self._session_id, self._config_dir)
-            await self._reap_session_process_groups()
+                await cleanup_owner_completed(self._session_id, self._config_dir)
+            finally:
+                # Own finally: a fault in the notice flush or console cleanup must
+                # not leak this session's servers (the reap never raises itself).
+                await self._reap_session_process_groups()
             # ``finally``: host-owned resources must be released even when the
             # session's own teardown blew up part way through.
             for hook in self._dispose_hooks:

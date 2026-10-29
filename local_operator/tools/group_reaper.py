@@ -77,13 +77,17 @@ The contract added for that, and its limits:
 - ``reap_session_groups`` ends what a SESSION started: it reads only this
   process's own ledger, only lines tagged with that ``session_id``. It is wired
   into ``Session`` disposal, which both a top-level session end and a finished
-  subagent child pass through.
+  subagent child pass through. It operates on ledger lines, never on pgids alone:
+  a pgid may recur across lines of one ledger once its first group is gone.
 - A survivor-bearing line is "still ours" iff a RECORDED ``(pid, start)`` member
   is alive in the same pgid (``_survivor_verdict``) — no pattern or name
   matching ever decides a kill.
 - An explicit detach (``nohup``/``setsid``/``disown`` in the command) is honoured:
   the line is ``detached`` and the new paths never reap it. Pattern matching is
-  permitted ONLY to SPARE, never to kill.
+  permitted ONLY to SPARE, never to kill. Asymmetry, deliberate: session end
+  spares every ``detached`` line, while process exit / the hard-death sweep spare
+  one only once it has ``survivors`` (a live-leader ``nohup x`` keeps its
+  pre-existing owner-death reap, since the owner's sink for it is gone).
 
 Out of scope, on purpose: ``exec_mode --background`` workers. Those spawn
 ``python -m local_operator.exec_worker`` as a SEPARATE detached process (not via
@@ -581,7 +585,16 @@ def _group_survivors(pgid: int) -> list[dict[str, object]] | None:
 
 
 def _annotate_entry(path: Path, pgid: int, updates: dict[str, object]) -> None:
-    """Merge ``updates`` into the ledger line(s) for ``pgid``. Best-effort.
+    """Merge ``updates`` into the NEWEST ledger line for ``pgid``. Best-effort.
+
+    ONLY the last matching line: ``settle_group`` annotates the line its own
+    command just registered, and register appends. A survivor-bearing line now
+    outlives its command, so an older line with the same pgid can still be in the
+    file (the pid/pgid wrapped and was handed to a later command, possibly of
+    another session). Stamping that stale line with the new command's survivors
+    would let the old session's dispose pass the ownership check against the new
+    session's live group and kill it. Pgid uniqueness among the lines of one
+    ledger is therefore NOT assumed here; only "last appended = ours" is.
 
     Same read-modify-rewrite discipline (and EXCLUSIVE lock) as
     :func:`_rewrite_without_pgid`; unreadable lines are kept verbatim.
@@ -592,19 +605,24 @@ def _annotate_entry(path: Path, pgid: int, updates: dict[str, object]) -> None:
         except OSError as exc:
             logger.debug("group reaper: cannot read ledger %s: %s", path, exc)
             return
-        out: list[str] = []
-        for line in raw_lines:
+        parsed: list[object] = []
+        newest = -1
+        for index, line in enumerate(raw_lines):
             try:
-                obj = json.loads(line)
+                obj: object = json.loads(line)
             except (ValueError, TypeError):
-                out.append(line)
-                continue
+                obj = None
+            parsed.append(obj)
             if isinstance(obj, dict) and obj.get("pgid") == pgid:
-                obj.update(updates)
-                line = json.dumps(obj)
-            out.append(line)
+                newest = index
+        if newest < 0:
+            return
+        target = parsed[newest]
+        assert isinstance(target, dict)
+        target.update(updates)
+        raw_lines[newest] = json.dumps(target)
         try:
-            path.write_text("\n".join(out) + "\n", encoding="utf-8")
+            path.write_text("\n".join(raw_lines) + "\n", encoding="utf-8")
         except OSError as exc:
             logger.debug("group reaper: cannot rewrite ledger %s: %s", path, exc)
 
@@ -797,7 +815,7 @@ def _ledger_lock(path: Path, *, exclusive: bool) -> Iterator[None]:
                 os.close(fd)
 
 
-def _rewrite_without_pgid(path: Path, pgid: int) -> None:
+def _rewrite_without_pgid(path: Path, pgid: int, session_id: str | None = None) -> None:
     """Rewrite ``path`` keeping every line whose ``pgid`` differs. Best-effort.
 
     Reads the whole ledger, filters the one pgid, and writes it back under an
@@ -808,10 +826,10 @@ def _rewrite_without_pgid(path: Path, pgid: int) -> None:
     owner's ledger disappears once its last group is accounted for.
     """
     with _ledger_lock(path, exclusive=True):
-        _rewrite_without_pgid_locked(path, pgid)
+        _rewrite_without_pgid_locked(path, pgid, session_id)
 
 
-def _rewrite_without_pgid_locked(path: Path, pgid: int) -> None:
+def _rewrite_without_pgid_locked(path: Path, pgid: int, session_id: str | None = None) -> None:
     """The read-filter-rewrite body of :func:`_rewrite_without_pgid`.
 
     Split out so the exclusive-lock scope in the caller stays a thin wrapper and
@@ -835,7 +853,13 @@ def _rewrite_without_pgid_locked(path: Path, pgid: int) -> None:
             # dropping a line we could not read would lose a sibling's group.
             kept.append(line)
             continue
-        if isinstance(obj, dict) and obj.get("pgid") == pgid:
+        if (
+            isinstance(obj, dict)
+            and obj.get("pgid") == pgid
+            # A session-scoped removal must not take a same-pgid line that
+            # belongs to another session (recycled pgid), see _annotate_entry.
+            and (session_id is None or obj.get("session_id") == session_id)
+        ):
             continue
         kept.append(line)
     try:
@@ -1296,7 +1320,7 @@ def reap_session_groups(
                 settled.append(int(entry["pgid"]))  # type: ignore[call-overload]
         signalled = _terminate_groups(ours) if ours else 0
         for pgid in settled:
-            _rewrite_without_pgid(path, pgid)
+            _rewrite_without_pgid(path, pgid, session_id)
         return signalled
     except Exception:  # noqa: BLE001 — a reaper fault must never break disposal
         logger.debug("group reaper: reap_session_groups failed", exc_info=True)
