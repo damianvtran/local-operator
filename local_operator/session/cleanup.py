@@ -90,7 +90,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, NamedTuple
 
-from local_operator.paths import DEFAULT_CONFIG_DIRNAME
 from local_operator.session import compression
 from local_operator.session.retention import (
     _SIDECAR_NAMES,
@@ -257,11 +256,6 @@ ALLOW_TEST_STORE_DELETIONS_ENV = "LOCAL_OPERATOR_ALLOW_TEST_STORE_DELETIONS"
 
 #: The only spellings that opt a test process in (case-insensitive).
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
-
-#: Path from a home directory to the ``sessions/`` store that lives under it,
-#: spelled once for :func:`_live_session_stores`. Built from the same two names
-#: every other reader uses instead of a literal ``".local-operator/sessions"``.
-LIVE_STORE_RELATIVE = (DEFAULT_CONFIG_DIRNAME, SESSIONS_DIRNAME)
 
 #: Modules whose PRESENCE means this interpreter is a test run. ``PYTEST_
 #: CURRENT_TEST`` covers the per-test phase and is the primary signal; these
@@ -956,12 +950,28 @@ def _live_session_stores() -> tuple[Path, ...]:
 
     Resolved, and tolerant: a home that cannot be resolved is dropped rather than
     raising, since a guard that crashes on a missing path refuses nothing at all.
+
+    WHY ``local_operator.paths`` IS IMPORTED HERE AND NOT AT MODULE SCOPE. This
+    module is on ``delegated_retention``'s import path, and that pass runs on the
+    store-maintenance thread of EVERY runtime process, so
+    ``tests/unit/test_import_graph.py::test_delegated_retention_import_is_light``
+    pins the exact ``local_operator.*`` set importing it may load. A
+    module-scope ``from local_operator.paths import DEFAULT_CONFIG_DIRNAME`` —
+    the obvious spelling of the two lines below, and the first thing this guard
+    had — landed ``local_operator.paths`` in that set and broke the guarantee on
+    a path the guard does not run on (measured: the pinned test fails with that
+    import, passes with this one). DO NOT HOIST IT: the name belongs to
+    :mod:`local_operator.paths` on purpose (one definition of the config-dir
+    name), but this module may only read it at CALL time, which costs one
+    ``sys.modules`` lookup on a removal and nothing at import.
     """
+    from local_operator.paths import DEFAULT_CONFIG_DIRNAME
+
     home = _real_home()
     if home is None:
         home = Path(os.path.expanduser("~"))
     try:
-        return (home.joinpath(*LIVE_STORE_RELATIVE).resolve(),)
+        return ((home / DEFAULT_CONFIG_DIRNAME / SESSIONS_DIRNAME).resolve(),)
     except OSError:
         return ()
 

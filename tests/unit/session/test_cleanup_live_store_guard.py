@@ -24,6 +24,7 @@ from pathlib import Path
 
 import pytest
 
+from local_operator.paths import DEFAULT_CONFIG_DIRNAME
 from local_operator.session import cleanup
 from local_operator.session.cleanup import (
     ALLOW_TEST_STORE_DELETIONS_ENV,
@@ -190,14 +191,14 @@ def test_a_redirected_home_is_not_the_live_store(
     every isolated run into a refusal.
     """
     scratch_home = tmp_path / "scratch-home"
-    (scratch_home / cleanup.DEFAULT_CONFIG_DIRNAME).mkdir(parents=True)
+    (scratch_home / DEFAULT_CONFIG_DIRNAME).mkdir(parents=True)
     monkeypatch.setenv("HOME", str(scratch_home))
-    target = _store(scratch_home / cleanup.DEFAULT_CONFIG_DIRNAME)
+    target = _store(scratch_home / DEFAULT_CONFIG_DIRNAME)
 
     assert (
         remove_session_dir(
             target,
-            config_dir=scratch_home / cleanup.DEFAULT_CONFIG_DIRNAME,
+            config_dir=scratch_home / DEFAULT_CONFIG_DIRNAME,
             policy="p",
             reason="r",
             actor="test",
