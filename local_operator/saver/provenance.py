@@ -180,7 +180,7 @@ def _media_bytes(content: Any) -> int:
     total = 0
     for block in content if isinstance(content, list) else []:
         if isinstance(block, dict) and block.get("type") == "image_ref":
-            size = _json_int(block.get("bytes"))
+            size = _json_bytes(block.get("bytes"))
             if size:
                 total += size
     return total
@@ -194,6 +194,21 @@ def _json_str(value: Any) -> str:
 def _json_int(value: Any) -> int:
     """A JSON value as a small non-negative int, or 0 (`_small_int`'s rule)."""
     return value if _small_int(value) else 0
+
+
+#: `reduce_v2.media_receipt` reads an attachment's size with
+#: `_small_int(ref["bytes"], 1 << 40)` — a ONE-TERABYTE ceiling, not the
+#: 100,000 default. Reading it with the default made every attachment of
+#: 100,000 bytes or more render without a size and report 0 bytes to the
+#: ceiling, so the receipt was unadmittable and the denominator was wrong:
+#: every ordinary screenshot was refused at 0.39x-0.43x and charged at full
+#: (S-28, found independently by security and QA).
+_BYTES_LIMIT = 1 << 40
+
+
+def _json_bytes(value: Any) -> int:
+    """An attachment's declared size under the reducer's own ceiling, or 0."""
+    return value if _small_int(value, _BYTES_LIMIT) else 0
 
 
 def _render_bytes(size: int) -> str:
@@ -225,9 +240,21 @@ def _row_media_slots(content: Any) -> frozenset[str]:
         width, height = _json_int(block.get("width")), _json_int(block.get("height"))
         if width and height:
             out.add(f"{width}x{height}")
-        size = _json_int(block.get("bytes"))
+        size = _json_bytes(block.get("bytes"))
         if size:
             out.add(_render_bytes(size))
+        # THE DIGEST IS A SLOT OF THIS REF (S-24 residual). Span-wide
+        # admission let A's digest wear B's mime, dimensions and size, and let
+        # any 12-hex string the span contained stand in as a receipt digest.
+        raw = block.get("sha256")
+        if isinstance(raw, str) and _DIGEST_FULL.fullmatch(raw):
+            out.add(raw[:12])
+        # `media_receipt` appends ` url=<url>` for a URL-sourced attachment, so
+        # the denominator renders it and the epoch must be able to carry it
+        # (S-29: it was rendered but unadmittable).
+        url = _json_str(block.get("url"))
+        if url and _URL_SAFE_RE.fullmatch(url):
+            out.add(url)
     return frozenset(out)
 
 
@@ -260,7 +287,7 @@ def _media_receipts(span: Sequence[dict[str, Any]]) -> list[str]:
             kind = mime if _MIME_RE.fullmatch(mime) else "media"
             width, height = _json_int(block.get("width")), _json_int(block.get("height"))
             dims = f" {width}x{height}" if width and height else ""
-            size = _json_int(block.get("bytes"))
+            size = _json_bytes(block.get("bytes"))
             bytes_note = _render_bytes(size) + " " if size else ""
             sense = "audible" if kind.startswith("audio") else "visible"
             if digest in seen:
@@ -1056,7 +1083,14 @@ def _check_slots(
                     raise SaverRejected("provenance")
                 continue
             if _HEX12.fullmatch(token):
-                if token in media or token in derived or token in record.text:
+                # A RECEIPT digest is its own ref's (S-24 residual): the
+                # span-wide set admitted A's digest beside B's slots and let a
+                # row hash pass as an attachment digest. A dedupe marker is the
+                # exception it always was — it names an occurrence the span
+                # really holds, which no single record can enumerate.
+                if token in record.media_slots or token in derived or token in record.text:
+                    continue
+                if _DEDUPE.match(text) and token in media:
                     continue
                 raise SaverRejected("provenance")
             if token in record.block_types or token in record.media_slots:

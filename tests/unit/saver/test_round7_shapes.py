@@ -193,27 +193,120 @@ def _receipt_epoch(rows: list[dict[str, Any]]) -> str:
     return HEADER + "\n" + "\n".join(f"user: {receipt}" for receipt in _media_receipts(rows))
 
 
+#: A receipt EXACTLY as `reduce_v2.media_receipt` renders it, captured from the
+#: reference reducer and pinned as a literal. The S-27 test used to build its
+#: expected epoch by calling `_media_receipts()` — comparing the mirror with
+#: itself, which cannot see a mirror that renders nothing. This literal can:
+#: with `_json_int`'s 100 kB ceiling an attachment of 1.2 MB lost its size here
+#: and the epoch stopped being admissible (S-28).
+_GOLDEN_RECEIPT = (
+    "[radient:image omitted — image/png 1440x900 1.2 MB sha256=0123456789ab; "
+    "it was visible when first sent and is not visible now; describe it only "
+    "from what was said about it]"
+)
+
+
+def _big_image_rows() -> list[dict[str, Any]]:
+    """Four attachments, three of them at or above 100 kB, plus the text tail."""
+    sizes = (40_568, 100_000, 250_288, 1_200_000)
+    rows: list[dict[str, Any]] = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_ref",
+                    "sha256": f"{i:012x}" + "a" * 52,
+                    "bytes": size,
+                    "width": 1440,
+                    "height": 900,
+                    "mime": "image/png",
+                }
+            ],
+        }
+        for i, size in enumerate(sizes)
+    ]
+    return rows + [{"role": "user", "content": [{"type": "text", "text": _TAIL}]}]
+
+
+def test_the_receipt_mirror_renders_the_reducers_own_receipt() -> None:
+    """S-30: the mirror is pinned against a literal, not against itself."""
+    from local_operator.saver.provenance import _media_receipts
+
+    rows = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_ref",
+                    "sha256": "0123456789ab" + "c" * 52,
+                    "bytes": 1_200_000,
+                    "width": 1440,
+                    "height": 900,
+                    "mime": "image/png",
+                }
+            ],
+        }
+    ]
+    assert _media_receipts(rows) == [_GOLDEN_RECEIPT]
+
+
 def test_a_multimodal_epoch_is_measured_against_the_spans_own_receipts() -> None:
-    """S-27: the denominator must count the receipt an image row costs.
+    """S-27, and the S-28 regression it hid.
 
     `parts` holds TEXT blocks, so an image row added nothing to the span side
-    while the epoch paid ~49 cl100k tokens of receipt for it: an honest
-    four-image epoch measured 3.98x on the text-only denominator — refused —
-    and 0.958x once the span's own receipts are counted. A refusal is charged
-    at full, so that was a bill for an honest multimodal turn.
+    while the epoch paid ~49 cl100k tokens of receipt for it. And because the
+    size came through a 100 kB default ceiling, every attachment of 100 kB or
+    more rendered WITHOUT a size and reported 0 bytes: an ordinary screenshot
+    was refused at 0.39x-0.43x and charged at full.
     """
     from local_operator.compaction.tokens import count_text_tokens
-    from local_operator.saver.provenance import _media_receipts, source_records
+    from local_operator.saver.provenance import (
+        _media_bytes,
+        _media_receipts,
+        source_records,
+    )
 
-    rows = _multimodal_rows(4)
-    text = _receipt_epoch(rows)
+    rows = _big_image_rows()
+    receipts = _media_receipts(rows)
+    # The size is the reducer's own reading: the 100 kB default ceiling loses
+    # it for three of these four attachments, so this line is the S-28 guard.
+    assert _media_bytes(rows[2]["content"]) == 250_288, receipts
+    assert "250.3 kB" in receipts[2], receipts
+    text = HEADER + "\n" + "\n".join(f"user: {r}" for r in receipts)
     parts = source_records(rows)[1]
     text_only = count_text_tokens("\n".join(parts))
-    with_receipts = count_text_tokens("\n".join(list(parts) + _media_receipts(rows)))
+    with_receipts = count_text_tokens("\n".join(list(parts) + receipts))
     measured = count_text_tokens(text)
-    # The fixture is only a guard if the OLD denominator refused it.
     assert measured / text_only > 1.0, "fixture must amplify on the text-only denominator"
     assert measured / with_receipts < 0.9, "and be cheaper with the span's receipts counted"
+    check_provenance(text, rows)
+
+
+def test_a_non_lockstep_receipt_still_measures_under_one() -> None:
+    """S-28 boundary: 10 attachments at 250 kB, the common screenshot turn."""
+    from local_operator.saver.provenance import _media_bytes, _media_receipts
+
+    rows = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_ref",
+                    "sha256": f"{i:012x}" + "b" * 52,
+                    "bytes": 250_288,
+                    "width": 1440,
+                    "height": 900,
+                    "mime": "image/png",
+                }
+            ],
+        }
+        for i in range(10)
+    ]
+    rows.append({"role": "user", "content": [{"type": "text", "text": _TAIL}]})
+    assert all(_media_bytes(row["content"]) == 250_288 for row in rows[:-1])
+    receipts = _media_receipts(rows)
+    assert all("250.3 kB" in r for r in receipts)
+    text = HEADER + "\n" + "\n".join(f"user: {r}" for r in receipts)
     check_provenance(text, rows)
 
 
@@ -251,6 +344,27 @@ def test_a_receipt_slot_belongs_to_the_ref_that_printed_it() -> None:
     with pytest.raises(SaverRejected):
         _check_slots(other, first, media, derived, [99], 10**9)
 
+    # THE DIGEST LEG (S-24 residual): the digest is a slot of its own ref, so
+    # A's digest may not wear B's mime and dimensions, and a value the span
+    # holds only as a ROW HASH is not an attachment digest at all.
+    digest_of = {rec.identity: sorted(t for t in rec.media_slots if len(t) == 12) for rec in images}
+    stolen = _elements(
+        _media_receipts(rows)[1].replace(
+            digest_of[second.identity][0], digest_of[first.identity][0]
+        )
+    )
+    with pytest.raises(SaverRejected):
+        _check_slots(stolen, first, media, derived, [99], 10**9)
+    owned = set(digest_of[first.identity]) | set(digest_of[second.identity])
+    row_hashes = [d for d in sorted(media) if len(d) == 12 and d not in owned]
+    assert row_hashes, "the span must hold a row hash that is no attachment's digest"
+    forged = _elements(
+        _media_receipts(rows)[0].replace(digest_of[first.identity][0], row_hashes[0])
+    )
+    assert forged != own
+    with pytest.raises(SaverRejected):
+        _check_slots(forged, first, media, derived, [99], 10**9)
+
 
 def test_a_receipt_size_is_the_attachments_exact_byte_rendering() -> None:
     """S-25: the old rule accepted any size within `ceiling * 1.05 + 64`."""
@@ -259,3 +373,61 @@ def test_a_receipt_size_is_the_attachments_exact_byte_rendering() -> None:
     forged = receipts[1].replace("1.1 kB", "1.0 kB")
     with pytest.raises(SaverRejected):
         check_provenance(HEADER + "\n" + forged, rows)
+
+
+def test_a_url_attachment_receipt_is_admissible_and_only_its_own_url() -> None:
+    """S-29: the receipt renders `url=`, so the epoch must be able to carry it.
+
+    `media_receipt` appends ` url=<url>` for a URL-sourced attachment. The
+    denominator rendered it while the slot path admitted nothing, so an honest
+    URL receipt was refused. Both sides now agree, and the url is bound to the
+    ref that carried it like mime, dimensions and size.
+    """
+    from local_operator.saver.provenance import (
+        _check_slots,
+        _derived_digests,
+        _elements,
+        _media_receipts,
+        source_records,
+    )
+
+    rows = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_ref",
+                    "sha256": "0" * 12 + "d" * 52,
+                    "bytes": 250_288,
+                    "width": 1440,
+                    "height": 900,
+                    "mime": "image/png",
+                    "url": "https://example.com/frame.png",
+                }
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_ref",
+                    "sha256": "1" * 12 + "d" * 52,
+                    "bytes": 40_568,
+                    "width": 800,
+                    "height": 600,
+                    "mime": "image/png",
+                    "url": "https://example.com/other.png",
+                }
+            ],
+        },
+    ]
+    recs, parts, media = source_records(rows)
+    derived = _derived_digests(parts)
+    first, second = [r for r in recs["user"] if "image_ref" in r.block_types]
+    receipts = _media_receipts(rows)
+    assert "url=https://example.com/frame.png" in receipts[0]
+    _check_slots(_elements(receipts[0]), first, media, derived, [99], 10**9)
+    _check_slots(_elements(receipts[1]), second, media, derived, [99], 10**9)
+    # The other ref's url is present in the span but belongs to that ref only.
+    with pytest.raises(SaverRejected):
+        _check_slots(_elements(receipts[1]), first, media, derived, [99], 10**9)
