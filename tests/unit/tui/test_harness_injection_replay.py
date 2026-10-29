@@ -485,7 +485,7 @@ async def test_a_run_spanning_two_accounts_folds_to_one_row_that_names_both() ->
     Folding per credential id painted the wall back; folding on the sentence
     alone would hide a genuine second account. The run therefore folds on what a
     reader sees (sentence + provenance) and carries the SET of ids it covered, so
-    one row replaces the wall and ``· 2 accounts`` states what the wall was.
+    one row replaces the wall and ``· 2 logins`` states what the wall was.
     """
     from local_operator.harness.message_types import SESSION_BINDING_NOTICE_MESSAGE_TYPE
     from local_operator.harness.types import CustomMessage
@@ -517,7 +517,9 @@ async def test_a_run_spanning_two_accounts_folds_to_one_row_that_names_both() ->
             for block in app.query_one(TranscriptView).blocks()
             if isinstance(block, NoticeBlock)
         ]
-    assert notices == [f"{same}  \u00d720 \u00b7 2 accounts", named], notices
+    # "logins", not "accounts": the module's own noun, and 2 cells shorter, which
+    # is what keeps the marker on the sentence's first line at 100 columns (D3).
+    assert notices == [f"{same}  \u00d720 \u00b7 2 logins", named], notices
 
 
 @pytest.mark.asyncio

@@ -1402,7 +1402,7 @@ def project_settled_rows(
     # Neither is acceptable, so the run folds on what a reader actually sees —
     # the sentence and its provenance — while the SET of credential ids it
     # covered is carried along and stated in the marker (``render_binding_notice
-    # _repeat``): ``×20`` for one account, ``×20 · 2 accounts`` when the run named
+    # _repeat``): ``×20`` for one login, ``×20 · 2 logins`` when the run named
     # two. The operator gets one row instead of a wall, and the fact that the run
     # covered two accounts is never silently dropped.
     #

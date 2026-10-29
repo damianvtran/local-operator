@@ -595,9 +595,11 @@ def render_removal_endings(
 #: tree's convention for session records that are not conversation (incidents,
 #: the MCP warning), and '[session credential]' is the family's own credential
 #: head — measured at 20 cells against the first cut's 28, which wrapped the
-#: sentence onto a third row at 60 columns (design round 1, D5). The message
-#: TYPE and the peek heading ("account change") carry the distinction; nothing
-#: consumes the longer words.
+#: sentence onto a third row at 60 columns (design round 1, D5). The message TYPE
+#: carries the distinction now; nothing consumes the longer words, and there is no
+#: peek heading of this type at all — a peek step is model context, so
+#: ``harness/comms.py``'s ``is_peek_step_entry`` refuses this row outright (#3098
+#: round 1, R1).
 _BINDING_NOTICE_HEAD = "[session credential] "
 
 
@@ -723,20 +725,23 @@ def render_binding_notice_repeat(text: str, *, seen: int, accounts: int = 1) -> 
     subagent misattributed to its parent — so ``seen`` is a volume fact, and
     ``accounts`` is the disclosure of what that volume contained.
 
-    WHY THIS SPELLING, MEASURED: in the 100x30 frame this sentence is 76 cells and
-    a notice row offers ~90, so the marker has ~12 to spend. ``×20 · 2 accounts``
-    costs 16 and wraps onto a SECOND line ("×20 · 2" / "accounts" measured in the
-    after-frame); the wordier ``×20, alternating between 2 accounts`` costs 31 and
-    would spend roughly two more rows saying the same thing. The compact form is
-    therefore the narrower of the two at this width, which is all it claims: it does
-    not fit on one line, and this sentence is close to the widest a notice gets.
+    WHY "logins", AND WHY THIS SPELLING (design round 2, D3): "login" is the noun
+    the rest of this module already uses for one account on one owner
+    (``_login_phrase``, and the remedy ``lop login <provider>``), so the marker
+    names the thing the operator has two of rather than introducing a second word
+    for it. It is also 2 cells shorter than "accounts", which is what keeps the
+    marker on the sentence's own line: at 100 columns this sentence is 76 cells and
+    a notice row offers ~90, so the earlier ``×20 · 2 accounts`` (16 cells) wrapped
+    its last word onto a line of its own — measured in the round-1 after-frame —
+    while ``×20 · 2 logins`` (14) fits. The wordier "alternating between 2 logins"
+    would cost 29 and wrap regardless.
 
     It lives HERE, beside the sentence it annotates, because this module is the
     credential copy home; the fold in ``tui/session_presentation.py`` calls it
     rather than spelling a marker of its own.
     """
     if accounts > 1:
-        return f"{text}  \u00d7{seen} \u00b7 {accounts} accounts"
+        return f"{text}  \u00d7{seen} \u00b7 {accounts} logins"
     return f"{text}  \u00d7{seen}"
 
 
