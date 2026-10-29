@@ -4,7 +4,7 @@ through the outbox, and NO decide authority."""
 from __future__ import annotations
 
 import json
-from typing import cast
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -662,7 +662,7 @@ async def test_every_accepted_target_shape_sends_the_same_normalized_pair(
     """
     from local_operator.team_bridge.outbox import Outbox
 
-    recorded: list[dict] = []
+    recorded: list[dict[str, Any]] = []
     original = Outbox.record_send
 
     def record(self, *args, **kwargs):
