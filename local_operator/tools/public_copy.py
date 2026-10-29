@@ -158,22 +158,31 @@ _AUDIT_DIRNAME = "audit"
 _AUDIT_FILENAME = "public-copy-reads.jsonl"
 
 
+# NOT a docstring: pydantic copies a class docstring into the published schema's
+# ``description`` and every request pays for it, so the contract lives here.
+#
+# ``repo_root`` CONTRACT (the schema states it tersely; this is the full rule):
+#   * it only SELECTS which checkout is read -- read-only, never moves the session;
+#   * it must be the exact checkout/worktree root, not a subdirectory of it;
+#   * that checkout's GitHub origin must be one of ``ACCEPTED_REPOSITORIES``;
+#   * the public-copy allowlist is NOT widened -- ``path`` is still matched against
+#     the same patterns, relative to the selected root;
+#   * a confinement refusal answers ``refused: <code>`` plus one JSON line of repair
+#     fields (``_next_step``), so the schema carries no refusal prose.
 class ReadPublicCopyParams(BaseModel):
-    """Arguments for the sanctioned public-copy reader."""
-
     model_config = ConfigDict(extra="forbid")
 
-    path: str = Field(description="Repository-relative public i18n copy path.")
+    path: str = Field(description="Repo-relative public copy path.")
     repo_root: str | None = Field(
         default=None,
         description=(
-            "Exact checkout/worktree root; GitHub origin is damianvtran/local-operator or "
-            "damianvtran/local-operator-ui. Never moves the session; grants no access."
+            "Checkout/worktree root, not a subdir; origin damianvtran/local-operator or "
+            "damianvtran/local-operator-ui. Read-only."
         ),
     )
     key: str | None = Field(
         default=None,
-        description="Catalogue/message key; required for key modules and maps.",
+        description="Message key; required for key modules/maps.",
     )
 
 
@@ -933,9 +942,7 @@ def build_read_public_copy_tool() -> AgentTool:
         name=TOOL_NAME,
         label="Read public copy",
         description=(
-            "Read committed public i18n copy through the audited route: a catalogue "
-            "key, a key-module line, or a generated key map. Allowlisted; every read "
-            "is recorded."
+            "Read allowlisted public i18n copy: key, key-module line or map; audited."
         ),
         parameters=ReadPublicCopyParams.model_json_schema(),
         approval_tier="read",

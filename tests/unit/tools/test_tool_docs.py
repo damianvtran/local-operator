@@ -477,16 +477,18 @@ MEASURED_TOKENS: dict[str, int] = {
     # NEW (redaction policy, PR #2796): the sanctioned public-copy reader.
     # 237 tokens measured through this test's own table; deliberately small —
     # it exists to avoid a bypass, not to be a second file browser.
-    # RE-MEASURED (#3106): 121 -> 162. The delta is the `repo_root` field
-    # description (295 -> 150 characters: it reclaims "never moves the session"
-    # and frees slack, review R3-3/R3-4), so the budget now measures 34,338 of
-    # 34,341. Measured through this test's own assertion table after the cut,
-    # never carried from CI or guessed:
+    # RE-MEASURED (#3106): 121 -> 135. The delta is the `repo_root` field
+    # (the only added schema text) after the description, `path` and `key` prose
+    # were cut to what the contract needs: the full rule lives in a comment above
+    # `ReadPublicCopyParams`, not in the published schema. The `--kind child`
+    # budget arm (30,380) is the tighter ratchet and is what forced the cut: it
+    # measures 30,355 and the main arm 34,263 of 34,341. Measured through this
+    # test's own assertion table after the cut, never carried from CI or guessed:
     #   .venv/bin/python scripts/run_bounded.py --timeout 300 -- \
     #     .venv/bin/python -m pytest
     #     tests/unit/tools/test_tool_docs.py::test_docs_stay_within_the_soft_cap_and_the_token_ledger_is_current
     # No other entry moved.
-    "read_public_copy": 162,
+    "read_public_copy": 135,
     "read_variable": 67,
     "secret": 186,
     # Advertised surface re-measured: explicit repeat + confirmed-reuse detail
