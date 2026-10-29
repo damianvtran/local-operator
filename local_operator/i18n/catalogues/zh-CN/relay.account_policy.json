@@ -1,0 +1,15 @@
+{
+  "relay.account_policy.title": "电脑设置",
+  "relay.account_policy.back": "返回",
+  "relay.account_policy.loading": "正在加载账户路由……",
+  "relay.account_policy.save": "保存策略",
+  "relay.account_policy.saving": "正在保存……",
+  "relay.account_policy.saved": "已保存在此电脑上。",
+  "relay.account_policy.retry": "重试",
+  "relay.account_policy.unavailable": "此中继上无法使用账户路由设置。更新此电脑上的Local Operator。",
+  "relay.account_policy.error": "无法确认此次更改。检查网络连接并重新加载，以读取当前策略。",
+  "relay.account_policy.scope": "更改仅对此电脑生效。",
+  "relay.account_policy.entry": "设置",
+  "relay.account_policy.rejected": "更改未保存。检查所填的值或此电脑的设置，然后重试。",
+  "relay.account_policy.load_error": "无法加载账户路由。检查网络连接后重试。"
+}

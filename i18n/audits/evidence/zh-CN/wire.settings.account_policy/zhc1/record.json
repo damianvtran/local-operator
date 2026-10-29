@@ -1,0 +1,36 @@
+{
+  "locale": "zh-CN",
+  "namespace": "wire.settings.account_policy",
+  "audit_date": "2026-10-28",
+  "key_count": 14,
+  "translator": {
+    "agent": "translator (lopdev team)",
+    "session": "809b6f2773e0",
+    "model": "radient/auto",
+    "model_note": "started on anthropic/claude-sonnet-5-5; provider-quota fallbacks through openai/gpt-6-astra and kimi/k3.1-pro before the run completed on radient/auto",
+    "date": "2026-10-28"
+  },
+  "auditor": {
+    "agent": "translation-auditor (lopdev team)",
+    "session": "e139d7f8f30c",
+    "model": "radient/auto",
+    "model_note": "started on anthropic/claude-sonnet-5-5; quota fallbacks to openai/gpt-6-astra, then kimi/k3.1-pro, then radient/auto, which produced the findings",
+    "independence": "the auditor is not the translator: translator session 809b6f2773e0, auditor session e139d7f8f30c, neither edited the other's files and the auditor edited nothing",
+    "date": "2026-10-28"
+  },
+  "input_hashes": {
+    "en": "1ad13f8198e28cb19fe0ecb2a6ef9b2a6990bc0d047566b71f5dd5322f594b25",
+    "context": "ccee657198d84a0bef6d20ae0343c9a864567e5a622a1b9736b1974ca296a254",
+    "target_locale": "51c800cd4fe8bbcfe857b4749f08f1bd836e536fb8b18f88de3426805c769b93"
+  },
+  "artifacts": [
+    "audit.log",
+    "redaction-scan.json",
+    "report.md",
+    "record.json"
+  ],
+  "current_report_verdict": "passed after one minor remediation",
+  "findings": "0 blocker, 0 major, 1 minor (ZH-SETAP-R1-001), remediated in the same commit as this bundle",
+  "route": "Read route for this bundle: the translator and the auditor read the English source, the context sidecars and the existing zh-CN catalogues directly from the git checkout (`/Users/damian/lo-i18n-zh`) with ordinary file reads. That is permitted: `docs/security/redaction-policy.md` §2.2 classes catalogue copy as public and not secret, and §4 scopes the `read_public_copy` route to copy the shape pass would otherwise mask. `redaction-scan.json` records the measured result for every input file this wave used: 0 redaction markers in the committed bytes. A known display trap (the harness masks `name=value`-looking runs on the way to a transcript) was handled by verifying assignment tokens with ordinals rather than trusting the display; a byte scan of both shipped files for the ASCII marker returned 0 occurrences. No sanctioned-reader receipt is claimed for a read the auditor did not make.",
+  "scope_note": "This wave was tasked with four zh-CN namespaces. Two of them — wire.errors.sdk_spec and wire.errors.sdk_startup — carry an English-only contract in their English context sidecars (\"English source only ... Keep the existing exception string unchanged; translation requires caller-contract migration\" / \"English-only child namespace falls back under RFC §6 per-CARRIED policy\"). They were therefore NOT shipped: their translations were discarded rather than committed, and their coverage-allowance entries stay. Their audit findings are preserved in audit.log for the record that would own the caller-contract migration."
+}

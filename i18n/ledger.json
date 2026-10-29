@@ -7977,6 +7977,44 @@
       },
       "status": "passed",
       "note": "Two independent Urdu relay audits over translator session 905e702c8399's bytes; neither auditor is the translator and neither edited the tree. Round 1 (base 9dc317f4, all 109 keys): session 49a2149e4f78 (openrouter/moonshotai/kimi-k3.1-pro) raised UR-RELAY-R1-001 MAJOR on relay.shell.usage.as_of \u2014 \u062a\u06a9 reads as until/expiry for an 'as of' cached-at timestamp; the second independent high-visibility audit (session a017851a0ea0, openrouter/moonshotai/kimi-k3.1-pro) read all 109 keys clean. Round 2 on remediation ea2f92e0 (rebased for this integration): 49a2149e4f78 (radient/auto) re-read relay.shell 44/44 and a017851a0ea0 (radient/auto) read the one changed value in depth and proved the other 108 byte-identical; both CLEAN. The fix to \u06a9\u06d2 \u0645\u0637\u0627\u0628\u0642 was verified; no unresolved BLOCKER/MAJOR/MINOR/NIT. This row: relay.login 4 keys on the separate SSR auth gate \u2014 round 1 clean; round 2 byte-identical and unaffected by the SPA shell delta. Rendered RTL/bidi isolation, Arabic shaping, font fallback and narrow-width layout were not exercised in either round; no screenshot or native design approval is claimed, and this row records the independent translation audit, not a rendered sign-off."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "relay.account_policy",
+      "source_sha256": "0019b08106e6f7762194b164b9b9b37054a8cfade759aa2f6490787a73dea890",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "model": "radient/auto",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "radient/auto",
+        "date": "2026-10-28",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent zh-CN audit, 13 keys, clean: 0 blocker/major/minor/nit. Evidence i18n/audits/evidence/zh-CN/relay.account_policy/zhc1. Auditor read the English source and sidecar at the hashes recorded there; route and marker scan recorded in record.json (worktree reads per docs/security/redaction-policy.md 2.2; 0 markers; assignment tokens verified by ordinals). Translator session 809b6f2773e0, auditor session e139d7f8f30c; both ran on radient/auto after anthropic quota fallbacks. No native-speaker pass claimed."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.settings.account_policy",
+      "source_sha256": "1ad13f8198e28cb19fe0ecb2a6ef9b2a6990bc0d047566b71f5dd5322f594b25",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "model": "radient/auto",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "radient/auto",
+        "date": "2026-10-28",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent zh-CN audit, 14 keys: 0 blocker, 0 major, 1 minor (ZH-SETAP-R1-001 reset_soonest.description unknown-reports wording), remediated in the same commit as this row. Evidence i18n/audits/evidence/zh-CN/wire.settings.account_policy/zhc1; route and marker scan in record.json; ordinals verified. Translator session 809b6f2773e0, auditor session e139d7f8f30c (radient/auto after quota fallbacks). No native-speaker pass claimed."
     }
   ]
 }

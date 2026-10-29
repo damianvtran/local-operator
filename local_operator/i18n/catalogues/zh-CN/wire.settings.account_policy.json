@@ -1,0 +1,16 @@
+{
+  "wire.settings.account_policy.label": "账户选择策略",
+  "wire.settings.account_policy.help": "在同一提供商和凭据层级内选择符合条件的同级账户。对每种策略，成功请求留下的兼容且未过期的租约都优先；这并不保证命中缓存。最早重置优先选择最近的每周额度补充；并列相差不足一分钟时，以5小时额度补充为准。显式指定的策略会覆盖旧版用量感知账户选择设置。",
+  "wire.settings.account_policy.reset_soonest.label": "最早重置",
+  "wire.settings.account_policy.reset_soonest.description": "优先选择最近的内含额度重置；对并列项和上报未知的账户做确定性分散。新配置的默认值。",
+  "wire.settings.account_policy.headroom.label": "余量最多",
+  "wire.settings.account_policy.headroom.description": "优先使用缓存的剩余配额，把账户分散在最佳值上下10个百分点以内。",
+  "wire.settings.account_policy.fair.label": "公平分散",
+  "wire.settings.account_policy.fair.description": "改用基于会话的稳定分散，而不是按缓存的重置时间或剩余配额排序。",
+  "wire.settings.account_policy.legacy.label": "旧版用量感知选择",
+  "wire.settings.account_policy.legacy.help": "兼容设置，仅在未指定账户选择策略时使用：true选择余量最多，false选择公平分散。显式指定的账户选择策略优先。重置“账户选择策略”一行，即可恢复为最早重置并清除旧版覆盖。",
+  "wire.settings.account_policy.error.unavailable": "账户路由不可用。",
+  "wire.settings.account_policy.error.invalid_shape": "只应提供value字段。",
+  "wire.settings.account_policy.error.invalid_json": "应为JSON对象。",
+  "wire.settings.account_policy.error.write_failed": "无法保存该设置。检查此电脑上的配置权限后重试。"
+}

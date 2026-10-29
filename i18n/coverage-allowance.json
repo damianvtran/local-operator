@@ -3138,28 +3138,6 @@
     },
     {
       "locale": "zh-CN",
-      "namespace": "relay.account_policy",
-      "reason": "English-only namespace: zh-CN does not carry it; renders the English child fallback.",
-      "owner": "i18n-translator lane",
-      "payoff": "2027-02-28",
-      "missing": [
-        "relay.account_policy.back",
-        "relay.account_policy.entry",
-        "relay.account_policy.error",
-        "relay.account_policy.load_error",
-        "relay.account_policy.loading",
-        "relay.account_policy.rejected",
-        "relay.account_policy.retry",
-        "relay.account_policy.save",
-        "relay.account_policy.saved",
-        "relay.account_policy.saving",
-        "relay.account_policy.scope",
-        "relay.account_policy.title",
-        "relay.account_policy.unavailable"
-      ]
-    },
-    {
-      "locale": "zh-CN",
       "namespace": "wire.errors.sdk_spec",
       "reason": "English-only namespace: zh-CN does not carry it; renders the English child fallback.",
       "owner": "i18n-translator lane",
@@ -3199,29 +3177,6 @@
         "wire.errors.sdk_startup.attach_runtime_missing",
         "wire.errors.sdk_startup.profile_attach_failed",
         "wire.errors.sdk_startup.tool_inventory_mismatch"
-      ]
-    },
-    {
-      "locale": "zh-CN",
-      "namespace": "wire.settings.account_policy",
-      "reason": "English-only namespace: zh-CN does not carry it; renders the English child fallback.",
-      "owner": "i18n-translator lane",
-      "payoff": "2027-02-28",
-      "missing": [
-        "wire.settings.account_policy.error.invalid_json",
-        "wire.settings.account_policy.error.invalid_shape",
-        "wire.settings.account_policy.error.unavailable",
-        "wire.settings.account_policy.error.write_failed",
-        "wire.settings.account_policy.fair.description",
-        "wire.settings.account_policy.fair.label",
-        "wire.settings.account_policy.headroom.description",
-        "wire.settings.account_policy.headroom.label",
-        "wire.settings.account_policy.help",
-        "wire.settings.account_policy.label",
-        "wire.settings.account_policy.legacy.help",
-        "wire.settings.account_policy.legacy.label",
-        "wire.settings.account_policy.reset_soonest.description",
-        "wire.settings.account_policy.reset_soonest.label"
       ]
     },
     {
