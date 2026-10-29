@@ -7977,6 +7977,272 @@
       },
       "status": "passed",
       "note": "Two independent Urdu relay audits over translator session 905e702c8399's bytes; neither auditor is the translator and neither edited the tree. Round 1 (base 9dc317f4, all 109 keys): session 49a2149e4f78 (openrouter/moonshotai/kimi-k3.1-pro) raised UR-RELAY-R1-001 MAJOR on relay.shell.usage.as_of \u2014 \u062a\u06a9 reads as until/expiry for an 'as of' cached-at timestamp; the second independent high-visibility audit (session a017851a0ea0, openrouter/moonshotai/kimi-k3.1-pro) read all 109 keys clean. Round 2 on remediation ea2f92e0 (rebased for this integration): 49a2149e4f78 (radient/auto) re-read relay.shell 44/44 and a017851a0ea0 (radient/auto) read the one changed value in depth and proved the other 108 byte-identical; both CLEAN. The fix to \u06a9\u06d2 \u0645\u0637\u0627\u0628\u0642 was verified; no unresolved BLOCKER/MAJOR/MINOR/NIT. This row: relay.login 4 keys on the separate SSR auth gate \u2014 round 1 clean; round 2 byte-identical and unaffected by the SPA shell delta. Rendered RTL/bidi isolation, Arabic shaping, font fallback and narrow-width layout were not exercised in either round; no screenshot or native design approval is claimed, and this row records the independent translation audit, not a rendered sign-off."
+    },
+    {
+      "locale": "fr",
+      "namespace": "relay.chrome",
+      "source_sha256": "0456005a0730d99a27656f1b0413b751c5916630e4c56aad346238e25c0c5994",
+      "translator": {
+        "agent": "coder (lopdev session 6999135b36d2)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": null,
+        "model": null,
+        "date": null,
+        "result": "pending",
+        "findings": null
+      },
+      "status": "pending_audit",
+      "note": "Relay composer placeholder slice (fix/relay-composer-placeholder): 2 new keys composer.placeholder.idle/.steer translated from the frozen en bytes (85 keys; target SHA-256 7fcb90164e52be98e209b6a88fcc0b0818785f2ee6825bcbd2fcefe7fb032104); the other 83 values are byte-identical to the prior passed row. Independent auditor has NOT run: this row deliberately does not pass, so the carried-namespace gate keeps the locale out of shipped.json until an independent audit replaces auditor/status at these bytes. Source: the desktop UI's audited ui.chat.composer.placeholder.idle/.waiting first clauses; widths measured at 16px system-ui against the 184px D1 budget (PR body)."
+    },
+    {
+      "locale": "es",
+      "namespace": "relay.chrome",
+      "source_sha256": "0456005a0730d99a27656f1b0413b751c5916630e4c56aad346238e25c0c5994",
+      "translator": {
+        "agent": "coder (lopdev session 6999135b36d2)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": null,
+        "model": null,
+        "date": null,
+        "result": "pending",
+        "findings": null
+      },
+      "status": "pending_audit",
+      "note": "Relay composer placeholder slice (fix/relay-composer-placeholder): 2 new keys composer.placeholder.idle/.steer translated from the frozen en bytes (85 keys; target SHA-256 a2d25deb40633c2b478babb7c9fd0dd3bdc0b2cd77c4010fedd1c205b9840097); the other 83 values are byte-identical to the prior passed row. Independent auditor has NOT run: this row deliberately does not pass, so the carried-namespace gate keeps the locale out of shipped.json until an independent audit replaces auditor/status at these bytes. Source: the desktop UI's audited ui.chat.composer.placeholder.idle/.waiting first clauses; widths measured at 16px system-ui against the 184px D1 budget (PR body)."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "relay.chrome",
+      "source_sha256": "0456005a0730d99a27656f1b0413b751c5916630e4c56aad346238e25c0c5994",
+      "translator": {
+        "agent": "coder (lopdev session 6999135b36d2)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": null,
+        "model": null,
+        "date": null,
+        "result": "pending",
+        "findings": null
+      },
+      "status": "pending_audit",
+      "note": "Relay composer placeholder slice (fix/relay-composer-placeholder): 2 new keys composer.placeholder.idle/.steer translated from the frozen en bytes (85 keys; target SHA-256 d47a5d58a73a92f53c160fe26429432db2a8ea63a48e92cd5e18109b2efcf89e); the other 83 values are byte-identical to the prior passed row. Independent auditor has NOT run: this row deliberately does not pass, so the carried-namespace gate keeps the locale out of shipped.json until an independent audit replaces auditor/status at these bytes. Source: the desktop UI's audited ui.chat.composer.placeholder.idle/.waiting first clauses; widths measured at 16px system-ui against the 184px D1 budget (PR body)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "relay.chrome",
+      "source_sha256": "0456005a0730d99a27656f1b0413b751c5916630e4c56aad346238e25c0c5994",
+      "translator": {
+        "agent": "coder (lopdev session 6999135b36d2)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": null,
+        "model": null,
+        "date": null,
+        "result": "pending",
+        "findings": null
+      },
+      "status": "pending_audit",
+      "note": "Relay composer placeholder slice (fix/relay-composer-placeholder): 2 new keys composer.placeholder.idle/.steer translated from the frozen en bytes (85 keys; target SHA-256 b91a1a1c7dd20c1fa97dc1957f80b1351b60b5b2b8153c2b05393273e42ee91c); the other 83 values are byte-identical to the prior passed row. Independent auditor has NOT run: this row deliberately does not pass, so the carried-namespace gate keeps the locale out of shipped.json until an independent audit replaces auditor/status at these bytes. Source: the desktop UI's audited ui.chat.composer.placeholder.idle/.waiting first clauses; widths measured at 16px system-ui against the 184px D1 budget (PR body)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "relay.chrome",
+      "source_sha256": "0456005a0730d99a27656f1b0413b751c5916630e4c56aad346238e25c0c5994",
+      "translator": {
+        "agent": "coder (lopdev session 6999135b36d2)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": null,
+        "model": null,
+        "date": null,
+        "result": "pending",
+        "findings": null
+      },
+      "status": "pending_audit",
+      "note": "Relay composer placeholder slice (fix/relay-composer-placeholder): 2 new keys composer.placeholder.idle/.steer translated from the frozen en bytes (85 keys; target SHA-256 8c45d9220ce6e1a053b53413cbd63a3fd69573ef29f9f017a15b2c9bc256e5dd); the other 83 values are byte-identical to the prior passed row. Independent auditor has NOT run: this row deliberately does not pass, so the carried-namespace gate keeps the locale out of shipped.json until an independent audit replaces auditor/status at these bytes. Source: the desktop UI's audited ui.chat.composer.placeholder.idle/.waiting first clauses; widths measured at 16px system-ui against the 184px D1 budget (PR body)."
+    },
+    {
+      "locale": "ur",
+      "namespace": "relay.chrome",
+      "source_sha256": "0456005a0730d99a27656f1b0413b751c5916630e4c56aad346238e25c0c5994",
+      "translator": {
+        "agent": "coder (lopdev session 6999135b36d2)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": null,
+        "model": null,
+        "date": null,
+        "result": "pending",
+        "findings": null
+      },
+      "status": "pending_audit",
+      "note": "Relay composer placeholder slice (fix/relay-composer-placeholder): 2 new keys composer.placeholder.idle/.steer translated from the frozen en bytes (85 keys; target SHA-256 9f91c63962b7a4ff4392bb32b93d5dec4b6a4e9bb399f4eb690d918232f2cb59); the other 83 values are byte-identical to the prior passed row. Independent auditor has NOT run: this row deliberately does not pass, so the carried-namespace gate keeps the locale out of shipped.json until an independent audit replaces auditor/status at these bytes. Source: the desktop UI's audited ui.chat.composer.placeholder.idle/.waiting first clauses; widths measured at 16px system-ui against the 184px D1 budget (PR body)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "relay.chrome",
+      "source_sha256": "0456005a0730d99a27656f1b0413b751c5916630e4c56aad346238e25c0c5994",
+      "translator": {
+        "agent": "coder (lopdev session 6999135b36d2)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": null,
+        "model": null,
+        "date": null,
+        "result": "pending",
+        "findings": null
+      },
+      "status": "pending_audit",
+      "note": "Relay composer placeholder slice (fix/relay-composer-placeholder): 2 new keys composer.placeholder.idle/.steer translated from the frozen en bytes (85 keys; target SHA-256 a521665a12b61ae031b2429fce45eeca0bf9d00381ae59aef7cc4f99dc7083f8); the other 83 values are byte-identical to the prior passed row. Independent auditor has NOT run: this row deliberately does not pass, so the carried-namespace gate keeps the locale out of shipped.json until an independent audit replaces auditor/status at these bytes. Source: the desktop UI's audited ui.chat.composer.placeholder.idle/.waiting first clauses; widths measured at 16px system-ui against the 184px D1 budget (PR body)."
+    },
+    {
+      "locale": "fr",
+      "namespace": "relay.health",
+      "source_sha256": "e060aed0898c7aa9951f7abf18c6792cc4629ee490b10546aabd36aac8187f5b",
+      "translator": {
+        "agent": "coder (lopdev session 6999135b36d2)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": null,
+        "model": null,
+        "date": null,
+        "result": "pending",
+        "findings": null
+      },
+      "status": "pending_audit",
+      "note": "Relay composer placeholder slice (fix/relay-composer-placeholder): deletes the now-unused relay.health.ended_placeholder; the remaining 8 values are byte-identical to the prior doubly-audited row (target SHA-256 af3ac7a7cd3eb258228cda49c7c7c1e366f02983e9c3a1a41983589e7e8487ec). A deletion-only delta, but the en hash moved, so an independent auditor must confirm the byte identity before this row passes; until then the locale stays out of shipped.json."
+    },
+    {
+      "locale": "es",
+      "namespace": "relay.health",
+      "source_sha256": "e060aed0898c7aa9951f7abf18c6792cc4629ee490b10546aabd36aac8187f5b",
+      "translator": {
+        "agent": "coder (lopdev session 6999135b36d2)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": null,
+        "model": null,
+        "date": null,
+        "result": "pending",
+        "findings": null
+      },
+      "status": "pending_audit",
+      "note": "Relay composer placeholder slice (fix/relay-composer-placeholder): deletes the now-unused relay.health.ended_placeholder; the remaining 8 values are byte-identical to the prior doubly-audited row (target SHA-256 563c533f52fbc21b240979fba164e4e0768ff57f2882025d592280fc56638c62). A deletion-only delta, but the en hash moved, so an independent auditor must confirm the byte identity before this row passes; until then the locale stays out of shipped.json."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "relay.health",
+      "source_sha256": "e060aed0898c7aa9951f7abf18c6792cc4629ee490b10546aabd36aac8187f5b",
+      "translator": {
+        "agent": "coder (lopdev session 6999135b36d2)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": null,
+        "model": null,
+        "date": null,
+        "result": "pending",
+        "findings": null
+      },
+      "status": "pending_audit",
+      "note": "Relay composer placeholder slice (fix/relay-composer-placeholder): deletes the now-unused relay.health.ended_placeholder; the remaining 8 values are byte-identical to the prior doubly-audited row (target SHA-256 c4892a4de82249195a405e2e195d3aa6859ffe432951a6ba899866009260217c). A deletion-only delta, but the en hash moved, so an independent auditor must confirm the byte identity before this row passes; until then the locale stays out of shipped.json."
+    },
+    {
+      "locale": "ru",
+      "namespace": "relay.health",
+      "source_sha256": "e060aed0898c7aa9951f7abf18c6792cc4629ee490b10546aabd36aac8187f5b",
+      "translator": {
+        "agent": "coder (lopdev session 6999135b36d2)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": null,
+        "model": null,
+        "date": null,
+        "result": "pending",
+        "findings": null
+      },
+      "status": "pending_audit",
+      "note": "Relay composer placeholder slice (fix/relay-composer-placeholder): deletes the now-unused relay.health.ended_placeholder; the remaining 8 values are byte-identical to the prior doubly-audited row (target SHA-256 515b4828008259d5ac2985bd501c86c4a8085eba29e4681ad75ef361f51c11db). A deletion-only delta, but the en hash moved, so an independent auditor must confirm the byte identity before this row passes; until then the locale stays out of shipped.json."
+    },
+    {
+      "locale": "vi",
+      "namespace": "relay.health",
+      "source_sha256": "e060aed0898c7aa9951f7abf18c6792cc4629ee490b10546aabd36aac8187f5b",
+      "translator": {
+        "agent": "coder (lopdev session 6999135b36d2)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": null,
+        "model": null,
+        "date": null,
+        "result": "pending",
+        "findings": null
+      },
+      "status": "pending_audit",
+      "note": "Relay composer placeholder slice (fix/relay-composer-placeholder): deletes the now-unused relay.health.ended_placeholder; the remaining 8 values are byte-identical to the prior doubly-audited row (target SHA-256 177a77a4c83ee877f7dcaa01ada1c1f9fc5e89df181e878aa730f1ad51203b09). A deletion-only delta, but the en hash moved, so an independent auditor must confirm the byte identity before this row passes; until then the locale stays out of shipped.json."
+    },
+    {
+      "locale": "ur",
+      "namespace": "relay.health",
+      "source_sha256": "e060aed0898c7aa9951f7abf18c6792cc4629ee490b10546aabd36aac8187f5b",
+      "translator": {
+        "agent": "coder (lopdev session 6999135b36d2)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": null,
+        "model": null,
+        "date": null,
+        "result": "pending",
+        "findings": null
+      },
+      "status": "pending_audit",
+      "note": "Relay composer placeholder slice (fix/relay-composer-placeholder): deletes the now-unused relay.health.ended_placeholder; the remaining 8 values are byte-identical to the prior doubly-audited row (target SHA-256 c82869677b2cff5b4bb063e71fe99f9d5a67ecedf48c190100542024c9b38779). A deletion-only delta, but the en hash moved, so an independent auditor must confirm the byte identity before this row passes; until then the locale stays out of shipped.json."
+    },
+    {
+      "locale": "hi",
+      "namespace": "relay.health",
+      "source_sha256": "e060aed0898c7aa9951f7abf18c6792cc4629ee490b10546aabd36aac8187f5b",
+      "translator": {
+        "agent": "coder (lopdev session 6999135b36d2)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": null,
+        "model": null,
+        "date": null,
+        "result": "pending",
+        "findings": null
+      },
+      "status": "pending_audit",
+      "note": "Relay composer placeholder slice (fix/relay-composer-placeholder): deletes the now-unused relay.health.ended_placeholder; the remaining 8 values are byte-identical to the prior doubly-audited row (target SHA-256 1df31b48794129045fa807f5f1c181d74c1054de7e068689c46989bd9f01103b). A deletion-only delta, but the en hash moved, so an independent auditor must confirm the byte identity before this row passes; until then the locale stays out of shipped.json."
     }
   ]
 }

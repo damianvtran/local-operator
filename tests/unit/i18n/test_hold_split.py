@@ -102,7 +102,10 @@ def test_active_ledger_carries_the_released_chinese_candidate() -> None:
     # The mobile ask card's `Other` row adds one key to `relay.asks`; the ledger
     # is append-only, so a fresh zh-CN row lands at the new English bytes and the
     # earlier row stays at its superseded hash: one more.
-    assert len(chinese) == 93
+    # The relay composer placeholder slice appends a fresh zh-CN row for each of
+    # `relay.chrome` (two new placeholder keys) and `relay.health` (the deleted
+    # ended placeholder); the earlier rows stay at their superseded hashes: 95.
+    assert len(chinese) == 95
     assert all(entry["status"] == "passed" for entry in chinese)
     carried = set(catalogues.namespaces("zh-CN"))
     assert {entry["namespace"] for entry in chinese} == carried
@@ -160,7 +163,9 @@ def test_active_ledger_carries_the_released_chinese_candidate() -> None:
     # bytes: one more.
     # The mobile ask card's `Other` row appends a fresh hi `relay.asks` row at
     # the new English bytes; the earlier row stays superseded: one more.
-    assert len(hindi) == 48
+    # The relay composer placeholder slice appends fresh hi `relay.chrome` and
+    # `relay.health` rows at the new English bytes: FIFTY.
+    assert len(hindi) == 50
     assert all(entry["status"] == "passed" for entry in hindi)
     _assert_latest_row_is_fresh_and_earlier_rows_superseded(hindi)
 
