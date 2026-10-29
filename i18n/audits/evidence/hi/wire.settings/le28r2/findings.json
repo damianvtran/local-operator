@@ -1,0 +1,134 @@
+{
+  "locale": "hi",
+  "namespace": "wire.settings",
+  "result": "FINDINGS",
+  "gate_status": "blocked",
+  "counts": {
+    "blocker": 0,
+    "major": 1,
+    "minor": 3,
+    "nit": 0
+  },
+  "unresolved_blocker_major": 1,
+  "findings": [
+    {
+      "id": "F1",
+      "key": "wire.settings.proactive_patience_episode_ttl_ms.help",
+      "severity": "major",
+      "category": "glossary-terminology",
+      "en": "Hard stop for one cycle however the waits were sized (milliseconds; 7200000 = 2 h). A fire past it retires silently.",
+      "current": "एक चक्र की कड़ी सीमा, इंतज़ार चाहे कैसे भी तय हुए हों (मिलीसेकंड; 7200000 = 2 h)। इसके बाद का जागरण चुपचाप बंद हो जाता है।",
+      "excerpt": "इसके बाद का जागरण चुपचाप बंद हो जाता है।",
+      "problem": "‘wake/fire’ is rendered ‘जागरण’ (vigil/awakening), but glossary §2 and the hi guide fix wake → जागृति (the rest of this namespace uses जागृति: aida_cadence_min_gap_minutes.help, wakes.*). A different term for the same concept breaks the one-term invariant.",
+      "proposed": "एक चक्र की कड़ी सीमा, इंतज़ार चाहे कैसे भी तय हुए हों (मिलीसेकंड; 7200000 = 2 h)। इसके बाद आने वाली जागृति चुपचाप बंद हो जाती है।",
+      "note": "replace the clause only",
+      "source": "independent subaudit; final coordinator adjudication"
+    },
+    {
+      "id": "F2",
+      "key": "wire.settings.shell_environment_exclude.help",
+      "severity": "minor",
+      "category": "terminology/mistranslation",
+      "en": "Empty = nothing removed. Names never handed to a command the agent runs, in either mode — including the session credential store's own injections, so this is how a variable is denied outright. Covers the bash and eval children only; MCP servers and the harness's own processes are not governed by it.",
+      "current": "खाली = कुछ नहीं हटाया जाता। ऐसे नाम जो एजेंट के चलाए कमांड को किसी भी मोड में कभी नहीं दिए जाते — सत्र क्रेडेंशियल स्टोर के अपने इंजेक्शन समेत, यानी किसी वेरिएबल को सीधे मना करने का यही तरीक़ा है। सिर्फ़ bash और eval के चिल्ड्रन पर लागू; MCP सर्वर और हार्नेस की अपनी प्रक्रियाएँ इसके दायरे में नहीं आतीं।",
+      "excerpt": "सिर्फ़ bash और eval के चिल्ड्रन पर लागू;",
+      "problem": "‘children’ here means child processes of the bash/eval tools, not agents. ‘चिल्ड्रन’ (literally ‘kids’) is a bare transliteration a native reader will find odd/unclear, and the hi guide records that the child-only transliteration was abandoned. Use ‘child process’ wording.",
+      "proposed": "खाली = कुछ नहीं हटाया जाता। ऐसे नाम जो एजेंट के चलाए कमांड को किसी भी मोड में कभी नहीं दिए जाते — सत्र क्रेडेंशियल स्टोर के अपने इंजेक्शन समेत, यानी किसी वेरिएबल को सीधे मना करने का यही तरीक़ा है। सिर्फ़ bash और eval की चाइल्ड प्रोसेस पर लागू; MCP सर्वर और हार्नेस की अपनी प्रक्रियाएँ इसके दायरे में नहीं आतीं।",
+      "note": "replace the clause only",
+      "source": "independent subaudit; final coordinator adjudication",
+      "original_severity": "major"
+    },
+    {
+      "id": "F3",
+      "key": "wire.settings.speech.description",
+      "severity": "minor",
+      "category": "meaning-fidelity",
+      "en": "How the assistant sounds when it speaks aloud. The descriptor is sent to the hub, which maps it onto whichever voice provider serves; fields a provider cannot express degrade with a note rather than failing. Read on the next spoken message.",
+      "current": "असिस्टेंट बोलते समय कैसा सुनाई देता है। यह डिस्क्रिप्टर हब को भेजा जाता है, जो इसे जो भी वॉइस प्रोवाइडर सेवा दे रहा हो उस पर मैप करता है; जिन फ़ील्ड को कोई प्रोवाइडर नहीं दिखा सकता, वे विफल होने के बजाय नोट के साथ कम हो जाते हैं। अगले बोले गए संदेश पर पढ़ा जाता है।",
+      "excerpt": "जिन फ़ील्ड को कोई प्रोवाइडर नहीं दिखा सकता, वे विफल होने के बजाय नोट के साथ कम हो जाते हैं।",
+      "problem": "‘cannot express’ rendered with ‘दिखा सकता’ (show) and ‘degrade with a note’ as ‘कम हो जाते हैं’ (get reduced) — the sense (unsupported fields are downgraded/approximated with a note rather than erroring) is not conveyed.",
+      "proposed": "जिन फ़ील्ड को कोई प्रोवाइडर व्यक्त नहीं कर सकता, वे विफल होने के बजाय नोट के साथ सरल रूप में लागू होते हैं।",
+      "note": "low confidence on exact wording",
+      "source": "independent subaudit; final coordinator adjudication"
+    },
+    {
+      "id": "F5",
+      "key": "wire.settings.supplements_denyprefixes.help",
+      "severity": "minor",
+      "category": "meaning-fidelity (omission)",
+      "en": "Needs Highlights on. Comma-separated folders whose files are never listed or sent to a decision model; use it on a machine holding customer data.",
+      "current": "हाइलाइट्स चालू होने पर ही लागू। ऐसे फ़ोल्डर जिनकी फ़ाइलें कभी सूचीबद्ध नहीं होतीं और निर्णय मॉडल को नहीं भेजी जातीं; ग्राहक डेटा वाली मशीन पर इस्तेमाल करें।",
+      "excerpt": "हाइलाइट्स चालू होने पर ही लागू। ऐसे फ़ोल्डर जिनकी फ़ाइलें कभी सूचीबद्ध नहीं होतीं और निर्णय मॉडल को नहीं भेजी जातीं; ग्राहक डेटा वाली मशीन पर इस्तेमाल करें।",
+      "problem": "en says ‘Comma-separated folders’; the input-format cue is dropped (every sibling list help — providers_openrouter_ignore/only/order, static_roots, web_search_providers — says ‘कॉमा से अलग’).",
+      "proposed": "हाइलाइट्स चालू होने पर ही लागू। कॉमा से अलग फ़ोल्डर, जिनकी फ़ाइलें कभी सूचीबद्ध नहीं होतीं और निर्णय मॉडल को नहीं भेजी जातीं; ग्राहक डेटा वाली मशीन पर इस्तेमाल करें।",
+      "source": "independent subaudit; final coordinator adjudication"
+    }
+  ],
+  "adjudication": [
+    {
+      "id": "F1",
+      "disposition": "accepted",
+      "reason": "Meaning/guide/context reviewed; no catalogue changes made."
+    },
+    {
+      "id": "F2",
+      "disposition": "accepted with severity correction",
+      "reason": "Explicit child-process wording is clearer, but the original already names bash/eval and excludes MCP/harness processes. The glossary child-agent rule does NOT govern child processes; minor clarity, not that claimed glossary violation."
+    },
+    {
+      "id": "F3",
+      "disposition": "accepted",
+      "reason": "Meaning/guide/context reviewed; no catalogue changes made."
+    },
+    {
+      "id": "F4",
+      "disposition": "not adopted",
+      "reason": "Retained as an advisory lead; not promoted into the final bounded finding set, not certified fixed."
+    },
+    {
+      "id": "F5",
+      "disposition": "accepted",
+      "reason": "Meaning/guide/context reviewed; no catalogue changes made."
+    },
+    {
+      "id": "F6",
+      "disposition": "not adopted",
+      "reason": "ADVISORY ONLY: enum-token versus display-label policy was not conclusively established; do not apply speculative translations of literal values."
+    },
+    {
+      "id": "F7",
+      "disposition": "not adopted",
+      "reason": "REJECTED: glossary Wave-2 kept-English set explicitly applies to ALL locales and keeps endpoint/merge/pull/push/commit. Transliteration proposed by this lead would violate the glossary."
+    },
+    {
+      "id": "F8",
+      "disposition": "not adopted",
+      "reason": "Retained as an advisory lead; not promoted into the final bounded finding set, not certified fixed."
+    },
+    {
+      "id": "F9",
+      "disposition": "not adopted",
+      "reason": "Retained as an advisory lead; not promoted into the final bounded finding set, not certified fixed."
+    },
+    {
+      "id": "F10",
+      "disposition": "not adopted",
+      "reason": "Retained as an advisory lead; not promoted into the final bounded finding set, not certified fixed."
+    },
+    {
+      "id": "F11",
+      "disposition": "not adopted",
+      "reason": "Retained as an advisory lead; not promoted into the final bounded finding set, not certified fixed."
+    },
+    {
+      "id": "F12",
+      "disposition": "not adopted",
+      "reason": "Retained as an advisory lead; not promoted into the final bounded finding set, not certified fixed."
+    }
+  ],
+  "linguistic_gate_status": "blocked",
+  "publication_hold_reasons": [
+    "unresolved semantic/glossary majors",
+    "en context sidecar not routable"
+  ]
+}

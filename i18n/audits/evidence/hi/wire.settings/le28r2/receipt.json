@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "audit_id": "le28r2",
+  "locale": "hi",
+  "namespace": "wire.settings",
+  "source_sha256": "a31ff23241581dddb24f3cd2b93444a408734bbcb0957b0068a97806bf7c36d3",
+  "target_sha256": "01dd65f601e84c69728cf6104609f3e5487bf7026579c5fa5c11026d487286f7",
+  "hashes": {
+    "audit.log": "5187ece14392c765d9b564767794c510eb1549849a752bc8bce0acb22171222c",
+    "coverage.json": "e673ab583595c8cbc966d9a9bcd3fe482f15a947419331f8f1278f7c1bb71845",
+    "extra_checks.py.txt": "44a7e1c93a18469859af70afe141df9e883a188a390f3c1215c838a39a9a977e",
+    "findings.json": "e4a251a74ff5e1fec8a15274618f374afda0c52551d3363500ef995ccdd4f1b7",
+    "mech_sweep.py.txt": "a53d9a247669658ad39b12022d66411b53c0033cc72307fd4bd6904b4848c2ee",
+    "mechanical.json": "8d73f94bedcfbf703dd2395dd8488e6dbe6ae43cedf87ba731e54998fdcfb08d",
+    "prior-ledger.json": "25b6a39b76bcfd114e82d8fc2bd8efc0a7815ffb6426c62e91cdee16bb388f5f",
+    "probe.py.txt": "a431d62529197feec3f74988f1a19cefb5acfbf90e836f7fc382beb574517f31",
+    "record.json": "14dd85f13d5caec3a392b46fe5c99bfbeeeed819066257d436bfc23785dc8817",
+    "rendered-text.json": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+    "renders.py.txt": "9d9d60733012f449eda1b33439dc75d241ae0becdb286ca0097a10df283c8328",
+    "report.md": "666fc0c664feafd8b04597e152d8eb0715f52042daf962d09ed02f076767367c",
+    "route-receipts.json": "23d620f4cde838f70cd18105d15319f06acf46d11db8a83ee88309bba7262f12",
+    "subaudit-original.json": "1c9751a0fa417de1775d363f26f0915313be49cc33d7ed89df71ee7fa290e621",
+    "widths-and-rederivations.json": "aed10a58874e950ef9e39a901091a21634ed9d0bbe05d39dcff9509bdeb17fdc"
+  }
+}

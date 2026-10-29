@@ -1,0 +1,194 @@
+{
+  "locale": "ru",
+  "namespace": "wire.settings",
+  "result": "FINDINGS",
+  "gate_status": "blocked",
+  "counts": {
+    "blocker": 0,
+    "major": 4,
+    "minor": 3,
+    "nit": 0
+  },
+  "unresolved_blocker_major": 4,
+  "findings": [
+    {
+      "id": "F1",
+      "key": "wire.settings.subagents_max_running.label",
+      "severity": "major",
+      "category": "glossary",
+      "en": "Max background jobs",
+      "current": "Макс. фоновых задач",
+      "problem": "Style guide (wave-2 recorded call) fixes job → «задание» (background job → «фоновое задание»), and explicitly says this very copy «Max background jobs» is the alignment anchor; «задача» is reserved for todos.",
+      "proposed": "Макс. фоновых заданий",
+      "source": "independent subaudit; final coordinator adjudication"
+    },
+    {
+      "id": "F2",
+      "key": "wire.settings.supplements_maxcostusd.help",
+      "severity": "major",
+      "category": "glossary",
+      "en": "Needs graphics on. Soft cap on one job's spend.",
+      "current": "Требует включённых графиков. Мягкий потолок расходов на одну задачу.",
+      "problem": "en 'job' = a generation job; glossary/style guide: job → «задание», not «задача».",
+      "proposed": "Требует включённых графиков. Мягкий потолок расходов на одно задание.",
+      "source": "independent subaudit; final coordinator adjudication"
+    },
+    {
+      "id": "F3",
+      "key": "wire.settings.supplements_timeouts.help",
+      "severity": "major",
+      "category": "glossary",
+      "en": "Needs Highlights on. Give up on a whole job after this long.",
+      "current": "Требует включённых дополнений. Отказаться от всей задачи по истечении этого срока.",
+      "problem": "en 'job' → glossary «задание»; «задача» is reserved for todos.",
+      "proposed": "Требует включённых дополнений. Отказаться от всего задания по истечении этого срока.",
+      "source": "independent subaudit; final coordinator adjudication"
+    },
+    {
+      "id": "F4",
+      "key": "wire.settings.librarian_enabled.help",
+      "severity": "major",
+      "category": "glossary",
+      "en": "Read at boot and by /v1/desktop/librarian; a disabled install never creates her session.",
+      "current": "Читается при запуске и в /v1/desktop/librarian; выключенная установка никогда не создаёт его сеанс.",
+      "problem": "«сеанс» violates glossary session → «сессия» (used everywhere else in the namespace); «выключенная установка… его сеанс» is also a clumsy calque of 'a disabled install never creates her session' and inconsistent with aida_enabled.help.",
+      "proposed": "Считывается при запуске и в /v1/desktop/librarian; если отключено, его сессия не создаётся.",
+      "source": "independent subaudit; final coordinator adjudication"
+    },
+    {
+      "id": "F7",
+      "key": "wire.settings.librarian_cadence_at.help",
+      "severity": "minor",
+      "category": "accuracy",
+      "en": "Local wall-clock HH:MM. An invalid value falls back to 03:30 at the next arm.",
+      "current": "Местное время ЧЧ:ММ. Неверное значение вернётся к 03:30 при следующей установке.",
+      "problem": "'arm' here means schedule the next pass (aida_cadence_at.help correctly says «планировании»); «при следующей установке» reads as software installation. «Неверное значение вернётся» is also stilted.",
+      "proposed": "Местное время в формате ЧЧ:ММ. Некорректное значение при следующем планировании заменяется на 03:30.",
+      "source": "independent subaudit; final coordinator adjudication"
+    },
+    {
+      "id": "F10",
+      "key": "wire.settings.static_roots.help",
+      "severity": "minor",
+      "category": "accuracy",
+      "en": "Empty = only the built-in roots. Consulted only by the fallback posture (a connection that is not loopback): normal loopback previews can serve any readable file. Comma-separated absolute directories; dot-directories below a root are never served.",
+      "current": "Пусто = только встроенные корни. Учитывается только резервным режимом (соединение не по loopback): обычные предпросмотры через loopback могут отдать любой читаемый файл. Абсолютные каталоги через запятую; каталоги с точкой внутри корня никогда не отдаются.",
+      "problem": "«каталоги с точкой внутри корня» is ambiguous (reads as directories containing a dot); en 'dot-directories' = hidden directories whose names start with a dot.",
+      "proposed": "Пусто = только встроенные корни. Учитывается только резервным режимом (соединение не по loopback): обычные предпросмотры через loopback могут отдать любой читаемый файл. Абсолютные каталоги через запятую; скрытые каталоги (с именем на точку) внутри корня никогда не отдаются.",
+      "source": "independent subaudit; final coordinator adjudication"
+    },
+    {
+      "id": "F11",
+      "key": "wire.settings.wakes_triggers_project_staleness_enabled.help",
+      "severity": "minor",
+      "category": "accuracy",
+      "en": "Wake to check in on projects whose progress went stale. Settled (done/paused/archived) projects are never watched.",
+      "current": "Пробуждаться, чтобы проверить проекты с устаревшим прогрессом. Завершённые (done/paused/archived) проекты никогда не отслеживаются.",
+      "problem": "en 'Settled (done/paused/archived)' — «Завершённые» is wrong for paused/archived projects.",
+      "proposed": "Пробуждаться, чтобы проверить проекты с устаревшим прогрессом. Проекты в статусах done/paused/archived никогда не отслеживаются.",
+      "source": "independent subaudit; final coordinator adjudication"
+    }
+  ],
+  "adjudication": [
+    {
+      "id": "F1",
+      "disposition": "accepted",
+      "reason": "Meaning/guide/context reviewed; no catalogue changes made."
+    },
+    {
+      "id": "F2",
+      "disposition": "accepted",
+      "reason": "Meaning/guide/context reviewed; no catalogue changes made."
+    },
+    {
+      "id": "F3",
+      "disposition": "accepted",
+      "reason": "Meaning/guide/context reviewed; no catalogue changes made."
+    },
+    {
+      "id": "F4",
+      "disposition": "accepted",
+      "reason": "Meaning/guide/context reviewed; no catalogue changes made."
+    },
+    {
+      "id": "F5",
+      "disposition": "not adopted",
+      "reason": "Retained as an advisory lead; not promoted into the final bounded finding set, not certified fixed."
+    },
+    {
+      "id": "F6",
+      "disposition": "not adopted",
+      "reason": "Retained as an advisory lead; not promoted into the final bounded finding set, not certified fixed."
+    },
+    {
+      "id": "F7",
+      "disposition": "accepted",
+      "reason": "Meaning/guide/context reviewed; no catalogue changes made."
+    },
+    {
+      "id": "F8",
+      "disposition": "not adopted",
+      "reason": "Retained as an advisory lead; not promoted into the final bounded finding set, not certified fixed."
+    },
+    {
+      "id": "F9",
+      "disposition": "not adopted",
+      "reason": "Retained as an advisory lead; not promoted into the final bounded finding set, not certified fixed."
+    },
+    {
+      "id": "F10",
+      "disposition": "accepted",
+      "reason": "Meaning/guide/context reviewed; no catalogue changes made."
+    },
+    {
+      "id": "F11",
+      "disposition": "accepted",
+      "reason": "Meaning/guide/context reviewed; no catalogue changes made."
+    },
+    {
+      "id": "F12",
+      "disposition": "not adopted",
+      "reason": "Retained as an advisory lead; not promoted into the final bounded finding set, not certified fixed."
+    },
+    {
+      "id": "F13",
+      "disposition": "not adopted",
+      "reason": "Retained as an advisory lead; not promoted into the final bounded finding set, not certified fixed."
+    },
+    {
+      "id": "F14",
+      "disposition": "not adopted",
+      "reason": "Retained as an advisory lead; not promoted into the final bounded finding set, not certified fixed."
+    },
+    {
+      "id": "F15",
+      "disposition": "not adopted",
+      "reason": "Retained as an advisory lead; not promoted into the final bounded finding set, not certified fixed."
+    },
+    {
+      "id": "F16",
+      "disposition": "not adopted",
+      "reason": "Retained as an advisory lead; not promoted into the final bounded finding set, not certified fixed."
+    },
+    {
+      "id": "F17",
+      "disposition": "not adopted",
+      "reason": "Retained as an advisory lead; not promoted into the final bounded finding set, not certified fixed."
+    },
+    {
+      "id": "F18",
+      "disposition": "not adopted",
+      "reason": "Retained as an advisory lead; not promoted into the final bounded finding set, not certified fixed."
+    },
+    {
+      "id": "F19",
+      "disposition": "not adopted",
+      "reason": "Retained as an advisory lead; not promoted into the final bounded finding set, not certified fixed."
+    }
+  ],
+  "linguistic_gate_status": "blocked",
+  "publication_hold_reasons": [
+    "unresolved semantic/glossary majors",
+    "en context sidecar not routable"
+  ]
+}

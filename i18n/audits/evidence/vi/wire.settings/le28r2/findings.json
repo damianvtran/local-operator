@@ -1,0 +1,153 @@
+{
+  "locale": "vi",
+  "namespace": "wire.settings",
+  "result": "FINDINGS",
+  "gate_status": "blocked",
+  "counts": {
+    "blocker": 0,
+    "major": 3,
+    "minor": 3,
+    "nit": 0
+  },
+  "unresolved_blocker_major": 3,
+  "findings": [
+    {
+      "id": "F1",
+      "key": "wire.settings.web_fetch_render_backend.help",
+      "severity": "major",
+      "category": "glossary",
+      "en": "Auto uses markdownify when the [fetch] extra is installed.",
+      "current": "auto dùng markdownify khi gói phụ trợ [fetch] được cài.",
+      "problem": "Glossary §2 wave-2 kept-English set fixes 'extra' (pip extras) as English, undeclined; es/fr/ru all keep 'extra'. 'gói phụ trợ' translates the term and obscures the pip-extra name.",
+      "proposed": "auto dùng markdownify khi extra [fetch] được cài.",
+      "source": "independent subaudit; final coordinator adjudication"
+    },
+    {
+      "id": "F2",
+      "key": "wire.settings.speech_transcription_cleanup.help",
+      "severity": "major",
+      "category": "terminology",
+      "en": "How dictation strips filler words and non-speech cues. auto uses the provider's native cleanup where available and the conservative client rules elsewhere; provider and client each use only one of the two mechanisms; off keeps the verbatim transcript. A per-request `cleanup` field still wins.",
+      "current": "Cách nhập bằng giọng nói loại bỏ âm đệm và âm thanh phi ngôn ngữ. auto dùng tính năng làm sạch tích hợp sẵn của nhà cung cấp khi có và quy tắc thận trọng phía máy khách trong các trường hợp còn lại; provider và client mỗi bên chỉ dùng một trong hai cơ chế; off giữ nguyên bản ghi. Trường `cleanup` trong từng yêu cầu vẫn được ưu tiên.",
+      "problem": "'âm đệm' is the phonology term for the medial glide (the /w/ in 'hoa'), not filler words (um/uh). Filler words are 'từ đệm' / 'từ thừa'. Same wrong term in ...choice.off.description. LOW-MEDIUM confidence (I am not a native speaker) but the phonological sense is standard.",
+      "proposed": "Cách nhập bằng giọng nói loại bỏ từ đệm và âm thanh phi ngôn ngữ. auto dùng tính năng làm sạch tích hợp sẵn của nhà cung cấp khi có và quy tắc thận trọng phía máy khách trong các trường hợp còn lại; provider và client mỗi bên chỉ dùng một trong hai cơ chế; off giữ nguyên bản ghi. Trường `cleanup` trong từng yêu cầu vẫn được ưu tiên.",
+      "source": "independent subaudit; final coordinator adjudication"
+    },
+    {
+      "id": "F2b",
+      "key": "wire.settings.speech_transcription_cleanup.choice.off.description",
+      "severity": "major",
+      "category": "terminology",
+      "en": "Verbatim; no filler or cue removal.",
+      "current": "Giữ nguyên; không bỏ âm đệm hay tín hiệu.",
+      "problem": "Same 'âm đệm' mis-term as F2; 'tín hiệu' for 'cue' is also vaguer than the help's 'âm thanh phi ngôn ngữ'.",
+      "proposed": "Giữ nguyên; không loại bỏ từ đệm hay dấu hiệu phi ngôn ngữ.",
+      "source": "independent subaudit; final coordinator adjudication"
+    },
+    {
+      "id": "F3",
+      "key": "wire.settings.web_search_timeout_seconds.help",
+      "severity": "minor",
+      "category": "terminology/consistency",
+      "en": "Per-provider request timeout. Clamped to 1-120 when read.",
+      "current": "Hết giờ cho mỗi yêu cầu nhà cung cấp. Được kẹp trong khoảng 1-120 khi đọc.",
+      "problem": "'kẹp' is a calque of 'clamp'; the same catalogue renders 'Clamped 60 s..24 h' as 'Được giới hạn trong khoảng' (proactive_patience_default_ms.help). Same calque in speech_voice_pace.help ('tự kẹp về giới hạn của nó').",
+      "proposed": "Hết giờ cho mỗi yêu cầu nhà cung cấp. Được giới hạn trong khoảng 1-120 khi đọc.  /  speech_voice_pace.help: '... Nhà cung cấp có dải hẹp hơn sẽ tự giới hạn theo dải của nó.'",
+      "source": "independent subaudit; final coordinator adjudication"
+    },
+    {
+      "id": "F6",
+      "key": "wire.settings.providers_openrouter_sort.choice.unset.description",
+      "severity": "minor",
+      "category": "idiom",
+      "en": "no preference — sticky routing stays on (warmest cache)",
+      "current": "không tùy chọn — định tuyến cố định được giữ (cache ấm nhất)",
+      "problem": "'không tùy chọn' reads as 'no options', not 'no preference set'. Same in providers_openrouter_allow_fallbacks.choice.unset.description and providers_openrouter_require_parameters.choice.unset.description.",
+      "proposed": "không đặt tùy chọn — định tuyến cố định được giữ (cache ấm nhất)",
+      "source": "independent subaudit; final coordinator adjudication"
+    },
+    {
+      "id": "F7",
+      "key": "wire.settings.speech_transcription_cleanup.choice.auto.description",
+      "severity": "minor",
+      "category": "clarity",
+      "en": "Native, else client rules.",
+      "current": "Tích hợp sẵn; nếu không, máy khách.",
+      "problem": "Elliptical: drops 'rules' and reads as 'built-in; otherwise, the client' (the 'client' choice description says 'Quy tắc phía máy khách').",
+      "proposed": "Bản của nhà cung cấp; nếu không, quy tắc phía máy khách.",
+      "source": "independent subaudit; final coordinator adjudication"
+    }
+  ],
+  "adjudication": [
+    {
+      "id": "F1",
+      "disposition": "accepted",
+      "reason": "Meaning/guide/context reviewed; no catalogue changes made."
+    },
+    {
+      "id": "F2",
+      "disposition": "accepted",
+      "reason": "Meaning/guide/context reviewed; no catalogue changes made."
+    },
+    {
+      "id": "F2b",
+      "disposition": "accepted",
+      "reason": "Meaning/guide/context reviewed; no catalogue changes made."
+    },
+    {
+      "id": "F3",
+      "disposition": "accepted",
+      "reason": "Meaning/guide/context reviewed; no catalogue changes made."
+    },
+    {
+      "id": "F4",
+      "disposition": "not adopted",
+      "reason": "Retained as an advisory lead; not promoted into the final bounded finding set, not certified fixed."
+    },
+    {
+      "id": "F5",
+      "disposition": "not adopted",
+      "reason": "Retained as an advisory lead; not promoted into the final bounded finding set, not certified fixed."
+    },
+    {
+      "id": "F6",
+      "disposition": "accepted",
+      "reason": "Meaning/guide/context reviewed; no catalogue changes made."
+    },
+    {
+      "id": "F7",
+      "disposition": "accepted",
+      "reason": "Meaning/guide/context reviewed; no catalogue changes made."
+    },
+    {
+      "id": "N1",
+      "disposition": "not adopted",
+      "reason": "Retained as an advisory lead; not promoted into the final bounded finding set, not certified fixed."
+    },
+    {
+      "id": "N2",
+      "disposition": "not adopted",
+      "reason": "Retained as an advisory lead; not promoted into the final bounded finding set, not certified fixed."
+    },
+    {
+      "id": "N3",
+      "disposition": "not adopted",
+      "reason": "Retained as an advisory lead; not promoted into the final bounded finding set, not certified fixed."
+    },
+    {
+      "id": "N4",
+      "disposition": "not adopted",
+      "reason": "Retained as an advisory lead; not promoted into the final bounded finding set, not certified fixed."
+    },
+    {
+      "id": "N5",
+      "disposition": "not adopted",
+      "reason": "Retained as an advisory lead; not promoted into the final bounded finding set, not certified fixed."
+    }
+  ],
+  "linguistic_gate_status": "blocked",
+  "publication_hold_reasons": [
+    "unresolved semantic/glossary majors",
+    "en context sidecar not routable"
+  ]
+}

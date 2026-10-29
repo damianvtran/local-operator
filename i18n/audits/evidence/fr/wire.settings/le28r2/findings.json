@@ -1,0 +1,143 @@
+{
+  "locale": "fr",
+  "namespace": "wire.settings",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 5,
+    "nit": 0
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "id": "F1",
+      "key": "wire.settings.local_providers.base_url.label",
+      "severity": "minor",
+      "category": "grammar (elision with dynamic name)",
+      "en": "{name} endpoint",
+      "current": "endpoint de {name}",
+      "problem": "{name} is a LOCAL_PRESETS display name: 'LM Studio','Ollama','vLLM','llama.cpp','OpenAI-compatible' (providers/local.py:16-26; consumed at settings_io.py:4701). 'endpoint de {name}' renders 'endpoint de Ollama' and 'endpoint de OpenAI-compatible' — in French 'de' must elide before a vowel (d’Ollama, d’OpenAI-compatible) and ICU cannot elide, so the phrasing must avoid 'de {name}'.",
+      "proposed": "endpoint {name}",
+      "source": "independent subaudit; final coordinator adjudication",
+      "original_severity": "major"
+    },
+    {
+      "id": "F2",
+      "key": "wire.settings.local_providers.models.label",
+      "severity": "minor",
+      "category": "grammar (elision with dynamic name)",
+      "en": "{name} model overrides",
+      "current": "surcharges de modèle de {name}",
+      "problem": "'surcharges de modèle de {name}' renders 'de Ollama' / 'de OpenAI-compatible' (same elision defect as F1; settings_io.py:4711).",
+      "proposed": "surcharges de modèle pour {name}",
+      "source": "independent subaudit; final coordinator adjudication",
+      "original_severity": "major"
+    },
+    {
+      "id": "F3",
+      "key": "wire.settings.librarian.description",
+      "severity": "minor",
+      "category": "typography",
+      "en": "The Librarian keeps the global Library organised: her display name, the daily pass, and the pause switch. The Library is long-term and shared by every conversation.",
+      "current": "Le Bibliothécaire garde la Bibliothèque globale organisée : son nom affiché, la passe quotidienne et la pause. La Bibliothèque est durable et partagée par toutes les conversations.",
+      "problem": "U+0020 (ASCII space) before ':' — the style guide requires U+202F before : ; ! ? in prose; every other key in the namespace uses U+202F (177 occurrences). Same defect in librarian_cadence_min_gap_minutes.help (before ';'), librarian_cadence_paused.help (before ';'), librarian_enabled.help (before ';'): replace the U+0020 with U+202F in each.",
+      "proposed": "Le Bibliothécaire garde la Bibliothèque globale organisée : son nom affiché, la passe quotidienne et la pause. La Bibliothèque est durable et partagée par toutes les conversations.",
+      "also_keys": [
+        "wire.settings.librarian_cadence_min_gap_minutes.help",
+        "wire.settings.librarian_cadence_paused.help",
+        "wire.settings.librarian_enabled.help"
+      ],
+      "source": "independent subaudit; final coordinator adjudication"
+    },
+    {
+      "id": "F4",
+      "key": "wire.settings.remote_compute.description",
+      "severity": "minor",
+      "category": "typography",
+      "en": "Preview: run agent work on Radient-hosted compute, bound to one of your mesh networks.",
+      "current": "Aperçu  : exécuter le travail de l’agent sur le calcul hébergé par Radient, rattaché à l’un de vos maillages.",
+      "problem": "Contains U+0020 followed by U+202F before ':' ('Aperçu' + ' ' + U+202F + ':'), i.e. a visible double space. Sibling remote_compute_enabled.help is correct.",
+      "proposed": "Aperçu : exécuter le travail de l’agent sur le calcul hébergé par Radient, rattaché à l’un de vos maillages.",
+      "source": "independent subaudit; final coordinator adjudication"
+    },
+    {
+      "id": "F6",
+      "key": "wire.settings.librarian_cadence_max_extra_per_day.help",
+      "severity": "minor",
+      "category": "consistency (grammatical gender)",
+      "en": "How many extra passes she may request per day. 0 disables extra passes.",
+      "current": "Combien de passes supplémentaires elle peut demander par jour. 0 les désactive.",
+      "problem": "The Librarian is masculine in this section ('Le Bibliothécaire', 'Bibliothécaire activé', 'désactivé/activé' choices) but this help says 'elle peut demander' (en: 'she'). Aida is consistently feminine (Cheffe de cabinet activée). Choose one gender for the Librarian and keep it throughout the section.",
+      "proposed": "Combien de passes supplémentaires il peut demander par jour. 0 les désactive. (or feminise the section: La Bibliothécaire, Bibliothécaire activée, activée/désactivée)",
+      "source": "independent subaudit; final coordinator adjudication"
+    }
+  ],
+  "adjudication": [
+    {
+      "id": "F1",
+      "disposition": "accepted with severity correction",
+      "reason": "Elision defect reproduced for vowel-leading provider names; understandable meaning and operation are unchanged, so minor grammar rather than major."
+    },
+    {
+      "id": "F2",
+      "disposition": "accepted with severity correction",
+      "reason": "Elision defect reproduced for vowel-leading provider names; understandable meaning and operation are unchanged, so minor grammar rather than major."
+    },
+    {
+      "id": "F3",
+      "disposition": "accepted",
+      "reason": "Meaning/guide/context reviewed; no catalogue changes made."
+    },
+    {
+      "id": "F4",
+      "disposition": "accepted",
+      "reason": "Meaning/guide/context reviewed; no catalogue changes made."
+    },
+    {
+      "id": "F5",
+      "disposition": "not adopted",
+      "reason": "Retained as an advisory lead; not promoted into the final bounded finding set, not certified fixed."
+    },
+    {
+      "id": "F6",
+      "disposition": "accepted",
+      "reason": "Meaning/guide/context reviewed; no catalogue changes made."
+    },
+    {
+      "id": "F7",
+      "disposition": "not adopted",
+      "reason": "Retained as an advisory lead; not promoted into the final bounded finding set, not certified fixed."
+    },
+    {
+      "id": "F8",
+      "disposition": "not adopted",
+      "reason": "Retained as an advisory lead; not promoted into the final bounded finding set, not certified fixed."
+    },
+    {
+      "id": "F9",
+      "disposition": "not adopted",
+      "reason": "Retained as an advisory lead; not promoted into the final bounded finding set, not certified fixed."
+    },
+    {
+      "id": "F10",
+      "disposition": "not adopted",
+      "reason": "Retained as an advisory lead; not promoted into the final bounded finding set, not certified fixed."
+    },
+    {
+      "id": "F11",
+      "disposition": "not adopted",
+      "reason": "Retained as an advisory lead; not promoted into the final bounded finding set, not certified fixed."
+    },
+    {
+      "id": "F12",
+      "disposition": "not adopted",
+      "reason": "Retained as an advisory lead; not promoted into the final bounded finding set, not certified fixed."
+    }
+  ],
+  "linguistic_gate_status": "passed",
+  "publication_hold_reasons": [
+    "en context sidecar not routable"
+  ]
+}

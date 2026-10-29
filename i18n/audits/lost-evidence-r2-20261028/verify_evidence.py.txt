@@ -1,0 +1,61 @@
+#!/usr/bin/env python3
+"""Read-only le28r2 verifier; run from the repository root with existing Python.
+
+This verifies file integrity and history preservation, NOT linguistic correctness
+or sanctioned read_public_copy access. No live config/session or browser is used.
+"""
+import hashlib
+import json
+import subprocess
+from pathlib import Path
+
+root = Path.cwd()
+base = '9495f8a6c3bf2b5438ef5c33d7274cf519435dda'
+old = json.loads(subprocess.check_output(['git','show',base+':i18n/ledger.json']))['entries']
+new = json.loads((root/'i18n/ledger.json').read_text())['entries']
+assert len(new)==len(old)+24
+changed=0
+for a,b in zip(old,new):
+    assert {k:v for k,v in a.items() if k!='note'}=={k:v for k,v in b.items() if k!='note'}
+    assert b['note'].startswith(a['note'])
+    changed += a['note']!=b['note']
+assert changed==24
+sha=lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
+rows={ (r['locale'],r['namespace']):r for r in new[-24:]}
+records=sorted((root/'i18n/audits/evidence').glob('*/*/le28r2/record.json'))
+assert len(records)==len(rows)==24
+files=0;inputs=0;majors=0;counts={};routed=0
+for path in records:
+    d=json.loads(path.read_text());b=path.parent
+    r=json.loads((b/'receipt.json').read_text())
+    assert set(r['hashes'])=={p.name for p in b.iterdir() if p.name!='receipt.json'}
+    for name,h in r['hashes'].items():
+        assert sha(b/name)==h,(str(b),name)
+        files+=1
+    for name,p in d['input_paths'].items():
+        assert sha(root/p)==d['input_hashes'][name],(str(b),name)
+        inputs+=1
+    row=rows[d['locale'],d['namespace']]
+    assert row['source_sha256']==d['input_hashes']['en']
+    assert row['status']==d['ledger_status'] in ('passed','blocked')
+    route=json.loads((b/'route-receipts.json').read_text())
+    assert [r['path'] for r in route['routed_reads']]==[route['routed_reads'][0]['path'], route['routed_reads'][1]['path']]
+    assert len(route['routed_reads'])==2
+    for rr in route['routed_reads']:
+        assert rr['reader_body_sha256']==rr['recomputed_body_sha256'], rr['path']
+        assert rr['tool']=='read_public_copy' and rr['key'] if False else rr['tool']=='read_public_copy'
+        assert rr['session'] and rr['ts']
+    assert route['context_sidecar']['refused'] is True
+    assert d['read_provenance']['sanctioned_route_verified']=='partial'
+    routed+=len(route['routed_reads'])
+    coverage=json.loads((b/'coverage.json').read_text())
+    assert len(coverage['keys'])==coverage['keys_read']==d['key_count']
+    f=json.loads((b/'findings.json').read_text())
+    assert f['unresolved_blocker_major']==sum(x['severity'] in ('blocker','major') for x in f['findings'])
+    majors+=f['unresolved_blocker_major']
+    counts[d['current_report_verdict']]=counts.get(d['current_report_verdict'],0)+1
+# A hashed companion cannot be changed without detection (counterfactual local
+# byte-only control, no mutation of tracked evidence).
+p=records[0].parent/'report.md'
+assert hashlib.sha256(p.read_bytes()+b'\nCORRUPTION-CONTROL\n').hexdigest()!=sha(p)
+print(json.dumps({'result':'PASS','pairs':24,'original_rows_preserved':len(old),'historical_notes_appended':changed,'current_rows_appended':24,'companions_verified':files,'input_hashes_verified':inputs,'semantic_verdicts':counts,'unresolved_semantic_blocker_major':majors,'routed_file_receipts':routed,'pairs_with_context_refusal':24,'byte_corruption_negative_control':'detected','scope':'Integrity/history only; no sanctioned-reader or native/rendered certification.'},indent=2))

@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "audit_id": "le28r2",
+  "locale": "es",
+  "namespace": "tui.authoring",
+  "source_sha256": "7431acf3288cc3766cf37135badb29511737120ab52fc518bf514311ee488d13",
+  "target_sha256": "16434b14866a140f46aa3690f28ce62ab95001b6772071357abd5317ca5bef4b",
+  "hashes": {
+    "audit.log": "901b8111225b4a796fe18033b499cc6138a5cfb2488b44fa794df6d6d8109efa",
+    "coverage.json": "9f42655e09ec88b2f9e84bbd4a5e52a848d504c8860ddc4b64833e16230bb646",
+    "extra_checks.py.txt": "44a7e1c93a18469859af70afe141df9e883a188a390f3c1215c838a39a9a977e",
+    "findings.json": "4421746d82c7d8dccda0133795d573d32f0cf2eafda6e8b43b0fc443f05d62d4",
+    "mech_sweep.py.txt": "a53d9a247669658ad39b12022d66411b53c0033cc72307fd4bd6904b4848c2ee",
+    "mechanical.json": "f004a92bcda4bca4a79ece1b0115723f2a808d4537a1b8cbb02b1e56918b2ddc",
+    "prior-ledger.json": "b3e9644dd976da87766f804bb898ff12a89f2174d3bb5ffc85de7edaaef47d75",
+    "probe.py.txt": "a431d62529197feec3f74988f1a19cefb5acfbf90e836f7fc382beb574517f31",
+    "record.json": "926acce8d8379d0b884c8dcb77ec1e13d6e271828981a46dae7818f17c3d5a27",
+    "rendered-text.json": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+    "renders.py.txt": "9d9d60733012f449eda1b33439dc75d241ae0becdb286ca0097a10df283c8328",
+    "report.md": "1aa6de3f0e112dc471936e73dfec19a9b1562407c303ae97352b15afc4709b4a",
+    "route-receipts.json": "459e2aaba0ccca4f300a57b33ec43bad654d0c0b997c3d8752e80786834e056a",
+    "widths-and-rederivations.json": "ce2740746aeacdc68bfd3a28ad71258854b69f6a7a8c7b49b7c46a763acfd373"
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "audit_id": "le28r2",
+  "locale": "es",
+  "namespace": "tui.transcript",
+  "source_sha256": "13915d6c6dcec0da9fd892c1cb74c23546045717c1d3400d264e8608e75876ba",
+  "target_sha256": "3a9cd42bade9f38499a42efac167b57fb331ac2b36ca6dd509745a8bf5c8c5b7",
+  "hashes": {
+    "audit.log": "1c7a8bb6f11f6a3f99d613b8722c8d4c6af948d3b1128c0cb4e7915883bac795",
+    "coverage.json": "28da57c934fb022f3088614af9c2c80bbd1c5d7e85fde1d1c22bc1277cbcccda",
+    "extra_checks.py.txt": "44a7e1c93a18469859af70afe141df9e883a188a390f3c1215c838a39a9a977e",
+    "findings.json": "8e3f67a16fd8b550e17d8ad41a36166f67583736e8d79ebad1b2c7ec1943dbdc",
+    "mech_sweep.py.txt": "a53d9a247669658ad39b12022d66411b53c0033cc72307fd4bd6904b4848c2ee",
+    "mechanical.json": "a1da2f7664d670f89259695f851c08b4614d282e3f9882831e241d3619190468",
+    "prior-ledger.json": "98d00df371a6f4e90ed34271cfdb163a2b60da1c438c61798cafefb5f8e6fe3a",
+    "probe.py.txt": "a431d62529197feec3f74988f1a19cefb5acfbf90e836f7fc382beb574517f31",
+    "record.json": "d7303a4f298a2d8246081c8038177764a4f50ce92b11a60856603af58527a42c",
+    "rendered-text.json": "6ec65ca43b019867e445abf9dacfa7ffe2ed0de392cbb8b0cdf39c958859bc01",
+    "renders.py.txt": "9d9d60733012f449eda1b33439dc75d241ae0becdb286ca0097a10df283c8328",
+    "report.md": "0820b0cd692c3c53e3d447846ec391509a462184fb1c23ed08596849523c76b6",
+    "route-receipts.json": "247a825672343d9f92dfaae304e506ccd681942144ad1290376b7242c0c16419",
+    "widths-and-rederivations.json": "9c7954fa56467ed60e6778423b45cb6b256336f209f116845140c682e6b13c5c"
+  }
+}

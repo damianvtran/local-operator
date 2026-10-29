@@ -1,0 +1,104 @@
+{
+  "schema": 1,
+  "audit_id": "le28r2",
+  "locale": "vi",
+  "namespace": "tui.authoring",
+  "audit_date": "2026-10-28",
+  "packaged_at_utc": "2026-10-28T17:37:44.006279+00:00",
+  "key_count": 49,
+  "auditor": {
+    "agent": "translation-reviewer (lopdev)",
+    "session": "bc5209588225",
+    "model": "anthropic/claude-sonnet-5-5",
+    "actual_model_source": "Session model-switch notice plus independent child report where applicable; see phase_models.",
+    "independence": "None of these agents authored or edited the target translations. Subauditors were given committed English/target/context and guides only; suggestions have not been applied."
+  },
+  "coordinator": {
+    "agent": "translation-reviewer",
+    "session": "bc5209588225",
+    "final_model": "openai/gpt-6-astra"
+  },
+  "phase_models": {
+    "initial": "deepseek/deepseek-flash",
+    "linguistic": "anthropic/claude-sonnet-5-5",
+    "final_adjudication_and_packaging": "openai/gpt-6-astra",
+    "phase_detail": "DeepSeek performed the initial repository survey. Sonnet performed the TUI source/target/context comparison and mechanical probes. Five independent child auditors read all wire.settings keys under Sonnet after their DeepSeek quota fallbacks. GPT completed context coverage, reconciled findings/severity, and packaged evidence after a further provider-quota fallback. No model was a human/native speaker."
+  },
+  "source_audit_revision": "aeb9bb9dc34e3988c78ebbb6921e79e049143cbf",
+  "packaging_base_revision": "9495f8a6c3bf2b5438ef5c33d7274cf519435dda",
+  "input_hashes": {
+    "en": "7431acf3288cc3766cf37135badb29511737120ab52fc518bf514311ee488d13",
+    "context": "df98bba4457c1080b3941e9a24a04a52e360d11d2a07bdda992861c6cb54928c",
+    "target": "6d54279fffe0436451f5dc1cce88bc19dd559f1dc145ec30b34aa5e2e144a3a2",
+    "style_guide": "0a99f5643a262a1c1994f08746fab2473ade5946573eedf20c95107b40b9fa97",
+    "glossary": "ef07b446668778822d0ff4dcd7b380543456ddf7b08e060dce5818cb8fd6fdcd"
+  },
+  "input_paths": {
+    "en": "local_operator/i18n/catalogues/en/tui.authoring.json",
+    "context": "local_operator/i18n/catalogues/en/tui.authoring.context.json",
+    "target": "local_operator/i18n/catalogues/vi/tui.authoring.json",
+    "style_guide": "i18n/style-guides/vi.md",
+    "glossary": "i18n/glossary.md"
+  },
+  "current_bytes_match_audited_hashes": true,
+  "source_sha256": "7431acf3288cc3766cf37135badb29511737120ab52fc518bf514311ee488d13",
+  "target_sha256": "6d54279fffe0436451f5dc1cce88bc19dd559f1dc145ec30b34aa5e2e144a3a2",
+  "current_report_verdict": "FINDINGS",
+  "ledger_status": "passed",
+  "unresolved_blocker_major": 0,
+  "finding_counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 1,
+    "nit": 0
+  },
+  "limitations": [
+    "No lost scratchpad, screenshot, geometry-report.json, prior report hash, or old audit trajectory was reconstructed. The deletion date/count in the task are supplied incident context, not independently proven deletion events.",
+    "No live OperatorApp, real terminal/font, browser, native app, 60x24/100x24 frame or settled-frame equality was exercised. Those previous visual/geometry claims are UNVERIFIABLE in this re-audit. Rich cell_len and ICU output are scalar/text evidence only, not layout or shaping proof.",
+    "Style/semantic decisions are independent LLM review, not native-speaker certification. Hindi idiom would need a native speaker for that certification; none of these auditors is one. The operator waived human/native-speaker sign-off for all locales; it is not a merge gate here.",
+    "No catalogue text was changed. Proposed fixes are recommendations to a separate translator, not translations authored by this auditor and self-approved.",
+    "The full check.py result is from a SPARSE tree; its AST scanned-file count is not whole-repository coverage. --catalogues-only checked the complete carried catalogues. No full test suite or UI QA was run.",
+    "Sanctioned-reader receipts exist for the en source and the locale catalogue only; the en context sidecar is structurally refused by read_public_copy (\"catalogue keys and values must be strings\"), recorded verbatim in route-receipts.json. The judgments were formed on direct reads BEFORE the routed receipts were taken, and are not relabelled.",
+    "The routed receipts reproduce the tool's own audit-log lines, and each digest was independently recomputed from the base blob. They confirm bytes, not linguistic judgement."
+  ],
+  "artifacts": [
+    "audit.log",
+    "coverage.json",
+    "extra_checks.py.txt",
+    "findings.json",
+    "mech_sweep.py.txt",
+    "mechanical.json",
+    "prior-ledger.json",
+    "probe.py.txt",
+    "receipt.json",
+    "record.json",
+    "rendered-text.json",
+    "renders.py.txt",
+    "report.md",
+    "route-receipts.json",
+    "widths-and-rederivations.json"
+  ],
+  "read_provenance": {
+    "method": "direct Python/bash/git reads for the linguistic judgement; sanctioned read_public_copy receipts obtained afterwards for the en source and locale catalogue",
+    "mechanism": "lop exec --run-in <owned sparse worktree at 9495f8a6c3bf2b5438ef5c33d7274cf519435dda> --tools read_public_copy",
+    "sanctioned_reader_receipts": [
+      "route-receipts.json"
+    ],
+    "routed_files": [
+      "local_operator/i18n/catalogues/en/tui.authoring.json",
+      "local_operator/i18n/catalogues/vi/tui.authoring.json"
+    ],
+    "routed_sessions": [
+      "8e3f2dbf7c26"
+    ],
+    "context_sidecar_routed": false,
+    "context_sidecar_refusal": "refused: catalogue keys and values must be strings",
+    "sanctioned_route_verified": "partial",
+    "sanctioned_route_verified_reason": "en source and locale catalogue are routed; the en context sidecar is structurally refused by read_public_copy (non-string values), so this pair is not fully routed.",
+    "receipts_obtained_after_judgement": true
+  },
+  "publication_hold_reasons": [
+    "en context sidecar not routable"
+  ],
+  "linguistic_status_before_route_hold": "passed"
+}

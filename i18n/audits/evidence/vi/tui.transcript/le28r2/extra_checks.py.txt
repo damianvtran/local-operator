@@ -1,0 +1,54 @@
+#!/usr/bin/env python3
+"""Extra re-derivations for reaudit-lost-evidence-r2 (run with the repo interpreter).
+
+Usage: <repo>/.venv/bin/python extra_checks.py <repo-root> > extra.json
+ 1. digit_parity: per pair, keys whose multiset of ASCII digit runs differs from en.
+ 2. prior_claims: values the lost reports asserted that CAN be re-derived from
+    committed bytes: (a) the sha256 each tui.palette / hub-ledger note cites for the
+    audited locale file vs the file's sha256 now; (b) the 2026-10-19 wire.settings
+    width-delta claim (session_scratchpad_max_bytes.label cells es/fr/ru/vi 28/27/24/26,
+    hi/en 19/27); (c) tui.palette fr placeholder budgets (Trouver 48 / Rechercher 51);
+    (d) queued.older is a strict prefix of queued.newest per locale.
+ 3. proposal_widths: rich cell_len of each replacement text proposed in the findings.
+"""
+import hashlib, json, re, sys
+from pathlib import Path
+root = Path(sys.argv[1]).resolve(); sys.path.insert(0, str(root))
+from rich.cells import cell_len as c
+B = root/"local_operator/i18n/catalogues"
+LOC = ["es","fr","ru","vi","hi"]
+NS = ["tui.transcript","tui.authoring","tui.team_authoring","tui.palette","wire.settings"]
+L = lambda l, n: json.loads((B/l/f"{n}.json").read_text(encoding="utf-8"))
+out = {"digit_parity": {}, "prior_claims": {}, "proposal_widths": {}}
+for n in NS:
+    en = L("en", n)
+    for l in LOC:
+        if not (B/l/f"{n}.json").exists(): continue
+        t = L(l, n)
+        bad = [k for k in en if k in t and sorted(re.findall(r"\d+", en[k])) != sorted(re.findall(r"\d+", t[k]))]
+        out["digit_parity"][f"{l}/{n}"] = bad
+led = json.loads((root/"i18n/ledger.json").read_text(encoding="utf-8"))["entries"]
+sha = lambda l, n: hashlib.sha256((B/l/f"{n}.json").read_bytes()).hexdigest()
+for l in LOC:
+    cited = [h for e in led if e["locale"]==l and e["namespace"]=="tui.palette" for h in re.findall(r"\b[0-9a-f]{64}\b", e["note"])]
+    out["prior_claims"][f"{l}/tui.palette cited target sha256 == current file sha256"] = {"cited": cited, "current": sha(l,"tui.palette"), "match": sha(l,"tui.palette") in cited}
+sp = "wire.settings.session_scratchpad_max_bytes.label"
+out["prior_claims"]["wire.settings scratchpad cap label cells (lost claim es/fr/ru/vi 28/27/24/26; hi/en 19/27)"] = {l: c(L(l,"wire.settings")[sp]) for l in ["es","fr","ru","vi","hi","en"]}
+ph = "tui.palette.placeholder"
+out["prior_claims"]["fr palette placeholder cells (lost claim: Trouver 48 fits, Rechercher 51 refused)"] = {
+  "current": c(L("fr","tui.palette")[ph]), "Rechercher variant": c("Rechercher commandes, paramètres, sessions, agents…"), "Chercher variant": c("Chercher commandes, paramètres, sessions, agents…"), "maxCells": json.loads((B/"en/tui.palette.context.json").read_text())[ph]["maxCells"]}
+out["prior_claims"]["queued.older strict prefix of queued.newest"] = {l: L(l,"tui.transcript")["tui.transcript.queued.newest"].startswith(L(l,"tui.transcript")["tui.transcript.queued.older"]) for l in ["en"]+LOC}
+P = {
+ "es class_hint": "un agente proactivo puede iniciar trabajo sin una petición",
+ "fr class_hint": "un agent proactif peut démarrer un travail sans demande",
+ "fr discard (authoring)": "Abandonner les modifications ? y abandonner · n continuer",
+ "ru discard (team)": "Отбросить изменения? y отбросить · n продолжить",
+ "ru promote_failed": "не удалось скопировать в аккаунт: {reason}",
+ "vi promote_failed": "không thể sao chép vào tài khoản: {reason}",
+ "hi promote_failed": "खाते में कॉपी नहीं हो सका: {reason}",
+ "hi usage_new": "/agent new का उपयोग बिना अतिरिक्त आर्ग्युमेंट के करें।",
+ "vi promote_hint (team)": "Sao chép nhóm cuộc trò chuyện này vào tài khoản",
+ "fr promote_hint (team)": "Copiez l’équipe de cette conversation dans le compte",
+}
+out["proposal_widths"] = {k: {"text": v, "cells": c(v)} for k, v in P.items()}
+json.dump(out, sys.stdout, ensure_ascii=False, indent=1)

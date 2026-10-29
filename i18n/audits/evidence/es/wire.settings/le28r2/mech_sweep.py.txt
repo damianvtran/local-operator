@@ -1,0 +1,165 @@
+#!/usr/bin/env python3
+"""Mechanical sweep for the reaudit-lost-evidence-r2 re-audit.
+
+Run from a sparse worktree of damianvtran/local-operator with the repo's own
+interpreter:  <repo>/.venv/bin/python mech_sweep.py <repo-root> <outdir>
+
+For every (locale, namespace) pair it checks, against the COMMITTED en source:
+key parity, ICU argument tuples (name+kind, via scripts/i18n/check.py's own
+comparator), plural-category completeness, rendering of every message through
+the repo's ICU runtime at sample counts, NFC, backtick-literal byte parity,
+maxCells (rich cell_len) where the en sidecar records one, locale typography
+(fr narrow spaces, straight quotes, ASCII ellipsis, hi danda), untranslated
+(identical to en) values, and glossary-term presence leads.
+It PRODUCES LEADS and numbers; the semantic judgement is the auditor's.
+"""
+import json, re, sys, unicodedata, hashlib
+from pathlib import Path
+root = Path(sys.argv[1]).resolve(); out = Path(sys.argv[2]); out.mkdir(parents=True, exist_ok=True)
+sys.path.insert(0, str(root))
+from local_operator.i18n import catalogues as C, runtime as R
+from scripts.i18n import check as K
+from rich.cells import cell_len
+
+NS = ["tui.transcript", "tui.authoring", "tui.team_authoring", "tui.palette", "wire.settings"]
+LOC = ["es", "fr", "ru", "vi", "hi"]
+plural = json.loads((root/"local_operator/i18n/data/plural_rules.json").read_text())
+COUNTS = [0, 1, 2, 3, 4, 5, 11, 12, 21, 22, 25, 100, 101, 1000, 1000000, 1500000]
+BT = re.compile(r"`[^`]*`")
+
+def strip_icu_syntax(s):
+    return s
+
+def sample_params(src, count):
+    p = {}
+    for name, kind in R.message_arguments(src):
+        p[name] = count if kind in ("plural", "number") else ("X" if kind == "simple" else "X")
+    return p
+
+def render_all(src, loc):
+    res = {}
+    args = R.message_arguments(src)
+    if not args:
+        return {"-": R.render_message(src, {}, loc)}
+    for c in COUNTS:
+        try:
+            res[str(c)] = R.render_message(src, sample_params(src, c), loc)
+        except Exception as e:
+            res[str(c)] = f"!!{type(e).__name__}: {e}"
+    return res
+
+GLOSS = {  # en word -> accepted stems per locale (leads only, from glossary §2 + style guides)
+ "session": {"es": ["sesi"], "fr": ["session"], "ru": ["сесси"], "vi": ["phiên"], "hi": ["सत्र"]},
+ "subagent": {"es": ["subagente"], "fr": ["sous-agent"], "ru": ["субагент"], "vi": ["tác nhân con"], "hi": ["उप-एजेंट"]},
+ "agent": {"es": ["agente"], "fr": ["agent"], "ru": ["агент"], "vi": ["tác nhân"], "hi": ["एजेंट"]},
+ "workspace": {"es": ["espacio de trabajo"], "fr": ["espace de travail"], "ru": ["рабочее пространство", "рабочего пространства", "рабочем пространстве", "рабочему пространству"], "vi": ["không gian làm việc"], "hi": ["कार्यक्षेत्र"]},
+ "team": {"es": ["equipo"], "fr": ["équipe"], "ru": ["команд"], "vi": ["nhóm"], "hi": ["टीम"]},
+ "cost": {"es": ["coste"], "fr": ["coût"], "ru": ["стоимост"], "vi": ["chi phí"], "hi": ["लागत"]},
+ "usage": {"es": ["uso"], "fr": ["utilisation"], "ru": ["использовани"], "vi": ["lượng sử dụng"], "hi": ["उपयोग"]},
+ "job": {"es": ["trabajo"], "fr": ["tâche"], "ru": ["задани"], "vi": ["tác vụ"], "hi": ["जॉब"]},
+ "model": {"es": ["modelo"], "fr": ["modèle"], "ru": ["модел"], "vi": ["mô hình"], "hi": ["मॉडल"]},
+ "project": {"es": ["proyecto"], "fr": ["projet"], "ru": ["проект"], "vi": ["dự án"], "hi": ["प्रोजेक्ट"]},
+ "schedule": {"es": ["programa"], "fr": ["planifi"], "ru": ["расписани"], "vi": ["lịch"], "hi": ["शेड्यूल"]},
+ "approval": {"es": ["aprobaci"], "fr": ["approbation"], "ru": ["одобрени"], "vi": ["phê duyệt"], "hi": ["स्वीकृति"]},
+ "transcript": {"es": ["transcripci"], "fr": ["transcription"], "ru": ["транскрипт"], "vi": ["bản ghi"], "hi": ["ट्रांसक्रिप्ट"]},
+ "compaction": {"es": ["compactaci"], "fr": ["compactage"], "ru": ["сжати"], "vi": ["nén"], "hi": ["संपीडन"]},
+ "device": {"es": ["dispositivo"], "fr": ["appareil"], "ru": ["устройств"], "vi": ["thiết bị"], "hi": ["डिवाइस"]},
+ "credential": {"es": ["credencial"], "fr": ["identifiant"], "ru": ["учётн", "учетн"], "vi": ["thông tin xác thực"], "hi": ["क्रेडेंशियल"]},
+ "relay": {"es": ["relé"], "fr": ["relais"], "ru": ["ретранслятор"], "vi": ["chuyển tiếp"], "hi": ["रिले"]},
+ "skill": {"es": ["habilidad"], "fr": ["compétence"], "ru": ["навык"], "vi": ["kỹ năng"], "hi": ["कौशल"]},
+ "wake": {"es": ["despert"], "fr": ["réveil"], "ru": ["пробужден"], "vi": ["thức dậy"], "hi": ["जागृति", "जाग"]},
+}
+
+summary = {}
+for ns in NS:
+    en = C.load_catalogue("en", ns)
+    ctx = C.context("en", ns) if hasattr(C, "context") else {}
+    en_sha = C.catalogue_sha256("en", ns)
+    for loc in LOC:
+        try:
+            tr = C.load_catalogue(loc, ns)
+        except Exception as e:
+            summary[f"{loc}/{ns}"] = {"error": repr(e)}; continue
+        tgt_sha = C.catalogue_sha256(loc, ns)
+        r = {"locale": loc, "namespace": ns, "en_sha256": en_sha, "target_sha256": tgt_sha,
+             "en_keys": len(en), "target_keys": len(tr),
+             "missing": sorted(set(en)-set(tr)), "unknown": sorted(set(tr)-set(en)),
+             "arg_problems": [], "render_errors": [], "plural_cat_problems": [],
+             "not_nfc": [], "backtick_diff": [], "over_budget": [], "typography": [],
+             "identical_to_en": [], "gloss_leads": [], "empty": [], "ws_edge": [],
+             "length_ratio_outliers": [], "script_leads": [], "excl_added": [], "end_punct": []}
+        probs = []
+        for k in sorted(set(en) & set(tr)):
+            e, t = en[k], tr[k]
+            if not t.strip(): r["empty"].append(k)
+            if t != unicodedata.normalize("NFC", t): r["not_nfc"].append(k)
+            if t != t.strip() or (e != e.strip()): 
+                if (t != t.strip()) != (e != e.strip()) or t[:1].isspace() != e[:1].isspace() or t[-1:].isspace() != e[-1:].isspace():
+                    r["ws_edge"].append([k, e[:1].isspace(), e[-1:].isspace(), t[:1].isspace(), t[-1:].isspace()])
+            try:
+                want = R.message_arguments(e); got = R.message_arguments(t)
+                pr = K._arguments_problem(want, got, translated_source=t, locale=loc, plural=plural)
+                if pr is not None: r["arg_problems"].append([k, pr])
+            except Exception as ex:
+                r["arg_problems"].append([k, repr(ex)])
+            # plural completeness
+            pl = []
+            K._check_plural_categories(pl, loc, ns, k, t, plural, loc)
+            r["plural_cat_problems"] += pl
+            # render
+            try:
+                rr = render_all(t, loc)
+                bad = {c: v for c, v in rr.items() if v.startswith("!!")}
+                if bad: r["render_errors"].append([k, bad])
+            except Exception as ex:
+                r["render_errors"].append([k, repr(ex)])
+            # backticks
+            if sorted(BT.findall(e)) != sorted(BT.findall(t)): r["backtick_diff"].append([k, BT.findall(e), BT.findall(t)])
+            # budget (raw text with ICU syntax for arg-free messages; rendered "X" otherwise at count 5)
+            mc = (ctx.get(k) or {}).get("maxCells")
+            if mc is not None:
+                try: shown = R.render_message(t, sample_params(t, 5), loc)
+                except Exception: shown = t
+                n = cell_len(shown)
+                if n > mc: r["over_budget"].append([k, n, mc, shown])
+            # untranslated
+            if e == t and re.search(r"[A-Za-z]{3,}", BT.sub("", e)): r["identical_to_en"].append([k, e[:80]])
+            # typography
+            plain = BT.sub("", t)
+            if loc == "fr":
+                for m in re.finditer(r"[ ]([:;!?»])|([«])[ ]|(?<=[A-Za-zÀ-ÿ0-9])([:;!?])(?!\S*[A-Za-z/.]{2})", plain):
+                    r["typography"].append([k, "fr ASCII space/missing narrow space around punctuation", m.group(0)]); break
+                if "'" in plain: r["typography"].append([k, "fr straight apostrophe", plain[:80]])
+                if '"' in plain: r["typography"].append([k, "fr straight double quote", plain[:80]])
+            if loc in ("es", "ru", "vi", "hi") and "'" in plain and "{" not in plain.replace("{","",0)[:0]:
+                r["typography"].append([k, f"{loc} straight apostrophe", plain[:80]])
+            if loc in ("es","ru","vi","hi","fr") and '"' in plain: r["typography"].append([k, f"{loc} straight double quote", plain[:80]])
+            if "..." in t and "..." not in e: r["typography"].append([k, "ASCII ellipsis where en has …", t[:80]])
+            if loc == "hi" and re.search(r"[\u0900-\u097F]\.(\s|$)", plain): r["typography"].append([k, "hi: ASCII full stop after Devanagari (danda expected)", t[:80]])
+            if loc == "vi" and re.search(r"\s[:;!?,.]", plain): r["typography"].append([k, "vi space before punctuation", t[:80]])
+            if loc in ("es","ru","vi","hi") and re.search(r"\s[:;!?]", plain) : r["typography"].append([k, f"{loc} space before : ; ! ?", t[:80]])
+            if t.count("!") > e.count("!"): r["excl_added"].append(k)
+            ep = lambda s: re.sub(r"[`\s]+$", "", s)[-1:] 
+            ee, tt = ep(e), ep(t)
+            if (ee in ".。") != (tt in ".।。") : r["end_punct"].append([k, ee, tt])
+            # length ratio
+            if len(e) >= 12:
+                ratio = len(BT.sub("", t))/max(1, len(BT.sub("", e)))
+                if ratio > 2.2 or ratio < 0.5: r["length_ratio_outliers"].append([k, round(ratio,2)])
+            # glossary leads
+            for term, forms in GLOSS.items():
+                if re.search(rf"\b{term}s?\b", BT.sub("", e), re.I) and not any(f.lower() in t.lower() for f in forms[loc]):
+                    r["gloss_leads"].append([k, term])
+            # script leads
+            if loc == "ru":
+                lat = [w for w in re.findall(r"[A-Za-z][A-Za-z\-]{2,}", BT.sub("", re.sub(r"\{[^{}]*\}", "", t)))]
+                if lat: r["script_leads"].append([k, lat])
+            if loc == "hi":
+                lat = [w for w in re.findall(r"[A-Za-z][A-Za-z\-]{2,}", BT.sub("", re.sub(r"\{[^{}]*\}", "", t)))]
+                if lat: r["script_leads"].append([k, lat])
+        r["counts"] = {k: len(v) for k, v in r.items() if isinstance(v, list)}
+        summary[f"{loc}/{ns}"] = r["counts"] | {"target_sha256": tgt_sha, "en_sha256": en_sha}
+        (out/f"{loc}.{ns}.mech.json").write_text(json.dumps(r, ensure_ascii=False, indent=1), encoding="utf-8")
+(out/"mech-summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=1), encoding="utf-8")
+for k, v in summary.items():
+    print(k, {a: b for a, b in v.items() if isinstance(b, int) and b and a not in("en_keys","target_keys")})

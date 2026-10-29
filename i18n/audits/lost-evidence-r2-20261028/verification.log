@@ -1,0 +1,18 @@
+{
+  "result": "PASS",
+  "pairs": 24,
+  "original_rows_preserved": 401,
+  "historical_notes_appended": 24,
+  "current_rows_appended": 24,
+  "companions_verified": 345,
+  "input_hashes_verified": 120,
+  "semantic_verdicts": {
+    "FINDINGS": 11,
+    "PASS": 13
+  },
+  "unresolved_semantic_blocker_major": 8,
+  "routed_file_receipts": 48,
+  "pairs_with_context_refusal": 24,
+  "byte_corruption_negative_control": "detected",
+  "scope": "Integrity/history only; no sanctioned-reader or native/rendered certification."
+}
