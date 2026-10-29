@@ -10,14 +10,6 @@ from __future__ import annotations
 from ..messages import Msg
 
 
-def mode_choice_auto_description() -> Msg:
-    return Msg("wire.radient_saver.mode.choice.auto.description", {})
-
-
-def mode_choice_auto_label() -> Msg:
-    return Msg("wire.radient_saver.mode.choice.auto.label", {})
-
-
 def mode_choice_off_description() -> Msg:
     return Msg("wire.radient_saver.mode.choice.off.description", {})
 

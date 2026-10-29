@@ -660,8 +660,6 @@ export type MessageParams = {
   "wire.memory.sync.help": undefined;
   "wire.memory.sync.label": undefined;
   "wire.memory.title": undefined;
-  "wire.radient_saver.mode.choice.auto.description": undefined;
-  "wire.radient_saver.mode.choice.auto.label": undefined;
   "wire.radient_saver.mode.choice.off.description": undefined;
   "wire.radient_saver.mode.choice.off.label": undefined;
   "wire.radient_saver.mode.choice.opt_in.description": undefined;

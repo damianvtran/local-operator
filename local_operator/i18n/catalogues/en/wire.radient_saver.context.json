@@ -43,17 +43,6 @@
     "tone": "plain",
     "note": "Allowed but off by default for each session; a later release adds the per-session switch."
   },
-  "wire.radient_saver.mode.choice.auto.label": {
-    "role": "enum choice label",
-    "tone": "plain",
-    "note": "Short word for 'automatic'.",
-    "maxCells": 12
-  },
-  "wire.radient_saver.mode.choice.auto.description": {
-    "role": "enum choice description",
-    "tone": "plain",
-    "note": "'Signed in with credit' = signed in to Radient AND the Radient balance is above zero."
-  },
   "wire.radient_saver.notice.unavailable": {
     "role": "transient session notice (warning) shown once per session in the conversation",
     "tone": "calm, reassuring",

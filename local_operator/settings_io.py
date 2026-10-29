@@ -3642,13 +3642,21 @@ SETTINGS: tuple[Setting, ...] = (
         gated_by="classification.auto",
     ),
     # Radient Saver's gate (contract §1, §9). OFF by default: nothing uploads
-    # until the operator chooses ``opt_in`` or ``auto``. The default here is the
+    # until the operator chooses ``opt_in``. The default here is the
     # "later flip" the contract describes, pinned to ``saver.gate.DEFAULT_MODE``
     # by a test; it is deliberately NOT in ``config.DEFAULT_CONFIG`` (R-6), so an
     # unrelated settings write never persists it. Operator-only: the model's
     # ``setting`` tool refuses it (``settings_control.OPERATOR_ONLY``, S-5).
     # ``LOP_RADIENT_SAVER`` overrides it per process (the ``LOP_ASK_GATE``
     # precedent), which the help names.
+    #
+    # ``auto`` is deliberately NOT offered (R6-2): in LO1 it always resolves OFF
+    # (``saver.gate`` -> ``auto_unavailable``) until the verifier can prove an
+    # epoch cheaper than the history it replaces, so a visible choice would be a
+    # mode that does nothing. ``saver.gate.MODES`` still RECOGNISES ``auto`` from
+    # config.yml or ``LOP_RADIENT_SAVER``, so an existing value keeps resolving
+    # OFF with its reason rather than becoming a parse error. Re-add the choice
+    # (and its catalogue keys) in the release that makes ``auto`` reachable.
     Setting(
         key="radient.saver.mode",
         path=("radient", "saver", "mode"),
@@ -3667,11 +3675,6 @@ SETTINGS: tuple[Setting, ...] = (
                 "opt_in",
                 _t(_rsv.mode_choice_opt_in_label()),
                 _t(_rsv.mode_choice_opt_in_description()),
-            ),
-            Choice(
-                "auto",
-                _t(_rsv.mode_choice_auto_label()),
-                _t(_rsv.mode_choice_auto_description()),
             ),
         ),
     ),
