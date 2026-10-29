@@ -77,6 +77,8 @@
   "relay.chrome.session.resuming": "Đang mở lại…",
   "relay.chrome.session.degraded": "Không phản hồi — tin nhắn sẽ chờ",
   "relay.chrome.composer.label": "Tin nhắn",
+  "relay.chrome.composer.placeholder.idle": "Hỏi bất cứ điều gì…",
+  "relay.chrome.composer.placeholder.steer": "Định hướng tác nhân…",
   "relay.chrome.composer.folder_label": "Thư mục làm việc: {name}",
   "relay.chrome.composer.model_label": "Mô hình: {label}",
   "relay.chrome.composer.spend_label": "Chi phí & ngữ cảnh: {label}",
