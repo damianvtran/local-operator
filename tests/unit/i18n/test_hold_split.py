@@ -101,20 +101,15 @@ def test_active_ledger_carries_the_released_chinese_candidate() -> None:
     # bytes; the earlier row stays at its superseded hash: one more.
     # The mobile ask card's `Other` row adds one key to `relay.asks`; the ledger
     # is append-only, so a fresh zh-CN row lands at the new English bytes and the
-    # earlier row stays at its superseded hash: one more.
-    # The independently audited `relay.account_policy` backfill (13 keys, PR
-    # #3121) is the ninety-third. The three other namespaces that wave was
-    # tasked with stay deliberately English-only: `wire.settings.account_policy`
-    # is pinned to en by the settings registry (`settings_io._t()`), and the two
-    # SDK exception namespaces require a caller-contract migration first, so no
-    # ledger row exists for them.
     # earlier row stays at its superseded hash: one more. Radient Saver LO1
     # (PR #3078) adds the CARRIED 17-key `wire.radient_saver` with its
     # independently audited row at the current English bytes: one more again.
-    # The independently audited `relay.account_policy` backfill (13 keys, PR
-    # #3121) is the ninety-fifth: main reached 94 while this branch was open, and
-    # the append-only tail gained one more row for the namespace this PR lands.
-    assert len(chinese) == 95
+    # The relay composer placeholder slice then appends a fresh zh-CN row for
+    # each of `relay.chrome` (two new placeholder keys) and `relay.health` (the
+    # deleted ended placeholder): two more. Both contributions are counted.
+    # 2026-10-29: PR #3121 adds one independently audited
+    # `relay.account_policy` row after main's 96 rows.
+    assert len(chinese) == 97
     assert all(entry["status"] == "passed" for entry in chinese)
     carried = set(catalogues.namespaces("zh-CN"))
     assert {entry["namespace"] for entry in chinese} == carried
@@ -173,8 +168,10 @@ def test_active_ledger_carries_the_released_chinese_candidate() -> None:
     # The mobile ask card's `Other` row appends a fresh hi `relay.asks` row at
     # the new English bytes; the earlier row stays superseded: one more.
     # Radient Saver LO1 (PR #3078) adds the audited, newly carried
-    # `hi/wire.radient_saver` row: one more again.
-    assert len(hindi) == 49
+    # `hi/wire.radient_saver` row: one more again. The relay composer
+    # placeholder slice then appends fresh hi `relay.chrome` and `relay.health`
+    # rows at the new English bytes: two more.
+    assert len(hindi) == 51
     assert all(entry["status"] == "passed" for entry in hindi)
     _assert_latest_row_is_fresh_and_earlier_rows_superseded(hindi)
 

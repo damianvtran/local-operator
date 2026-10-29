@@ -1,0 +1,38 @@
+#!/usr/bin/env python3
+"""exec_epilog: block structure and command-line byte identity.
+
+The `Examples:` block is a hard-wrapped prose block: a title line, five command
+lines that are LITERAL shell (never translatable), one blank line, then a
+wrapped paragraph. The translator may rewrap the paragraph (Spanish has
+different line lengths) but must not touch the command lines, must not add or
+remove paragraph breaks, and must keep the meaning.
+
+Read-only.
+"""
+import json
+
+BASE = "local_operator/i18n/catalogues"
+en = json.load(open(f"{BASE}/en/wire.exec.json", encoding="utf-8"))["wire.exec.exec_epilog"]
+es = json.load(open(f"{BASE}/es/wire.exec.json", encoding="utf-8"))["wire.exec.exec_epilog"]
+a, b = en.split("\n"), es.split("\n")
+
+print("== exec_epilog structure ==")
+print(f"en: {len(a)} lines, blank at {[i + 1 for i, l in enumerate(a) if not l.strip()]}, max {max(map(len, a))} cells")
+print(f"es: {len(b)} lines, blank at {[i + 1 for i, l in enumerate(b) if not l.strip()]}, max {max(map(len, b))} cells")
+
+blank_ok = [i for i, l in enumerate(a) if not l.strip()] == [i for i, l in enumerate(b) if not l.strip()]
+print(f"blank-line positions identical: {blank_ok}")
+
+print("== command lines (must be byte-identical) ==")
+for i in range(1, 6):
+    same = a[i] == b[i]
+    print(f"line {i + 1}: identical={same} | {b[i]}")
+    if not same:
+        print(f"   en: {a[i]!r}\n   es: {b[i]!r}")
+
+print("== title line ==")
+print(f"en {a[0]!r} / es {b[0]!r}  (translated title expected; no colon change)")
+
+print(f"== prose: en {len(a) - 6} lines -> es {len(b) - 6} lines (rewrap, not structure) ==")
+for i, line in enumerate(b[6:], start=7):
+    print(f"es[{i:02d}] {line}")

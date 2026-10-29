@@ -6,6 +6,5 @@
   "relay.health.dropped_detail": "Máy tính của bạn hiện không kết nối được với phiên này và vẫn đang thử lại. Cho đến khi kết nối được, gửi tin nhắn sẽ thất bại ngay và nội dung đã gõ vẫn còn trong ô nhập.",
   "relay.health.quiet_detail": "Phiên này trên máy tính của bạn đã ngừng phản hồi — có thể đang bận hoặc bị treo. Có thể tin nhắn báo gửi thất bại nhưng vẫn được chuyển đến khi phiên bắt kịp. Thử lại sẽ không gửi tin nhắn hai lần.",
   "relay.health.ended_detail": "Lịch sử đã được lưu. Gửi tin nhắn hoặc chạm Mở lại để khôi phục phiên trong thư mục home của bạn.",
-  "relay.health.ended_send_failed": "Phiên này đã kết thúc và lúc này chưa khôi phục được. Hãy thử gửi lại, hoặc chạm “Đã kết thúc” ở trên cùng rồi chọn Mở lại.",
-  "relay.health.ended_placeholder": "Gửi để mở lại trong thư mục home…"
+  "relay.health.ended_send_failed": "Phiên này đã kết thúc và lúc này chưa khôi phục được. Hãy thử gửi lại, hoặc chạm “Đã kết thúc” ở trên cùng rồi chọn Mở lại."
 }

@@ -1,0 +1,127 @@
+es wave-1 independent translation audit — namespace wire.host_speed
+audit_id=w1a2  audit_round=1  date=2026-10-29
+auditor=translation-auditor (es-w1-auditor-2)  session=1abd0b38e62a
+model=radient/auto (self-reported; radient/auto is an auto-routing alias: the session header names the alias, not the concrete backend model, so the backend that performed this audit is not identified by the header. Requested primary anthropic/claude-sonnet-5-5 and the intermediate fallbacks are disclosed above and none of them is claimed as the audit model.)
+model_switch_notices=anthropic/claude-sonnet-5-5 -> openai/gpt-6-astra -> kimi/k3.1-pro -> radient/auto; each transition was a session model-switch notice reading "provider failure: quota HTTP 429"
+independence=authored none of this copy; edited no catalogue/sidecar/ledger/generated file; no git write commands
+
+=== revision and untracked status of the audited bytes ===
+COMMAND: git rev-parse HEAD
+efcfbe812609cbf228c01f11a1fb622f3555b487
+[exit 0]
+
+COMMAND: git status --porcelain -- local_operator/i18n/catalogues/es/wire.host_speed.json
+?? local_operator/i18n/catalogues/es/wire.host_speed.json
+[exit 0]
+
+=== sha256 of audited inputs ===
+COMMAND: shasum -a 256 local_operator/i18n/catalogues/en/wire.host_speed.json local_operator/i18n/catalogues/es/wire.host_speed.json local_operator/i18n/catalogues/en/wire.host_speed.context.json
+e193473d58c0de1779bcefab06d0e9b1734ee493aea30ea827e4499510282b8c  local_operator/i18n/catalogues/en/wire.host_speed.json
+1c2281ae22b7ed442dede47aa12323e3ea87a55ba2e7fd4ad7b49059209d5f17  local_operator/i18n/catalogues/es/wire.host_speed.json
+d5316700be4f79de5280b95f8ae96e48dfa66bef378dec38074fd3311969098d  local_operator/i18n/catalogues/en/wire.host_speed.context.json
+[exit 0]
+
+=== mechanical parity / width / hygiene checks (probe -> es) ===
+COMMAND: python3 "$LOCAL_OPERATOR_SCRATCHPAD/audit_es_w1a2.py"
+HEAD efcfbe812609cbf228c01f11a1fb622f3555b487
+namespaces: wire.aida_cadence, wire.host_speed, wire.slash.library, wire.tunnel_setup, wire.console
+
+### wire.aida_cadence  en=2 es=2 context=2
+  sha256 en      3bb421a58f2ffa4fec089421d9cb91257fa626d66b2e215b3e120c068bb8e5dd  (local_operator/i18n/catalogues/en/wire.aida_cadence.json)
+  sha256 target  69f2bdb08d2175c6e1178ef6d4e7fd9966ab0fd8c04702529207ebab37880d4d  (local_operator/i18n/catalogues/es/wire.aida_cadence.json)
+  sha256 context 6efad501b08345b72e5d4d19cfee3dd27a02a48c2eb721780cf9d7f8c7694d0e  (local_operator/i18n/catalogues/en/wire.aida_cadence.context.json)
+
+### wire.host_speed  en=2 es=2 context=2
+  sha256 en      e193473d58c0de1779bcefab06d0e9b1734ee493aea30ea827e4499510282b8c  (local_operator/i18n/catalogues/en/wire.host_speed.json)
+  sha256 target  1c2281ae22b7ed442dede47aa12323e3ea87a55ba2e7fd4ad7b49059209d5f17  (local_operator/i18n/catalogues/es/wire.host_speed.json)
+  sha256 context d5316700be4f79de5280b95f8ae96e48dfa66bef378dec38074fd3311969098d  (local_operator/i18n/catalogues/en/wire.host_speed.context.json)
+  width wire.host_speed:wire.host_speed.retire_below_tps.label: es=26 maxCells=29 PASS (en=24)
+
+### wire.slash.library  en=2 es=2 context=NONE
+  sha256 en      0f8615f2ed9ffaf3aeb0288a4ff4b8fc8becd46017a931db9d4b3d9ec32fce46  (local_operator/i18n/catalogues/en/wire.slash.library.json)
+  sha256 target  f6cc726978641736096351eb2f4bc7d754ce848cc6b3b93d8f5523cecaf47875  (local_operator/i18n/catalogues/es/wire.slash.library.json)
+  context sidecar: ABSENT (no sidecar authored for this namespace)
+
+### wire.tunnel_setup  en=5 es=5 context=5
+  sha256 en      3854be7dce54dd3aeb9564921ed6a50f0560b32c7ac40955d81be93acd7e2ac1  (local_operator/i18n/catalogues/en/wire.tunnel_setup.json)
+  sha256 target  f7d4114e7083bf264807d8d1ec6c6515de813a454ba68b5f705b8b40b70893b7  (local_operator/i18n/catalogues/es/wire.tunnel_setup.json)
+  sha256 context 0ff6f387f29ff89b62aa96c73aaffdb47f18ec775588043b63ea56ecd25c4457  (local_operator/i18n/catalogues/en/wire.tunnel_setup.context.json)
+
+### wire.console  en=8 es=8 context=8
+  sha256 en      1a591fbc1f6a939651cfe9bc5c4ff619a5a4ade2099cc9cfb348534d09a0011b  (local_operator/i18n/catalogues/en/wire.console.json)
+  sha256 target  61f0a242644b1adfe6afaf29f113849a88745f650a93d6f91a6da09b5605bac8  (local_operator/i18n/catalogues/es/wire.console.json)
+  sha256 context 453aadc8095e93122719cef9b8da2ed9f8b57170449804e6af716fe684ef2dd9  (local_operator/i18n/catalogues/en/wire.console.context.json)
+
+keys read en=19 es=19 context=17
+NOTES (0):
+
+NEGATIVE CONTROLS (detectors must fire on deliberately broken copies)
+  width over maxCells: DETECTED PASS
+  en-dash replaced by hyphen: DETECTED PASS
+  machine literal dropped: DETECTED PASS
+  placeholder dropped: DETECTED PASS
+
+FAILURES=[]
+[exit 0]
+
+
+=== shared probe tail (all five namespaces) ===
+  sha256 en      3bb421a58f2ffa4fec089421d9cb91257fa626d66b2e215b3e120c068bb8e5dd  (local_operator/i18n/catalogues/en/wire.aida_cadence.json)
+  sha256 target  69f2bdb08d2175c6e1178ef6d4e7fd9966ab0fd8c04702529207ebab37880d4d  (local_operator/i18n/catalogues/es/wire.aida_cadence.json)
+  sha256 context 6efad501b08345b72e5d4d19cfee3dd27a02a48c2eb721780cf9d7f8c7694d0e  (local_operator/i18n/catalogues/en/wire.aida_cadence.context.json)
+  sha256 en      e193473d58c0de1779bcefab06d0e9b1734ee493aea30ea827e4499510282b8c  (local_operator/i18n/catalogues/en/wire.host_speed.json)
+  sha256 target  1c2281ae22b7ed442dede47aa12323e3ea87a55ba2e7fd4ad7b49059209d5f17  (local_operator/i18n/catalogues/es/wire.host_speed.json)
+  sha256 context d5316700be4f79de5280b95f8ae96e48dfa66bef378dec38074fd3311969098d  (local_operator/i18n/catalogues/en/wire.host_speed.context.json)
+  width wire.host_speed:wire.host_speed.retire_below_tps.label: es=26 maxCells=29 PASS (en=24)
+  sha256 en      0f8615f2ed9ffaf3aeb0288a4ff4b8fc8becd46017a931db9d4b3d9ec32fce46  (local_operator/i18n/catalogues/en/wire.slash.library.json)
+  sha256 target  f6cc726978641736096351eb2f4bc7d754ce848cc6b3b93d8f5523cecaf47875  (local_operator/i18n/catalogues/es/wire.slash.library.json)
+  context sidecar: ABSENT (no sidecar authored for this namespace)
+  sha256 en      3854be7dce54dd3aeb9564921ed6a50f0560b32c7ac40955d81be93acd7e2ac1  (local_operator/i18n/catalogues/en/wire.tunnel_setup.json)
+  sha256 target  f7d4114e7083bf264807d8d1ec6c6515de813a454ba68b5f705b8b40b70893b7  (local_operator/i18n/catalogues/es/wire.tunnel_setup.json)
+  sha256 context 0ff6f387f29ff89b62aa96c73aaffdb47f18ec775588043b63ea56ecd25c4457  (local_operator/i18n/catalogues/en/wire.tunnel_setup.context.json)
+  sha256 en      1a591fbc1f6a939651cfe9bc5c4ff619a5a4ade2099cc9cfb348534d09a0011b  (local_operator/i18n/catalogues/en/wire.console.json)
+  sha256 target  61f0a242644b1adfe6afaf29f113849a88745f650a93d6f91a6da09b5605bac8  (local_operator/i18n/catalogues/es/wire.console.json)
+  sha256 context 453aadc8095e93122719cef9b8da2ed9f8b57170449804e6af716fe684ef2dd9  (local_operator/i18n/catalogues/en/wire.console.context.json)
+keys read en=19 es=19 context=17
+NOTES (0):
+NEGATIVE CONTROLS (detectors must fire on deliberately broken copies)
+  width over maxCells: DETECTED PASS
+  en-dash replaced by hyphen: DETECTED PASS
+  machine literal dropped: DETECTED PASS
+  placeholder dropped: DETECTED PASS
+FAILURES=[]
+=== term precedent checks the judgements rest on ===
+COMMAND: grep -rn "caché de\|en frío\|umbral\|tokens de salida por segundo" local_operator/i18n/catalogues/es/wire.settings.json | head -8
+local_operator/i18n/catalogues/es/wire.settings.json:419:  "wire.settings.providers_anthropic_cache_ttl_1h_min_context_tokens.help": "Tamaño de contexto a partir del cual las peticiones de Anthropic con clave de API usan el TTL de 1 hora de la caché de prompts (coste de escritura 2x; sobrevive a huecos de inactividad de más de 5 minutos). Con una suscripción de Claude que no esté consumiendo uso adicional, la conversación principal usa siempre 1 hora, y un subagente pasa a 1 hora en cuanto una de sus llamadas dura 4 minutos o más. 0 desactiva todo esto; solo sigue aplicándose el ajuste de tamaño de los subagentes.",
+local_operator/i18n/catalogues/es/wire.settings.json:421:  "wire.settings.providers_anthropic_subagent_cache_ttl_1h_min_context_tokens.help": "Tamaño de contexto (tokens) a partir del cual las peticiones de subagentes usan el TTL de 1 hora de la caché de prompts. 0 no añade ninguna regla por tamaño: en las mediciones, usar 1 hora solo por tamaño resultó más caro para los subagentes con cualquier tamaño. Aparte, con una suscripción de Claude un subagente pasa a 1 hora tras una llamada que dure 4 minutos o más; un 0 en el ajuste principal de 1 hora lo desactiva.",
+local_operator/i18n/catalogues/es/wire.settings.json:451:  "wire.settings.providers_openrouter_ignore.help": "Vacío = sin opinión (se mantiene el enrutamiento fijo). Lista de exclusión separada por comas con los slugs de hosts que omitir (p. ej., un host que esté fallando ahora mismo) — puede costarte la caché de prompts en caliente.",
+local_operator/i18n/catalogues/es/wire.settings.json:457:  "wire.settings.providers_openrouter_only.help": "Vacío = sin opinión (se mantiene el enrutamiento fijo). Lista de permitidos de slugs de host separada por comas; cualquier otro host queda excluido — un inicio en frío forzado si el host en caliente no está en la lista.",
+local_operator/i18n/catalogues/es/wire.settings.json:463:  "wire.settings.providers_openrouter_order.warning": "desactiva el enrutamiento fijo — la caché de prompts se enfría",
+local_operator/i18n/catalogues/es/wire.settings.json:464:  "wire.settings.providers_openrouter_preferred_max_latency.help": "Prefiere hosts cuyo tiempo hasta el primer token se mantenga por debajo de estos segundos (p50). 0 no envía preferencia. Un host por encima del umbral pierde prioridad, lo que puede costarte una caché de prompts en caliente.",
+local_operator/i18n/catalogues/es/wire.settings.json:466:  "wire.settings.providers_openrouter_preferred_min_throughput.help": "Prefiere hosts que sirvan al menos estos tokens de salida por segundo (p50). 0 no envía preferencia. Un host por debajo del umbral pierde prioridad, lo que puede costarte una caché de prompts en caliente.",
+local_operator/i18n/catalogues/es/wire.settings.json:468:  "wire.settings.providers_openrouter_provider_affinity.help": "Reutiliza el host que sirvió el turno anterior para que la caché de prompts siga en caliente. Desactivado = el balanceo de carga ponderado por precio de OpenRouter.",
+[exit 0]
+
+=== strict JSON / encoding hygiene (duplicate keys, BOM, control bytes, NFC, trailing newline) ===
+COMMAND: python3 "$LOCAL_OPERATOR_SCRATCHPAD/strict_json_es_w1a2.py"
+en wire.aida_cadence          dup_keys=none bom=False ctrl_bytes=none nfc=True trailing_nl=False
+es wire.aida_cadence          dup_keys=none bom=False ctrl_bytes=none nfc=True trailing_nl=False
+ctx wire.aida_cadence          dup_keys=none bom=False nfc=True
+en wire.host_speed            dup_keys=none bom=False ctrl_bytes=none nfc=True trailing_nl=False
+es wire.host_speed            dup_keys=none bom=False ctrl_bytes=none nfc=True trailing_nl=False
+ctx wire.host_speed            dup_keys=none bom=False nfc=True
+en wire.slash.library         dup_keys=none bom=False ctrl_bytes=none nfc=True trailing_nl=False
+es wire.slash.library         dup_keys=none bom=False ctrl_bytes=none nfc=True trailing_nl=False
+ctx wire.slash.library         ABSENT
+en wire.tunnel_setup          dup_keys=none bom=False ctrl_bytes=none nfc=True trailing_nl=False
+es wire.tunnel_setup          dup_keys=none bom=False ctrl_bytes=none nfc=True trailing_nl=False
+ctx wire.tunnel_setup          dup_keys=none bom=False nfc=True
+en wire.console               dup_keys=none bom=False ctrl_bytes=none nfc=True trailing_nl=False
+es wire.console               dup_keys=none bom=False ctrl_bytes=none nfc=True trailing_nl=False
+ctx wire.console               dup_keys=none bom=False nfc=True
+[exit 0]
+
+=== verdict ===
+verdict=passed result=clean-with-findings keys_read en=2 es=2 context=2
+blocker=0 major=0 minor=1 nit=1
+findings=['es-w1-B02', 'es-w1-B03']
