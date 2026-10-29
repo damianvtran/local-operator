@@ -26,7 +26,7 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 from unittest.mock import patch
 
 import pytest
@@ -487,11 +487,26 @@ async def _settle_signature(  # type: ignore[no-untyped-def]
     raise AssertionError(("the transcript never settled", last))
 
 
+class _Signature(TypedDict):
+    """One frame's comparable transcript state, with each part typed.
+
+    A plain ``dict[str, object]`` made every reader of this value an ``object``
+    — ``set(at_first["rows"])`` was "argument of type object is not iterable" to
+    pyright (CI type-check, QA round 4). Naming the four parts is the fix; a
+    cast would only move the same lie one line down.
+    """
+
+    rows: tuple[tuple[str, str, bool], ...]
+    groups: tuple[tuple[str, int, bool, int], ...]
+    hidden: int
+    nblocks: int
+
+
 def _group_signature(view):  # type: ignore[no-untyped-def]
     from local_operator.tui.widgets.transcript import QuietGroupBlock
 
     blocks = view.blocks()
-    return {
+    signature: _Signature = {
         "rows": tuple(
             (type(b).__name__, getattr(b, "navigation_anchor_id", "") or "", bool(b.display))
             for b in blocks
@@ -507,6 +522,7 @@ def _group_signature(view):  # type: ignore[no-untyped-def]
         # and the settled one is exactly the trim-after-paint this PR removes.
         "nblocks": len(blocks),
     }
+    return signature
 
 
 @pytest.mark.asyncio
@@ -534,7 +550,7 @@ async def test_grouped_history_is_final_at_first_frame(expand: bool) -> None:
     home = SidebarRemote("home-session")
     target = _grouped_conversation("grouped-session")
     app = OperatorApp(lambda: _factory(home))
-    at_first: dict[str, object] = {}
+    at_first: _Signature | None = None
     with (
         patch("local_operator.session.attached.AttachedSession", SidebarRemote),
         patch("local_operator.tui.app.RESUME_PAGE_MESSAGES", 8),
@@ -568,9 +584,10 @@ async def test_grouped_history_is_final_at_first_frame(expand: bool) -> None:
             real_hook = app.post_display_hook
 
             def hook() -> None:
+                nonlocal at_first
                 real_hook()
-                if armed["on"] and not at_first:
-                    at_first.update(_group_signature(app._transcript_view()))
+                if armed["on"] and at_first is None:
+                    at_first = _group_signature(app._transcript_view())
                     # "Whole" is READ, not assumed: the prefill's own state at the
                     # instant of the first paint says whether it finished inside its
                     # budget. Only then can the two frames be required to be equal.
@@ -627,7 +644,7 @@ async def test_grouped_history_is_final_at_first_frame(expand: bool) -> None:
     # Equality of the two signatures is therefore asserted only when the first
     # frame already holds the whole window (`first_is_whole`), which the fresh-open
     # leg establishes by construction.
-    assert at_first, "the first frame was never sampled, so nothing was compared"
+    assert at_first is not None, "the first frame was never sampled, so nothing was compared"
     first_rows = set(at_first["rows"])
     settled_rows = set(settled["rows"])
     assert first_rows <= settled_rows, (
@@ -1033,7 +1050,11 @@ async def test_a_checkpoint_with_a_null_model_still_opens(tmp_path: Path) -> Non
     Fails on the previous head: the property raise escapes `_model_spec`.
     """
     from local_operator.session.attached import AttachedSession
-    from local_operator.tui.app import _has_model_identity, _model_spec, _read_stored_frontend_state
+    from local_operator.tui.app import (
+        _has_model_identity,
+        _model_spec,
+        _read_stored_frontend_state,
+    )
 
     directory = tmp_path / "config" / "sessions" / "null-model-session"
     _journal_with_checkpoint(directory, "null-model-session", title="No model", model=None)
