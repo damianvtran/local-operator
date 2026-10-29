@@ -291,13 +291,19 @@ def test_a_crash_between_the_request_and_the_boot_is_settled_by_where_it_really_
     assert crashed is not None, "the request survived the process that made it"
     assert crashed.stage == cwd_move.STAGE_QUEUED
 
-    # 2. A SUCCESSOR IN THE WRONG DIRECTORY claims nothing.
+    # 2. A SUCCESSOR IN THE WRONG DIRECTORY claims nothing — and, by design, it also
+    #    RETIRES: its move watcher reads the queued intent at the first idle tick and
+    #    stops the runtime, because confirming the move is the job of a successor that
+    #    is IN the destination. So the observable here is its EXIT, not a published
+    #    record: CI caught the earlier version waiting for a record this runtime may
+    #    never write (it retires before the publisher runs on a fast host), which made
+    #    a real behaviour read as a hang.
     wrong = _spawn_successor(config_dir, str(elsewhere), inherit_cwd=host_cwd)
     try:
         _wait_until(
-            lambda: _record_cwd(config_dir, wrong.pid) == str(elsewhere) or None,
+            lambda: True if wrong.poll() is not None else None,
             timeout=BOOT_COMMIT_TIMEOUT_S,
-            what="the successor to publish a record from the wrong directory",
+            what="the wrong-directory successor to retire instead of claiming the move",
         )
         assert (
             _stage(config_dir) == cwd_move.STAGE_QUEUED
