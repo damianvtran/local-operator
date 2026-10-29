@@ -3762,6 +3762,16 @@ class FrontendSessionState(BaseModel):
     #: publish it, or one whose store could not be read); old clients ignore
     #: the key, and this client renders nothing for ``None``.
     model_access: "FrontendModelAccess | None" = None
+    #: Whether Radient Saver resolves ON for this session's NEXT request.
+    #:
+    #: Declared rather than left to ``extra="allow"``: a follower cannot inspect
+    #: the owner's session, its settings or its Radient credential, so a badge
+    #: derived locally would be a second, divergent answer. ``False`` is the
+    #: ordinary value and also what an older backend publishes by omitting it.
+    radient_saver_on: bool = False
+    #: The session's own tri-state override (``None`` follows the global setting
+    #: and the agent's pin), so a surface can say WHY Saver is on or off.
+    radient_saver_choice: bool | None = None
     last_usage: FrontendUsage | None = None
     usage_components: list[FrontendUsage] = Field(default_factory=list)
     context_tokens: int | None = None
@@ -7972,7 +7982,13 @@ class FrontendStateStore:
         # the manager's ledger), but one call is what keeps them provably the
         # same number.
         ledger = _ledger_cost(session)
+        from local_operator.saver.command import saver_on
+
         changes = dict(
+            # Canonical because a follower cannot inspect the owner's session or
+            # its credentials; the badge otherwise goes stale after a routed slash.
+            radient_saver_on=saver_on(session),
+            radient_saver_choice=getattr(session, "radient_saver_choice", None),
             attention=dict(getattr(session, "_attention", {}) or {}),
             cwd=str(getattr(session, "cwd", "") or getattr(session, "_cwd", "") or os.getcwd()),
             # A BLANK TITLE NEVER OVERWRITES A SET ONE (review round 1, F1). The

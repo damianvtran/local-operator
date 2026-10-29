@@ -4272,6 +4272,18 @@ async def _construct_child_session(
             mark_pin = getattr(child_stream, "mark_launch_pin", None)
             if callable(mark_pin):
                 mark_pin(f"{model_spec.provider}/{model_spec.model_id}")
+    # Team slot outranks profile, then the child inherits its parent's live
+    # decision. The session's explicit slash choice always outranks this pin.
+    from local_operator.teams import find_member
+    from local_operator.saver.command import saver_on
+
+    slot_name = team_slot_name(agent, bool(target and target.is_team_launch)) or (
+        target.role if target else agent
+    )
+    slot = find_member(getattr(getattr(target, "roster", None), "members", None), slot_name)
+    agent_pin = getattr(slot, "saver", None)
+    if agent_pin is None and profile is not None:
+        agent_pin = profile.saver
     child = Session(
         model=model_spec if model_spec is not None else parent_session.model,
         # A child's model was chosen HERE (tier or parent), never by the
@@ -4586,5 +4598,8 @@ async def _construct_child_session(
         child.add_dispose_hook(watcher.subscribe(child._apply_config_change))
     except Exception:  # noqa: BLE001 — a child must build without the watcher
         logger.warning("config watcher could not be attached to the child", exc_info=True)
+    child._saver_agent_pin_value = agent_pin
+    if child_stream is not parent_stream:
+        child_stream._saver_parent_value = saver_on(parent_session)
     await child.async_init()
     return child

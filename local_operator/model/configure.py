@@ -3969,6 +3969,11 @@ class SessionStreamFn:
 
         self._auth_store = auth_store
         self._settings = settings
+        # Bound by Session after construction; keeping these on the stream lets
+        # every turn read the latest slash/CLI choice without rebuilding clients.
+        self._saver_session_choice: bool | None = None
+        self._saver_agent_pin: bool | None = None
+        self._saver_parent_value: bool | None = None
         self._session_id = session_id
         self._parent_session_id: str | None = None
         # The Anthropic response id of this conversation's last DIAGNOSED turn,
@@ -5306,6 +5311,22 @@ class SessionStreamFn:
             or not request.messages
         )
 
+    def bind_saver_session(self, session: Any) -> None:
+        """Read the owning session's live choice without sharing stream state.
+
+        Forks bind their own child session, so a parent's slash command cannot
+        silently change a child's upload decision.
+        """
+        self._saver_session = session
+
+    def _saver_choices(self) -> tuple[bool | None, bool | None, bool | None]:
+        session = getattr(self, "_saver_session", None)
+        return (
+            getattr(session, "radient_saver_choice", None),
+            getattr(session, "_saver_agent_pin_value", None),
+            self._saver_parent_value,
+        )
+
     async def _apply_saver(self, request: ChatRequest) -> ChatRequest:
         """Splice this conversation's Saver epochs into ``request``, or return it unchanged.
 
@@ -5360,8 +5381,19 @@ class SessionStreamFn:
         # gate instead of duplicating it: in LO1 `auto` is refused
         # (`auto_unavailable`) and `opt_in` has no session choice wired, so
         # neither reaches the network.
-        if not resolve_saver(self._settings, Availability(True, True)).on:
-            if mode == "opt_in":
+        session_choice, agent_pin, parent_value = self._saver_choices()
+
+        def resolved(best: Availability | None) -> Any:
+            return resolve_saver(
+                self._settings,
+                best,
+                session_choice=session_choice,
+                agent_pin=agent_pin,
+                parent_value=parent_value,
+            )
+
+        if not resolved(Availability(True, True)).on:
+            if mode == "opt_in" and self._saver_session_choice is not False:
                 await self._saver_signed_out_notice()
             return request
         # The availability read is NEVER awaited on the turn (R-1/S-4/Q1): it
@@ -5371,7 +5403,7 @@ class SessionStreamFn:
         if availability is None or availability.expired():
             availability = start_availability_read()
             self._saver_availability_read = availability
-        decision = resolve_saver(self._settings, availability.result())
+        decision = resolved(availability.result())
         if not decision.on:
             return request
         chain = self._ensure_saver_chain()

@@ -8604,6 +8604,24 @@ class ServingSessionHandle(SessionHandle):
             return await self._effort_slash(session, args, SlashResult)
         if command == "fast":
             return self._fast_slash(session, args, SlashResult)
+        if command in {"saver", "radient"}:
+            from local_operator.saver.command import saver_slash
+
+            if command == "radient":
+                word, _, rest = args.partition(" ")
+                if word != "saver":
+                    from local_operator.i18n.keys import wire_radient_saver
+                    from local_operator.i18n.text import tr
+
+                    return SlashResult(
+                        kind="notice",
+                        text=str(tr("wire.radient_saver")(wire_radient_saver.command_usage())),
+                        style="warning",
+                    )
+                args = rest
+            result = saver_slash(session, args, SlashResult)
+            self._notify()
+            return result
         if command == "approvals":
             # ``may_loosen`` (issue #1310; design round 2 D10, UX round 2 U9):
             # whether THIS connection could carry `/approvals auto`, as the seam

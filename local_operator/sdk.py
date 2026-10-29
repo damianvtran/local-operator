@@ -631,6 +631,10 @@ async def _build_session(
             )
         ) from error
 
+    if spec.radient_saver is not None:
+        from local_operator.saver.command import set_saver_choice
+
+        await set_saver_choice(session, spec.radient_saver)
     if mode == "attach":
         # A viewer, or nothing. create_session(has_ui=True) hands back an
         # AttachedSession only when a live runtime already owns the id; a cold

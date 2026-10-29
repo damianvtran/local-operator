@@ -84,6 +84,10 @@ class TeamOverride(BaseModel):
             "ladder. 'inherit' clears it. Omit to leave it alone."
         ),
     )
+    saver: Literal["on", "off", "inherit"] | None = Field(
+        default=None,
+        description="Pin Radient Saver for this slot; 'inherit' clears it.",
+    )
 
 
 class TeamParams(BaseModel):
@@ -217,6 +221,8 @@ def _override_lines(team: Any, mark: Callable[[str], str] | None = None) -> list
             parts.append(f"tier {member.tier}")  # i18n: ignore model-facing tool output
         if member.effort:
             parts.append(f"effort {member.effort}")  # i18n: ignore model-facing tool output
+        if member.saver is not None:
+            parts.append(f"saver {'on' if member.saver else 'off'}")  # i18n: ignore model-facing tool output
         rows.append(f"- {label(_slot_token(member))}: {', '.join(parts)}")
     if not rows:
         return []
@@ -273,7 +279,7 @@ def _apply_overrides(members: list[TeamMember], overrides: list[TeamOverride]) -
                 f"no roster slot named {token!r} to put overrides on; this roster is: {roster}"
             )
         fields: dict[str, Any] = {}
-        for field in ("tier", "effort"):
+        for field in ("tier", "effort", "saver"):
             value = getattr(override, field)
             if value is None:
                 continue

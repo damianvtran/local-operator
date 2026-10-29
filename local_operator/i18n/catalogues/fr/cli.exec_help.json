@@ -14,6 +14,7 @@
   "cli.exec_help.output_retries": "Nombre maximal de tentatives après une réponse finale invalide (0-5 ; par défaut 2). Nécessite --output-format.",
   "cli.exec_help.output_schema": "Fichier JSON Schema auquel la charge utile JSON/YAML/TOML décodée doit satisfaire. Pour --output-format markdown : un objet JSON '{'''required_sections'': [...]'}'. Nécessite --output-format.",
   "cli.exec_help.profile": "Attacher un rôle ou un spécialiste réutilisable (équivalent de /agent ; pas l’ancien --agent)",
+  "cli.exec_help.saver": "Activer Radient Saver pour cette session (activé par défaut quand le drapeau est présent ; aussi off ou inherit)",
   "cli.exec_help.status": "Lire l’état d’une tâche d’arrière-plan durable en JSON ; ne démarre pas de session",
   "cli.exec_help.supervisor_fd": "Écrire la capacité opérateur de cette exécution dans ce descripteur hérité, afin que le superviseur tenant l’autre extrémité puisse APPROUVER les cartes que cette exécution met en attente (étape E). Nécessite --control ; refusé avec --background. Numéros de descripteur uniquement — la valeur ne touche jamais argv, l’environnement ni un fichier.",
   "cli.exec_help.team": "Attacher une équipe enregistrée avec son manager, son effectif et ses briefs",

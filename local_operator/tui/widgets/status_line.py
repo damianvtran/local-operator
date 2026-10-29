@@ -105,6 +105,8 @@ ICON_EFFORT = "▴"
 #: is ``›``, and ``high › » fast`` read as two separators in a row (design
 #: D1).
 ICON_FAST = "↯"
+#: Saver's compression mark: one cell, distinct from the speed lightning.
+ICON_SAVER = "≡"
 ICON_CWD = "⌂"
 #: Active ``/agent`` profile governing THIS session (U2). A CATEGORY marker like
 #: every other icon here — the value is the profile name beside it (`◉ auditor`),
@@ -422,6 +424,9 @@ _MIN_GROUP_GAP = 4
 _DROP_LADDER: tuple[str, ...] = (
     # Re-derivable from the transcript.
     "duration",
+    # Saver is a convenience indicator, already visible in /saver status; narrow
+    # bands spend these cells on readings that cannot be recovered there.
+    "saver",
     # Counters. Not re-derivable without scrolling, so they outlast the one
     # above; jobs go before agents because a backgrounded shell command is
     # visible in the transcript as a tool card, while a subagent is not.
@@ -1278,7 +1283,12 @@ class StatusLine:
         #: band never reaches into the session, so the source of truth stays the
         #: session's own spec and the app pushes the reading through ``update``.
         self._fast: str = ""
-        # The active /agent profile name and /team roster name governing this
+        # Fixed five-cell value keeps the model and adjacent segments stationary
+        # when Saver toggles; blank cells are reserved, not layout-dropped.
+        self._saver: str = ""
+        # Explicitly enabled by the populated composer path, so sparse/narrow
+        # bands do not pay for an empty feature segment.
+        self._saver_reserved = False
         # session (U2), "" when unattached — the band's two static-identity
         # segments. Held as plain strings the app pushes through `update`, the
         # same shape as `effort`: the band never reaches into the session, so
@@ -1664,6 +1674,8 @@ class StatusLine:
         model_name: str | None = None,
         effort: str | None = None,
         fast: str | None = None,
+        saver: str | None = None,
+        reserve_saver: bool = False,
         agent_profile: str | None = None,
         team: str | None = None,
         cwd: str | None = None,
@@ -1706,6 +1718,10 @@ class StatusLine:
             self._effort = effort
         if fast is not None:
             self._fast = fast
+        if saver is not None:
+            self._saver = saver
+        if reserve_saver:
+            self._saver_reserved = True
         # "" is a MEANINGFUL value here (detach), so these follow the same
         # None-means-leave-alone contract as every other segment: the app passes
         # "" to clear the segment on /agent clear or team detach, and None to
@@ -2484,6 +2500,17 @@ class StatusLine:
                 # colour a user already reads as "this is costing you". It also
                 # separates the two adjacent dials at a glance.
                 (ICON_FAST, self._fast, Style(color=theme_mod.semantic_color("warning")), None)
+            )
+        # Reserve Saver's whole segment in both states so toggling it cannot
+        # move the model label or its neighbours by one cell.
+        if self._subagent is None and "saver" not in dropped and (self._saver or self._saver_reserved):
+            parts.append(
+                (
+                    ICON_SAVER,
+                    self._saver.ljust(5),
+                    Style(color=theme_mod.semantic_color("label")),
+                    None,
+                )
             )
         # Active /team roster, then /agent profile (U2). Both are the SESSION's
         # own settings, never a subagent's: the overlay describes a CHILD's

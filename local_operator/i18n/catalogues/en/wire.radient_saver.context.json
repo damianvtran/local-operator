@@ -77,5 +77,51 @@
     "role": "transient session notice (info/warning) shown once per session",
     "tone": "calm, reassuring",
     "note": "A single message (typically a very large tool output) is bigger than Saver can accept. It is sent in full; the rest of the conversation keeps being shortened. No action is needed."
+  },
+  "wire.radient_saver.command.description": {
+    "role": "slash command picker description",
+    "tone": "plain",
+    "note": "Product name 'Radient Saver' stays unchanged; this changes only the current session, never the global config file."
+  },
+  "wire.radient_saver.command.radient_description": {
+    "role": "slash command namespace picker description",
+    "tone": "plain",
+    "note": "Radient is a product name; these are controls for the current session."
+  },
+  "wire.radient_saver.command.usage": {
+    "role": "slash command invalid-argument notice",
+    "tone": "plain, actionable",
+    "note": "Copy every command token exactly: /saver, on, off, status and inherit. Bare /saver toggles; inherit clears the session override so the global setting applies."
+  },
+  "wire.radient_saver.command.enabled": {
+    "role": "slash command success receipt",
+    "tone": "plain",
+    "note": "The explicit session override is on; the global config file is deliberately unchanged. No savings or percentage claim."
+  },
+  "wire.radient_saver.command.disabled": {
+    "role": "slash command success receipt",
+    "tone": "plain",
+    "note": "The explicit session override is off; the global config file is deliberately unchanged."
+  },
+  "wire.radient_saver.command.inherited": {
+    "role": "slash command success receipt",
+    "tone": "plain",
+    "note": "The explicit session override was cleared. Global setting and agent designation are product concepts; translate naturally."
+  },
+  "wire.radient_saver.command.status.on": {
+    "role": "slash command status receipt",
+    "tone": "plain, actionable",
+    "note": "Copy commands exactly; no savings or percentage claim."
+  },
+  "wire.radient_saver.command.status.off": {
+    "role": "slash command status receipt",
+    "tone": "plain, actionable",
+    "note": "Copy /saver on exactly."
+  },
+  "wire.radient_saver.command.badge": {
+    "role": "small TUI status badge beside the model",
+    "tone": "terse",
+    "maxCells": 5,
+    "note": "Technical short form of the product name; keep 'saver' in Latin lowercase so the reserved-width badge is stable."
   }
 }

@@ -13,5 +13,14 @@
   "wire.radient_saver.notice.no_credit": "由于Radient余额为零，Radient Saver已在此会话中暂停。前往console.radienthq.com充值后即可使用。",
   "wire.radient_saver.notice.rate_limited": "Radient Saver正忙，因此在其重新接受请求前将发送完整历史。",
   "wire.radient_saver.notice.disabled": "当前配置下无法使用Radient Saver，因此将发送完整历史。",
-  "wire.radient_saver.notice.oversize": "此对话中有一条消息超出了Radient Saver可处理的大小，因此该消息保持原样。Saver会继续精简对话的其余部分。"
+  "wire.radient_saver.notice.oversize": "此对话中有一条消息超出了Radient Saver可处理的大小，因此该消息保持原样。Saver会继续精简对话的其余部分。",
+  "wire.radient_saver.command.description": "为此会话设置 Radient Saver",
+  "wire.radient_saver.command.radient_description": "Radient 会话控制",
+  "wire.radient_saver.command.usage": "请使用 /saver、/saver on、/saver off、/saver status 或 /saver inherit。单独使用 /saver 可切换状态；inherit 表示遵循全局设置。",
+  "wire.radient_saver.command.enabled": "已为此会话启用 Radient Saver。你的全局设置未更改。",
+  "wire.radient_saver.command.disabled": "已为此会话停用 Radient Saver。你的全局设置未更改。",
+  "wire.radient_saver.command.inherited": "此会话的 Radient Saver 现在遵循全局设置和智能体指定。",
+  "wire.radient_saver.command.status.on": "Radient Saver：此会话已启用。使用 /saver off 可停用，或使用 /saver inherit 遵循全局设置。",
+  "wire.radient_saver.command.status.off": "Radient Saver：此会话已停用。使用 /saver on 可启用。",
+  "wire.radient_saver.command.badge": "saver"
 }

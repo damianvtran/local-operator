@@ -23,6 +23,7 @@ from local_operator.i18n.keys import (
     tui_tags,
     tui_viewer,
     wire_memory,
+    wire_radient_saver,
     wire_slash,
     wire_slash_library,
     wire_slash_notifications_page,
@@ -1604,6 +1605,23 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # NOT an echo, same rule as `/approvals`: the argument is a setting, and
     # the receipt names the theme that ended up in force — strictly more than
     # the typed word, which may have been an abbreviation the matcher resolved.
+    # Saver is a conversation choice; its handler journals the choice without
+    # writing config. Both spellings reach the same shared implementation.
+    SlashCommand(
+        "radient",
+        _tr(wire_radient_saver.command_radient_description()),
+        arguments=ArgumentMode.REQUIRED,
+        argument_shape=ArgumentShape.ANY,
+        subcommands=("saver",),
+        desktop_destination="session.saver",
+    ),
+    SlashCommand(
+        "saver",
+        _tr(wire_radient_saver.command_description()),
+        arguments=ArgumentMode.OPTIONAL,
+        argument_shape=ArgumentShape.WORD,
+        desktop_destination="session.saver",
+    ),
     SlashCommand(
         "theme",
         # Terse like `/model`'s: the description column wraps past ~55 cells.

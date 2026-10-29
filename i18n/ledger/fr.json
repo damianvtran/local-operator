@@ -2492,6 +2492,54 @@
       },
       "status": "passed",
       "note": "Dual blind passes: i18n/audits/evidence/fr/wire.errors.session_host/fr31a/record.json; i18n/audits/evidence/fr/wire.errors.session_host/h3222b/record.json. Both pass, 0 findings; actual quota fallback model recorded."
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.exec_help",
+      "source_sha256": "0cf4fd220dd99750a64b79b8b679a908b1815c4c2a45415cae01c1b4e4f17d4e",
+      "translator": {
+        "agent": "coder (radientdev; self-translated, no i18n-translator delegation)",
+        "model": "kimi/k3.1-pro (fallback after quota failures)",
+        "date": "2026-10-29",
+        "note": "Translated new command-surface strings; existing values retain their earlier translations."
+      },
+      "auditor": {
+        "agent": "coder (radientdev; self-audit only, NOT independent)",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "self-reviewed",
+        "findings": 0
+      },
+      "status": "pending-independent-audit",
+      "note": "Self-translation and self-audit recorded truthfully; no independent i18n-auditor delegation is available in this bounded coder role. This is NOT an independent pass. English fallback applies for this namespace until independent audit is completed."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.radient_saver",
+      "source_sha256": "d2c78470f5117bc99248f3835e1b2d3fd41c57b4400b70d28a2f5bc4fcb233df",
+      "translator": {
+        "agent": "coder (radientdev; self-translated, no i18n-translator delegation)",
+        "model": "kimi/k3.1-pro (fallback after quota failures)",
+        "date": "2026-10-29",
+        "note": "Translated new command-surface strings; existing values retain their earlier translations."
+      },
+      "auditor": {
+        "agent": "coder (radientdev; self-audit only, NOT independent)",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "self-reviewed",
+        "findings": 0
+      },
+      "status": "pending-independent-audit",
+      "second_audit": {
+        "status": "pending",
+        "agent": "pending",
+        "model": "pending",
+        "date": null,
+        "scope": "round-3 SA-2 remediation of wire.radient_saver.mode.help (PR #3078)",
+        "note": "Second independent audit commissioned by the radientdev manager; it has NOT run. Auditor identity, model and date are deliberately unrecorded until it reports — this row is not a second-audit pass."
+      },
+      "note": "Self-translation and self-audit recorded truthfully; no independent i18n-auditor delegation is available in this bounded coder role. This is NOT an independent pass. English fallback applies for this namespace until independent audit is completed."
     }
   ]
 }

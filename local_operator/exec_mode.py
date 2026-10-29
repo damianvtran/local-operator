@@ -162,6 +162,7 @@ class ExecArgs:
     loop_goal: str | None = None
     name: str | None = None
     effort: str | None = None
+    saver: str | None = None
     #: Enforce the format of the assistant's FINAL response
     #: (``markdown`` | ``json`` | ``yaml`` | ``toml``), or ``None`` for no
     #: enforcement — the default, and byte-identical to every run before this

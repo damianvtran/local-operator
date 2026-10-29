@@ -35,6 +35,7 @@ STARTUP_FIELDS = (
     "loop_goal",
     "name",
     "effort",
+    "saver",
     "tools",
     # Not a selector a session applies (`apply_startup` never reads it): this one
     # decides what the run IS to every listing, and it belongs in this tuple for
@@ -188,6 +189,13 @@ def add_startup_arguments(parser: argparse.ArgumentParser, *, help_locale: str =
         "--effort",
         metavar="LEVEL",
         help=_eh.effort().envelope(locale=help_locale)["text"],
+    )
+    parser.add_argument(
+        "--saver",
+        nargs="?",
+        const="on",
+        choices=("on", "off", "inherit"),
+        help=_eh.saver().envelope(locale=help_locale)["text"],
     )
     parser.add_argument(
         "--workstream",
@@ -460,6 +468,16 @@ def declared_tool_inventory(session: Any, args: Any) -> tuple[str, ...] | None:
 
 def apply_startup(session: Any, args: Any, team: Any) -> None:
     """Apply explicit overrides after ordinary resume restored its attachment."""
+    from local_operator.saver.command import set_saver_choice
+
+    saver = getattr(args, "saver", None)
+    if saver is not None:
+        # The flag must survive the same journal/resume path as a slash choice.
+        # This synchronous startup hook schedules onto the already-running loop.
+        import asyncio
+
+        choice = None if saver == "inherit" else saver == "on"
+        asyncio.get_running_loop().create_task(set_saver_choice(session, choice))
     if team is not None:
         session.attach_team(team)
     if getattr(args, "profile", None) and not session.attach_agent_profile(args.profile):

@@ -8,6 +8,7 @@
     "local_operator/exec_mode.py",
     "local_operator/exec_session.py",
     "local_operator/exec_startup.py",
+    "local_operator/saver/command.py",
     "local_operator/keymap.py",
     "local_operator/server/desktop.py",
     "local_operator/server/routes/agents.py",

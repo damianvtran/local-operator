@@ -13,5 +13,14 @@
   "wire.radient_saver.notice.no_credit": "Radient Saver اس سیشن میں رکا ہوا ہے کیونکہ آپ کا Radient بیلنس ختم ہو چکا ہے۔ اسے استعمال کرنے کے لیے console.radienthq.com پر کریڈٹ شامل کریں۔",
   "wire.radient_saver.notice.rate_limited": "Radient Saver مصروف ہے، اس لیے جب تک یہ دوبارہ درخواستیں قبول نہ کرے، آپ کی پوری گفتگو بھیجی جائے گی۔",
   "wire.radient_saver.notice.disabled": "اس کنفیگریشن کے ساتھ Radient Saver دستیاب نہیں، اس لیے آپ کی پوری گفتگو بھیجی جاتی ہے۔",
-  "wire.radient_saver.notice.oversize": "اس گفتگو کا ایک پیغام Radient Saver کے لیے بہت بڑا ہے، اس لیے اسے مختصر نہیں کیا جاتا۔ باقی گفتگو پر Saver کام جاری رکھتا ہے۔"
+  "wire.radient_saver.notice.oversize": "اس گفتگو کا ایک پیغام Radient Saver کے لیے بہت بڑا ہے، اس لیے اسے مختصر نہیں کیا جاتا۔ باقی گفتگو پر Saver کام جاری رکھتا ہے۔",
+  "wire.radient_saver.command.description": "اس سیشن کے لیے Radient Saver ترتیب دیں",
+  "wire.radient_saver.command.radient_description": "Radient سیشن کنٹرول",
+  "wire.radient_saver.command.usage": "‏/saver، /saver on، /saver off، /saver status یا /saver inherit استعمال کریں۔ اکیلا /saver حالت بدلتا ہے؛ inherit عمومی ترتیب کی پیروی کرتا ہے۔",
+  "wire.radient_saver.command.enabled": "اس سیشن کے لیے Radient Saver چالو ہے۔ آپ کی عمومی ترتیب نہیں بدلی۔",
+  "wire.radient_saver.command.disabled": "اس سیشن کے لیے Radient Saver بند ہے۔ آپ کی عمومی ترتیب نہیں بدلی۔",
+  "wire.radient_saver.command.inherited": "اس سیشن میں Radient Saver اب عمومی ترتیب اور ایجنٹ کی تعیناتی کی پیروی کرتا ہے۔",
+  "wire.radient_saver.command.status.on": "‏Radient Saver: اس سیشن کے لیے چالو ہے۔ بند کرنے کے لیے /saver off یا عمومی ترتیب کی پیروی کے لیے /saver inherit استعمال کریں۔",
+  "wire.radient_saver.command.status.off": "‏Radient Saver: اس سیشن کے لیے بند ہے۔ چالو کرنے کے لیے /saver on استعمال کریں۔",
+  "wire.radient_saver.command.badge": "saver"
 }
