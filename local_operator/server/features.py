@@ -27,6 +27,19 @@ from local_operator.supplements.contract import (
     SUPPLEMENTS_FEATURE_VERSION,
 )
 
+#: Keys this map holds that ONLY the desktop routes serve. The phone relay
+#: (``mobile/daemon.py``) republishes this map as its own capabilities, but it
+#: validates notifications with the legacy ``NotificationsQuery`` (unknown keys
+#: ignored) and ``NotificationsPatch``: a relay ``preview=true`` answers a plain
+#: first page with no ``selection``, the silent first-page fallback the
+#: ``notification_bulk_selection`` key exists to rule out. The relay drops these
+#: keys rather than reshaping its validators, so its behaviour stays as it was.
+#: ``notification_bulk_ask_read`` is listed on its own because the contract
+#: calls it a SEPARATE additive capability a client may test without also
+#: checking ``notification_bulk_selection``; the relay's ``extra="ignore"`` query
+#: drops ``include_ask_reads`` and answers the same plain first page.
+DESKTOP_ONLY_FEATURES = frozenset({"notification_bulk_selection", "notification_bulk_ask_read"})
+
 
 def feature_flags() -> dict[str, Any]:
     """The versioned feature map, resolved per call.
@@ -341,6 +354,13 @@ def static_feature_flags() -> dict[str, Any]:
         # meaningful answer, which is why this is a plain integer
         # rather than a boolean with a default.
         "notification_contract": 1,
+        # Unlike the original observed-id writes, filtered selections cover
+        # unloaded pages and carry server-side Undo receipts. Clients must not
+        # silently fall back to a first-page action against an older backend.
+        "notification_bulk_selection": 1,
+        # V2 freezes ask notification read marks too, but never grants ask
+        # settlement authority. Older selection tokens retain update-only counts.
+        "notification_bulk_ask_read": 1,
         "mcp": 1,
         "mcp_auth": 1,
         # Sessionless MCP management: `GET/POST /v1/desktop/mcp` and
@@ -468,6 +488,11 @@ def static_feature_flags() -> dict[str, Any]:
         # predates #227 answers either with 409 `outdated_hub`, which the
         # renderer shows as "the server needs an update" rather than probing.
         "team_bridge_owner_invitations": 1,
+        # `GET /v1/desktop/team-bridge/accounts/{id}/notification-avatar`: one
+        # precomposed PNG (photo or initials, LO corner badge, agent marker)
+        # for a Team Bridge OS notification's image slot. Own key so a desktop
+        # facing an older core keeps today's app icon instead of 404-probing.
+        "team_bridge_notification_avatar": 1,
         # Session code memory: GET/POST/PATCH/DELETE on
         # `/v1/desktop/sessions/{id}/variables`, reading and writing a
         # session's LIVE eval-kernel namespace by session id. Its OWN key

@@ -529,6 +529,54 @@ def is_revoked(config_root: Path, device_id: str) -> bool:
     return device_is_revoked(loaded.anchor, device_id)
 
 
+def is_admitted(certificate: str) -> bool:
+    """Whether the installed anchor ADMITS the device behind this certificate.
+
+    The relay's half of :func:`local_operator.operator.trust.device_is_admitted`,
+    beside :func:`is_revoked` and for the same reason: the relay forwards a phone's
+    frames, so it should withhold one the runtime is going to refuse rather than
+    park it and let the phone show a failure about the wrong thing. The RULE lives
+    in the predicate; this only feeds it the two facts the certificate carries
+    (its declared id and the key that will actually sign), so the relay cannot
+    drift from the runtime about who is admitted.
+
+    NO ``config_root``, deliberately (agent review round 1, n2). The anchor is ONE
+    root-owned file per UID — the loader takes no path and nothing here reads the
+    relay's config directory — so a parameter named for that root read as
+    root-scoping the answer never had. :func:`is_revoked` keeps its root because it
+    really does read ``revoked.json`` under it.
+
+    THE CERTIFICATE IS PARSED, NOT VERIFIED, deliberately and exactly as
+    :func:`is_revoked` does it: the relay is a courier and holds no operator key, so
+    it cannot tell a genuine statement from a forged one — the runtime does that.
+    A forged statement gains nothing by being refused here. An UNPARSABLE one is
+    REFUSED: ``read_device_cert`` returning ``None`` means the statement does not
+    even name a device, and the earlier sentence here claimed it was forwarded — a
+    docstring describing a body the function never had (agent review round 1, m3).
+    Fail closed on a statement this courier cannot read; the runtime refuses it too.
+
+    NO USABLE ANCHOR ADMITS, which is the same answer :func:`is_revoked` gives in
+    that state and is not a widening: the runtime is the authority that verifies the
+    signature, and with no anchor of its own it refuses every device certificate
+    (``_device_cert_point`` returns before verification, and
+    ``test_no_usable_anchor_refuses_a_device_certificate_at_the_runtime_path`` pins
+    that end to end). A courier that withheld
+    the command instead would add a refusal without adding a boundary — the
+    reasoning already recorded beside the caller for the anchor-unreadable arm
+    (agent review round 3, R3-1).
+    """
+    from local_operator.operator.trust import device_is_admitted, load_anchor
+    from local_operator.operator.verify import read_device_cert
+
+    parsed = read_device_cert(certificate)
+    if parsed is None:
+        return False
+    loaded = load_anchor()
+    if not loaded.usable or loaded.anchor is None:
+        return True
+    return device_is_admitted(loaded.anchor, parsed.device_id, parsed.spki)
+
+
 def is_revoked_here(config_root: Path, device_id: str) -> bool:
     """Whether a LOCALLY RECORDED revocation names this device **under this anchor**.
 
@@ -675,6 +723,7 @@ __all__ = [
     "drop_pending",
     "forget_revocation",
     "encode_spki",
+    "is_admitted",
     "is_revoked",
     "is_revoked_here",
     "list_devices",

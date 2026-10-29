@@ -79,6 +79,11 @@
     "tone": "Preserve casing, lowercase.",
     "note": "Owned relay SPA asks copy. Used for ordinary questions with no options."
   },
+  "relay.asks.card.other": {
+    "role": "phone ask card free-text option row label",
+    "tone": "Plain, one word. Sentence case.",
+    "note": "Owned relay SPA asks copy. The free-text door on every non-secret option question: it sits after the agent's options, opens a text field, and answers with the TEXT typed there, not an option or an index. Shown beside the dim hint 'your answer'."
+  },
   "relay.asks.card.recommended": {
     "role": "badge suffix on a recommended option",
     "tone": "Preserve the leading middle dot and the lowercase word.",

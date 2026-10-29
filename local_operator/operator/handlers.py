@@ -18,12 +18,14 @@ acceptance matrix:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
 import subprocess
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +38,7 @@ from local_operator.operator import (
     anchor_bytes,
     anchor_path,
     create_key,
+    format_install_commands,
     install_commands,
     key_id_for,
     load_anchor,
@@ -44,6 +47,7 @@ from local_operator.operator import (
     sign_challenge,
     staging_path,
 )
+from local_operator.operator import trust as trust_module
 from local_operator.operator.keychain import (
     FILE_ONLY,
     SECURE_ENCLAVE,
@@ -114,7 +118,105 @@ def stage_anchor(root: Path, anchor: Any) -> Path:
     return staged
 
 
-def install_anchor(root: Path, *, print_only: bool = False, sudo_secret: str = "") -> int:
+#: The ``purpose`` of an anchor write that ADDS a device to the operator's list
+#: (S4a pair-op calls ``install_anchor`` with it). See ``install_anchor`` (F5).
+PURPOSE_ADMIT_DEVICE = "admit_device"
+
+#: WHY an admission write did not happen — ONE code per cause. A single
+#: ``pair_device_not_admitted`` covered a cancelled prompt, a host that cannot ask
+#: for approval at all, the migration guard, and "this phone has no pending
+#: request", and its one remedy ("confirm the phone here and try again") is right
+#: for the first and wrong — for the no-pending case a dead end — for the rest
+#: (agent review round 2, m2). ``admit_device``/``confirm_devices`` and
+#: ``_admission_install`` return these, and ``pair_op`` turns one into the refusal
+#: code and sentence the card shows.
+ADMIT_OK = 0
+ADMIT_NO_INSTALLED_ANCHOR = 1
+ADMIT_MIGRATION_GUARD = 2
+ADMIT_NO_PENDING_REQUEST = 3
+ADMIT_REVOKED = 4
+ADMIT_CANCELLED = 5
+ADMIT_NO_PROMPT = 6
+ADMIT_INSTALL_FAILED = 7
+#: `--confirm`/`--approve` named no paired phone, or one this computer does not hold.
+#: Its own code (agent review round 3, m5): it used to borrow
+#: ``ADMIT_NO_INSTALLED_ANCHOR``, so a typo'd id exited as "no operator statement".
+#: CLI-only — ``admit_device`` never returns it, so ``ADMIT_REFUSED`` has no row.
+ADMIT_NO_SELECTION = 8
+
+#: The refusal code and sentence the pairing card shows for each cause, keyed by
+#: code. ONE map, so a new cause cannot ship with a neighbour's remedy copied into
+#: it — which is what one "not confirmed, confirm it and try again" sentence did for
+#: all of them (agent review round 2, m2). The sentences name a route that exists:
+#: `--authorise` is the only way back from a revocation, and `--confirm` is the only
+#: way to end the migration guard.
+ADMIT_REFUSED: dict[int, tuple[str, str]] = {
+    ADMIT_NO_INSTALLED_ANCHOR: (
+        "pair_device_not_admitted",
+        "This computer could not read its own operator statement, so no certificate was "
+        "issued. Ask Local Operator to set up operator authority here, then pair the "
+        "phone again; nothing was installed.",
+    ),
+    ADMIT_MIGRATION_GUARD: (
+        "pair_device_not_admitted",
+        "This phone was not confirmed on this computer: confirm the phones you paired "
+        "before this version first (`lop operator devices --confirm`), then try the "
+        "pairing again; nothing was installed.",
+    ),
+    ADMIT_NO_PENDING_REQUEST: (
+        "pair_device_not_admitted",
+        "This phone has no pairing request waiting on this computer, so no certificate "
+        "was issued — start the pairing again from the phone; nothing was installed.",
+    ),
+    ADMIT_REVOKED: (
+        "pair_device_revoked",
+        # No id here (design round 2, D14): this map holds only fixed strings, so
+        # the card names the verb and the CLI's own refusal names the id.
+        "This phone was removed on this computer, so no certificate was issued. Bring "
+        "it back on this computer first with `lop operator devices --authorise` and "
+        "the phone's id (`lop operator devices` lists it), then pair the phone again; "
+        "nothing was installed.",
+    ),
+    ADMIT_CANCELLED: (
+        "pair_device_not_admitted",
+        "You cancelled the approval, so no certificate was issued. Try the pairing "
+        "again when you are ready; nothing was installed.",
+    ),
+    ADMIT_NO_PROMPT: (
+        "pair_device_not_admitted",
+        "This computer has no way to ask you for an administrator's approval, so no "
+        "certificate was issued. Install sudo (or ask whoever runs this computer to), "
+        "then try the pairing again; nothing was installed.",
+    ),
+    ADMIT_INSTALL_FAILED: (
+        "pair_device_not_admitted",
+        "The approval did not finish, so no certificate was issued. Try the pairing "
+        "again; nothing was installed.",
+    ),
+}
+
+
+def _unrevoked_devices(installed: Any, staged: Any) -> list[Any]:
+    """Ids whose installed revocation the incoming statement would lift (R1)."""
+    staged_revoked = trust_module.revoked_device_ids(staged)
+    return [d for d in trust_module.revoked_device_ids(installed) if d not in staged_revoked]
+
+
+def _admitted_devices(installed: Any, staged: Any) -> list[str]:
+    """Device ids the STAGED anchor lets in that the INSTALLED one keeps out (R1-4).
+
+    Tightening (a new revocation) is not an admission. Raw ``==`` is deliberate:
+    the runtime compares the JSON values without coercing their types.
+    """
+    installed_open = trust_module.open_device_ids(installed)
+    added = [d for d in trust_module.open_device_ids(staged) if d not in installed_open]
+    changed = _unrevoked_devices(installed, staged) + added
+    return sorted({repr(d) if not isinstance(d, str) else d for d in changed})
+
+
+def install_anchor(
+    root: Path, *, print_only: bool = False, sudo_secret: str = "", purpose: str = ""
+) -> int:
     """The ONE privileged step: move the staged anchor to where the runtime reads it.
 
     Returns a process exit code rather than raising, because every caller is a
@@ -123,10 +225,81 @@ def install_anchor(root: Path, *, print_only: bool = False, sudo_secret: str = "
     inline in that verb. ``sudo_secret`` is the INTERIM ask-sudo path (design
     §3.7/OQ15): the admin password is resolved in place from the secret store and
     fed to ``sudo -S`` on stdin for this one step, never printed or logged.
+
+    ``purpose=PURPOSE_ADMIT_DEVICE`` REFUSES ``sudo_secret`` (F5). Admitting a
+    device is the write whose whole value is that a HUMAN approved it at an OS
+    admin prompt the agent cannot answer. A stored admin password is readable by
+    any same-user process (``lop secret get``), so letting this write take one
+    would let an agent admit its own device with nothing but files it can read —
+    the presence proof would be the agent's own keystroke. Onboarding's installs
+    (no ``purpose``) keep the interim path unchanged; narrowing those is the
+    mesh lane's call, not this guard's.
+
+    THE GUARD DOES NOT RELY ON THE CALLER'S ``purpose`` ALONE (R1-4): a future
+    admit path that forgets the keyword would bypass it. So ``sudo_secret`` is
+    ALSO refused whenever the staged anchor would admit a device the installed
+    anchor keeps out (see :func:`_admitted_devices`) — the write is judged by
+    what it does, not by what it says it is. A host with no usable installed
+    anchor (first onboarding) has nothing to compare and is unchanged.
+
+    THE BYTES INSTALLED ARE THE BYTES READ (the staging-swap race): the staged
+    file is read once here, its sha256 travels in the privileged command's argv,
+    and the privileged step installs only content with that digest — a swap of
+    the user-writable staged file in between is refused, not installed.
     """
+    if purpose == PURPOSE_ADMIT_DEVICE and sudo_secret:
+        print(
+            "confirming a phone needs an administrator to approve it in person, so a "
+            "stored admin password cannot be used for it; nothing was installed",
+            file=sys.stderr,
+        )
+        return 2
     staged = staging_path(root)
     target = anchor_path()
-    if not staged.exists():
+    refusal = trust_module.install_refusal()
+    if refusal is not None:
+        # R2-1: no root (or no PowerShell) means no command — print the reason,
+        # never an elevated line whose ``$root`` is the drive root.
+        print(
+            f"the operator anchor cannot be installed on this computer: {refusal}; "
+            "nothing was installed",
+            file=sys.stderr,
+        )
+        return 1
+    # Q3: ONE read. The device guard, the digest and the install all use these
+    # bytes, so a swap of the user-writable staged file between two reads can no
+    # longer show the guard a benign copy and install another.
+    try:
+        staged_bytes: bytes | None = staged.read_bytes()
+    except OSError:
+        staged_bytes = None
+    if sudo_secret and staged_bytes is not None:
+        installed = load_anchor()
+        staged_anchor = trust_module.parse_staged_anchor(staged_bytes)
+        if installed.usable and installed.anchor is not None and staged_anchor is not None:
+            if trust_module.admission_enforced(
+                installed.anchor
+            ) and not trust_module.admission_enforced(staged_anchor):
+                # Dropping the admission marker turns the rule off. It needs the
+                # same in-person gesture as admitting a phone; otherwise a stored
+                # password could quietly undo every confirmed list.
+                print(
+                    "turning off phone admission needs an administrator to approve it "
+                    "in person, so a stored admin password cannot be used; nothing was installed",
+                    file=sys.stderr,
+                )
+                return 2
+            admitted = _admitted_devices(installed.anchor, staged_anchor)
+            if admitted:
+                print(
+                    "this change confirms a phone ("
+                    + ", ".join(admitted)
+                    + "), which needs an administrator to approve it in person, so a "
+                    "stored admin password cannot be used for it; nothing was installed",
+                    file=sys.stderr,
+                )
+                return 2
+    if staged_bytes is None:
         # R1-4 (§4's rule applied to the init-shaped refusals): the remedy names the
         # product action, not the terminal verb that performs it.
         print(
@@ -135,19 +308,23 @@ def install_anchor(root: Path, *, print_only: bool = False, sudo_secret: str = "
             file=sys.stderr,
         )
         return 1
-    command = install_commands(staged, target)
+    command = install_commands(staged, target, hashlib.sha256(staged_bytes).hexdigest())
     if print_only:
-        print(" && ".join(" ".join(argv) for argv in command))
+        print(format_install_commands(command))
         return 0
     if _is_privileged():
+        # Already root: write the bytes READ above rather than copying the path
+        # again, so a swap after the read cannot change what lands.
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(staged, target)
+        target.write_bytes(staged_bytes)
         os.chmod(target, 0o644)
     else:
-        if shutil.which("sudo") is None:
+        # Windows always prints: the elevated step raises a UAC prompt, and lop
+        # never starts one on the operator's behalf — they run it themselves.
+        if trust_module._on_windows() or shutil.which("sudo") is None:
             print(
                 "installing the anchor needs administrator rights. Run this by hand:\n  "
-                + "\n  ".join(" ".join(argv) for argv in command),
+                + format_install_commands(command).replace(" && ", "\n  "),
                 file=sys.stderr,
             )
             return 1
@@ -225,9 +402,21 @@ def _install_with_sudo_stdin(command: list[list[str]], secret_name: str) -> int:
 
 
 def install_anchor_from(
-    source: Path, root: Path, *, print_only: bool = False, sudo_secret: str = ""
+    source: Path,
+    root: Path,
+    *,
+    print_only: bool = False,
+    sudo_secret: str = "",
+    allow_revocation_lift: bool = False,
 ) -> int:
     """Install a statement RECEIVED from another machine (remote onboarding §3.3 step 7).
+
+    ``allow_revocation_lift`` IS A TEST SEAM, NOT AN OPERATOR CONTROL. It exists so
+    the plant's own cell can prove the allow-control behind R1 toggles exactly one
+    thing; no product caller passes it (`git grep` finds only the test), and there is
+    no verb, flag or surface that reaches it. Recorded here rather than left to be
+    discovered, so a future caller does not reach for a bypass where the product
+    route is `lop operator devices --authorise` followed by a fresh plant.
 
     THE POINT IS THE BYTES. The approval that authorises this install mints the
     digest of the exact statement the operator's machine holds (F4b), and the
@@ -269,15 +458,373 @@ def install_anchor_from(
         return 1
     if anchor_bytes(anchor) != raw:
         print(
-            f"the anchor statement at {source} isn't the one the operator's machine "
+            f"the anchor statement at {source} isn't the one the operator's computer "
             "exported (it looks edited or re-saved), so nothing was installed — ask "
             "for a fresh export",
             file=sys.stderr,
         )
         return 1
+    installed = load_anchor()
+    if installed.usable and installed.anchor is not None:
+        lifted = _unrevoked_devices(installed.anchor, anchor)
+        if lifted and not allow_revocation_lift:
+            # A plant REPLACES the receiving list with the approved bytes, but it
+            # must not resurrect a phone this computer revoked. Adding a phone is
+            # the explicit control: re-list it locally before retrying the plant.
+            names = ", ".join(str(item) for item in lifted)
+            print(
+                f"the incoming anchor would lift this computer's revocation of {names}; "
+                "nothing was staged or installed. Allow that phone here first if you "
+                "intend to trust it again",
+                file=sys.stderr,
+            )
+            return 2
+    # No merge: the statement's bytes are exactly what the sending operator
+    # approved, so the receiving list is replaced rather than partly preserved.
     staged = stage_anchor(root, anchor)
     print(f"anchor statement accepted from {source} (staged at {staged})", file=sys.stderr)
     return install_anchor(root, print_only=print_only, sudo_secret=sudo_secret)
+
+
+#: D13 (design round 2): "operator anchor" is build vocabulary; the person needs the
+#: verb that says why.
+_UNREADABLE_SETUP = (
+    "this computer's operator setup could not be read, so nothing was confirmed. "
+    "Run `lop operator status` to see why."
+)
+
+
+def _admission_install(
+    root: Path,
+    expected_old: bytes,
+    *,
+    print_only: bool,
+    sudo_secret: str,
+    runner: Any = None,
+    announce: bool = False,
+) -> int:
+    """Install with both old and new digests pinned across the OS prompt.
+
+    ``announce`` prints the gesture sentence on stdout just before the prompt. Only the
+    CLI verb asks for it: the desktop apply route runs in a server whose card already
+    renders the same sentence from ``confirm_card_copy``.
+    """
+    if sudo_secret:
+        # `install_anchor` prints its own refusal and answers with its own codes; map
+        # them onto THIS function's one-code-per-cause set, so a caller cannot read a
+        # stored-password refusal as the migration guard or a cancelled prompt.
+        return (
+            ADMIT_OK
+            if install_anchor(root, sudo_secret=sudo_secret, purpose=PURPOSE_ADMIT_DEVICE) == 0
+            else ADMIT_INSTALL_FAILED
+        )
+    from local_operator.operator.elevate import run_elevated
+
+    target = anchor_path()
+    refusal = trust_module.install_refusal()
+    if refusal is not None:
+        # The same precheck `install_anchor` runs (R2-1), and it has to run HERE
+        # too: `install_commands` raises ValueError on a Windows host with no
+        # PowerShell, and that exception used to escape `admit_device` into the
+        # desktop apply route as a 500 instead of the typed refusal (agent review
+        # round 2, m5).
+        print(
+            f"the operator anchor cannot be installed on this computer: {refusal}; "
+            "nothing was confirmed",
+            file=sys.stderr,
+        )
+        return ADMIT_INSTALL_FAILED
+    try:
+        staged_bytes = trust_module.staging_path(root).read_bytes()
+    except OSError:
+        return ADMIT_INSTALL_FAILED
+    command = trust_module.install_commands(
+        trust_module.staging_path(root),
+        target,
+        hashlib.sha256(staged_bytes).hexdigest(),
+        hashlib.sha256(expected_old).hexdigest(),
+    )
+    if print_only:
+        print(format_install_commands(command))
+        return ADMIT_OK
+    if runner is None:
+        from local_operator.operator.elevate import confirm_card_copy, prompt_refusal
+
+        # THE PROMISE IS PRINTED ONLY WHERE IT IS KEPT (design round 2, D8). Every
+        # check that can stop the prompt — revoked, unknown id, `install_refusal`,
+        # idempotence above, and the host's ability to ask at all here — has run, so
+        # "Your Mac will ask for your admin password." is never one line above the
+        # sentence saying no prompt will appear, nor above a success that asked for
+        # nothing. The words still come from `confirm_card_copy`, the one source the
+        # card renders from.
+        cannot = prompt_refusal()
+        if cannot is not None:
+            try:
+                trust_module.staging_path(root).unlink()
+            except OSError:
+                pass
+            print(cannot, file=sys.stderr)
+            return ADMIT_NO_PROMPT
+        if announce:
+            print(confirm_card_copy()[2])
+    result = run_elevated(command) if runner is None else runner(command)
+    if result.cancelled or result.exit_code != 0:
+        # S3 signs the certificate only after a zero result, so a failed prompt can
+        # never reach certificate issuance. The staged statement goes on ANY
+        # non-zero result, not only on a cancellation (agent review round 2, m4):
+        # on macOS `osascript` exits 1 for a script error as well as a cancel, and
+        # on pkexec/sh a real failure is not a cancel either — and a statement left
+        # behind is exactly what the next plain `lop operator install` would apply
+        # after an unrelated admin prompt.
+        try:
+            trust_module.staging_path(root).unlink()
+        except OSError:
+            pass
+        # EVERY failed privileged step says something (design round 1, D2). The
+        # card promises a gesture; a run in which none happened and nothing was
+        # said is the one outcome a person cannot tell from success.
+        if result.refusal:
+            print(result.refusal, file=sys.stderr)
+            return ADMIT_NO_PROMPT
+        # NO CLAIM ABOUT WHAT THE PHONE CAN DO NOW (design round 2, D10): after a
+        # cancelled migration `--confirm` the pre-rule phones keep working, and on a
+        # presence host an unlisted phone is admitted — so the sentence names only
+        # the fact and the retry.
+        if result.cancelled:
+            print(
+                "You cancelled the approval, so nothing was confirmed. Run the same "
+                "command again when you are ready.",
+                file=sys.stderr,
+            )
+            return ADMIT_CANCELLED
+        # The script's own reason first, then the retry (agent review round 4, m3).
+        if result.diagnosis:
+            print(result.diagnosis, file=sys.stderr)
+        print(
+            "The approval did not complete, so nothing was confirmed. Run the same "
+            "command again to retry.",
+            file=sys.stderr,
+        )
+        return ADMIT_INSTALL_FAILED
+    try:
+        installed_raw = target.read_bytes()
+        loaded = trust_module.OperatorAnchor.from_json(json.loads(installed_raw.decode("utf-8")))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return ADMIT_INSTALL_FAILED
+    return (
+        ADMIT_OK
+        if loaded is not None and trust_module.anchor_bytes(loaded) == staged_bytes
+        else ADMIT_INSTALL_FAILED
+    )
+
+
+def _admission_anchor(installed: Any, ids: list[str]) -> Any:
+    """Installed statement plus marker and selected ids; never a fresh anchor.
+
+    A REVOCATION IS NOT LIFTED BY AN ADMISSION (agent review round 2, M1). This
+    builder used to strip the entry and append a bare ``{"device_id": id}``, so
+    admitting a phone the installed statement revokes REWROTE the revocation — a
+    phone revoked while its pairing card was open came back admitted, signed,
+    installed and honoured. Both callers now refuse a revoked phone before they
+    get here (``--authorise`` is the one route back); this is the second lock, so
+    no future caller can lift a revocation by admitting.
+    """
+    revoked = trust_module.revoked_device_ids(installed)
+    entries = [dict(entry) for entry in installed.devices]
+    for device_id in ids:
+        if device_id in revoked:
+            continue
+        entries = [entry for entry in entries if entry.get("device_id") != device_id]
+        entries.append({"device_id": device_id})
+    return replace(
+        installed,
+        admission=trust_module.ADMISSION_LISTED,
+        devices=tuple(entries),
+    )
+
+
+def _installed_admission_anchor() -> tuple[Any, bytes] | None:
+    """The canonical installed statement, only after its ownership gate passes."""
+    loaded = load_anchor()
+    try:
+        raw = anchor_path().read_bytes()
+        installed = trust_module.OperatorAnchor.from_json(json.loads(raw.decode("utf-8")))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return None
+    if (
+        not loaded.usable
+        or installed is None
+        or loaded.anchor != installed
+        or trust_module.anchor_bytes(installed) != raw
+    ):
+        return None
+    return installed, raw
+
+
+def _revoked_selection(root: Path, ids: list[str]) -> list[str]:
+    """Which of ``ids`` this computer has revoked — the ANCHOR's list or the record's.
+
+    ``devices.is_revoked`` is the product predicate (both lists, in the order that
+    costs least when the answer is yes), so ``admit_device`` (one id) and
+    ``confirm_devices`` (a selection) cannot disagree about the rule — and neither
+    can miss the revocation a `--revoke --print-only` left in the local record
+    before the privileged anchor write landed. Separate from the refusal sentence so
+    the words live in one place.
+    """
+    from local_operator.operator.devices import is_revoked
+
+    return [device_id for device_id in ids if is_revoked(root, device_id)]
+
+
+def _revoked_in(installed: Any, ids: list[str]) -> list[str]:
+    """Which of ``ids`` the statement just read revokes — independent of ``devices``.
+
+    THE SECOND LOCK REFUSES, NOT ONLY REFRAINS (agent review round 3, m3).
+    ``_admission_anchor`` leaves a revoked entry's bytes alone, so for a lone revoked
+    id the proposal equalled the installed bytes and the idempotence branch answered
+    ``ADMIT_OK`` — and ``pair_op`` signs on ``ADMIT_OK``. Reading the revocation off
+    the SAME statement the proposal is built from means a caller that skips (or a
+    future change that weakens) ``_revoked_selection`` still gets a refusal.
+    """
+    revoked = trust_module.revoked_device_ids(installed)
+    return [device_id for device_id in ids if device_id in revoked]
+
+
+def _print_revoked_refusal(ids: list[str]) -> None:
+    """The one sentence for "this phone was removed on this computer".
+
+    NAMES THE ROUTE BACK, because a revoked phone can never be admitted by
+    confirming it: ``--authorise`` clears the entry, and only then does a pairing
+    work. Saying "confirm the phone" here would be an instruction that cannot
+    work (agent review round 2, m1/m2).
+    """
+    from local_operator.operator.devices import AUTHORISE_COMMAND
+
+    names = ", ".join(ids)
+    print(
+        f"this phone was removed on this computer, so it cannot be confirmed here: "
+        f"{names}. Bring it back first with "
+        f"`{AUTHORISE_COMMAND.format(device_id=ids[0])}` (this asks for your "
+        "approval), then pair the phone again; nothing was installed",
+        file=sys.stderr,
+    )
+
+
+def confirm_devices(
+    root: Path,
+    ids: list[str],
+    *,
+    print_only: bool = False,
+    sudo_secret: str = "",
+    runner: Any = None,
+) -> int:
+    """Confirm the human's chosen phones and end the pre-rule migration state."""
+    from local_operator.operator.devices import list_devices
+
+    current = _installed_admission_anchor()
+    if current is None:
+        # Never derive an admission from the user-writable staged statement.
+        print(_UNREADABLE_SETUP, file=sys.stderr)
+        return ADMIT_NO_INSTALLED_ANCHOR
+    installed, old = current
+    known = {device.device_id for device in list_devices(root)}
+    selected = list(dict.fromkeys(ids))
+    if not selected or any(device_id not in known for device_id in selected):
+        print(
+            "choose one or more paired phones to confirm; nothing was installed",
+            file=sys.stderr,
+        )
+        return ADMIT_NO_SELECTION
+    revoked = _revoked_selection(root, selected) or _revoked_in(installed, selected)
+    if revoked:
+        _print_revoked_refusal(revoked)
+        return ADMIT_REVOKED
+    proposed = _admission_anchor(installed, selected)
+    if trust_module.anchor_bytes(proposed) == old:
+        return ADMIT_OK  # Idempotence: an already confirmed selection needs no prompt.
+    stage_anchor(root, proposed)
+    return _admission_install(
+        root,
+        old,
+        print_only=print_only,
+        sudo_secret=sudo_secret,
+        runner=runner,
+        announce=True,
+    )
+
+
+def admit_device(
+    root: Path,
+    device_id: str,
+    *,
+    print_only: bool = False,
+    sudo_secret: str = "",
+    runner: Any = None,
+) -> int:
+    """Confirm exactly one new phone before S3 is allowed to issue its cert.
+
+    A phone this computer revoked is refused FIRST (agent review round 2, M1): a
+    revocation that lands while a pairing card is open used to be rewritten by the
+    admission that followed, so the phone was signed, installed and honoured.
+
+    AND BEFORE THE ANCHOR IS READ AT ALL (CI red on PR #3118). The local revocation
+    record needs no privileged read, so that half of the answer exists even on a host
+    whose statement cannot be read — and a revocation is the MORE SPECIFIC cause.
+    Reading the anchor first reported ``pair_device_not_admitted`` ("this computer
+    could not read its own operator statement ... pair the phone again") for a phone
+    whose only route back is ``--authorise``: a remedy that cannot work, offered to a
+    phone the host would refuse again on the retry it just recommended.
+    """
+    from local_operator.operator.devices import is_revoked_here, list_devices
+
+    if is_revoked_here(root, device_id):
+        _print_revoked_refusal([device_id])
+        return ADMIT_REVOKED
+    current = _installed_admission_anchor()
+    if current is None:
+        print(_UNREADABLE_SETUP, file=sys.stderr)
+        return ADMIT_NO_INSTALLED_ANCHOR
+    installed, old = current
+    if _revoked_selection(root, [device_id]) or _revoked_in(installed, [device_id]):
+        # A REVOCATION OUTRANKS ADMISSION (agent review round 2, M1). Without this
+        # the admission REWROTE the revocation a moment later and the phone was
+        # signed, installed and honoured — a phone revoked while its card was open
+        # came back by finishing that card. `--authorise` is the one route back.
+        _print_revoked_refusal([device_id])
+        return ADMIT_REVOKED
+    if not trust_module.admission_enforced(installed) and any(
+        device.device_id not in trust_module.open_device_ids(installed)
+        for device in list_devices(root)
+    ):
+        print(
+            "confirm your existing phones before adding another; adding one must not "
+            "un-confirm the phones you already paired",
+            file=sys.stderr,
+        )
+        return ADMIT_MIGRATION_GUARD
+    if device_id not in {device.device_id for device in list_devices(root)}:
+        # A first-time phone has no stored cert until S3 signs it, AFTER this
+        # write. Its pending request, not the cert store, is what validates it.
+        from local_operator.operator.devices import list_pending
+
+        if device_id not in {str(row.get("device_id") or "") for row in list_pending(root)}:
+            print(
+                "the phone has no pending pairing request; nothing was confirmed — "
+                "start the pairing again from the phone",
+                file=sys.stderr,
+            )
+            return ADMIT_NO_PENDING_REQUEST
+    proposed = _admission_anchor(installed, [device_id])
+    if trust_module.anchor_bytes(proposed) == old:
+        return ADMIT_OK
+    stage_anchor(root, proposed)
+    return _admission_install(
+        root,
+        old,
+        print_only=print_only,
+        sudo_secret=sudo_secret,
+        runner=runner,
+    )
 
 
 def _existing_key(root: Path, preference: str) -> KeyHandle | None:
@@ -355,7 +902,16 @@ def _report_existing_key(root: Path, handle: KeyHandle, label: str) -> int:
     loaded = load_anchor()
     staged_now = False
     if not staged.exists() and not loaded.exists:
-        staged = stage_anchor(root, anchor_for_handle(handle, label=label))
+        # New statements are born enforcing; only an existing pre-rule installed
+        # file gets the migration guard. Constructing from this installed/created
+        # statement preserves the key and backend rather than minting a new key.
+        staged = stage_anchor(
+            root,
+            replace(
+                anchor_for_handle(handle, label=label),
+                admission=trust_module.ADMISSION_LISTED,
+            ),
+        )
         staged_now = True
     print(f"operator key already exists in the {handle.backend} store; nothing replaced")
     print(f"  key id : {handle.key_id}")
@@ -428,7 +984,10 @@ def _init(args: argparse.Namespace) -> int:
         again = _existing_key(root, args.backend)
         if again is not None:
             return _report_existing_key(root, again, args.label)
-    anchor = anchor_for_handle(handle, label=args.label)
+    anchor = replace(
+        anchor_for_handle(handle, label=args.label),
+        admission=trust_module.ADMISSION_LISTED,
+    )
     staged = stage_anchor(root, anchor)
 
     print(f"operator key created in the {handle.backend} store")
@@ -747,6 +1306,16 @@ def _status() -> int:
         backend_field = "(none — an operator key is staged; the install step has not run yet)"
     print(f"private-half backend   : {backend_field}")
     print(f"presence per signature : {report['presence_enforced_by_os']}")
+    # THE RULE, STATED WHERE AN OPERATOR WILL READ IT. One sentence shared with
+    # `lop operator devices` (`trust.admission_sentence`), because two hand-written
+    # copies of one rule drifted exactly where nobody could check them: both claimed
+    # a list requirement that `anchor.presence` exempts before the marker is read, so
+    # a Secure-Enclave host would have honoured an unlisted phone while both surfaces
+    # said it would not (agent review round 1, m1). The anchor is read once here for
+    # both facts; the report above describes the LEVEL, which is a different question.
+    loaded_anchor = trust_module.load_anchor()
+    anchor = loaded_anchor.anchor if loaded_anchor.usable else None
+    print(f"phone admission        : {trust_module.admission_sentence(anchor)}")
     print(f"spawn-capable guarantee: {report['capability_guarantee']}")
 
     # THE KEY AGENT'S FAULT STANDS BESIDE THE AUTHORITY REASON, NEVER IN PLACE OF IT
@@ -836,25 +1405,53 @@ def _print_paired_devices() -> None:
     listings: the revocation clears the certificate, so `paired` cannot hold one, and
     nothing printed the anchor-only revocations — which left the id the remedy names
     unreadable anywhere but a receipt from an earlier day.
+
+    UNDER ENFORCEMENT EACH PHONE SAYS WHETHER THE COMPUTER HAS CONFIRMED IT. A phone
+    whose certificate this machine holds but whose id the anchor does not list is
+    refused by the runtime, and without this the listing above would name it as a
+    phone that can act — the one reading a human would take from a line of ids. The
+    marker appears only on hosts that enforce, because on a host that does not, an
+    unlisted phone IS admitted and calling it "not confirmed" would describe a
+    boundary the host does not apply.
     """
     from local_operator.operator.devices import (
         AUTHORISE_COMMAND,
         list_devices,
         revoked_ids,
     )
+    from local_operator.operator.trust import (
+        admission_enforced,
+        load_anchor,
+        open_device_ids,
+    )
 
     paired = list_devices(config_dir())
     revoked = revoked_ids(config_dir())
+    loaded = load_anchor()
+    anchor = loaded.anchor if loaded.usable else None
+    enforcing = bool(anchor is not None and admission_enforced(anchor))
+    # A PRESENCE HOST EXEMPTS THE LIST BEFORE THE MARKER IS READ
+    # (`trust.device_is_admitted`): the key asks for a gesture per signature there,
+    # so an unlisted phone IS admitted and the marker below would be a boundary this
+    # host does not apply (agent review round 1, m1).
+    presence = bool(anchor is not None and anchor.presence)
+    listed = open_device_ids(anchor) if anchor is not None else []
     if paired:
         print(f"paired devices         : {len(paired)}")
         for device in paired:
-            print(f"  - {device.device_id}  {device.name or '(unnamed)'}")
+            # Under enforcement a phone this computer holds a certificate for but does
+            # not list is REFUSED by the runtime, so the row has to say so — otherwise
+            # a line of ids reads as a list of phones that can act.
+            admitted = not enforcing or presence or device.device_id in listed
+            pending = "" if admitted else "  (not confirmed on this computer)"
+            print(f"  - {device.device_id}  {device.name or '(unnamed)'}{pending}")
     if revoked:
         print(f"revoked devices        : {len(revoked)}")
         for device_id in revoked:
             print(
                 f"  - {device_id}  (revoked — "
-                f"`{AUTHORISE_COMMAND.format(device_id=device_id)}` brings it back)"
+                f"`{AUTHORISE_COMMAND.format(device_id=device_id)}` brings this device "
+                "back, then pair the phone again)"
             )
 
 

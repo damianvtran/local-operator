@@ -24,6 +24,12 @@ START-UP ORDER (each step exists because getting it wrong is a real failure):
    then process env). Starting with none held every message as
    ``provider_error`` before any screen (live E2E F4).
 
+6. Stop CLEANLY on SIGTERM/SIGHUP (see ``_supervise``). launchd sends
+   SIGTERM on a bootout, a logout and a reboot; with no handler the default
+   action killed the process mid-spine, the spine's ``finally:
+   release_claim`` never ran, and the message's claim stayed ``held`` for
+   the whole lease (PR #3038 review R2-3).
+
 This entry point does NOT install services; that is connector/install.py's
 separate, guarded lifecycle (D2a), never a connector's own start path.
 """
@@ -34,6 +40,8 @@ import argparse
 import asyncio
 import copy
 import logging
+import os
+import signal
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +58,25 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--base-url")
     return parser
 
+
+#: How long a stop signal lets the in-flight iteration finish on its own (a
+#: spine already past screening usually completes and releases in well under
+#: this) before the work is cancelled. Cancellation is what bounds the rest:
+#: the spine's ``finally: release_claim`` runs on ``CancelledError``.
+STOP_GRACE_S = 5.0
+#: How long the cancelled work gets to unwind before the process exits
+#: regardless. GRACE + CANCEL stays well inside launchd's default
+#: ``ExitTimeOut`` (20 s), after which launchd SIGKILLs — the very state the
+#: handler exists to avoid. Both are asyncio timers, so the real bound is
+#: GRACE + CANCEL plus the longest SYNCHRONOUS step running on the loop thread
+#: when they fire (a SQLite busy wait, ≤ 2 s); every such step is bounded. A
+#: claim still held at exit is the loop's ``stale_claim`` park to recover.
+STOP_CANCEL_S = 5.0
+#: The stop signals: SIGTERM (launchd/systemd stop, reboot) and SIGHUP (the
+#: controlling terminal went away). SIGINT keeps Python's KeyboardInterrupt.
+_STOP_SIGNALS = tuple(
+    sig for sig in (getattr(signal, "SIGTERM", None), getattr(signal, "SIGHUP", None)) if sig
+)
 
 #: One rotating file is bounded at (BACKUP_COUNT + 1) x MAX_BYTES = 1.5 MiB.
 _LOG_MAX_BYTES = 256 * 1024
@@ -111,7 +138,7 @@ def _configure_logging(config_dir: Path) -> logging.Handler | None:
     return handler
 
 
-async def _main_async(args: argparse.Namespace) -> int:
+async def _main_async(args: argparse.Namespace, stop: asyncio.Event | None = None) -> int:
     from local_operator.providers.auth_store import AuthStore
     from local_operator.team_bridge.client import (
         DEFAULT_RADIENT_API_BASE_URL,
@@ -151,8 +178,10 @@ async def _main_async(args: argparse.Namespace) -> int:
         # commits, and the watch below re-checks it without logging per tick.
         logger.info("bridge connector idle: stage=idle code=no_owner")
     while owner is None:
+        if stop is not None and stop.is_set():
+            return 0
         await _loop.idle_until_owner_changes(
-            None, config_dir=config_dir, owner_source=owner_source, stop=None
+            None, config_dir=config_dir, owner_source=owner_source, stop=stop
         )
         owner = owner_source()
 
@@ -195,6 +224,9 @@ async def _main_async(args: argparse.Namespace) -> int:
                 auth_store=auth_store,
                 access_provider=access_provider,
                 owner_source=owner_source,
+                # Set by a stop signal: no NEW iteration starts, and every
+                # pause/idle wakes at once. Returns ``None``, ending this loop.
+                stop=stop,
             )
     finally:
         auth_store.close()
@@ -202,10 +234,80 @@ async def _main_async(args: argparse.Namespace) -> int:
     return 0
 
 
+def _install_stop_handlers(loop: asyncio.AbstractEventLoop, stop: asyncio.Event) -> list[int]:
+    """Route the stop signals to ``stop``; return the ones actually installed.
+
+    ``add_signal_handler`` runs the callback ON the loop (never inside an
+    arbitrary frame the way a ``signal.signal`` handler would), so setting an
+    ``asyncio.Event`` from it is safe. It is UNIX-only: a platform that refuses
+    it keeps the old default behaviour, which the ``stale_claim`` park still
+    recovers — one claim lease later, and at-least-once (see loop.py).
+    """
+
+    installed: list[int] = []
+    for sig in _STOP_SIGNALS:
+        try:
+            loop.add_signal_handler(sig, stop.set)
+        except (NotImplementedError, RuntimeError, ValueError):
+            continue
+        installed.append(sig)
+    return installed
+
+
+async def _supervise(args: argparse.Namespace) -> int:
+    """Run the connector until it returns or a stop signal arrives.
+
+    THE STOP SEQUENCE (R2-3): the signal sets ``stop`` — the loop starts no
+    new iteration and its pauses wake. The in-flight iteration gets
+    ``STOP_GRACE_S`` to finish on its own (its spine reaches its ``finally``
+    and releases its claim), then it is CANCELLED, which runs that same
+    ``finally`` from the ``await`` it is parked on (screening, the long poll,
+    the handoff). The machine lock and the credential store close in
+    ``_main_async``'s own ``finally``. Exit is 0: a requested stop is not a
+    failure, and ``KeepAlive`` should not read it as a crash.
+    """
+
+    loop = asyncio.get_running_loop()
+    stop = asyncio.Event()
+    installed = _install_stop_handlers(loop, stop)
+    work = asyncio.create_task(_main_async(args, stop))
+    stopped = asyncio.create_task(stop.wait())
+    try:
+        await asyncio.wait({work, stopped}, return_when=asyncio.FIRST_COMPLETED)
+        if work.done():
+            return work.result()
+        logger.info("bridge connector stopping: stage=stop code=signal")
+        await asyncio.wait({work}, timeout=STOP_GRACE_S)
+        if not work.done():
+            work.cancel()
+            await asyncio.wait({work}, timeout=STOP_CANCEL_S)
+        if not work.done():
+            # The cancellation never landed: something is awaiting outside
+            # the task's reach (an executor future, or a callee swallowing
+            # ``CancelledError``). Waiting longer only ends in launchd's
+            # SIGKILL; leave now — the kernel drops the flock and the loop's
+            # stale-claim park recovers any claim still held.
+            logger.warning("bridge connector stopping: stage=stop code=unwind_timeout")
+            logging.shutdown()
+            os._exit(0)
+        if not work.cancelled() and work.exception() is not None:
+            # Content-free, like every connector line: the class name only.
+            logger.warning(
+                "bridge connector stopping: stage=stop code=%s",
+                type(work.exception()).__name__,
+            )
+        logger.info("bridge connector stopped: stage=stop code=clean")
+        return 0
+    finally:
+        stopped.cancel()
+        for sig in installed:
+            loop.remove_signal_handler(sig)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     try:
-        return asyncio.run(_main_async(args))
+        return asyncio.run(_supervise(args))
     except KeyboardInterrupt:
         return 0
 

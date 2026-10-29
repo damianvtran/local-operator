@@ -280,7 +280,7 @@ async def test_a_non_action_receipt_passes_through_untouched() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_busy_session_is_steered_rather_than_prompted() -> None:
+async def test_a_busy_session_is_steered_rather_than_prompted(tmp_path: Path) -> None:
     """Mid-turn, the completion STEERS — mirroring what a viewer does.
 
     ``prompt`` rejects a concurrent call, so admitting one while a turn runs
@@ -288,7 +288,7 @@ async def test_a_busy_session_is_steered_rather_than_prompted() -> None:
     boundary, which is the existing mid-turn channel and the same choice
     ``app.py::_submit_prompt`` makes.
     """
-    handle, session = make_handle()
+    handle, session = make_handle(directory=tmp_path / "session")
     session.is_streaming = True
 
     await handle._complete_unconsumed_action(_attach_receipt(), None, None)
