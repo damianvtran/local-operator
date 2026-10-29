@@ -255,8 +255,11 @@ def test_compact_recipient_wire_schema_preserves_closed_one_of(target, valid):
         {"account_id": "acc_2", "endpoint_id": ""},
         {"account_id": "acc_2", "endpoint_id": "bep_9"},
         {"account_id": "   "},
-        # A guessed name learns the accepted shapes from the refusal itself.
-        {"name": "Ada Lovelace"},
+        # A DISPLAY NAME is no longer a refused SHAPE for send/reply: it is a
+        # RESOLUTION REQUEST that needs the directory and the owner's allowlist,
+        # so it refuses after the admission gate instead of here (that path has
+        # its own test below). The keys around it still refuse with no I/O.
+        {"name": "Ada Lovelace", "kind": "human"},
         # The bare-string form is an id or nothing: empty, padded, and a display
         # NAME written as a bare string (ids never contain whitespace) refuse.
         "",
@@ -789,3 +792,79 @@ def test_the_published_to_schema_names_both_shapes_and_the_directory() -> None:
             )
             == []
         )
+
+
+@pytest.mark.asyncio
+async def test_a_send_name_is_refused_after_the_scope_reads_not_before(
+    tmp_path, monkeypatch
+) -> None:
+    """A name is a RESOLUTION REQUEST, so its refusal costs the scope reads — and no intent.
+
+    The property this file exists for still holds: a refused recipient leaves no
+    retryable outbox intent and dispatches no message. What changed with name
+    resolution is WHEN it can refuse: the bridge directory and the owner's own
+    allowlist are wire reads behind the admission gate, so a name that resolves to
+    nobody refuses after them — naming BOTH reasons it might be (not on this team,
+    or their bridge is not enabled) — and still leaves nothing behind.
+    """
+    from local_operator.team_bridge.outbox import Outbox
+
+    records = []
+    original = Outbox.record_send
+
+    def record(self, *args, **kwargs):
+        records.append(kwargs)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Outbox, "record_send", record)
+    requests: list[httpx.Request] = []
+    runtime = BridgeRuntime(
+        client=_client(
+            lambda request: (
+                requests.append(request),
+                # A directory with one member, and an allowlist naming somebody
+                # else: the asked-for name is simply not in the reachable set.
+                (
+                    _ok(
+                        {
+                            "members": [
+                                {
+                                    "account_id": "acc_other",
+                                    "display_label": "Bo Chen",
+                                    "bridge_enabled": True,
+                                }
+                            ]
+                        }
+                    )
+                    if request.url.path.endswith("/directory")
+                    else _ok(
+                        {
+                            "allowlist": {
+                                "entries": [
+                                    {
+                                        "direction": "send",
+                                        "effect": "allow",
+                                        "target": {"account_id": "acc_other"},
+                                    }
+                                ]
+                            }
+                        }
+                    )
+                ),
+            )[1],
+        ),
+        config_dir=tmp_path,
+        tenant_id=TENANT,
+        owner=_owner(),
+        session_id="synthetic-session",
+    )
+    result = await execute_bridge(
+        runtime, {"op": "send", "to": {"name": "Ada Lovelace"}, "text": "synthetic"}
+    )
+    assert result["ok"] is False and result["code"] == "invalid_request"
+    # BOTH reasons, because a model that cannot tell them apart guesses.
+    assert "not on this team" in result["error"]
+    assert "bridge is not enabled" in result["error"]
+    assert records == []
+    # The scope reads happened; nothing was sent.
+    assert [request.method for request in requests] == ["GET", "GET"]

@@ -167,6 +167,131 @@ def members_from_conversation(payload: Any) -> tuple[MemberCandidate, ...]:
     return tuple(candidates)
 
 
+def _allowlist_entries(payload: Any) -> list[Mapping[str, Any]]:
+    """The owner's policy entries from the ``allowlist`` read, or none.
+
+    The payload is the frozen ``{allowlist: {tenant_id, entries: [...]}}`` shape
+    (``client.allowlist_view`` reads the same block). Anything unreadable yields
+    NO entries — which, for a name resolution, means nobody is reachable and
+    every name refuses: the safe direction, and never a directory-wide fallback.
+    """
+
+    if not isinstance(payload, Mapping):
+        return []
+    block = payload.get("allowlist")
+    if not isinstance(block, Mapping):
+        return []
+    rows = block.get("entries")
+    if not isinstance(rows, list):
+        return []
+    return [row for row in rows if isinstance(row, Mapping)]
+
+
+def _target_key(entry: Mapping[str, Any]) -> tuple[str, str] | None:
+    """``(key, value)`` for one policy entry's target, or ``None`` if unreadable."""
+
+    target = entry.get("target")
+    if not isinstance(target, Mapping):
+        return None
+    account_id = target.get("account_id")
+    if isinstance(account_id, str) and account_id.strip():
+        return ("account_id", account_id.strip())
+    endpoint_id = target.get("endpoint_id")
+    if isinstance(endpoint_id, str) and endpoint_id.strip():
+        return ("endpoint_id", endpoint_id.strip())
+    return None
+
+
+def reachable_targets(payload: Any) -> frozenset[tuple[str, str]]:
+    """The ``send``-direction targets the owner has EXPLICITLY allowed.
+
+    This is the owner's own policy, read by its own vocabulary (``direction``
+    ``send``, ``effect`` ``allow``/``deny``), and it is a TARGET SET rather than
+    a count the way ``allowlist_view`` reads the same block for its S-7 cues.
+
+    The rule is the intersection's allow half and nothing else:
+
+    * ``allow`` targets are addressable by name; an ``allow`` for ``receive``
+      says nothing about whom this owner may write to, so it is not read here;
+    * a ``deny`` for the same target in the ``send`` direction removes it even
+      when an ``allow`` also names it — the narrower, safer reading, and the one
+      that cannot deliver to somebody the owner has blocked;
+    * an EMPTY allow set is an EMPTY reachable set. That is deliberate and is
+      the whole least-privilege point of this scope: a resolver that fell back
+      to the organization directory when the owner had listed nobody would be
+      guessing on the owner's behalf, and a name would then reach a colleague
+      the owner never named. Sending to an explicit account id is unaffected —
+      that path is not a guess.
+    """
+
+    allowed: set[tuple[str, str]] = set()
+    denied: set[tuple[str, str]] = set()
+    for entry in _allowlist_entries(payload):
+        if entry.get("direction") != "send":
+            continue
+        key = _target_key(entry)
+        if key is None:
+            continue
+        if entry.get("effect") == "allow":
+            allowed.add(key)
+        elif entry.get("effect") == "deny":
+            denied.add(key)
+    return frozenset(allowed - denied)
+
+
+def members_from_allowlist(directory: Any, allowlist: Any) -> tuple[MemberCandidate, ...]:
+    """Project the owner's REACHABLE set: the directory ∩ the send-allowlist.
+
+    Two reads, one set, and the intersection is the security property: the
+    directory says who exists (and whether their bridge is enabled), the
+    allowlist says whom this owner permits, and only a member in BOTH can be
+    named. Neither read alone can produce a candidate, so a name cannot resolve
+    to a colleague the owner never listed, and cannot resolve to somebody who
+    does not exist however the allowlist was edited.
+
+    ``bridge_enabled`` is carried, not filtered: a disabled member still
+    RESOLVES (they are that person), and the delivery step refuses them with a
+    sentence that says why — see ``resolve_for_delivery``'s third guard. Dropping
+    them here would turn "your colleague's bridge is off" into "nobody by that
+    name", which is the confusion the refusal exists to prevent.
+
+    Anything unreadable yields NO candidates, never a directory-wide fallback.
+    """
+
+    reachable = reachable_targets(allowlist)
+    if not reachable:
+        return ()
+    if not isinstance(directory, Mapping):
+        return ()
+    rows = directory.get("members")
+    if not isinstance(rows, list):
+        return ()
+    candidates: list[MemberCandidate] = []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        account_id = row.get("account_id")
+        display_label = row.get("display_label")
+        if not isinstance(account_id, str) or not account_id.strip():
+            continue
+        if not isinstance(display_label, str) or not display_label.strip():
+            continue
+        if ("account_id", account_id) not in reachable:
+            continue
+        kind = row.get("kind")
+        endpoint_id = row.get("endpoint_id")
+        candidates.append(
+            MemberCandidate(
+                account_id=account_id,
+                display_label=display_label,
+                kind=kind if isinstance(kind, str) and kind in MEMBER_KINDS else "",
+                endpoint_id=endpoint_id if isinstance(endpoint_id, str) else "",
+                bridge_enabled=row.get("bridge_enabled") is True,
+            )
+        )
+    return tuple(candidates)
+
+
 def record_resolution(
     *,
     config_dir: Path | str,
@@ -240,7 +365,13 @@ def record_resolution(
 #: three answers the matcher can give; ``unavailable`` is the fourth state, for an
 #: attempt whose candidate set could not be read at all (recorded BEFORE the
 #: refusal, so "I asked for Ada and nothing happened" is on the record too).
-OUTCOMES = ("resolved", "no_match", "ambiguous", "unavailable")
+OUTCOMES = (
+    "resolved",
+    "no_match",
+    "ambiguous",
+    "unavailable",
+    "bridge_disabled",
+)
 
 
 def _outcome(resolution: NameResolution) -> str:
@@ -265,10 +396,20 @@ def resolve_for_delivery(
     too — :class:`~local_operator.team_bridge.types.RecipientNameRefused` carries
     the :class:`~local_operator.team_bridge.types.NameResolution` the row needs.
 
-    Wiring ``send``/``reply`` to the owner's allowlist is therefore this same
-    call with :data:`~local_operator.team_bridge.types.SCOPE_ALLOWLIST` and that
-    scope's candidates — the sentence, the audit word and the matching rule
-    arrive with it rather than being re-derived.
+    ``send``/``reply`` reach this same call with
+    :data:`~local_operator.team_bridge.types.SCOPE_ALLOWLIST` and that scope's
+    candidates — the sentence, the audit word and the matching rule arrive with
+    it rather than being re-derived.
+
+    THE THIRD GUARD, and why it is here rather than in the matcher. A name that
+    resolves to an account whose bridge is NOT enabled has resolved correctly and
+    still cannot be delivered to: the hub would accept the send and nothing would
+    ever arrive. It is checked as its own step (not by dropping disabled members
+    from the candidate set) because the caller deserves to hear the difference —
+    "nobody by that name" and "them, but their bridge is off" have different next
+    moves, and a silent non-delivery is exactly the class this feature exists to
+    eliminate. The check and the row are ordered the same way the matcher's are:
+    the refusal is recorded before it is raised.
     """
 
     try:
@@ -285,11 +426,26 @@ def resolve_for_delivery(
     # never the member's own label: a reconstruction has to show the caller's
     # words next to the ids, or "they asked for A and it went to B" is
     # indistinguishable from a correct resolution.
+    resolution = NameResolution(requested=requested_name.strip(), matches=(member,))
+    if not member.bridge_enabled:
+        record_resolution(
+            config_dir=config_dir,
+            scope=scope,
+            scope_id=scope_id,
+            resolution=resolution,
+            outcome="bridge_disabled",
+        )
+        raise RecipientNameRefused(
+            f"that member's bridge is not enabled {scope.where}, so a message cannot "
+            "reach them yet — they enable it in their own Team Bridge settings; "
+            "this is not a name problem",
+            resolution,
+        )
     record_resolution(
         config_dir=config_dir,
         scope=scope,
         scope_id=scope_id,
-        resolution=NameResolution(requested=requested_name.strip(), matches=(member,)),
+        resolution=resolution,
     )
     return member
 
@@ -299,7 +455,9 @@ __all__ = [
     "OUTCOMES",
     "RESOLUTION_AUDIT_FILENAME",
     "ResolutionAuditUnavailable",
+    "members_from_allowlist",
     "members_from_conversation",
+    "reachable_targets",
     "record_resolution",
     "resolve_for_delivery",
     "resolution_audit_path",
