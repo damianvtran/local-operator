@@ -325,7 +325,9 @@ def _events(device: Device) -> list[str]:
     return [str(row.get("event")) for row in device.server.audit.tail(limit=500)]
 
 
-def _recorded(device: Device, word: str, *, timeout_s: float = 15.0) -> net_fixtures.WaitResult:
+def _recorded(
+    device: Device, word: str, *, timeout_s: float = net_fixtures.NET_WAIT_BUDGET_S
+) -> net_fixtures.WaitResult:
     """Wait until ``device``'s own trail carries ``word``; report whether it arrived.
 
     THE TRAIL IS WRITTEN BY WHICHEVER THREAD DID THE ACT, AND AFTER THE ACT. The
@@ -337,7 +339,9 @@ def _recorded(device: Device, word: str, *, timeout_s: float = 15.0) -> net_fixt
     ended at ``trust_changed`` and no ``pairing_refused`` ever appeared), and 1 ms is
     well inside the 525-668 ms starvation gaps this fleet measures. The bound is the
     backstop for a row that genuinely never arrives — which then fails the assertion
-    below with the whole trail in the message.
+    below with the whole trail in the message, and it is the SHARED backstop
+    (``net_fixtures.NET_WAIT_BUDGET_S``): the row is not shorter-latency by construction,
+    so this helper must not carry a private 15 s of its own.
     """
     return net_fixtures.wait_for(lambda: word in _events(device), timeout_s=timeout_s)
 

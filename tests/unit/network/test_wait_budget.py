@@ -52,8 +52,12 @@ def test_a_wait_that_never_holds_is_falsy_and_says_why() -> None:
     assert "EXPIRED" in message
     assert "still false" in message
     # The elapsed time, the budget, and what was still false — the three facts the old
-    # bare ``False`` threw away.
-    assert "after 0.2" in message
+    # bare ``False`` threw away. The elapsed figure is read back from the MEASURED value,
+    # not written as the budget literal: ``__repr__`` renders ``:.2f`` of the measurement,
+    # and the four 50 ms polls cannot finish in under 0.20 s but can easily land past
+    # 0.295 s — one 525-668 ms starvation gap (conftest.py, the fleet figure) would red a
+    # `"after 0.2"` substring on exactly the loaded host this PR exists to keep green.
+    assert f"after {outcome.elapsed_s:.2f}s" in message
     assert "budget 0.2s" in message
     assert "lambda" in message
 
@@ -88,24 +92,27 @@ def test_the_budget_decides_a_delayed_condition_in_both_directions() -> None:
 
     THE CELL. A driver thread sets a flag after ``FLAG_DELAY_S`` — no network, no relay,
     no fixtures, no clock assumptions about this host other than "12 s is longer than
-    0.5 s". The SAME predicate is then waited on twice through the shipped
+    0.5 s". The SAME predicate is then waited on three times through the shipped
     ``wait_for``/``wait_outcome`` path (``timeout_s`` is the parameter
     ``LO_TEST_NET_WAIT_S`` feeds — one call site, so the budget cannot be smuggled in
     from elsewhere, and passing it explicitly is what makes the cell independent of
-    import-time env capture).
+    import-time env capture). Each leg asserts the BEHAVIOUR — where the wait stopped —
+    rather than a wide plausible range, because a range wide enough to survive a starved
+    host is also wide enough to accept the wrong mechanism.
 
-    1. Under the short budget the wait EXPIRES while the flag is still false, and the
-       message carries the elapsed time and the not-yet-true predicate — the facts a red
-       shard log needs to be readable as "slow machine, real work" rather than as a
-       product defect.
-    2. Under the long budget the SAME wait succeeds, and it returns at ~12 s: when the
-       condition became true, not when the 30 s budget ran out.
+    1. With the flag still false, the short budget EXPIRES, and the message carries the
+       elapsed time and the not-yet-true predicate — the facts a red shard log needs to
+       be readable as "slow machine, real work" rather than as a product defect. The
+       measured elapsed must be ≈0.5 s: the wait stopped on its bound, not on the flag.
+    2. The driver is started only now, and the SAME wait under the long budget succeeds
+       with elapsed ≈12 s — the flag's own delay. A wait that returned at its 30 s bound,
+       or that slept its budget before checking, lands nowhere near it.
     3. The two elapsed figures are separated by the flag's delay minus the short budget
-       the first wait already spent — i.e. the difference is accounted for by the
-       condition, not by either bound.
+       already spent — i.e. the difference is accounted for by the condition, not by
+       either bound.
 
-    Plus the control that closes the loop: the short-budget wait run again AFTER the flag
-    is set succeeds immediately, so the earlier failure was the predicate's falsehood and
+    Plus the leg that closes the loop: the short-budget wait run again AFTER the flag is
+    set succeeds with elapsed ≈0, so the first failure was the predicate's falsehood and
     never the 0.5 s number itself.
 
     12 s of wall clock is the price; it buys a cell that cannot pass unless the budget
@@ -122,47 +129,57 @@ def test_the_budget_decides_a_delayed_condition_in_both_directions() -> None:
         time.sleep(FLAG_DELAY_S)
         flag.set()
 
-    driver = threading.Thread(target=set_flag_later, name="delayed-flag", daemon=True)
-    driver.start()
+    driver: threading.Thread | None = None
     try:
-        # 1. The short budget must expire on a predicate that is still false.
+        # 1. The short budget must expire on a predicate that is still false, and it must
+        #    expire AT its budget. Slack is one starvation gap's worth above the bound: the
+        #    four 50 ms polls are preemption points, so the overshoot is real but bounded.
         short = net_fixtures.wait_for(flag_is_set, timeout_s=SHORT_BUDGET_S)
         assert not short, f"a wait on a still-false predicate reported success: {short!r}"
         message = repr(short)
         assert "EXPIRED" in message and "still false" in message, message
-        # The elapsed time is measured, not the budget restated: the two agree only
-        # because the wait really did run out, so assert both members of the report.
         assert f"after {short.elapsed_s:.2f}s" in message, message
         assert f"(budget {SHORT_BUDGET_S:.1f}s)" in message, message
         assert "flag_is_set" in message, f"the report does not name the predicate: {message}"
-        assert short.elapsed_s >= SHORT_BUDGET_S, message
+        assert SHORT_BUDGET_S <= short.elapsed_s <= SHORT_BUDGET_S + 0.45, (
+            f"the short wait reported {short.elapsed_s:.2f}s against a "
+            f"{SHORT_BUDGET_S:.1f}s budget: it did not stop on its bound"
+        )
 
-        # 2. The same predicate and the same wait, one budget change later: it must now
-        #    succeed, and it must succeed when the flag fires rather than at the bound.
+        # 2. Start the condition now, so the long wait's elapsed time is the flag's delay
+        #    measured from its own start: ≈12 s, which is neither the 0.5 s it just spent
+        #    nor the 30 s it is allowed. A range here (say 10-25 s) would also accept a
+        #    wait that ran its whole budget, so assert the delay itself.
+        driver = threading.Thread(target=set_flag_later, name="delayed-flag", daemon=True)
+        driver.start()
         long = net_fixtures.wait_for(flag_is_set, timeout_s=LONG_BUDGET_S)
         assert long, f"the same wait under a {LONG_BUDGET_S:.0f}s budget expired: {long!r}"
         assert short.ok is False and long.ok is True
-        # Not at the budget: the flag is at 12 s and the budget at 30 s, so a wait that
-        # consumed the bound would land far outside this window.
-        assert FLAG_DELAY_S - 1.5 <= long.elapsed_s < LONG_BUDGET_S - 5.0, (
-            f"the long wait returned at {long.elapsed_s:.2f}s, not when the flag fired "
-            f"({FLAG_DELAY_S:.0f}s) nor at its {LONG_BUDGET_S:.0f}s budget"
+        assert abs(long.elapsed_s - FLAG_DELAY_S) <= 1.0, (
+            f"the long wait returned at {long.elapsed_s:.2f}s against a "
+            f"{FLAG_DELAY_S:.0f}s flag delay and a {LONG_BUDGET_S:.0f}s budget: it "
+            f"neither woke on the condition nor ran out of budget, so something else "
+            f"ended it"
         )
 
         # 3. The two figures differ by the flag delay minus the time the first wait had
         #    already spent — the gap the condition (not a bound) accounts for.
         expected_gap = FLAG_DELAY_S - SHORT_BUDGET_S
         measured_gap = long.elapsed_s - short.elapsed_s
-        assert abs(measured_gap - expected_gap) <= 3.0, (
+        assert abs(measured_gap - expected_gap) <= 1.5, (
             f"short {short.elapsed_s:.2f}s, long {long.elapsed_s:.2f}s: gap "
             f"{measured_gap:.2f}s is not the ~{expected_gap:.2f}s between the flag delay "
             f"and the short budget, so neither bound explains the difference"
         )
 
-        # The control: with the predicate now true, the SAME short budget succeeds at
+        # The closing leg: with the predicate now true, the SAME short budget succeeds at
         # once. The 0.5 s number was never what failed the first wait.
         after = net_fixtures.wait_for(flag_is_set, timeout_s=SHORT_BUDGET_S)
         assert after, f"a satisfied predicate still expired under the short budget: {after!r}"
-        assert after.elapsed_s < SHORT_BUDGET_S, after
+        assert after.elapsed_s < 0.2, (
+            f"a satisfied predicate waited {after.elapsed_s:.2f}s: the wait spent time on "
+            f"the clock instead of reading the condition"
+        )
     finally:
-        driver.join(timeout=1.0)
+        if driver is not None:
+            driver.join(timeout=1.0)
