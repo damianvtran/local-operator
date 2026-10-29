@@ -166,7 +166,10 @@ def test_mode_off_refuses_and_writes_nothing(tmp_path):
     """Review M4: the old test asserted the bad row (`enabled: True`)."""
     current = session(tmp_path, mode="off")
     result = run(current, "on")
-    assert "not available" in result.text
+    # F-1 split the key: the GATE cause now names the setting that fixes it, and
+    # is the only `disabled`-family sentence that does.
+    assert "/settings" in result.text, result.text
+    assert "off in your settings" in result.text, result.text
     assert current.radient_saver_choice is None
     assert rows(tmp_path) == []
 

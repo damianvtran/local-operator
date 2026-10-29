@@ -274,7 +274,14 @@ _REFUSAL_NOTICE = {
     "signed_out": _rs.notice_signed_out,
     "no_credit": _rs.notice_no_credit,
     "unknown_balance": _rs.notice_unknown_balance,
-    "gate": _rs.notice_disabled,
+    # THE SETTINGS POINTER BELONGS TO ONE CAUSE (independent audit round 5, F-1).
+    # `gate` is "the global mode is off", so naming the setting is the fix. The
+    # other two are NOT that: `auto_unavailable` means the mode is `auto`, which an
+    # explicit session choice may still be honoured past, and the chain's own
+    # `disabled` class (credential conflict, non-canonical base, 403/404, an
+    # un-followed 3xx) is a configuration or route fault the setting cannot fix —
+    # there the key says no action is implied, and it must keep saying that.
+    "gate": _rs.notice_gate_off,
     "auto_unavailable": _rs.notice_disabled,
 }
 

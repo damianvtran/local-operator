@@ -74,6 +74,10 @@ def notice_disabled() -> Msg:
     return Msg("wire.radient_saver.notice.disabled", {})
 
 
+def notice_gate_off() -> Msg:
+    return Msg("wire.radient_saver.notice.gate_off", {})
+
+
 def notice_no_credit() -> Msg:
     return Msg("wire.radient_saver.notice.no_credit", {})
 

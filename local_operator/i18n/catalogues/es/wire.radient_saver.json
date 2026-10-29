@@ -12,7 +12,7 @@
   "wire.radient_saver.notice.signed_out": "Radient Saver está en pausa en esta sesión porque no has iniciado sesión en Radient. Ejecuta /login radient para usarlo.",
   "wire.radient_saver.notice.no_credit": "Radient Saver está en pausa en esta sesión porque no tienes saldo en Radient. Añade crédito en console.radienthq.com para usarlo.",
   "wire.radient_saver.notice.rate_limited": "Radient Saver está ocupado, así que se envía tu historial completo hasta que vuelva a aceptar solicitudes.",
-  "wire.radient_saver.notice.disabled": "Radient Saver no está disponible con esta configuración, así que se envía tu historial completo. Actívalo en /settings, en Radient Saver, y luego /saver on.",
+  "wire.radient_saver.notice.disabled": "Radient Saver no está disponible para esta solicitud, así que se envía toda tu conversación. Nada más se ve afectado.",
   "wire.radient_saver.notice.oversize": "Un mensaje de esta conversación es demasiado grande para Radient Saver, así que se queda sin acortar. Saver sigue acortando el resto de la conversación.",
   "wire.radient_saver.command.description": "Configurar Radient Saver para esta sesión",
   "wire.radient_saver.command.radient_description": "Radient Saver (/radient saver)",
@@ -24,5 +24,6 @@
   "wire.radient_saver.command.status.off": "Radient Saver: desactivado para esta sesión. Usa /saver on para activarlo; si el ajuste global está desactivado, actívalo en /settings, en Radient Saver.",
   "wire.radient_saver.command.badge": "saver",
   "wire.radient_saver.notice.unknown_balance": "Radient Saver no pudo comprobar tu saldo de Radient ahora mismo, así que nada ha cambiado. Vuelve a intentar /saver on en un momento.",
-  "wire.radient_saver.notice.no_session": "Radient Saver necesita una conversación abierta; abre una y vuelve a intentarlo."
+  "wire.radient_saver.notice.no_session": "Radient Saver necesita una conversación abierta; abre una y vuelve a intentarlo.",
+  "wire.radient_saver.notice.gate_off": "Radient Saver está desactivado en tus ajustes, así que esta sesión no puede activarlo. Actívalo en /settings, en Radient Saver, y luego /saver on."
 }
