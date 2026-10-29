@@ -31700,6 +31700,28 @@ class Session:
             self._disposal_task = task
         return task
 
+    async def _reap_session_process_groups(self) -> None:
+        """End process groups this session's bash calls left running.
+
+        A finished subagent child shares its parent's ``lop`` process, so the
+        process-exit reaper never fires for it; this runs on every disposal
+        (top-level or child). Strictly this session's own, non-detached,
+        ownership-proven groups (``group_reaper.reap_session_groups``). Threaded
+        and time-boxed because it may fork ``ps`` and waits out a SIGTERM grace;
+        dispose must never raise or stall on it.
+        """
+        from local_operator.tools import group_reaper
+
+        try:
+            await asyncio.wait_for(
+                asyncio.to_thread(group_reaper.reap_session_groups, self._session_id),
+                timeout=10.0,
+            )
+        except asyncio.CancelledError:
+            raise
+        except BaseException:  # noqa: BLE001 — teardown must proceed
+            logger.debug("session process-group reap failed", exc_info=True)
+
     async def _dispose_impl(self) -> None:
         """Abort any in-flight turn, close the browser surface, cancel
         background work, dispose jobs and the wake scheduler, flush the
@@ -32080,6 +32102,7 @@ class Session:
             from local_operator.ui_console.backend import cleanup_owner_completed
 
             await cleanup_owner_completed(self._session_id, self._config_dir)
+            await self._reap_session_process_groups()
             # ``finally``: host-owned resources must be released even when the
             # session's own teardown blew up part way through.
             for hook in self._dispose_hooks:

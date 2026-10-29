@@ -60,6 +60,31 @@ product decision, not a port, so nothing here pretends to have made it:
 :func:`_note_unsupported_platform_once` says so once, on the path where a user
 would otherwise be told nothing.
 
+SECOND LEAK, SAME LEDGER: a *surviving member* of a group whose leader exited.
+``pnpm storybook & echo $!`` returns, the shell leader exits, and the dev server
+stays in the SAME process group (reparented to launchd) for hours. The old
+normal-exit path unregistered the ledger line unconditionally, so nothing — not
+the owner's ``atexit`` reap, not the hard-death sweep (which reads a dead leader
+as "group already dead") — ever saw it again. Measured: Storybook servers alive
+10.5 h after the lane that started them finished, and a finished subagent child
+shares its parent's ``lop`` process, so no process-exit hook fires for it either.
+
+The contract added for that, and its limits:
+
+- ``settle_group`` replaces the unconditional unregister. It probes the group
+  with ``killpg(pgid, 0)`` (no fork on the hot path); only when members remain
+  does it spend one ``ps`` to record them as ``survivors`` ``[{pid, start}]``.
+- ``reap_session_groups`` ends what a SESSION started: it reads only this
+  process's own ledger, only lines tagged with that ``session_id``. It is wired
+  into ``Session`` disposal, which both a top-level session end and a finished
+  subagent child pass through.
+- A survivor-bearing line is "still ours" iff a RECORDED ``(pid, start)`` member
+  is alive in the same pgid (``_survivor_verdict``) — no pattern or name
+  matching ever decides a kill.
+- An explicit detach (``nohup``/``setsid``/``disown`` in the command) is honoured:
+  the line is ``detached`` and the new paths never reap it. Pattern matching is
+  permitted ONLY to SPARE, never to kill.
+
 Out of scope, on purpose: ``exec_mode --background`` workers. Those spawn
 ``python -m local_operator.exec_worker`` as a SEPARATE detached process (not via
 ``execute_bash``), so they never get a ledger line — and they should not: they
@@ -78,6 +103,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import time
@@ -185,6 +211,30 @@ _LOCK_ACQUIRE_TIMEOUT_S = 0.3
 #: proportional to the timeout it serves; change one and re-derive the other.
 _LOCK_RETRY_SLEEP_S = 0.01
 _LOCK_RETRY_SLEEP_MAX_S = 0.05
+
+
+#: An explicit, deliberate detach in the command text. The ONLY place this
+#: module pattern-matches a command, and only to SPARE: a line carrying it is
+#: never reaped by the survivor paths (session end, process exit, hard-death
+#: sweep), because the operator asked for the process to outlive the call. A
+#: false positive (the word inside a quoted string) merely leaks the way every
+#: group leaked before this existed; a false negative is the case the reaper is
+#: for. Never use a match to decide a KILL.
+_DETACH_RE = re.compile(r"\b(?:nohup|setsid|disown)\b")
+
+#: Longest SIGTERM->SIGKILL grace for one reaped group. Short on purpose: the
+#: callers are session disposal and process exit, which must not stall; a dev
+#: server that has not stopped in 2 s will not stop politely.
+_TERM_GRACE_S = 2.0
+_TERM_POLL_S = 0.05
+
+#: Bounds the ``ps`` forks of the rare survivor paths so a wedged ``ps`` (it has
+#: measured 0.4-13.6 s under fleet load) cannot stall a bash call or a dispose.
+_PS_TIMEOUT_S = 5.0
+
+#: Cap on recorded survivors per line (a build can leave dozens of workers); the
+#: ownership check needs only ONE live recorded member, so more is wasted bytes.
+_MAX_SURVIVORS = 16
 
 
 @dataclass(frozen=True)
@@ -352,8 +402,14 @@ def register_group(
     *,
     config_dir: Path | None = None,
     owner_pid: int | None = None,
+    session_id: str = "",
 ) -> None:
     """Append this group to the owner's ledger. Best-effort; never raises.
+
+    ``session_id`` tags the line with the session whose tool call started the
+    group, so :func:`reap_session_groups` can end exactly what one session
+    started and nothing a sibling session did. Empty means "unattributed": such
+    a line is only ever reaped by the owner-wide paths, never by a session end.
 
     Called at spawn, immediately after the pgid is known. Records the
     two-factor OWNER identity (this ``lop`` process's pid + start token) that
@@ -396,6 +452,12 @@ def register_group(
         "runtime_start": owner_start,
         "grp_leader_start": grp_leader_start,
         "cmd": cmd[:_CMD_LOG_CHARS],
+        # Written only when set, keeping the common line as small as before.
+        **({"session_id": session_id} if session_id else {}),
+        # Decided on the FULL command (the stored ``cmd`` is truncated, so a
+        # trailing ``& disown`` would be lost). SPARE-only signal: see
+        # ``_DETACH_RE``.
+        **({"detached": True} if _DETACH_RE.search(cmd) else {}),
         # Diagnostics ONLY. BANNED as a decision input (§2 of the design): a
         # stuck pyright and a live trainer are indistinguishable by age. No
         # branch in this module may read this field.
@@ -446,6 +508,147 @@ def unregister_group(
         return
     path = _ledger_path(resolved, pid, owner_start)
     _rewrite_without_pgid(path, pgid)
+
+
+def _group_has_members(pgid: int) -> bool:
+    """Whether ANY process is still in group ``pgid`` — zero-fork.
+
+    ``killpg(pgid, 0)`` delivers no signal and only reports whether the group
+    exists. ``EPERM`` means a group exists that we may not signal: it cannot be
+    one this process spawned (we spawned it under our own uid), so it is reported
+    as "no members of ours" and the ledger line is dropped rather than kept.
+    """
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return False
+    return True
+
+
+def _run_ps(argv: list[str]) -> subprocess.CompletedProcess[str] | None:
+    """One bounded ``ps`` read under ``LC_ALL=C``; ``None`` when it cannot answer.
+
+    ``None`` (missing binary, timeout) is the AMBIGUOUS outcome every caller
+    must treat as "do not kill". A non-zero exit WITH output is still returned:
+    ``ps -p a,b`` exits 1 when only some of the pids exist.
+    """
+    try:
+        return subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            env={**os.environ, "LC_ALL": "C"},
+            check=False,
+            timeout=_PS_TIMEOUT_S,
+        )
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        logger.debug("group reaper: %s failed: %s", argv[:3], exc)
+        return None
+
+
+def _parse_ps_rows(stdout: str, *, fields: int) -> list[list[str]]:
+    """Split ``ps`` rows into ``fields`` leading tokens + the opaque ``lstart``.
+
+    ``lstart`` contains spaces (``Wed Aug 26 11:38:17 2026``) and is kept
+    verbatim as the LAST element, exactly like :func:`_owner_start_token` keeps
+    it opaque: equality is the only operation ever performed on it.
+    """
+    rows: list[list[str]] = []
+    for line in stdout.splitlines():
+        parts = line.split(None, fields)
+        if len(parts) == fields + 1:
+            rows.append([*parts[:fields], parts[fields].strip()])
+    return rows
+
+
+def _group_survivors(pgid: int) -> list[dict[str, object]] | None:
+    """Snapshot ``[{pid, start}]`` of every process now in group ``pgid``.
+
+    ONE ``ps -axo pid=,pgid=,lstart=`` filtered by pgid. ``None`` when ``ps``
+    could not answer. Only called on the rare path where a group outlived its
+    leader; the hot path never forks (see :func:`settle_group`).
+    """
+    completed = _run_ps(["ps", "-axo", "pid=,pgid=,lstart="])
+    if completed is None or (completed.returncode != 0 and not completed.stdout):
+        return None
+    found: list[dict[str, object]] = []
+    for pid_s, pgid_s, start in _parse_ps_rows(completed.stdout, fields=2):
+        if pgid_s == str(pgid) and pid_s.isdigit() and pid_s != str(os.getpid()):
+            found.append({"pid": int(pid_s), "start": start})
+    return found[:_MAX_SURVIVORS]
+
+
+def _annotate_entry(path: Path, pgid: int, updates: dict[str, object]) -> None:
+    """Merge ``updates`` into the ledger line(s) for ``pgid``. Best-effort.
+
+    Same read-modify-rewrite discipline (and EXCLUSIVE lock) as
+    :func:`_rewrite_without_pgid`; unreadable lines are kept verbatim.
+    """
+    with _ledger_lock(path, exclusive=True):
+        try:
+            raw_lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError as exc:
+            logger.debug("group reaper: cannot read ledger %s: %s", path, exc)
+            return
+        out: list[str] = []
+        for line in raw_lines:
+            try:
+                obj = json.loads(line)
+            except (ValueError, TypeError):
+                out.append(line)
+                continue
+            if isinstance(obj, dict) and obj.get("pgid") == pgid:
+                obj.update(updates)
+                line = json.dumps(obj)
+            out.append(line)
+        try:
+            path.write_text("\n".join(out) + "\n", encoding="utf-8")
+        except OSError as exc:
+            logger.debug("group reaper: cannot rewrite ledger %s: %s", path, exc)
+
+
+def settle_group(
+    pgid: int,
+    *,
+    config_dir: Path | None = None,
+    owner_pid: int | None = None,
+) -> None:
+    """Close out a finished command's ledger line — unless members outlived it.
+
+    Replaces the unconditional :func:`unregister_group` on ``execute_bash``'s
+    normal-exit paths. The distinction is the whole fix: ``cmd & echo $!``
+    returns, the shell LEADER exits, and the backgrounded process stays in the
+    same group. Unregistering then erased the only record that something of
+    ours was still running, and every later reaper reads a dead leader as "group
+    already dead".
+
+    HOT PATH IS FORK-FREE: ``killpg(pgid, 0)`` answers "any member left?" with a
+    syscall. Nothing left (the overwhelmingly common case) -> unregister exactly
+    as before. Members left -> one ``ps`` snapshot records ``survivors`` so the
+    ownership check can later prove the group is the original one (see
+    :func:`_survivor_verdict`) and the line stays. If the snapshot itself is
+    unreadable the line is kept without survivors: the leader-based check then
+    reads it as dead and kills nothing — the pre-existing outcome, never a
+    wrong kill.
+    """
+    if not _REAPING_IS_SUPPORTED:
+        return
+    if not _group_has_members(pgid):
+        unregister_group(pgid, config_dir=config_dir, owner_pid=owner_pid)
+        return
+    survivors = _group_survivors(pgid)
+    if survivors is not None and not survivors:
+        # Died between the probe and the snapshot.
+        unregister_group(pgid, config_dir=config_dir, owner_pid=owner_pid)
+        return
+    resolved = _resolve_config_dir(config_dir)
+    pid = os.getpid() if owner_pid is None else owner_pid
+    owner_start = _self_start_token(pid)
+    if resolved is None or owner_start is None or survivors is None:
+        return
+    _annotate_entry(_ledger_path(resolved, pid, owner_start), pgid, {"survivors": survivors})
 
 
 def _try_lock_ledger(fd: int, *, exclusive: bool) -> bool:
@@ -896,39 +1099,139 @@ def _owner_is_dead(owner_pid: int, owner_start: str) -> bool | None:
     return False  # same pid, same start -> original owner ALIVE -> never reap
 
 
-def _reap_if_still_ours(entry: dict[str, object]) -> bool:
-    """killpg one registered group, but ONLY if it is still genuinely ours.
+def _entry_survivors(entry: dict[str, object]) -> list[tuple[int, str]]:
+    """The well-formed ``(pid, start)`` survivors recorded on a ledger line."""
+    raw = entry.get("survivors")
+    out: list[tuple[int, str]] = []
+    if isinstance(raw, list):
+        for item in raw:
+            if (
+                isinstance(item, dict)
+                and isinstance(item.get("pid"), int)
+                and isinstance(item.get("start"), str)
+                and item["start"]
+            ):
+                out.append((item["pid"], item["start"]))
+    return out
 
-    The pgid-reuse (victim) gate: even with a dead owner, the pgid itself may
-    have been recycled by the OS onto an unrelated live group between the
-    owner's death and now. Killing a recycled pgid would murder an innocent
-    process. Defence uses the group-leader start token recorded at spawn (the
-    leader pid == the pgid):
 
-        still_ours = _process_alive(pgid) and
-                     _owner_start_token(pgid) == grp_leader_start
+def _survivor_verdict(pgid: int, survivors: list[tuple[int, str]]) -> bool | None:
+    """Is group ``pgid`` still the ORIGINAL group? ``None`` when unknowable.
 
-    - leader gone            -> the group already died; drop, no kill.
-    - leader alive, differs  -> pgid recycled onto a new leader; drop, no kill.
-    - leader alive, matches  -> genuinely our orphaned group; killpg.
-
-    Returns ``True`` only when a live, still-ours group was actually signalled.
+    True iff at least one RECORDED ``(pid, start)`` member is alive, still in
+    ``pgid``, with the same start token. WHY this is sufficient: the kernel
+    cannot hand a pgid to a new group while any member of the old one lives, and
+    a recycled member PID would carry a different start token. So one recorded
+    member still inside the group proves nobody else owns that pgid, which the
+    leader-based check cannot say once the leader has exited. No recorded member
+    matching means the group we saw is gone (the pgid may now be anyone's) ->
+    ``False``, kill nothing. ``ps`` unreadable -> ``None``, kill nothing.
     """
+    pids = ",".join(str(pid) for pid, _ in survivors)
+    completed = _run_ps(["ps", "-o", "pid=,pgid=,lstart=", "-p", pids])
+    if completed is None:
+        return None
+    recorded = dict(survivors)
+    for pid_s, pgid_s, start in _parse_ps_rows(completed.stdout, fields=2):
+        if pid_s.isdigit() and pgid_s == str(pgid) and recorded.get(int(pid_s)) == start:
+            return True
+    # ps exiting non-zero with NO rows is its "none of these pids exist".
+    return False
+
+
+def _leader_verdict(entry: dict[str, object]) -> bool | None:
+    """The original leader-based gate: is the group's LEADER still our leader?"""
     pgid = entry.get("pgid")
     if not isinstance(pgid, int) or pgid <= 0:
         return False
-    grp_leader_start = entry.get("grp_leader_start")
     if not _process_alive(pgid):
         return False  # leader gone: group already dead, nothing to kill
     current_leader = _owner_start_token(pgid)
     if current_leader is None:
         # Alive but the leader's identity is unreadable -> ambiguous -> do NOT
         # kill (err toward not killing an innocent).
+        return None
+    # Differs -> pgid recycled onto a new leader; the original group is gone.
+    return current_leader == entry.get("grp_leader_start")
+
+
+def _ownership_verdict(entry: dict[str, object]) -> bool | None:
+    """Is this ledger line a group that is still genuinely ours?
+
+    The pgid-reuse (victim) gate. A line carrying ``survivors`` is a group whose
+    leader already exited, so the leader token proves nothing and the
+    survivor-aware check decides; any other line keeps the leader check.
+    ``True`` -> ours, may be signalled; ``False`` -> gone/recycled, drop the
+    line; ``None`` -> ambiguous, signal nothing.
+    """
+    pgid = entry.get("pgid")
+    if not isinstance(pgid, int) or pgid <= 0:
         return False
-    if current_leader != grp_leader_start:
-        # pgid recycled onto a different leader -> the original group is gone,
-        # this is an innocent live group. Do NOT kill.
+    survivors = _entry_survivors(entry)
+    if survivors:
+        return _survivor_verdict(pgid, survivors)
+    return _leader_verdict(entry)
+
+
+def _terminate_groups(entries: list[dict[str, object]]) -> int:
+    """SIGTERM every group, wait <= ``_TERM_GRACE_S`` TOTAL, SIGKILL the rest.
+
+    Total (not per-group) so a session ending with several leftover servers
+    stalls its dispose once, briefly. Returns how many groups were signalled.
+    Logs one INFO line per group. Callers have ALREADY passed the ownership gate.
+    """
+    import signal
+
+    live: list[dict[str, object]] = []
+    for entry in entries:
+        pgid = entry["pgid"]
+        assert isinstance(pgid, int)
+        try:
+            os.killpg(pgid, signal.SIGTERM)
+        except OSError as exc:  # already gone, or not ours to signal
+            logger.debug("group reaper: SIGTERM %s failed: %s", pgid, exc)
+            continue
+        live.append(entry)
+        logger.info(
+            "group reaper: reaped group pgid=%s session=%s cmd=%r",
+            pgid,
+            entry.get("session_id", ""),
+            entry.get("cmd", ""),
+        )
+    deadline = time.monotonic() + _TERM_GRACE_S
+    pending = [int(e["pgid"]) for e in live if isinstance(e["pgid"], int)]
+    while pending and time.monotonic() < deadline:
+        pending = [g for g in pending if _group_has_members(g)]
+        if pending:
+            time.sleep(_TERM_POLL_S)
+    for pgid in pending:
+        with contextlib.suppress(OSError):
+            os.killpg(pgid, signal.SIGKILL)
+    return len(live)
+
+
+def _reap_if_still_ours(entry: dict[str, object]) -> bool:
+    """killpg one registered group, but ONLY if it is still genuinely ours.
+
+    Gate: :func:`_ownership_verdict` (leader token for live-leader groups,
+    recorded-survivor proof for groups that outlived their leader). A
+    survivor-bearing line is ``detached`` (explicit ``nohup``/``setsid``/
+    ``disown``) -> spared. Live-leader groups keep their original SIGKILL;
+    survivor groups get SIGTERM + a short grace, since they are dev servers that
+    deserve to flush before dying.
+
+    Returns ``True`` only when a live, still-ours group was actually signalled.
+    """
+    pgid = entry.get("pgid")
+    if not isinstance(pgid, int) or pgid <= 0:
         return False
+    survivors = _entry_survivors(entry)
+    if survivors and entry.get("detached"):
+        return False
+    if _ownership_verdict(entry) is not True:
+        return False
+    if survivors:
+        return _terminate_groups([entry]) == 1
     try:
         os.killpg(pgid, _sigkill())
     except ProcessLookupError:
@@ -943,6 +1246,61 @@ def _reap_if_still_ours(entry: dict[str, object]) -> bool:
         entry.get("cmd", ""),
     )
     return True
+
+
+def reap_session_groups(
+    session_id: str,
+    *,
+    config_dir: Path | None = None,
+    owner_pid: int | None = None,
+) -> int:
+    """End what ONE session started: its still-ours, non-detached groups.
+
+    Called from ``Session`` disposal, which both a top-level session end and a
+    finished subagent child go through. A child shares its parent's ``lop``
+    process, so the process-exit reaper (:func:`kill_own_groups`) never fires for
+    it — this is the hook that does. Scope is the intersection of THIS process's
+    own ledger and lines tagged with ``session_id``: a sibling session's server,
+    another process's ledger and unattributed lines are untouchable by
+    construction. ``detached`` lines are skipped (an explicit ``nohup`` is
+    honoured), a line failing :func:`_ownership_verdict` is dropped without a
+    signal, and an ambiguous one is kept for a later attempt.
+
+    Idempotent, never raises, returns the number of groups signalled. Blocks at
+    most ``_TERM_GRACE_S`` plus a couple of bounded ``ps`` reads; callers on an
+    event loop should run it in a thread.
+    """
+    if not session_id or not _REAPING_IS_SUPPORTED:
+        return 0
+    try:
+        resolved = _resolve_config_dir(config_dir)
+        pid = os.getpid() if owner_pid is None else owner_pid
+        owner_start = _self_start_token(pid)
+        if resolved is None or owner_start is None:
+            return 0
+        path = _ledger_path(resolved, pid, owner_start)
+        mine = [
+            e
+            for e in _read_ledger(path)
+            if e.get("session_id") == session_id
+            and not e.get("detached")
+            and isinstance(e.get("pgid"), int)
+        ]
+        ours: list[dict[str, object]] = []
+        settled: list[int] = []
+        for entry in mine:
+            verdict = _ownership_verdict(entry)
+            if verdict is True:
+                ours.append(entry)
+            if verdict is not None:
+                settled.append(int(entry["pgid"]))  # type: ignore[call-overload]
+        signalled = _terminate_groups(ours) if ours else 0
+        for pgid in settled:
+            _rewrite_without_pgid(path, pgid)
+        return signalled
+    except Exception:  # noqa: BLE001 — a reaper fault must never break disposal
+        logger.debug("group reaper: reap_session_groups failed", exc_info=True)
+        return 0
 
 
 def _read_ledger(path: Path) -> list[dict[str, object]]:
