@@ -474,13 +474,17 @@ def _failure_text(failure: BaseException) -> str:
     own ``code`` field already says what failed.
 
     THAT PROXY IS NOT EXACT, and the limit is stated rather than assumed away
-    (review round 1, R1-3): the client also SYNTHESIZES refusals with an
-    ``http_status`` and no exchange at all (``_require_body_within``'s 413
-    ``payload_too_large`, the avatar paths' 409 `account_mismatch`). None is
-    reachable from a wrapped site today, so every message this change can reach
-    keeps its promise; one that became reachable would gain a coded footer (a
-    code, never content). If that ever happens, key the footer on a
-    server-derived marker rather than on the status alone.
+    (review rounds 1–2): the client also SYNTHESIZES refusals carrying an
+    ``http_status`` with no exchange at all, and ONE of them is reachable from
+    these sites — ``_guarded_access``'s 409 ``account_mismatch``, which ``dm``'s
+    create and post can raise because both pass ``expected_account_id``. It
+    therefore gains a footer with no server answer, which is INTENDED and safe:
+    the footer is a code and never content, and the sentence beside it is the
+    client's own (it tells the user to sign in again). The others
+    (``_require_body_within``'s 413 ``payload_too_large``, the avatar paths' 409s)
+    are not reachable here today. If a future local refusal must stay
+    byte-identical, key the footer on a server-derived marker on the refusal
+    rather than on the status alone.
 
     The keys are read from the exception, not from a parsed body: every refusal
     shape that reaches here (:class:`~.client.BridgeRefusal` and its subclasses,

@@ -42,6 +42,8 @@ import pytest
 
 from local_operator.team_bridge import host as host_mod
 from local_operator.team_bridge.client import (
+    ACCOUNT_MISMATCH_CODE,
+    ACCOUNT_MISMATCH_SENTENCE,
     BridgeRefusal,
     BridgeUnreachable,
     TeamBridgeClient,
@@ -337,24 +339,45 @@ async def test_dm_to_keeps_the_not_found_refusal_identical(
 
 
 @pytest.mark.asyncio
-async def test_dm_to_keeps_the_self_target_refusal_identical() -> None:
+@pytest.mark.parametrize("own", [{"account_id": "acc_owner"}, {"endpoint_id": "bep_1"}])
+async def test_dm_to_keeps_the_self_target_refusal_identical(own: dict[str, str]) -> None:
     """A DM has two identities, so reaching your OWN person refuses either way.
 
     The resolver compares the chosen row against the caller's account, so this is
     the one refusal that needs the directory to contain the caller: it is the
-    guard that stops ``to`` from addressing the sender. Both spellings must land
-    on the same ``self_target`` answer, and neither may write.
+    guard that stops ``to`` from addressing the sender. Both transcribed keys are
+    pinned — the caller's own ``account_id`` and its own ``endpoint_id``, since
+    the second takes the endpoint branch — and both spellings must land on the
+    same ``self_target`` answer without writing.
     """
 
     members = [_member(), _member(account_id="acc_owner", label="Damian", endpoint_id="bep_1")]
     by_field = DmClient(members)
     by_to = DmClient(members)
-    field_outcome = await execute_bridge(_runtime(by_field), _dm(account_id="acc_owner"))
-    to_outcome = await execute_bridge(_runtime(by_to), _dm(to={"account_id": "acc_owner"}))
+    field_outcome = await execute_bridge(_runtime(by_field), _dm(**own))
+    to_outcome = await execute_bridge(_runtime(by_to), _dm(to=own))
 
     assert to_outcome == field_outcome, to_outcome
     assert to_outcome["code"] == "self_target"
     assert not [c for c in by_to.calls if c["method"] == "create_conversation"]
+
+
+def test_a_locally_synthesised_refusal_still_names_its_code() -> None:
+    """A refusal the CLIENT raises can carry a status; its code still travels.
+
+    ``_guarded_access`` refuses a stale owner snapshot before any request is
+    dispatched (``account_mismatch``, 409) and ``dm`` feeds it
+    ``expected_account_id``, so this is the one local refusal a wrapped site can
+    reach. The footer is a decision rather than an accident (review round 2,
+    R2-1): a code tells the reader WHICH refusal, and no tenant data rides with
+    it — the sentence beside it is the client's own.
+    """
+
+    failure = BridgeRefusal(ACCOUNT_MISMATCH_CODE, ACCOUNT_MISMATCH_SENTENCE, http_status=409)
+
+    assert _failure_text(failure) == (
+        f"{ACCOUNT_MISMATCH_SENTENCE} [refusal code=account_mismatch]"
+    )
 
 
 @pytest.mark.asyncio
