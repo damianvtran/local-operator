@@ -21984,6 +21984,15 @@ class Session:
                 "owner_device": binding.owner_device,
                 "owner_device_name": binding.owner_device_name,
                 "credential_id": binding.credential_id,
+                # NO DERIVED IDENTIFIER IS RECORDED HERE, deliberately: a digest
+                # or hash of the account label is dictionary-reversible (an
+                # email is low-entropy) and this row is copied to peers and moved
+                # between devices, so the pseudonym would be a linkable
+                # identifier for the operator's account on every replica — the
+                # leak class this notice's operator-only rule exists to stop. The
+                # transcript's fold uses ``credential_id`` above instead: a store
+                # fact, stable across restarts, not reversible, and different for
+                # two accounts.
             },
         )
         try:
