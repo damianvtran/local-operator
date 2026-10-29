@@ -53,6 +53,14 @@ from tests.unit.network.test_relay_e2e import _pair_settled
 # ``SESSION`` comes from the rig: one name for the id both files move, so the cells
 # here and the cells there cannot drift apart.
 
+#: Backstops, not assertions: the cells below wait on an event the code under test
+#: publishes, and these bounds only turn a genuine hang into a named failure instead
+#: of a stranded CI job (there is no ``pytest-timeout`` in this suite). They are
+#: generous because they are never the success path, and widening them cannot hide a
+#: scheduling bet the way a tuned ``sleep`` does.
+WAKE_S = 60.0
+RELEASE_S = 60.0
+
 
 def _blob(store: Path, ref: str, payload: bytes) -> None:
     store.mkdir(parents=True, exist_ok=True)
@@ -225,14 +233,37 @@ def test_link_close_keeps_the_descriptor_until_its_reader_exits(
     thread must wake that read without releasing its fd; only the reader's finally
     may close it. This pins the ordering independently of the macOS timed-recv race
     that left the re-dial test's evicted reader alive on an already-closed socket.
+
+    THE CLOSE WAITS FOR A PUBLICATION FROM THE READER, not for a wall-clock budget
+    (CI flake 2026-10-28, job 123111232558: "shutdown did not wake the retained
+    reader" on four unrelated PRs). The old body closed the link the instant
+    ``_ensure_link`` returned and then gave the reader five seconds to reach its
+    read; on a loaded runner the reader thread had not been scheduled into it yet,
+    so the wait expired about a reader that was never woken because it was never
+    reading. The seam below publishes the reader's own entry into the socket read,
+    keyed by that thread, so the close happens after the read exists — and a reader
+    that stops short of it fails here naming its own state instead of being
+    reported as a shutdown that did not wake anything.
     """
     p: Devices = request.getfixturevalue("pair")
     server_a, server_b, _host, _port = p
     _pair_settled(p, monkeypatch, role="admin")
     observed = threading.Event()
     release = threading.Event()
+    seams: list[str] = []
     owner: dict[str, Any] = {}
     real = wire.FrameReader.read_record_payload
+    real_fill = wire.FrameReader._fill
+
+    def reading_from_socket(reader: Any, deadline: float | None) -> None:
+        # Publish the recv seam BY THREAD, not once globally: the closing thread
+        # must not be able to close before THIS link's reader has entered the read
+        # it owns, and a global flag any other reader could set would let the
+        # precondition pass without the target reader ever getting there.
+        name = threading.current_thread().name
+        if name not in seams:
+            seams.append(name)
+        real_fill(reader, deadline)
 
     def read_until_shutdown(reader: Any, deadline: float | None) -> bytes:
         try:
@@ -240,9 +271,14 @@ def test_link_close_keeps_the_descriptor_until_its_reader_exits(
         except (ConnectionError, OSError):
             if reader._sock is owner.get("socket"):
                 observed.set()
-                release.wait(timeout=5)
+                if not release.wait(timeout=RELEASE_S):
+                    raise AssertionError(
+                        f"the retained reader of {reader._sock} was never released; "
+                        f"its finally block did not run"
+                    )
             raise
 
+    monkeypatch.setattr(wire.FrameReader, "_fill", reading_from_socket)
     monkeypatch.setattr(wire.FrameReader, "read_record_payload", read_until_shutdown)
     server_b._ensure_link(server_a.identity.device_id)
     assert wait_for(lambda: server_a._link_for(server_b.identity.device_id) is not None)
@@ -250,8 +286,21 @@ def test_link_close_keeps_the_descriptor_until_its_reader_exits(
     assert link is not None and link._reader is not None
     owner["socket"] = link.sock
     try:
+        # The event, not the clock, decides when to close: the wait exists so a
+        # reader that never reaches its read fails here with its own state
+        # instead of being read as "shutdown did not wake it" (AGENTS.md, "Wait on
+        # the event, never on the clock").
+        assert wait_for(lambda: link._reader.name in seams), (
+            f"reader {link._reader.name} never entered its socket read; "
+            f"alive={link._reader.is_alive()} closing={link.closing} "
+            f"closed={link._closed.is_set()} fd={link.sock.fileno()} "
+            f"seams={seams}"
+        )
         link.close("we-closed", flush_s=0.0)
-        assert observed.wait(timeout=5), "shutdown did not wake the retained reader"
+        assert observed.wait(timeout=WAKE_S), (
+            f"shutdown did not wake retained reader {link._reader.name}; "
+            f"alive={link._reader.is_alive()} fd={link.sock.fileno()}"
+        )
         assert link._reader.is_alive(), "the gate must hold the reader before its finally"
         assert link.sock.fileno() >= 0, "the closing thread released the reader's descriptor"
     finally:
