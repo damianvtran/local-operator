@@ -12,6 +12,7 @@ import { supplementsFromWire } from "./lib/supplement";
 import { createMessageRuntime, directionFor, isResolvedLocale, type LocaleSnapshot } from "./i18n/runtime";
 import { createWireLoader } from "./i18n/wire-cache";
 import { BUNDLED_OWNED } from "./i18n/bundled.gen";
+import { createLocaleBundleLoader } from "./i18n/locale-bundles";
 import type {
 	Capabilities,
 	NotificationsBlock,
@@ -107,6 +108,16 @@ export const messageRuntime = createMessageRuntime(
 	() => publishLocaleSnapshot(),
 	Object.keys(BUNDLED_OWNED),
 );
+/* The other shipped locales arrive as chunks the first time a config frame
+   names one (`BUNDLED_CHUNKS`). Registered through `registerBundle`, so a chunk
+   landing repaints and re-labels the document by exactly the path the eager
+   English map uses — no second locale truth, and the page is complete in
+   English while the chunk is in flight. */
+export const localeBundleLoader = createLocaleBundleLoader({
+	activate: (namespace, locale, messages) => {
+		messageRuntime.registerBundle(namespace, locale, messages);
+	},
+});
 export const wireCatalogueLoader = createWireLoader({
 	context: () => ({ origin: typeof location === "object" ? location.origin : "", locale: localeSnapshot.backendLocale }),
 	capabilities: () => capabilities,
@@ -652,6 +663,9 @@ function applyConfigFrame(data: string): void {
 		};
 		if (!isResolvedLocale(payload.language)) return;
 		publishLocaleSnapshot(payload.language);
+		// The English surface is already painted and complete; this only asks for
+		// the resolved locale's chunk, and registers it when it lands.
+		localeBundleLoader.ensure(payload.language);
 	} catch {
 		/* A malformed frame is dropped; the next one repaints. */
 	}

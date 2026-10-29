@@ -79,11 +79,12 @@ describe("relay.session extraction", () => {
 
 	it("follows the actual owned-copy language, not the backend preference", () => {
 		// The contract from #2297: lang/dir describe the ACTUAL rendered owned-copy
-		// language (uiLocale), not the backend preference. French has no owned
-		// relay bundle, so it still paints EN/LTR; Urdu's audited relay bundle is
-		// shipped, so an Urdu backend paints ur/RTL.
+		// language (uiLocale), not the backend preference. French has no emitted
+		// owned chunk yet, so a French backend paints EN/LTR. A locale that DOES
+		// ship one arrives with its chunk on the config frame — the lazy path is
+		// relay-shell's "loads a shipped locale's chunk" test, asserted there so
+		// this one does not depend on whether that chunk has already been loaded.
 		expect(messageRuntime.uiLocaleFor("fr")).toBe("en");
-		expect(messageRuntime.uiLocaleFor("ur")).toBe("ur");
 		const { result, unmount } = renderHook(() => useLocaleSnapshot());
 		expect(result.current.uiLocale).toBe("en");
 		expect(result.current.direction).toBe("ltr");

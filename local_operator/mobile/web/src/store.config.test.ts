@@ -237,7 +237,13 @@ describe("resolveInitialLocale", () => {
 		expect(fetchMock).toHaveBeenCalledTimes(1);
 		expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/config/events");
 		const { result, unmount } = renderHook(() => fresh.useLocaleSnapshot());
-		expect(result.current.uiLocale).toBe("ur");
+		// The baseline frame names the backend locale at once, but a shipped
+		// locale's own copy arrives with its chunk (BUNDLED_CHUNKS): the first paint
+		// is the complete English fallback and the SAME page repaints in Urdu when
+		// the chunk registers — never a mix of the two.
+		expect(result.current).toMatchObject({ backendLocale: "ur", uiLocale: "en", direction: "ltr" });
+		expect(document.documentElement.lang).toBe("en");
+		await vi.waitFor(() => expect(result.current.uiLocale).toBe("ur"));
 		expect(result.current.direction).toBe("rtl");
 		expect(document.documentElement.lang).toBe("ur");
 		expect(document.documentElement.dir).toBe("rtl");

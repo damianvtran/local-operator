@@ -166,10 +166,13 @@ def test_bundled_spa_module_is_empty_when_no_owned_namespace_is_present(
 def test_bundled_spa_module_emits_only_shipped_localized_owned_copy(
     generated, i18n_generate, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Audited locale files become namespace/locale bundles; held bytes do not.
+    """The eager map is English; each complete locale is its own lazy chunk.
 
     The synthetic Urdu text is a generation fixture, not a translation or an
-    audit. An unshipped locale beside it must not leak into the client package.
+    audit. An unshipped locale beside it must not leak into the client package,
+    and the eager map must not carry the other locales' bytes: that is the whole
+    point of the chunk split (all eight eagerly measured +261,511 B / +36 % of
+    the built bundle to render one).
     """
     root, emitted = generated
     monkeypatch.setattr(i18n_generate, "_shipped_locales", lambda: ("en", "ur"))
@@ -178,11 +181,17 @@ def test_bundled_spa_module_emits_only_shipped_localized_owned_copy(
         target.mkdir(exist_ok=True)
         (target / "relay.shell.json").write_text(json.dumps({"relay.shell.list.empty": text}))
     planned = i18n_generate._planned_files(emitted)
-    bundle = planned[i18n_generate.REPO / "local_operator/mobile/web/src/i18n/bundled.gen.ts"]
-    assert bundle.index('"relay.shell": {') < bundle.index('"en": {')
-    assert bundle.index('"en": {') < bundle.index('"ur": {')
-    assert json.dumps("اردو") in bundle
-    assert json.dumps("Français") not in bundle
+    bundle_path = i18n_generate._bundled_dir() / "bundled.gen.ts"
+    chunk_path = i18n_generate._bundled_dir() / "bundled.ur.gen.ts"
+    bundle, chunk = planned[bundle_path], planned[chunk_path]
+    # Eager: English only, and the manifest names the chunk.
+    assert json.dumps("English") in bundle
+    assert json.dumps("اردو") not in bundle
+    assert '"ur": () => import("./bundled.ur.gen")' in bundle
+    # Lazy: the shipped locale's own file carries it; an unshipped one has none.
+    assert json.dumps("اردو") in chunk
+    assert json.dumps("Français") not in chunk and json.dumps("Français") not in bundle
+    assert i18n_generate._bundled_dir() / "bundled.fr.gen.ts" not in planned
 
 
 def test_committed_bundle_carries_exactly_the_owned_shell_namespace() -> None:
