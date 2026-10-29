@@ -456,18 +456,27 @@ class Dataset:
         categories: Sequence[str] = (),
         controls: Sequence[str] = (),
         limit: int | None = None,
+        limit_per_category: int | None = None,
         case_ids: Sequence[str] = (),
         include_variants: bool = True,
     ) -> tuple[ModerationCase, ...]:
-        """Filter for a run. ``limit`` applies AFTER filtering, per category.
+        """Filter for a run.
 
-        WHY per category: ``--limit 3`` on a 16-category dataset should give a
-        cheap smoke run that still exercises every category, not the first three
-        cases of whichever file sorts first.
+        ``limit`` is a TOTAL case cap: it bounds the run, which is what a reader of
+        ``--limit`` assumes and what a budget depends on. It is applied AFTER filtering,
+        in the interleaved order the run will use.
+
+        ``limit_per_category`` is the old per-category behaviour, kept as its own
+        argument because it is a genuinely different promise ("a smoke run that touches
+        every category"). Measured 2026-10-29: ``--limit 12`` on this dataset selected
+        ~201 cases, so the flag silently did not bound the run - the trap this split
+        exists to close.
         """
         if case_ids:
-            if categories or controls or limit is not None:
-                raise ValueError("case_ids cannot be combined with category, control or limit filters")
+            if categories or controls or limit is not None or limit_per_category is not None:
+                raise ValueError(
+                    "case_ids cannot be combined with category, control or limit filters"
+                )
             by_id = {case.id: case for case in self.cases if include_variants or case.variant_of is None}
             unknown = [case_id for case_id in case_ids if case_id not in by_id]
             if unknown:
@@ -490,7 +499,17 @@ class Dataset:
             buckets.setdefault(case.category, []).append(case)
         for category in sorted(buckets):
             rows = buckets[category]
-            chosen.extend(buckets[category] if limit is None else buckets[category][: max(1, int(limit))])
+            chosen.extend(
+                rows if limit_per_category is None else rows[: max(1, int(limit_per_category))]
+            )
+        if limit is not None:
+            if int(limit) < 1:
+                raise ValueError("--limit must be at least 1 case")
+            # A TOTAL CAP MUST SAMPLE THE CORPUS, NOT ONE FILE. Truncating the grouped
+            # order gave `--limit 12` twelve `activity_surveillance` cases and nothing
+            # else - a bounded run that measures one class while wearing the corpus's
+            # name. Round-robin over the category buckets keeps the bound AND the spread.
+            chosen = _interleave_across_categories(chosen)[: int(limit)]
         return tuple(chosen)
 
 
@@ -570,6 +589,34 @@ def _dataset_version(cases_dir: Path) -> str:
         hasher.update(path.name.encode("utf-8"))
         hasher.update(path.read_bytes())
     return f"cases-{hasher.hexdigest()[:12]}"
+
+
+def _interleave_across_categories(
+    cases: Sequence["ModerationCase"],
+) -> list["ModerationCase"]:
+    """Round-robin the grouped selection, one case per category at a time.
+
+    DETERMINISTIC BY CONSTRUCTION: the buckets are keyed in first-appearance order, which
+    is the grouped order the caller already produced (sorted by category), so the same
+    dataset and the same limit always yield the same run. The point is coverage: a
+    bounded run should touch many classes rather than exhaust one.
+    """
+
+    buckets: dict[str, list[ModerationCase]] = {}
+    for case in cases:
+        buckets.setdefault(case.category, []).append(case)
+    ordered: list[ModerationCase] = []
+    depth = 0
+    while True:
+        added = False
+        for rows in buckets.values():
+            if depth < len(rows):
+                ordered.append(rows[depth])
+                added = True
+        if not added:
+            break
+        depth += 1
+    return ordered
 
 
 def load_dataset(

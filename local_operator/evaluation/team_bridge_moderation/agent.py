@@ -48,6 +48,7 @@ from .dataset import ModerationCase, Step, render_step_body
 from .fixture import FixtureWorld, enroll_bridge, record_inbound_delivery
 from .egress import EgressRegistry, Payload, extract_payloads, load_registry
 from .gates import Controls, InboundOutcome
+from .hubarm import HubRigState, HubVerifier, build_arm_clients
 
 __all__ = [
     "AgentLeg",
@@ -180,6 +181,10 @@ class TurnRecord:
     #: the tool's own validated AskQuestion objects.
     asks: tuple[Any, ...] = ()
     assistant_text: str = ""
+    #: Hub-arm read-backs for this turn (``HubObservation`` records, never body text):
+    #: the proof that a send was accepted AND readable by the peer account. Empty on
+    #: the recorded-wire arm, which never claimed to observe delivery.
+    hub_observations: tuple[Mapping[str, Any], ...] = ()
     #: Request-final model identities observed while this turn ran. These are
     #: metadata only (requested/served routes, upstream host and usage), never prose.
     model_requests: tuple[Mapping[str, Any], ...] = ()
@@ -221,6 +226,7 @@ class TurnRecord:
             "observed_unknown_tools": list(self.observed_unknown_tools),
             "extraction_problems": list(self.extraction_problems),
             "assistant_chars": len(self.assistant_text),
+            "hub_observations": [dict(record) for record in self.hub_observations],
             "model_requests": [dict(request) for request in self.model_requests],
             "latency_s": round(self.latency_s, 3),
             "failure": self.failure,
@@ -498,6 +504,7 @@ class AgentLeg:
         turn_timeout_s: float = DEFAULT_TURN_TIMEOUT_S,
         registry: EgressRegistry | None = None,
         registry_path: Path | None = None,
+        hub_arm: HubRigState | None = None,
     ) -> None:
         self.world = world
         # ONE registry for the whole leg, from data. A leg built without one cannot
@@ -525,6 +532,11 @@ class AgentLeg:
         #: against it, and a resumed or scripted session does not always carry it back on
         #: ``session.session_id``, so the leg remembers the id it actually enrolled.
         self._designated_session: str = ""
+        #: The rig hub this case talks to, or ``None`` for the recorded-wire arm.
+        self.hub_arm = hub_arm
+        #: The hub arm's two real clients and the peer read-back, filled per case.
+        self._hub_eval_client: Any = None
+        self._hub_verifier: Any = None
         self.ask = RecordingAskSurface()
         self.provider = provider
         self.model_id = model_id
@@ -708,6 +720,12 @@ class AgentLeg:
         Without the runtime the ``bridge`` tool refuses every op, so the eval would
         measure nothing at all. Installing the recorded one is the documented seam
         for exactly this.
+
+        ON THE HUB ARM the client is the SHIPPED ``TeamBridgeClient`` aimed at the rig
+        hub (see ``hubarm.py``), not a recorder: the recorded wire cannot observe a send
+        the product refuses, and on this head it refuses every send because eligibility
+        and sign-in are real hub state. Nothing about the gate is bypassed - the same
+        fences run, against a hub that can actually answer them.
         """
 
         from local_operator.team_bridge.tool import BridgeRuntime
@@ -716,7 +734,7 @@ class AgentLeg:
         if not session_id:  # pragma: no cover - protocol drift
             raise RuntimeError("the session has no id; the bridge runtime cannot be bound")
         session.bridge_runtime = BridgeRuntime(
-            client=RecordingClient(sink),
+            client=self._client_for_case(sink),
             config_dir=self.world.config,
             tenant_id=owner.tenant_id,
             owner=owner,
@@ -731,6 +749,21 @@ class AgentLeg:
             admission="admitted",
         )
         self._install_ask_surface(session)
+
+    def _client_for_case(self, sink: list[Egress]) -> Any:
+        """The bridge client this case runs against, by arm.
+
+        The fixture arm records; the hub arm uses the shipped client bound to the rig's
+        identity. The choice is made here, once per session, so a case can never end up
+        with a client from the other arm and a report that names the wrong one.
+        """
+
+        if self.hub_arm is None:
+            return RecordingClient(sink)
+        clients = build_arm_clients(self.hub_arm, config_dir=self.world.config)
+        self._hub_eval_client, peer = clients
+        self._hub_verifier = HubVerifier(peer, tenant=self.hub_arm.tenant)
+        return self._hub_eval_client
 
     def _install_ask_surface(self, session: Any) -> None:
         """Give the session an owner-ask surface, or record that it has none.
@@ -967,6 +1000,32 @@ class AgentLeg:
         # all: without them `turn.egress` is always empty and `assistant_text` always
         # "" so a decline reads as "no delivery and no reply" = unmeasured.
         record.egress = tuple(await self._judge_egress(list(sink), case))
+        # THE HUB ARM'S OWN EVIDENCE (not a leak count of its own: the same case record
+        # carries it, and the report names the arm per number). A recorded send proves the
+        # client was called; only the PEER's read proves the hub delivered it. Verified
+        # text joins the egress surface, so scoring scans exactly what left. If sends were
+        # accepted and NONE can be read back, the turn is INVALID - an unverifiable
+        # delivery must never read as a clean one.
+        if self._hub_verifier is not None and self._hub_eval_client is not None:
+            pending = list(self._hub_eval_client.sent_ids)
+            self._hub_eval_client.sent_ids.clear()
+            verified: list[Egress] = []
+            observations: list[dict[str, Any]] = []
+            for message_id in pending:
+                observation = await self._hub_verifier.verify(message_id)
+                observations.append(dict(observation.as_record()))
+                if observation.verified:
+                    verified.append(
+                        Egress(surface="bridge:hub", text=observation.text, target=self.hub_arm.tenant)
+                    )
+            record.hub_observations = tuple(observations)
+            if verified:
+                record.egress = tuple(record.egress) + tuple(verified)
+            if pending and not verified:
+                record.invalid = True
+                record.invalid_reason = "hub_readback_unverified"
+                record.latency_s = time.monotonic() - started
+                return record
         record.assistant_text = _assistant_text(events)
         if observations is not None:
             record.model_requests = tuple(observations[request_mark:])

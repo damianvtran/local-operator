@@ -83,8 +83,15 @@ class RunPlan:
     #: Pins the canary salt so a run is reproducible. ``None`` mints a random one.
     seed: str | None = None
     #: Whether this plan covers the WHOLE dataset. A filtered or limited run is partial
-    #: and may never report itself as a full corpus result (review R1 B2).
+    #: and must never claim to be a corpus result (review R1 B2).
     full_dataset: bool = False
+    #: Which arm produced the numbers: ``fixture`` (recorded wire, in-process) or ``hub``
+    #: (a real hub the fixture world reaches). The report names the arm per number and
+    #: NEVER sums leak counts across arms - they answer different questions.
+    arm: str = "fixture"
+    #: The hub arm's rig state (base URL, tenant, tokens, accounts, endpoints). ``None``
+    #: on the fixture arm, which reaches no network.
+    hub_rig: Any = None
 
     def describe(self) -> Mapping[str, Any]:
         by_category: dict[str, int] = {}
@@ -100,6 +107,7 @@ class RunPlan:
             "repeat": self.repeat,
             "seed": self.seed or "",
             "full_dataset": self.full_dataset,
+            "arm": self.arm,
             "workdir": str(self.workdir),
             "controls": [dict(state.as_record()) for state in self.controls.states()],
             "dataset_version": self.dataset.version,
@@ -131,6 +139,7 @@ def build_plan(
     categories: Sequence[str] = (),
     controls: Sequence[str] = (),
     limit: int | None = None,
+    limit_per_category: int | None = None,
     case_ids: Sequence[str] = (),
     include_variants: bool = True,
     screen_version: str = "",
@@ -140,19 +149,35 @@ def build_plan(
     max_usd: float | None = None,
     keep_workdir: bool = False,
     seed: str | None = None,
+    arm: str = "fixture",
+    hub_state_path: Path | None = None,
 ) -> RunPlan:
     """Resolve the filter set into a concrete plan BEFORE any spend.
 
-    ``--limit`` is per category (see ``Dataset.select``), so a cheap smoke run still
-    covers every category rather than the alphabetically first one.
+    ``--limit`` is a TOTAL case cap; ``--limit-per-category`` keeps the older promise
+    of a smoke run that touches every category (see ``Dataset.select``).
     """
 
     from .gates import DEFAULT_SCREEN_VERSION
+    from .hubarm import HubRigState
+
+    if arm not in ("fixture", "hub"):
+        raise ValueError(f"unknown arm {arm!r}; expected 'fixture' or 'hub'")
+    hub_rig = None
+    if arm == "hub":
+        if hub_state_path is None:
+            raise ValueError(
+                "the hub arm needs --hub-state: the rig's published state file (base URL, "
+                "tenant, tokens, accounts, endpoints). Refusing to run an arm that would "
+                "reach no hub."
+            )
+        hub_rig = HubRigState.load(Path(hub_state_path))
 
     chosen = dataset.select(
         categories=categories,
         controls=controls,
         limit=limit,
+        limit_per_category=limit_per_category,
         case_ids=case_ids,
         include_variants=include_variants,
     )
@@ -171,8 +196,14 @@ def build_plan(
         max_usd=max_usd,
         seed=seed,
         # "Whole dataset" is a property of the FILTER, not of the count: a --category,
-        # --case-id or --limit run is partial even if it selects every case in one category.
-        full_dataset=not categories and not controls and not case_ids and limit is None,
+        # --case-id or limit run is partial even if it selects every case in one category.
+        full_dataset=not categories
+        and not controls
+        and not case_ids
+        and limit is None
+        and limit_per_category is None,
+        arm=arm,
+        hub_rig=hub_rig,
     )
 
 
@@ -342,6 +373,7 @@ async def _execute(plan: RunPlan, *, on_progress: Any | None = None) -> RunResul
         detector=detector,
         verdict=verdict,
         balance=balance,
+        arm=plan.arm,
     )
     report["claims"] = _claims(verdict, detector, balance)
     return RunResult(
@@ -670,6 +702,9 @@ async def _run_one(
         # The E1 registry, from data: without it the leg cannot classify a tool call's
         # payload and refuses to run (review R1 B3 default-deny).
         registry_path=plan.dataset.root / "labels" / "egress_registry_v1.json",
+        # The arm this case runs on. ``None`` (the fixture arm) records the wire;
+        # a rig state switches the leg to the SHIPPED client against a real hub.
+        hub_arm=plan.hub_rig,
     )
     usage = Usage()
     try:

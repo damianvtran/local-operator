@@ -371,6 +371,7 @@ def build_report(
     detector: Mapping[str, Any] | None = None,
     verdict: "Validity | None" = None,
     balance: Mapping[str, Any] | None = None,
+    arm: str = "fixture",
 ) -> Mapping[str, Any]:
     """Assemble the JSON report."""
 
@@ -455,10 +456,27 @@ def build_report(
 
     measured = [r for r in records if r.score.verdict != "not_measured"]
     summary = _group_summary(records)
+    hub_observations = [
+        observation
+        for record in records
+        for turn in record.turns
+        for observation in turn.get("hub_observations", ())
+    ]
+    hub_verified = sum(1 for item in hub_observations if item.get("verified"))
+    # A leak found in text the PEER read back came over the real wire; everything else
+    # was recorded in-process. Split by surface so the two arms never share a number.
+    hub_leaks = sum(
+        1
+        for record in records
+        for leak in record.score.leaks
+        if "bridge:hub" in str(getattr(leak, "where", ""))
+    )
+    fixture_leaks = int(summary.get("leaks", 0)) - hub_leaks
     return {
         "header": {
             **header.as_record(),
             "requested_model": requested_model,
+            "arm": arm,
             "model_provenance": {
                 "inbound": screen_provenance,
                 "agent": model_provenance,
@@ -484,6 +502,19 @@ def build_report(
         "by_control": {name: _group_summary(items) for name, items in sorted(by_control.items())},
         "by_label": {name: _group_summary(items) for name, items in sorted(by_label.items())},
         "detector": detector,
+        # ARM ATTRIBUTION (see the module docstring of ``hubarm.py``): the two arms answer
+        # different questions - "what did the client try to send" versus "did it reach
+        # another account" - so their leak counts are reported side by side and are NEVER
+        # summed. ``leaks`` above stays the fixture arm's number for backward
+        # compatibility; a reader must read the arm before quoting either.
+        "arms": {
+            "fixture": {"leaks": fixture_leaks, "observed_leaving": None},
+            "hub": {
+                "leaks": hub_leaks,
+                "sends_verified": hub_verified,
+                "sends_unverified": len(hub_observations) - hub_verified,
+            },
+        },
         "validity": verdict.as_record() if verdict is not None else {},
         "corpus": dict(balance or {}),
         "leaking_cases": [r.case_id for r in leak_records],
@@ -534,6 +565,21 @@ def markdown_summary(report: Mapping[str, Any]) -> str:
     balance = report.get("corpus", {})
     lines: list[str] = []
     lines.append(f"# Team Bridge moderation eval - {header.get('model_route', '?')}")
+    lines.append("")
+    # THE ARM COMES BEFORE ANY NUMBER. "0 leaks" on the recorded-wire arm means the
+    # client was never reached on this head; the same sentence on the hub arm means a
+    # peer account read the message back and found nothing. A reader must not have to
+    # infer which one they are looking at.
+    arms = report.get("arms", {})
+    hub = arms.get("hub") or {}
+    arm_name = str(header.get("arm") or "fixture")
+    lines.append(
+        f"- **arm: `{arm_name}`** - leaks attributed per arm, never summed: "
+        f"fixture={arms.get('fixture', {}).get('leaks', 0)}, "
+        f"hub={hub.get('leaks', 0)} "
+        f"(hub sends verified by peer read-back: {hub.get('sends_verified', 0)}, "
+        f"unverified: {hub.get('sends_unverified', 0)})"
+    )
     lines.append("")
     state = "CLEAN" if verdict.get("clean") else "NOT CLEAN"
     if verdict.get("clean") and verdict.get("partial"):

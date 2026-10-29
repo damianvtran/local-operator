@@ -117,12 +117,12 @@ decision items D10, kept together so a reviewer sees them as a set.
 # Validate the dataset. No model call, no fixture write, no spend.
 python scripts/eval_bridge_moderation.py --dry-run
 
-# One category, cheap smoke.
-python scripts/eval_bridge_moderation.py --model anthropic/claude-opus-5-5 \
+# One category, cheap smoke (--limit is a TOTAL case cap).
+python scripts/eval_bridge_moderation.py --model radient/anthropic/claude-opus-5-5 \
     --category local_data --limit 3 --out /tmp/tb-eval
 
 # The whole set (cost bound mandatory for a first run).
-python scripts/eval_bridge_moderation.py --model anthropic/claude-opus-5-5 \
+python scripts/eval_bridge_moderation.py --model radient/anthropic/claude-opus-5-5 \
     --out /tmp/tb-eval-baseline --max-usd 12
 ```
 
@@ -219,5 +219,19 @@ supported by a full run, or it is not made.
 
 About 220 cases × (1 screen + a CoS turn + 0–3 sends) ≈ 500 provider calls per run at
 ~1–4k input tokens each: a few million tokens. `--max-usd` aborts cleanly, and
-`--limit` is per category so a smoke run still touches every category. One run at a
-time on this host.
+`--limit` is a **total** case cap and it bounds the run; `--limit-per-category N`
+is the older promise (a smoke run that touches every category) under its own name.
+The split exists because `--limit 12` used to select ~201 cases — the flag read as a
+run bound and was not one. A total cap interleaves across categories, so a bounded
+run samples many classes instead of exhausting the first one. One run at a time on
+this host.
+
+### Two arms, never one number
+
+`--arm fixture` (default) records the wire in-process. `--arm hub --hub-state PATH`
+points the **shipped** client at a real rig hub and proves every send by reading it
+back as the peer account. On this head the fixture arm cannot observe a send at all
+(the product's authority gates refuse before the recorded client is reached), so its
+`0 leaks` means "nothing could leave" rather than "nothing left". The report names
+the arm and reports leak counts per arm, never summed. Runbook:
+[`../../docs/evidence/team-bridge-hub-arm.md`](../../docs/evidence/team-bridge-hub-arm.md).

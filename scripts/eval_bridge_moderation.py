@@ -15,13 +15,19 @@ USAGE
     python scripts/eval_bridge_moderation.py --dry-run
 
     # One category, cheap smoke. Exits 5 (partial) even when every case passes:
-    # a filtered run is never a corpus result.
-    python scripts/eval_bridge_moderation.py --model anthropic/claude-opus-5-5 \\
+    # a filtered run is never a corpus result. --limit is a TOTAL case cap;
+    # --limit-per-category keeps the older "touch every category" promise.
+    python scripts/eval_bridge_moderation.py --model radient/anthropic/claude-opus-5-5 \\
         --category local_data --limit 3 --out /tmp/tb-eval
 
     # The baseline: everything, with the controls as they exist on this branch.
-    python scripts/eval_bridge_moderation.py --model anthropic/claude-opus-5-5 \\
+    python scripts/eval_bridge_moderation.py --model radient/anthropic/claude-opus-5-5 \\
         --out /tmp/tb-eval-baseline --max-usd 12
+
+    # Control A against a REAL hub (the shipped client, sends proved by peer read-back).
+    # The runbook is docs/evidence/team-bridge-hub-arm.md; leak counts stay per arm.
+    python scripts/eval_bridge_moderation.py --arm hub --hub-state /tmp/tb-rig-state.json \\
+        --model radient/anthropic/claude-opus-5-5 --max-usd 3 --out /tmp/tb-hub-arm
 
     # Prove a control changes the result (after C2/C3 land).
     python scripts/eval_bridge_moderation.py --model ... --disable-control A --out /tmp/gate-off
@@ -170,7 +176,33 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--limit", type=int, default=None, metavar="N",
-        help="max cases PER CATEGORY (so a smoke run still covers every category)",
+        help=(
+            "TOTAL case cap for this run (bounds what the run can spend). Applied after "
+            "category/control filters, in the order the run will use"
+        ),
+    )
+    parser.add_argument(
+        "--limit-per-category", type=int, default=None, metavar="N",
+        help=(
+            "max cases PER CATEGORY - the old --limit behaviour, kept under its own name "
+            "so it cannot be mistaken for a run bound (on this dataset it selects up to "
+            "N x 18 cases)"
+        ),
+    )
+    parser.add_argument(
+        "--arm", choices=("fixture", "hub"), default="fixture",
+        help=(
+            "which arm measures the run: 'fixture' records the wire in-process (cannot "
+            "observe a send the product refuses), 'hub' points the SHIPPED client at a "
+            "real rig hub and proves each send by reading it back as the peer account"
+        ),
+    )
+    parser.add_argument(
+        "--hub-state", type=Path, default=None, metavar="PATH",
+        help=(
+            "the rig's published state file (url, tenant, tokens, accounts, endpoints). "
+            "Required by --arm hub: see docs/evidence/team-bridge-hub-arm.md"
+        ),
     )
     parser.add_argument(
         "--workers", type=int, default=1, metavar="N",
@@ -349,23 +381,33 @@ def main(argv: list[str] | None = None) -> int:
               file=sys.stderr)
         return EXIT_PREFLIGHT
 
-    plan = build_plan(
-        dataset=dataset,
-        model_route=args.model or ("unset", "unset"),
-        workdir=workdir,
-        categories=categories,
-        controls=controls,
-        limit=args.limit,
-        case_ids=_split_csv(args.case_id),
-        include_variants=True,
-        screen_version=args.screen_version,
-        judge_route=None,
-        controls_object=Controls(disabled=disabled),
-        repeat=args.repeat,
-        max_usd=args.max_usd,
-        keep_workdir=bool(args.keep_workdir),
-        seed=args.seed,
-    )
+    plan_error = None
+    try:
+        plan = build_plan(
+            dataset=dataset,
+            model_route=args.model or ("unset", "unset"),
+            workdir=workdir,
+            categories=categories,
+            controls=controls,
+            limit=args.limit,
+            limit_per_category=args.limit_per_category,
+            case_ids=_split_csv(args.case_id),
+            include_variants=True,
+            screen_version=args.screen_version,
+            judge_route=None,
+            controls_object=Controls(disabled=disabled),
+            repeat=args.repeat,
+            arm=args.arm,
+            hub_state_path=args.hub_state,
+            max_usd=args.max_usd,
+            keep_workdir=bool(args.keep_workdir),
+            seed=args.seed,
+        )
+    except ValueError as error:  # a bad plan is exit 1, never a traceback
+        plan_error = error
+    if plan_error is not None:
+        print(f"invalid plan: {plan_error}", file=sys.stderr)
+        return EXIT_DATASET
 
     if args.write_manifest:
         # Stdlib only: this must work in an isolated env with no provider configured.
