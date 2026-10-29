@@ -8630,8 +8630,11 @@ class ServingSessionHandle(SessionHandle):
                 )
             # Same rule as the app host: a bare `/radient saver` REPORTS rather
             # than toggles, so a namespace command completed by return keys cannot
-            # change state (QA round 3, Q1).
-            result = await saver_slash(session, rest or "status", SlashResult)
+            # change state (QA round 3, Q1). STRIPPED, because this host forwards
+            # `body.args` verbatim (desktop_sessions.py) and `rest or "status"` is a
+            # TRUTHINESS test: a whitespace-only argument is truthy, so `/radient
+            # saver␣␣` reported in the app and WROTE Saver on here (round 4).
+            result = await saver_slash(session, (rest or "").strip() or "status", SlashResult)
             self._notify()
             return result
         if command == "approvals":
