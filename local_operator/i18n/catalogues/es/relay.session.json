@@ -11,7 +11,7 @@
   "relay.session.past.heading": "sesiones anteriores",
   "relay.session.past.search_placeholder": "buscar nombres y conversaciones…",
   "relay.session.past.loading": "cargando…",
-  "relay.session.directory.sheet_title": "carpeta de trabajo",
+  "relay.session.directory.sheet_title": "directorio de trabajo",
   "relay.session.directory.path_placeholder": "o escribe otra ruta…",
   "relay.session.model.sheet_title": "modelo",
   "relay.session.model.filter_placeholder": "filtrar modelos",

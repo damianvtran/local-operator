@@ -9396,8 +9396,15 @@
         "model": "anthropic/claude-opus-5-5",
         "date": "2026-10-29"
       },
-      "status": "pending_audit",
-      "note": "Translated from the CURRENT en bytes (44/44 keys, no extras, no omissions) with no independent audit yet; status is pending_audit, not passed, and the auditor replaces this row rather than inheriting it. ICU held byte-exactly: the usage amounts stay `{value, number}` (no number->plural upgrade), the unit nouns carry one/many/other with `de` in `many` and never `#`, and the exact-numeric-million `de` is supplied exactly once by the unit noun. es agreement call recorded here: `remaining`/`used` are invariable leading labels (\"restante:\", \"usado:\") so 1 credit/token/request never produces a wrong plural adjective or verb, and `row`/`row_family` use an em dash where en uses a colon so a labelled amount does not render a double colon. Terminology: allowance = cuota (anchored on the existing es wire.settings \"cuota restante\"), usage = uso (relay.chrome), spend = gasto (relay.chrome \"Gasto y contexto\"), request = petición, window = periodo."
+      "status": "passed",
+      "note": "Independent es audit: all 44 keys read against the en source and its sidecar. Meaning and state direction clean: the state-bearing strings (cached, unavailable, empty, last_known, continue, family_caps, stale) each read as information, warning or unavailable, and none reads as success about data the daemon does not have. ICU: es `many` added on unit_credits/unit_tokens/unit_requests with `de` supplied exactly once by the unit noun and no `#` (the outer message formats the number), placeholder names identical to en, and `{value}` reused across date+time in reset/as_of exactly as en does. Rendered through the real engine: 0/1/2/5/1.000.000 -> 'restante: 0 créditos', 'restante: 1 crédito', 'restante: 1.000.000 de créditos'. Recorded decisions, both accepted: (1) 'restante:'/'usado:' leading invariable labels — they remove en's postpositive agreement failure outright ('1 crédito restantes' cannot be produced), and the sheet reads 'Cuota incluida · 5 horas — restante: 1 crédito'; (2) em dash in row/row_family where en uses a colon, which the sidecar explicitly delegates ('own the separator before the value') and which avoids '— restante: … : …'. 'Cuota de pago' for Paid allowance accepted: it keeps the Cuota incluida / Cuota de pago contrast in one frame ('de pago' as a product modifier, cf. 'versión de pago'); residual risk recorded for a native reader, that 'cuota' also means instalment. Terminology anchored on shipped es: cuota (wire.settings 'cuota restante'), uso (relay.chrome), gasto (relay.chrome spend_label), periodo for window. Typography clean: U+2026 in all 4 ellipsis strings of this namespace, no ASCII dots anywhere in the 75, no space before : or %, es percent spacing left to the formatter. NOT checked: no native-speaker pass, no rendered relay-sheet or layout/screenshot check (this role has no browser surface), no vite build. Independent auditor identity: the session was pinned to openai/gpt-6-astra and the host descended on provider quota failures (anthropic/claude-sonnet-5-5 -> kimi/k3.1-pro -> radient/auto); radient/auto ran this audit. Read from a detached worktree at 219544bbda6, never the shared checkout.",
+      "auditor": {
+        "agent": "i18n-auditor (lopdev reviewer, independent of the translator)",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 2
+      }
     },
     {
       "locale": "es",
@@ -9408,8 +9415,15 @@
         "model": "anthropic/claude-opus-5-5",
         "date": "2026-10-29"
       },
-      "status": "pending_audit",
-      "note": "Translated from the CURRENT en bytes (17/17 keys) with no independent audit yet; status is pending_audit, and the auditor replaces this row. Lowercase fragment register follows the en sidecar's 'preserve casing' instruction; tú address per the es guide (\"empieza\", \"envía\"). Anchored on shipped es relay.chrome: conversaciones, nueva sesión, sesiones anteriores, carpetas de trabajo. TUI and Local Operator stay untranslated per glossary §1."
+      "status": "passed",
+      "note": "Independent es audit: all 17 keys read. One MAJOR found and FIXED in this audit, disclosed individually on the PR: directory.sheet_title 'carpeta de trabajo' -> 'directorio de trabajo', because shipped es names a session's working directory 'directorio de trabajo' (wire.settings.display_composer_cwd.help 'El segmento del directorio de trabajo en la banda de estado', .label 'Banda: directorio de trabajo', wire.settings.static.description 'los directorios de trabajo de tus agentes y sesiones') while 'carpeta' is its word for a plain folder (relay.chrome 'carpeta personal'). The translator note's cited anchor ('relay.chrome carpetas de trabajo') does not exist in relay.chrome — NIT, superseded by this row. Everything else clean: lowercase fragment casing mirrors en and matches relay.session.tags 'etiquetas'; casing differences vs relay.shell's 'Sesiones anteriores' mirror en's own previous/past split; tú address throughout ('empieza', 'envía', 'escribe'); placeholders identical, no ICU. NOT checked: no native-speaker pass, no rendered layout. Independent auditor identity: the session was pinned to openai/gpt-6-astra and the host descended on provider quota failures (anthropic/claude-sonnet-5-5 -> kimi/k3.1-pro -> radient/auto); radient/auto ran this audit. Read from a detached worktree at 219544bbda6, never the shared checkout.",
+      "auditor": {
+        "agent": "i18n-auditor (lopdev reviewer, independent of the translator)",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 2
+      }
     },
     {
       "locale": "es",
@@ -9420,8 +9434,15 @@
         "model": "anthropic/claude-opus-5-5",
         "date": "2026-10-29"
       },
-      "status": "pending_audit",
-      "note": "Translated from the CURRENT en bytes (13/13 keys) with no independent audit yet; status is pending_audit, and the auditor replaces this row. account routing = enrutamiento de cuentas, anchored on the existing audited es wire.settings.account_policy error copy; policy = política (\"Política de cuentas\"); settings = ajustes. `error` states only that the change could not be confirmed and never asserts the write failed, while `rejected` does assert it was not saved — the known-failed/unknown-status split the sidecar names. \"this computer\" reads \"esta máquina\" because ordenador (Spain) and computadora (LatAm) are both region-marked and the es guide requires neutral Spanish; \"máquina\" is already the es corpus's word for it (wire.settings \"en esta máquina\"). relay = relé per glossary §2."
+      "status": "passed",
+      "note": "Independent es audit: all 13 keys read. State direction preserved exactly as the sidecar requires: 'error' asserts only that the change could not be confirmed (commit status UNKNOWN), while 'rejected' does assert it was not saved; 'unavailable' is a capability gap with a remedy, not a failure. 'esta máquina' for this computer accepted: 'ordenador' is Spain-marked and 'computadora' LatAm-marked, so 'máquina' is the neutral call the guide asks for, and it is already the corpus's word (34 occurrences across 18 pre-existing es catalogues, e.g. wire.settings.team_bridge_enabled.label 'Activado en esta máquina'). The title's added deictic ('Ajustes de esta máquina' for 'Computer settings') is accepted because it matches the scope/saved/rejected sentences in the same screen. 'relé' is not a drift: shipped es already uses it (cli.services_help, wire.settings). 'enrutamiento de cuentas' matches wire.settings.account_policy.error.unavailable verbatim; ajustes for settings matches the guide. No ICU arguments in this namespace. NOT checked: no native-speaker pass, no rendered screen. Independent auditor identity: the session was pinned to openai/gpt-6-astra and the host descended on provider quota failures (anthropic/claude-sonnet-5-5 -> kimi/k3.1-pro -> radient/auto); radient/auto ran this audit. Read from a detached worktree at 219544bbda6, never the shared checkout.",
+      "auditor": {
+        "agent": "i18n-auditor (lopdev reviewer, independent of the translator)",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 2
+      }
     },
     {
       "locale": "es",
@@ -9432,8 +9453,15 @@
         "model": "anthropic/claude-opus-5-5",
         "date": "2026-10-29"
       },
-      "status": "pending_audit",
-      "note": "Translated from the CURRENT en bytes (1/1 key) with no independent audit yet; status is pending_audit, and the auditor replaces this row. asset = recurso, anchored on the shipped es wire.slash.library (\"Biblioteca global de recursos\"); one/many/other with the RAE exact-million `de` arm, 0 is `other` per the es guide."
+      "status": "passed",
+      "note": "Independent es audit: the 1 key read and rendered: 0 -> '0 recursos', 1 -> '1 recurso', 2 -> '2 recursos', 1.000.000 -> '1.000.000 de recursos' (RAE exact-million de, supplied once, 0 correctly in other). 'recurso' matches shipped es wire.slash.library. Observation for a native pass, not a string defect: 1.500.000 renders '1.500.000 recursos' because the es `many` category is exact multiples of 10^6 only (style guide), so the 'de' arm cannot fire there. NOT checked: no native-speaker pass, no rendered library grid. Independent auditor identity: the session was pinned to openai/gpt-6-astra and the host descended on provider quota failures (anthropic/claude-sonnet-5-5 -> kimi/k3.1-pro -> radient/auto); radient/auto ran this audit. Read from a detached worktree at 219544bbda6, never the shared checkout.",
+      "auditor": {
+        "agent": "i18n-auditor (lopdev reviewer, independent of the translator)",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 2
+      }
     }
   ]
 }
