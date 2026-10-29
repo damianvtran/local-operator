@@ -44,6 +44,7 @@ from local_operator.tools.public_copy import (
     PUBLIC_COPY_GLOBS,
     UI_REPOSITORY,
     _matches_public_copy,
+    _origin_identity,
     _publishing_checkouts,
     execute_read_public_copy,
 )
@@ -240,6 +241,31 @@ def test_the_consumer_identity_binding_is_per_checkout() -> None:
         "local_operator/mobile/web/src/i18n/keys.gen.ts",
     ):
         assert _publishing_checkouts(core) == ()
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        # The three shapes git hands back for a GitHub remote.
+        ("git@github.com:damianvtran/local-operator-mobile.git", MOBILE_REPOSITORY),
+        ("ssh://git@github.com/damianvtran/local-operator-mobile.git", MOBILE_REPOSITORY),
+        ("https://github.com/damianvtran/local-operator-mobile", MOBILE_REPOSITORY),
+        ("ssh://git@github.com/damianvtran/local-operator-ui.git", UI_REPOSITORY),
+        # Case-insensitive, and the host is not part of the identity: an alias or
+        # a mirror with the repository path is the same repository.
+        ("git@gitlab.example:DamianVTran/Local-Operator-Mobile.git", MOBILE_REPOSITORY),
+        # Another owner, and a shorter path, are not a consumer checkout.
+        (
+            "git@github.com:someone-else/local-operator-mobile.git",
+            "someone-else/local-operator-mobile",
+        ),
+        ("/Users/me/src", "me/src"),
+        ("", ""),
+    ],
+)
+def test_the_origin_identity_is_the_last_two_path_components(url: str, expected: str) -> None:
+    """Identity is `owner/repo` from the URL's tail, never the path shape."""
+    assert _origin_identity(url) == expected
 
 
 @pytest.mark.parametrize("path", ACCEPTED_PUBLIC_COPY_PATHS)
