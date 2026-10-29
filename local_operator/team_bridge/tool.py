@@ -85,7 +85,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from local_operator.harness.message_types import BRIDGE_UNTRUSTED_CLAUSE
 from local_operator.harness.types import (
@@ -102,6 +102,7 @@ from .outbox import Outbox, send_from_outbox
 from .types import _CONVERSATION_MESSAGE_ID as _CANONICAL_MESSAGE_ID
 from .types import (
     CONVERSATION_ID_PATTERN,
+    SEND_RECIPIENT_DESCRIPTION,
     InvalidSendRecipient,
     is_conversation_message_id,
     validate_send_recipient,
@@ -202,12 +203,24 @@ def _closed_recipient_schema(schema: dict[str, Any]) -> None:
     # Derive explicit properties from Pydantic's Literal-key schema instead of
     # requiring every provider to implement propertyNames. This preserves the
     # closed key set without a second hand-maintained list or duplicate models.
+    # The field is a UNION (object | bare id | null), so the object branch is one
+    # of several at the top level; branches without ``propertyNames`` (the string
+    # and null arms) are already closed and are left exactly as published.
     for branch in schema.get("anyOf", [schema]):
-        if branch.get("type") == "object":
+        if branch.get("type") == "object" and "propertyNames" in branch:
             names = branch.pop("propertyNames")["enum"]
             value = branch["additionalProperties"]
             branch["properties"] = {name: value for name in names}
             branch["additionalProperties"] = False
+
+
+#: The recipient OBJECT shape as a type: exactly one of the two keys, each a
+#: non-empty string. Cardinality and the closed key set live HERE (not on the
+#: field) so they still apply now that the field also accepts a bare id.
+_SendRecipientObject = Annotated[
+    dict[Literal["endpoint_id", "account_id"], Annotated[str, Field(min_length=1)]],
+    Field(min_length=1, max_length=1),
+]
 
 
 class BridgeToolParams(BaseModel):
@@ -235,8 +248,17 @@ class BridgeToolParams(BaseModel):
     # recipient models, without duplicating object definitions, titles and
     # descriptions in every prompt. Pydantic and JSON Schema both reject unknown
     # keys; the shared pre-admission/client guard additionally rejects padding.
-    to: dict[Literal["endpoint_id", "account_id"], Annotated[str, Field(min_length=1)]] | None = (
-        Field(default=None, min_length=1, max_length=1, json_schema_extra=_closed_recipient_schema)
+    #
+    # A BARE ID is also accepted: ``"acc_123"`` is one recipient in one field,
+    # the shape a model writes first, and it is unambiguous. The description is
+    # the schema's own string, assembled from the same constants the refusals
+    # teach (:data:`SEND_RECIPIENT_DESCRIPTION`), so the published advice cannot
+    # drift from what ``validate_send_recipient`` accepts. Names stay refused:
+    # only an id (bare or paired) is a destination.
+    to: _SendRecipientObject | Annotated[str, Field(min_length=1)] | None = Field(
+        default=None,
+        description=SEND_RECIPIENT_DESCRIPTION,
+        json_schema_extra=_closed_recipient_schema,
     )
     type: Literal["note", "question", "request"] = "note"
     text: str = ""
@@ -261,6 +283,19 @@ class BridgeToolParams(BaseModel):
     #: channel_post: reply in this root message's thread; channel_thread: the
     #: thread to read. A conversation message id (bcmsg_…).
     thread_root_id: str = ""
+
+    @field_validator("to")
+    @classmethod
+    def _normalize_recipient(cls, value: Any) -> dict[str, str] | None:
+        """Hand on THE validator's canonical pair, never a second reading.
+
+        The annotation accepts a bare id because the schema must ADVERTISE it, but
+        a raw string leaving this model would reach a serializer as one — the exact
+        class of silent reinterpretation ``validate_send_recipient`` exists to stop.
+        Delegating (rather than re-deriving the mapping here) is what keeps ONE
+        rule for the executor, the wire client and every other caller.
+        """
+        return None if value is None else validate_send_recipient(value)
 
 
 def _error(message: str, *, code: str = "invalid_request") -> dict[str, Any]:

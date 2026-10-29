@@ -327,7 +327,14 @@ MEASURED_TOKENS: dict[str, int] = {
     # repeated op roster left the description and the thread-reply clause moved
     # to thread_root_id's own field note. Every op is still discoverable.
     # Neither the document soft cap nor the start-context budget changes.
-    "bridge": 777,
+    # 777 -> 839 (tb-send-recipient-ergonomics): the ``to`` parameter publishes
+    # its own DESCRIPTION now — both accepted object shapes, the bare account id
+    # and where the ids come from — because the schema is the model's first
+    # teacher, and the bare form was refused at validation while teaching
+    # nothing. +62 on this opt-in reference; the paired start-context raise is
+    # stated in scripts/bench_context_budget.py. Measured by this test's printed
+    # table, no other tool's bytes moved.
+    "bridge": 839,
     # Re-measured with this test's canonical isolated renderer: the read-only
     # inspect_ownership operation adds 19 opt-in tokens, not wire prompt cost.
     # 1327 -> 1424 (2026-10-16): the browser `type` secret_ref convention adds

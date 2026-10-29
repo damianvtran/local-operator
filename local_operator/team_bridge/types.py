@@ -33,6 +33,10 @@ __all__ = [
     "ATTACHMENT_ID_PATTERN",
     "CONVERSATION_ID_PATTERN",
     "InvalidSendRecipient",
+    "RECIPIENT_ACCOUNT_SHAPE",
+    "RECIPIENT_ENDPOINT_SHAPE",
+    "RECIPIENT_TEACHING",
+    "SEND_RECIPIENT_DESCRIPTION",
     "is_account_id",
     "validate_send_recipient",
     "SCREENING_CATEGORIES",
@@ -131,6 +135,35 @@ class InvalidSendRecipient(TeamBridgeTypeError):
     code = "invalid_request"
 
 
+#: The two accepted recipient OBJECT shapes, spelled once. Every refusal that
+#: teaches the contract and the tool's ``to`` description (below) interpolate
+#: these, so what a model is TOLD cannot drift from what the validator accepts.
+RECIPIENT_ENDPOINT_SHAPE = '{"endpoint_id": "<id>"}'
+RECIPIENT_ACCOUNT_SHAPE = '{"account_id": "<id>"}'
+
+#: The teaching tail on a shape refusal. A refusal that only said "unsupported
+#: field" left the caller with no next move, so this names BOTH accepted shapes,
+#: the bare-string form and where the ids come from. It deliberately says nothing
+#: about the VALUE or KEY it refused (see the validator's docstring): the words
+#: "name"/"label" do not appear, so no caller-controlled key is echoed back.
+RECIPIENT_TEACHING = (
+    f"send/reply take exactly one of {RECIPIENT_ENDPOINT_SHAPE} or "
+    f"{RECIPIENT_ACCOUNT_SHAPE}, or the bare account id string; those ids come "
+    f"from the bridge directory, which lists every addressable member"
+)
+
+#: Model-facing help for the ``to`` parameter, published in the tool schema
+#: (``tool.BridgeToolParams.to``). Built from the same shapes the refusals teach,
+#: so the published advice cannot drift from the contract. It is billed on every
+#: tool call, so it states the two object shapes, the bare form, and where the
+#: ids come from — and nothing else (``scripts/bench_context_budget.py``).
+SEND_RECIPIENT_DESCRIPTION = (
+    f"Who receives it: {RECIPIENT_ACCOUNT_SHAPE} or {RECIPIENT_ENDPOINT_SHAPE}, "
+    f'or the bare account id — e.g. {{"account_id": "acc_123"}}. Ids come from '
+    f"the bridge directory; a name is never resolved."
+)
+
+
 def validate_send_recipient(value: Any) -> dict[str, str]:
     """Return the closed pair-inbox destination without coercion or field loss.
 
@@ -140,13 +173,27 @@ def validate_send_recipient(value: Any) -> dict[str, str]:
     use this check, so neither can silently reinterpret a destination. This is
     the existing pair-inbox contract, not conversation routing or a human fallback.
     Refusals deliberately do not quote caller-controlled keys or values.
+
+    A BARE STRING is an ACCOUNT id (``"acc_123"`` → ``{"account_id": "acc_123"}``):
+    one string is one recipient in one field, so there is nothing to reinterpret
+    and no second field that can be lost — the same guarantee the object form
+    gives, for the shape a model reaches for first. Names are still NOT resolved:
+    a name is ambiguous and is the caller's own directory read to make, and a
+    guessed ``{"name": ...}`` refuses with :data:`RECIPIENT_TEACHING`, which
+    names both accepted shapes and the directory. The string checks are the SAME
+    ones the object values get, applied to the only value there is.
     """
-    if not isinstance(value, Mapping) or len(value) != 1:
-        raise InvalidSendRecipient("send/reply require exactly one endpoint_id or account_id")
-    key = next(iter(value))
-    if key not in ("endpoint_id", "account_id"):
-        raise InvalidSendRecipient("send/reply recipient contains an unsupported field")
-    identifier = value[key]
+    if isinstance(value, str):
+        key, identifier = "account_id", value
+    else:
+        if not isinstance(value, Mapping) or len(value) != 1:
+            raise InvalidSendRecipient(RECIPIENT_TEACHING)
+        key = next(iter(value))
+        if key not in ("endpoint_id", "account_id"):
+            raise InvalidSendRecipient(
+                "send/reply recipient contains an unsupported field; " + RECIPIENT_TEACHING
+            )
+        identifier = value[key]
     if not isinstance(identifier, str) or not identifier or identifier != identifier.strip():
         raise InvalidSendRecipient("send/reply recipient must be a non-empty unpadded string")
     return {key: identifier}
