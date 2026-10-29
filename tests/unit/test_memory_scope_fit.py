@@ -141,6 +141,67 @@ def test_personal_words_that_look_workish_store(tmp_path, text):
 
 
 @pytest.mark.parametrize(
+    "text",
+    [
+        # Live global-bank evidence (2026-10-29): five work-shaped writes reached
+        # `global` from agents that believed they were storing durable facts, each
+        # through ONE missing shape. These are the real texts, so a regression that
+        # reopens any of them fails here. Row order matches the code comment at
+        # `_WORK_WORD`.
+        "Saver releases so far: agent-server #233 live (image 20db00fc), #234 live",
+        "PR3078 R1 remediation: all source edits done (validate, chain, client, gate)",
+        "Session todo: query Cloudflare MCP for radienthq.com zone id + ruleset",
+        "cloudflare-zone-lookup: next action is mcp__cloudflare_whoami then search zones",
+        "Do not use memory recall for task progress on this workstream; project record",
+    ],
+)
+def test_live_missed_work_shapes_are_refused(text):
+    """The five shapes that reached the live global bank are refused now."""
+    with pytest.raises(MemoryError):
+        scope_fit("global", {"title": "x", "body": text, "tags": [], "aliases": [], "subject": ""})
+
+
+# Round 5 NEGATIVE controls, one per new shape, each a REAL sentence from the same
+# bank's personal rows (contacts, preferences, environment): the shape must not touch
+# it. `lanes hold` is why `lane` stayed singular; `RS256` and `sdk-pr2` are why the
+# unspaced-ref arm is UPPERCASE-only with 3+ digits; `task progress` inside the
+# operator's own boundaries note is why the plan/progress arm keys off `workstream`
+# and the `session todo` phrase rather than those two words alone.
+@pytest.mark.parametrize(
+    "text",
+    [
+        # Plural work noun: `lanes` in a stored disk-reclaim rule.
+        "never force a shared tool's lock (uv cache prune --force while other lanes "
+        "hold the uv cache lock) - report the blocker instead",
+        # `task progress` / `release status` / `session resumption` in a preference.
+        "Global memory is only for durable user/personal facts, preferences, contacts "
+        "and environment-not task progress, release status, transient approvals, "
+        "debug logs or session resumption.",
+        # Plural `PRs` with no tracker ref beside it.
+        "UI i18n PRs consolidate under one owner; shared-catalogue merge "
+        "order: 1052 actions union.",
+        # Two uppercase letters + three digits that are NOT a tracker ref (a JWT alg).
+        "assertion = Google ID token (RS256, aud=GOOGLE_VAULT_CLIENT_ID, "
+        "iss accounts.google.com).",
+        # A bare TODO and a lane label: `session todo` is the phrase, not `todo`.
+        "L4 remaining TODO: drawer tabs Asks|Updates|All (D9), transcript flag line "
+        "+ in-view auto-read.",
+        # A hyphenated key ending in `pr` + one digit: not an unspaced PR ref.
+        "never delete or move ~/worktrees/sdk-pr2 (717M).",
+        # Rust/JSON spec only, and the 2-digit product-code class the arm excludes.
+        "I fitted MR16 LED bulbs in the kitchen downlights.",
+        # QA round 1's M-1 boundary still holds for the new `action` wording.
+        "The next action is to renew the passport before March.",
+        "Session notes: the todo list for the trip is on the fridge.",
+    ],
+)
+def test_live_personal_rows_not_refused(tmp_path, text):
+    """The live bank's personal rows must still store to global after the widening."""
+    store = _store(tmp_path)
+    assert store.put("global", {"title": "Note", "body": text, "tags": []})["scope"] == "global"
+
+
+@pytest.mark.parametrize(
     "fact",
     [
         {

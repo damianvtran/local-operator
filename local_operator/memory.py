@@ -313,38 +313,71 @@ def _fold(text: str) -> str:
 # is therefore UPPERCASE-ONLY here (`MR`, `MRs`); the lowercase form is never a tracker
 # word. GitLab work uses `!N`, which is matched absolutely.
 #
+# Live global-bank evidence (5 rows an agent stored as "durable" while it was
+# really session work): every miss was ONE missing shape, not a missing classifier,
+# and each fix below is scoped to the shape that let its row through —
+#   `Saver releases so far: agent-server #233 live`  → the word list was singular-only,
+#     so a real tracker ref had no work word beside it;
+#   `PR3078 R1 remediation: …`                        → an unspaced ref (see _WORK_REF);
+#   `Session todo: query …`, `next action is mcp__cloudflare_whoami`,
+#     `task progress on this workstream`               → plan/progress nouns with no
+#     status verb and no locator to sit beside (see _WORK_STATUS).
+#
 # KNOWN BOUNDARY (documented, not debt): this is a bounded SHAPE rule, so prose work
 # text with no locator (`Fleet scratchpad purge 2026-10-15/16: …`) and hyphenated keys
 # (`LOH-13`, `PR34`) still pass. Catching those needs a classifier, which the design
 # deliberately rejects; the guide states this bound rather than overclaiming.
+#
+# Every plural added below was measured against the live global bank's personal rows
+# (contacts, preferences, environment) and none of them match, with two deliberate
+# exclusions that measurement forced: ``lane`` stays SINGULAR, because `while other
+# lanes hold the uv cache lock` (a stored disk-reclaim rule) became a HOLD match on
+# the plural alone; and ``tag`` stays singular in ``_WORK_NOUN``, because "tags" is
+# ordinary retail/gift prose. Do not pluralise either without re-running that bank.
 _WORK_WORD = (
-    r"pr|pull request|merge request|(?-i:MRs?)|issue|ticket|ci|pipeline|build|commit|"
-    r"sha|branch|rebase|squash|deploy|release|rollout|lane|backlog|sprint|milestone|"
-    r"tracker|jira|linear|holding|blocked|pending|awaiting|drivable|wip"
+    r"prs?|pull requests?|merge requests?|(?-i:MRs?)|issues?|tickets?|ci|pipelines?|"
+    r"builds?|commits?|sha|branches?|rebase[sd]?|squash(?:ed)?|deploys?|releases?|"
+    r"rollouts?|lane|backlogs?|sprints?|milestones?|tracker|jira|linear|holding|blocked|"
+    r"pending|awaiting|drivable|wip"
 )
 _WORK_REF = re.compile(
     r"\b(?:" + _WORK_WORD + r")\b[^.\n]{0,24}(?<![\w#])#\d{1,6}\b"
     r"|(?<![\w#])#\d{1,6}\b[^.\n]{0,24}\b(?:" + _WORK_WORD + r")\b"
-    r"|(?<![\w!])!\d{1,6}\b",
+    r"|(?<![\w!])!\d{1,6}\b"
+    # Unspaced shorthand (`PR3078`, `MR3078`) is how an agent writes a tracker ref into
+    # a session note, and it matched no rule at all. UPPERCASE only, like `MR` above,
+    # and 3+ digits: `MR16`/`MR11` are halogen bulb sizes and `PR34` is the documented
+    # hyphenated-key boundary, so those two-digit forms stay ordinary text.
+    r"|(?<![\w#])(?-i:PR|MR)\d{3,6}\b",
     re.I,
 )
 # A named commit needs a LETTER in the hash: `commit 5000000` is ordinary prose, an
 # all-letter abbreviation (`cafebabe`) is not.
-_WORK_NOUN = r"pr|(?-i:MRs?)|release|merge|ci|branch|tag|deploy|lane|ticket|issue"
+_WORK_NOUN = r"prs?|(?-i:MRs?)|releases?|merges?|ci|branches?|tag|deploys?|lane|tickets?|issues?"
 _WORK_SHA = re.compile(r"\b(?:commit|sha|head)\s+(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\b", re.I)
 _WORK_STATUS = re.compile(
     r"\b(?:ci|pipeline|build|checks)\b[^.\n]{0,24}\b(?:green|red|pass(?:ed|ing)?|fail(?:ed|ing)?)"
     r"\b"
     r"|\b(?:merged|merge[sd]?|rebase[sd]?|squash(?:ed)?)\b[^.\n]{0,20}"
-    r"\b(?:pr|(?-i:MRs?)|#\d|into main)\b"
+    r"\b(?:prs?|(?-i:MRs?)|#\d|into main)\b"
     # Noun-then-verb needs TIGHT adjacency, or only a copula/auxiliary between:
     # `PR`/`MR` are also permanent residency, public relations and a person
     # (`My PR application merged into the family one`, `The PR agency merged with a rival`),
     # while `the PR was merged` / `MRs rebased onto main` are real work text.
-    r"|\b(?:pr|(?-i:MRs?))\b(?:\s+(?:was|is|are|were|been|has|had|gets?|got|now))?\s{0,4}"
+    r"|\b(?:prs?|(?-i:MRs?))\b(?:\s+(?:was|is|are|were|been|has|had|gets?|got|now))?\s{0,4}"
     r"(?:merged|merge[sd]?|rebase[sd]?|squash(?:ed)?)\b"
     r"|\b(?:cut|land|ship|tag)\b[^.\n]{0,20}\b(?:(?:the )?release|v\d)"
-    r"|\bnext (?:step|lane)\b[^.\n]{0,40}\b(?:" + _WORK_NOUN + r")\b"
+    # `next action` needs the SAME work context as `next step`, never standing alone
+    # (QA round 1, M-1: `next step is to fold in the flour` is personal prose). An
+    # MCP tool identifier (`mcp__cloudflare_whoami`) is that context: a tool call is
+    # execution state for the session that made it, never a durable personal fact.
+    r"|\bnext (?:step|lane|action)\b[^.\n]{0,40}\b(?:" + _WORK_NOUN + r"|\w+__\w+)\b"
+    # Plan/progress nouns, the third live shape. `session todo` is the phrase an agent
+    # uses for its own queue; `todo` alone is ordinary prose (`the todo list for the
+    # trip is on the fridge`). `workstream` is engineering vocabulary like the
+    # `backlog`/`sprint` already listed.
+    r"|\bsession todos?\b"
+    r"|\bworkstreams?\b"
     r"|\b(?:the )?(?:" + _WORK_NOUN + r")\b[^.\n]{0,24}\bnext (?:step|lane)\b"
     r"|\bremaining work\b",
     re.I,
