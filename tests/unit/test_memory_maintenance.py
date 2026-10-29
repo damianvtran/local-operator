@@ -808,10 +808,16 @@ def test_eviction_and_expiry_tombstones_are_never_mistaken_for_each_other(
     from local_operator.memory import is_expiry_tombstone
 
     store = _store(tmp_path)
-    old = time.time() - 15 * DAY
-    _capture(store, "m1", "Oldest capture the budget will evict first", old - 60)
+    # The evicted row must still be INSIDE its TTL: a capture past its deadline is the
+    # expiry sweep's to retire, never eviction's (PR #3057 review r6, m1 — eviction is
+    # final, expiry is re-capturable, so evicting a stale row first loses the text).
+    live = time.time() - 60
+    _capture(store, "m1", "Oldest capture the budget will evict first", live)
+    _capture(
+        store, "stale", "Newer capture that will merely expire later on", time.time() - 15 * DAY
+    )
     monkeypatch.setattr(memory_capture, "CAPTURE_SESSION_TOKENS", 20)
-    _capture(store, "m2", "Newer capture that will merely expire later on", old)
+    _capture(store, "m2", "Live capture that makes the budget bind", live + 30)
     assert memory_capture.capture_status(store)["evicted"] == 1
     db = sqlite3.connect(tmp_path / "memory" / "memory.db")
     try:
@@ -839,7 +845,12 @@ def test_eviction_and_expiry_tombstones_are_never_mistaken_for_each_other(
     now = time.time()
     _capture(store, "m3", "Oldest capture the budget will evict first", now)
     _capture(store, "m4", "Newer capture that will merely expire later on", now)
-    assert set(_facts(tmp_path)) == {"Newer capture that will merely expire later on"}
+    # The EVICTED text stays gone; the EXPIRED one is re-capturable, and the live row
+    # the budget evicted first is the only thing that keeps it out of ``current``.
+    assert set(_facts(tmp_path)) == {
+        "Newer capture that will merely expire later on",
+        "Live capture that makes the budget bind",
+    }
 
 
 def test_owed_ids_whose_op_compaction_dropped_are_pruned(tmp_path: Path) -> None:
