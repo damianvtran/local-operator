@@ -52,7 +52,9 @@ async def _start_server(session_id: str, seconds: int) -> int:
     result = await builtin.execute_bash(
         "t",
         {"command": f"sleep {seconds} >/dev/null 2>&1 & echo pid=$!", "timeout": 20},
-        context=ToolContext(session_id=session_id),
+        None,
+        None,
+        ToolContext(session_id=session_id),
     )
     match = re.search(r"pid=(\d+)", json.dumps(result.model_dump(mode="json")))
     assert match

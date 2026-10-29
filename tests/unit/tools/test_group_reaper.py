@@ -1009,6 +1009,13 @@ from local_operator.harness.types import ToolContext  # noqa: E402
 from local_operator.tools import builtin  # noqa: E402
 
 
+def _own_ledger_path(config_dir):
+    """The ledger path with a start token pyright can see is not None."""
+    start = group_reaper._owner_start_token(os.getpid())
+    assert start is not None
+    return group_reaper._ledger_path(config_dir, os.getpid(), start)
+
+
 def _ledger_entries(config_dir):
     entries = []
     for ledger in _groups_dir(config_dir).glob("*.jsonl"):
@@ -1016,17 +1023,17 @@ def _ledger_entries(config_dir):
     return entries
 
 
+async def _run_bash_bg(command: str, session_id: str) -> str:
+    result = await builtin.execute_bash(
+        "t1", {"command": command, "timeout": 20}, None, None, ToolContext(session_id=session_id)
+    )
+    return json.dumps(result.model_dump(mode="json"))
+
+
 def _bash_bg(command, session_id, config_dir, monkeypatch):
     """Run ``command`` through the real bash tool; return the pid it printed."""
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
-    result = asyncio.run(
-        builtin.execute_bash(
-            "t1",
-            {"command": command, "timeout": 20},
-            context=ToolContext(session_id=session_id),
-        )
-    )
-    text = json.dumps(result.model_dump(mode="json") if hasattr(result, "model_dump") else result)
+    text = asyncio.run(_run_bash_bg(command, session_id))
     match = re.search(r"pid=(\d+)", text)
     assert match, text
     return int(match.group(1))
@@ -1125,9 +1132,7 @@ def test_no_matching_member_kills_nothing(tmp_path, monkeypatch):
         monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
         register_group(bystander_pgid, "x", config_dir=tmp_path, session_id="sess-a")
         group_reaper._annotate_entry(
-            group_reaper._ledger_path(
-                tmp_path, os.getpid(), group_reaper._owner_start_token(os.getpid())
-            ),
+            _own_ledger_path(tmp_path),
             bystander_pgid,
             {"survivors": [{"pid": dead.pid, "start": "Mon Jan  1 00:00:00 2001"}]},
         )
@@ -1145,9 +1150,7 @@ def test_recorded_member_with_different_start_is_not_ours(tmp_path, monkeypatch)
     try:
         register_group(bystander_pgid, "x", config_dir=tmp_path, session_id="sess-a")
         group_reaper._annotate_entry(
-            group_reaper._ledger_path(
-                tmp_path, os.getpid(), group_reaper._owner_start_token(os.getpid())
-            ),
+            _own_ledger_path(tmp_path),
             bystander_pgid,
             {"survivors": [{"pid": bystander.pid, "start": "Mon Jan  1 00:00:00 2001"}]},
         )
@@ -1220,9 +1223,7 @@ def test_recycled_pgid_line_of_another_session_never_inherits_survivors(tmp_path
         dead.wait()
         # Session A's stale line: its group is long gone, survivor pid is dead.
         register_group(pgid, "old", config_dir=tmp_path, session_id="sess-a")
-        ledger = group_reaper._ledger_path(
-            tmp_path, os.getpid(), group_reaper._owner_start_token(os.getpid())
-        )
+        ledger = _own_ledger_path(tmp_path)
         group_reaper._annotate_entry(
             ledger, pgid, {"survivors": [{"pid": dead.pid, "start": "Mon Jan  1 00:00:00 2001"}]}
         )

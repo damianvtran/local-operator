@@ -1229,8 +1229,10 @@ def _terminate_groups(entries: list[dict[str, object]]) -> int:
         if pending:
             time.sleep(_TERM_POLL_S)
     for pgid in pending:
-        with contextlib.suppress(OSError):
-            os.killpg(pgid, signal.SIGKILL)
+        try:
+            os.killpg(pgid, _sigkill())
+        except OSError:  # died during the grace, or not ours to signal
+            pass
     return len(live)
 
 
