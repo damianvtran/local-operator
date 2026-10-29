@@ -535,11 +535,36 @@ class _Pool:
     """
 
     def __init__(self, parts: Sequence[str]) -> None:
+        # THE MATERIAL IS BUILT LAZILY, on the first pool payload. Extracting
+        # `identifiers()` per chunk and a word scan per part are both O(span),
+        # and most epochs carry no pool line at all — paying that on every
+        # epoch charged rejections for work they never used (S-1: the 1.4 MB
+        # span fixture measured 3.2 s against a 1.5 s bound, most of it here).
+        self._parts = parts
+        self._material: frozenset[str] | None = None
+        self.sorted: list[str] = []
+        #: The span's own text, for the last-resort containment test.
+        self.text = ""
+        #: length -> {tail: identifier}, built on first use per length.
+        self._tails: dict[int, dict[str, str]] = {}
+        #: token -> identifier it was found inside, so a repeat costs a hit.
+        self._contained: dict[str, str] = {}
+        #: The containment lookup's budget: each miss costs one unit.
+        self.scans = _POOL_SCANS
+
+        self.chars = 0
+        #: Set by :func:`check_records` once the epoch's content is known.
+        self.char_budget = 0
+
+    def _ensure_material(self) -> frozenset[str]:
+        """The span's identifier material, extracted once on first use."""
+        if self._material is not None:
+            return self._material
         from local_operator.saver.provenance_ids import identifiers
         from local_operator.saver.validate import _b64_note_digests, _chunks
 
         tokens: set[str] = set()
-        for part in parts:
+        for part in self._parts:
             # Bounded by the span itself: every identifier is a substring of
             # it, so the pool can never exceed the span's own text.
             for chunk in _chunks(part):
@@ -553,22 +578,13 @@ class _Pool:
             # the record.
             tokens.update(_WORD.findall(part))
             tokens.update(_b64_note_digests(part))
-        self.tokens = frozenset(tokens)
-        # Sorted once: `tail_owner` walks it to pick WHICH identifier a tail
+        self._material = frozenset(tokens)
+        # Sorted once: `owner_of` walks it to pick WHICH identifier a tail
         # spends, and two clients with the same span must pick the same one.
-        self.sorted = sorted(tokens)
+        self.sorted = sorted(self._material)
         #: The span's own text, for the last-resort containment test.
-        self.text = "\n".join(parts)
-        #: length -> {tail: identifier}, built on first use per length.
-        self._tails: dict[int, dict[str, str]] = {}
-        #: token -> identifier it was found inside, so a repeat costs a hit.
-        self._contained: dict[str, str] = {}
-        #: The containment lookup's budget: each miss costs one unit.
-        self.scans = _POOL_SCANS
-
-        self.chars = 0
-        #: Set by :func:`check_records` once the epoch's content is known.
-        self.char_budget = 0
+        self.text = "\n".join(self._parts)
+        return self._material
 
     def owner_of(self, token: str) -> str | None:
         """An unspent span identifier this pool token came from, or ``None``.
@@ -597,7 +613,7 @@ class _Pool:
         """
         if not token:
             return None
-        if token in self.tokens:
+        if token in self._ensure_material():
             return token
         # A leading `...` is the reducer's display elision, not identifier text.
         core = token.lstrip(".")
@@ -655,15 +671,16 @@ class _Pool:
         """
         from local_operator.saver.validate import SaverRejected
 
+        self._ensure_material()
         tokens = text.split()
         index = 0
         while index < len(tokens):
             token = tokens[index]
             index += 1
             emitted = token
-            if token not in self.tokens:
+            if token not in self._ensure_material():
                 pair = token + " " + tokens[index] if index < len(tokens) else ""
-                if pair and pair in self.tokens:
+                if pair and pair in self._ensure_material():
                     token = pair
                     emitted = pair
                     index += 1
@@ -1467,7 +1484,9 @@ def check_records(
     # own bytes against the span's own text as the reducer reads it — never the
     # canonical JSON, whose ~80 bytes of structure per row made a 199-of-200
     # verbatim epoch look like a 0.42x saving while being larger than the text
-    # it replaced (S-18's second half).
+    # it replaced (S-18's second half). It runs before the mapping so a cost
+    # violation is NAMED as one; behind the mapping the candidate-try cap
+    # refused the same epoch as `busy`, which reads as "retry later".
     span_text = "\n".join(parts)
     if _ruler_tokens(text) >= _ruler_tokens(span_text):
         raise SaverRejected("provenance")
