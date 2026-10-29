@@ -883,7 +883,8 @@ def _posted_message(result: Any) -> tuple[str, int | None]:
 
     if not isinstance(result, dict):
         return "", None
-    view = result.get("message") if isinstance(result.get("message"), dict) else result
+    nested = result.get("message")
+    view: dict[str, Any] = nested if isinstance(nested, dict) else result
     message_id = view.get("id")
     seq = view.get("seq")
     return (

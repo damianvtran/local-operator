@@ -8,6 +8,7 @@ files, including a second read after changing the durable chief record.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -29,7 +30,7 @@ def config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return root
 
 
-def _config(root: Path, bridge: dict) -> Path:
+def _config(root: Path, bridge: dict[str, Any]) -> Path:
     path = root / CONFIG_FILE_NAME
     path.write_text(
         yaml.safe_dump({"values": {"team_bridge": bridge, "language": "en"}}),
@@ -48,7 +49,9 @@ def test_absent_designation_uses_durable_cos_id_not_its_display_name(config_dir)
     assert manager.get_nested_value(("team_bridge", "session")) == "sess-chief-123"
     values = yaml.safe_load(path.read_text(encoding="utf-8"))["values"]
     assert values["team_bridge"] == {
-        "enabled": False, "onboarding": "seen", "session": "sess-chief-123",
+        "enabled": False,
+        "onboarding": "seen",
+        "session": "sess-chief-123",
     }
     assert values["language"] == "en"
 

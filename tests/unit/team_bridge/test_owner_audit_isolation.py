@@ -206,11 +206,16 @@ def _hub_answer(request: httpx.Request) -> httpx.Response:
     path = request.url.path
     if path.endswith("/directory"):
         result: Any = {
-            "members": [{
-                "account_id": "acc_b", "display_label": "Teammate", "role": "member",
-                "bridge_enabled": True, "bridge_state": "active",
-                "agent": {"endpoint_id": "bep_b", "name": "CoS", "state": "active"},
-            }],
+            "members": [
+                {
+                    "account_id": "acc_b",
+                    "display_label": "Teammate",
+                    "role": "member",
+                    "bridge_enabled": True,
+                    "bridge_state": "active",
+                    "agent": {"endpoint_id": "bep_b", "name": "CoS", "state": "active"},
+                }
+            ],
         }
     elif path.endswith("/replies"):
         result = {"root": {"id": ROOT, "seq": 1}, "replies": [], "has_more": False}
@@ -320,8 +325,10 @@ async def test_no_bridge_tool_op_reaches_the_owner_audit(tmp_path: Path) -> None
     assert all(r.url.params.get("actor_endpoint_id") == "bep_1" for r in shared)
     assert all(r.url.params.get("tenant_id") == TENANT for r in shared)
     dm_creates = [
-        json.loads(r.content) for r in requests
-        if r.method == "POST" and r.url.path == "/v1/messaging/conversations"
+        json.loads(r.content)
+        for r in requests
+        if r.method == "POST"
+        and r.url.path == "/v1/messaging/conversations"
         and json.loads(r.content).get("kind") == "dm"
     ]
     assert len(dm_creates) == 1

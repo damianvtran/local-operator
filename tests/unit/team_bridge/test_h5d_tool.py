@@ -576,6 +576,7 @@ async def test_malformed_legacy_receipt_stays_pending_until_frozen_replay_confir
     monkeypatch.setattr(Outbox, "record_send", lambda self, owner_key, **kwargs: pending[0])
     replay_result = await tool.execute("synthetic-replay-call", args, None, None, context)
     confirmed = replay_result.details
+    assert isinstance(confirmed, dict), "the replay must report its confirmation details"
     assert replay_result.is_error is False
     assert isinstance(replay_result.content[0], TextContent)
     assert json.loads(replay_result.content[0].text) == confirmed
