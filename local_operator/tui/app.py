@@ -15043,23 +15043,16 @@ class OperatorApp(App[None]):
             # The scheduled fill below still runs and reaches the same goal — or
             # stands down and remembers the view — by the ordinary route.
             #
-            # STILL SETTLE THE MEASUREMENT, and this is the whole of QA round 2's
-            # Q1. `_settle_reveal_measurement` used to run only on the paths that
-            # mount pages, so a WARM reopen — every row already retained, nothing
-            # pending, nothing to fill — returned here and revealed the parked
-            # view UNMEASURED. Textual then painted one frame against the stale
-            # arrangement (`_layout_required` only reaches the idle hook) and the
-            # next layout pass re-decided the gaps: every rendered line moved down
-            # one row and row 0 went blank, with the viewport, `scroll_y` and the
-            # block count all unchanged — 38 of 41 lines, 544k-546k pixels,
-            # intermittent precisely because it needs that pre-layout frame to be
-            # painted at all (4 of 6 runs at 160x48; the 80-column variant paints
-            # fewer rows per pass and stayed clean). Measured first paint 62-82 ms
-            # and the shift 50 ms later on the runs that showed it.
-            #
-            # Paint-suppressed and pre-reveal, exactly like the in-loop call: no
-            # frame is added and no layout is forced after paint.
-            self._settle_reveal_measurement(view)
+            # DELIBERATELY NO `_settle_reveal_measurement` HERE (round 3 added it,
+            # round 4 removed it). It was justified by a warm-reopen shift that QA
+            # then re-diagnosed as the failed-open notice's own height, and the call
+            # is not neutral: it re-measures the parked view against a dock the
+            # adopt has only just changed, and it broke
+            # `test_first_paint_reveal::test_a_gate_the_app_already_holds_is_in_the_reveal_frame`
+            # — the reveal frame stopped being the settled one (measured: the test
+            # passes at d98b5e88a44, fails at d50fe8ca049, and the only difference
+            # is this call). The settle stays on the paths that MOUNT pages, where
+            # the viewport it corrects is the one the fill is about to fill.
             self._start_resume_fill()
             return
         # READ THE REAL VIEWPORT BEFORE THE FIRST CHECK — every burst, not only
