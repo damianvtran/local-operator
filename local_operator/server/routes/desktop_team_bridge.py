@@ -1622,6 +1622,22 @@ class ConversationSendIn(ConversationOwnerIn):
         _validate_attachment_ids(self.attachment_ids)
         if not self.body and not self.attachment_ids:
             raise ValueError("a message needs body or attachment_ids")
+        # A THREADED send (``thread_root_id`` present) REQUIRES the captured-owner
+        # receipt, because it is a thread MUTATION and ``team_bridge_threads``
+        # promises the guard on the thread surface, the same promise the replies
+        # read keeps: a reply composed as account A and sent after a login
+        # switch must not post as B, and a pre-fix client must not be able to
+        # mutate through this route at all. An ordinary top-level send keeps the
+        # legacy optional receipt (``team_bridge_conversation_owner_guard``) so
+        # an older renderer keeps working. No shipped renderer ever sent a reply
+        # (the desktop UI held threads closed), so requiring it here breaks no
+        # working caller; round-1 review R1 found this path still dispatched
+        # receipt-less after an account switch.
+        if self.thread_root_id is not None:
+            if self.expected_account_id is None or not self.expected_account_id.strip():
+                raise ValueError("a threaded reply needs expected_account_id")
+            if self.tenant_id is None or not self.tenant_id.strip():
+                raise ValueError("a threaded reply needs an explicit tenant_id")
         return self
 
 
@@ -1679,7 +1695,56 @@ class ConversationAdmitIn(ConversationOwnerIn):
 
 
 class ConversationReactIn(_Strict):
-    tenant_id: str | None = Field(default=None, max_length=128)
+    """The reaction PUT body: the captured DATA-owner receipt, REQUIRED.
+
+    DELIBERATELY NOT a subclass of :class:`ConversationOwnerIn`, on the rule
+    :class:`MessageAdmission` states for its own fields: that base declares
+    ``expected_account_id`` and ``tenant_id`` OPTIONAL (the legacy conversation
+    writes stay compatible with an older renderer that omits them), and
+    narrowing a mutable field to required in a subclass is not a narrowing at
+    all — pyright's ``reportIncompatibleVariableOverride`` refuses it, rightly,
+    because the inherited annotation would still advertise the optional
+    contract on a route that refuses to run without it. A field type here is the
+    API contract for the renderer, so both receipt fields are stated in full.
+
+    Unlike the legacy conversation writes, no shipped renderer ever called the
+    reaction routes: the UI held them closed (`TEAM_BRIDGE_REACTIONS_SHIPPED_IN_THIS_BUILD`)
+    because the old path had never been reviewed for account/retry safety. So
+    there is no legacy caller to stay compatible with, and an OPTIONAL guard
+    would regress the first time a new renderer forgot it (the attachment
+    routes' #2772 B1 rule). ``tenant_id`` is required for the same reason the
+    base's validator requires it once a receipt is present: a guarded write
+    names the tenant of the captured data, never the picker's default
+    organization.
+
+    There is still no ``actor_endpoint_id`` here, so the renderer cannot react
+    as an agent (``_Strict`` refuses the extra key).
+    """
+
+    expected_account_id: str = Field(min_length=1, max_length=128)
+    tenant_id: str = Field(min_length=1, max_length=128)
+
+    @model_validator(mode="after")
+    def _receipt_grammar(self) -> "ConversationReactIn":
+        if not is_account_id(self.expected_account_id):
+            raise ValueError("expected_account_id is outside the accepted grammar")
+        # ``min_length`` admits a whitespace-only tenant; the guarded write
+        # needs a real organization, exactly as ``ConversationOwnerIn`` refuses
+        # a blank one.
+        if not self.tenant_id.strip():
+            raise ValueError("a guarded mutation needs an explicit tenant_id")
+        return self
+
+
+#: The query names the thread replies read accepts. ``expected_account_id`` and
+#: ``tenant_id`` are REQUIRED (see ``_required_owner_query``); the rest are the
+#: history route's paging/endpoint hints.
+_REPLIES_QUERY = frozenset(
+    {"expected_account_id", "tenant_id", "limit", "after_seq", "endpoint_id"}
+)
+#: The reaction DELETE's query: the receipt only. ``actor_endpoint_id`` is
+#: deliberately absent, so the desktop can never remove an agent's reaction.
+_REACTION_DELETE_QUERY = frozenset({"expected_account_id", "tenant_id"})
 
 
 #: The hub's reaction-key byte bound (agent-server §10.2: NFC, <=128 UTF-8
@@ -1718,6 +1783,38 @@ def _conversation_owner_query(request: Request) -> ConversationOwnerIn:
         )
     except ValueError:
         _raise_read("invalid_request")
+
+
+def _required_owner_query(request: Request, accepted: frozenset[str]) -> ConversationOwnerIn:
+    """The REQUIRED captured-owner receipt for a query-addressed thread/reaction call.
+
+    Used by the reaction DELETE (a DELETE body is not reliably carried) and the
+    thread replies GET, the two query-addressed halves of the thread/reaction
+    surface the desktop re-enables behind ``team_bridge_threads`` and
+    ``team_bridge_reactions``. Both capabilities PROMISE this guard, so it is not
+    optional here: an absent, repeated or blank ``expected_account_id`` or
+    ``tenant_id`` is refused before any I/O rather than taking the unguarded
+    path, and so is any query name outside ``accepted`` (closed table, like
+    every route in this family). The receipt is local-only: the client compares
+    it against the exact bearer snapshot it dispatches with and never forwards
+    it upstream.
+    """
+
+    if set(request.query_params) - accepted:
+        _raise_read("invalid_request")
+    values: dict[str, str] = {}
+    for name in ("expected_account_id", "tenant_id"):
+        got = request.query_params.getlist(name)
+        if len(got) != 1:
+            _raise_read("invalid_request")
+        values[name] = got[0]
+    try:
+        receipt = ConversationOwnerIn(**values)
+    except ValueError:
+        _raise_read("invalid_request")
+    if receipt.expected_account_id is None or not is_account_id(receipt.expected_account_id):
+        _raise_read("invalid_request")
+    return receipt
 
 
 def _conversation_client(config_manager: ConfigManager):
@@ -2833,7 +2930,6 @@ async def conversation_replies(
     conversation_id: str,
     message_id: str,
     request: Request,
-    tenant_id: str | None = Query(default=None),
     limit: str | None = Query(default=None),
     after_seq: str | None = Query(default=None),
     endpoint_id: str | None = Query(default=None),
@@ -2845,12 +2941,20 @@ async def conversation_replies(
     before any I/O, an unknown query key is refused rather than dropped, and the
     numeric hints are parsed (never interpolated) so a caller-controlled value
     is a 422, not a 500.
+
+    OWNER-GUARDED (``team_bridge_threads``): the captured ``expected_account_id``
+    and target ``tenant_id`` are REQUIRED, and the client compares the receipt
+    against the exact bearer it dispatches with, so a thread opened (or a
+    delayed/retried read started) as account A is refused with
+    ``409 account_mismatch`` once the machine is signed in as B, instead of
+    answering B's thread into A's cache. No shipped renderer called this route
+    before the guard (the UI held threads closed), so there is no legacy caller
+    an optional receipt would protect.
     """
 
     _require_conversation_id(conversation_id)
     _require_message_id(message_id)
-    if set(request.query_params) - {"tenant_id", "limit", "after_seq", "endpoint_id"}:
-        _raise_read("invalid_request")
+    owner = _required_owner_query(request, _REPLIES_QUERY)
     try:
         parsed_limit = int(limit) if limit is not None else None
         parsed_after = int(after_seq) if after_seq else None
@@ -2864,7 +2968,8 @@ async def conversation_replies(
             client.conversation_replies(
                 conversation_id,
                 message_id,
-                tenant_id=tenant_id,
+                tenant_id=owner.tenant_id,
+                expected_account_id=owner.expected_account_id,
                 limit=parsed_limit,
                 after_seq=parsed_after,
                 endpoint_id=endpoint_id,
@@ -2943,7 +3048,7 @@ async def conversation_react_add(
     message_id: str,
     emoji: str,
     request: Request,
-    body: ConversationReactIn | None = None,
+    body: ConversationReactIn,
     config_manager: ConfigManager = Depends(get_config_manager),
 ) -> CRUDResponse[Any]:
     """Add the signed-in person's reaction; idempotent upstream.
@@ -2952,6 +3057,11 @@ async def conversation_react_add(
     agent's own ``bridge`` tool (``react``), which carries the actor endpoint
     from the runtime and is screened like every agent write. There is no
     ``actor_endpoint_id`` on this body, so the renderer cannot act as an agent.
+
+    OWNER-GUARDED (``team_bridge_reactions``): the body REQUIRES the captured
+    ``expected_account_id`` and target ``tenant_id`` (``ConversationReactIn``),
+    compared atomically against the dispatch bearer, so a click (or retry)
+    captured as account A never reacts as B.
     """
     _require_conversation_id(conversation_id)
     _require_message_id(message_id)
@@ -2966,7 +3076,8 @@ async def conversation_react_add(
                 message_id,
                 key,
                 active=True,
-                tenant_id=body.tenant_id if body else None,
+                tenant_id=body.tenant_id,
+                expected_account_id=body.expected_account_id,
             )
         )
     )
@@ -2982,25 +3093,31 @@ async def conversation_react_remove(
     message_id: str,
     emoji: str,
     request: Request,
-    tenant_id: str | None = Query(default=None, max_length=128),
     config_manager: ConfigManager = Depends(get_config_manager),
 ) -> CRUDResponse[Any]:
     """Remove the signed-in person's reaction; removing an unset one is a no-op.
 
-    ``tenant_id`` is a query parameter here (not a body) because a DELETE body
-    is not reliably carried by every client and proxy; the hub accepts both.
+    The receipt (``expected_account_id`` + ``tenant_id``) rides in the QUERY
+    here (not a body) because a DELETE body is not reliably carried by every
+    client and proxy; the hub accepts the tenant either way, and the receipt
+    never leaves this process. Both are REQUIRED, exactly as on the PUT.
     """
     _require_conversation_id(conversation_id)
     _require_message_id(message_id)
-    if set(request.query_params) - {"tenant_id"}:
-        _raise_read("invalid_request")
+    _refuse_write_scope(request)
+    owner = _required_owner_query(request, _REACTION_DELETE_QUERY)
     key = _require_reaction_emoji(emoji)
 
     client = _conversation_client(config_manager)
     return reply(
         await _conversation_reply(
             client.conversation_react(
-                conversation_id, message_id, key, active=False, tenant_id=tenant_id
+                conversation_id,
+                message_id,
+                key,
+                active=False,
+                tenant_id=owner.tenant_id,
+                expected_account_id=owner.expected_account_id,
             )
         )
     )

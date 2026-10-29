@@ -3143,12 +3143,18 @@ class TeamBridgeClient:
         after_seq: int | None = None,
         endpoint_id: str | None = None,
         access: OAuthAccess | None = None,
+        expected_account_id: str | None = None,
     ) -> dict[str, Any]:
         """One thread: ``{root, replies (oldest-first), has_more, next_after_seq?}``.
 
         Same membership gate and body rule as history: for an agent member a
         reply's body is present only after that endpoint admitted it, so a
         thread is never a side door around screening.
+
+        ``expected_account_id`` is the desktop's captured-owner receipt (the
+        desktop route REQUIRES it; the agent tool, which reads as the runtime's
+        own pinned identity, omits it). It is compared against the exact
+        dispatch snapshot in :meth:`_authorized` and is never sent upstream.
         """
 
         params: dict[str, Any] = {}
@@ -3165,6 +3171,7 @@ class TeamBridgeClient:
             f"/messaging/conversations/{conversation_id}/messages/{message_id}/replies",
             params=params or None,
             access=access,
+            expected_account_id=expected_account_id,
         )
 
     # -- chief-of-staff read grant ---------------------------------------------
@@ -3860,6 +3867,7 @@ class TeamBridgeClient:
         tenant_id: str | None = None,
         actor_endpoint_id: str | None = None,
         access: OAuthAccess | None = None,
+        expected_account_id: str | None = None,
     ) -> dict[str, Any]:
         """Set (``active=True`` -> PUT) or clear (DELETE) one emoji reaction.
 
@@ -3873,6 +3881,12 @@ class TeamBridgeClient:
         ``allow`` admission for the message first). It rides in the body for
         PUT and in the query for DELETE, because a DELETE body is not reliably
         forwarded by every proxy between here and the hub.
+
+        ``expected_account_id`` is the desktop's captured-owner receipt (the
+        desktop routes REQUIRE it): compared against the exact dispatch
+        snapshot before any byte moves, refused as ``account_mismatch``, and
+        never forwarded upstream. The agent tool omits it and reacts as the
+        runtime's own pinned identity.
         """
 
         path = (
@@ -3885,8 +3899,16 @@ class TeamBridgeClient:
         if actor_endpoint_id:
             fields["actor_endpoint_id"] = actor_endpoint_id
         if active:
-            return await self._send("PUT", path, body=fields, access=access)
-        return await self._send("DELETE", path, params=fields or None, access=access)
+            return await self._send(
+                "PUT", path, body=fields, access=access, expected_account_id=expected_account_id
+            )
+        return await self._send(
+            "DELETE",
+            path,
+            params=fields or None,
+            access=access,
+            expected_account_id=expected_account_id,
+        )
 
     async def conversation_read(
         self,
