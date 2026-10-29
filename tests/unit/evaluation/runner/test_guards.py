@@ -37,6 +37,8 @@ from local_operator.evaluation.runner.guards import (
     NoChangeGuard,
     RepeatedBatchGuard,
     default_guards,
+    describe_progress_policy,
+    progress_guards,
 )
 from local_operator.evaluation.runner.model import EpisodeTurn
 
@@ -463,6 +465,65 @@ def test_default_guards_composition_and_config_knob() -> None:
     assert default_guards(object())[1].evaluate(_snapshot(recent_costs_micros=(6,))).kind == (
         "continue"
     )
+
+
+def test_the_policy_stamp_states_the_thresholds_in_force() -> None:
+    """The record's description of the policy comes from the guards themselves.
+
+    The session arm builds no manifest, so this description IS the labelling
+    that keeps an on-policy run from being pooled with an off-policy one -- it
+    has to name the numbers actually enforced, never a copy of the defaults
+    that can drift away from them.
+    """
+
+    assert describe_progress_policy(progress_guards()) == {
+        "on": True,
+        "guards": [
+            {"code": "repeated-batch", "threshold": 4},
+            {"code": "no-change", "threshold": 6},
+            {"code": "ask-loop", "threshold": 3},
+        ],
+    }
+    # OFF is a stated absence, never a missing key: a run without the guards
+    # has to be identifiable too, or the stamp prevents only half the pooling
+    # it exists to prevent.
+    assert describe_progress_policy(None) == {"on": False, "guards": []}
+    # A configured threshold travels with the guard that enforces it.
+    assert RepeatedBatchGuard(repeats=2).describe() == {
+        "code": "repeated-batch",
+        "threshold": 2,
+    }
+
+
+@pytest.mark.parametrize(
+    ("guard", "turns"),
+    [
+        (RepeatedBatchGuard(repeats=3), _turns([[CLICK], [CLICK], [CLICK], None])),
+        (
+            NoChangeGuard(repeats=2),
+            _turns([[CLICK], [CLICK], None], digests=["a" * 64, "a" * 64, "a" * 64]),
+        ),
+        (AskLoopGuard(asks=2), _turns([[ASK], [ASK], None])),
+    ],
+)
+def test_the_code_a_guard_fires_and_the_code_it_states_are_one_value(
+    guard: Any, turns: tuple[EpisodeTurn, ...]
+) -> None:
+    """One definition: the stamp's code IS the verdict's code, not a copy."""
+
+    verdict = guard.evaluate(_snapshot(recent_turns=turns))
+    assert verdict.kind == "truncate"
+    described = guard.describe()
+    assert guard.describe()["code"] == verdict.code
+    assert set(described) == {"code", "threshold"}
+
+
+def test_a_guard_that_states_no_threshold_cannot_be_stamped() -> None:
+    """A partial stamp would read as "this guard has no threshold", not as one
+    the record cannot describe -- so it is refused, loudly, at stamp time."""
+
+    with pytest.raises(TypeError, match="turn-window"):
+        describe_progress_policy((BudgetCapGuard(),))
 
 
 @pytest.mark.parametrize(

@@ -713,6 +713,33 @@ def test_a_colon_bearing_entry_id_is_a_usable_cursor(
     assert "early-u0" in served and "early-a0" in served
 
 
+def test_a_reasoning_rows_id_pages_from_the_message_it_belongs_to(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An ``rz-`` cursor is not a journal row; the message below it is.
+
+    The live fold mints ``rz-<message id>`` for a reasoning row and reasoning is
+    never written to the journal, so a phone whose oldest held row is a
+    reasoning row asks for a page no journal row can match — and the route's own
+    contract answers a miss as END of history, which strands every row above
+    it. That is the shape that reaches a reader as "the middle is missing, the
+    jump goes to the very start": the first page is the only one that can fill
+    the gap under a pinned opener.
+
+    Resolving the prefix to the message is exact: the message sits one row
+    below the reasoning row the caller holds, so its page is precisely the rows
+    the caller lacks, and its de-dup discards the overlap.
+    """
+    config = tmp_path / "config"
+    _build(config)
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: config)
+
+    page, _ = _history_page(SESSION_ID, "rz-early-a2", 10)
+    served = [row.id for row in page]
+    assert served, "an rz- cursor served nothing, so the walk ended at the gap"
+    assert "early-u2" in served and "early-a1" in served
+
+
 def test_a_call_split_across_a_read_boundary_still_settles(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

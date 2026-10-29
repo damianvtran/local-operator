@@ -309,8 +309,12 @@ class MeshAwareAuthStore:
         """This device's id as the placement document spells it (``""`` if unknown)."""
         return str(getattr(self._mesh, "self_device", "") or "")
 
-    def _note_borrow_serve(self, provider: str, grant: Grant) -> None:
+    def _note_borrow_serve(self, provider: str, grant: Grant, session_id: str | None) -> None:
         """Report a borrow's serve to the sink, from the ref itself (no added work).
+
+        ``session_id`` is the resolve's own parameter and rides the report for
+        the reason :meth:`_note_local_serve` spells out: the sink belongs to ONE
+        session while the store is shared by its in-process children.
 
         Guarded: a bookkeeping sink must never fail a serve.
         """
@@ -321,6 +325,7 @@ class MeshAwareAuthStore:
         try:
             sink(
                 provider=provider,
+                session_id=session_id or "",
                 owner_device=ref.owner_device,
                 owner_device_name=ref.owner_device_name,
                 credential_id=ref.credential_id,
@@ -335,6 +340,17 @@ class MeshAwareAuthStore:
         ``session_id`` is the resolve's own parameter: the sticky was written
         by the same resolve, so a resolve without one has no row to name and
         reports nothing.
+
+        THE REPORT NAMES ITS SESSION because the sink does not belong to the
+        store. A subagent's stream is ``SessionStreamFn.fork(child_id)``, which
+        reuses the parent's store, while ``attach_credential_binding`` fills
+        this one slot with the PARENT's ``recorder.observe_serve``. Without the
+        id every child resolve wrote the child's sticky into the parent's
+        binding, and the parent's next resolve wrote its own back: a live
+        parent that never left its account journaled 3,876 alternating rows and
+        an account-change notice per flip. The recorder drops a report for any
+        other session; routing children to recorders of their own is a
+        separate decision, not this seam's.
         """
         sink = self._serve_sink
         if sink is None:
@@ -343,7 +359,12 @@ class MeshAwareAuthStore:
         if credential_id is None:
             return
         try:
-            sink(provider=provider, owner_device="", credential_id=credential_id)
+            sink(
+                provider=provider,
+                session_id=session_id or "",
+                owner_device="",
+                credential_id=credential_id,
+            )
         except Exception:  # noqa: BLE001 — a bookkeeping sink must not fail a serve
             logger.debug("credential serve sink failed", exc_info=True)
 
@@ -402,7 +423,7 @@ class MeshAwareAuthStore:
         )
         if not isinstance(grant, Grant):
             return None
-        self._note_borrow_serve(provider, grant)
+        self._note_borrow_serve(provider, grant, session_id)
         return grant.access_token
 
     async def get_oauth_access(
@@ -445,7 +466,7 @@ class MeshAwareAuthStore:
         )
         if not isinstance(grant, Grant):
             return None
-        self._note_borrow_serve(provider, grant)
+        self._note_borrow_serve(provider, grant, session_id)
         return self._access_from_grant(grant)
 
     # -- the broker rung ----------------------------------------------------

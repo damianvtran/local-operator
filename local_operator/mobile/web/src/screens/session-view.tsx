@@ -814,6 +814,7 @@ export function SessionScreen({
 					pid={sessionId}
 					entries={projection.transcript}
 					peerCycles={projection.peer_cycles === 1}
+					headPinned={projection.transcript_head_pinned}
 					pending={pendingEchoes}
 					streaming={projection.streaming}
 					topInset={0}
