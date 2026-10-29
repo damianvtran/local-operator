@@ -11,11 +11,13 @@ working-tree name and does not change ``HEAD``, so it is served.
 The fixture is a real miniature git checkout: ``HEAD`` is the whole control, so
 a test that never commits is not testing the route.
 
-Two fixtures exist because the allowlist spans two checkouts: ``_public_repo``
-models this repository's copy roots and ``_ui_repo`` models the companion UI
-checkout's (``src/i18n/...``).  A UI path is only ever read from a checkout whose
-working directory is that checkout and whose ``origin`` names the UI repository,
-which is what the second fixture pins.
+Three fixtures exist because the allowlist spans three checkouts: ``_public_repo``
+models this repository's copy roots, ``_ui_repo`` models the companion UI
+checkout's and ``_mobile_repo`` models the companion mobile checkout's
+(``src/i18n/...`` in both consumer apps).  A consumer path is only ever read
+from a checkout whose working directory is that checkout and whose ``origin``
+names the repository that ships that root, which is what the last two fixtures
+pin — including that neither app can read the other's generated map.
 
 Review round 2 (security) measured five boundary holes these tests now pin: a
 ``src/i18n/`` tree in any other checkout served unredacted (S-1: checkout
@@ -38,8 +40,11 @@ import pytest
 from local_operator.harness.types import ToolContext
 from local_operator.tools.public_copy import (
     _PUBLIC_COPY_PATTERNS,
+    MOBILE_REPOSITORY,
     PUBLIC_COPY_GLOBS,
+    UI_REPOSITORY,
     _matches_public_copy,
+    _publishing_checkouts,
     execute_read_public_copy,
 )
 
@@ -55,6 +60,11 @@ UI_ORIGIN_HTTPS = "https://github.com/damianvtran/local-operator-ui.git"
 UI_CATALOGUE = "src/i18n/catalogues/en/wire.slash.json"
 UI_KEYS = "src/i18n/keys.gen.ts"
 UI_VALUE = "Type or paste a secret after a space; masked"
+MOBILE_ORIGIN_SSH = "git@github.com:damianvtran/local-operator-mobile.git"
+MOBILE_ORIGIN_HTTPS = "https://github.com/damianvtran/local-operator-mobile.git"
+MOBILE_CATALOGUE = "src/i18n/catalogues/en/mobile.home.json"
+MOBILE_MAP = "src/i18n/catalogue.gen.ts"
+MOBILE_VALUE = "What can I help you with today?"
 
 ACCEPTED_PUBLIC_COPY_GLOBS: tuple[str, ...] = (
     "local_operator/i18n/catalogues/*/*.json",
@@ -63,6 +73,7 @@ ACCEPTED_PUBLIC_COPY_GLOBS: tuple[str, ...] = (
     "local_operator/mobile/web/src/i18n/bundled.gen.ts",
     "src/i18n/catalogues/*/*.json",
     "src/i18n/keys.gen.ts",
+    "src/i18n/catalogue.gen.ts",
 )
 
 ACCEPTED_PUBLIC_COPY_PATHS: tuple[str, ...] = (
@@ -72,6 +83,8 @@ ACCEPTED_PUBLIC_COPY_PATHS: tuple[str, ...] = (
     "local_operator/mobile/web/src/i18n/bundled.gen.ts",
     UI_CATALOGUE,
     UI_KEYS,
+    MOBILE_CATALOGUE,
+    MOBILE_MAP,
 )
 
 #: The enforcement list, verbatim.  The glob tuple alone is not the gate: a
@@ -84,6 +97,7 @@ ACCEPTED_PUBLIC_COPY_PATTERNS: tuple[str, ...] = (
     r"local_operator/mobile/web/src/i18n/bundled\.gen\.ts",
     r"src/i18n/catalogues/[^/]+/[^/]+\.json",
     r"src/i18n/keys\.gen\.ts",
+    r"src/i18n/catalogue\.gen\.ts",
 )
 
 
@@ -157,6 +171,43 @@ def _ui_repo(tmp_path: Path, origin: str | None = UI_ORIGIN_SSH) -> Path:
     return root
 
 
+def _mobile_repo(tmp_path: Path, origin: str | None = MOBILE_ORIGIN_SSH) -> Path:
+    """A committed miniature mobile checkout with that app's copy roots.
+
+    The app ships ``src/i18n/catalogue.gen.ts`` (not a ``keys.gen.ts``), so the
+    fixture carries the map the real checkout commits.  It also commits the UI's
+    generated map as a decoy holding a secret-shaped value: the refusal for that
+    path is then the identity gate, not the absence of a file, which is what
+    makes the mobile/UI separation a measurement rather than a coincidence.
+    """
+    root = tmp_path / "mobile"
+    catalogue = root / "src/i18n/catalogues/en"
+    catalogue.mkdir(parents=True)
+    (catalogue / "mobile.home.json").write_text(
+        json.dumps({"mobile.home.greeting": MOBILE_VALUE}), encoding="utf-8"
+    )
+    (root / MOBILE_MAP).write_text(
+        "export const catalogue = {\n"
+        f'  "mobile.home.greeting": "{MOBILE_VALUE}",\n'
+        "} as const;\n",
+        encoding="utf-8",
+    )
+    # The other consumer app's generated map, committed here on purpose.
+    (root / "src/i18n/keys.gen.ts").write_text(
+        "export const keys = {\n" f'  "wire.slash.credential": "{FAKE_API_KEY}",\n' "} as const;\n",
+        encoding="utf-8",
+    )
+    (root / "README.md").write_text("not public copy\n", encoding="utf-8")
+    _git(root, "init", "-q")
+    _git(root, "config", "user.email", "test@example.com")
+    _git(root, "config", "user.name", "Test")
+    if origin is not None:
+        _git(root, "remote", "add", "origin", origin)
+    _git(root, "add", "-A")
+    _git(root, "-c", "commit.gpgsign=false", "commit", "-qm", "mobile fixture")
+    return root
+
+
 def test_the_allowlist_is_exactly_the_reviewed_set() -> None:
     """A future widening has to edit these tuples and show up as a reviewed diff."""
     assert PUBLIC_COPY_GLOBS == ACCEPTED_PUBLIC_COPY_GLOBS
@@ -165,6 +216,30 @@ def test_the_allowlist_is_exactly_the_reviewed_set() -> None:
     assert (
         tuple(pattern.pattern for pattern in _PUBLIC_COPY_PATTERNS) == ACCEPTED_PUBLIC_COPY_PATTERNS
     )
+
+
+def test_the_consumer_identity_binding_is_per_checkout() -> None:
+    """A consumer root names its own checkout, and never another's.
+
+    Both apps keep a ``src/i18n/catalogues/`` tree, so that root belongs to both
+    identities; the generated maps differ per app, so each one names only the
+    app that ships it.  A core root names no checkout at all: the identity gate
+    is the consumer roots' control, and the committed-blob check is the core
+    roots' — the mobile identity must not add a core root to its own set.
+    """
+    ui = (UI_REPOSITORY, "companion UI checkout")
+    mobile = (MOBILE_REPOSITORY, "mobile app checkout")
+
+    assert _publishing_checkouts(UI_KEYS) == (ui,)
+    assert _publishing_checkouts(MOBILE_MAP) == (mobile,)
+    assert _publishing_checkouts(UI_CATALOGUE) == (ui, mobile)
+    assert _publishing_checkouts(MOBILE_CATALOGUE) == (ui, mobile)
+    for core in (
+        "local_operator/i18n/catalogues/en/wire.slash.json",
+        "local_operator/i18n/keys/wire_slash.py",
+        "local_operator/mobile/web/src/i18n/keys.gen.ts",
+    ):
+        assert _publishing_checkouts(core) == ()
 
 
 @pytest.mark.parametrize("path", ACCEPTED_PUBLIC_COPY_PATHS)
@@ -183,6 +258,10 @@ def test_every_reviewed_root_is_accepted(path: str) -> None:
         "src/i18n/catalogues/en/deep/x.json",
         # A name that merely ends like the generated map.
         "src/i18n/keys.gen.ts.bak",
+        # The mobile app's generated map, misspelled and misplaced.
+        "src/i18n/catalogue.gen.ts.bak",
+        "src/i18n/catalogues.gen.ts",
+        "vendor/src/i18n/catalogue.gen.ts",
         # A name beside the generated map; a widening to ``src/i18n/*`` would
         # admit it, which is why the compiled patterns are pinned (review S-2).
         "src/i18n/private.secrets.ts",
@@ -236,6 +315,51 @@ async def test_a_ui_generated_key_map_is_served(
     assert UI_VALUE in result.text
     assert result.details is not None
     assert result.details["path"] == UI_KEYS
+
+
+@pytest.mark.asyncio
+async def test_a_mobile_catalogue_key_is_served(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The mobile app's committed copy is public, like the UI's, so it is served."""
+    root = _mobile_repo(tmp_path)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+
+    result = await execute_read_public_copy(
+        "call-mobile-1",
+        {"path": MOBILE_CATALOGUE, "key": "mobile.home.greeting"},
+        None,
+        None,
+        _context(root, tmp_path),
+    )
+
+    assert not result.is_error, result.text
+    assert MOBILE_VALUE in result.text
+    assert result.details is not None
+    assert result.details["public_copy"] is True
+    assert result.details["path"] == MOBILE_CATALOGUE
+
+
+@pytest.mark.asyncio
+async def test_a_mobile_generated_catalogue_map_is_served(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # HTTPS is the other spelling the identity parser must accept.
+    root = _mobile_repo(tmp_path, origin=MOBILE_ORIGIN_HTTPS)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+
+    result = await execute_read_public_copy(
+        "call-mobile-2",
+        {"path": MOBILE_MAP, "key": "mobile.home.greeting"},
+        None,
+        None,
+        _context(root, tmp_path),
+    )
+
+    assert not result.is_error, result.text
+    assert MOBILE_VALUE in result.text
+    assert result.details is not None
+    assert result.details["path"] == MOBILE_MAP
 
 
 @pytest.mark.asyncio
@@ -383,6 +507,102 @@ async def test_a_ui_tree_without_the_ui_identity_is_refused(
     assert result.is_error
     assert "companion UI checkout" in result.text
     assert UI_VALUE not in result.text
+
+
+@pytest.mark.asyncio
+async def test_a_mobile_checkout_refuses_the_ui_generated_map(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The mobile identity does not unlock the UI's map, even when committed.
+
+    The fixture commits ``src/i18n/keys.gen.ts`` holding a secret-shaped value,
+    so a refusal here cannot be the file being absent: it is the identity gate
+    keeping the two consumer checkouts apart.  A widened shared identity ("any
+    consumer checkout may serve any consumer root") would serve it.
+    """
+    root = _mobile_repo(tmp_path)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+
+    result = await execute_read_public_copy(
+        "call-mobile-3",
+        {"path": UI_KEYS, "key": "wire.slash.credential"},
+        None,
+        None,
+        _context(root, tmp_path),
+    )
+
+    assert result.is_error
+    assert "companion UI checkout" in result.text
+    assert UI_REPOSITORY in result.text
+    assert FAKE_API_KEY not in result.text
+    assert not (tmp_path / "config" / "audit" / "public-copy-reads.jsonl").exists()
+
+
+@pytest.mark.asyncio
+async def test_a_mobile_checkout_has_no_route_to_a_core_catalogue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The mobile identity adds its own roots only — never this repository's.
+
+    Core roots carry no identity gate: they are gated by being committed in the
+    checkout, so a mobile checkout has no route to a core catalogue it does not
+    itself commit.  :func:`test_the_consumer_identity_binding_is_per_checkout`
+    pins the structural half — no core root names a consumer identity.
+    """
+    root = _mobile_repo(tmp_path)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+
+    result = await execute_read_public_copy(
+        "call-mobile-4",
+        {
+            "path": "local_operator/i18n/catalogues/en/wire.slash.json",
+            "key": "wire.slash.credential",
+        },
+        None,
+        None,
+        _context(root, tmp_path),
+    )
+
+    assert result.is_error
+    assert "not committed at HEAD" in result.text
+    assert not (tmp_path / "config" / "audit" / "public-copy-reads.jsonl").exists()
+
+
+@pytest.mark.asyncio
+async def test_a_core_checkout_does_not_serve_a_mobile_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Symmetric: this repository's own roots cannot borrow the mobile map.
+
+    The core fixture carries no origin, which is the realistic case for a clone
+    an auditor is reading from: a ``src/i18n/`` root is refused as unowned
+    rather than served, even though the file is committed there.
+    """
+    root = _public_repo(tmp_path)
+    (root / MOBILE_MAP).parent.mkdir(parents=True, exist_ok=True)
+    (root / MOBILE_MAP).write_text(
+        "export const catalogue = {\n"
+        f'  "mobile.home.greeting": "{FAKE_API_KEY}",\n'
+        "} as const;\n",
+        encoding="utf-8",
+    )
+    _git(root, "add", "-A")
+    _git(root, "-c", "commit.gpgsign=false", "commit", "-qm", "mobile map decoy")
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+
+    result = await execute_read_public_copy(
+        "call-mobile-5",
+        {"path": MOBILE_MAP, "key": "mobile.home.greeting"},
+        None,
+        None,
+        _context(root, tmp_path),
+    )
+
+    assert result.is_error
+    assert "mobile app checkout" in result.text
+    assert MOBILE_REPOSITORY in result.text
+    assert FAKE_API_KEY not in result.text
+    assert not (tmp_path / "config" / "audit" / "public-copy-reads.jsonl").exists()
 
 
 @pytest.mark.asyncio
