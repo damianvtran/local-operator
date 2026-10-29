@@ -138,6 +138,11 @@ ADMIT_REVOKED = 4
 ADMIT_CANCELLED = 5
 ADMIT_NO_PROMPT = 6
 ADMIT_INSTALL_FAILED = 7
+#: `--confirm`/`--approve` named no paired phone, or one this computer does not hold.
+#: Its own code (agent review round 3, m5): it used to borrow
+#: ``ADMIT_NO_INSTALLED_ANCHOR``, so a typo'd id exited as "no operator statement".
+#: CLI-only — ``admit_device`` never returns it, so ``ADMIT_REFUSED`` has no row.
+ADMIT_NO_SELECTION = 8
 
 #: The refusal code and sentence the pairing card shows for each cause, keyed by
 #: code. ONE map, so a new cause cannot ship with a neighbour's remedy copied into
@@ -165,25 +170,28 @@ ADMIT_REFUSED: dict[int, tuple[str, str]] = {
     ),
     ADMIT_REVOKED: (
         "pair_device_revoked",
+        # No id here (design round 2, D14): this map holds only fixed strings, so
+        # the card names the verb and the CLI's own refusal names the id.
         "This phone was removed on this computer, so no certificate was issued. Bring "
-        "it back on this computer first (`lop operator devices --authorise`), then pair "
-        "the phone again; nothing was installed.",
+        "it back on this computer first with `lop operator devices --authorise` and "
+        "the phone's id (`lop operator devices` lists it), then pair the phone again; "
+        "nothing was installed.",
     ),
     ADMIT_CANCELLED: (
         "pair_device_not_admitted",
-        "You cancelled the confirmation, so no certificate was issued. Confirm the phone "
-        "on this computer, then try the pairing again; nothing was installed.",
+        "You cancelled the approval, so no certificate was issued. Try the pairing "
+        "again when you are ready; nothing was installed.",
     ),
     ADMIT_NO_PROMPT: (
         "pair_device_not_admitted",
-        "This computer has no way to ask you for approval, so no certificate was issued. "
-        "Confirm the phone on this computer another way, then try the pairing again; "
-        "nothing was installed.",
+        "This computer has no way to ask you for an administrator's approval, so no "
+        "certificate was issued. Install sudo (or ask whoever runs this computer to), "
+        "then try the pairing again; nothing was installed.",
     ),
     ADMIT_INSTALL_FAILED: (
         "pair_device_not_admitted",
-        "The confirmation did not finish, so no certificate was issued. Confirm the phone "
-        "on this computer, then try the pairing again; nothing was installed.",
+        "The approval did not finish, so no certificate was issued. Try the pairing "
+        "again; nothing was installed.",
     ),
 }
 
@@ -478,6 +486,14 @@ def install_anchor_from(
     return install_anchor(root, print_only=print_only, sudo_secret=sudo_secret)
 
 
+#: D13 (design round 2): "operator anchor" is build vocabulary; the person needs the
+#: verb that says why.
+_UNREADABLE_SETUP = (
+    "this computer's operator setup could not be read, so nothing was confirmed. "
+    "Run `lop operator status` to see why."
+)
+
+
 def _admission_install(
     root: Path,
     expected_old: bytes,
@@ -485,8 +501,14 @@ def _admission_install(
     print_only: bool,
     sudo_secret: str,
     runner: Any = None,
+    announce: bool = False,
 ) -> int:
-    """Install with both old and new digests pinned across the OS prompt."""
+    """Install with both old and new digests pinned across the OS prompt.
+
+    ``announce`` prints the gesture sentence on stdout just before the prompt. Only the
+    CLI verb asks for it: the desktop apply route runs in a server whose card already
+    renders the same sentence from ``confirm_card_copy``.
+    """
     if sudo_secret:
         # `install_anchor` prints its own refusal and answers with its own codes; map
         # them onto THIS function's one-code-per-cause set, so a caller cannot read a
@@ -525,6 +547,26 @@ def _admission_install(
     if print_only:
         print(format_install_commands(command))
         return ADMIT_OK
+    if runner is None:
+        from local_operator.operator.elevate import confirm_card_copy, prompt_refusal
+
+        # THE PROMISE IS PRINTED ONLY WHERE IT IS KEPT (design round 2, D8). Every
+        # check that can stop the prompt — revoked, unknown id, `install_refusal`,
+        # idempotence above, and the host's ability to ask at all here — has run, so
+        # "Your Mac will ask for your admin password." is never one line above the
+        # sentence saying no prompt will appear, nor above a success that asked for
+        # nothing. The words still come from `confirm_card_copy`, the one source the
+        # card renders from.
+        cannot = prompt_refusal()
+        if cannot is not None:
+            try:
+                trust_module.staging_path(root).unlink()
+            except OSError:
+                pass
+            print(cannot, file=sys.stderr)
+            return ADMIT_NO_PROMPT
+        if announce:
+            print(confirm_card_copy()[2])
     result = run_elevated(command) if runner is None else runner(command)
     if result.cancelled or result.exit_code != 0:
         # S3 signs the certificate only after a zero result, so a failed prompt can
@@ -544,16 +586,20 @@ def _admission_install(
         if result.refusal:
             print(result.refusal, file=sys.stderr)
             return ADMIT_NO_PROMPT
+        # NO CLAIM ABOUT WHAT THE PHONE CAN DO NOW (design round 2, D10): after a
+        # cancelled migration `--confirm` the pre-rule phones keep working, and on a
+        # presence host an unlisted phone is admitted — so the sentence names only
+        # the fact and the retry.
         if result.cancelled:
             print(
-                "You cancelled the approval, so nothing was confirmed. This phone "
-                "cannot act on this computer until it is confirmed here.",
+                "You cancelled the approval, so nothing was confirmed. Run the same "
+                "command again when you are ready.",
                 file=sys.stderr,
             )
             return ADMIT_CANCELLED
         print(
-            "The approval did not complete, so nothing was confirmed. This phone "
-            "cannot act on this computer until it is confirmed here.",
+            "The approval did not complete, so nothing was confirmed. Run the same "
+            "command again to retry.",
             file=sys.stderr,
         )
         return ADMIT_INSTALL_FAILED
@@ -629,6 +675,20 @@ def _revoked_selection(root: Path, ids: list[str]) -> list[str]:
     return [device_id for device_id in ids if is_revoked(root, device_id)]
 
 
+def _revoked_in(installed: Any, ids: list[str]) -> list[str]:
+    """Which of ``ids`` the statement just read revokes — independent of ``devices``.
+
+    THE SECOND LOCK REFUSES, NOT ONLY REFRAINS (agent review round 3, m3).
+    ``_admission_anchor`` leaves a revoked entry's bytes alone, so for a lone revoked
+    id the proposal equalled the installed bytes and the idempotence branch answered
+    ``ADMIT_OK`` — and ``pair_op`` signs on ``ADMIT_OK``. Reading the revocation off
+    the SAME statement the proposal is built from means a caller that skips (or a
+    future change that weakens) ``_revoked_selection`` still gets a refusal.
+    """
+    revoked = trust_module.revoked_device_ids(installed)
+    return [device_id for device_id in ids if device_id in revoked]
+
+
 def _print_revoked_refusal(ids: list[str]) -> None:
     """The one sentence for "this phone was removed on this computer".
 
@@ -663,10 +723,7 @@ def confirm_devices(
     current = _installed_admission_anchor()
     if current is None:
         # Never derive an admission from the user-writable staged statement.
-        print(
-            "the installed operator anchor could not be read; nothing was confirmed",
-            file=sys.stderr,
-        )
+        print(_UNREADABLE_SETUP, file=sys.stderr)
         return ADMIT_NO_INSTALLED_ANCHOR
     installed, old = current
     known = {device.device_id for device in list_devices(root)}
@@ -676,8 +733,8 @@ def confirm_devices(
             "choose one or more paired phones to confirm; nothing was installed",
             file=sys.stderr,
         )
-        return ADMIT_NO_INSTALLED_ANCHOR
-    revoked = _revoked_selection(root, selected)
+        return ADMIT_NO_SELECTION
+    revoked = _revoked_selection(root, selected) or _revoked_in(installed, selected)
     if revoked:
         _print_revoked_refusal(revoked)
         return ADMIT_REVOKED
@@ -691,6 +748,7 @@ def confirm_devices(
         print_only=print_only,
         sudo_secret=sudo_secret,
         runner=runner,
+        announce=True,
     )
 
 
@@ -712,13 +770,10 @@ def admit_device(
 
     current = _installed_admission_anchor()
     if current is None:
-        print(
-            "the installed operator anchor could not be read; nothing was confirmed",
-            file=sys.stderr,
-        )
+        print(_UNREADABLE_SETUP, file=sys.stderr)
         return ADMIT_NO_INSTALLED_ANCHOR
     installed, old = current
-    if _revoked_selection(root, [device_id]):
+    if _revoked_selection(root, [device_id]) or _revoked_in(installed, [device_id]):
         # A REVOCATION OUTRANKS ADMISSION (agent review round 2, M1). Without this
         # the admission REWROTE the revocation a moment later and the phone was
         # signed, installed and honoured — a phone revoked while its card was open

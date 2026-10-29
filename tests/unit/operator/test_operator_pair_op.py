@@ -655,6 +655,55 @@ def test_a_card_that_cannot_be_applied_costs_no_prompt_and_no_write(
     assert state == (A.STATE_REQUESTED if decided == "requested" else A.STATE_DENIED), state
 
 
+def test_a_deny_during_the_prompt_stops_the_certificate_and_records_the_stop(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 3 m1: the lease precedes the OS prompt, so a deny can land inside it.
+
+    `connecting → denied` is a matrix row, and its receipt promises the runner stops
+    at its next step check. At `f49cd3822eee` nothing checked between the prompt and
+    the signer: the certificate was signed and written on a `denied` record, and the
+    release's `denied → failed` refusal was swallowed, so no receipt showed the stop.
+    """
+    from local_operator.operator import handlers
+
+    _make_key(root)
+    _level(monkeypatch, FILE_ONLY)
+    record = _file(root)
+    approval_id = str(record["approval_id"])
+    device_id = str(record["device"]["device_id"])
+    pair_op.check_ack(approval_id, code=_phone_code(record, root), root=root)
+    _counted_signer(root, monkeypatch)
+    _approve(root, record)
+
+    def deny_while_prompting(config_root: Path, phone_id: str) -> int:
+        # The person answers the OS prompt; meanwhile another surface denies the card.
+        assert A.load_record(approval_id, root=root)["state"] == A.STATE_CONNECTING
+        A.deny(approval_id, root=root)
+        return handlers.ADMIT_OK
+
+    monkeypatch.setattr(handlers, "admit_device", deny_while_prompting)
+    signed: list[str] = []
+    monkeypatch.setattr(pair_op, "_issue_certificate", lambda **kwargs: signed.append("sign"))
+
+    with pytest.raises(MeshRefusal) as raised:
+        pair_op.apply(approval_id, pair_op.expected(A.load_record(approval_id, root=root)), root)
+
+    assert raised.value.code == "approval_denied", raised.value.code
+    assert signed == [], "a certificate was signed after the card was denied"
+    assert devices.read_device(root, device_id) is None, "a denied card installed a cert"
+    finished = A.load_record(approval_id, root=root)
+    assert finished["state"] == A.STATE_DENIED, "the operator's deny must stay final"
+    run_id = str(finished["run"]["run_id"])
+    stops = [
+        r
+        for r in finished["receipts"]
+        if r.get("run_id") == run_id and r.get("step") == pair_op.STEP_INSTALL
+    ]
+    assert stops and stops[-1]["ok"] is False, finished["receipts"]
+    assert stops[-1]["detail"] == "approval_denied", stops[-1]
+
+
 # ---------------------------------------------------------------------------
 # The file-only row, and the shape predicate
 # ---------------------------------------------------------------------------

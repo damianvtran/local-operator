@@ -286,6 +286,7 @@ def describe_devices(args: argparse.Namespace) -> int:
     reach into either.
     """
     from local_operator.operator.handlers import (
+        ADMIT_NO_SELECTION,
         PURPOSE_ADMIT_DEVICE,
         confirm_devices,
         install_anchor,
@@ -309,6 +310,7 @@ def describe_devices(args: argparse.Namespace) -> int:
     from local_operator.operator.trust import (
         admission_enforced,
         admission_sentence,
+        anchor_bytes,
         load_anchor,
         open_device_ids,
     )
@@ -332,42 +334,64 @@ def describe_devices(args: argparse.Namespace) -> int:
         if confirm and not selected:
             selected = [device.device_id for device in paired]
         print_only = bool(getattr(args, "print_only", False))
-        if not print_only:
-            # THE PROMISE, PRINTED WHERE IT IS KEPT (agent review round 2, m6). The
-            # same function the desktop card renders from, so the gesture this verb
-            # announces and the prompt that follows cannot disagree — and when the
-            # gesture cannot be asked for, `_admission_install` says why instead of
-            # exiting silently.
-            from local_operator.operator.elevate import confirm_card_copy
-
-            print(confirm_card_copy()[2])
+        # The gesture sentence is printed by `_admission_install`, right before the
+        # prompt and only once one can happen (design round 2, D8).
         code = confirm_devices(
             root,
             selected,
             print_only=print_only,
             sudo_secret=str(getattr(args, "sudo_secret", "") or ""),
         )
+        if code == ADMIT_NO_SELECTION:
+            # A bad selection is a USAGE error, and this verb exited 2 for it before
+            # the per-cause codes existed (agent review round 3, m5) — the same status
+            # argparse gives a bad flag. Kept, so a script reading it is not broken.
+            return 2
         if code != 0:
             return code
+        if print_only:
+            # NOTHING WAS CONFIRMED, so no receipt (agent review round 3, m4): the
+            # install command above is the whole output, and a receipt after it read
+            # as a claim about a write that has not happened.
+            return 0
         # `--confirm` SELECTS THE PHONES ALREADY LISTED, so on a host whose list is
         # already marked it changes nothing — and the receipt still claimed a
         # confirmation while a phone this computer had never confirmed stayed refused
         # (agent review round 2, m3). Ask the anchor again and name the verb that
         # actually confirms a phone.
         reloaded = load_anchor()
+        # `--approve <id>` names its phone, so only `--confirm`'s implicit selection
+        # can change nothing while another phone stays unconfirmed (agent review
+        # round 3, m4): `--approve X` with Y unconfirmed printed "Nothing needed
+        # confirming" about the X it had just confirmed.
         unconfirmed = [
             device.device_id
             for device in paired
-            if reloaded.usable
+            if not approve
+            and reloaded.usable
             and reloaded.anchor is not None
             and admission_enforced(reloaded.anchor)
             and not reloaded.anchor.presence
             and device.device_id not in open_device_ids(reloaded.anchor)
         ]
+        changed = not (
+            usable_anchor is not None
+            and reloaded.usable
+            and reloaded.anchor is not None
+            and anchor_bytes(reloaded.anchor) == anchor_bytes(usable_anchor)
+        )
         if unconfirmed:
+            # TRUE IN BOTH CASES (agent review round 3, m4): a `--confirm` that did
+            # write (a pre-rule anchor gaining its marker) confirmed something, so it
+            # cannot lead with "Nothing needed confirming".
             print(
-                "Nothing needed confirming: the phones already on this computer's list "
-                "were confirmed before this run. To confirm "
+                (
+                    "Confirmed the phones already on this computer's list. "
+                    if changed
+                    else "Nothing needed confirming: the phones already on this "
+                    "computer's list were confirmed before this run. "
+                )
+                + "To confirm "
                 + ", ".join(unconfirmed)
                 + ", run "
                 + " or ".join(

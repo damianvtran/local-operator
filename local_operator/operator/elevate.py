@@ -55,7 +55,12 @@ def _macos_prompt(command: list[list[str]]) -> list[str]:
 
 
 def windows_uac_refusal() -> str | None:
-    """Whether UAC is off or elevates silently, which cannot be a human gesture."""
+    """Why UAC cannot ask for a gesture here, as the sentence a person reads, or ``None``.
+
+    ONE REMEDY PER BRANCH (design round 2, D11). An unreadable policy is not proof that
+    UAC is off — it may well be on — so telling that person to "turn it back on" sent
+    them to fix something that was not broken. Each branch now says what it knows.
+    """
     try:
         import winreg
 
@@ -67,28 +72,63 @@ def windows_uac_refusal() -> str | None:
             consent = winreg.QueryValueEx(key, "ConsentPromptBehaviorAdmin")[0]
     except (ImportError, OSError):
         # A missing/unreadable policy must not become a claim that UAC will ask.
-        return "Windows cannot confirm that User Account Control will ask for approval"
+        return (
+            "Windows did not say whether it will ask you for approval, so no phone was "
+            "confirmed. Check that User Account Control is on, then try again."
+        )
     if not enabled or consent == 0:
-        return "Windows User Account Control is set not to ask for approval"
+        return (
+            "Windows User Account Control is set not to ask for approval, so this "
+            "computer cannot confirm a phone. Nothing was confirmed. Turn User Account "
+            "Control back on and try again."
+        )
     return None
+
+
+#: The sentence for a host with no launcher that can ask a person (design round 2,
+#: D11): it names a next step, and not "polkit", a word a phone owner never met.
+NO_LAUNCHER_REFUSAL = (
+    "This computer has no way to ask you for an administrator's approval, so nothing "
+    "was confirmed. Install sudo (or ask whoever runs this computer to), then try again."
+)
+
+
+def prompt_refusal(*, windows: bool | None = None) -> str | None:
+    """Why no in-person prompt CAN appear on this host, or ``None`` when one can.
+
+    SPLIT OUT OF ``run_elevated`` SO A CALLER CAN ASK BEFORE IT PROMISES (design round
+    2, D8). The CLI prints the gesture it is about to ask for ("Your Mac will ask for
+    your admin password."); printed before this question was answered, that promise
+    sat one line above the sentence admitting no prompt could happen. Both the caller's
+    pre-check and ``run_elevated`` read this one function, so they cannot disagree.
+    """
+    is_windows = trust._on_windows() if windows is None else windows
+    if is_windows:
+        return windows_uac_refusal()
+    if sys.platform == "darwin":
+        return None
+    if shutil.which("pkexec") is not None or shutil.which("sudo") is not None:
+        return None
+    return NO_LAUNCHER_REFUSAL
+
+
+#: osascript's error number for "User canceled." on an administrator-privileges
+#: prompt. osascript exits 1 for EVERY script error — including the install script
+#: refusing because the anchor changed (its `exit 3`) — so the exit code alone cannot
+#: tell a cancel from a failure (agent review round 3, m2); this number can.
+_OSASCRIPT_USER_CANCELED = "(-128)"
 
 
 def run_elevated(command: list[list[str]], *, windows: bool | None = None) -> ElevationResult:
     """Launch the platform's in-person admin gesture, without a shell wrapper."""
     is_windows = trust._on_windows() if windows is None else windows
+    refusal = prompt_refusal(windows=is_windows)
+    if refusal is not None:
+        # The honest account of why no prompt can appear travels to the caller
+        # instead of the bare exit code that used to say nothing at all (design
+        # round 1, D2).
+        return ElevationResult(2, refusal=refusal)
     if is_windows:
-        refusal = windows_uac_refusal()
-        if refusal is not None:
-            # The sentence `windows_uac_refusal` computes is the honest account of
-            # why no prompt can appear, so it travels to the caller instead of the
-            # bare exit code that used to say nothing at all (design round 1, D2).
-            return ElevationResult(
-                2,
-                refusal=(
-                    f"{refusal}, so this computer cannot confirm a phone. Nothing was "
-                    "confirmed. Turn User Account Control back on and try again."
-                ),
-            )
         # install_commands' Windows command is ShellExecute runas via PowerShell;
         # running it here (unlike onboarding) raises UAC and waits for its result.
         argv = command[0]
@@ -98,24 +138,19 @@ def run_elevated(command: list[list[str]], *, windows: bool | None = None) -> El
         from local_operator.operator import format_install_commands
 
         argv = ["pkexec", "sh", "-c", format_install_commands(_without_sudo(command))]
-    elif shutil.which("sudo") is not None:
+    else:
         # Headless Linux has no polkit agent. sudo's terminal prompt is still an
         # in-person gesture; its password never passes through this process.
         argv = ["sh", "-c", " && ".join(shlex.join(row) for row in command)]
-    else:
-        return ElevationResult(
-            2,
-            refusal=(
-                "This computer has no way to ask you for approval (no polkit and no "
-                "sudo), so nothing was confirmed."
-            ),
-        )
+    darwin = sys.platform == "darwin" and not is_windows
     try:
-        result = subprocess.run(argv, check=False)
+        # Only osascript's stderr is captured: it carries the cancel number and no
+        # secret, while sudo/pkexec keep the terminal they prompt on.
+        result = subprocess.run(argv, check=False, capture_output=darwin, text=darwin)
     except OSError:
         return ElevationResult(1)
     cancelled = (
-        (sys.platform == "darwin" and result.returncode == 1)
+        (darwin and result.returncode == 1 and _OSASCRIPT_USER_CANCELED in (result.stderr or ""))
         or (argv[0] == "pkexec" and result.returncode in (126, 127))
         or (argv[0] == "sh" and result.returncode in (1, 130, -2))
         or (is_windows and result.returncode in (1223, -1073740771))
@@ -154,4 +189,11 @@ def confirm_card_copy(*, windows: bool | None = None) -> tuple[str, str, str]:
     return title, body, gesture
 
 
-__all__ = ["ElevationResult", "confirm_card_copy", "run_elevated", "windows_uac_refusal"]
+__all__ = [
+    "NO_LAUNCHER_REFUSAL",
+    "ElevationResult",
+    "confirm_card_copy",
+    "prompt_refusal",
+    "run_elevated",
+    "windows_uac_refusal",
+]

@@ -1425,6 +1425,7 @@ def admission_enforced(anchor: OperatorAnchor) -> bool:
 #: so is better than naming somebody else's key.
 _GESTURE_WORDS = {
     "secure-enclave": "Touch ID",
+    "cng-presence": "Windows Hello",
 }
 
 
@@ -1444,7 +1445,7 @@ def admission_sentence(anchor: OperatorAnchor | None) -> str:
     line beside this one already says the level is capped for that reason.
     """
     if anchor is None:
-        return "no operator anchor installed — nothing to admit or refuse yet"
+        return "no operator anchor installed — nothing to confirm or refuse yet"
     if anchor.presence:
         # THE EXEMPTION, NAMED WHERE THE OPERATOR READS THE RULE. The presence
         # backends cost a human gesture per signature, so an unlisted phone IS
@@ -1457,9 +1458,14 @@ def admission_sentence(anchor: OperatorAnchor | None) -> str:
         # AND Windows Hello on every machine — a Mac read Windows Hello, a Linux TPM
         # host read neither. ``backend`` is already on the anchor, so it decides.
         gesture = _GESTURE_WORDS.get(anchor.backend, "your password or your fingerprint")
+        # WHAT THE GESTURE GATES (design round 2, D9): the operator key's signature,
+        # which is what issues the phone's certificate — NOT each action the phone
+        # takes afterwards (a paired phone signs with its own key, and nothing on this
+        # computer asks then). The old "every action there asks you" claimed a
+        # per-action gate this host does not have.
         return (
-            "not needed on this computer — every action there asks you for "
-            f"{gesture}, and that is what confirms the phone"
+            f"not needed on this computer — pairing a phone here already asks for "
+            f"{gesture}, and that is what confirms it"
         )
     if not admission_enforced(anchor):
         # THE GUARD'S HOST, STATED WITHOUT A CLAIM IT DOES NOT MAKE. Every device this

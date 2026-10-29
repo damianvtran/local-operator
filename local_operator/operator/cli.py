@@ -117,7 +117,7 @@ def add_parser(subparsers: Any) -> None:
         "devices",
         help=(
             "List paired phones and pending pairing requests; confirm one, confirm "
-            "all pre-rule phones, remove or bring back a device"
+            "the phones paired before this version, remove or bring back a device"
         ),
     )
     devices_parser.add_argument(
@@ -149,8 +149,8 @@ def add_parser(subparsers: Any) -> None:
         "--confirm",
         action="store_true",
         help=(
-            "Confirm the phones already on this computer's list, ending the pre-rule "
-            "migration state (this asks for your approval)"
+            "Confirm the phones paired before this version, so this computer starts "
+            "requiring confirmation (this asks for your approval)"
         ),
     )
     devices_parser.add_argument(

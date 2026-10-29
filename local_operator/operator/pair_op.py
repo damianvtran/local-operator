@@ -778,6 +778,13 @@ def _apply(
         admitted = admit_device(config_root, device_id)
         if admitted != ADMIT_OK:
             raise _refuse(ADMIT_REFUSED[admitted][0], ADMIT_REFUSED[admitted][1])
+        # THE RECORD IS RE-READ AFTER THE PROMPT (agent review round 3, m1). The
+        # lease now comes before the OS prompt, and a deny on another surface may
+        # land while that prompt is up (`connecting → denied` is a matrix row whose
+        # receipt promises "the runner stops at its next step check"). This is that
+        # check: without it the certificate was signed and written on a record that
+        # said `denied`.
+        approvals.verify_for_run(approval_id, root=config_root)
         certificate = _issue_certificate(
             device_spki=spki,
             device_id=device_id,
@@ -885,24 +892,52 @@ def _issue_certificate(
 
 
 def _release_run(approval_id: str, run_id: str, detail: str, root: Path | None) -> None:
-    """``connecting → failed`` for THIS run only, so the card stays retryable.
+    """Settle THIS run's failure on the record so the card stays retryable.
 
     Mirrors ``finite_share._release_run``: a refusal after ``begin_run`` otherwise leaves the
     record ``connecting`` under a live pid, and ``run_is_stale`` never fires in the daemon,
     so every retry reads "run in flight" until the window closes. A record another run
-    superseded, or one already terminal, is that writer's.
+    superseded is that writer's.
+
+    A RECORD DENIED MID-RUN IS ALREADY SETTLED, AND SAYS SO (agent review round 3, m1).
+    ``denied → failed`` is not a matrix row, so ``mark_failed`` refused it and that refusal
+    was swallowed with every other one — the record kept only the deny's own receipt and
+    nothing showed this run stopped. The deny is final and stays; the stop is recorded as
+    a failed receipt under it. Any OTHER refusal propagates: a release that cannot be
+    written is a fact the caller must see, not one to drop.
     """
-    try:
-        record = approvals.load_record(approval_id, root=root)
-        raw_run = record.get("run")
-        run: Mapping[str, Any] = raw_run if isinstance(raw_run, Mapping) else {}
-        if str(run.get("run_id") or "") != run_id:
+    record = approvals.load_record(approval_id, root=root)
+    raw_run = record.get("run")
+    run: Mapping[str, Any] = raw_run if isinstance(raw_run, Mapping) else {}
+    if str(run.get("run_id") or "") != run_id:
+        return
+    if str(record.get("state")) == approvals.STATE_DENIED:
+        _record_denied_stop(approval_id, run_id, detail, root)
+        return
+    approvals.mark_failed(approval_id, run_id=run_id, step=STEP_INSTALL, detail=detail, root=root)
+
+
+def _record_denied_stop(approval_id: str, run_id: str, detail: str, root: Path | None) -> None:
+    """The failed receipt for a run a mid-run deny stopped; the state stays ``denied``.
+
+    Written under the record lock in the store's receipt shape; ``append_receipt`` itself
+    refuses any record that is not ``connecting``, which is why this is its own writer.
+    """
+    with approvals._record_lock(approval_id, root):
+        record = approvals._load_raw(approval_id, root)
+        if str(record.get("state")) != approvals.STATE_DENIED:
             return
-        approvals.mark_failed(
-            approval_id, run_id=run_id, step=STEP_INSTALL, detail=detail, root=root
+        record.setdefault("receipts", []).append(
+            {
+                "run_id": str(run_id),
+                "step": STEP_INSTALL,
+                "at": time.time(),
+                "ok": False,
+                "detail": str(detail)[:400],
+                "digest": "",
+            }
         )
-    except MeshRefusal:
-        pass
+        approvals._write_record(record, root)
 
 
 # ---------------------------------------------------------------------------
