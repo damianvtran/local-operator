@@ -395,6 +395,49 @@ def test_exec_team_count_loop_and_resume(exec_server):
     )
 
 
+def test_exec_saver_flag_is_journaled_and_resumes(exec_server):
+    """``--saver`` through the real CLI, a real session and a real transcript.
+
+    The unit half (``tests/unit/test_exec_startup.py``) only proves the flag
+    reaches a session object. What a headless runner needs is that the choice
+    SURVIVES, because an exec session is the one nobody watches turn by turn:
+    the run must journal it, and a later ``--resume`` with no flag must still
+    read it back.
+    """
+    from local_operator.saver.command import SAVER_CUSTOM_TYPE
+
+    run, _requests, root = exec_server
+
+    def choices(directory: Path) -> list[object]:
+        rows = [
+            json.loads(line)
+            for line in (directory / "transcript.jsonl").read_text().splitlines()
+            if line.strip()
+        ]
+        return [
+            row["payload"]["details"]["enabled"]
+            for row in rows
+            if row.get("type") == "custom"
+            and row.get("payload", {}).get("custom_type") == SAVER_CUSTOM_TYPE
+        ]
+
+    first = run("exec", "Turn Saver on", "--saver", "on", "--json", stdin="")
+    assert first.returncode == 0
+    session_id = first.stderr.split("session_id=", 1)[1].split()[0]
+    directory = root / "sessions" / session_id
+    assert choices(directory) == [True], "the exec run journals the explicit choice"
+
+    resumed = run("exec", "--resume", session_id, "Still on?", "--json", stdin="")
+    assert resumed.returncode == 0
+    assert choices(directory) == [True], "a resume with no flag keeps the stored choice"
+
+    cleared = run(
+        "exec", "--resume", session_id, "Back to global", "--saver", "inherit", "--json", stdin=""
+    )
+    assert cleared.returncode == 0
+    assert choices(directory) == [True, None], "inherit is a durable decision, not an absence"
+
+
 def test_exec_team_with_a_profile_is_refused_at_preflight(exec_server):
     """Issue #2014: a team OWNS the agent slot, so ``--team X --profile Y`` can
     never be honoured — and it is refused BEFORE anything is constructed.
