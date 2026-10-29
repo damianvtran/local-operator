@@ -17107,7 +17107,9 @@ def main() -> int:
     configure_cli_logging()
     try:
         parser = build_cli_parser()
-        args = parser.parse_args()
+        from local_operator.exec_startup import fold_saver_argv
+
+        args = parser.parse_args(fold_saver_argv(sys.argv[1:]))
 
         # macOS: replace this process with a branded image so Activity Monitor
         # stops showing a wall of `python3.x`. NEVER RETURNS when it brands;

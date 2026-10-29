@@ -697,6 +697,7 @@ export type MessageParams = {
   "wire.radient_saver.notice.rejected": undefined;
   "wire.radient_saver.notice.signed_out": undefined;
   "wire.radient_saver.notice.unavailable": undefined;
+  "wire.radient_saver.notice.unknown_balance": undefined;
   "wire.radient_saver.section.description": undefined;
   "wire.radient_saver.section.title": undefined;
   "wire.remote_compute.alone": undefined;

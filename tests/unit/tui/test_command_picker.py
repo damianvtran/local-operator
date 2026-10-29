@@ -846,7 +846,11 @@ async def test_click_on_the_overflow_row_does_nothing() -> None:
         # word still beats one that starts later in the name.
         # `schedule` sits beside `settings` in registry order (both are page
         # commands at the head of the `s` family).
-        ("s", ["settings", "schedule", "sidebar", "search", "session", "stop", "skills"]),
+        # `saver` joins the `s` family ahead of them all: its registry entry
+        # sits with `/radient` in the session-controls block, which is earlier
+        # than the page commands, and every `s` match here is a flat 900 prefix
+        # score, so the tiebreak is registry index.
+        ("s", ["saver", "settings", "schedule", "sidebar", "search", "session", "stop", "skills"]),
         # Every one of these is a flat 900 prefix match (verified, not assumed:
         # `score_command_text_match("/c", …)` returns 900 for all six), so
         # `match_commands` sorts them on `(-score, registry_index)` and the

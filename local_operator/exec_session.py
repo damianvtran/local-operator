@@ -12,7 +12,11 @@ import os
 import sys
 from typing import Any
 
-from local_operator.exec_startup import apply_startup, report_unresolved_declared_tools
+from local_operator.exec_startup import (
+    apply_saver_startup,
+    apply_startup,
+    report_unresolved_declared_tools,
+)
 from local_operator.i18n.keys import wire_exec as _wd
 from local_operator.i18n.text import tr
 
@@ -71,6 +75,7 @@ async def run_session(session: Any, prompt: str, args: Any, team: Any) -> int:
     control = None
     try:
         apply_startup(session, args, team)
+        await apply_saver_startup(session, args)
         control = await start_exec_control(
             session,
             cwd=os.getcwd(),

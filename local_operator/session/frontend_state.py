@@ -3749,12 +3749,18 @@ class FrontendSessionState(BaseModel):
     #: publish it, or one whose store could not be read); old clients ignore
     #: the key, and this client renders nothing for ``None``.
     model_access: "FrontendModelAccess | None" = None
-    #: Whether Radient Saver resolves ON for this session's NEXT request.
+    #: Whether Saver is ON for this session — the session's own state.
     #:
     #: Declared rather than left to ``extra="allow"``: a follower cannot inspect
     #: the owner's session, its settings or its Radient credential, so a badge
     #: derived locally would be a second, divergent answer. ``False`` is the
     #: ordinary value and also what an older backend publishes by omitting it.
+    #:
+    #: This is NOT "the next request will splice": that needs the account's
+    #: balance, which is a per-request network fact read at enable and on the
+    #: turn. Reporting it here made the badge claim ON for a request the gate
+    #: refused and OFF for one it served (review M3 / UX U3), so the field now
+    #: carries the setting the user sees, from ``command.saver_state``.
     radient_saver_on: bool = False
     #: The session's own tri-state override (``None`` follows the global setting
     #: and the agent's pin), so a surface can say WHY Saver is on or off.

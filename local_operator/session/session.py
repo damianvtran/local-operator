@@ -3475,7 +3475,13 @@ class Session:
         # Tri-state conversation choice: None follows the global setting/agent
         # pin; True/False are explicit overrides journaled for resume.
         self.radient_saver_choice: bool | None = None
-        self._saver_agent_pin: bool | None = None
+        #: The last real balance read for this session's gate, cached so a
+        #: reporting surface never has to guess or block (see
+        #: ``saver/command.py::cached_availability``). ``None`` = never read.
+        self._saver_availability: Any = None
+        #: The last sign-in answer, stamped by the same read. Read by the
+        #: badge instead of the credential store, which shells out per call.
+        self._saver_signed_in: bool | None = None
         self._stream_fn = stream_fn
         saver_bridge = getattr(self._stream_fn, "bind_saver_session", None)
         if callable(saver_bridge):

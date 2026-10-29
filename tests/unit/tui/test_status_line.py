@@ -42,6 +42,7 @@ from local_operator.tui.widgets.status_line import (
     ICON_CONTEXT,
     ICON_COST,
     ICON_CWD,
+    ICON_SAVER,
     ICON_DURATION,
     ICON_JOBS,
     ICON_LAST_RATE,
@@ -2568,3 +2569,58 @@ def test_the_composed_fork_and_liveness_row_fits_and_keeps_the_age_last(monkeypa
         # the head is intact.
         if "Not answering" in row and "4m" not in row:
             assert row.rstrip().endswith(("\u2026", "…", "reconnec…")), (width, row)
+
+
+# ---------------------------------------------------------------------------
+# Saver segment — presence IS the message (design round 2, D1/D2/D3)
+# ---------------------------------------------------------------------------
+
+
+def _saver_band(width: int, value: str) -> StatusLine:
+    status = StatusLine(_dock(width), clock=FakeClock())
+    status.update(model_label="openai/gpt-5.4", cwd="/Users/tester/work", saver=value)
+    return status
+
+
+def _band_text(status: StatusLine, width: int) -> str:
+    return status.render_text(width).plain
+
+
+def test_saver_off_paints_nothing_at_all() -> None:
+    """Off is ABSENT, not reserved (D1).
+
+    The shipped round-1 band painted ``ICON_SAVER`` with an empty value in every
+    session for every user — a dim smudge that told a reader nothing, and the
+    only segment in the band that painted without a reading. Every other
+    segment is gated on a non-empty value; this pins Saver to the same rule.
+    """
+    off = _saver_band(120, "")
+    text = _band_text(off, 120)
+    assert ICON_SAVER not in text
+    assert "saver" not in text
+
+
+def test_saver_on_paints_its_word_and_the_mark() -> None:
+    text = _band_text(_saver_band(120, "saver"), 120)
+    assert ICON_SAVER in text and "saver" in text
+
+
+def test_the_saver_mark_is_not_the_read_tool_icon() -> None:
+    """Design D3: ``≡`` is ``PLAIN_TOOL_ICONS["read"]`` on the same screen."""
+    from local_operator.tui.glyphs import PLAIN_TOOL_ICONS
+
+    assert ICON_SAVER not in PLAIN_TOOL_ICONS.values()
+
+
+def test_the_band_is_one_row_at_every_width_in_both_states() -> None:
+    for width in (80, 100, 120, 140):
+        for value in ("", "saver"):
+            row = _saver_band(width, value).render_text(width).plain
+            assert "\n" not in row, (width, value)
+
+
+def test_saver_sheds_beside_fast_not_under_duration() -> None:
+    """Design D2: the old rung lost the indicator at 80 columns while `fast` stayed."""
+    ladder = _DROP_LADDER
+    assert ladder.index("saver") > ladder.index("fast")
+    assert ladder.index("saver") - ladder.index("fast") == 1

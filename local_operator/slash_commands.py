@@ -1611,7 +1611,12 @@ SLASH_COMMANDS: list[SlashCommand] = [
         "radient",
         _tr(wire_radient_saver.command_radient_description()),
         arguments=ArgumentMode.REQUIRED,
-        argument_shape=ArgumentShape.ANY,
+        # SUBCOMMAND, not ANY: the vocabulary is closed (`saver <word>`), and a
+        # sentence typed after `/radient` must stay a message to the model
+        # rather than reaching the handler to be refused there. `subcommands`
+        # is the same list the handler parses, which is what lets the route's
+        # validator and the picker agree about what the word accepts.
+        argument_shape=ArgumentShape.SUBCOMMAND,
         subcommands=("saver",),
         desktop_destination="session.saver",
     ),

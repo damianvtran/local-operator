@@ -106,7 +106,14 @@ ICON_EFFORT = "▴"
 #: D1).
 ICON_FAST = "↯"
 #: Saver's compression mark: one cell, distinct from the speed lightning.
-ICON_SAVER = "≡"
+#:
+#: NOT ``≡`` (design round 2, D3): that is ``PLAIN_TOOL_ICONS["read"]``, the
+#: lines-of-text mark on the very same screen, and ``glyphs.py`` states the rule
+#: an icon may not break — it must not echo the shape of a different meaning. It
+#: also reads as a hamburger menu, which this band has no concept of. ``⊖`` (a
+#: minus inside a circle) says the one thing the feature does — FEWER tokens in
+#: the request — and collides with no tool icon, no separator and no verdict.
+ICON_SAVER = "⊖"
 ICON_CWD = "⌂"
 #: Active ``/agent`` profile governing THIS session (U2). A CATEGORY marker like
 #: every other icon here — the value is the profile name beside it (`◉ auditor`),
@@ -419,9 +426,6 @@ _MIN_GROUP_GAP = 4
 _DROP_LADDER: tuple[str, ...] = (
     # Re-derivable from the transcript.
     "duration",
-    # Saver is a convenience indicator, already visible in /saver status; narrow
-    # bands spend these cells on readings that cannot be recovered there.
-    "saver",
     # Counters. Not re-derivable without scrolling, so they outlast the one
     # above; jobs go before agents because a backgrounded shell command is
     # visible in the transcript as a tool card, while a subagent is not.
@@ -454,6 +458,16 @@ _DROP_LADDER: tuple[str, ...] = (
     # whole word. A band tight enough to drop one static dial should keep the
     # expensive one visible.
     "fast",
+    # Beside `fast` and shed just before it (design round 1, D2). The old rung
+    # put Saver directly under `duration`, so it survived to 96 columns while
+    # `fast` survived to 66 — at 80 columns the indicator this feature exists to
+    # provide was gone and the dial next to it stayed. The old reason ("already
+    # visible in /saver status") separated nothing: `/fast status` is equally
+    # recoverable, and `fast`'s own stated reason — it is the segment that is
+    # COSTING MONEY while it shows — is equally true of Saver, which bills
+    # Radient credits per token removed. `fast` still outlives it because it
+    # spends 4 cells against Saver's 6 and is the more transient reading.
+    "saver",
     # The active /team roster and /agent profile (U2). Both are STATIC session
     # settings the user chose — like `effort`, they do not change while the user
     # watches — so they belong in this static-settings band ahead of the live
@@ -1257,12 +1271,14 @@ class StatusLine:
         #: band never reaches into the session, so the source of truth stays the
         #: session's own spec and the app pushes the reading through ``update``.
         self._fast: str = ""
-        # Fixed five-cell value keeps the model and adjacent segments stationary
-        # when Saver toggles; blank cells are reserved, not layout-dropped.
+        # The localized word, or "" when this session is not occupying Saver.
+        # Off paints NOTHING (design round 1, D1): the reserved-five-cells
+        # version this replaced painted a dim glyph with an empty value in every
+        # band for every user, so presence stopped carrying information — and
+        # the reservation bought one 7-cell shift at a command the user typed, at
+        # the cost of a permanent hole. Every other segment in this band is
+        # gated on a non-empty reading; this is the one that was not.
         self._saver: str = ""
-        # Explicitly enabled by the populated composer path, so sparse/narrow
-        # bands do not pay for an empty feature segment.
-        self._saver_reserved = False
         # session (U2), "" when unattached — the band's two static-identity
         # segments. Held as plain strings the app pushes through `update`, the
         # same shape as `effort`: the band never reaches into the session, so
@@ -1644,7 +1660,6 @@ class StatusLine:
         effort: str | None = None,
         fast: str | None = None,
         saver: str | None = None,
-        reserve_saver: bool = False,
         agent_profile: str | None = None,
         team: str | None = None,
         cwd: str | None = None,
@@ -1680,8 +1695,6 @@ class StatusLine:
             self._fast = fast
         if saver is not None:
             self._saver = saver
-        if reserve_saver:
-            self._saver_reserved = True
         # "" is a MEANINGFUL value here (detach), so these follow the same
         # None-means-leave-alone contract as every other segment: the app passes
         # "" to clear the segment on /agent clear or team detach, and None to
@@ -2432,13 +2445,15 @@ class StatusLine:
                 # separates the two adjacent dials at a glance.
                 (ICON_FAST, self._fast, Style(color=theme_mod.semantic_color("warning")), None)
             )
-        # Reserve Saver's whole segment in both states so toggling it cannot
-        # move the model label or its neighbours by one cell.
-        if self._subagent is None and "saver" not in dropped and (self._saver or self._saver_reserved):
+        # Value-gated exactly like `/effort` and `/fast` above: absent when off,
+        # which is what makes its presence the whole message. A subagent overlay
+        # suppresses it for the same reason `/fast` is suppressed — the parent's
+        # upload policy is not the child's request.
+        if self._saver and self._subagent is None and "saver" not in dropped:
             parts.append(
                 (
                     ICON_SAVER,
-                    self._saver.ljust(5),
+                    self._saver,
                     Style(color=theme_mod.semantic_color("label")),
                     None,
                 )

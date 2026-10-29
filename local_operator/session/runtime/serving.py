@@ -8552,7 +8552,7 @@ class ServingSessionHandle(SessionHandle):
                         style="warning",
                     )
                 args = rest
-            result = saver_slash(session, args, SlashResult)
+            result = await saver_slash(session, args, SlashResult)
             self._notify()
             return result
         if command == "approvals":

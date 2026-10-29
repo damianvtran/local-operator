@@ -15,12 +15,13 @@
   "wire.radient_saver.notice.disabled": "Radient Saver không khả dụng với cấu hình này, nên toàn bộ lịch sử sẽ được gửi.",
   "wire.radient_saver.notice.oversize": "Một tin nhắn trong cuộc trò chuyện này quá lớn đối với Radient Saver, nên tin nhắn đó được giữ nguyên, không rút gọn. Saver vẫn tiếp tục rút gọn phần còn lại của cuộc trò chuyện.",
   "wire.radient_saver.command.description": "Thiết lập Radient Saver cho phiên này",
-  "wire.radient_saver.command.radient_description": "Điều khiển phiên Radient",
-  "wire.radient_saver.command.usage": "Dùng /saver, /saver on, /saver off, /saver status hoặc /saver inherit. /saver không có đối số sẽ chuyển đổi trạng thái; inherit tuân theo thiết lập chung.",
+  "wire.radient_saver.command.radient_description": "Radient Saver (/radient saver)",
+  "wire.radient_saver.command.usage": "Dùng /saver hoặc /radient saver, rồi on, off, status hoặc inherit. /saver không có đối số sẽ chuyển đổi trạng thái; inherit tuân theo thiết lập chung.",
   "wire.radient_saver.command.enabled": "Radient Saver đã bật cho phiên này. Thiết lập chung của bạn không thay đổi.",
-  "wire.radient_saver.command.disabled": "Radient Saver đã tắt cho phiên này. Thiết lập chung của bạn không thay đổi.",
+  "wire.radient_saver.command.disabled": "Radient Saver đã tắt cho phiên này. Thiết lập chung của bạn không thay đổi; /saver inherit sẽ tuân theo nó trở lại.",
   "wire.radient_saver.command.inherited": "Radient Saver của phiên này giờ tuân theo thiết lập chung và chỉ định của tác nhân.",
   "wire.radient_saver.command.status.on": "Radient Saver: đang bật cho phiên này. Dùng /saver off để tắt hoặc /saver inherit để tuân theo thiết lập chung.",
   "wire.radient_saver.command.status.off": "Radient Saver: đang tắt cho phiên này. Dùng /saver on để bật.",
-  "wire.radient_saver.command.badge": "saver"
+  "wire.radient_saver.command.badge": "saver",
+  "wire.radient_saver.notice.unknown_balance": "Radient Saver không kiểm tra được số dư Radient của bạn lúc này, nên không có gì thay đổi. Hãy thử lại /saver on sau giây lát."
 }
