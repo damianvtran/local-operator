@@ -308,7 +308,7 @@
   "wire.settings.librarian_cadence_paused.label": "Ежедневный проход на паузе",
   "wire.settings.librarian_enabled.choice.false.description": "выключен",
   "wire.settings.librarian_enabled.choice.true.description": "включён",
-  "wire.settings.librarian_enabled.help": "Считывается при запуске и в /v1/desktop/librarian; если отключено, её сессия не создаётся.",
+  "wire.settings.librarian_enabled.help": "Считывается при запуске и в /v1/desktop/librarian; если отключено, его сессия не создаётся.",
   "wire.settings.librarian_enabled.label": "Библиотекарь включён",
   "wire.settings.librarian_name.help": "Имя, которое используют его закреплённый разговор и все квитанции.",
   "wire.settings.librarian_name.label": "Отображаемое имя",
