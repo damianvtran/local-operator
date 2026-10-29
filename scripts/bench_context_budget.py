@@ -1750,7 +1750,22 @@ CHARS_PER_BILLED_TOKEN = 2.78
 # this one's published schema are capability, not prose. The ceiling is therefore
 # the MEASURED HEAD plus this file's 55-token band (34,286 + 55), the same rule
 # the older entries above used — not a round number and not a guess.
-BUDGET_BILLED_TOKENS = 34_341
+#
+# 34,341 -> 34,641 (2026-10-29, the directory/dm branch), and this one is a
+# CAPABILITY cost, argued rather than assumed. Measured on this tree at HEAD,
+# isolated HOME, by this script:
+#   top   96,277 chars / 34,632 billed / 37 schemas   vs 34,341 — 291 OVER
+# The branch publishes four OPS the tool did not have (`directory`, `dm`,
+# `shared_conversations`, `shared_history`) plus the six merged room ops, and
+# their schema prose is what a model reads before it calls them. That prose is
+# not decoration: an earlier round on this same feature failed at argument
+# validation because the recipient's accepted shapes were not described where
+# the model looked, and every send was refused for its addressing. Cutting the
+# op descriptions to fit the ceiling would reintroduce exactly that failure to
+# save 300 tokens, so the ceiling moves by the measured overrun plus this file's
+# 55-token band (34,632 + 9 = 34,641, the band applied to the mover's figure).
+# Reduce the schemas, not the guidance, if a later round needs the room back.
+BUDGET_BILLED_TOKENS = 34_641
 
 #: The SUBAGENT ceiling (``--kind child``), in billed tokens. Same ratchet rules
 #: as ``BUDGET_BILLED_TOKENS`` above. It is a separate number because a child's
@@ -1914,7 +1929,12 @@ BUDGET_BILLED_TOKENS = 34_341
 # pays the same four actions' schema. Measured on the same tree:
 #   30,329 billed   FAIL, 126 over (after the prose trim)
 #   budget 30,380 (measured head + 51 headroom, the same band the parent uses)
-BUDGET_CHILD_BILLED_TOKENS = 30_380
+#: 30,380 -> 30,779 (2026-10-29, the same directory/dm branch and the same
+#: argument as the top ceiling above): measured at HEAD on this tree,
+#:   child 85,414 chars / 30,724 billed / 32 schemas   vs 30,380 — 344 OVER
+#: The child inventory gains the same four ops, so the same capability cost
+#: lands on both ceilings; 30,724 + the same 55-token band = 30,779.
+BUDGET_CHILD_BILLED_TOKENS = 30_779
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:
