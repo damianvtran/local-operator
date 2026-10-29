@@ -18,6 +18,14 @@ And the bite itself is measured: a predicate that becomes true LATE, under two b
 so the same wait fails on one and succeeds on the other. See
 ``test_the_budget_decides_a_delayed_condition_in_both_directions`` for why that cell is
 the only one here that can distinguish the budget from the predicate.
+
+WHY THE BANDS ARE WIDE. Every numeric tolerance below separates two things that differ by
+SECONDS — 0.5 s from 12 s, 12 s from 20 s or 30 s — and each one states in place what it
+separates and by how much margin. None may be narrower than the 525-668 ms starvation gaps
+this fleet records (``conftest.py``): a band that thin reads as load-independent and is
+not, because it reds when the final poll was slow, which is the very class this PR exists
+to remove. The bands are coarse on purpose; the discrimination is not. A band whose margin
+is smaller than a documented starvation gap is wrong by construction.
 """
 
 from __future__ import annotations
@@ -54,9 +62,10 @@ def test_a_wait_that_never_holds_is_falsy_and_says_why() -> None:
     # The elapsed time, the budget, and what was still false — the three facts the old
     # bare ``False`` threw away. The elapsed figure is read back from the MEASURED value,
     # not written as the budget literal: ``__repr__`` renders ``:.2f`` of the measurement,
-    # and the four 50 ms polls cannot finish in under 0.20 s but can easily land past
-    # 0.295 s — one 525-668 ms starvation gap (conftest.py, the fleet figure) would red a
-    # `"after 0.2"` substring on exactly the loaded host this PR exists to keep green.
+    # and the four 50 ms polls this 0.2 s budget allows cannot finish in under 0.20 s but
+    # can easily land past 0.295 s — one 525-668 ms starvation gap (conftest.py, the fleet
+    # figure) would red an `"after 0.2"` substring on exactly the loaded host this PR
+    # exists to keep green.
     assert f"after {outcome.elapsed_s:.2f}s" in message
     assert "budget 0.2s" in message
     assert "lambda" in message
@@ -106,17 +115,13 @@ def test_the_budget_decides_a_delayed_condition_in_both_directions() -> None:
        measured elapsed must be ≈0.5 s: the wait stopped on its bound, not on the flag.
     2. The driver is started only now, and the SAME wait under the long budget succeeds
        with elapsed ≈12 s — the flag's own delay. A wait that returned at its 30 s bound,
-       or that slept its budget before checking, lands nowhere near it.
-    3. The two elapsed figures are separated by the flag's delay minus the short budget
-       already spent — i.e. the difference is accounted for by the condition, not by
-       either bound.
+       or that slept part of its budget before checking, lands 6-16 s away.
+    3. The closing leg: the same 0.5 s budget, now against a satisfied predicate, succeeds
+       — so the first failure was the predicate's falsehood and never the number itself.
 
-    Plus the leg that closes the loop: the short-budget wait run again AFTER the flag is
-    set succeeds with elapsed ≈0, so the first failure was the predicate's falsehood and
-    never the 0.5 s number itself.
-
-    12 s of wall clock is the price; it buys a cell that cannot pass unless the budget
-    both bites and yields.
+    Bands are stated where they are used, with their margins; see this module's docstring
+    for the rule they follow. 12 s of wall clock is the price, and it buys a cell that
+    cannot pass unless the budget both bites and yields.
     """
     flag = threading.Event()
 
@@ -132,8 +137,11 @@ def test_the_budget_decides_a_delayed_condition_in_both_directions() -> None:
     driver: threading.Thread | None = None
     try:
         # 1. The short budget must expire on a predicate that is still false, and it must
-        #    expire AT its budget. Slack is one starvation gap's worth above the bound: the
-        #    four 50 ms polls are preemption points, so the overshoot is real but bounded.
+        #    expire AT its budget. BAND 0.5-2.5 s: it separates the bound from the 12 s
+        #    condition by 9.5 s above the ceiling. Ten 50 ms polls are ten preemption
+        #    points, so overshoot is real, and the 2 s of headroom above the bound exists
+        #    because 525-668 ms starvation gaps are documented for this fleet — a 0.45 s
+        #    ceiling was narrower than one of those and red a load-independent cell.
         short = net_fixtures.wait_for(flag_is_set, timeout_s=SHORT_BUDGET_S)
         assert not short, f"a wait on a still-false predicate reported success: {short!r}"
         message = repr(short)
@@ -141,42 +149,42 @@ def test_the_budget_decides_a_delayed_condition_in_both_directions() -> None:
         assert f"after {short.elapsed_s:.2f}s" in message, message
         assert f"(budget {SHORT_BUDGET_S:.1f}s)" in message, message
         assert "flag_is_set" in message, f"the report does not name the predicate: {message}"
-        assert SHORT_BUDGET_S <= short.elapsed_s <= SHORT_BUDGET_S + 0.45, (
+        assert SHORT_BUDGET_S <= short.elapsed_s <= SHORT_BUDGET_S + 2.0, (
             f"the short wait reported {short.elapsed_s:.2f}s against a "
             f"{SHORT_BUDGET_S:.1f}s budget: it did not stop on its bound"
         )
 
         # 2. Start the condition now, so the long wait's elapsed time is the flag's delay
-        #    measured from its own start: ≈12 s, which is neither the 0.5 s it just spent
-        #    nor the 30 s it is allowed. A range here (say 10-25 s) would also accept a
-        #    wait that ran its whole budget, so assert the delay itself.
+        #    measured from its own start. BAND 12 s ± 2 s: 6 s of margin against a mutant
+        #    that sleeps part of the budget before checking (the 20 s one), 16 s against
+        #    the 30 s bound itself. ±1 s was narrower than one starvation gap.
         driver = threading.Thread(target=set_flag_later, name="delayed-flag", daemon=True)
         driver.start()
         long = net_fixtures.wait_for(flag_is_set, timeout_s=LONG_BUDGET_S)
         assert long, f"the same wait under a {LONG_BUDGET_S:.0f}s budget expired: {long!r}"
         assert short.ok is False and long.ok is True
-        assert abs(long.elapsed_s - FLAG_DELAY_S) <= 1.0, (
+        assert abs(long.elapsed_s - FLAG_DELAY_S) <= 2.0, (
             f"the long wait returned at {long.elapsed_s:.2f}s against a "
             f"{FLAG_DELAY_S:.0f}s flag delay and a {LONG_BUDGET_S:.0f}s budget: it "
             f"neither woke on the condition nor ran out of budget, so something else "
             f"ended it"
         )
 
-        # 3. The two figures differ by the flag delay minus the time the first wait had
-        #    already spent — the gap the condition (not a bound) accounts for.
-        expected_gap = FLAG_DELAY_S - SHORT_BUDGET_S
-        measured_gap = long.elapsed_s - short.elapsed_s
-        assert abs(measured_gap - expected_gap) <= 1.5, (
-            f"short {short.elapsed_s:.2f}s, long {long.elapsed_s:.2f}s: gap "
-            f"{measured_gap:.2f}s is not the ~{expected_gap:.2f}s between the flag delay "
-            f"and the short budget, so neither bound explains the difference"
-        )
+        # No gap assertion between the two elapsed figures. As sized, the two bands above
+        # mathematically implied it, so it could never fail; widened until it could, it
+        # would only fail when the SHORT leg overshot its own ceiling — a load-dependent
+        # red, the class this PR removes — while adding no discrimination that legs 1 and
+        # 2 do not already carry. The long band is what rejects a wait that stopped for a
+        # third reason.
 
-        # The closing leg: with the predicate now true, the SAME short budget succeeds at
-        # once. The 0.5 s number was never what failed the first wait.
+        # 3. The closing leg: with the predicate now true, the SAME 0.5 s budget succeeds,
+        #    so the number was never what failed the first wait. The discrimination here
+        #    is the ok flip (False on leg 1, True here) under an identical budget; the
+        #    elapsed ceiling only rules out "waited for the 12 s condition", and is set as
+        #    wide as leg 1's because one predicate call can also be preempted.
         after = net_fixtures.wait_for(flag_is_set, timeout_s=SHORT_BUDGET_S)
         assert after, f"a satisfied predicate still expired under the short budget: {after!r}"
-        assert after.elapsed_s < 0.2, (
+        assert after.elapsed_s <= SHORT_BUDGET_S + 2.0, (
             f"a satisfied predicate waited {after.elapsed_s:.2f}s: the wait spent time on "
             f"the clock instead of reading the condition"
         )
