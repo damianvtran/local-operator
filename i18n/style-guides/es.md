@@ -22,16 +22,19 @@ translators and the auditor. Wave 1 locale.
 - Keep exactly as in glossary §1: "Local Operator", `lop`, tool names,
   `--flags`, config keys, paths, identifiers.
 - Kept-English technical list: commit, push, pull, merge, rebase, token,
-  cache, endpoint, script, prompt, deploy · API, CLI, TUI, JSON, YAML, HTTP,
+  endpoint, script, prompt, deploy · API, CLI, TUI, JSON, YAML, HTTP,
   URL, GPU. Wave-1 recorded additions: runtime, harness, hook(s), handshake,
   backoff. Reason: settled dev usage across Spain and LatAm.
 - Prefer Spanish where settled: servidor, archivo, carpeta, red, dispositivo,
   ajustes (settings), equipo (team), habilidad (skill).
 - **Amendment (es W1, 2026-10-29): `cache` → `caché`.** The kept-English list
-  above named `cache`, but the shipped catalogue already used `caché` in ~40
-  strings (including the required `no garantiza un acierto de caché` in
-  `wire.settings.account_policy`). The guide now agrees with the shipped state;
-  follow `caché` rather than reopening the split.
+  above named `cache` before this amendment removed it. The shipped catalogue
+  already used `caché` in 19 keys (20 occurrences: `wire.settings` 15,
+  `wire.settings.account_policy` 3, `wire.host_speed` 2), including the required
+  `no garantiza un acierto de caché` in `wire.settings.account_policy` — a
+  string this wave ships. The guide now agrees with the shipped state; follow
+  `caché` rather than reopening the split. (The 35 `cache` tokens in the English
+  sources are the source-side count, not this one.)
 
 ## Locale calls (es)
 
