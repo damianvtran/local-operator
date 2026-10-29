@@ -538,7 +538,13 @@ MEASURED_TOKENS: dict[str, int] = {
     # RE-MEASURED (own-cwd slice 2): 880 -> 877. The `move` field description
     # was trimmed to fit the CHILD context-budget arm, and the rendered doc
     # follows it. Measured through this test's own table; no other entry moved.
-    "sessions": 877,
+    # RE-MEASURED (own-cwd, rebase onto the audited-reader main): 877 -> 868.
+    # The `cwd` description is now the one clause the always-loaded schema can
+    # afford (`move: destination directory.`), which is what took the delta of
+    # this feature on the start-context arms from 168 chars to 125; the resolved
+    # form moved to the `op='help'` entry, which the reference renders on demand
+    # and the arms do not pay for. No other entry moved.
+    "sessions": 868,
     # NEW (wave 4 slice A, 2026-10-10): the ``setting`` doc — the key
     # vocabulary, the op split and the validation-by-registry contract. 191
     # tokens is the deliberate cost of the reference detail staying off the

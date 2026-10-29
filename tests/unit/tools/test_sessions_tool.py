@@ -1201,10 +1201,12 @@ def test_schema_budget_is_measured_with_the_repos_own_ruler() -> None:
     params = json.dumps(SessionsParams.model_json_schema(), ensure_ascii=False)
     # LOH-11 adds one optional existing-category name list: 1267 measured
     # (54 tokens above 1213), with the same one-token headroom. No new tool.
-    # RAISED 1268 -> 1326 for the own-cwd `move` op: one property (`cwd`) and
-    # one enum word, 1325 measured with this test's own ruler, the same
-    # one-token headroom as every pin above.
-    assert count_text_tokens(params) <= 1326
+    # RE-MEASURED for the own-cwd `move` op: one property (`cwd`) and one enum
+    # word, 1313 measured with this test's own ruler after the field's prose was
+    # trimmed to the start-context budget — pinned at 1314, the same one-token
+    # headroom as every pin above rather than the cushion the untrimmed field
+    # would have left.
+    assert count_text_tokens(params) <= 1314
     assert count_text_tokens(_SESSIONS_TOOL_DESCRIPTION) <= 273
 
 

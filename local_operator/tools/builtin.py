@@ -16398,7 +16398,10 @@ class SessionsParams(BaseModel):
     )
     cwd: str | None = Field(
         default=None,
-        description=("move: destination directory; absolute or relative to the session's cwd."),
+        # Deliberately one clause: the always-loaded schema pays for this string on
+        # every request, and `op='help'`'s move entry carries the resolved form
+        # (absolute, or relative to the session's own cwd).
+        description="move: destination directory.",
     )
     name: str | None = Field(default=None, description="spawn: title.")
     tags: list[str] | None = Field(
@@ -20262,8 +20265,8 @@ async def _sessions_move(
     slice 2 does that. Reporting ``applied`` from this call would claim a boot
     that has not happened, so the result's stage is the durable intent's stage.
     """
-    from local_operator.session import cwd_move
     from local_operator.paths import config_dir
+    from local_operator.session import cwd_move
 
     def refuse(code: str, **fields: Any) -> ToolResult:
         return _error(
