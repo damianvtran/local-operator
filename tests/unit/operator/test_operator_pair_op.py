@@ -474,6 +474,67 @@ def test_every_generic_surface_refuses_a_pair_card_and_deny_stays_available(
     assert A.load_record(approval_id, root=root)["state"] == A.STATE_DENIED
 
 
+def _admit_rig(
+    root: Path, monkeypatch: pytest.MonkeyPatch, *, fail_first: int = 0
+) -> dict[str, list[Any]]:
+    """A REAL ``admit_device`` path: root-owned installed statement, faked gesture.
+
+    ``admit_device`` is the thing under test in these cells, so it is not stubbed. What
+    IS substituted are host facts no headless rig has: the installed statement's root
+    ownership (the same ``_ANCHOR_ROOT_OVERRIDE``/``_open_no_follow`` seam
+    ``test_device_admission_writes`` uses) and the OS admin prompt itself. ``fail_first``
+    makes the first ``fail_first`` privileged installs return a failed elevation, which
+    is how a transient apply failure is produced without stubbing any policy.
+    """
+    from types import SimpleNamespace
+
+    from local_operator.operator import handlers
+    from local_operator.operator.elevate import ElevationResult
+    from local_operator.operator import trust as trust_module
+
+    staged = trust_module.load_staged_anchor(root)
+    assert staged is not None, "the rig's operator key staged no statement"
+    # THE INSTALLED BYTES ARE THE STAGED BYTES, verbatim. Re-serialising a parsed anchor
+    # can change them, and ``statement_digest`` covers the anchor (finding F-B), so a
+    # re-emitted copy would make every filed card fail the anchor guard for a reason
+    # that is purely the rig's. No admission marker is added here either: a first-time
+    # phone passes the migration guard with an empty device store, so this rig is the
+    # honest legacy-start state an upgrading host has.
+    raw = trust_module.staging_path(root).read_bytes()
+    assert trust_module.parse_staged_anchor(raw) == staged
+    anchor_root = root / "anchor-root"
+    anchor_root.mkdir(exist_ok=True)
+    monkeypatch.setattr(trust_module, "_ANCHOR_ROOT_OVERRIDE", anchor_root)
+    target = trust_module.anchor_path()
+    target.write_bytes(raw)
+    real_open = trust_module._open_no_follow
+
+    def as_root(path: Path) -> Any:
+        opened = real_open(path)
+        assert opened is not None
+        descriptor, _ = opened
+        return descriptor, SimpleNamespace(st_uid=0, st_mode=0o100644)
+
+    monkeypatch.setattr(trust_module, "_open_no_follow", as_root)
+    # The store fixture pins "no installed anchor" (true of every developer host), and
+    # these cells are ABOUT the installed statement, so the pin is lifted.
+    monkeypatch.setattr(trust_module, "load_anchor", handlers.load_anchor)
+    monkeypatch.setattr(trust_module, "install_refusal", lambda: None)
+    monkeypatch.setattr("local_operator.operator.elevate.prompt_refusal", lambda: None)
+
+    prompts: list[Any] = []
+
+    def elevate(command: Any) -> Any:
+        prompts.append(command)
+        if len(prompts) <= fail_first:
+            return ElevationResult(1)
+        target.write_bytes(trust_module.staging_path(root).read_bytes())
+        return ElevationResult(0)
+
+    monkeypatch.setattr("local_operator.operator.elevate.run_elevated", elevate)
+    return {"prompts": prompts}
+
+
 def test_dedicated_cli_approves_through_typed_engine_with_wrong_code_retry_and_burn(
     root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -485,14 +546,19 @@ def test_dedicated_cli_approves_through_typed_engine_with_wrong_code_retry_and_b
     approval_id = str(record["approval_id"])
     right = _phone_code(record, root)
     wrong = f"{(int(right) + 1) % 1_000_000:06d}"
-    monkeypatch.setattr(
-        "local_operator.operator.handlers.admit_device", lambda config_root, phone_id: 0
-    )
+    rig = _admit_rig(root, monkeypatch)
     assert approve_pair_request(root, approval_id, wrong) == 1
     assert A.load_record(approval_id, root=root)["state"] == A.STATE_REQUESTED
     assert approve_pair_request(root, approval_id, right) == 0
     assert A.load_record(approval_id, root=root)["state"] == A.STATE_CONNECTED
     assert devices.read_device(root, str(record["device"]["device_id"])) is not None
+    # The REAL admission ran: exactly one privileged install, and the phone is listed.
+    assert len(rig["prompts"]) == 1
+    from local_operator.operator import trust as trust_module
+
+    loaded = trust_module.load_anchor()
+    assert loaded.anchor is not None
+    assert str(record["device"]["device_id"]) in trust_module.open_device_ids(loaded.anchor)
     assert "Phone paired on this computer" in capsys.readouterr().out
 
     burned = _file(root)
@@ -508,6 +574,41 @@ def test_dedicated_cli_approves_through_typed_engine_with_wrong_code_retry_and_b
     assert raised.value.code == "pair_typed_approval_required"
 
 
+def test_cli_retries_a_signed_card_whose_install_failed(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Q2 (C3 QA round 1): a post-signature failure is finished by the same command.
+
+    The decision is already signed, so the retry must NOT re-sign -- ``approve`` refuses
+    any card that is not ``requested``, while ``desktop_approval.apply`` is retryable from
+    ``failed``. The refusal text tells the operator to try again, so this path has to be
+    the one that works.
+    """
+    from local_operator.operator.pair_handlers import approve_pair_request
+
+    _make_key(root)
+    _level(monkeypatch, FILE_ONLY)
+    record = _file(root)
+    approval_id = str(record["approval_id"])
+    code = _phone_code(record, root)
+    rig = _admit_rig(root, monkeypatch, fail_first=1)
+    signer = _counted_signer(root, monkeypatch)
+
+    assert approve_pair_request(root, approval_id, code) == 1
+    assert A.load_record(approval_id, root=root)["state"] == A.STATE_FAILED
+    assert devices.read_device(root, str(record["device"]["device_id"])) is None
+    assert signer["signer"] == 1
+    err = capsys.readouterr().err
+    assert "no certificate was issued" in err, err
+
+    # Same command again: the decision is reused, only the install runs.
+    assert approve_pair_request(root, approval_id, code) == 0
+    assert A.load_record(approval_id, root=root)["state"] == A.STATE_CONNECTED
+    assert devices.read_device(root, str(record["device"]["device_id"])) is not None
+    assert signer["signer"] == 1, "the retry re-signed a card that was already decided"
+    assert len(rig["prompts"]) == 2
+
+
 def test_dedicated_cli_reviews_again_after_a_cancelled_signature(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -519,10 +620,6 @@ def test_dedicated_cli_reviews_again_after_a_cancelled_signature(
     approval_id = str(record["approval_id"])
     code = _phone_code(record, root)
 
-    def cancelled(**kwargs: Any) -> str:
-        raise MeshRefusal("approval_signing_unavailable", "The signing prompt was cancelled.")
-
-    monkeypatch.setattr(A, "sign_decision", cancelled)
     calls = 0
 
     def cancelled(**kwargs: Any) -> str:

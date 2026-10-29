@@ -775,8 +775,30 @@ def _apply(approval_id: str, expected_block: dict[str, Any], root: Path | None) 
     # prompt and no write at all. Nothing in the admit needs the lease.
     run_id = approvals.new_run_id()
     approvals.begin_run(approval_id, run_id=run_id, runner_pid=os.getpid(), root=config_root)
+    created_pending = False
     try:
         approvals.verify_for_run(approval_id, root=config_root)
+        # THE PENDING REQUEST IS DERIVED FROM THIS RECORD, AT APPLY TIME (C3 QA round 1,
+        # Q1). ``admit_device`` refuses a phone with no stored certificate and no pending
+        # pairing request, and the phone-side filer writes none -- so every filed-and-
+        # approved pairing stopped at ``pair_device_not_admitted``. It is written HERE and
+        # not at filing because the legacy ``lop pair`` watcher signs the OLDEST pending
+        # row it finds: a row written at filing would let an unrelated ``lop pair`` run
+        # install a phone whose typed card nobody has approved yet. Written under the run
+        # lease, after ``verify_for_run``, so only a card that has already been decided can
+        # produce it; dropped again if this apply does not reach the install.
+        if (
+            devices.read_device(config_root, device_id) is None
+            and devices.read_pending(config_root, device_id) is None
+        ):
+            devices.write_pending(
+                config_root,
+                device_id=device_id,
+                name=_plain(device["name"]),
+                spki=str(device["spki"]),
+                code="",
+            )
+            created_pending = True
         admitted = admit_device(config_root, device_id)
         if admitted != ADMIT_OK:
             raise _refuse(ADMIT_REFUSED[admitted][0], ADMIT_REFUSED[admitted][1])
@@ -828,6 +850,8 @@ def _apply(approval_id: str, expected_block: dict[str, Any], root: Path | None) 
             root=config_root,
         )
     except Exception as exc:
+        if created_pending:
+            devices.drop_pending(config_root, device_id)
         _release_run(
             approval_id,
             run_id,

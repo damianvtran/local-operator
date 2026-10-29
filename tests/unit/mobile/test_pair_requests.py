@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import base64
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -18,7 +19,7 @@ from local_operator.mobile.daemon import MobileDaemon, build_app
 from local_operator.network import approvals as A
 from local_operator.network.credentials import desktop_approval
 from local_operator.network.types import MeshRefusal
-from local_operator.operator import pair_op
+from local_operator.operator import devices, pair_op
 from tests.unit.network.test_approvals_store import _make_key
 from tests.unit.network.test_approvals_store import root as approvals_root  # noqa: F401
 
@@ -242,6 +243,43 @@ def test_three_wrong_codes_burn_durable_request_and_fourth_is_refused(
     with pytest.raises(MeshRefusal) as caught:
         pair_op.check_ack(approval_id, code="000000", root=root)
     assert caught.value.code == "approval_decision_conflict"
+
+
+def test_filed_record_reaches_a_certificate_through_the_typed_cli(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """C3 QA round 1, Q1: the phone's own filing route must end in a real certificate.
+
+    The whole point of the filer is that a filed-then-approved request installs. This
+    drives the HTTP route, then the human's typed CLI entry, then the REAL ``admit_device``
+    (no stub: only the host facts — root-owned statement and OS prompt — are faked), and
+    verifies the installed certificate against the computer's own key.
+    """
+    from local_operator.operator.pair_handlers import approve_pair_request
+    from local_operator.operator.verify import verify_device_cert
+    from tests.unit.operator.test_operator_pair_op import FILE_ONLY, _admit_rig, _level, _phone_code
+
+    client = _client(root, monkeypatch)
+    filed = _file(client)
+    assert filed.status_code == 201, filed.text
+    approval_id = str(filed.json()["approval_id"])
+    record = A.load_record(approval_id, root=root)
+    rig = _admit_rig(root, monkeypatch)
+    _level(monkeypatch, FILE_ONLY)
+
+    assert approve_pair_request(root, approval_id, _phone_code(record, root)) == 0
+    assert A.load_record(approval_id, root=root)["state"] == A.STATE_CONNECTED
+    device_id = str(record["device"]["device_id"])
+    stored = devices.read_device(root, device_id)
+    assert stored is not None, "a filed and approved pairing installed no certificate"
+    trio = A.local_anchor_trio(root)
+    assert trio is not None
+    assert (
+        verify_device_cert(stored.certificate, operator_spki=trio["spki"], now=int(time.time()))
+        is not None
+    ), "the installed certificate does not verify against this computer's key"
+    assert len(rig["prompts"]) == 1
+    assert "Phone paired on this computer" in capsys.readouterr().out
 
 
 def test_custom_route_has_no_client_asserted_account(
