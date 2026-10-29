@@ -222,7 +222,13 @@ async def test_file_only_inheritance_is_refused_before_the_signer(
     assert response.json()["detail"]["code"] == "credential_presence_required"
     assert counters["signer"] == 0
     assert A.load_record(aid, root=rig.root)["state"] == "requested"
-    assert desktop_approval.FILE_ONLY_SIGNING == {finite_share.OP: True, inheritance.OP: False}
+    # The phone op has its own explicit file-only decision; this credential test
+    # cares that the two pre-existing credential policies did not move.
+    assert {
+        op: allowed
+        for op, allowed in desktop_approval.FILE_ONLY_SIGNING.items()
+        if op in {finite_share.OP, inheritance.OP}
+    } == {finite_share.OP: True, inheritance.OP: False}
 
 
 @pytest.mark.asyncio

@@ -52,6 +52,7 @@ __all__ = [
     "ACK_PENDING",
     "ACK_CONFIRMED",
     "ACK_CONFLICT",
+    "CONNECTOR_CLAIM_TOKEN_PREFIX",
     "SCHEMA_VERSION",
     "Store",
     "StoreRefused",
@@ -168,6 +169,13 @@ _V3_COLUMNS = {
     "screening_breaker": frozenset({"account_scope", "failures", "open_until", "updated_at"}),
 }
 
+#: Every claim a connector spine mints starts with this (``connector:<uuid>``);
+#: a session's ``ack working`` claim (team_bridge.tool) never does. The loop
+#: reads the distinction through :meth:`Store.claim_status` to tell "a
+#: connector died holding this mid-handoff" (re-drive after the lease) from
+#: "a session already has this message" (never re-deliver).
+CONNECTOR_CLAIM_TOKEN_PREFIX = "connector:"
+
 #: Ack intent lifecycle: exactly one of these states, no others.
 ACK_PENDING = "pending"
 ACK_CONFIRMED = "confirmed"
@@ -261,6 +269,8 @@ CREATE TABLE IF NOT EXISTS ack_intents (
     error_code TEXT,
     retry_after REAL,
     created_at REAL NOT NULL,
+    creator_generation INTEGER,
+    envelope_digest TEXT,
     UNIQUE (owner_key, message_id, target)
 );
 CREATE TABLE IF NOT EXISTS feed_refs (
@@ -1051,6 +1061,7 @@ CREATE TABLE IF NOT EXISTS body_reservations (
     terminal_code TEXT,
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL,
+    card_posted_at REAL,
     PRIMARY KEY (owner_key, conversation_id, message_id)
 );
 CREATE INDEX IF NOT EXISTS body_reservations_eligible
@@ -1094,6 +1105,26 @@ _BODY_RESERVATION_COLUMNS = frozenset(
 #: every other transition is retryable by a later turn, so a refusal never
 #: silently consumes an admitted message.
 BODY_RESERVATION_STATES = ("pending", "claimed", "completed", "retired")
+
+#: The hold-row upsert every writer shares (PR #3063 review m10): a hold
+#: re-written for the same message keeps the row's FIRST ``created_at`` — the
+#: age the owner sees is how long the message has waited, not how long since
+#: its latest reason. Relies on the table's (owner_key, message_id) key.
+_HOLD_UPSERT = (
+    "ON CONFLICT(owner_key, message_id) DO UPDATE SET "
+    "hold_code = excluded.hold_code, retry_at = excluded.retry_at"
+)
+
+#: What a replay owes for an admission's card (PR #3063 reviews M5/m11/m15).
+#: ``owed``: the reservation is still ``pending`` and no card was recorded —
+#: post it. ``posted``: recorded, or ``claimed`` (a body turn already took the
+#: body, so the session was woken) — a duplicate. ``settled``: the
+#: reservation is completed/retired with no record — the body was served or
+#: will never be, so a card now would wake the agent for nothing; record it
+#: and stop.
+CARD_OWED = "owed"
+CARD_POSTED = "posted"
+CARD_SETTLED = "settled"
 
 #: Closed reason vocabulary for ``last_error`` on a reservation. The column is
 #: written from a caller argument, so an OPEN string is how third-party text
@@ -2165,6 +2196,88 @@ class Store:
             ).fetchone()
             return str(row["conversation_id"]) if row is not None else None
 
+    @staticmethod
+    def _ensure_card_posted_column(conn: sqlite3.Connection) -> None:
+        """Add ``card_posted_at`` to a carrying table that predates it.
+
+        ADDITIVE AND NULLABLE, so no schema stamp moves: an older binary
+        reading this store never names the column, and a row from before it
+        reads NULL — "no card recorded" — which re-posts a card at most once
+        for an admission that was in flight across the upgrade. It is NOT in
+        ``_BODY_RESERVATION_COLUMNS``: a table without it is not damaged.
+        """
+
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(body_reservations)")}
+        if "card_posted_at" not in columns:
+            conn.execute("ALTER TABLE body_reservations ADD COLUMN card_posted_at REAL")
+
+    def body_card_status(
+        self, owner: OwnerSnapshot, conversation_id: str, message_id: str
+    ) -> str | None:
+        """What a replay owes for this admission's CARD, or ``None`` (no row).
+
+        WHY ON THE RESERVATION (PR #3063 review M5): the reservation proves the
+        hub admitted the message; only ``card_posted_at`` proves the session
+        was woken for it — a fact about THIS admission's card, never inferred
+        from some other row (a hold of any code once read as "card owed" and
+        posted a second card). WHY THE STATE TOO (reviews m11/m15): an
+        unrecorded card is owed only while the reservation is ``pending``; a
+        ``claimed`` one was already taken by a body turn (:data:`CARD_POSTED`)
+        and a completed or retired one answers :data:`CARD_SETTLED`.
+        Live-owner fenced; a fenced
+        owner reads ``None``.
+
+        A READ THAT TAKES THE WRITE LOCK (review n6): the column is additive
+        and may not exist yet on a store last opened by an older binary, so
+        this runs the guarded ``ALTER`` under ``BEGIN IMMEDIATE`` first — the
+        same serialised step :meth:`mark_body_card_posted` runs.
+        """
+
+        with self._connect() as conn:
+            self._init(conn)
+            if self._live_generation(conn, owner) != owner.enrollment_generation:
+                return None
+            self._begin_write(conn)
+            self._ensure_card_posted_column(conn)
+            row = conn.execute(
+                "SELECT state, card_posted_at FROM body_reservations WHERE owner_key = ? "
+                "AND conversation_id = ? AND message_id = ?",
+                (_owner_key(owner), conversation_id, message_id),
+            ).fetchone()
+            if row is None:
+                return None
+            if row["card_posted_at"] is not None:
+                return CARD_POSTED
+            # ``claimed`` (review m15): a body turn already took this body, so
+            # the session was woken for it (a pre-upgrade card, or a mark
+            # that failed). Only a ``pending`` reservation can still owe one.
+            if row["state"] == "claimed":
+                return CARD_POSTED
+            return CARD_OWED if row["state"] == "pending" else CARD_SETTLED
+
+    def mark_body_card_posted(
+        self, owner: OwnerSnapshot, conversation_id: str, message_id: str, *, now: float
+    ) -> bool:
+        """Record that this admission's card was handed off (set once).
+
+        Written AFTER the hand-off returns: a stop or crash before it leaves
+        the card owed (re-posted once on the replay — at-least-once, never a
+        loss). Conditional on the column still being unset, so a replay never
+        moves the original time. Live-owner fenced.
+        """
+
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            self._ensure_card_posted_column(conn)
+            updated = conn.execute(
+                "UPDATE body_reservations SET card_posted_at = ? WHERE owner_key = ? "
+                "AND conversation_id = ? AND message_id = ? AND card_posted_at IS NULL",
+                (float(now), _owner_key(owner), conversation_id, message_id),
+            )
+            return bool(updated.rowcount)
+
     def pending_body_reservation_for(
         self,
         owner: OwnerSnapshot,
@@ -2995,6 +3108,8 @@ class Store:
         target: AckTarget,
         receipt: ScreeningReceipt | None,
         client_ref: str,
+        *,
+        identity_digest: str | None = None,
     ) -> str:
         """Write-once ack intent, recorded BEFORE any dispatch.
 
@@ -3024,6 +3139,7 @@ class Store:
             self._init(conn)
             self._begin_write(conn)
             self._require_live(conn, owner)
+            self._ensure_intent_binding_columns(conn)
             existing = conn.execute(
                 "SELECT * FROM ack_intents WHERE owner_key = ? AND message_id = ? AND target = ?",
                 (_owner_key(owner), message_id, target),
@@ -3046,12 +3162,23 @@ class Store:
                     and existing["client_ref"] == client_ref
                 )
                 if same:
+                    # REBIND, never re-tuple (PR #3063 review M7): the SAME
+                    # verdict, re-reached by this generation's own screen of
+                    # this envelope (after a re-login, say), now belongs to the
+                    # decision that just re-made it. The tuple and the ref the
+                    # hub knows are untouched.
+                    conn.execute(
+                        "UPDATE ack_intents SET creator_generation = ?, identity_digest = "
+                        "COALESCE(?, identity_digest) WHERE intent_id = ?",
+                        (owner.enrollment_generation, identity_digest, existing["intent_id"]),
+                    )
                     return str(existing["intent_id"])
                 raise StoreRefused("intent_conflict", "write-once intent tuple differs")
             conn.execute(
                 "INSERT INTO ack_intents (intent_id, owner_key, message_id, target, client_ref, "
                 "verdict, model, prompt_version, template_sha256, body_sha256, categories, "
-                "state, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "state, created_at, creator_generation, identity_digest) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     intent_id,
                     _owner_key(owner),
@@ -3066,9 +3193,39 @@ class Store:
                     json.dumps(sorted(receipt.categories)),
                     ACK_PENDING,
                     time.time(),
+                    owner.enrollment_generation,
+                    identity_digest,
                 ),
             )
             return intent_id
+
+    @staticmethod
+    def _ensure_intent_binding_columns(conn: sqlite3.Connection) -> None:
+        """Add the verdict's BINDING columns to an ``ack_intents`` that predates them.
+
+        WHY ON THE INTENT (PR #3063 reviews M7, r7 M8): the connector hands a
+        message off on a recorded read verdict without screening again, and
+        the binding proves the verdict is about THIS message: an IMMUTABLE
+        identity digest (``connector.wake.verdict_identity`` — message,
+        thread, sender endpoint, body hash; never display fields, which the
+        hub may change while the device is off). The intent is the one row
+        every recorded verdict has — a message served from the screening
+        cache has no receipt of its own — so the binding lives here, written
+        in the same transaction as the tuple, before any ACK is sent.
+        ``creator_generation`` is informational: the hub's ledger is
+        write-once per message, so a verdict it holds outlives a re-login.
+
+        ADDITIVE AND NULLABLE, so no schema stamp moves and an older binary
+        never names them. A pre-upgrade row reads NULL: "binding unknown",
+        which the connector treats as bound — exactly how it treated every
+        intent before.
+        """
+
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(ack_intents)")}
+        if "creator_generation" not in columns:
+            conn.execute("ALTER TABLE ack_intents ADD COLUMN creator_generation INTEGER")
+        if "identity_digest" not in columns:
+            conn.execute("ALTER TABLE ack_intents ADD COLUMN identity_digest TEXT")
 
     @staticmethod
     def _intent_dict(row: sqlite3.Row) -> dict[str, Any]:
@@ -3094,6 +3251,12 @@ class Store:
             "state": row["state"],
             "error_code": row["error_code"],
             "retry_after": row["retry_after"],
+            # NULL on a pre-upgrade row (and absent on a store no write has
+            # migrated yet): the binding is unknown, never "another owner".
+            "creator_generation": (
+                row["creator_generation"] if "creator_generation" in row.keys() else None
+            ),
+            "identity_digest": row["identity_digest"] if "identity_digest" in row.keys() else None,
         }
 
     def ack_intent(self, owner: OwnerSnapshot, intent_id: str) -> dict[str, Any] | None:
@@ -3132,6 +3295,52 @@ class Store:
                 return row["state"] if row is not None else None
         except StoreRefused:
             return None
+
+    def intent_client_ref(self, owner: OwnerSnapshot, message_id: str, target: str) -> str | None:
+        """The ``client_ref`` already recorded for this (message, target), ANY state.
+
+        WHY (PR #3063 QA Q-1): the ref is the hub's idempotency key and the
+        ledger's write-once identity. A connector stopped or killed after its
+        read ACK confirmed, but before the session handoff, re-drives the same
+        message; minting a FRESH ref there made ``record_ack_intent`` refuse
+        ``intent_conflict`` on every replay, so the handoff never ran again and
+        the message was lost. Replaying with the stored ref turns that into the
+        exact replay the ledger already supports (a confirmed intent returns
+        without a second request). A DIFFERENT screening tuple still conflicts:
+        the ref is reused, never the verdict. ``None`` when nothing is recorded.
+        """
+
+        with self._connect() as conn:
+            self._init(conn)
+            row = conn.execute(
+                "SELECT client_ref FROM ack_intents WHERE owner_key = ? AND message_id = ? "
+                "AND target = ?",
+                (_owner_key(owner), message_id, target),
+            ).fetchone()
+            return None if row is None else str(row["client_ref"] or "") or None
+
+    def recorded_intent(
+        self, owner: OwnerSnapshot, message_id: str, target: str
+    ) -> dict[str, Any] | None:
+        """The ack intent for this exact owner/(message, target), ANY state.
+
+        WHY (PR #3063 review M4): a recorded ``read`` intent IS the screening
+        decision this connector already made and sent for the message. The
+        spine hands off with it whether the hub has confirmed it or a stop cut
+        the POST short (still ``pending``), instead of screening again. A
+        re-screen under a changed model/template/revision mints a second tuple
+        the write-once ledger refuses, and the hub already reads the message
+        as read. ``None`` when nothing is recorded.
+        """
+
+        with self._connect() as conn:
+            self._init(conn)
+            row = conn.execute(
+                "SELECT * FROM ack_intents WHERE owner_key = ? AND message_id = ? "
+                "AND target = ?",
+                (_owner_key(owner), message_id, target),
+            ).fetchone()
+            return None if row is None else self._intent_dict(row)
 
     def find_pending_intent(
         self, owner: OwnerSnapshot, message_id: str, target: str
@@ -3526,6 +3735,58 @@ class Store:
                 }
         except (sqlite3.Error, json.JSONDecodeError):
             return None
+
+    def reattest_receipt_epoch(self, owner: OwnerSnapshot, message_id: str) -> bool:
+        """Carry a RECORDED allow forward to the live epoch of an IDENTICAL policy.
+
+        WHY (PR #3063 QA r4 O3): the policy epoch only ever advances, so a
+        policy changed and then changed BACK (a model update rolled back:
+        epochs A=1, B=2, A=3) leaves a receipt minted at epoch 1 stale forever,
+        although the live policy asks for exactly the tuple it proves. A
+        request stopped in its hand-off across that change was held
+        ``envelope_refused:stale_proof`` with no path to delivery, while the
+        hub already reads it as read.
+
+        NARROW BY CONSTRUCTION — this never widens what a proof certifies:
+        it moves ``policy_epoch`` ONLY when, inside one write transaction, the
+        live policy's template hash, default model and admission revision
+        (a digest of version, template, provider, model and approved
+        identities) ALL equal the receipt's, the receipt was minted by the
+        live enrollment generation, and it is an ``allow``. Under any other
+        policy the proof stays stale and the message stays held. The connector
+        calls it only when handing off on a recorded verdict, after the hub's
+        authority gate. Returns whether the epoch moved.
+        """
+
+        key = _owner_key(owner)
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            policy = conn.execute(
+                "SELECT template_sha256, default_model, revision, epoch FROM screening_policy "
+                "WHERE owner_key = ?",
+                (key,),
+            ).fetchone()
+            if policy is None:
+                return False
+            moved = conn.execute(
+                "UPDATE screening_receipts SET policy_epoch = ? WHERE owner_key = ? "
+                "AND message_id = ? AND verdict = 'allow' AND template_sha256 = ? "
+                "AND model = ? AND admission_revision = ? AND creator_generation = ? "
+                "AND policy_epoch < ?",
+                (
+                    int(policy["epoch"]),
+                    key,
+                    str(message_id),
+                    policy["template_sha256"],
+                    policy["default_model"],
+                    policy["revision"],
+                    owner.enrollment_generation,
+                    int(policy["epoch"]),
+                ),
+            )
+            return bool(moved.rowcount)
 
     def write_screened_request_delivery(
         self,
@@ -4462,9 +4723,12 @@ class Store:
                     raise StoreRefused(
                         "write_once_conflict", "attempt already committed its outcome"
                     )
+                # Upsert, never REPLACE (PR #3063 review m10): a re-drive held
+                # again for a NEW reason must keep the row's ``created_at``,
+                # or the owner-visible hold age resets on every pass.
                 conn.execute(
-                    "INSERT OR REPLACE INTO screening_holds (owner_key, message_id, "
-                    "hold_code, retry_at, created_at) VALUES (?,?,?,?,?)",
+                    "INSERT INTO screening_holds (owner_key, message_id, "
+                    "hold_code, retry_at, created_at) VALUES (?,?,?,?,?) " + _HOLD_UPSERT,
                     (key, message_id, hold_code, retry_at, time.time()),
                 )
 
@@ -4634,6 +4898,7 @@ class Store:
         hold_code: str,
         *,
         retry_at: float | None = None,
+        keep_existing: bool = False,
     ) -> None:
         """Durably quarantine a VALID-LIVE-OWNER early refusal (H3-Q8).
 
@@ -4642,15 +4907,28 @@ class Store:
         reason must still survive an inbox refresh instead of disappearing.
         An invalid owner gets no fresh writes at all (this method refuses —
         a non-resolving namespace must not accumulate state).
+
+        ``keep_existing`` writes only when no row exists for the message. The
+        connector's stale-claim park uses it: a row already there is already
+        a durable retry (possibly the live claimant's own hold, written after
+        its release), and overwriting it with a park that later retires on
+        that release would drop the message.
         """
 
+        # An existing row keeps its ``created_at`` either way (PR #3063
+        # review m10): ``keep_existing`` leaves it untouched; otherwise the
+        # code and schedule move IN PLACE. INSERT OR REPLACE deleted and
+        # re-inserted the row, so every re-hold reset the visible hold age.
+        on_conflict = (
+            "ON CONFLICT(owner_key, message_id) DO NOTHING" if keep_existing else _HOLD_UPSERT
+        )
         with self._connect() as conn:
             self._init(conn)
             self._begin_write(conn)
             self._require_live(conn, owner)
             conn.execute(
-                "INSERT OR REPLACE INTO screening_holds (owner_key, message_id, hold_code, "
-                "retry_at, created_at) VALUES (?,?,?,?,?)",
+                "INSERT INTO screening_holds (owner_key, message_id, hold_code, "
+                "retry_at, created_at) VALUES (?,?,?,?,?) " + on_conflict,
                 (
                     _owner_key(owner),
                     _contentless_delivery_key(message_id),
@@ -4760,23 +5038,44 @@ class Store:
             )
             return int(updated.rowcount)
 
-    def advance_hold_retry(self, owner: OwnerSnapshot, message_id: str, *, retry_at: float) -> bool:
+    def advance_hold_retry(
+        self,
+        owner: OwnerSnapshot,
+        message_id: str,
+        *,
+        retry_at: float,
+        hold_code: str | None = None,
+    ) -> bool:
         """Re-schedule ONE still-held message's next attempt (H4 backoff).
 
         CONDITIONAL on the row still existing: a re-screen that succeeded
         commits its receipt and DELETES the hold, so re-scheduling here must
         never resurrect a quarantine for a delivered message (rowcount is the
         answer, not an assumption). Live-owner fenced.
+
+        ``hold_code`` re-codes the row IN PLACE with the same UPDATE (PR #3063
+        review m9): the owner sees how long the message has waited from
+        ``created_at``, and re-coding through ``persist_hold``'s INSERT OR
+        REPLACE reset that age on every flip of reason.
         """
 
+        key = (_owner_key(owner), _contentless_delivery_key(message_id))
         with self._connect() as conn:
             self._init(conn)
             self._begin_write(conn)
             self._require_live(conn, owner)
-            updated = conn.execute(
-                "UPDATE screening_holds SET retry_at = ? " "WHERE owner_key = ? AND message_id = ?",
-                (float(retry_at), _owner_key(owner), _contentless_delivery_key(message_id)),
-            )
+            if hold_code:
+                updated = conn.execute(
+                    "UPDATE screening_holds SET retry_at = ?, hold_code = ? "
+                    "WHERE owner_key = ? AND message_id = ?",
+                    (float(retry_at), str(hold_code), *key),
+                )
+            else:
+                updated = conn.execute(
+                    "UPDATE screening_holds SET retry_at = ? "
+                    "WHERE owner_key = ? AND message_id = ?",
+                    (float(retry_at), *key),
+                )
             return bool(updated.rowcount)
 
     #: Consecutive provider failures that open the account breaker, and the
@@ -4840,6 +5139,44 @@ class Store:
             return None
 
     # -- claims (CAS lease) --------------------------------------------------
+
+    def claim_status(self, owner: OwnerSnapshot, message_id: str) -> dict[str, Any] | None:
+        """The claim row's lifecycle facts for ``message_id`` — never its token.
+
+        WHY (PR #3038 review R2-3): a connector killed mid-spine (launchd
+        bootout, reboot) leaves its claim ``held`` until ``expires_at``; the
+        restarted connector's spine is then refused ``claimed`` and used to
+        consume the feed ref with no retry, so the message was never
+        delivered. The loop needs three facts to schedule — not deliver — a
+        durable retry: whether the row is still ``held`` (and until when),
+        and whether its holder is a CONNECTOR spine (token minted with
+        :data:`CONNECTOR_CLAIM_TOKEN_PREFIX`) rather than a session's own
+        ``ack working`` claim (which proves the message already reached a
+        session). The token itself is lease authority and stays private.
+        Read-only; ``None`` only when no row exists. An unreadable store
+        raises ``StoreRefused`` (``state_unreadable`` or whatever ``_connect``
+        refuses with) rather than reading as "no claim": the loop would take
+        a missing claim as "nothing holds this" and retire the retry
+        (PR #3063 review m3), so callers must tell the two apart.
+        """
+
+        try:
+            with self._connect() as conn:
+                self._init(conn)
+                row = conn.execute(
+                    "SELECT token, state, expires_at FROM claims "
+                    "WHERE owner_key = ? AND message_id = ?",
+                    (_owner_key(owner), message_id),
+                ).fetchone()
+        except sqlite3.Error as error:
+            raise StoreRefused("state_unreadable", "claim row unreadable") from error
+        if row is None:
+            return None
+        return {
+            "state": str(row["state"]),
+            "expires_at": float(row["expires_at"]),
+            "connector": str(row["token"]).startswith(CONNECTOR_CLAIM_TOKEN_PREFIX),
+        }
 
     def claim(
         self,

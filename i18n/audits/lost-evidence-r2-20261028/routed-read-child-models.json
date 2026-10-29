@@ -1,0 +1,13 @@
+{
+  "authoring": "fell back to openai/gpt-6-astra",
+  "palette": "fell back to openai/gpt-6-astra",
+  "team_authoring": "fell back to openai/gpt-6-astra",
+  "transcript": "fell back to openai/gpt-6-astra",
+  "ws_context": "fell back to openai/gpt-6-astra",
+  "ws_en": "fell back to openai/gpt-6-astra",
+  "ws_es": "no fallback banner",
+  "ws_fr": "no fallback banner",
+  "ws_hi": "no fallback banner",
+  "ws_ru": "no fallback banner",
+  "ws_vi": "no fallback banner"
+}

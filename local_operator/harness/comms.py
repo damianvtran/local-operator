@@ -4071,23 +4071,62 @@ def _call_line(call: Any) -> str:
     return head
 
 
+def is_peek_step_entry(entry: Any) -> bool:
+    """Whether one transcript entry renders as a peek step — THE renderer's filter.
+
+    ONE predicate, and every caller of the step stream uses it (this module's
+    ``peek``, and ``tools/builtin.py``'s ``_peek_message_entries``, whose step
+    arithmetic has to count the same rows the renderer numbers). A second
+    definition of "what is a step" is how a window's cursor and the steps under
+    it drift apart.
+
+    Two classes are NOT steps:
+
+    * anything that is not a ``message`` row — compaction markers and host
+      bookkeeping (wake schedules, checkpoints);
+    * ``session_credential_binding_notice.v1``, the account-change notice. A
+      peek's steps are pasted into a TOOL RESULT, i.e. straight into model
+      context, and since round 1 of #3098 that sentence NAMES THE ACCOUNT
+      (``network/credentials/messages.py``). This type is operator-facing only
+      — see the surface list on ``SESSION_BINDING_NOTICE_MESSAGE_TYPE`` in
+      ``harness/message_types.py``, whose first entry is the transcript row and
+      whose second is "nothing else". The row used to render here as an
+      "account change" step; a parent that peeked its child got the child's
+      account label (an email) back as model text, which is exactly the
+      exclusion that type promises.
+    """
+    if getattr(entry, "type", "") != "message":
+        return False
+    payload = getattr(entry, "payload", None) or {}
+    if payload.get("kind") == "custom":
+        return payload.get("custom_type") != SESSION_BINDING_NOTICE_MESSAGE_TYPE
+    return True
+
+
 def _render_transcript_steps(entries: list[Any]) -> list[PeekStep]:
     """Render transcript entries as numbered peek steps.
 
-    Only LLM-visible rows become steps — compaction markers and host
-    bookkeeping (wake schedules, checkpoints) are invisible to the child's
-    reasoning and would only spend the parent's context saying nothing. A
-    hub message renders by its direction so a parent reading its own child
-    sees the conversation, not raw JSON.
+    Only rows :func:`is_peek_step_entry` admits become steps — compaction
+    markers and host bookkeeping (wake schedules, checkpoints) are invisible to
+    the child's reasoning and would only spend the parent's context saying
+    nothing, and the account-change notice is operator-facing only. A hub
+    message renders by its direction so a parent reading its own child sees the
+    conversation, not raw JSON.
+
+    NUMBERING COUNTS ONLY WHAT IS RENDERED, which is what keeps the step stream
+    dense (1..N, no gaps) and therefore what keeps ``peek``'s ranges and
+    cursors meaningful: a row filtered out here consumes no number, so a
+    caller's "give me from step N+1" cannot land inside a hole.
     """
     steps: list[PeekStep] = []
     index = 0
     for entry in entries:
-        payload = entry.payload or {}
-        if entry.type == "message":
-            index += 1
-            steps.append(_render_message_step(index, payload))
-        # compaction + custom bookkeeping: deliberately not a step.
+        if not is_peek_step_entry(entry):
+            # compaction + custom bookkeeping, and the account-change notice:
+            # deliberately not a step, and deliberately not numbered.
+            continue
+        index += 1
+        steps.append(_render_message_step(index, entry.payload or {}))
     return steps
 
 
@@ -4152,11 +4191,9 @@ def _render_custom_step(index: int, payload: dict[str, Any]) -> PeekStep:
         # that date still carries the rows: without it a parent peeking an old
         # child would see the raw wire type where it used to read a phrase.
         return PeekStep(index, "system", "credential masked", _clip(str(details.get("text", ""))))
-    if custom_type == SESSION_BINDING_NOTICE_MESSAGE_TYPE:
-        # The account-change notice (mesh credential binding, slice B). Like the
-        # row above, this is a notice the operator is meant to READ, and the
-        # text is already a rendered sentence — so the peek names what happened
-        # in words rather than printing the wire type over a sentence that
-        # already says it.
-        return PeekStep(index, "system", "account change", _clip(str(details.get("text", ""))))
+    # NO BRANCH FOR SESSION_BINDING_NOTICE_MESSAGE_TYPE, and its absence is the
+    # fix rather than an oversight: that row never reaches this function, because
+    # ``is_peek_step_entry`` refuses it (the sentence names the account, and a
+    # step's body is pasted into model context). A renderer arm here is exactly
+    # how the leak comes back the next time someone adds a reader.
     return PeekStep(index, "system", custom_type, _clip(str(details.get("text", ""))))
