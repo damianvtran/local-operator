@@ -705,7 +705,7 @@ export const BUNDLED_OWNED: Readonly<Record<string, Readonly<Record<string,
       "relay.library.count": "{count, plural, one {# asset} other {# assets}}",
     },
     "hi": {
-      "relay.library.count": "{count, plural, one {# \u0906\u0907\u091f\u092e} other {# \u0906\u0907\u091f\u092e}}",
+      "relay.library.count": "{count, plural, one {# \u0938\u0902\u0938\u093e\u0927\u0928} other {# \u0938\u0902\u0938\u093e\u0927\u0928}}",
     },
     "ur": {
       "relay.library.count": "{count, plural, one {# \u0627\u062b\u0627\u062b\u06c1} other {# \u0627\u062b\u0627\u062b\u06d2}}",
@@ -972,7 +972,7 @@ export const BUNDLED_OWNED: Readonly<Record<string, Readonly<Record<string,
     },
     "hi": {
       "relay.session.directory.path_placeholder": "\u092f\u093e \u0915\u094b\u0908 \u0926\u0942\u0938\u0930\u093e \u092a\u093e\u0925 \u0932\u093f\u0916\u0947\u0902\u2026",
-      "relay.session.directory.sheet_title": "\u0915\u093e\u0930\u094d\u092f \u092b\u093c\u094b\u0932\u094d\u0921\u0930",
+      "relay.session.directory.sheet_title": "\u0915\u093e\u0930\u094d\u092f \u0928\u093f\u0930\u094d\u0926\u0947\u0936\u093f\u0915\u093e",
       "relay.session.list.empty_hint": "\u0928\u0940\u091a\u0947 \u0938\u0947 \u090f\u0915 \u0938\u0924\u094d\u0930 \u0936\u0941\u0930\u0942 \u0915\u0930\u0947\u0902, \u092f\u093e \u0905\u092a\u0928\u0947 \u0915\u0902\u092a\u094d\u092f\u0942\u091f\u0930 \u092a\u0930 TUI \u0938\u0947",
       "relay.session.list.no_matches": "\u0915\u094b\u0908 \u092e\u0947\u0932 \u0916\u093e\u0924\u0940 \u092c\u093e\u0924\u091a\u0940\u0924 \u0928\u0939\u0940\u0902",
       "relay.session.list.search_placeholder": "\u092c\u093e\u0924\u091a\u0940\u0924 \u0916\u094b\u091c\u0947\u0902\u2026",
