@@ -25,9 +25,10 @@ import inspect
 import logging
 import time
 import uuid
+from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Literal, Mapping, Sequence
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
 from local_operator.harness.types import AbortSignal, Usage
 
@@ -471,11 +472,28 @@ def _merge_accounting_component(
         total.estimated_usd_cost = (total.estimated_usd_cost or 0.0) + (estimate or 0.0)
 
 
+@dataclass
+class _ProjectionRevision:
+    """Owner-issued invalidation token; never serialized with a durable row."""
+
+    value: int = 0
+
+
 class AsyncJob(BaseModel):
     """One registered background job. ``agent_id`` names the subagent the job
     RUNS (when applicable); ``registrant_id`` names who registered it."""
 
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
+
+    # Only a manager-owned row can promise notification-complete invalidation.
+    # Plain/extension rows keep None and readers must rebuild them. Sharing a
+    # tiny token avoids retaining the manager (and its tasks) from a UI memo.
+    _projection_source: _ProjectionRevision | None = PrivateAttr(default=None)
+
+    @property
+    def projection_revision(self) -> int | None:
+        source = self._projection_source
+        return source.value if source is not None else None
 
     id: str
     type: JobType
@@ -921,6 +939,7 @@ class AsyncJobManager:
         self._on_job_change = on_job_change
         self._job_listeners: set[Callable[[], None]] = set()
         self._jobs: dict[str, AsyncJob] = {}
+        self._projection_revision = _ProjectionRevision()
         # Historical attempt ids remain valid after a resume replaces the
         # visible row. Values point directly at the current attempt; flattening
         # on every bind avoids alias chains whose meaning depends on order.
@@ -1137,6 +1156,9 @@ class AsyncJobManager:
             return
         visited.add(identity)
         self._accounting_revision += 1
+        # Descendant accounting can change without a local lifecycle event.
+        # Invalidate before parent listeners can synchronously project the row.
+        self._projection_revision.value += 1
         for listener in tuple(self._accounting_listeners):
             listener(visited)
 
@@ -1245,6 +1267,7 @@ class AsyncJobManager:
 
     def _notify_job_change(self, *, persist_roster: bool) -> None:
         """Publish every job mutation and persist only durable task fields."""
+        self._projection_revision.value += 1
         callbacks = (
             ([self._on_roster_change] if persist_roster else [])
             + [self._on_job_change]
@@ -1397,6 +1420,7 @@ class AsyncJobManager:
                 # spinner forever and invite a cancel that finds nothing.
                 row.status = "interrupted"
             row.restored = True
+            row._projection_source = self._projection_revision
             self._jobs[row.id] = row
             for alias in row.attempt_aliases:
                 if alias != row.id:
@@ -1451,6 +1475,7 @@ class AsyncJobManager:
             queued=queued,
         )
         signal = AbortSignal()
+        job._projection_source = self._projection_revision
         self._jobs[job_id] = job
         self._signals[job_id] = signal
         if on_cancel is not None:
@@ -1735,6 +1760,10 @@ class AsyncJobManager:
         # reads it. Stamping it later would leave a window where the coroutine
         # is running and the row still says it never started.
         job.started_at = time.time()
+        # Registration may already have been projected before this task gets
+        # its first loop slice. The runner then awaits user work, so waiting
+        # for its next progress/settle notification would freeze started_at.
+        self._projection_revision.value += 1
         # The runner is now entered, so its own teardown (its ``finally``, its
         # CancelledError handler) is authoritative for the resources it owns.
         # Dropping the pre-start cleanup here is what keeps a cancel from

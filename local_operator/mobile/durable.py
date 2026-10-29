@@ -873,6 +873,17 @@ def _cursor_candidates(row_id: str) -> Iterator[str]:
     while ":" in head:
         head = head.rsplit(":", 1)[0]
         yield head
+    # A REASONING ROW'S ID CARRIES THE MESSAGE IT BELONGS TO. The live fold
+    # mints ``rz-<message id>`` (``projection.py:_reasoning_row``) and reasoning
+    # is never written to the journal at all, so a client holding one has a
+    # cursor no journal row can ever match — it was answered as end-of-history,
+    # which made the conversation's middle unreachable. That message IS a
+    # journal row, and the fold renders it directly BELOW the reasoning row, so
+    # the cursor resolves one journal position newer than the row the caller
+    # holds: the page is exactly the rows older than the message, which is what
+    # the caller lacks, and the caller's own rows de-dup.
+    if row_id.startswith("rz-"):
+        yield row_id[3:]
 
 
 #: The needle a prune entry's line carries, exactly as the journal writes it:
@@ -1076,7 +1087,10 @@ def journal_rows_older_than(
     each prefix cut at a colon from the right, so an id that carries a colon in
     EITHER half — a ``subagent-launch:<job>`` entry, a
     ``call_00_x7:06c08d4847`` call id — is located by whichever attempt names a
-    real row, and a miss is a miss only once every attempt has failed.
+    real row, and a miss is a miss only once every attempt has failed. A
+    reasoning row's ``rz-`` prefix is stripped for one last attempt: that id
+    exists only in the projection (reasoning is never journaled), while the
+    message it names does.
 
     Returns ``None`` when ``before_id`` names no journal row — the cursor a
     client holds can outlive the file it came from (a compaction that landed
