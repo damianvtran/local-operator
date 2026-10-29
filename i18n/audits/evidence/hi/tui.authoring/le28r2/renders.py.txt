@@ -1,0 +1,53 @@
+#!/usr/bin/env python3
+"""Plural/ICU render probe + single-string cell widths (reaudit-lost-evidence-r2).
+
+Usage: <repo>/.venv/bin/python renders.py <repo-root> > renders.json
+For every message that contains a plural/select, renders it through the repo ICU
+runtime (local_operator.i18n.runtime.render_message) at representative counts per
+locale, with {label} given as the locale-formatted count (as the TUI does), and
+records the sentence. For the two form namespaces it also records the rich
+cell_len of every value and flags values wider than 56 / 58 / 96 / 98 cells (the
+inner widths a lost report cited for 60x24 / 100x24). cell_len of one string is
+NOT a rendered-frame fit proof: it ignores label columns, wrapping and the app.
+"""
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1]).resolve(); sys.path.insert(0, str(root))
+from rich.cells import cell_len
+
+from local_operator.i18n import catalogues as C
+from local_operator.i18n import format as F
+from local_operator.i18n import runtime as R
+
+LOC = ["es","fr","ru","vi","hi"]
+COUNTS = [0,1,2,3,4,5,11,21,22,25,1000000,1500000]
+out = {"renders": {}, "widths": {}}
+for ns in ["tui.transcript","tui.authoring","tui.team_authoring","tui.palette","wire.settings"]:
+    en = C.load_catalogue("en", ns)
+    for loc in LOC:
+        t = C.load_catalogue(loc, ns)
+        for k, v in t.items():
+            args = R.message_arguments(v)
+            if not any(kind in ("plural","select") for _, kind in args):
+                continue
+            rows = {}
+            for c in COUNTS:
+                p = {}
+                for n, kind in args:
+                    if n == "label": p[n] = F.format_number(c, loc)
+                    elif kind in ("plural","number"): p[n] = c
+                    else: p[n] = "X"
+                try: rows[str(c)] = R.render_message(v, p, loc)
+                except Exception as e: rows[str(c)] = f"!!{type(e).__name__}: {e}"
+            out["renders"][f"{loc}/{k}"] = rows
+        if ns in ("tui.authoring","tui.team_authoring"):
+            w = {k: cell_len(v) for k, v in t.items()}
+            out["widths"][f"{loc}/{ns}"] = {
+                "max": max(w.values()), "over56": sorted(k for k,x in w.items() if x>56),
+                "over58": sorted(k for k,x in w.items() if x>58),
+                "over96": sorted(k for k,x in w.items() if x>96),
+                "en_over56": sorted(k for k,x in ((k,cell_len(v)) for k,v in en.items()) if x>56),
+                "cells": w}
+json.dump(out, sys.stdout, ensure_ascii=False, indent=1)

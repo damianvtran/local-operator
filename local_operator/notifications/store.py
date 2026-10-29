@@ -60,7 +60,7 @@ NOTIFICATIONS_DB_NAME = "notifications.db"
 
 #: ``PRAGMA user_version`` of the shipped schema. Migrations are ADDITIVE only
 #: (the ``attention.py`` rule): an older build must still read a newer file.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 3
 
 #: Copied from ``session/attention.py`` (``_BUSY_TIMEOUT_MS``,
 #: ``_CONNECT_TIMEOUT_S``, ``_CONTENTION_ATTEMPTS``, ``_CONTENTION_BACKOFF_S``)
@@ -387,6 +387,47 @@ _SCHEMA = (
     )
     """,
     "CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT)",
+    # Selection metadata and post-image receipts share the items transaction.
+    # Expiry/capacity live in notifications.bulk; no foreign store is mutated.
+    """
+    CREATE TABLE IF NOT EXISTS bulk_tokens (
+      token TEXT PRIMARY KEY,
+      scope TEXT NOT NULL,
+      expires_at INTEGER NOT NULL,
+      filters_json TEXT,
+      through_seq INTEGER NOT NULL,
+      eligible_count INTEGER NOT NULL,
+      skipped_ask_count INTEGER NOT NULL,
+      op TEXT,
+      result_json TEXT,
+      request_json TEXT,
+      undo_json TEXT
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS bulk_rows (
+      token TEXT NOT NULL,
+      item_id TEXT NOT NULL,
+      revision INTEGER NOT NULL,
+      post_seq INTEGER NOT NULL,
+      before_json TEXT NOT NULL,
+      PRIMARY KEY (token, item_id)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS bulk_tokens_expiry ON bulk_tokens(expires_at)",
+    # Asks originate outside the notification sequence. A frozen acknowledgement
+    # therefore needs explicit identities, unlike seq-bounded update selections.
+    """
+    CREATE TABLE IF NOT EXISTS bulk_ask_refs (
+      token TEXT NOT NULL,
+      ref TEXT NOT NULL,
+      lifecycle TEXT NOT NULL,
+      expected_seq INTEGER NOT NULL DEFAULT 0,
+      read_at INTEGER,
+      post_seq INTEGER,
+      PRIMARY KEY (token, ref)
+    )
+    """,
 )
 
 _ITEM_COLUMNS = (
@@ -655,6 +696,51 @@ class NotificationStore:
             "ON CONFLICT(k) DO UPDATE SET v=excluded.v",
             (str(seq + 1),),
         )
+        return seq
+
+    @staticmethod
+    def item_changes(row: Mapping[str, Any], op: str) -> bool:
+        """Share state semantics with receipt-backed operations, not two implementations."""
+        read = int(row["read_rev"]) >= int(row["revision"])
+        dismissed = row["dismissed_at"] is not None
+        return {
+            "read": not read,
+            "unread": read,
+            "dismiss": not dismissed,
+            "undismiss": dismissed,
+        }[op]
+
+    @classmethod
+    def write_item(
+        cls, conn: sqlite3.Connection, row: Mapping[str, Any], op: str, stamp: int, via: str
+    ) -> int:
+        """Advance the common sequence inside the caller's transaction.
+
+        Receipt snapshots must commit atomically with this state write. Keeping
+        the primitive connection-bound lets both callers preserve that boundary.
+        """
+        seq = cls._next_seq(conn)
+        if op == "read":
+            conn.execute(
+                "UPDATE items SET seq=?, read_rev=revision, read_at=?, read_via=? WHERE id=?",
+                (seq, stamp, via, row["id"]),
+            )
+        elif op == "unread":
+            conn.execute(
+                "UPDATE items SET seq=?, read_rev=0, read_at=NULL, read_via=NULL, "
+                "read_surface=NULL WHERE id=?",
+                (seq, row["id"]),
+            )
+        elif op == "dismiss":
+            conn.execute(
+                "UPDATE items SET seq=?, dismissed_at=?, dismissed_via=? WHERE id=?",
+                (seq, stamp, via, row["id"]),
+            )
+        else:
+            conn.execute(
+                "UPDATE items SET seq=?, dismissed_at=NULL, dismissed_via=NULL WHERE id=?",
+                (seq, row["id"]),
+            )
         return seq
 
     # -- the notify write -------------------------------------------------
@@ -980,38 +1066,10 @@ class NotificationStore:
         result = ApplyResult()
 
         def changes(row: Mapping[str, Any]) -> bool:
-            read = int(row["read_rev"]) >= int(row["revision"])
-            dismissed = row["dismissed_at"] is not None
-            return {
-                "read": not read,
-                "unread": read,
-                "dismiss": not dismissed,
-                "undismiss": dismissed,
-            }[op]
+            return self.item_changes(row, op)
 
         def write(conn: sqlite3.Connection, row: Mapping[str, Any]) -> None:
-            seq = self._next_seq(conn)
-            if op == "read":
-                conn.execute(
-                    "UPDATE items SET seq=?, read_rev=revision, read_at=?, read_via=? WHERE id=?",
-                    (seq, stamp, via, row["id"]),
-                )
-            elif op == "unread":
-                conn.execute(
-                    "UPDATE items SET seq=?, read_rev=0, read_at=NULL, read_via=NULL, "
-                    "read_surface=NULL WHERE id=?",
-                    (seq, row["id"]),
-                )
-            elif op == "dismiss":
-                conn.execute(
-                    "UPDATE items SET seq=?, dismissed_at=?, dismissed_via=? WHERE id=?",
-                    (seq, stamp, via, row["id"]),
-                )
-            else:
-                conn.execute(
-                    "UPDATE items SET seq=?, dismissed_at=NULL, dismissed_via=NULL WHERE id=?",
-                    (seq, row["id"]),
-                )
+            self.write_item(conn, row, op, stamp, via)
             result.changed.append(str(row["id"]))
 
         def body(conn: sqlite3.Connection) -> ApplyResult:
@@ -1048,6 +1106,17 @@ class NotificationStore:
             return result
 
         return self._write(body, f"apply:{op}")
+
+    @classmethod
+    def write_ref(cls, conn: sqlite3.Connection, ref: str, read_at: int | None) -> int:
+        """Share the read-mark primitive with atomic bulk receipts, never ask logs."""
+        seq = cls._next_seq(conn)
+        conn.execute(
+            "INSERT INTO ref_state(ref, read_at, seq) VALUES (?, ?, ?) "
+            "ON CONFLICT(ref) DO UPDATE SET read_at=excluded.read_at, seq=excluded.seq",
+            (ref, read_at, seq),
+        )
+        return seq
 
     def merge_into_ask(
         self, ids: Sequence[tuple[str, int]], *, now: int | None = None
@@ -1093,12 +1162,7 @@ class NotificationStore:
                 is_read = row is not None and row["read_at"] is not None
                 if is_read == read:
                     continue
-                seq = self._next_seq(conn)
-                conn.execute(
-                    "INSERT INTO ref_state(ref, read_at, seq) VALUES (?, ?, ?) "
-                    "ON CONFLICT(ref) DO UPDATE SET read_at=excluded.read_at, seq=excluded.seq",
-                    (ref, stamp if read else None, seq),
-                )
+                self.write_ref(conn, ref, stamp if read else None)
                 changed.append(ref)
             return changed
 

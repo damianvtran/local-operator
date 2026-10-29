@@ -2707,6 +2707,32 @@ def _part_holds_frame(part: Any, image_part_types: tuple[str, ...]) -> bool:
     )
 
 
+def _frozen_prefix_ids(request: ChatRequest) -> frozenset[str]:
+    """Ids of the Radient Saver epoch rows at the head of ``request.messages``.
+
+    Empty unless ``SessionStreamFn`` spliced a frozen prefix (contract §4), so
+    every other request renders exactly as before.
+    """
+    count = request.frozen_prefix_messages
+    if not count or count <= 0:
+        return frozenset()
+    return frozenset(message.id for message in request.messages[:count])
+
+
+def _last_block(messages: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The last content block of the last rendered message, normalising a string."""
+    if not messages:
+        return None
+    last = messages[-1]
+    content = last.get("content")
+    if isinstance(content, str):
+        last["content"] = [{"type": "text", "text": content}]
+        content = last["content"]
+    if isinstance(content, list) and content and isinstance(content[-1], dict):
+        return content[-1]
+    return None
+
+
 def _targets_cover(targets: list[dict[str, Any]], block: dict[str, Any]) -> bool:
     """Whether ``block`` is already in ``targets`` -- by IDENTITY, not equality.
 
@@ -3030,6 +3056,10 @@ class OpenAICompatClient:
         # one boundary where the wire history is rendered, and real recorded
         # reasoning always wins over the placeholder.
         echo_turns = 0
+        # Radient Saver (contract §4): the rendered entry that ends the frozen
+        # prefix, captured as rendered (one entry per message on this wire).
+        epoch_ids = _frozen_prefix_ids(request)
+        epoch_entry: dict[str, Any] | None = None
         for message in _without_unrenderable_tool_calls(wire_messages):
             entry = self._replay_chat_message(
                 message, request.model, endpoint, scope, chat_document_budget
@@ -3047,6 +3077,8 @@ class OpenAICompatClient:
             if request.model.requires_reasoning_echo and _echo_reasoning_content(entry):
                 echo_turns += 1
             messages.append(entry)
+            if message.id in epoch_ids:
+                epoch_entry = entry
         # Aggregator identity alone is not the model family: Google keeps its
         # final-user requirement through OpenRouter's OpenAI-compatible wire.
         google_boundary_tokens = 0
@@ -3072,7 +3104,7 @@ class OpenAICompatClient:
         if direct_deepseek:
             messages = _deepseek_tool_images(messages)
         elif request.model.supports_prompt_cache:
-            self._message_cache_markers(messages)
+            self._message_cache_markers(messages, frozen_entry=epoch_entry)
         body: dict[str, Any] = {
             "model": request.model.model_id,
             "stream": True,
@@ -3269,7 +3301,12 @@ class OpenAICompatClient:
                 out.append({"role": "system", "content": block})
         return out
 
-    def _message_cache_markers(self, messages: list[dict[str, Any]]) -> None:
+    def _message_cache_markers(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        frozen_entry: dict[str, Any] | None = None,
+    ) -> None:
         """Mark the final message and the settled boundary for caching.
 
         Same economics as the Anthropic client: system-only markers stop the
@@ -3285,6 +3322,10 @@ class OpenAICompatClient:
         can no longer find it (see ``_settled_cache_target`` for the measured
         cost). With no usable frame in the history the previous user turn is
         marked instead, the historical layout for text-only sessions.
+
+        ``frozen_entry`` is the rendered message ending a Radient Saver prefix
+        (contract §4). When present its last block takes the second marker in
+        place of the heuristic, exactly as on the Anthropic wire.
         """
         targets: list[dict[str, Any]] = []
         if messages:
@@ -3296,7 +3337,11 @@ class OpenAICompatClient:
             if isinstance(content, list) and content:
                 targets.append(content[-1])
         settled = _settled_cache_target(messages, ("image_url",))
-        if settled is not None:
+        frozen_block = _last_block([frozen_entry]) if frozen_entry is not None else None
+        if frozen_block is not None:
+            if not _targets_cover(targets, frozen_block):
+                targets.append(frozen_block)
+        elif settled is not None:
             if not _targets_cover(targets, settled):
                 targets.append(settled)
         else:
@@ -4722,7 +4767,12 @@ class AnthropicClient:
         return blocks
 
     def _message_cache_breakpoints(
-        self, messages: list[dict[str, Any]], body: dict[str, Any], *, ttl: str | None = None
+        self,
+        messages: list[dict[str, Any]],
+        body: dict[str, Any],
+        *,
+        ttl: str | None = None,
+        frozen_block: dict[str, Any] | None = None,
     ) -> None:
         """Place cache_control on the conversation, not just the system head.
 
@@ -4746,6 +4796,13 @@ class AnthropicClient:
         ``ttl`` must be the SAME value the system markers were rendered with:
         Anthropic rejects a 1h marker that follows a 5m one, and the message
         markers always follow the system ones.
+
+        ``frozen_block`` is the last rendered block of a Radient Saver prefix
+        (``ChatRequest.frozen_prefix_messages``, contract §4). When present it
+        REPLACES the settled/previous-user heuristic as the second marker: the
+        epochs are byte-stable until the chain advances, so a marker there is a
+        cache entry the next turn reads in full. System markers and the budget
+        are unchanged.
         """
         system = body.get("system") or []
         system_markers = [i for i, entry in enumerate(system) if "cache_control" in entry]
@@ -4755,7 +4812,10 @@ class AnthropicClient:
             if isinstance(last.get("content"), list) and last["content"]:
                 message_targets.append(last["content"][-1])
         settled = _settled_cache_target(messages, ("image",))
-        if settled is not None:
+        if frozen_block is not None:
+            if not _targets_cover(message_targets, frozen_block):
+                message_targets.append(frozen_block)
+        elif settled is not None:
             if not _targets_cover(message_targets, settled):
                 message_targets.append(settled)
         else:
@@ -4799,6 +4859,12 @@ class AnthropicClient:
         doc_budget = document_budget_for_request(doc_form, request)
         messages: list[dict[str, Any]] = []
         wire_messages = request.wire_messages()
+        # Radient Saver (contract §4): the rendered block that ENDS the frozen
+        # prefix. The rendered list is not 1:1 with the request (tool rows merge
+        # into one user message, empty turns drop), so the block is captured as
+        # it is rendered rather than located by index afterwards.
+        epoch_ids = _frozen_prefix_ids(request)
+        epoch_block: dict[str, Any] | None = None
         for message in _without_unrenderable_tool_calls(wire_messages):
             # Anthropic 400s on an assistant message whose content array is
             # empty, which is exactly what an errored/aborted model turn
@@ -4855,6 +4921,8 @@ class AnthropicClient:
                     # where skipping is the right answer.
                     blocks = [{"type": "text", "text": EMPTY_USER_TEXT}]
                 messages.append({"role": message.role, "content": blocks})
+            if message.id in epoch_ids:
+                epoch_block = _last_block(messages)
 
         body: dict[str, Any] = {
             "model": request.model.model_id,
@@ -4896,7 +4964,7 @@ class AnthropicClient:
         # second breakpoint's block survives frame re-renders, within
         # MAX_CACHE_BREAKPOINTS by dropping the lowest-value system
         # breakpoint.
-        self._message_cache_breakpoints(messages, body, ttl=ttl)
+        self._message_cache_breakpoints(messages, body, ttl=ttl, frozen_block=epoch_block)
         if request.tools:
             # Safe default: unmapped values fall back to auto (PR-22).
             #

@@ -1,0 +1,510 @@
+{
+  "locale": "vi",
+  "namespace": "wire.settings",
+  "en_sha256": "a31ff23241581dddb24f3cd2b93444a408734bbcb0957b0068a97806bf7c36d3",
+  "target_sha256": "617766d8803624c00ef2fce75722d096d7c2ca3929b28618e18ada27fdbbb6c7",
+  "en_keys": 820,
+  "target_keys": 820,
+  "missing": [],
+  "unknown": [],
+  "arg_problems": [],
+  "render_errors": [],
+  "plural_cat_problems": [],
+  "not_nfc": [],
+  "backtick_diff": [],
+  "over_budget": [],
+  "typography": [
+    [
+      "wire.settings.agents.description",
+      "vi straight apostrophe",
+      "Liệu các vai trò khởi đầu đã cài (reviewer, coder, aida, …) có tự cập nhật theo "
+    ],
+    [
+      "wire.settings.bash_memory_limit_mb.help",
+      "vi straight apostrophe",
+      "Trần áp dụng khi chọn 'manual' ở trên. 0 nghĩa là dùng trần tự động thay thế, nê"
+    ],
+    [
+      "wire.settings.bash_memory_mode.help",
+      "vi straight apostrophe",
+      "'auto' suy ra trần từ lượng bộ nhớ thiết bị còn trống ngay lúc này, nên nó tự si"
+    ],
+    [
+      "wire.settings.desktop_launch_command.help",
+      "vi straight apostrophe",
+      "Để trống = tự phát hiện ứng dụng (local-operator-ui, rồi ứng dụng macOS). '{'ses"
+    ],
+    [
+      "wire.settings.desktop_launch_command.placeholder",
+      "vi straight apostrophe",
+      "local-operator-ui --open-session '{'session'}'"
+    ],
+    [
+      "wire.settings.local_providers.models.help",
+      "vi straight apostrophe",
+      "JSON: '{'\"model-id\":'{'\"context_window\":8192'}''}'; giới hạn của máy chủ vẫn áp "
+    ],
+    [
+      "wire.settings.local_providers.models.help",
+      "vi straight double quote",
+      "JSON: '{'\"model-id\":'{'\"context_window\":8192'}''}'; giới hạn của máy chủ vẫn áp "
+    ],
+    [
+      "wire.settings.monitor_defaultintervals.help",
+      "vi straight apostrophe",
+      "Kiểm tra mỗi N giây khi bỏ qua 'every'; tối thiểu 30 giây."
+    ],
+    [
+      "wire.settings.network.description",
+      "vi space before punctuation",
+      "Nơi thiết bị này lắng nghe, những gì nó báo cho thiết bị ngang hàng kết nối, và "
+    ],
+    [
+      "wire.settings.network.description",
+      "vi space before : ; ! ?",
+      "Nơi thiết bị này lắng nghe, những gì nó báo cho thiết bị ngang hàng kết nối, và "
+    ],
+    [
+      "wire.settings.providers_openrouter_allow_fallbacks.help",
+      "vi straight apostrophe",
+      "'default' không gửi gì (OpenRouter chuyển sang host khác khi host ưu tiên gặp lỗ"
+    ],
+    [
+      "wire.settings.providers_openrouter_data_collection.help",
+      "vi straight apostrophe",
+      "'deny' loại trừ các host có thể huấn luyện trên hoặc lưu giữ prompt của bạn. 'de"
+    ],
+    [
+      "wire.settings.providers_openrouter_enforce_distillable_text.help",
+      "vi straight apostrophe",
+      "'true': chỉ giới hạn ở endpoint có đầu ra văn bản được phép chưng cất. 'default'"
+    ],
+    [
+      "wire.settings.providers_openrouter_max_price.help",
+      "vi straight apostrophe",
+      "'{'\"prompt\": 1, \"completion\": 2'}' — USD / triệu token"
+    ],
+    [
+      "wire.settings.providers_openrouter_max_price.help",
+      "vi straight double quote",
+      "'{'\"prompt\": 1, \"completion\": 2'}' — USD / triệu token"
+    ],
+    [
+      "wire.settings.providers_openrouter_max_price.placeholder",
+      "vi straight apostrophe",
+      "'{'\"prompt\": 1, \"completion\": 2'}'"
+    ],
+    [
+      "wire.settings.providers_openrouter_max_price.placeholder",
+      "vi straight double quote",
+      "'{'\"prompt\": 1, \"completion\": 2'}'"
+    ],
+    [
+      "wire.settings.providers_openrouter_require_parameters.help",
+      "vi straight apostrophe",
+      "'true' giới hạn ở các host hỗ trợ mọi tham số được gửi (công cụ, đầu ra có cấu t"
+    ],
+    [
+      "wire.settings.providers_openrouter_sort.help",
+      "vi straight apostrophe",
+      "Cách OpenRouter xếp hạng host cho lệnh gọi này. Có thể định tuyến rời khỏi host "
+    ],
+    [
+      "wire.settings.providers_openrouter_zdr.help",
+      "vi straight apostrophe",
+      "'true': giới hạn ở endpoint không lưu giữ dữ liệu. 'default': không gửi gì."
+    ],
+    [
+      "wire.settings.shell_environment_mode.help",
+      "vi straight apostrophe",
+      "'inherit' để lệnh do tác nhân chạy thấy môi trường của bạn (gh, aws, npm giữ tok"
+    ],
+    [
+      "wire.settings.subagents_models_hi.help",
+      "vi straight apostrophe",
+      "Tính phí theo mức giá của mô hình đó; 'default': theo phiên; để trống sẽ bỏ bậc "
+    ],
+    [
+      "wire.settings.subagents_models_lo.help",
+      "vi straight apostrophe",
+      "Tính phí theo mức giá của mô hình đó; 'default': theo phiên; để trống sẽ bỏ bậc "
+    ],
+    [
+      "wire.settings.subagents_models_med.help",
+      "vi straight apostrophe",
+      "Tính phí theo mức giá của mô hình đó; 'default': theo phiên; để trống sẽ bỏ bậc "
+    ],
+    [
+      "wire.settings.supplements_maxfeatured.help",
+      "vi straight apostrophe",
+      "Cần bật Điểm nhấn. Số tệp được nêu tên trước khi phần còn lại gộp thành 'N more'"
+    ],
+    [
+      "wire.settings.tools_search_interception_enabled.help",
+      "vi space before punctuation",
+      "Từ chối lệnh shell `grep`/`rg`/`find` quét đệ quy từ gốc kho mã hoặc cây vendor/"
+    ],
+    [
+      "wire.settings.web_fetch_enrich.help",
+      "vi space before punctuation",
+      "Thử .md, llms.txt và thương lượng nội dung trước khi cào HTML."
+    ]
+  ],
+  "identical_to_en": [
+    [
+      "wire.settings.aida.title",
+      "Aida"
+    ],
+    [
+      "wire.settings.aida_name.placeholder",
+      "Aida"
+    ],
+    [
+      "wire.settings.bash_memory_mode.choice.auto.label",
+      "auto"
+    ],
+    [
+      "wire.settings.bash_memory_mode.choice.manual.label",
+      "manual"
+    ],
+    [
+      "wire.settings.classification_vendor.choice.auto.label",
+      "auto"
+    ],
+    [
+      "wire.settings.classification_vendor.choice.openrouter.label",
+      "openrouter"
+    ],
+    [
+      "wire.settings.classification_vendor.choice.radient.label",
+      "radient"
+    ],
+    [
+      "wire.settings.classification_vendor.choice.typesafe.label",
+      "typesafe"
+    ],
+    [
+      "wire.settings.compaction_strategy.choice.auto.label",
+      "auto"
+    ],
+    [
+      "wire.settings.compaction_strategy.choice.context_full.label",
+      "context-full"
+    ],
+    [
+      "wire.settings.compaction_strategy.choice.snapcompact.label",
+      "snapcompact"
+    ],
+    [
+      "wire.settings.desktop_launch_command.placeholder",
+      "local-operator-ui --open-session '{'session'}'"
+    ],
+    [
+      "wire.settings.display_nerd_icons.choice.none.label",
+      "auto"
+    ],
+    [
+      "wire.settings.display_time_format.choice.12h.description",
+      "7:52 PM PDT"
+    ],
+    [
+      "wire.settings.display_time_format.choice.24h.description",
+      "19:52 PDT"
+    ],
+    [
+      "wire.settings.fork.title",
+      "Fork"
+    ],
+    [
+      "wire.settings.hub.title",
+      "Agent Hub"
+    ],
+    [
+      "wire.settings.model_effort.choice.unset.label",
+      "auto"
+    ],
+    [
+      "wire.settings.network_advertise_hosts.placeholder",
+      "203.0.113.7:4097, tunnel.example.com:4100"
+    ],
+    [
+      "wire.settings.network_credentials_github_repositories.placeholder",
+      "damianvtran/scratch, damianvtran/sandbox"
+    ],
+    [
+      "wire.settings.network_rollout_on_update.choice.auto.label",
+      "auto"
+    ],
+    [
+      "wire.settings.providers_openai_api.choice.chat_completions.label",
+      "chat_completions"
+    ],
+    [
+      "wire.settings.providers_openai_api.choice.responses.label",
+      "responses"
+    ],
+    [
+      "wire.settings.providers_openrouter_allow_fallbacks.choice.false.label",
+      "false"
+    ],
+    [
+      "wire.settings.providers_openrouter_allow_fallbacks.choice.unset.label",
+      "default"
+    ],
+    [
+      "wire.settings.providers_openrouter_data_collection.choice.allow.label",
+      "allow"
+    ],
+    [
+      "wire.settings.providers_openrouter_data_collection.choice.deny.label",
+      "deny"
+    ],
+    [
+      "wire.settings.providers_openrouter_data_collection.choice.unset.label",
+      "default"
+    ],
+    [
+      "wire.settings.providers_openrouter_enforce_distillable_text.choice.true.label",
+      "true"
+    ],
+    [
+      "wire.settings.providers_openrouter_enforce_distillable_text.choice.unset.label",
+      "default"
+    ],
+    [
+      "wire.settings.providers_openrouter_ignore.placeholder",
+      "deepseek, groq, mistral, …"
+    ],
+    [
+      "wire.settings.providers_openrouter_max_price.placeholder",
+      "'{'\"prompt\": 1, \"completion\": 2'}'"
+    ],
+    [
+      "wire.settings.providers_openrouter_only.placeholder",
+      "deepseek, groq, mistral, …"
+    ],
+    [
+      "wire.settings.providers_openrouter_order.placeholder",
+      "deepseek, groq, mistral, …"
+    ],
+    [
+      "wire.settings.providers_openrouter_quantizations.placeholder",
+      "int8, fp8, mxfp4, …"
+    ],
+    [
+      "wire.settings.providers_openrouter_require_parameters.choice.true.label",
+      "true"
+    ],
+    [
+      "wire.settings.providers_openrouter_require_parameters.choice.unset.label",
+      "default"
+    ],
+    [
+      "wire.settings.providers_openrouter_sort.choice.unset.label",
+      "default"
+    ],
+    [
+      "wire.settings.providers_openrouter_zdr.choice.true.label",
+      "true"
+    ],
+    [
+      "wire.settings.providers_openrouter_zdr.choice.unset.label",
+      "default"
+    ],
+    [
+      "wire.settings.runtime.title",
+      "Runtime"
+    ],
+    [
+      "wire.settings.session_scratchpad.title",
+      "Scratchpad"
+    ],
+    [
+      "wire.settings.shell_environment_exclude.placeholder",
+      "OPENROUTER_API_KEY, …"
+    ],
+    [
+      "wire.settings.shell_environment_inherit.placeholder",
+      "LOCAL_OPERATOR_CONFIG_DIR, LANG, …"
+    ],
+    [
+      "wire.settings.shell_environment_mode.choice.allowlist.label",
+      "allowlist"
+    ],
+    [
+      "wire.settings.shell_environment_mode.choice.inherit.label",
+      "inherit"
+    ],
+    [
+      "wire.settings.speech_transcription_cleanup.choice.auto.label",
+      "auto"
+    ],
+    [
+      "wire.settings.speech_transcription_cleanup.choice.client.label",
+      "client"
+    ],
+    [
+      "wire.settings.speech_transcription_cleanup.choice.off.label",
+      "off"
+    ],
+    [
+      "wire.settings.speech_transcription_cleanup.choice.provider.label",
+      "provider"
+    ],
+    [
+      "wire.settings.speech_voice_expressiveness.choice.high.label",
+      "high"
+    ],
+    [
+      "wire.settings.speech_voice_expressiveness.choice.low.label",
+      "low"
+    ],
+    [
+      "wire.settings.speech_voice_expressiveness.choice.medium.label",
+      "medium"
+    ],
+    [
+      "wire.settings.speech_voice_gender.choice.auto.label",
+      "auto"
+    ],
+    [
+      "wire.settings.speech_voice_gender.choice.female.label",
+      "female"
+    ],
+    [
+      "wire.settings.speech_voice_gender.choice.male.label",
+      "male"
+    ],
+    [
+      "wire.settings.speech_voice_tone.choice.authoritative.label",
+      "authoritative"
+    ],
+    [
+      "wire.settings.speech_voice_tone.choice.bright.label",
+      "bright"
+    ],
+    [
+      "wire.settings.speech_voice_tone.choice.calm.label",
+      "calm"
+    ],
+    [
+      "wire.settings.speech_voice_tone.choice.neutral.label",
+      "neutral"
+    ],
+    [
+      "wire.settings.speech_voice_tone.choice.warm.label",
+      "warm"
+    ],
+    [
+      "wire.settings.static_roots.placeholder",
+      "~/Documents, /Volumes/data/reports"
+    ],
+    [
+      "wire.settings.supplements_denyprefixes.placeholder",
+      "~/clients, ~/Documents/private"
+    ],
+    [
+      "wire.settings.tool_approval_mode.choice.auto.label",
+      "auto"
+    ],
+    [
+      "wire.settings.web_fetch_render_backend.choice.auto.label",
+      "auto"
+    ],
+    [
+      "wire.settings.web_fetch_render_backend.choice.stdlib.label",
+      "stdlib"
+    ],
+    [
+      "wire.settings.web_search_strategy.choice.ordered.label",
+      "ordered"
+    ],
+    [
+      "wire.settings.web_search_strategy.choice.round_robin.label",
+      "round_robin"
+    ]
+  ],
+  "gloss_leads": [
+    [
+      "wire.settings.agents.description",
+      "agent"
+    ],
+    [
+      "wire.settings.approvals.description",
+      "approval"
+    ],
+    [
+      "wire.settings.desktop_launch_command.placeholder",
+      "session"
+    ],
+    [
+      "wire.settings.hosting.help",
+      "model"
+    ],
+    [
+      "wire.settings.hub.title",
+      "agent"
+    ],
+    [
+      "wire.settings.local_providers.models.help",
+      "model"
+    ],
+    [
+      "wire.settings.network.description",
+      "relay"
+    ],
+    [
+      "wire.settings.network_max_handshakes.help",
+      "relay"
+    ],
+    [
+      "wire.settings.providers_openrouter_ignore.help",
+      "cost"
+    ],
+    [
+      "wire.settings.providers_openrouter_preferred_max_latency.help",
+      "cost"
+    ],
+    [
+      "wire.settings.providers_openrouter_preferred_min_throughput.help",
+      "cost"
+    ],
+    [
+      "wire.settings.retry_usageawareaccountpick.help",
+      "usage"
+    ],
+    [
+      "wire.settings.retry_usageawarefallback.help",
+      "cost"
+    ],
+    [
+      "wire.settings.tool_approval_mode.help",
+      "approval"
+    ]
+  ],
+  "empty": [],
+  "ws_edge": [],
+  "length_ratio_outliers": [],
+  "script_leads": [],
+  "excl_added": [],
+  "end_punct": [],
+  "counts": {
+    "missing": 0,
+    "unknown": 0,
+    "arg_problems": 0,
+    "render_errors": 0,
+    "plural_cat_problems": 0,
+    "not_nfc": 0,
+    "backtick_diff": 0,
+    "over_budget": 0,
+    "typography": 27,
+    "identical_to_en": 68,
+    "gloss_leads": 14,
+    "empty": 0,
+    "ws_edge": 0,
+    "length_ratio_outliers": 0,
+    "script_leads": 0,
+    "excl_added": 0,
+    "end_punct": 0
+  }
+}

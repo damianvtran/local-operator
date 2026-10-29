@@ -9514,6 +9514,23 @@ def _approval_lines(record: Mapping[str, Any]) -> list[str]:
             "This records a credential permission only; nothing is installed, joined or "
             "connected.",
         ]
+    from local_operator.operator import pair_op
+
+    if pair_op.intent(dict(record)) is not None:
+        # Same reason as the credential branches above: the fallthrough is the ONBOARDING
+        # card, which would call a phone pairing an anchor install and list "definitions,
+        # MCP servers, git identity and logins" as what approving it does. The card also
+        # names no approve command: this kind is refused on the terminal by design (the six
+        # digits have to be typed on the computer), so a command would be an instruction
+        # that cannot work.
+        try:
+            described = pair_op.card_lines(dict(record))
+        except MeshRefusal:
+            described = ["A phone pairing request this build cannot describe; do not approve it."]
+        return [
+            *described,
+            f"Approval {record.get('approval_id', '')}: {record.get('state', '')}",
+        ]
     block = record.get("device") or record.get("machine") or {}
     what = record.get("what") or {}
     state = str(record.get("state") or "")

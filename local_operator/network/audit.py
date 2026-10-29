@@ -292,6 +292,20 @@ EVENT_KINDS: frozenset[str] = frozenset(
         # able to tell it apart from a deny (the operator said no) and from an
         # expiry (the window lapsed on its own).
         "onboard_withdrawn",
+        # THE PHONE PAIRING APPROVAL (S4a-pair-op, ``operator/pair_op.py``). One row per
+        # semantic step of ONE ``operator_device_pair`` record, and the reason the family
+        # exists at all: a pairing is the one approval that issues a STANDING signer, so an
+        # incident review asks of it in particular "which phone, under which key, and was a
+        # PERSON proven". `desktop_signed` names the assurance (``presence`` -- an OS prompt
+        # per signature -- or ``file_only``, a 0600 file signed with no person proven), which
+        # is the disclosure the operator accepted (a-2a8b); `desktop_ack` names the typed code
+        # check and how many strikes it has taken (a wrong code costs one, and the third
+        # closes the card as a deny); `desktop_applied` is the certificate landing in the
+        # device store, and `desktop_apply_refused` is why it did not.
+        "device_pair.desktop_ack",
+        "device_pair.desktop_signed",
+        "device_pair.desktop_applied",
+        "device_pair.desktop_apply_refused",
         # MESH ROLLING UPDATES, member side (mesh-update-propagation.md §6). One
         # row per semantic change of one update request: the request was admitted
         # by the authoriser, a rule refused it, or the install began/ended. A
@@ -594,6 +608,18 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     # withdrew (the store only ever accepts the filer), so the row is
     # self-explaining without reading the record.
     "onboard_withdrawn": frozenset({"kind", "surface", "session_id"}),
+    # The phone pairing approval (``operator/pair_op.py``). `device_id` is DERIVED from the
+    # phone's public key (public data, the same string the certificate and the revocation
+    # list carry). `strikes`/`ok` are the typed-code check's own outcome, `assurance` the
+    # level the signature actually reached, `operation` the record's ``what`` key, and
+    # `code` a refusal token -- never a sentence, never key material, and never the six
+    # digits themselves (they are compared in constant time and are never stored).
+    "device_pair.desktop_ack": frozenset({"surface", "ok", "strikes", "device_id"}),
+    "device_pair.desktop_signed": frozenset(
+        {"surface", "operation", "device_id", "key_id", "assurance"}
+    ),
+    "device_pair.desktop_applied": frozenset({"surface", "device_id", "run_id", "lifetime_days"}),
+    "device_pair.desktop_apply_refused": frozenset({"surface", "device_id", "code"}),
     # Mesh rolling updates, member side. `rollout` is the origin's record id when
     # one exists (empty for the single-peer verb — S1 carries it through so the
     # S3 driver's rows need no schema change). `target` is the VERSION asked for,
