@@ -63,6 +63,7 @@ from local_operator import keymap as _keymap
 from local_operator.config_writer import config_write_lock, serialized_config_write
 from local_operator.i18n import catalogues as _catalogues
 from local_operator.i18n import runtime as _i18n_runtime
+from local_operator.i18n import text as _i18n_text
 from local_operator.i18n.keys import wire_aida_cadence as _ac
 from local_operator.i18n.keys import wire_console as _cs
 from local_operator.i18n.keys import wire_host_speed as _hs
@@ -109,78 +110,82 @@ logger = logging.getLogger(__name__)
 # Registry copy: rendered through the i18n runtime
 # ---------------------------------------------------------------------------
 #
-# The registry's user-facing strings live in the `wire.settings` catalogue
-# (RFC §2.2); the module renders them at import through the local runtime.
-# Resolution is PINNED to `en`, and that is not a shortcut: the shipped locale
-# set is en-only while the program ships dark (RFC §9 P1), so a full resolution
-# and this pin agree byte-for-byte today. When the translation waves land, the
-# re-resolution point is this helper (and the clients, which render the served
-# catalogue by key per §2.6).
-#
-# ONE catalogue read at import, not one per message: the registry builds ~740
-# strings and a read-per-string would put ~740 file parses on the CLI's
-# import path. A broken wheel (catalogue missing/invalid) degrades the way
-# `messages.render` does — each string resolves to its own message code —
-# rather than making `lop --help` impossible.
-try:
-    _WIRE_SETTINGS_SOURCES: dict[str, str] = _catalogues.load_catalogue("en", "wire.settings")
-except Exception:  # pragma: no cover - a wheel without the catalogue is broken
-    _WIRE_SETTINGS_SOURCES = {}
+# Only the carried `wire.settings` namespace follows the active locale. The
+# English-only children stay English: keeping them separate preserves the audited
+# wire.settings source hashes, and looking them up in a translated tree would
+# silently change that boundary if a child catalogue appeared later.
+_ENGLISH_SETTINGS_NAMESPACES = (
+    "wire.settings.account_policy",
+    "wire.settings.hub_defaults",
+    "wire.aida_cadence",
+    "wire.host_speed",
+    "wire.console",
+    "wire.memory",
+    "wire.radient_saver",
+)
 
 
-# A small English-only addition must not invalidate already-audited settings
-# translations. Keep the established import-time rendering path, with its own
-# namespace so carried locales retain their existing source hashes/eligibility.
-try:
-    _WIRE_SETTINGS_SOURCES.update(_catalogues.load_catalogue("en", "wire.aida_cadence"))
-except Exception:  # pragma: no cover - missing optional copy degrades to its code
-    pass
+@functools.lru_cache(maxsize=64)
+def _sources(root: str, namespace: str, locale: str) -> dict[str, str]:
+    """One read per catalogue root, namespace and locale; never per message.
 
-# The OpenRouter host-speed row is a small English-only addition, merged for the
-# same reason as ``wire.aida_cadence``: it must not move the already-audited
-# ``wire.settings`` source hash the translated locales are pinned to.
-try:
-    _WIRE_SETTINGS_SOURCES.update(_catalogues.load_catalogue("en", "wire.host_speed"))
-except Exception:  # pragma: no cover - missing optional copy degrades to its code
-    pass
+    The registry materialises ~740 strings at import, so resolving each through
+    `messages.render` would put ~740 file parses on the CLI import path. Cache
+    the merged namespace map instead: one read for carried settings per locale,
+    one per English-only child, shared by every row.
+    """
+    sources: dict[str, str] = {}
+    for name in (namespace, *_ENGLISH_SETTINGS_NAMESPACES):
+        try:
+            # The child pin is explicit, not fallback: only wire.settings moves.
+            child_locale = locale if name == namespace else "en"
+            sources.update(_catalogues.load_catalogue(child_locale, name))
+        except Exception:  # pragma: no cover - a broken wheel still paints codes
+            pass
+    return sources
 
-# Radient Saver's section and row carry their copy in their own namespace for the
-# same reason as ``wire.host_speed``: the section is new, so adding it must not
-# move the ``wire.settings`` source hash the translated locales are pinned to.
-try:
-    _WIRE_SETTINGS_SOURCES.update(_catalogues.load_catalogue("en", "wire.radient_saver"))
-except Exception:  # pragma: no cover - missing optional copy degrades to its code
-    pass
 
-# The console-admission section reads its copy from its own namespace for the
-# same reason as `wire.aida_cadence`: the section is new, so adding it beside
-# already-translated settings must not move those sources. Without this merge the
-# section's `_cs.*` messages resolve to their bare codes (`wire.console.title`),
-# which is what the byte-identical golden caught.
-try:
-    _WIRE_SETTINGS_SOURCES.update(_catalogues.load_catalogue("en", "wire.console"))
-    _WIRE_SETTINGS_SOURCES.update(_catalogues.load_catalogue("en", "wire.memory"))
-    # The new child keeps translated wire.settings source hashes unchanged.
-    _WIRE_SETTINGS_SOURCES.update(_catalogues.load_catalogue("en", "wire.settings.account_policy"))
-except Exception:  # pragma: no cover - missing optional copy degrades to its code
-    pass
+class _LocalizedText(str):
+    """Rendered copy retaining its message for the frozen registry refresher."""
 
-# The Hub defaults rows read their copy from their own English-only child: the
-# switch they describe governs BOTH agent and skill links, and that correction
-# must not move the already-audited ``wire.settings`` source hash the carried
-# locales are pinned to (the same reason as ``wire.aida_cadence`` above).
-try:
-    _WIRE_SETTINGS_SOURCES.update(_catalogues.load_catalogue("en", "wire.settings.hub_defaults"))
-except Exception:  # pragma: no cover - missing optional copy degrades to its code
-    pass
+    def __new__(cls, rendered: str, message: _Msg) -> "_LocalizedText":
+        value = super().__new__(cls, rendered)
+        value.message = message
+        return value
+
+    message: _Msg
 
 
 def _t(message: _Msg) -> str:
-    """The resolved string for a generated settings message."""
-    source = _WIRE_SETTINGS_SOURCES.get(message.code)
+    """Resolve carried copy now, then English, then the message code.
+
+    The returned string remembers its message so `register_refresh` can update
+    the frozen registry in place when `/language` or the config watcher moves
+    the locale. Catalogue reads stay namespace-cached, not one per message.
+    """
+    locale = _i18n_text.active_locale()
+    root = str(_catalogues.catalogue_root())
+    source = _sources(root, "wire.settings", locale).get(message.code)
+    source_locale = locale
+    if source is None and locale != "en":
+        source = _sources(root, "wire.settings", "en").get(message.code)
+        source_locale = "en"
     if source is None:
-        return message.code
-    return _i18n_runtime.render_message(source, dict(message.params), "en")
+        return _LocalizedText(message.code, message)
+    try:
+        rendered = _i18n_runtime.render_message(source, dict(message.params), source_locale)
+        return _LocalizedText(rendered, message)
+    except _i18n_runtime.MessageError:
+        if source_locale != "en":
+            # A malformed translated value must not hide a healthy English one.
+            source = _sources(root, "wire.settings", "en").get(message.code)
+            if source is not None:
+                try:
+                    rendered = _i18n_runtime.render_message(source, dict(message.params), "en")
+                    return _LocalizedText(rendered, message)
+                except _i18n_runtime.MessageError:
+                    pass
+        return _LocalizedText(message.code, message)
 
 
 class ConfigUnreadableError(Exception):
@@ -5855,6 +5860,29 @@ SETTINGS: tuple[Setting, ...] = (
 
 #: ``key -> Setting`` for the lookups the CLI and the page both do.
 BY_KEY: dict[str, Setting] = {setting.key: setting for setting in SETTINGS}
+
+
+def _refresh_registry_copy() -> None:
+    """Re-materialise localized fields after a locale move, in place.
+
+    The frozen dataclasses and registry containers are public API: refresh only
+    their catalogue-backed strings, retaining defaults, validators, identities
+    and BY_KEY. Dynamic choices remain owned by their existing providers.
+    """
+    for record in (*SECTIONS, *SETTINGS):
+        for field in dataclasses.fields(record):
+            value = getattr(record, field.name)
+            if isinstance(value, _LocalizedText):
+                object.__setattr__(record, field.name, _t(value.message))
+            elif field.name == "choices":
+                for choice in value:
+                    for choice_field in dataclasses.fields(choice):
+                        copy = getattr(choice, choice_field.name)
+                        if isinstance(copy, _LocalizedText):
+                            object.__setattr__(choice, choice_field.name, _t(copy.message))
+
+
+_i18n_text.register_refresh(_refresh_registry_copy)
 
 
 def settings_for(section: str) -> tuple[Setting, ...]:

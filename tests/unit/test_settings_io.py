@@ -14,9 +14,10 @@ The two that matter most, and why:
 
 from __future__ import annotations
 
+import json
 import math
 import sys
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 
 import pytest
@@ -25,6 +26,10 @@ from rich.cells import cell_len
 
 from local_operator import keymap, settings_io
 from local_operator.config import DEFAULT_CONFIG, ConfigManager
+from local_operator.i18n import catalogues, text
+from local_operator.i18n.keys import wire_settings as ws
+from local_operator.i18n.keys import wire_settings_account_policy as ap
+from local_operator.i18n.messages import Msg
 from local_operator.memory import DEFAULT_EXCLUDED_DEVICES, SCOPES
 from local_operator.memory_capture import (
     LOCATORS_DEFAULT_ENABLED,
@@ -2665,6 +2670,113 @@ class TestConfigEditQualifiesALoosening:
         assert code == 0, out
         assert "Successfully updated tool_approval_mode to ask" in out, out
         assert "Running sessions are unchanged" not in out, out
+
+
+class TestRegistryLocaleResolution:
+    """Carried settings follow the live locale; English-only children do not."""
+
+    @pytest.fixture(autouse=True)
+    def _restore_english(self, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+        # Some cases pin the active locale directly to exercise missing-catalogue
+        # fallback; a no-op public move would otherwise leave the next test in es.
+        monkeypatch.setattr(text, "_active_locale", "en")
+        yield
+        monkeypatch.undo()
+        # Direct locale pins bypass set_active_locale's refresh, and a public
+        # switch in a test can make the restored value a no-op. Restore both.
+        settings_io._refresh_registry_copy()
+
+    def test_a_locale_move_rematerialises_frozen_rows_in_place(self) -> None:
+        section = next(section for section in settings_io.SECTIONS if section.name == "model")
+        setting = settings_io.BY_KEY["hosting"]
+        by_key = settings_io.BY_KEY
+        assert section.title == "Model"
+        text.set_active_locale("es")
+        assert section.title == "Modelo"
+        assert setting.label == "Proveedor predeterminado"
+        assert settings_io.BY_KEY is by_key
+        assert settings_io.BY_KEY["hosting"] is setting
+        text.set_active_locale("en")
+        assert section.title == "Model"
+        assert setting.label == "Default provider"
+
+    def test_missing_locale_and_key_fall_back_to_english_then_code(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        root = tmp_path / "catalogues"
+        (root / "es").mkdir(parents=True)
+        (root / "en").mkdir()
+        (root / "en" / "wire.settings.json").write_text(
+            json.dumps({ws.model_title().code: "Model"}), encoding="utf-8"
+        )
+        monkeypatch.setattr(catalogues, "_CATALOGUES", root)
+        monkeypatch.setattr(text, "_active_locale", "es")
+        assert settings_io._t(ws.model_title()) == "Model"
+        (root / "en" / "wire.settings.json").unlink()
+        settings_io._sources.cache_clear()
+        assert settings_io._t(ws.model_title()) == ws.model_title().code
+
+    def test_english_only_children_never_resolve_a_translated_namespace(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        message = ap.label()
+        english = settings_io._catalogues.load_catalogue("en", "wire.settings.account_policy")[
+            message.code
+        ]
+        root = tmp_path / "catalogues"
+        (root / "es").mkdir(parents=True)
+        (root / "es" / "wire.settings.account_policy.json").write_text(
+            json.dumps({message.code: "NO DEBE APARECER"}), encoding="utf-8"
+        )
+        (root / "en").mkdir()
+        (root / "en" / "wire.settings.account_policy.json").write_text(
+            json.dumps({message.code: english}), encoding="utf-8"
+        )
+        monkeypatch.setattr(catalogues, "_CATALOGUES", root)
+        monkeypatch.setattr(text, "_active_locale", "es")
+        assert settings_io._t(message) == english
+        assert settings_io._sources.cache_info().currsize >= 1
+
+    def test_registry_copy_costs_one_read_per_namespace_per_locale(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        settings_io._sources.cache_clear()
+        reads: list[tuple[str, str]] = []
+        real_load = settings_io._catalogues.load_catalogue
+
+        def counted(locale: str, namespace: str) -> dict[str, str]:
+            reads.append((locale, namespace))
+            return real_load(locale, namespace)
+
+        monkeypatch.setattr(settings_io._catalogues, "load_catalogue", counted)
+        monkeypatch.setattr(text, "_active_locale", "es")
+        settings_io._refresh_registry_copy()
+        expected = {
+            ("es", "wire.settings"),
+            *(("en", namespace) for namespace in settings_io._ENGLISH_SETTINGS_NAMESPACES),
+        }
+        assert len(reads) == len(expected)
+        assert set(reads) == expected
+        settings_io._refresh_registry_copy()
+        assert len(reads) == len(expected), "cached copy must not re-read on every message"
+
+    def test_a_render_failure_degrades_to_the_message_code(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        message = Msg("wire.settings.model.title", {})
+        monkeypatch.setattr(
+            settings_io,
+            "_sources",
+            lambda root, namespace, locale: {message.code: "{bad" if locale == "es" else "Model"},
+        )
+        monkeypatch.setattr(text, "_active_locale", "es")
+        assert settings_io._t(message) == "Model"
+
+        def no_english(root: str, namespace: str, locale: str) -> dict[str, str]:
+            return {message.code: "{bad"} if locale == "es" else {}
+
+        monkeypatch.setattr(settings_io, "_sources", no_english)
+        assert settings_io._t(message) == message.code
 
 
 def test_the_exclusion_row_round_trips_and_treats_empty_as_none(manager: ConfigManager) -> None:
