@@ -296,16 +296,25 @@ def reconcile_move(root: Path, session_id: str, *, effective_cwd: str) -> MoveIn
     """Settle a queued intent against where the session ACTUALLY is now.
 
     THE ONLY WAY A ``queued`` INTENT BECOMES ``committed`` WITHOUT A LIVE
-    CONFIRMATION: if the session is observed in the destination, the successor
+    CONFIRMATION: if the session is observed at the destination, the successor
     evidently booted there — the confirmation was lost, not the move. Observed
-    anywhere else, the intent stays ``queued`` for the owner to act on; this
-    function never infers a failure, because a failure it invented would discard
-    a request the user made.
+    anywhere else, the intent stays ``queued`` for the successor to act on; this
+    function never infers a failure, because an inference is not evidence.
+
+    ``effective_cwd`` is the directory THE SESSION holds, which is not
+    necessarily the one this process runs in: the value arrives from a record (or
+    from a caller) and may spell the same directory through a different symlink
+    (``/var`` versus ``/private/var`` on macOS), so both sides are compared
+    realpath-ed — the destination was stored resolved by
+    :func:`resolve_destination`, and a spelling difference is not a different
+    directory.
     """
     intent = read_move_intent(root, session_id)
     if intent is None or intent.stage != STAGE_QUEUED:
         return intent
-    if str(Path(effective_cwd)) != intent.destination_cwd:
+    if not effective_cwd.strip():
+        return intent
+    if os.path.realpath(effective_cwd) != os.path.realpath(intent.destination_cwd):
         return intent
     committed = MoveIntent(
         request_id=intent.request_id,

@@ -3551,10 +3551,19 @@ class RuntimeServer:
 
                 from local_operator.session import cwd_move
 
+                # THE SESSION'S DIRECTORY, NOT THIS PROCESS'S, and the difference
+                # is the whole check: ``launch._spawn_runtime`` passes no
+                # ``cwd=``, so a successor starts where the ENGAGING host stood
+                # and the directory the session actually uses rides
+                # ``LOP_MOBILE_CHILD_CWD`` into the record. Reconcile against
+                # ``Path.cwd()`` and the destination can never match — measured
+                # against a real spawn (the branch's e2e cell): the successor's
+                # record named the destination while the intent stayed `queued`
+                # forever, i.e. no move could ever commit in production.
                 cwd_move.reconcile_move(
                     Path(getattr(self, "_config_root", None) or config_dir()),
                     self._record.session_id,
-                    effective_cwd=str(Path.cwd()),
+                    effective_cwd=str(self._record.cwd or ""),
                 )
             except Exception:  # noqa: BLE001 -- evidence must not block a boot
                 logger.warning("session runtime: cwd-move boot reconcile skipped", exc_info=True)
@@ -7419,8 +7428,9 @@ class RuntimeServer:
         """
         if self._queued_move is not None or self._queued_move_stage or self._retirement_committed:
             return ""
-        from local_operator.session import cwd_move
         from pathlib import Path
+
+        from local_operator.session import cwd_move
 
         root = Path(getattr(self, "_config_root", None) or config_dir())
         intent = cwd_move.read_move_intent(root, self._record.session_id)
@@ -7436,9 +7446,7 @@ class RuntimeServer:
             return "waiting"
         if reason:
             return "waiting"
-        accepted = await self._handle_call_on_session_loop(
-            lambda: latch("cwd-move", "cwd move")
-        )
+        accepted = await self._handle_call_on_session_loop(lambda: latch("cwd-move", "cwd move"))
         if not accepted:
             return "waiting"
         self._queued_move_stage = "retiring"
