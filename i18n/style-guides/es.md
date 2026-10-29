@@ -55,6 +55,19 @@ translators and the auditor. Wave 1 locale.
 - skill → **habilidad**; the tight-form abbreviation `habil.` is acceptable only
   where a hard cell budget forces it (`wire.settings.hub_defaults.agents.label`
   is 29 cells and the full phrase does not fit).
+- **Amendment (es W2, 2026-10-29): three more recorded decisions.**
+  - `daemon` → **`daemon` / `daemons`, kept English.** The shipped catalogue
+    already used it (`relay.asks`, `wire.settings`, `cli.browser_help`) and the
+    borrowed form is standard in Spanish dev usage; W2 had introduced
+    `demonio`/`demonios` in eleven cli.* keys and the independent audit rejected
+    the split. Do not reopen it.
+  - `tenant` → **`tenant`, kept English**, lowercase mid-sentence
+    (`tenant de la organización`). It is a multi-tenancy term, and
+    `<tenant_id>` is a machine token that never translates.
+  - `starter` → **`plantilla incluida`** (shipped in
+    `tui.authoring.seed_not_installed`); the plural is `plantillas incluidas`.
+    W2 briefly used `perfiles iniciales`, which the audit flagged as a second
+    rendering of one product term.
 
 ## Plurals
 
@@ -79,6 +92,11 @@ translators and the auditor. Wave 1 locale.
   truncation, always.
 - Budgets: `maxCells` from the en sidecar; pinned: PERSIST_HINT 42/43 cells,
   tip pool 59, `/help` ≈ 55.
+- Recorded width exception: `cli.services_status` in this wave:
+  `serve_linger_required` measures 103 and `unsupervised_unknown` 87 cells with
+  `rich.cells.cell_len` against the 80/78 status budget. Recorded rather than
+  tightened to a shorter remedy, because the alternatives lose the logout-only
+  qualification or the scope name.
 
 ## Punctuation & typography
 
