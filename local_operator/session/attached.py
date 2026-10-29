@@ -1173,6 +1173,12 @@ class AttachedSession:
         #: viewer needs it (an attached one inherits the runtime's own cwd);
         #: ``cold()`` sets the real value.
         self._cwd = ""
+        #: A ``retiring`` frame's destination, recorded by the SYNCHRONOUS frame
+        #: handler and adopted inside ``_bind_lock`` before the engage reads
+        #: ``_cwd``. Assigning ``_cwd`` here would race that read (the measured
+        #: blocker on ``set_working_directory``), and calling that method from
+        #: the handler would retire a runtime that is already retiring.
+        self._pending_frame_cwd = ""
         #: Serialises ``_ensure_bound`` so concurrent first-writes engage one
         #: runtime between them rather than one each.
         self._bind_lock = asyncio.Lock()
@@ -4501,6 +4507,13 @@ class AttachedSession:
         if not self.is_cold and not self._model_selection_override:
             return
         async with self._bind_lock_for(foreground=foreground):
+            # THE ADOPTION IS FIRST, INSIDE THE LOCK: the engage below reads
+            # ``_cwd`` in this same critical section, so a destination that
+            # arrived on the retiring frame must be in place before that read or
+            # the successor is spawned at the old path.
+            if self._pending_frame_cwd:
+                self._cwd = self._pending_frame_cwd
+                self._pending_frame_cwd = ""
             await self._bind_under_lock(foreground=foreground)
             # Cover every winning-owner path, including another attach/recovery
             # completing during an await. A failed model RPC is not a failed
@@ -8566,6 +8579,9 @@ class AttachedSession:
         they decide; a frame that names neither trigger still yields ``""``, and
         the host paints the sentence that is true of any drain.
         """
+        pending_cwd = str(frame.get("cwd") or "")
+        if pending_cwd:
+            self._pending_frame_cwd = pending_cwd
         if not frame.get("draining") and not frame.get("updating"):
             return
         callback = self._drain_callback

@@ -3058,6 +3058,7 @@ class RuntimeServer:
         draining: bool = False,
         leaving: str = "",
         checkpoint_id: str = "",
+        cwd: str = "",
     ) -> None:
         """Tell attached viewers this runtime is leaving so a NEWER build can
         take its place — a planned refresh, not a stop and not a death.
@@ -3158,13 +3159,19 @@ class RuntimeServer:
                         draining=draining,
                         leaving=leaving,
                         checkpoint_id=checkpoint_id,
+                        cwd=cwd,
                     ),
                     loop,
                 )
             )
             return
         await self._announce_retiring_on_loop(
-            reason, to=to, draining=draining, leaving=leaving, checkpoint_id=checkpoint_id
+            reason,
+            to=to,
+            draining=draining,
+            leaving=leaving,
+            checkpoint_id=checkpoint_id,
+            cwd=cwd,
         )
 
     async def _announce_retiring_on_loop(
@@ -3175,6 +3182,7 @@ class RuntimeServer:
         draining: bool = False,
         leaving: str = "",
         checkpoint_id: str = "",
+        cwd: str = "",
     ) -> None:
         """The retiring announcement, on the runtime's own loop.
 
@@ -3215,6 +3223,12 @@ class RuntimeServer:
             # ignores the unknown key, and "" is exactly "no readable resume
             # record", which never advertises a continuation that cannot happen.
             "checkpoint_id": checkpoint_id,
+            # ADDITIVE, like ``checkpoint_id``: the directory THIS departure is
+            # a move TO, or "" for every departure that is not a move. A viewer
+            # that does not know the key ignores it; a viewer that does adopts
+            # it before it engages the successor (``attached._ensure_bound``),
+            # so the successor is spawned in the directory the user asked for.
+            "cwd": cwd,
             # The trigger's own words, for the sentence a viewer paints: see the
             # ``leaving`` paragraph above. ``""`` means THIS FRAME NAMED NO
             # TRIGGER — it is what every runtime older than this key sends, this
@@ -3528,6 +3542,23 @@ class RuntimeServer:
             )
             port = self._server.sockets[0].getsockname()[1]
             self._record.control_port = port
+            # BOOT RECONCILIATION (best-effort): a move whose confirmation was
+            # lost is settled against where THIS process actually booted, never
+            # reverted. Then the one move watcher starts; with no intent it reads
+            # a missing file and does nothing.
+            try:
+                from pathlib import Path
+
+                from local_operator.session import cwd_move
+
+                cwd_move.reconcile_move(
+                    Path(getattr(self, "_config_root", None) or config_dir()),
+                    self._record.session_id,
+                    effective_cwd=str(Path.cwd()),
+                )
+            except Exception:  # noqa: BLE001 -- evidence must not block a boot
+                logger.warning("session runtime: cwd-move boot reconcile skipped", exc_info=True)
+            self._ensure_queued_move_watcher()
             # INSTALL THE PUBLISHER BEFORE ITS RECORD CAN BE READ, and the
             # ordering is the guarantee rather than housekeeping: ``_republish``
             # no-ops while ``self._publisher`` is unset, so a record made
@@ -7367,6 +7398,56 @@ class RuntimeServer:
             return
         self._queued_move_task = loop.create_task(self._queued_move_watch())
 
+    async def _apply_queued_cwd_move(self) -> str:
+        """Consume a QUEUED cwd intent at an idle boundary; say why if not.
+
+        THE SAME ACT AS A NETWORK MOVE with a different payload, so it rides the
+        one Trigger this runtime already has (this watcher, announce_retiring,
+        request_stop) rather than a second retirement path. Everything mesh-shaped
+        is skipped: no ``move_pending`` frame, no ``to_device``/``to_name``, no
+        ``to=`` on the announce -- the frame carries ``cwd`` and no peer.
+
+        THE GATE IS ``may_refresh``, the one predicate that already answers "is
+        this runtime doing nothing it would lose" (a live turn, a parked gate, a
+        goal loop, subagents, background jobs, and the wake window), plus the
+        move state's own latches. Anything short of idle leaves the intent
+        ``queued`` for the next tick; nothing is cut over mid-turn.
+
+        Returns ``"retiring"`` when it latched and announced, ``"waiting"`` when
+        an intent exists but the runtime is not at a boundary, ``""`` when there
+        is nothing to do.
+        """
+        if self._queued_move is not None or self._queued_move_stage or self._retirement_committed:
+            return ""
+        from local_operator.session import cwd_move
+        from pathlib import Path
+
+        root = Path(getattr(self, "_config_root", None) or config_dir())
+        intent = cwd_move.read_move_intent(root, self._record.session_id)
+        if intent is None or intent.stage != cwd_move.STAGE_QUEUED:
+            return ""
+        probe = getattr(self._handle, "may_refresh", None)
+        latch = getattr(self._handle, "begin_retire", None)
+        if not callable(probe) or not callable(latch):
+            return ""
+        try:
+            reason = str(await self._handle_call_on_session_loop(probe) or "")
+        except Exception:  # noqa: BLE001 -- an unreadable probe keeps the runtime
+            return "waiting"
+        if reason:
+            return "waiting"
+        accepted = await self._handle_call_on_session_loop(
+            lambda: latch("cwd-move", "cwd move")
+        )
+        if not accepted:
+            return "waiting"
+        self._queued_move_stage = "retiring"
+        await self.announce_retiring("cwd-move", cwd=intent.destination_cwd)
+        request_stop = getattr(self._handle, "request_stop", None)
+        if callable(request_stop):
+            await self._handle_call_on_session_loop(request_stop)
+        return "retiring"
+
     async def _queued_move_watch(self) -> None:
         """Watch for the queued move's safe point; then pause, announce, retire.
 
@@ -7444,7 +7525,13 @@ class RuntimeServer:
         root = Path(getattr(self, "_config_root", None) or config_dir())
 
         while True:
-            if self._closed.is_set() or self._queued_move is None:
+            if self._closed.is_set():
+                return
+            # BEFORE ANY MESH WORK: a cwd intent must never reach the record
+            # gate below, send a move_pending frame, or name a peer.
+            if await self._apply_queued_cwd_move() == "retiring":
+                return
+            if self._queued_move is None:
                 return
             movement = dict(self._queued_move)
             to_device = str(movement.get("to_device") or "")

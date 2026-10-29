@@ -16398,10 +16398,7 @@ class SessionsParams(BaseModel):
     )
     cwd: str | None = Field(
         default=None,
-        description=(
-            "move: destination for this session; absolute or relative to its "
-            "cwd; must exist."
-        ),
+        description=("move: destination directory; absolute or relative to the session's cwd."),
     )
     name: str | None = Field(default=None, description="spawn: title.")
     tags: list[str] | None = Field(
