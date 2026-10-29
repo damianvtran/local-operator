@@ -269,7 +269,9 @@ async def set_saver_choice(
 
 
 #: ``SaverDecision.source`` -> the notice that explains it. One map, so a new
-#: refusal source cannot silently fall back to "unavailable".
+#: refusal source has a single place to be named. An UNNAMED source still falls
+#: back to ``notice.unavailable`` at the lookup below: a refusal must always say
+#: something, and "unavailable" is the one sentence that claims nothing about why.
 _REFUSAL_NOTICE = {
     "signed_out": _rs.notice_signed_out,
     "no_credit": _rs.notice_no_credit,
@@ -319,7 +321,16 @@ async def saver_slash(session: Any, arg: str, SlashResult: Any) -> Any:
         return SlashResult(
             kind="notice", text=_tr(_rs.notice_no_session()), style="warning"
         )
-    wanted = (arg or "").strip().lower()
+    raw = arg or ""
+    wanted = raw.strip().lower()
+    if raw and not wanted:
+        # WHITESPACE IS NOT "SAY NOTHING" (round 4). The empty-string arm below
+        # toggles, because for the bare alias `/saver` the absence of a value is
+        # the whole intent. Whitespace is not that absence: it is an argument that
+        # failed to parse, and every path that reached it here used to enable the
+        # feature. It reads instead, which is safe for any caller — including one
+        # that forwards raw wire arguments and never strips them.
+        wanted = "status"
     if wanted in {"status", "show"}:
         # A report is a user-initiated moment, so it takes the real read rather
         # than answering from a cache that may predate the balance running out.

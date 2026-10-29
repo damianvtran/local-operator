@@ -330,3 +330,51 @@ async def test_signed_out_refuses_and_writes_nothing(
         assert session.radient_saver_choice is None
         assert _journalled(tmp_path / "sessions" / "saver") == []
         assert any("/login radient" in text for text in _notices(app))
+
+
+@pytest.mark.asyncio
+async def test_the_app_host_agrees_with_the_serving_host_on_every_input(tmp_path: Path) -> None:
+    """Round 4: the hosts disagreed on a whitespace argument, and the disagreement wrote.
+
+    `rest or "status"` is a truthiness test, so `/radient saver␣␣` was truthy and
+    reached the toggle arm. The app host was safe only because its own parse
+    stripped first; the serving host forwards raw wire arguments and wrote Saver
+    ON. Both hosts now strip, and this table is the same one
+    `tests/unit/session/runtime/test_serving_saver_slash.py` runs against the
+    serving dispatch, so the pair cannot drift apart again.
+    """
+    session = FakeSession()
+    session.routing_settings = SETTINGS
+    session.radient_saver_choice = None
+    journal_dir = tmp_path / "sessions" / "saver"
+    session._transcript = Transcript(journal_dir)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+
+        def rows() -> list[bool | None]:
+            return [
+                entry.payload["details"]["enabled"]
+                for entry in Transcript(journal_dir).entries()
+                if entry.payload.get("custom_type") == "radient_saver_choice_v1"
+            ]
+
+        cases = [
+            ("/radient", []),
+            ("/radient ", []),
+            ("/radient saver", []),
+            ("/radient saver  ", []),
+            ("/radient saver \t", []),
+            ("/radient saver --", []),
+            ("/radient saver on", [True]),
+            ("/radient saver off", [False]),
+        ]
+        for typed, expected in cases:
+            before = len(rows())
+            app._editor().text = ""
+            await pilot.pause()
+            app._run_slash_command(typed)
+            for _ in range(40):
+                await pilot.pause()
+            written = rows()[before:]
+            assert written == expected, (typed, written)

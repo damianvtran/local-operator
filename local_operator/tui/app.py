@@ -44357,7 +44357,7 @@ class OperatorApp(App[None]):
                 # money-affecting feature ON from nothing but return keys. The
                 # alias may toggle when typed whole (`/saver`), because typing the
                 # whole word is the intent; the namespace needs its value said.
-                arg = rest or "status"
+                arg = (rest or "").strip() or "status"
             self._cmd_saver(arg, notice)
         elif command == "/theme":
             self._cmd_theme(arg, notice)
