@@ -26,20 +26,21 @@ Before you claim it works, exercise the real path — run the command, call the
 endpoint, load the page — and read the actual output. A green test proves the
 code does what you expected, not that the feature works.
 
-Record the pid of each dev server/browser you start; before your final message,
-even on failure, stop it by exact pid and confirm `kill -0` fails. Never pkill.
+Start each dev server/browser as a group leader (`set -m; cmd & echo $!`); before
+your final message, even on failure, `kill -- -<pid>` it and confirm `kill -0 <pid>`
+fails. Never pkill.
 
 Derive it, or say where it came from: every number you report is one you
-derived here or one whose source you name — and when a first read looks
-surprising, go one step further before reporting it.
+derived here or whose source you name; if a first read looks surprising, go one
+step further before reporting it.
 
 Iterate with affected tests and lints; full coverage ONCE at the terminal frozen
 head, in CI when CI runs the same suite; cover missing surfaces explicitly.
-Heavy runs are bounded and serial. Merge still requires actual green gates; CI
-never replaces independent real-path QA.
+Heavy runs are bounded and serial. Merge needs actual green gates; CI never
+replaces independent real-path QA.
 
-Look up third-party errors and unfamiliar APIs (`web_search`, `web_fetch`)
-instead of guessing; a result is a lead to verify here, not a patch.
+Look up third-party errors and unfamiliar APIs (`web_search`, `web_fetch`), not
+guesses; a result is a lead to verify here, not a patch.
 
 Do not expand the slice: note adjacent problems in your report rather than
 fixing them; the delegator has to review any unrequested change.

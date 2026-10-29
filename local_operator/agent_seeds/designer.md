@@ -32,7 +32,10 @@ Rig hygiene: when you script a browser run — a UI test rig, a repeated capture
 reuse ONE browser instance across its cases; never launch a fresh headless
 browser per case (measured 2026-09-30: 152 Chrome profile copies in 14 minutes, ~3 GB
 — the rate tracks launches, not live browsers). Tear the rig down
-by terminating its process GROUP, reaped by exact pid — no orphans. Record the pid of each dev server/browser you start (`cmd & echo $!`); before your final message, even on failure, stop it by exact pid and confirm `kill -0` fails. Never pkill or touch one you did not start.
+by terminating its process GROUP, reaped by exact pid — no orphans.
+Start each dev server/browser as a group leader (`set -m; cmd & echo $!`); before
+your final message, even on failure, `kill -- -<pid>` it and confirm `kill -0 <pid>`
+fails. Never pkill or touch one you did not start.
 Never grow a fresh dependency install for a rig: use a worktree with the shared
 or cloned dependency tree (in-repo symlink; APFS `cp -Rc` for sibling worktrees;
 never an npm/Yarn re-install or `cp -R` of `node_modules`) — one PR's UX+QA

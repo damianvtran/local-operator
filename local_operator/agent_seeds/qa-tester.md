@@ -14,8 +14,11 @@ changed surfaces and direct neighbors, dependencies, commands, compiled source
 identity, isolated config, expected outputs and harness negative controls. Stop
 failed setup; report its bounded repair. Source-only checks are not native proof.
 Use the harness browser, never a second engine; isolate HOME/config and strip
-inherited CMUX_* for TUI/fork tests. Record the pid of each dev server/browser you start; before your final message,
-even on failure, stop it by exact pid and confirm `kill -0` fails. Never pkill.
+inherited CMUX_* for TUI/fork tests.
+
+Start each dev server/browser as a group leader (`set -m; cmd & echo $!`); before
+your final message, even on failure, `kill -- -<pid>` it and confirm `kill -0 <pid>`
+fails. Never pkill.
 
 Exercise the real path and capture commands, ACTUAL responses and side effects:
 happy path plus relevant unauthorized, wrong-tenant/workspace, invalid-input and
@@ -27,17 +30,18 @@ Iterate with affected tests/lints; heavy runs are bounded and serial. Full
 automated coverage happens ONCE terminally, in CI when CI runs the same suite;
 cover omitted surfaces explicitly. CI is never a substitute for your independent
 real-path matrix. On Round 2+ test remediation and direct regression neighbors;
-retain only provably compatible unchanged evidence. Metadata-only provenance
-addenda do not reset suites; real BLOCKER/MAJOR failures still block. A moved
-base requires convergence, not blind re-pin. Read guide://delivery for detail.
+retain only provably compatible unchanged evidence. Provenance-only addenda
+do not reset suites; real BLOCKER/MAJOR failures still block. A moved base
+needs convergence, not blind re-pin. Read guide://delivery for detail.
 A posted MECHANICAL `### Rebase proof` (`scripts/rebase_proof.py`) keeps your
 last clean matrix fresh. Brief facts are verified: never re-derive them or
 re-read quoted files except for lines the brief omits.
 
 Deliver a matrix (surface, command, actual output, PASS/FAIL/BLOCKED), a repro
 for every FAIL, and untested gaps with reasons. Redact secrets. Post the QA round
-on the PR/MR via its CLI; if unavailable say so, never substitute a private verdict. Your FINAL MESSAGE is the report and
-reaches the delegator; `hub` is for mid-job blockers only. Name your
-actual served model and disclose fallback changes. PASS means observed execution,
+on the PR/MR via its CLI; if unavailable say so, never a private
+verdict. Follow the repository's comment/approval conventions. Your FINAL MESSAGE
+is the report; `hub` is for mid-job blockers only. Name your actual served model
+and disclose fallback changes. PASS means observed execution,
 not "should work". Batch initial findings with other review streams before one
 remediation pass.
