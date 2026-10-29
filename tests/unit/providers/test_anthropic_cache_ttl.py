@@ -406,3 +406,227 @@ async def test_session_stream_errands_are_auxiliary() -> None:
             assert stamped.cache_role == "auxiliary"
     finally:
         await stream.close()
+
+
+# -- after a long-streaming call (subagents) -------------------------------------
+
+
+def test_subagent_after_long_call_is_1h_on_a_subscription() -> None:
+    assert _decide(role="subagent", after_long_call=True) == "1h"
+    # Before any long call: the 5m default, exactly as before.
+    assert _decide(role="subagent", after_long_call=False) is None
+
+
+def test_after_long_call_leaves_main_and_auxiliary_alone() -> None:
+    # The main thread's own rules decide, with or without the flag.
+    assert _decide(after_long_call=True) == "1h"
+    assert _decide(subscription=False, after_long_call=True) is None
+    assert _decide(overage=True, after_long_call=True) is None
+    assert _decide(role="auxiliary", after_long_call=True) is None
+
+
+def test_overage_still_forces_the_api_key_rules_after_a_long_call() -> None:
+    """Overage is billed like the API, where the 1h premium is not worth it
+    for a subagent: below the (opt-in) size threshold it stays 5m."""
+    assert _decide(role="subagent", overage=True, after_long_call=True) is None
+    assert (
+        _decide(
+            role="subagent",
+            overage=True,
+            after_long_call=True,
+            subagent_min_context_tokens=150_000,
+            context_size=lambda: 100_000,
+        )
+        is None
+    )
+    # ...and an explicit size opt-in still applies above it.
+    assert (
+        _decide(
+            role="subagent",
+            overage=True,
+            after_long_call=True,
+            subagent_min_context_tokens=150_000,
+            context_size=lambda: 200_000,
+        )
+        == "1h"
+    )
+    # API-key traffic is not on a subscription at all: unchanged.
+    assert _decide(role="subagent", subscription=False, after_long_call=True) is None
+
+
+def test_main_threshold_zero_still_turns_the_long_call_rule_off() -> None:
+    assert _decide(role="subagent", after_long_call=True, main_min_context_tokens=0) is None
+
+
+class _Clock:
+    """``configure.time`` with a monotonic clock a fake stream can advance."""
+
+    def __init__(self) -> None:
+        import time as real
+
+        self._real = real
+        self.offset = 0.0
+
+    def monotonic(self) -> float:
+        return self._real.monotonic() + self.offset
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._real, name)
+
+
+async def _run_calls(
+    stream: Any,
+    request: ChatRequest,
+    durations: list[float],
+    monkeypatch: Any,
+    endings: list[str] | None = None,
+) -> list[ChatRequest]:
+    """Drive one call per duration and capture what reached failover.
+
+    ``endings`` picks how each call ends: ``"stop"`` (completed, the default),
+    ``"error"`` (a terminal ``stop_reason="error"`` frame) or ``"raise"`` (the
+    provider stream raises after the time has passed).
+
+    Each fake call advances the stream's clock by its duration while it is
+    streaming, so ``_record_stream`` measures exactly that request-start to
+    stream-end span, the same clock the analytics ledger records.
+    """
+    from local_operator.harness.types import StreamEndEvent
+    from local_operator.model import configure
+
+    clock = _Clock()
+    monkeypatch.setattr(configure, "time", clock)
+    captured: list[ChatRequest] = []
+    pending = list(durations)
+    ends = list(endings or ["stop"] * len(durations))
+
+    async def fake_failover(req: ChatRequest, *args: Any, **kwargs: Any) -> AsyncIterator[Any]:
+        captured.append(req)
+        clock.offset += pending.pop(0)
+        ending = ends.pop(0)
+        if ending == "raise":
+            raise RuntimeError("synthetic provider failure")
+        yield StreamEndEvent(stop_reason=ending)
+
+    import local_operator.providers.failover as failover
+
+    monkeypatch.setattr(failover, "stream_with_failover", fake_failover)
+    for _ in durations:
+        try:
+            async for _ in stream(request, None):
+                pass
+        except RuntimeError:
+            pass
+    return captured
+
+
+def _wire_ttls(request: ChatRequest) -> set[str | None]:
+    client = AnthropicClient(cache_ttl_1h_min_context_tokens=150_000)
+    return _ttls(client._build_body(request, oauth=True))
+
+
+@pytest.mark.asyncio
+async def test_subagent_turn_after_a_300s_call_goes_out_with_1h_markers(monkeypatch) -> None:
+    parent = _session_stream()
+    child = parent.fork("s-child")
+    try:
+        first, second, third = await _run_calls(child, _request(), [300.0, 5.0, 5.0], monkeypatch)
+    finally:
+        await child.close()
+        await parent.close()
+    # Before any long call: the 5m default, body unchanged.
+    assert first.cache_role == "subagent" and not first.cache_after_long_call
+    assert _wire_ttls(first) == {None}
+    # The 300 s call armed the rule for every later turn, short ones included.
+    assert second.cache_after_long_call and third.cache_after_long_call
+    assert _wire_ttls(second) == {"1h"}
+    assert _wire_ttls(third) == {"1h"}
+
+
+@pytest.mark.asyncio
+async def test_subagent_below_the_threshold_stays_5m(monkeypatch) -> None:
+    parent = _session_stream()
+    child = parent.fork("s-child")
+    try:
+        calls = await _run_calls(child, _request(), [239.0, 239.0], monkeypatch)
+    finally:
+        await child.close()
+        await parent.close()
+    assert [c.cache_after_long_call for c in calls] == [False, False]
+    assert all(_wire_ttls(c) == {None} for c in calls)
+
+
+@pytest.mark.asyncio
+async def test_long_errand_does_not_arm_and_a_fork_starts_clean(monkeypatch) -> None:
+    """Only conversation turns count, and the fact is per conversation: a long
+    compaction never arms it, and a child forked after the parent's long turn
+    starts unarmed."""
+    parent = _session_stream()
+    try:
+        errands = await _run_calls(
+            parent, _request(purpose="compaction"), [400.0, 5.0], monkeypatch
+        )
+        assert not errands[1].cache_after_long_call
+        await _run_calls(parent, _request(), [400.0], monkeypatch)
+        child = parent.fork("s-child")
+        try:
+            (child_first,) = await _run_calls(child, _request(), [5.0], monkeypatch)
+        finally:
+            await child.close()
+        assert not child_first.cache_after_long_call
+    finally:
+        await parent.close()
+
+
+@pytest.mark.asyncio
+async def test_main_thread_after_a_long_call_is_unchanged(monkeypatch) -> None:
+    stream = _session_stream()
+    try:
+        _, after = await _run_calls(stream, _request(), [300.0, 5.0], monkeypatch)
+    finally:
+        await stream.close()
+    assert after.cache_role == "main"
+    # Subscription main: 1h with or without the fact; API key below the size
+    # threshold: still 5m — the flag does not move the main thread.
+    assert _wire_ttls(after) == {"1h"}
+    client = AnthropicClient(cache_ttl_1h_min_context_tokens=150_000)
+    assert _ttls(client._build_body(after, oauth=False)) == {None}
+    assert _ttls(client._build_body(after, oauth=False)) == _ttls(
+        client._build_body(after.model_copy(update={"cache_after_long_call": False}), oauth=False)
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["error", "raise"])
+async def test_a_failed_300s_subagent_call_does_not_arm(monkeypatch, ending: str) -> None:
+    """Only a COMPLETED turn arms the rule: a 300 s stream that ends in an
+    error frame or raises says nothing reliable about a later turn's length,
+    and its failed attempt is not the prefix a next request would re-read."""
+    parent = _session_stream()
+    child = parent.fork("s-child")
+    try:
+        _, after = await _run_calls(
+            child, _request(), [300.0, 5.0], monkeypatch, endings=[ending, "stop"]
+        )
+    finally:
+        await child.close()
+        await parent.close()
+    assert not after.cache_after_long_call
+    assert _wire_ttls(after) == {None}
+
+
+@pytest.mark.asyncio
+async def test_a_long_isolated_turn_does_not_arm(monkeypatch) -> None:
+    """Isolated decoration (a title, a supplement) shares ``purpose="turn"``
+    with the conversation but is a one-shot beside it; its duration must not
+    arm the conversation's TTL rule."""
+    parent = _session_stream()
+    child = parent.fork("s-child")
+    try:
+        await _run_calls(child, _request(isolated=True), [300.0], monkeypatch)
+        (after,) = await _run_calls(child, _request(), [5.0], monkeypatch)
+    finally:
+        await child.close()
+        await parent.close()
+    assert not after.cache_after_long_call
+    assert _wire_ttls(after) == {None}

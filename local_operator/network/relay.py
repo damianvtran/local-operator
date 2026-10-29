@@ -14472,6 +14472,61 @@ SYSTEMD_UNIT = "local-operator-network.service"
 #: daemons from collapsing into one ``Local Operator`` row in Activity Monitor.
 LABEL_TEMPLATE = "{brand} [network relay] port={port}"
 
+#: The exit status of a relay that was ASKED to stop, and the only exit the
+#: Linux unit does not restart (``RestartPreventExitStatus``).
+#:
+#: WHY A STATUS AND NOT ``Restart=on-failure`` ALONE (2026-10-27, cloud node,
+#: AL2023 with linger): the relay exited 0 with no ``Stopping`` line — nobody
+#: had run a stop verb — and under ``on-failure`` a clean exit stays down, so
+#: the node was dark to the mesh for ~4 minutes until a hand start. A SIGTERM
+#: from anything but the unit's own stop (an OOM-adjacent reaper, a stray
+#: ``kill``, a session-scope teardown) is exactly that clean exit. Plain
+#: ``Restart=always`` would be wrong the other way: ``lop network stop``,
+#: ``uninstall`` and an incident stop are deliberate, and must stay down.
+#:
+#: So the unit says ``Restart=always`` and names this status as the one it
+#: honours. Everything a person did not ask for — a stray signal, a crash, an
+#: unhandled exception — is restarted.
+#:
+#: WHAT THE STATUS IS FOR, stated narrowly (agent review round 1, m2): every
+#: product stop on Linux today is SYSTEMD-INITIATED (``lop network stop`` runs
+#: ``systemctl stop``, uninstall runs ``disable --now``), and systemd never
+#: restarts a unit it was told to stop, whatever the exit status — so those
+#: verbs stay down with or without this status. The marker + 75 covers the
+#: OUT-OF-BAND case: a deliberate stop that reaches the relay as a plain
+#: SIGTERM rather than through the manager (a future incident path, an
+#: operator's own tooling). Such a path marks the stop FIRST
+#: (:func:`mark_deliberate_stop`) and the relay, on its way out, exits with
+#: this status only when that marker is fresh (:func:`_exit_status`). The
+#: product verbs mark too, so the exit they cause is labelled the same way
+#: whichever route delivered the signal.
+#:
+#: THE VALUE: 75 is ``EX_TEMPFAIL`` in sysexits.h — outside the 0/1/2 a Python
+#: process uses (2 is argparse's usage error and this unit's "cannot start"
+#: refusal), outside 128+N (killed by a signal), and outside systemd's own
+#: 200-243 ``EXIT_*`` range, so no other cause of exit can collide with it.
+#: Also listed as ``SuccessExitStatus`` so a deliberate stop does not leave the
+#: unit in ``failed`` state.
+#:
+#: macOS: launchd's ``KeepAlive: {SuccessfulExit: false}`` would read 75 as a
+#: crash and relaunch, so on that platform the relay never returns it
+#: (:func:`_exit_status`) — launchd stops are ``launchctl kill``/``bootout``,
+#: which launchd itself does not restart, and that arm is unchanged.
+DELIBERATE_STOP_EXIT_STATUS = 75
+
+#: How long a stop marker stays valid. A deliberate stop reaches the relay
+#: within the service verb's own verify window (:data:`SERVICE_VERIFY_WINDOW_S`)
+#: or not at all; a marker older than this is left over from a stop that never
+#: arrived (the relay was already down) and must not turn a LATER unrequested
+#: exit into a deliberate one — that would recreate the stays-down defect.
+DELIBERATE_STOP_MARKER_TTL_S = 120.0
+
+#: The marker's file name, under ``<config>/run`` beside the relay's discovery
+#: records (``run/peers``): it describes the same process and is written by the
+#: same user. One file, not per-pid, because a stop names the UNIT (there is one
+#: relay unit per config root, pinned by its ``LOCAL_OPERATOR_CONFIG_DIR``).
+DELIBERATE_STOP_MARKER = "relay-stop-requested.json"
+
 #: The relay's ``OOMScoreAdjust``: make the kernel's OOM killer pick almost any
 #: other process first.
 #:
@@ -14542,6 +14597,117 @@ def plist_path() -> Path:
 def systemd_path() -> Path:
     """``~/.config/systemd/user/<unit>`` for the CURRENT home (redirectable)."""
     return supervisors.systemd_unit_path(SYSTEMD_UNIT)
+
+
+def deliberate_stop_marker_path(root: Path | None = None) -> Path:
+    """``<config>/run/relay-stop-requested.json`` — a PATH; nothing is created."""
+    return (Path(root) if root is not None else config_dir()) / "run" / DELIBERATE_STOP_MARKER
+
+
+def _unit_config_root() -> Path | None:
+    """The config root the INSTALLED unit pins (``Environment=LOCAL_OPERATOR_CONFIG_DIR``).
+
+    THE MARKER MUST LAND WHERE THE SUPERVISED RELAY READS IT (agent review round
+    1, m4). The relay reads ``<its config>/run``, and its config is the one
+    :func:`render_systemd` pinned into the unit — not whatever override the
+    process running the stop verb happens to carry. Read from the unit file the
+    same way :func:`_service_port` reads ``--port``; ``None`` when the platform
+    has no such unit or the line cannot be read, and the caller then writes no
+    marker at all rather than one in a root no supervised relay reads.
+    """
+    try:
+        if not (sys.platform.startswith("linux") and systemd_path().exists()):
+            return None
+        text = systemd_path().read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    # The line is written by ``supervisors.quoted`` (``\\``, ``\"`` and ``%%``
+    # escaped inside one pair of quotes), so it is decoded by inverting exactly
+    # that, never by a looser guess that would misread a path with a quote or a
+    # percent sign in it.
+    found = re.search(
+        rf'^Environment="{re.escape(CONFIG_DIR_ENV)}=((?:[^"\\]|\\.)*)"\s*$', text, re.M
+    )
+    if not found:
+        return None
+    value = re.sub(r"\\(.)", r"\1", found.group(1)).replace("%%", "%")
+    return Path(value) if value else None
+
+
+def _mark_unit_stop(reason: str) -> bool:
+    """Mark a product stop verb's stop in the UNIT's root; ``False`` if none.
+
+    Linux only: on macOS the marker is never consulted (:func:`_exit_status`
+    answers 0 there), so writing one would be dead state.
+    """
+    root = _unit_config_root()
+    if root is None:
+        return False
+    mark_deliberate_stop(reason, root)
+    return True
+
+
+def mark_deliberate_stop(reason: str, root: Path | None = None) -> None:
+    """Record that the NEXT relay exit was asked for, before asking for it.
+
+    Every deliberate-stop path calls this BEFORE it signals the relay (see
+    :data:`DELIBERATE_STOP_EXIT_STATUS`): the relay reads the marker on its way
+    out, so a marker written after the signal would race the exit it describes.
+    Best effort and never raising: a stop that could not write the marker still
+    stops (``systemctl stop``/``disable --now`` are never restarted by systemd
+    whatever the status), it only loses the guarantee for a non-systemd signal.
+    """
+    path = deliberate_stop_marker_path(root)
+    tmp = path.with_name(path.name + f".{os.getpid()}.tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(
+            json.dumps({"reason": str(reason), "at": time.time(), "by_pid": os.getpid()}),
+            encoding="utf-8",
+        )
+        os.replace(tmp, path)
+    except OSError:
+        logger.debug("relay: could not write the stop marker %s", path, exc_info=True)
+        # Never leave this writer's own staging file behind in run/ (review n1).
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def clear_deliberate_stop(root: Path | None = None) -> None:
+    """Remove the marker. The relay calls this at START, so a stale one cannot
+    outlive the relay it was written for and excuse a later unrequested exit."""
+    try:
+        deliberate_stop_marker_path(root).unlink(missing_ok=True)
+    except OSError:
+        logger.debug("relay: could not clear the stop marker", exc_info=True)
+
+
+def deliberate_stop_requested(root: Path | None = None, *, now: float | None = None) -> bool:
+    """Whether a FRESH marker says this exit was asked for (TTL-bounded)."""
+    try:
+        raw = json.loads(deliberate_stop_marker_path(root).read_text(encoding="utf-8"))
+        at = float(raw.get("at") or 0.0)
+    except (OSError, ValueError, TypeError, AttributeError):
+        return False
+    age = (time.time() if now is None else now) - at
+    return 0.0 <= age <= DELIBERATE_STOP_MARKER_TTL_S
+
+
+def _exit_status(root: Path | None = None) -> int:
+    """The status the supervised relay exits with: 75 only for an asked-for stop.
+
+    0 otherwise — and under ``Restart=always`` a 0 is restarted, which is the
+    self-heal. macOS always answers 0: launchd's ``KeepAlive: {SuccessfulExit:
+    false}`` would relaunch on 75 (see :data:`DELIBERATE_STOP_EXIT_STATUS`).
+    The marker is consumed either way, so it describes exactly one exit.
+    """
+    deliberate = deliberate_stop_requested(root)
+    clear_deliberate_stop(root)
+    if deliberate and sys.platform.startswith("linux"):
+        return DELIBERATE_STOP_EXIT_STATUS
+    return 0
 
 
 def is_supported() -> bool:
@@ -14626,6 +14792,18 @@ def render_systemd(port: int = DEFAULT_PORT) -> str:
         exec_start=(
             f"{supervisors.quoted(str(image))} -m local_operator.network.relay " f"--port {port}"
         ),
+        # SELF-HEAL WITHOUT RESURRECTING A DELIBERATE STOP (2026-10-27): every
+        # exit nobody asked for comes back — the node's relay exited 0 and stayed
+        # down ~4 minutes under ``on-failure`` — while an asked-for stop exits
+        # with DELIBERATE_STOP_EXIT_STATUS and stays down. Chosen over "keep
+        # on-failure and make every unrequested exit non-zero" because that
+        # option needs the relay to classify EVERY way it can leave (signals,
+        # exceptions, interpreter shutdown) correctly, and one missed path is
+        # the stays-down defect again; here an unclassified exit fails SAFE
+        # (restarted). ``refresh_unit_if_stale`` rewrites installed units to this
+        # render, so existing installs gain these lines on their next update.
+        restart="always",
+        restart_prevent_exit_status=DELIBERATE_STOP_EXIT_STATUS,
         # ``KillMode=process`` IS THE SESSION-SAFETY FIX (2026-10-11), and the
         # relay is the one unit that must carry it: this device's session
         # runtimes are children of the relay, so under systemd's default
@@ -14856,7 +15034,29 @@ def refresh_unit_if_stale() -> Any:
             # macOS arm's "no live pid" decline).
             return launchd.PlistRefresh(name=name, kind="current")
         stale = update.stale_generation_of_process(pid)
-        if stale is None:
+        pinned = _named_generation(image)
+        current_generation = update.current_generation() if pinned is not None else None
+        pinned_stale = (
+            pinned.resolve() != current_generation.resolve()
+            if pinned is not None and current_generation is not None
+            else None if pinned is not None else False
+        )
+        # The unit is independent evidence of drift. A process-probe miss must
+        # not turn an old pinned unit + live process into `current`: a restart
+        # would re-execute that old image, so unit-vs-current proof is enough to
+        # move it. Conversely an unreadable pointer is a loud failed step, not
+        # an unverified restart or success.
+        move = stale or (pinned if pinned_stale else None)
+        if move is None:
+            if pinned_stale is None and pinned is not None:
+                return launchd.PlistRefresh(
+                    name=name,
+                    kind="failed",
+                    detail=(
+                        f"could not compare pinned generation {pinned.name} with the current "
+                        f"install — run `{recovery}` to reinstall and restart the relay"
+                    ),
+                )
             return launchd.PlistRefresh(name=name, kind="current")
         if current == rendered:
             # The rewrite arm already reloaded this caller's new definition.
@@ -14873,11 +15073,45 @@ def refresh_unit_if_stale() -> Any:
             why = "systemctl would not restart it"
             if str(result.get("reason") or "") == "not_restarted":
                 why = "the restart it accepted did not take"
-            return launchd.build_move_failure(name, recovery, stale, why=why)
+            return launchd.build_move_failure(name, recovery, move, why=why)
+        restarted_pid = _managed_service_pid()
+        restarted_stale = (
+            update.generation_staleness_of_process(restarted_pid)
+            if restarted_pid is not None
+            else None
+        )
+        if restarted_stale is not False:
+            # A fresh PID proves replacement, not the image that PID loaded. A
+            # generation-pinned unit can therefore satisfy the supervisor check
+            # while leaving the mesh on the pre-update build. The update must
+            # fail this step loudly unless the RUNNING process and `current`
+            # were both read and match; an unreadable comparison is not success.
+            loaded = (
+                update.generation_of_process(restarted_pid) if restarted_pid is not None else None
+            )
+            current_generation = update.current_generation()
+            if restarted_stale is True:
+                actual = loaded.name if loaded is not None else "an unreadable generation"
+                expected = (
+                    current_generation.name
+                    if current_generation is not None
+                    else "an unreadable current generation"
+                )
+                detail = (
+                    "the restarted relay process still loaded "
+                    f"{actual} instead of current generation {expected}"
+                )
+            else:
+                detail = "could not verify the restarted relay process's loaded generation"
+            return launchd.PlistRefresh(
+                name=name,
+                kind="failed",
+                detail=f"{detail} — run `{recovery}` to reinstall and restart the relay",
+            )
         return launchd.PlistRefresh(
             name=name,
             kind="restarted",
-            detail=stale.name,
+            detail=move.name,
             consequence="expect a brief mesh blip",
         )
     except Exception as exc:  # noqa: BLE001 — a repair must never fail an upgrade
@@ -15143,6 +15377,9 @@ def uninstall(
             )
         elif sys.platform.startswith("linux") and is_supported():
             if supervisors.systemd_unit_is_addressable(SYSTEMD_UNIT):
+                # A DELIBERATE STOP: marked before the signal, so the exit it
+                # causes reads as asked-for (DELIBERATE_STOP_EXIT_STATUS).
+                _mark_unit_stop("uninstall")
                 supervisors.systemctl_user("disable", "--now", SYSTEMD_UNIT)
                 systemd_path().unlink(missing_ok=True)
                 supervisors.systemctl_user("daemon-reload")
@@ -15827,6 +16064,15 @@ def _supervised_action(
     refused = guard(action)
     if refused is not None:
         return refused
+    marked = False
+    if action == "stop":
+        # THE OPERATOR'S STOP VERB (`lop network stop`) IS DELIBERATE: marked
+        # before the arm signals, so the exit reads as asked-for whichever route
+        # delivers it (see DELIBERATE_STOP_EXIT_STATUS for what that buys). Linux
+        # only — a no-op on macOS, where the marker is never read — and in the
+        # UNIT's config root (_unit_config_root). After the guard, so a
+        # redirected HOME writes nothing.
+        marked = _mark_unit_stop("lop network stop")
     port = _service_port()
     before = _supervision_state(port)
     replaced: list[dict[str, Any]] = []
@@ -15844,6 +16090,12 @@ def _supervised_action(
             replaced.append({**holder, "outcome": outcome})
     result = arm(action)
     if not result.get("ok"):
+        if marked:
+            # THE STOP DID NOT HAPPEN (review m1: e.g. `systemctl --user stop`
+            # could not reach the bus), so the relay is still running and its
+            # next exit is NOT asked-for. Left in place, the marker would keep a
+            # genuine crash inside its TTL down instead of restarting it.
+            clear_deliberate_stop(_unit_config_root())
         return _service_failure(action, port, result, replaced=replaced)
     verdict = _verify_service_action(action, before)
     if not verdict.get("ok"):
@@ -16362,6 +16614,27 @@ def _names_the_shim(image: Path) -> bool:
         return False
 
 
+def _named_generation(image: Path) -> Path | None:
+    """The generation root an image names, including through an interpreter symlink.
+
+    Do NOT resolve the image itself: a generation's ``bin/python3`` commonly
+    links to the shared runtime, whose real path is outside the generation. The
+    image a unit executes is nevertheless generation-pinned. Resolve only its
+    ancestors, matching ``update.generation_in_argv`` without splitting a path
+    that may contain spaces.
+    """
+    from local_operator import update
+
+    try:
+        root = update.generations_dir().resolve()
+        for parent in image.parents:
+            if parent.parent.resolve() == root:
+                return parent
+    except OSError:
+        return None
+    return None
+
+
 def _names_a_generation(image: Path) -> bool:
     """Whether ``image`` is an interpreter INSIDE this install's generations tree.
 
@@ -16375,14 +16648,7 @@ def _names_a_generation(image: Path) -> bool:
     moved it. An image anywhere else (a source checkout's venv, a pipx tree) is
     still not this run's to repoint.
     """
-    from local_operator import update
-
-    try:
-        root = update.generations_dir().resolve()
-        resolved = image.resolve()
-    except OSError:
-        return False
-    return resolved != root and root in resolved.parents
+    return _named_generation(image) is not None
 
 
 def _restart_target() -> tuple[Path | None, Path | None, bool]:
@@ -16487,6 +16753,16 @@ def generation_reading(pid: int | None) -> dict[str, Any]:
                     reading["relay_generation_stale"] = update.generation_staleness_of_process(pid)
             else:
                 reading["installed_build"] = update.version_of_image(target_image) or None
+                pinned = _named_generation(target_image)
+                if pinned is not None:
+                    # A restart re-executes this fixed image, so the ordinary
+                    # "restart the relay" remedy cannot move it onto `current`.
+                    # Keep the condition tri-state: only a readable pointer can
+                    # prove that the pinned generation differs.
+                    current = update.current_generation()
+                    reading["relay_unit_generation_pinned"] = (
+                        None if current is None else pinned.resolve() != current.resolve()
+                    )
     except Exception:  # noqa: BLE001 — a probe must never fail the payload it decorates
         pass
     return reading
@@ -16503,7 +16779,7 @@ def generation_words(facts: Mapping[str, Any]) -> str:
     pruned tree whose process still runs, which is the drill's own incident —
     because dropping it there would leave the row saying nothing.
 
-    FOUR ANSWERS (F10 slice A; the third is design round 1's D1 correction).
+    FIVE ANSWERS (F10 slice A; the third is design round 1's D1 correction).
     ``""``: nothing on either side can be named (no generation layout, no unit,
     no shim — the question cannot exist, and a pip/pipx machine keeps its block
     byte-for-byte). ``"not reported"``: the running build could not be read at
@@ -16511,7 +16787,9 @@ def generation_words(facts: Mapping[str, Any]) -> str:
     is current"``: the build WAS read and the comparison could not be proven.
     That read-but-unproven case is the steady state of a flow-install node, and
     withholding a value the surface holds made the row information-free exactly
-    where the drill ran (D1): name what was read, decline the verdict. The bare
+    where the drill ran (D1): name what was read, decline the verdict. A unit
+    pinned to another generation instead names that condition and its install
+    remedy, because a restart would load the same fixed image again. The bare
     version only when the shipped comparison proves the process current, and the
     flagged form only when it proves the move.
 
@@ -16532,6 +16810,11 @@ def generation_words(facts: Mapping[str, Any]) -> str:
     stale = facts.get("relay_generation_stale")
     if not running:
         return "not reported"
+    if facts.get("relay_unit_generation_pinned") is True:
+        # This unit re-executes an older fixed generation; restarting it cannot
+        # apply the install. Name the condition and the command that re-renders
+        # the unit through the stable shim, within the family's 80-column row.
+        return f"{running} — pinned generation; run lop network install"
     if not isinstance(stale, bool):
         return f"{running} — cannot confirm it is current"
     if not stale:
@@ -16757,8 +17040,11 @@ def amain(argv: list[str] | None = None) -> int:
     # with one record per request — the same reason the mobile daemon calls both.
     quiet_wire_clients()
     server = RelayServer(settings=settings)
+    # A marker left by a stop that never reached a relay (it was already down)
+    # must not excuse THIS relay's next unrequested exit; see _exit_status.
+    clear_deliberate_stop(server.root)
     server.serve_forever()
-    return 0
+    return _exit_status(server.root)
 
 
 if __name__ == "__main__":  # pragma: no cover - the supervised entry point

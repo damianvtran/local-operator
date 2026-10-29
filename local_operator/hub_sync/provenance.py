@@ -388,6 +388,26 @@ def iter_baselines(config_dir: Path) -> list[BaselineRecord]:
     return records
 
 
+def baselines_dir_listable(config_dir: Path) -> bool:
+    """Whether the baselines directory can be LISTED right now.
+
+    ``iter_baselines`` answers "the records I could read" and swallows an
+    unlistable directory as an empty one -- right for every inventory reader, wrong
+    for the ONE caller that deletes status rows on the strength of a check: a
+    transient listing failure would look exactly like "every link is gone", and the
+    prune would drop rows for items that still exist. A MISSING directory is not a
+    failure (a fresh profile has no links yet), so it answers True.
+    """
+
+    try:
+        with os.scandir(baselines_dir(config_dir)):
+            return True
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+
+
 def _sync_dir(directory: Path) -> None:
     """Fsync a directory so a rename/replace in it survives a power loss.
 

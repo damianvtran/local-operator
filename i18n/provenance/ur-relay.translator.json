@@ -1,0 +1,226 @@
+{
+  "schema": 1,
+  "record_kind": "translator_provenance",
+  "locale": "ur",
+  "scope": "six owned relay SPA namespaces together, plus the separate SSR relay.login namespace",
+  "base_revision": "bdb8083cb06d109d5a0cf0ec21a93078478a400e",
+  "date": "2026-10-24",
+  "status": "round_2_audits_clean_eligible_on_the_relay_slice",
+  "source_set": {
+    "reference_locale": "en",
+    "namespace_count": 7,
+    "key_count": 109,
+    "spa_namespaces": [
+      "relay.shell",
+      "relay.session",
+      "relay.session.tags",
+      "relay.account_policy",
+      "relay.library",
+      "relay.ask"
+    ],
+    "ssr_namespaces": [
+      "relay.login"
+    ]
+  },
+  "integrator": {
+    "agent": "translator (lopdev team)",
+    "session": "905e702c8399",
+    "model": "openrouter/moonshotai/kimi-k3.1-pro",
+    "fallback": "none",
+    "note": "Translated five newly owned namespaces and carried the two byte-identical prior Urdu candidates whose English source hashes still match. No self-audit, ledger pass, eligibility or hold change."
+  },
+  "hash_algorithm": "SHA-256 over exact UTF-8 file bytes; context_sha256 covers the English context sidecar",
+  "reused_translations": {
+    "relay.ask": {
+      "source_revision": "8f2084d507",
+      "source_record": "i18n/provenance/ur-core.translator.json",
+      "english_hash_matches_current": true,
+      "urdu_bytes_identical": true,
+      "note": "Reuse is translation provenance, not a fresh independent audit of this relay set."
+    },
+    "relay.session.tags": {
+      "source_revision": "8f2084d507",
+      "source_record": "i18n/provenance/ur-core.translator.json",
+      "english_hash_matches_current": true,
+      "urdu_bytes_identical": true,
+      "note": "Reuse is translation provenance, not a fresh independent audit of this relay set."
+    }
+  },
+  "terminology_decisions": {
+    "projection": "سیشن کا منظر (the arriving live session view, not graphical projection)",
+    "cached_usage": "کیش شدہ استعمال",
+    "model_family": "ماڈل فیملی",
+    "allowance": "الاؤنس",
+    "asset": "اثاثہ / اثاثے",
+    "account_routing": "اکاؤنٹ روٹنگ",
+    "working_directory": "ورکنگ ڈائریکٹری",
+    "path": "پاتھ",
+    "dismiss": "خارج کریں / خارج کیا گیا (carried from the prior Urdu core candidate)"
+  },
+  "width": {
+    "explicit_maxCells_samples_checked": 12,
+    "actual_explicit_maxCells_overflow_count": 0,
+    "overflow_risks": [
+      {
+        "key": "relay.session.tags.saving",
+        "cells": 16,
+        "budget": "No en maxCells; prior relay tag audits document a min-w-14/nowrap status area. Preserved reviewed bytes; rendered fit remains for independent design audit."
+      }
+    ]
+  },
+  "pending_gates": [
+    "ACTIVATION IS GATED: shipped.json makes Urdu globally eligible, so shipping it here would also expose Urdu to the CLI before #2863 (audited Urdu core completeness) and #2872 (TUI RTL projection) land, and before the operator's explicit activation decision. Hold this PR ready-but-unmerged until those land and activation is approved.",
+    "Independent native Urdu review of terminology, plural/safety meaning and RTL rendering; the two LLM audits below are not native human review.",
+    "Rendered narrow-width review of relay.session.tags.saving and the six SPA namespaces together; relay.login remains separate SSR.",
+    "Independent design/UX review of the RTL layout. The /language receipt copy is NOT changed here: #2863 owns it, and the 70-cell budget is breached at this branch's 7-value shipped set (72 cells at vi and at the 'klingon' refusal; zh-CN measures exactly 70), pinned in the tests and deferred to #2863.",
+    "Urdu namespaces outside this relay slice and the other clients remain English-source; nothing outside the relay slice is claimed translated."
+  ],
+  "namespaces": [
+    {
+      "namespace": "relay.shell",
+      "key_count": 44,
+      "en_sha256": "f53b23560b88b531ef8fc3274bc396676f26e755ad4ff9ad87ce368cebdee560",
+      "ur_sha256": "8370737fcb67775696b04f9331b91eb7db70dc1f848bc11c51d35142aa00ab0c",
+      "context_sha256": "16746ecd1537006992935bb2aa88fe39c46700d9e0341e7aacd565e2366349ea",
+      "translator_session": "905e702c8399"
+    },
+    {
+      "namespace": "relay.session",
+      "key_count": 17,
+      "en_sha256": "a4ae148de969d4a2e8541aca5b4b99ad311d9ef112a0d056fc21fcf90e7e0129",
+      "ur_sha256": "4747e1c5414e7d137a2bc4ac177aee54b13e1c272ce4cae6f4167a4fa4936a11",
+      "context_sha256": "8777c48c750d982f3f795c81d0a543e92000a3898223cfa60637f8a2edc1e2db",
+      "translator_session": "905e702c8399"
+    },
+    {
+      "namespace": "relay.session.tags",
+      "key_count": 19,
+      "en_sha256": "7254ba273a4148ddef8279161682ada6405745a9b1634c59a2c5b6ec9e677af0",
+      "ur_sha256": "4f0fab7f40bacc152b1cabba0244372b8d8dec40213c778ef8c417ac6be242aa",
+      "context_sha256": "8051bf6e05e0fd4720c8dfbf03094b81eb85b3239b7603c6c817f47cb40714c7",
+      "translator_session": "905e702c8399"
+    },
+    {
+      "namespace": "relay.account_policy",
+      "key_count": 13,
+      "en_sha256": "0019b08106e6f7762194b164b9b9b37054a8cfade759aa2f6490787a73dea890",
+      "ur_sha256": "e86334cb4a8627f3c616a30a8bd19661fe9191ce1557f80177927dc9bb51d509",
+      "context_sha256": "7e55e4fadebcde0a6b93d545a62b2743fbb16009498cdf4e2122cb309ecc07f4",
+      "translator_session": "905e702c8399"
+    },
+    {
+      "namespace": "relay.library",
+      "key_count": 1,
+      "en_sha256": "ad478c433a4db3e725994766c724a2e8e92176f015f8283e71dc13b87185466a",
+      "ur_sha256": "57e1c543fc084deda49a88eeb94c405e81b86a3cdf0a8037bf7ed571f4b9ce1d",
+      "context_sha256": "877b88290cf14602e63b2bb1c58719fac96a20ae53ff04b147e21de23df93c54",
+      "translator_session": "905e702c8399"
+    },
+    {
+      "namespace": "relay.ask",
+      "key_count": 11,
+      "en_sha256": "2ead3ad32467d6e7c7a7a4aa96a4bde65f7451687fe0878f8dedb464340b24e7",
+      "ur_sha256": "534aa6d0f7a34c153a088695fa052cc2342fe716de96a0fb0bfc9e5dffba863c",
+      "context_sha256": "85cb7131423eab2649ff1b7600eeedde3308cdfb36491a04e32daae16ab68c42",
+      "translator_session": "905e702c8399"
+    },
+    {
+      "namespace": "relay.login",
+      "key_count": 4,
+      "en_sha256": "9a59686bcd0e3641a5a807ea2b778cb385e591060c26c7fb994bea95e4de5bc5",
+      "ur_sha256": "2b3cfdd6808fa3091485c2c788d1708b3944b6a4730752246aa3777d4b23a985",
+      "context_sha256": "9fcd5a1669e6831b10b7041d82f77c69e858183c001ba9faa949532b4d71980a",
+      "translator_session": "905e702c8399"
+    }
+  ],
+  "updated_date": "2026-10-24",
+  "round_1_remediation": {
+    "date": "2026-10-24",
+    "audited_revision": "9dc317f46f9283d050c6ea7d5841626f062022d1",
+    "findings": [
+      {
+        "id": "UR-RELAY-R1-001",
+        "disposition": "fixed",
+        "namespace": "relay.shell",
+        "key": "relay.shell.usage.as_of",
+        "note": "Cached-at timestamp now uses کے مطابق for as-of semantics; تک incorrectly implied until/expiry. ICU order and skeletons unchanged."
+      }
+    ]
+  },
+  "audit_evidence": {
+    "scope": "all 109 keys across the seven relay namespaces (six SPA, relay.login SSR)",
+    "independence": "Both auditors are a different agent role and session from the translator (905e702c8399); neither edited the repository, and neither read the other's round-2 receipt before reporting.",
+    "rounds": [
+      {
+        "round": 1,
+        "date": "2026-10-24",
+        "audited_revision": "9dc317f46f9283d050c6ea7d5841626f062022d1",
+        "scope": "all 109 keys read in depth",
+        "auditors": [
+          {
+            "agent": "translation-auditor (lopdev team)",
+            "session": "49a2149e4f78",
+            "model": "openrouter/moonshotai/kimi-k3.1-pro",
+            "fallback": "none",
+            "result": "blocked_on_1_major",
+            "findings": 1,
+            "receipt": "scratchpad://ur-relay-audit-round1-49a2149e4f78.json"
+          },
+          {
+            "agent": "translation-auditor (lopdev team)",
+            "session": "a017851a0ea0",
+            "model": "openrouter/moonshotai/kimi-k3.1-pro",
+            "fallback": "none",
+            "result": "clean",
+            "findings": 0,
+            "receipt": "scratchpad://i18n-ur-relay-round1-second-a017851a0ea0-receipt.md",
+            "evidence": "scratchpad://i18n-ur-relay-round1-second-a017851a0ea0-evidence.json"
+          }
+        ],
+        "finding": {
+          "id": "UR-RELAY-R1-001",
+          "severity": "major",
+          "namespace": "relay.shell",
+          "key": "relay.shell.usage.as_of",
+          "disposition": "fixed",
+          "remediation_revision": "9dc317f46f9283d050c6ea7d5841626f062022d1",
+          "note": "تک read as until/expiry for an 'as of' cached-at timestamp; replaced by کے مطابق with ICU arguments and order unchanged."
+        }
+      },
+      {
+        "round": 2,
+        "date": "2026-10-24",
+        "audited_revision": "ea2f92e052027265a8c5688df3c28092c98bc0e6",
+        "scope": "remediation 9dc317f4..ea2f92e0: relay.shell 44/44 re-read by session 49a2149e4f78; the one changed value read in depth by session a017851a0ea0, which proved the other 108 keys byte-identical",
+        "auditors": [
+          {
+            "agent": "translation-auditor (lopdev team)",
+            "session": "49a2149e4f78",
+            "model": "radient/auto",
+            "fallback": "underlying served model not disclosed by the harness; selected route radient/auto",
+            "result": "clean",
+            "findings": 0,
+            "receipt": "scratchpad://ur-relay-audit-round2-49a2149e4f78.json"
+          },
+          {
+            "agent": "translation-auditor (lopdev team)",
+            "session": "a017851a0ea0",
+            "model": "radient/auto",
+            "fallback": "none stated",
+            "result": "clean",
+            "findings": 0,
+            "receipt": "scratchpad://i18n-ur-relay-round2-independent-a017851a0ea0-receipt.md",
+            "evidence": "scratchpad://i18n-ur-relay-round2-independent-a017851a0ea0-evidence.json"
+          }
+        ],
+        "verdict": "clean for all 109 keys; zero unresolved BLOCKER/MAJOR/MINOR/NIT"
+      }
+    ],
+    "ledger": "Seven ur relay rows in i18n/ledger.json record these auditors, sessions and models; the coverage allowance no longer lists the complete relay pairs.",
+    "rendered_evidence": "Not captured in either round: no browser, screenshot, shaping, bidi or narrow-width measurement is claimed. Rendered RTL/design sign-off remains a separate gate.",
+    "integration_rebase": {
+      "base": "fd3302ea8757d6d386255380c7feafded1aa97f6",
+      "note": "Rebased after the audits; all seven English and Urdu relay catalogue SHA-256 values still match the audited receipt values, so the clearance is on the current bytes."
+    }
+  }
+}

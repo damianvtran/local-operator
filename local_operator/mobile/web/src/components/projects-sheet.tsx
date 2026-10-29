@@ -313,7 +313,7 @@ function BackRow({ onClick, label = "projects" }: { onClick: () => void; label?:
 			onClick={onClick}
 			className="flex min-h-11 items-center gap-1 px-3 text-body-sm text-ink-muted active:bg-surface"
 		>
-			<span aria-hidden>‹</span>
+			<span aria-hidden dir="ltr" className="lo-directional">‹</span>
 			{label}
 		</button>
 	);

@@ -46,6 +46,11 @@ FIELDS = {
     "denies",
 }
 
+#: Every ``reason`` a retained withdrawal may carry: a fixed machine vocabulary. Shared with
+#: ``finite_share``'s card shape (#3087 r1, R1-1), which signs each deny row's ``reason``
+#: without displaying it -- safe only because it can be nothing but one of these tokens.
+DENY_REASONS = frozenset({"withdrawn", "local_only", "logout", "expired"})
+
 
 def _refuse(code: str = "finite_journal_unknown") -> NoReturn:
     raise MeshRefusal(
@@ -183,7 +188,7 @@ class Journal:
                         _refuse()
                     consent._revision(denial["revision"])
                     consent._ref(denial["approval_ref"])
-                    if denial["reason"] not in {"withdrawn", "local_only", "logout", "expired"}:
+                    if denial["reason"] not in DENY_REASONS:
                         _refuse()
                     encoded = json.dumps(
                         {k: denial[k] for k in ("selector", "revision", "approval_ref")},

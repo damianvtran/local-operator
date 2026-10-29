@@ -15,6 +15,7 @@ Each test pins one deterministic rule and FAILS on the pre-B2 code:
 from __future__ import annotations
 
 import json
+import time
 from typing import Any
 
 import pytest
@@ -132,7 +133,11 @@ def test_state_tags_keep_one_head_per_tag_across_five_passes(store):
 
 
 def test_a_corrected_state_row_is_never_overwritten(store):
-    persist(store, "m0", extract("", "## Goal\n- Ship the first version"), "ok", committed_at=1.0)
+    # Real commit times: this test reads through ``search``, which hides a capture
+    # past its 14-day deadline (``source_time`` + ``CAPTURE_TTL_S``, PR #3057), and
+    # a 1970 ``committed_at`` is expired on arrival.
+    base = time.time()
+    persist(store, "m0", extract("", "## Goal\n- Ship the first version"), "ok", committed_at=base)
     [item] = store.search("first version", "session")
     store.put(
         "session",
@@ -145,15 +150,18 @@ def test_a_corrected_state_row_is_never_overwritten(store):
         entity=item["id"],
         expected_version=item["version"],
     )
-    persist(store, "m1", extract("", "## Goal\n- Ship the second version"), "ok", committed_at=2.0)
+    persist(
+        store, "m1", extract("", "## Goal\n- Ship the second version"), "ok", committed_at=base + 1
+    )
     assert [f["body"] for f in _live(store, "goal")] == ["Ship the corrected version"]
 
 
 def test_a_full_state_chain_rolls_over_with_replaces_not_a_freeze(store, monkeypatch):
     monkeypatch.setattr(memory_capture, "MAX_REVISIONS", 3)
+    base = time.time()  # read through ``search``: see the corrected-row test above
     for n in range(5):
         rows = extract("", f"## Goal\n- Ship goal revision number {n}")
-        persist(store, f"roll-{n}", rows, "ok", committed_at=10.0 + n)
+        persist(store, f"roll-{n}", rows, "ok", committed_at=base + n)
     visible = [i for i in _visible(store, "goal revision") if i["status"] == "candidate"]
     assert [i["title"] for i in visible] == ["Ship goal revision number 4"]
     goals = _live(store, "goal")

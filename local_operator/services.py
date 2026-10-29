@@ -371,6 +371,27 @@ class _ServeOutcome:
     state: dict[str, Any] = field(default_factory=dict)
 
 
+def stale_serve_daemons(records: Sequence[Any] | None = None) -> list[Any] | None:
+    """The ``serve`` daemons NOT on the build the pointer names, or ``None``.
+
+    The same verdict ``lop services status`` prints as ``STALE:`` — the same
+    stamp and the same version-and-ref predicate — so a receipt that says
+    "serve is stale" and the status line an operator runs next can never
+    disagree. ``None`` when no stamp can be read: without a build to compare
+    against there is no verdict, and "none stale" would be a claim.
+
+    ``records`` defaults to the live set. The mesh pass passes the fleet as
+    status sees it (live records plus any whose address answers as their own
+    instance, which status lists as serving although the beat is late), so the
+    predicate is applied to the same rows status prints it on.
+    """
+    stamp = _current_stamp()
+    if stamp is None:
+        return None
+    fleet = live_serve_daemons() if records is None else records
+    return [record for record in fleet if not _serves_current_build(record, stamp)]
+
+
 def live_serve_daemons() -> list[Any]:
     """Every LIVE ``serve`` record on this machine, in pid order.
 
@@ -1454,7 +1475,7 @@ def _await_relocations(
 
 
 def restart_services(
-    *, wait_s: float = RELOAD_WAIT_S, rolling: bool = False
+    *, wait_s: float = RELOAD_WAIT_S, rolling: bool = False, supervised: bool = True
 ) -> list[ServiceRefresh]:
     """Bring EVERY non-runtime service onto the current build.
 
@@ -1472,10 +1493,22 @@ def restart_services(
     generation install has generations to roll a busy daemon through, and
     ``update._services_stage`` is the caller that knows. ``lop services restart``
     keeps the default, which is the non-rolling reload it always ran.
+
+    ``supervised=False`` runs the serve half ALONE, for the one caller that
+    cannot run the supervised half in-line: the mesh member pass
+    (``network/meshupdate.py``) runs inside the network relay, and the
+    supervised repair restarts that relay — ending the very process that still
+    owes the origin its receipt. That caller rolls the supervised units after
+    its reply instead (``meshupdate.roll_services_after_reply``), so skipping
+    them here is a deferral, not an omission; the serve move it keeps is this
+    function's own, so ``lop update``, ``lop services restart`` and a rollout
+    move a ``serve`` daemon through one path.
     """
     from local_operator import update
 
     refreshes: list[ServiceRefresh] = []
+    if not supervised:
+        return reload_serve_daemons(wait_s=wait_s, rolling=rolling)
     try:
         for refresh in update.refresh_daemons_after_upgrade():
             refreshes.append(

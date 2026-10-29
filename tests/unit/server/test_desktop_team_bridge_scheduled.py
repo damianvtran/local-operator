@@ -74,11 +74,26 @@ def proxy(tmp_path, monkeypatch):
                     "send_at": body["send_at"],
                     "status": "scheduled",
                     "created_at": "2030-04-05T10:00:00Z",
+                    "version": 0,
                 }
                 code, out = 201, {"msg": "Message scheduled", "result": state["row"]}
             elif self.command == "PATCH":
-                state["row"].update(body)
-                out = {"msg": "Message updated", "result": state["row"]}
+                # agent-server #223's optimistic check: a stale expected_version
+                # writes nothing and answers 409 concurrent_edit; a match (or
+                # no expected_version) applies the edit and advances version.
+                # Copy, never pop: ``calls`` holds this same dict as the wire record.
+                edit = dict(body)
+                expected = edit.pop("expected_version", None)
+                if expected is not None and expected != state["row"]["version"]:
+                    code, out = 409, {
+                        "code": "invalid_transition",
+                        "error": "Fixture refusal",
+                        "details": {"rule": "concurrent_edit"},
+                    }
+                else:
+                    state["row"].update(edit)
+                    state["row"]["version"] += 1
+                    out = {"msg": "Message updated", "result": state["row"]}
             elif self.command == "DELETE":
                 state["row"] = None
                 out = {"msg": "Scheduled message canceled"}
@@ -304,3 +319,84 @@ def test_a_schedule_without_a_thread_root_sends_no_such_field(proxy):
 
     assert created.status_code == 200, created.text
     assert "thread_root_id" not in calls[-1][2]
+
+
+def test_schedule_version_survives_every_response(proxy):
+    """The hub's ``version`` is what the renderer echoes as ``expected_version``,
+    so the proxy must hand it back unchanged on create, list and edit."""
+
+    client, _calls, _state, _ = proxy
+
+    created = client.post(PREFIX, json=CREATE)
+    listed = client.get(PREFIX, params={"tenant_id": "org-a"})
+    edited = client.patch(f"{PREFIX}/{SID}?tenant_id=org-a", json={"body": "edit"})
+
+    assert created.json()["result"]["version"] == 0
+    assert listed.json()["result"]["scheduled"][0]["version"] == 0
+    assert edited.json()["result"]["version"] == 1
+
+
+def test_an_edit_forwards_expected_version(proxy):
+    client, calls, _state, _ = proxy
+    client.post(PREFIX, json=CREATE)
+    patch = {"body": "edit", "expected_version": 0}
+
+    edited = client.patch(f"{PREFIX}/{SID}?tenant_id=org-a", json=patch)
+
+    assert edited.status_code == 200, edited.text
+    assert calls[-1][:3] == ("PATCH", f"/v1/messaging/scheduled/{SID}?tenant_id=org-a", patch)
+    assert edited.json()["result"]["version"] == 1
+
+
+def test_an_edit_without_expected_version_sends_no_such_field(proxy):
+    """An older hub refuses unknown body fields (``DisallowUnknownFields``), so
+    the field must never appear unless the caller sent it."""
+
+    client, calls, _state, _ = proxy
+    client.post(PREFIX, json=CREATE)
+
+    edited = client.patch(f"{PREFIX}/{SID}?tenant_id=org-a", json={"body": "edit"})
+
+    assert edited.status_code == 200, edited.text
+    assert calls[-1][2] == {"body": "edit"}
+
+
+def test_a_stale_expected_version_conflict_passes_through(proxy):
+    client, calls, state, _ = proxy
+    client.post(PREFIX, json=CREATE)
+    client.patch(f"{PREFIX}/{SID}?tenant_id=org-a", json={"body": "other device"})
+
+    stale = client.patch(
+        f"{PREFIX}/{SID}?tenant_id=org-a", json={"body": "stale", "expected_version": 0}
+    )
+
+    assert stale.status_code == 409, stale.text
+    assert stale.json()["detail"]["code"] == "invalid_transition"
+    assert stale.json()["detail"]["details"] == {"rule": "concurrent_edit"}
+    assert calls[-1][2] == {"body": "stale", "expected_version": 0}
+    assert state["row"]["body"] == "other device"
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [
+        # A precondition is not an edit: the hub would answer empty_patch.
+        {"expected_version": 0},
+        {"expected_version": 3, "body": None},
+        {"body": "edit", "expected_version": -1},
+        {"body": "edit", "expected_version": None},
+        # The hub decodes an int64 strictly; anything it would 400 is refused here.
+        {"body": "edit", "expected_version": "0"},
+        {"body": "edit", "expected_version": True},
+        {"body": "edit", "expected_version": 1.5},
+        {"body": "edit", "expected_version": 2**63},
+    ],
+)
+def test_invalid_expected_version_never_reaches_hub(proxy, patch):
+    client, calls, _state, _ = proxy
+
+    response = client.patch(f"{PREFIX}/{SID}?tenant_id=org-a", json=patch)
+
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"]["code"] == "invalid_request"
+    assert calls == []

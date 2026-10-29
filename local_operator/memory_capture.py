@@ -24,12 +24,14 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, NamedTuple
 
 from local_operator.memory import (
+    CAPTURE_AUTHOR,
     MAX_REVISIONS,
     MAX_TOMBSTONES,
     MemoryError,
     MemoryStore,
     _dump,
     guard,
+    is_expiry_tombstone,
     validate_fact,
     validate_op,
 )
@@ -1457,6 +1459,15 @@ def persist(
     if not isinstance(skipped, int) or skipped < 0:
         raise MemoryError("Invalid capture skip count.")
     timestamp = time.time() if committed_at is None else committed_at
+    # Unreviewed captures expire CAPTURE_TTL_S after their LAST revision (operator
+    # decision D2): each refresh below writes a new revision with a new deadline,
+    # so a fact the session keeps re-capturing lives while the session works. An
+    # integer deadline, not the float timestamp: the stamp is charged to the item's
+    # wire-token cap, and a 17-digit float costs more of it than seconds precision
+    # is worth. Deliberate facts never pass through here, so they never get one.
+    from local_operator.memory_maintenance import CAPTURE_TTL_S
+
+    expires_at = int(timestamp) + CAPTURE_TTL_S
     facts: dict[str, dict[str, Any]] = {}
     state: dict[str, dict[str, Any]] = {}
     # The tag of the previous admitted row: a state tag's bullets fold only while
@@ -1471,11 +1482,12 @@ def persist(
                     status="candidate",
                     created_at=timestamp,
                     source_time=timestamp,
+                    expires_at=expires_at,
                     source={
                         "session": store.identity.session_id,
                         "entry": marker_id,
                         "kind": "compaction",
-                        "author": "deterministic-capture",
+                        "author": CAPTURE_AUTHOR,
                     },
                 )
             )
@@ -1569,8 +1581,26 @@ def persist(
             # never fuzzy consolidation. Stable entities prevent repeated
             # compactions filling the ACTIVE bank; each committed marker still has
             # a distinct idempotent causal op.
-            operation_id = hashlib.sha256((entity + "|" + marker_id).encode()).hexdigest()
             ops = store._ops(db, entity)
+            # A capture entity that EXPIRED — every tombstone on it is an expiry
+            # tombstone (``is_expiry_tombstone``), recognisable from synced data
+            # whichever host wrote it — is re-admitted under a chained, still
+            # deterministic entity ``sha256(entity|expiry tombstone)``, so a
+            # session resumed after its captures went stale re-learns the same
+            # text, and two passes over it land on one entity. Any other
+            # tombstone (a person or an agent forgot it) keeps the text out. The
+            # lowest op id picks the link when two hosts both expired it.
+            # Bounded: each link needs a 14-day expiry of the previous one. State
+            # chains need none of this: ``_state_entity`` already rolls a
+            # forgotten generation to a fresh one.
+            while entity not in chains:
+                tombstones = [op for op in ops if op["kind"] == "tombstone"]
+                if not tombstones or not all(is_expiry_tombstone(op) for op in tombstones):
+                    break
+                link = min(op["op_id"] for op in tombstones)
+                entity = hashlib.sha256((entity + "|" + link).encode()).hexdigest()
+                ops = store._ops(db, entity)
+            operation_id = hashlib.sha256((entity + "|" + marker_id).encode()).hexdigest()
             if any(op["kind"] == "tombstone" for op in ops):
                 continue
             if any(op["op_id"] == operation_id for op in ops):
@@ -1586,6 +1616,10 @@ def persist(
                     len(heads) != 1
                     or current["status"] != "candidate"
                     or current["source"].get("kind") != "compaction"
+                    # An agent's correction that kept status ``candidate`` is
+                    # still deliberate: ``put`` rewrites the author on every
+                    # revision it writes, so only capture's own rows match.
+                    or current["source"].get("author") != CAPTURE_AUTHOR
                     or (current["source_time"] or 0) > timestamp
                     or len(ops) >= MAX_REVISIONS
                 ):

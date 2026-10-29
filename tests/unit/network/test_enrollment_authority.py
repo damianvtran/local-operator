@@ -537,13 +537,40 @@ def test_network_only_verify_requires_known_positive_targeted_producer_facts():
                     "code": "no_repository",
                     "detail": "fixture lacks a working copy",
                 },
+                {
+                    "check": "readiness",
+                    "class": "equipment",
+                    "device_id": "d_target",
+                    "ok": False,
+                    "capability": "peer_restart",
+                    "source": "local",
+                    "code": "update_grant_missing",
+                    "detail": "viewer cannot restart the target relay",
+                },
             ],
         }
 
     positive = report()
     rows = e.ready_evidence(positive, device_id="d_target", network_id="n_target")
-    assert [row["capability"] for row in rows] == ["model_credential", "repository"]
+    assert [row["capability"] for row in rows] == [
+        "model_credential",
+        "repository",
+        "peer_restart",
+    ]
     assert positive["ok"] is False
+    terminal = e.public_report(
+        {
+            "enrollment_verified": True,
+            "ready_ok": False,
+            "task_ready": False,
+            "equipment_warnings": rows,
+        }
+    )
+    assert {row["capability"] for row in terminal["equipment_warnings"]} == {
+        "model_credential",
+        "repository",
+        "peer_restart",
+    }
     variants = [
         None,
         {},

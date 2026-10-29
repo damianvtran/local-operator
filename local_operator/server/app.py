@@ -48,6 +48,7 @@ from local_operator.server.routes import (
     desktop_catalogues,
     desktop_claim,
     desktop_code_requests,
+    desktop_credentials,
     desktop_hub,
     desktop_imports,
     desktop_librarian,
@@ -987,6 +988,10 @@ app.include_router(desktop_mesh.router)
 # template declared earlier (`{id}/approve`/`{id}/deny` are two-segment children of a
 # path nothing else declares).
 app.include_router(desktop_approvals.router)
+# The op-generic TYPED approval routes (`{id}/approve-operation`, `{id}/apply-operation`):
+# their own router because `desktop_approvals.router`'s route set is a pinned contract.
+# Two-segment children of the same template family, so they collide with nothing above.
+app.include_router(desktop_credentials.router)
 # The CODE-REQUEST surface (`features.code_requests`): the per-session read of which PRs
 # and MRs this conversation touched, and the refresh affordance. Registered after the
 # approvals block for the reason each block above gives — FastAPI matches in declaration

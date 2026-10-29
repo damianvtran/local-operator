@@ -1116,7 +1116,7 @@ plus retry bookkeeping, never a source of truth for content).
       "remote_fingerprint": "<sha256 or null>",
       "local_fingerprint": "<sha256>",
       "baseline": "known | unknown",
-      "classification": "remote-only | both-changed | baseline-unknown | null",
+      "classification": "remote-only | both-changed | baseline-unknown | local-only | null",
       "summary": {"taken-remote": 2, "kept-local": 1, "combined": 0,
                   "removal-honored": 1, "unresolved": 0},
       "attempts": 0,
@@ -1144,6 +1144,39 @@ sentence, ≤ 300 chars, credential-scrubbed (`public_data`/`redact_secrets`
 precedent: `routes/desktop_radient.py:547`, `clients/_http.py` `scrub_details`).
 Items whose local row was deleted or whose baseline link vanished are pruned at
 the next tick.
+
+`classification` is the CHECK's answer about which side moved, and it is stored
+whenever the check reported one the row still needs — NOT only when the row is
+`available`. `local-only` (L≠B, R==B) is the one that rides an `up-to-date` row:
+the verdict answers the PULL (nothing to fetch), while the classification is the
+PUBLISH-side fact (the hub has not seen these bytes). Blanking it with the
+verdict made a locally edited copy read clean-too after one check, so no client
+could show "Modified" / "local changes not published". It stays an `up-to-date`
+row and is NEVER an incoming update: `apply`/`apply-all` select on the VERDICT
+(`available`), `auto_will_apply` requires the `available`/`updating` state, and
+nothing reads this field to decide an action. It is retired when the sentence
+stops being true: an accepted publication of THIS link clears it — a link push
+(the runner tick, `lop skills push`, the desktop `hub.push`) and a manual
+publish/republish (agent publish and republish, team publish, the CLI push
+commands; all through `seed_receipt_after_publish`, and only after its origin
+fence proves the hub row is the one this link names) — as does a pull that WROTE
+the hub's bytes and an unpull, which leaves no local copy to publish. A write
+that KEPT the local side (`prefer=local` / `replace=local`, whether it wrote or
+found nothing to write) stores it again. A full default check prunes the rows of
+items that no longer exist or are NO LONGER LINKED, and only when BOTH hold: that
+kind's inventory could be read completely (an unreadable `agent.yml`, a vanished
+`agents/` directory or an unlistable baselines directory makes the answer
+partial, not empty -- and the gate is PER KIND, so one bystander's broken
+definition does not freeze another kind's prune), AND the item itself is
+CONFIRMED gone -- `agents/<id>` absent from a tree that can be listed, a readable
+agent definition that names no `hub:` origin (the Tags editor can remove the
+marker, which unlinks the row), `teams/<id>` absent with no `.<id>.*` swap
+artifact, a skill with no baseline file at all. A row missing from a listing that
+failed to read its item is KEPT, with its retry schedule, its pull/push cadence
+and its backup pointer: absence from one pass is not evidence, and a permission
+error (EACCES) is unknown, never absence -- only ENOENT is. (The row-level twin
+of `provenance.prune`'s `confirmed_absent` guard, which has always refused to
+drop a baseline on an incomplete listing.)
 
 ### B4.3 Failure classes
 
@@ -1221,10 +1254,18 @@ Feature flag: `features.py:54` gains `"hub_updates": 1`; the UI gates on
 | Method + path | Body | Purpose |
 |---|---|---|
 | `GET /v1/desktop/hub/updates` | — | **Store read, no network, O(items).** The UI polling endpoint. |
-| `POST /v1/desktop/hub/updates/check` | `{request_id, kind?: "agent"\|"team", name?: str}` | Check now (network). Honors `force_refresh`. Applies nothing, even with auto on (user asked to *check*). Runs are single-flight (B3.3): a concurrent runner tick is joined, not doubled. |
-| `POST /v1/desktop/hub/updates/apply` | `{request_id, kind, name, prefer?: "local"\|"remote", acknowledge_unknown_baseline?: bool, replace?: "remote"\|"local", dry_run?: bool}` | Apply ONE item (click-to-update). `dry_run` returns the `ItemMergeReport` without writing (the preview a UI/CLI can show). `replace` requires `confirm_replace: true`. |
+| `POST /v1/desktop/hub/updates/check` | `{request_id, kind?: "agent"\|"team"\|"skill", name?: str, local_id?: str}` (at most one of `name`/`local_id`; `local_id` requires `kind`) | Check now (network). Honors `force_refresh`. Applies nothing, even with auto on (user asked to *check*). Runs are single-flight (B3.3): a concurrent runner tick is joined, not doubled. |
+| `POST /v1/desktop/hub/updates/apply` | `{request_id, kind, name?: str, local_id?: str, prefer?: "local"\|"remote", acknowledge_unknown_baseline?: bool, replace?: "remote"\|"local", dry_run?: bool}` (exactly one of `name`/`local_id`; `resolve_source` is name-only) | Apply ONE item (click-to-update). `dry_run` returns the `ItemMergeReport` without writing (the preview a UI/CLI can show). `replace` requires `confirm_replace: true`. |
 | `POST /v1/desktop/hub/updates/apply-all` | `{request_id, kind?: "agent"\|"team"}` | B4.4 semantics. |
-| `POST /v1/desktop/hub/updates/retry` | `{request_id, kind, name}` | Clears `attempts`/`next_retry_at`/`auto_retry=false`, then check+apply(auto=cfg) for that item. |
+| `POST /v1/desktop/hub/updates/retry` | `{request_id, kind, name?: str, local_id?: str}` (exactly one of `name`/`local_id`) | Clears `attempts`/`next_retry_at`/`auto_retry=false`, then check+apply(auto=cfg) for that item. |
+
+**Addressing (`hub_items_by_id`).** `name` matches display names case-insensitively, and
+display names are not unique (`Coder` and `coder` can both be linked), so a `name` request
+can reach several rows. `local_id` (the registry id, or a skill's link id, as `/hub/links`
+rows carry it) addresses exactly one row of exactly `kind`. An unknown id and an id of
+another kind are both 404, the same shape as an unknown name. A blank or whitespace-only
+id is 422. Renderers send `local_id` only when the capabilities advertise
+`hub_items_by_id`; older cores refuse the field with a 422.
 
 `GET /v1/desktop/hub/updates` → `CRUDResponse.result`:
 
@@ -1245,11 +1286,15 @@ Feature flag: `features.py:54` gains `"hub_updates": 1`; the UI gates on
 }
 ```
 
-Only items with `state != "up-to-date"` are listed, PLUS any item carrying the
-`no-credential` class — an org-linked row the local session has no login for never
-becomes `available`, and that class is the one fact the sidebar's sign-in sentence
-is drawn from (UX round 2, U11) — plus a `counts` roll-up (the sidebar polls this
-constantly; keep it small). Names are the profile/team
+Only items with `state != "up-to-date"` are listed, PLUS any up-to-date item that
+carries a fact the client cannot get anywhere else: the `no-credential` class (an
+org-linked row the local session has no login for never becomes `available`, and
+that class is the one fact the sidebar's sign-in sentence is drawn from — UX round
+2, U11), and `classification == "local-only"` (up to date to PULL, but the hub has
+not seen the person's edits; listed with its own state and classification so a
+client can say "Modified" / "local changes not published" after a check — never as
+`available`, and `auto_will_apply` stays false for it) — plus a `counts` roll-up
+(the sidebar polls this constantly; keep it small). Names are the profile/team
 **names** because they are the UI's attachment keys ("Names deliberately remain
 the runtime's attachment keys", `server/utils/desktop_profiles.py:1-6`).
 `auto_will_apply` = `auto_update.<kind> && state=="available" &&

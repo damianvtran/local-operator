@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createMessageRuntime, isResolvedLocale, type LocaleSnapshot } from "./runtime";
+import { createMessageRuntime, directionFor, isResolvedLocale, type LocaleSnapshot } from "./runtime";
 
 type MutableContext = { -readonly [K in keyof LocaleSnapshot]: LocaleSnapshot[K] };
 
@@ -37,7 +37,7 @@ describe("explicit translation context", () => {
 	});
 	it("keeps own bundles ahead of any wire map, and requires complete own copy for UI metadata", () => {
 		const context: MutableContext = { backendLocale: "ur", uiLocale: "en", direction: "ltr", revision: 0 };
-		const runtime = createMessageRuntime(() => context, () => { context.revision++; });
+		const runtime = createMessageRuntime(() => context, () => { context.revision++; }, ["relay.login"]);
 		runtime.registerBundle("relay.login", "en", { "relay.login.page.title": "English", "relay.login.submit.label": "Submit" });
 		runtime.registerBundle("relay.login", "ur", { "relay.login.page.title": "اردو" });
 		expect(runtime.uiLocaleFor("ur")).toBe("en");
@@ -46,5 +46,38 @@ describe("explicit translation context", () => {
 		context.uiLocale = runtime.uiLocaleFor("ur");
 		expect(context.uiLocale).toBe("ur");
 		expect(runtime.renderEnvelope("relay.login.page.title", {}, "old")).toEqual({ text: "اردو", locale: "ur", direction: "rtl" });
+	});
+
+	it("fails closed when a required owned namespace is wholly absent", () => {
+		const context: MutableContext = { backendLocale: "ur", uiLocale: "en", direction: "ltr", revision: 0 };
+		const runtime = createMessageRuntime(() => context, () => { context.revision++; }, ["relay.login", "relay.shell"]);
+		runtime.registerBundle("relay.login", "en", { "relay.login.page.title": "English" });
+		runtime.registerBundle("relay.login", "ur", { "relay.login.page.title": "اردو" });
+		expect(runtime.uiLocaleFor("ur")).toBe("en");
+		runtime.registerBundle("relay.shell", "en", { "relay.shell.list.empty": "Empty" });
+		expect(runtime.uiLocaleFor("ur")).toBe("en");
+		runtime.registerBundle("relay.shell", "ur", { "relay.shell.list.empty": "خالی" });
+		expect(runtime.uiLocaleFor("ur")).toBe("ur");
+	});
+
+	it("round-trips a live synthetic en to ur to en context without mislabelling fallback", () => {
+		const context: MutableContext = { backendLocale: "en", uiLocale: "en", direction: "ltr", revision: 0 };
+		const publish = () => {
+			context.uiLocale = runtime.uiLocaleFor(context.backendLocale);
+			context.direction = directionFor(context.uiLocale);
+			context.revision++;
+		};
+		const runtime = createMessageRuntime(() => context, publish, ["relay.login"]);
+		runtime.registerBundle("relay.login", "en", { "relay.login.page.title": "English" });
+		runtime.registerBundle("relay.login", "ur", { "relay.login.page.title": "اردو" });
+		expect(context).toMatchObject({ backendLocale: "en", uiLocale: "en", direction: "ltr" });
+		context.backendLocale = "ur";
+		publish();
+		expect(context).toMatchObject({ backendLocale: "ur", uiLocale: "ur", direction: "rtl" });
+		expect(runtime.t("relay.login.page.title")).toBe("اردو");
+		context.backendLocale = "en";
+		publish();
+		expect(context).toMatchObject({ backendLocale: "en", uiLocale: "en", direction: "ltr" });
+		expect(runtime.t("relay.login.page.title")).toBe("English");
 	});
 });

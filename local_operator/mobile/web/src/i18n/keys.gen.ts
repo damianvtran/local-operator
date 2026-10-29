@@ -53,6 +53,7 @@ export type MessageParams = {
   "relay.asks.card.dismiss": undefined;
   "relay.asks.card.gone": undefined;
   "relay.asks.card.nothing_left": undefined;
+  "relay.asks.card.other": undefined;
   "relay.asks.card.placeholder_answer": undefined;
   "relay.asks.card.placeholder_secret": undefined;
   "relay.asks.card.recommended": undefined;

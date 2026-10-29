@@ -15,6 +15,7 @@
   "relay.asks.card.secret_notice_persisted": "secreto — enviado directamente, no aparece en la transcripción y se guarda en tu almacén de credenciales",
   "relay.asks.card.placeholder_secret": "pega el secreto",
   "relay.asks.card.placeholder_answer": "tu respuesta",
+  "relay.asks.card.other": "Otro",
   "relay.asks.card.recommended": "· recomendado",
   "relay.asks.card.choose_any": "elige las que correspondan",
   "relay.asks.card.urgent": "· urgente",

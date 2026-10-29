@@ -9,6 +9,7 @@ helpers.
 
 from __future__ import annotations
 
+import os
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,7 @@ from typing import Any
 import pytest
 
 from local_operator.config import ConfigManager, read_config_values
+from local_operator.hub_sync import check as chk
 from local_operator.hub_sync import policies as pol
 from local_operator.hub_sync import provenance as prov
 from local_operator.hub_sync import service as svc
@@ -907,3 +909,243 @@ def test_a_publish_refusal_calls_a_file_occupant_a_file(tmp_path: Path) -> None:
     # It must not claim a skill exists, and it must not borrow A/B's sentence.
     assert "a skill named" not in message
     assert "outside the hub" not in message
+
+
+# -- unpublished local edits (Q14) -----------------------------------------------------
+#
+# A locally edited copy whose hub row has NOT moved is ``local-only``: nothing to
+# fetch, but the hub has not seen these bytes. The check verdict for it is
+# ``up-to-date``, and the status store used to blank the classification with the
+# verdict -- so after one check both hub routes answered "clean" and no client
+# could say "Modified" / "local changes not published". It must survive, and it
+# must keep being NOT an incoming update.
+
+
+def _edit_locally(ctx: svc.HubSyncContext, note: str = "## A local note\n") -> str:
+    """Change the managed copy in place, the way a person edits a skill."""
+
+    skill_md = ctx.config_dir / "skills" / ALIAS / "SKILL.md"
+    skill_md.write_text(skill_md.read_text(encoding="utf-8") + "\n" + note, encoding="utf-8")
+    return skill_md.read_text(encoding="utf-8")
+
+
+def _install(ctx: svc.HubSyncContext) -> None:
+    checks = svc.check_items(ctx, kinds=("skill",))
+    report = svc.apply_items(ctx, kind="skill", checks=checks, allow_llm=False)
+    assert report.reports[0].applied is True
+    # ``applied`` is kept for exactly ONE check cycle ("Updated just now"), so one
+    # more check settles the row to the ``up-to-date`` state these tests are about.
+    svc.check_items(ctx, kinds=("skill",))
+
+
+def test_a_locally_edited_skill_keeps_local_only_after_a_check(tmp_path: Path) -> None:
+    """The report, the stored row and BOTH hub projections keep the fact."""
+
+    ctx, _manager, _remote, base, _document = _rig(tmp_path)
+    _subscribe(ctx, base)
+    _install(ctx)
+    _edit_locally(ctx)
+
+    checks = svc.check_items(ctx, kinds=("skill",))
+    (check,) = checks
+    assert check.classification is not None and check.classification.state == "local-only"
+    assert check.verdict == "up-to-date"
+    assert svc.check_report(check).to_json()["classification"] == "local-only"
+
+    item = st.StatusStore(ctx.config_dir).load()["items"][f"skill:{check.local_id}"]
+    assert item["state"] == "up-to-date"
+    assert item["classification"] == "local-only", "the verdict must not blank the publish fact"
+
+    (row,) = [i for i in svc.status_snapshot(ctx)["items"] if i["kind"] == "skill"]
+    assert row["state"] == "up-to-date" and row["classification"] == "local-only"
+    assert row["auto_will_apply"] is False, "unpublished edits are never an incoming update"
+
+    (link,) = svc.links_snapshot(ctx, kinds=("skill",))["links"]
+    assert link["pull"]["classification"] == "local-only"
+    assert link["push"]["classification"] == "local-only"
+    assert link["auto_will_apply"] is False and link["auto_will_push"] is False
+
+
+def test_local_only_is_counted_and_selected_as_nothing_to_apply(tmp_path: Path) -> None:
+    """It is listed for the person and NEVER offered to update-all or auto-apply."""
+
+    ctx, _manager, _remote, base, _document = _rig(tmp_path)
+    _subscribe(ctx, base)
+    _install(ctx)
+    before = _edit_locally(ctx)
+
+    svc.check_items(ctx, kinds=("skill",))
+
+    snapshot = svc.status_snapshot(ctx)
+    assert snapshot["counts"]["available"] == 0
+    assert snapshot["counts"]["failed"] == 0
+    (row,) = [i for i in snapshot["items"] if i["kind"] == "skill"]
+    assert row["state"] == "up-to-date" and row["classification"] == "local-only"
+
+    # Update-all selects on the VERDICT: a local-only row is not in its todo, so
+    # the batch reports nothing and the person's bytes are untouched.
+    batch = svc.apply_items(ctx, kind="skill", all_available=True, allow_llm=False)
+    assert batch.reports == ()
+    # An unattended tick behaves the same way.
+    auto = svc.apply_items(
+        ctx, kind="skill", checks=svc.check_items(ctx, kinds=("skill",)), auto=True
+    )
+    assert auto.reports[0].outcome == "up-to-date" and auto.reports[0].applied is False
+    # A plain pull of the row writes nothing either.
+    pull = svc.apply_items(ctx, kind="skill", allow_llm=False)
+    assert pull.reports[0].outcome == "up-to-date" and pull.reports[0].applied is False
+    assert (ctx.config_dir / "skills" / ALIAS / "SKILL.md").read_text(encoding="utf-8") == before
+
+
+def test_an_accepted_push_retires_the_local_only_mark(tmp_path: Path) -> None:
+    """Once the hub HAS seen the bytes, the unpublished-changes fact is false."""
+
+    ctx, _manager, _remote, base, _document = _rig(tmp_path)
+    _subscribe(ctx, base)
+    _install(ctx)
+    _edit_locally(ctx)
+    (check,) = svc.check_items(ctx, kinds=("skill",))
+    key = f"skill:{check.local_id}"
+    assert st.StatusStore(ctx.config_dir).load()["items"][key]["classification"] == "local-only"
+
+    # The success fold both push paths share (the runner tick and `lop skills push`).
+    from local_operator.hub_sync.push import PushOutcome
+
+    outcome = PushOutcome("pushed", operation_id="op-1", revision='"rev-2"')
+    svc.record_push_outcome(ctx, check, outcome)
+
+    item = st.StatusStore(ctx.config_dir).load()["items"][key]
+    assert item["classification"] is None
+    assert item["last_pushed_at"] is not None
+    # And the row leaves the attention list: an up-to-date skill with nothing to
+    # publish carries no fact the person needs to act on.
+    assert [i for i in svc.status_snapshot(ctx)["items"] if i["kind"] == "skill"] == []
+
+
+# -- round-1 remediation: unpull, and a link that no longer exists ----------------------
+
+
+def test_an_unpull_retires_the_unpublished_changes_mark(tmp_path: Path) -> None:
+    """Q3: there are no local bytes left, so the mark is wrong the moment they go."""
+
+    ctx, _manager, _remote, base, _document = _rig(tmp_path)
+    _subscribe(ctx, base)
+    _install(ctx)
+    _edit_locally(ctx)
+    (check,) = svc.check_items(ctx, kinds=("skill",))
+    key = f"skill:{check.local_id}"
+    assert st.StatusStore(ctx.config_dir).load()["items"][key]["classification"] == "local-only"
+
+    record = _record(ctx.config_dir)
+    assert record.identity is not None
+    svc.unpull_skill(ctx, link_id=record.identity.link_id)
+
+    item = st.StatusStore(ctx.config_dir).load()["items"][key]
+    assert _record(ctx.config_dir).content_state == "absent"
+    assert item["classification"] is None, "an unpulled link has nothing to publish"
+
+
+def test_a_full_check_prunes_a_row_whose_link_is_gone(tmp_path: Path) -> None:
+    """Q1 for skills: the row dies with the link, not with a later check of it."""
+
+    ctx, _manager, _remote, base, _document = _rig(tmp_path)
+    _subscribe(ctx, base)
+    _install(ctx)
+    _edit_locally(ctx)
+    (check,) = svc.check_items(ctx, kinds=("skill",))
+    key = f"skill:{check.local_id}"
+    assert st.StatusStore(ctx.config_dir).load()["items"][key]["classification"] == "local-only"
+
+    for path in (ctx.config_dir / "hub" / "baselines").glob("skill-*.json"):
+        path.unlink()
+
+    svc.check_items(ctx)  # the FULL default check: every kind, no scope
+
+    assert key not in st.StatusStore(ctx.config_dir).load()["items"]
+
+
+def test_an_unlistable_baselines_dir_never_prunes_a_skill_row(tmp_path: Path) -> None:
+    """m1 for skills: a listing that FAILED is not a link that disappeared."""
+
+    ctx, _manager, _remote, base, _document = _rig(tmp_path)
+    _subscribe(ctx, base)
+    _install(ctx)
+    _edit_locally(ctx)
+    (check,) = svc.check_items(ctx, kinds=("skill",))
+    key = f"skill:{check.local_id}"
+    assert st.StatusStore(ctx.config_dir).load()["items"][key]["classification"] == "local-only"
+
+    baselines = ctx.config_dir / "hub" / "baselines"
+    os.chmod(baselines, 0o000)
+    try:
+        svc.check_items(ctx)  # the full check, over a baselines dir it cannot list
+        assert key in st.StatusStore(ctx.config_dir).load()["items"]
+    finally:
+        os.chmod(baselines, 0o700)
+
+
+def test_an_unreadable_baseline_file_keeps_its_row(tmp_path: Path) -> None:
+    """Q4(c): a baseline that cannot be READ is not a link that was removed.
+
+    ``iter_baselines`` skips the unreadable record, so the skill is absent from the
+    check's enumeration; only the file still existing proves the row must stay.
+    """
+
+    ctx, _manager, _remote, base, _document = _rig(tmp_path)
+    _subscribe(ctx, base)
+    _install(ctx)
+    (check,) = svc.check_items(ctx, kinds=("skill",))
+    key = f"skill:{check.local_id}"
+
+    def fold(doc: dict[str, Any]) -> None:
+        item = doc["items"][key]
+        item["last_pulled_at"] = "2026-01-01T00:00:00Z"
+        item["attempts"] = 2
+
+    st.StatusStore(ctx.config_dir).mutate(fold)
+
+    (baseline,) = (ctx.config_dir / "hub" / "baselines").glob("skill-*.json")
+    os.chmod(baseline, 0o000)
+    try:
+        svc.check_items(ctx)  # the full default check
+        item = st.StatusStore(ctx.config_dir).load()["items"].get(key)
+        assert item is not None, "a corrupt baseline is not a removed link"
+        assert item["attempts"] == 2
+        assert item["last_pulled_at"] == "2026-01-01T00:00:00Z"
+    finally:
+        os.chmod(baseline, 0o600)
+
+
+def test_a_read_only_baselines_dir_never_reads_a_link_as_gone(tmp_path: Path) -> None:
+    """m1 (round 3): a baselines directory we may READ but not TRAVERSE is UNKNOWN.
+
+    On Python 3.14 ``Path.exists()`` answers False on EACCES, so an existing
+    ``skill-*.json`` under such a directory read as a removed link and the row was
+    pruned. Only ENOENT may mean the link is gone.
+    """
+
+    ctx, _manager, _remote, base, _document = _rig(tmp_path)
+    _subscribe(ctx, base)
+    _install(ctx)
+    (check,) = svc.check_items(ctx, kinds=("skill",))
+    key = f"skill:{check.local_id}"
+
+    def fold(doc: dict[str, Any]) -> None:
+        item = doc["items"][key]
+        item["last_pulled_at"] = "2026-01-01T00:00:00Z"
+
+    st.StatusStore(ctx.config_dir).mutate(fold)
+
+    baselines = ctx.config_dir / "hub" / "baselines"
+    # ENOENT is answerable only on a traversable tree; EACCES must stay "unknown".
+    assert chk._absent(baselines / "skill-no-such-link.json") is True
+    os.chmod(baselines, 0o444)
+    try:
+        assert chk._absent(baselines / f"skill-{check.local_id}.json") is False
+        assert chk.skill_confirmed_gone(ctx.config_dir, check.local_id) is False
+        svc.check_items(ctx)  # the full default check
+        item = st.StatusStore(ctx.config_dir).load()["items"].get(key)
+        assert item is not None, "a permission error is not a removed link"
+        assert item["last_pulled_at"] == "2026-01-01T00:00:00Z"
+    finally:
+        os.chmod(baselines, 0o755)

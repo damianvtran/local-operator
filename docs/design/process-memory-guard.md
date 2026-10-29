@@ -167,6 +167,11 @@ state we are trying to prevent. Swap enters in one bounded way instead: a
 memory is the min of the §3.1 arm and the free-swap headroom, which lowers the
 ceiling on a host that has already paged itself into a corner. On this host now
 (1,192 MB free) the floor does not bind; the term exists for the day it does.
+The floor applies only where a swap pool exists (total > 0): a swapless host
+(Linux `SwapTotal: 0`, or macOS `total = 0.00M` before any swap file exists)
+reads as "no measurable swap", never as exhausted swap. Without that guard a
+16 GB cloud node with 13.5 GB available and no swap was floored to 256 MB
+effective and every command capped at 64 MB (2026-10-28).
 
 **Compression (macOS).** The compressor is deliberately not subtracted from
 available — pages it occupies are already excluded from free and file-backed

@@ -702,3 +702,54 @@ def test_a_fork_resumes_its_own_chain_once_it_has_one(tmp_path) -> None:
         _resumed_cache_diagnostics_id(_Journal([copied, own]))  # type: ignore[arg-type]
         == "msg_fork"
     )
+
+
+@pytest.mark.asyncio
+async def test_a_mid_session_account_switch_restarts_the_chain(tmp_path, monkeypatch) -> None:
+    """Fingerprints live per account: after the session moves to another
+    credential the previous id cannot be found, so the call must open a fresh
+    chain (``baseline``) instead of naming it (``previous_message_not_found``)."""
+    bodies: list[dict[str, Any]] = []
+    stream, store = await _mounted(tmp_path, monkeypatch, bodies)
+    try:
+        await _collect(stream(_turn(), None))  # msg_p_1 on the first credential
+        first = store.session_credential_id("anthropic", "p")
+        assert first is not None, "the resolve pins the serving credential"
+        await _collect(stream(_turn(), None))  # same account: chain continues
+        other = store.upsert_credential("anthropic", {"key": "sk-ant-other", "source": "login"})
+        store.pin_session_credential("anthropic", "p", other.id)
+        await _collect(stream(_turn(), None))  # switched account: chain restarts
+        await _collect(stream(_turn(), None))  # and continues on the new one
+    finally:
+        await stream.close()
+        store.close()
+    diag = [body.get("diagnostics", "absent") for body in bodies]
+    assert diag == [
+        {"previous_message_id": None},
+        {"previous_message_id": "msg_p_1"},
+        {"previous_message_id": None},
+        {"previous_message_id": "msg_p_3"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_released_sticky_on_the_same_account_keeps_the_chain(tmp_path, monkeypatch) -> None:
+    """An UNSET sticky is unknown, not switched: after the pin is released the
+    next resolve lands on the same credential, so the chain must continue
+    rather than open a spurious ``baseline`` (review #3072 m2)."""
+    bodies: list[dict[str, Any]] = []
+    stream, store = await _mounted(tmp_path, monkeypatch, bodies)
+    try:
+        await _collect(stream(_turn(), None))  # msg_p_1
+        first = store.session_credential_id("anthropic", "p")
+        store.release_session_credential("anthropic", "p")
+        await _collect(stream(_turn(), None))
+        assert store.session_credential_id("anthropic", "p") == first
+    finally:
+        await stream.close()
+        store.close()
+    diag = [body.get("diagnostics", "absent") for body in bodies]
+    assert diag == [
+        {"previous_message_id": None},
+        {"previous_message_id": "msg_p_1"},
+    ]

@@ -224,6 +224,20 @@ def test_a_unit_restarts_on_failure_and_not_always() -> None:
     assert unit.endswith("\n")
 
 
+def test_restart_prevent_exit_status_is_opt_in_and_paired_with_success() -> None:
+    """Only a unit that names the status gains the lines; it is also a clean exit."""
+    base = supervisors.render_systemd_unit(description="d", exec_start="/bin/true")
+    assert "RestartPreventExitStatus" not in base and "SuccessExitStatus" not in base
+
+    unit = supervisors.render_systemd_unit(
+        description="d", exec_start="/bin/true", restart="always", restart_prevent_exit_status=75
+    )
+    lines = unit.splitlines()
+    assert "Restart=always" in lines
+    assert lines.index("RestartPreventExitStatus=75") > lines.index("RestartSec=5")
+    assert "SuccessExitStatus=75" in lines
+
+
 def test_the_browser_unit_retains_its_hoisted_shape() -> None:
     """The browser's explicit log redirects keep their established placement."""
     expected = (

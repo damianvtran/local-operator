@@ -481,6 +481,18 @@ jobs:
           python -m pip install build
           python -m build --wheel --outdir dist/packaging-smoke
 
+      # The release ships a comment-stripped wheel (scripts/slim_wheel.py, for
+      # PyPI's 10 GB project cap), so the smoke legs must install that exact
+      # shape, and a PR whose code the slimmer cannot verify must fail here
+      # rather than at release time. The size guard runs at --budget-mib 17.5, not
+      # the release's 18: this wheel lacks the phone bundle and the key-agent helper
+      # (~0.37 MiB together), so the plain budget would first go red in the release's
+      # keyagent-macos job, after the tag exists (see scripts/check_dist_size.py).
+      - name: Slim the wheel and check its size budget
+        run: |
+          python scripts/slim_wheel.py dist/packaging-smoke/local_operator-*-py3-none-any.whl
+          python scripts/check_dist_size.py --budget-mib 17.5 dist/packaging-smoke
+
       - uses: actions/upload-artifact@v7
         with:
           name: packaging-smoke-wheel
@@ -897,7 +909,32 @@ jobs:
     # and only the prose differed, so this merges the two rationales rather
     # than raising the ceiling a second time. Weights, workers, partition and
     # watchdogs remain unchanged.
-    timeout-minutes: 32
+    #
+    # 32 -> 38 on 2026-10-28, and unlike every step above this is NOT a guard
+    # minimum: `shard_tests.py --report` projects the heaviest shard at 86.4
+    # serial test-minutes (~1296s on 4 workers), so the guard's minimum is
+    # ceil((1296 + 60)/60) = 23, well below 32. The ceiling is raised for
+    # runner speed variance instead. Measured from the API over 59 CI runs
+    # (378 shard jobs, 13:36Z-21:00Z): success walls by shard, p50/p90/max in
+    # minutes, were s0 27.2/28.8/29.1, s1 25.6/31.7/31.9, s2 26.9/30.6/31.3,
+    # s3 27.0/28.9/29.6 and s4 25.1/31.6/31.9. Eighteen jobs were cancelled at
+    # 32.0-32.9 minutes by this ceiling (seven on main, fifteen of them
+    # shard 1). Twelve of those had already printed a green pytest summary
+    # (1848-1882s of test time) and were cut in the ~0.1-minute tail; the
+    # other six were at 99% progress. Identical files swing by runner:
+    # #3087's shard 1 ran 12436 passed in 1881.59s and was cancelled at 32:15
+    # on attempt 2, then the SAME files passed in 1212.19s (21:11 wall) on
+    # attempt 3. That 1.55x swing is runner-side, so this buys protection
+    # against slow runners and is not a waiver for a test-cost regression.
+    # Formula: worst healthy wall W = 32.38 minutes (the slowest job to reach
+    # a green pytest summary, at 32.23, plus the slowest observed 0.15-minute
+    # tail), and 38 = ceil(1.15 * W). That also covers the worst cut-off run
+    # projected to completion (99% at 31.92 plus the slowest observed 3.50
+    # minutes from 99% to the summary, about 35.4). Weights are relative and
+    # the guard passes, so reweighting moves no runner's speed. More shards
+    # would spend the 20-job concurrency budget. Weights, workers, partition,
+    # and the per-test and stall watchdogs are unchanged.
+    timeout-minutes: 38
     strategy:
       fail-fast: false
       matrix:

@@ -616,8 +616,16 @@ def child_environment(
     for name in policy.exclude:
         env.pop(name, None)
     # LAST, and in BOTH modes: the daemon's desktop bearer never reaches a tool child,
-    # however the policy or an injection named it (operator ask a-772b; see
-    # ``agent_shell.DAEMON_BEARER_ENVS`` for the demonstrated path and the limit).
+    # however the policy or an injection named it (operator ask a-772b). This is not
+    # one of the operator's tool credentials, so ``inherit`` passing ``gh``'s token or
+    # an AWS profile through is unaffected. A command holding it can call any
+    # ``/v1/desktop/...`` route as the app, including the human-only Team Bridge owner
+    # audit that serves bodies the agent's screening REJECTED (PR #3022 QA round 1, Q1),
+    # and nothing a model runs needs it: only the daemon reads it
+    # (``server/desktop.py``), and a ``lop`` a model runs reaches sessions over the
+    # session socket, never the desktop plane. The names live once, in
+    # ``agent_shell.DAEMON_BEARER_ENVS`` (``tests/unit/server/
+    # test_owner_audit_model_reach.py`` pins them to the daemon's own).
     from local_operator.agent_shell import without_daemon_bearer
 
     without_daemon_bearer(env)

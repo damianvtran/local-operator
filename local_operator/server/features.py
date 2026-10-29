@@ -117,6 +117,15 @@ def static_feature_flags() -> dict[str, Any]:
         # no network) plus check/apply/apply-all/retry. A renderer gates the
         # sidebar indicator on this so it never polls a backend that lacks it.
         "hub_updates": 1,
+        # ADDRESSING ONE HUB ITEM BY ITS LOCAL ID: check/apply/retry under
+        # `/v1/desktop/hub/updates/*` accept `local_id` (with `kind`) beside
+        # `name`. Display names are not unique, and the name arm matches
+        # case-insensitively, so `name: "coder"` reaches both `Coder` and
+        # `coder`; a renderer that sees this key sends the `local_id` its
+        # `/hub/links` row carries and touches exactly one item. Its OWN key
+        # rather than a bump of `hub_updates`: older cores refuse the field as
+        # an unknown key (422), so a renderer must keep sending `name` there.
+        "hub_items_by_id": 1,
         # The full local-only LINKS inventory: GET /v1/desktop/hub/links plus
         # PATCH /v1/desktop/hub/links/{link_id} (independent subscribe/auto_push
         # with a policy-revision CAS). Its OWN key rather than a bump of
@@ -410,6 +419,20 @@ def static_feature_flags() -> dict[str, Any]:
         # in this runtime: feature branches must adopt the same guard before
         # advertising their mutations alongside this capability.
         "team_bridge_conversation_owner_guard": 1,
+        # The OWNER AUDIT ("{chief of staff}'s messages"): the read-only
+        # `/v1/desktop/team-bridge/owner-audit/...` family over agent-server
+        # #221, where the signed-in owner reads every conversation their own
+        # agent is or was in, with full bodies and per-message
+        # `agent_delivery_status`. Its own key by the `radient_org` rule: a
+        # renderer that does not see it hides the section rather than mounting
+        # one whose every call 404s. 1 is the shape version
+        # (`server/models/desktop_team_bridge_owner_audit.py`). The renderer
+        # keys the section's AVAILABILITY on this capability, never on a 404:
+        # `conversation_not_found` is also what a non-owner or an out-of-window
+        # conversation answers, so treating a 404 as "no audit here" would hide
+        # the section over one conversation (#3022 R1-N2). A hub that predates
+        # #221 is detected on the LIST route only (its 404 there).
+        "team_bridge_owner_audit": 1,
         # The owner's agent-invitation surface over agent-server #227: the
         # `GET /v1/desktop/team-bridge/agents/owned/invitations` read (metadata
         # only, receipt required, `private, no-store`) and `decision=withdraw`
@@ -421,6 +444,11 @@ def static_feature_flags() -> dict[str, Any]:
         # predates #227 answers either with 409 `outdated_hub`, which the
         # renderer shows as "the server needs an update" rather than probing.
         "team_bridge_owner_invitations": 1,
+        # `GET /v1/desktop/team-bridge/accounts/{id}/notification-avatar`: one
+        # precomposed PNG (photo or initials, LO corner badge, agent marker)
+        # for a Team Bridge OS notification's image slot. Own key so a desktop
+        # facing an older core keeps today's app icon instead of 404-probing.
+        "team_bridge_notification_avatar": 1,
         # Session code memory: GET/POST/PATCH/DELETE on
         # `/v1/desktop/sessions/{id}/variables`, reading and writing a
         # session's LIVE eval-kernel namespace by session id. Its OWN key

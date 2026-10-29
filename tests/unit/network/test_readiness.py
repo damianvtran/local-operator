@@ -18,13 +18,16 @@ Two properties are pinned here rather than only observed in the link tests:
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+from local_operator import procstate
 from local_operator.network import readiness, wire
 
 PEER = "d_" + "b" * 32
@@ -364,6 +367,7 @@ def test_repository_row_is_inserted_after_git_identity_only() -> None:
         readiness.CAPABILITY_MODEL_CREDENTIAL,
         readiness.CAPABILITY_TOOLING,
         readiness.CAPABILITY_RESILIENCE,
+        readiness.CAPABILITY_SERVE_DAEMON,
     )
 
 
@@ -531,34 +535,96 @@ def test_ready_reads_a_populated_closed_store_without_side_effects(tmp_path: Pat
     assert tmp_path.stat().st_mtime_ns == root_mtime
 
 
-def test_ready_reports_an_open_wal_as_unavailable_not_empty_or_stale(tmp_path: Path) -> None:
-    """Immutable reads cannot see a live WAL; say UNKNOWN, never invent empty."""
+def _wal_bytes_snapshot(root: Path) -> dict[str, Any]:
+    """Every file NAME, plus the database and ``-wal`` bytes, beside a live writer.
+
+    ``-shm`` content is left out on purpose: a WAL reader records its read-mark
+    in the existing ``-shm``, which is ordinary reader coordination, not a
+    credential write and not a new file. The same-process writer case is pinned
+    in tests/unit/providers/test_auth_store.py.
+    """
+    snapshot = _root_file_snapshot(root)
+    return {
+        "names": sorted(snapshot),
+        "bytes": {name: value for name, value in snapshot.items() if not name.endswith("-shm")},
+    }
+
+
+def _orphan_the_wal(root: Path, writer: Any) -> None:
+    """Leave ``auth.db`` beside a non-empty ``-wal`` and NO ``-shm``: a crashed writer.
+
+    The bytes are captured while ``writer`` is open (the committed rows live in
+    the WAL), then put back after it closes, which had checkpointed and removed
+    both sidecars. A read-only reader cannot open that WAL without creating a
+    ``-shm``, so it must keep the immutable snapshot and say it may be stale.
+    """
+    database = root / "auth.db"
+    wal = root / "auth.db-wal"
+    frozen = {database: database.read_bytes(), wal: wal.read_bytes()}
+    assert frozen[wal], "the fixture needs committed frames in -wal"
+    writer.close()
+    for path, data in frozen.items():
+        path.write_bytes(data)
+    assert not (root / "auth.db-shm").exists()
+
+
+def test_ready_reads_an_open_wal_as_current_without_creating_files(tmp_path: Path) -> None:
+    """A live writer's WAL is the normal state of a running owner: read it, do not say UNKNOWN.
+
+    The reader must still create nothing (#2894): both sidecars already exist,
+    and the database and ``-wal`` bytes are unchanged by the read.
+    """
     url = "https://mcp.notion.com/mcp"
     (tmp_path / "mcp.json").write_text(
         json.dumps({"mcpServers": {"notion": {"type": "http", "url": url}}}),
         encoding="utf-8",
     )
     auth = _seed_mcp_row(tmp_path, url)
+    auth.upsert_credential("openai", {"type": "oauth", "access": "ready-fixture-provider"})
     try:
-        assert auth.read_only_sidecar_present(), "the fixture needs an uncheckpointed WAL"
-        before = _root_file_snapshot(tmp_path)
-        root_mtime = tmp_path.stat().st_mtime_ns
+        assert (tmp_path / "auth.db-wal").stat().st_size > 0, "the fixture needs a live WAL"
+        before = _wal_bytes_snapshot(tmp_path)
 
-        fact = viewer = readiness.ViewerFacts(tmp_path)
+        viewer = readiness.ViewerFacts(tmp_path)
         try:
-            assert viewer.holds_mcp_login(url) is None
+            assert viewer.holds_mcp_login(url) is True
         finally:
             viewer.close()
         fact = readiness.collect_peer_facts(tmp_path)["mcp"]
 
         server = fact["servers"][0]
-        assert server["has_row"] is None
-        assert server["auth_diagnostics"]["access_state"] == "unknown"
-        assert server["auth_diagnostics"]["sharing_mode"] == "unavailable"
-        assert _root_file_snapshot(tmp_path) == before
-        assert tmp_path.stat().st_mtime_ns == root_mtime
+        assert server["has_row"] is True
+        assert server["auth_diagnostics"]["sharing_mode"] == "finite_only"
+        assert readiness.has_local_provider_credential(tmp_path, "openai", read_only=True) is True
+        assert _wal_bytes_snapshot(tmp_path) == before
     finally:
         auth.close()
+
+
+def test_ready_reports_an_orphaned_wal_as_unavailable_not_empty_or_stale(tmp_path: Path) -> None:
+    """Immutable reads cannot see a WAL they cannot open; say UNKNOWN, never invent empty."""
+    url = "https://mcp.notion.com/mcp"
+    (tmp_path / "mcp.json").write_text(
+        json.dumps({"mcpServers": {"notion": {"type": "http", "url": url}}}),
+        encoding="utf-8",
+    )
+    _orphan_the_wal(tmp_path, _seed_mcp_row(tmp_path, url))
+    before = _root_file_snapshot(tmp_path)
+    root_mtime = tmp_path.stat().st_mtime_ns
+
+    viewer = readiness.ViewerFacts(tmp_path)
+    try:
+        assert viewer.holds_mcp_login(url) is None
+    finally:
+        viewer.close()
+    fact = readiness.collect_peer_facts(tmp_path)["mcp"]
+
+    server = fact["servers"][0]
+    assert server["has_row"] is None
+    assert server["auth_diagnostics"]["access_state"] == "unknown"
+    assert server["auth_diagnostics"]["sharing_mode"] == "unavailable"
+    assert _root_file_snapshot(tmp_path) == before
+    assert tmp_path.stat().st_mtime_ns == root_mtime
 
 
 # This is the verdict specification, not a set of examples chosen to fit the code.
@@ -567,19 +633,23 @@ _CREDENTIAL_TRUTH_TABLE = {
     ("self", "healthy"): (True, ""),
     ("self", "absent"): (False, readiness.CODE_NO_CREDENTIAL),
     ("self", "corrupt"): (False, readiness.CODE_UNKNOWN),
-    ("self", "open_wal"): (False, readiness.CODE_UNKNOWN),
+    ("self", "open_wal"): (True, ""),
+    ("self", "orphan_wal"): (False, readiness.CODE_UNKNOWN),
     ("member", "healthy"): (True, ""),
     ("member", "absent"): (False, readiness.CODE_UNKNOWN),
     ("member", "corrupt"): (False, readiness.CODE_UNKNOWN),
-    ("member", "open_wal"): (False, readiness.CODE_UNKNOWN),
+    ("member", "open_wal"): (True, ""),
+    ("member", "orphan_wal"): (False, readiness.CODE_UNKNOWN),
     ("viewer", "healthy"): (True, ""),
     ("viewer", "absent"): (True, ""),
     ("viewer", "corrupt"): (False, readiness.CODE_UNKNOWN),
-    ("viewer", "open_wal"): (False, readiness.CODE_UNKNOWN),
+    ("viewer", "open_wal"): (True, ""),
+    ("viewer", "orphan_wal"): (False, readiness.CODE_UNKNOWN),
     ("third", "healthy"): (True, ""),
     ("third", "absent"): (True, ""),
     ("third", "corrupt"): (False, readiness.CODE_UNKNOWN),
-    ("third", "open_wal"): (False, readiness.CODE_UNKNOWN),
+    ("third", "open_wal"): (True, ""),
+    ("third", "orphan_wal"): (False, readiness.CODE_UNKNOWN),
 }
 
 
@@ -637,14 +707,17 @@ def _truth_fixture(
             observations.save()
 
     auth = None
-    if store_state in {"healthy", "open_wal"}:
+    if store_state in {"healthy", "open_wal", "orphan_wal"}:
         auth = _seed_mcp_row(root, URL)
         auth.upsert_credential("openai", {"type": "oauth", "access": "ready-openai-fixture"})
         if store_state == "healthy":
             auth.close()
             auth = None
+        elif store_state == "orphan_wal":
+            _orphan_the_wal(root, auth)
+            auth = None
         else:
-            assert auth.read_only_sidecar_present()
+            assert (root / "auth.db-wal").stat().st_size > 0
     elif store_state == "corrupt":
         (root / "auth.db").write_bytes(b"not a database")
     else:
@@ -679,7 +752,7 @@ def test_credential_verdict_truth_table(
     auth = _truth_fixture(root, placement_shape, store_state)
     try:
         facts = readiness.collect_peer_facts(root)
-        expected_fact = {"healthy": True, "absent": False}.get(store_state)
+        expected_fact = {"healthy": True, "open_wal": True, "absent": False}.get(store_state)
         assert facts["has_local"] is expected_fact
         assert facts["mcp"]["servers"][0]["has_row"] is expected_fact
         viewer = _truth_viewer(placement_shape)
@@ -700,7 +773,7 @@ def test_credential_verdict_truth_table(
 
 
 @pytest.mark.parametrize("placement_shape", ["member", "viewer", "third"])
-@pytest.mark.parametrize("store_state", ["healthy", "absent", "corrupt", "open_wal"])
+@pytest.mark.parametrize("store_state", ["healthy", "absent", "corrupt", "open_wal", "orphan_wal"])
 def test_observation_failure_precedes_store_uncertainty(
     tmp_path: Path, placement_shape: str, store_state: str
 ) -> None:
@@ -715,7 +788,7 @@ def test_observation_failure_precedes_store_uncertainty(
             viewer=_truth_viewer(placement_shape),
             peer_label="holder",
         )
-        if store_state == "healthy":
+        if store_state in {"healthy", "open_wal"}:
             assert row["ok"] is True
             assert row["detail"] == "holder serves openai from its own login"
         else:
@@ -729,9 +802,10 @@ def test_observation_failure_precedes_store_uncertainty(
             auth.close()
 
 
-@pytest.mark.parametrize("viewer_state", ["corrupt", "open_wal"])
+@pytest.mark.parametrize("viewer_state", ["corrupt", "orphan_wal"])
 def test_viewer_unknown_is_not_no_credential(tmp_path: Path, viewer_state: str) -> None:
     """A viewer store that cannot be read must not get a sign-in-first remedy."""
+    from local_operator.providers.auth_store import AuthStore
     from tests.unit.mcp.test_credential_status import URL
 
     peer_root = tmp_path / "peer"
@@ -742,10 +816,8 @@ def test_viewer_unknown_is_not_no_credential(tmp_path: Path, viewer_state: str) 
         json.dumps({"mcpServers": {"linear": {"type": "http", "url": URL}}}),
         encoding="utf-8",
     )
-    auth = None
-    if viewer_state == "open_wal":
-        auth = _seed_mcp_row(viewer_root, URL)
-        assert auth.read_only_sidecar_present()
+    if viewer_state == "orphan_wal":
+        _orphan_the_wal(viewer_root, _seed_mcp_row(viewer_root, URL))
     else:
         (viewer_root / "auth.db").write_bytes(b"not a database")
     viewer = None
@@ -764,10 +836,10 @@ def test_viewer_unknown_is_not_no_credential(tmp_path: Path, viewer_state: str) 
         assert row["detail"] in rendered[0]
         assert "sign in here first" not in "\n".join(rendered)
 
-        if viewer_state == "open_wal":
-            assert auth is not None
-            auth.close()
-            auth = None
+        if viewer_state == "orphan_wal":
+            # Control: the next writer recovers the orphaned WAL and checkpoints
+            # it on close, after which the same store reads definitely.
+            AuthStore(db_path=viewer_root / "auth.db", config_dir=viewer_root).close()
             control_viewer = readiness.ViewerFacts(viewer_root, device_id=VIEWER)
             try:
                 control = readiness.mcp_credential_rows(
@@ -780,8 +852,6 @@ def test_viewer_unknown_is_not_no_credential(tmp_path: Path, viewer_state: str) 
     finally:
         if viewer is not None:
             viewer.close()
-        if auth is not None:
-            auth.close()
 
 
 def test_an_unopenable_store_answers_could_not_be_read(tmp_path: Path) -> None:
@@ -1899,8 +1969,13 @@ def _composed_model_credential_row(
     provider: str,
     *,
     peer_holds: bool = False,
+    framed: bool = False,
 ) -> dict[str, Any]:
-    """Compose one model row from real network, placement and AuthStore state."""
+    """Compose one model row from real network, placement and AuthStore state.
+
+    ``framed`` publishes the current peer's ``credential_required`` fact; without
+    it the facts are an older peer's, which must keep the legacy sentences.
+    """
     from local_operator.network import identity, relay, store, types
     from local_operator.network.credentials import placement as placement_mod
     from local_operator.providers.auth_store import AuthStore
@@ -1976,6 +2051,7 @@ def _composed_model_credential_row(
             "model_name": "synthetic-model",
             "resolved": True,
             "reason": "",
+            **({"credential_required": True} if framed else {}),
         },
     )
     facts = readiness.collect_peer_facts(peer_root, home=peer_root)
@@ -2033,6 +2109,102 @@ def test_model_credential_healthy_peer_is_unchanged(
         "ok  readiness model_credential cloud-node-1: "
         "cloud-node-1 serves synthetic-provider from its own login"
     ]
+
+
+# ---------------------------------------------------------------------------
+# The DEFAULT model, framed as the create preflight will meet it
+# ---------------------------------------------------------------------------
+
+
+def test_an_unservable_default_names_the_default_and_the_create_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The live node-2 shape: default radient, the peer not among radient's holders.
+
+    The create preflight refuses ``model_credential_missing`` here; the row must
+    say THAT (the default, and a create without --model refused), keep the
+    holder fact, and remedy with a model choice -- never a share, never
+    "declined" (no decline is persisted to read). Composed from real network,
+    placement and AuthStore state; only the peer's default pair is pinned.
+    """
+    for cell in ("legacy", "framed"):
+        (tmp_path / cell).mkdir()
+    legacy = _composed_model_credential_row(tmp_path / "legacy", monkeypatch, "radient")
+    row = _composed_model_credential_row(tmp_path / "framed", monkeypatch, "radient", framed=True)
+
+    assert row["ok"] is False and row["code"] == readiness.CODE_NOT_SHARED
+    assert row["detail"] == (
+        "cloud-node-1's default model radient/synthetic-model cannot be served "
+        f"({legacy['detail']}); a create there without --model is refused"
+    )
+    assert row["remedies"] == [
+        "set cloud-node-1's default to a model it holds (`/model default` in its window), "
+        "or create with --model <provider>/<model-id> naming a provider cloud-node-1 holds instead"
+    ]
+    rendered = "\n".join(readiness.render_check_lines([row]))
+    for forbidden in ("credential share", "share it with", "as a holder", "declin"):
+        assert forbidden not in rendered
+    # An older peer (no ``credential_required``) keeps today's sentence exactly.
+    assert legacy["detail"].startswith("radient is shared in this network")
+    assert legacy["remedies"] == [
+        "create with --model <provider>/<model-id> naming a provider cloud-node-1 holds instead"
+    ]
+
+
+def test_a_servable_default_is_unchanged_when_framed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    row = _composed_model_credential_row(
+        tmp_path, monkeypatch, "deepseek", peer_holds=True, framed=True
+    )
+    assert row["ok"] is True
+    assert row["detail"] == "cloud-node-1 serves deepseek from its own login"
+
+
+def _default_root(root: Path, hosting: str, model_name: str) -> Path:
+    root.mkdir(parents=True)
+    (root / "config.yml").write_text(
+        f'version: "0.0.0"\nvalues:\n  hosting: {hosting}\n  model_name: {model_name}\n',
+        encoding="utf-8",
+    )
+    return root
+
+
+def test_a_keyless_default_is_ready_because_create_needs_no_credential(tmp_path: Path) -> None:
+    """Ready used to FAIL a local-server default the create preflight accepts."""
+    from local_operator.network import relay
+    from local_operator.providers import registry
+
+    keyless = next(
+        d.id for d in registry.PROVIDER_REGISTRY if d.allows_missing_api_key and d.wire != "mock"
+    )
+    root = _default_root(tmp_path / "peer", keyless, "local-model")
+    before = sorted(p.name for p in root.iterdir())
+    facts = readiness.collect_peer_facts(root, home=root)
+    assert sorted(p.name for p in root.iterdir()) == before  # a report writes nothing
+    assert facts["default_model"]["credential_required"] is False
+    row = readiness.model_credential_row(
+        _member(), facts, viewer=_FakeViewer(rows=[]), peer_label="cloud-node-1"
+    )
+    assert row["ok"] is True
+    assert (
+        row["detail"] == f"cloud-node-1's default model {keyless}/local-model needs no credential"
+    )
+    # The prediction: the create preflight on the same root does not refuse.
+    assert relay._model_credential_refusal(root, None, None) == ""
+
+
+def test_an_unreadable_store_stays_unknown_for_a_framed_default(tmp_path: Path) -> None:
+    """Create's fail-open on "cannot tell" is not proof; the row stays UNKNOWN."""
+    root = _default_root(tmp_path / "peer", "radient", "auto")
+    (root / "auth.db").write_bytes(b"not a database")
+    facts = readiness.collect_peer_facts(root, home=root)
+    assert facts["default_model"]["credential_required"] is True
+    row = readiness.model_credential_row(
+        _member(), facts, viewer=_FakeViewer(rows=[]), peer_label="cloud-node-1"
+    )
+    assert row["ok"] is False and row["code"] == readiness.CODE_UNKNOWN
+    assert "default model" not in row["detail"]
 
 
 def test_a_share_that_has_not_been_pulled_is_not_denied() -> None:
@@ -2896,6 +3068,160 @@ def test_equipment_note_names_failed_mcp_rows_and_nothing_else() -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_peer_restart_row_is_unknown_offline_and_uses_only_receiver_evidence() -> None:
+    """Viewer-local grants cannot create either a false pass or a false denial."""
+    own = SimpleNamespace(device_id=VIEWER, active=True, capabilities=["list"])
+    record = SimpleNamespace(
+        network_id="n_restart_grant",
+        self_device_id=VIEWER,
+        self_member=lambda: own,
+    )
+    row = readiness.peer_restart_row(_member(), {}, record=record, peer_label="cloud-node-1")
+    assert row["ok"] is False, row
+    assert row["code"] == readiness.CODE_UNKNOWN, row
+    assert "cannot confirm" in row["detail"], row
+    assert row["source"] == readiness.SOURCE_UNKNOWN, row
+    assert row["remedies"] == [
+        f"if restart is refused, on cloud-node-1, run "
+        f"`lop network member grant n_restart_grant {VIEWER} update`"
+    ]
+    assert readiness.row_state(row) == "warn", row
+    rendered = "\n".join(readiness.render_check_lines([row]))
+    assert "peer_restart" in rendered, rendered
+    assert row["remedies"][0] in rendered, rendered
+
+    no_record = readiness.peer_restart_row(_member(), {}, record=None, peer_label="cloud-node-1")
+    assert no_record["code"] == readiness.CODE_UNKNOWN, no_record
+    assert no_record["source"] == readiness.SOURCE_UNKNOWN, no_record
+    assert "<network> <this-device-id> update" in no_record["remedies"][0]
+
+    def receiver_fact(granted: bool) -> dict[str, Any]:
+        return {
+            "restart_authority": {
+                "network_id": record.network_id,
+                "device_id": VIEWER,
+                "update_granted": granted,
+            }
+        }
+
+    # Counterexample 1: the viewer's local self row says update, but the
+    # receiver explicitly denies it. The receiver must win.
+    own.capabilities.append("update")
+    denied = readiness.peer_restart_row(
+        _member(), receiver_fact(False), record=record, peer_label="cloud-node-1"
+    )
+    assert denied["ok"] is False and denied["code"] == "update_grant_missing", denied
+    assert denied["source"] == readiness.SOURCE_PEER, denied
+    assert denied["remedies"] == [
+        f"on cloud-node-1, run `lop network member grant n_restart_grant {VIEWER} update`"
+    ]
+
+    # Counterexample 2: the viewer lacks its own update row, while the receiver
+    # explicitly grants it. Again only the receiver's evidence matters.
+    own.capabilities.clear()
+    allowed = readiness.peer_restart_row(
+        _member(), receiver_fact(True), record=record, peer_label="cloud-node-1"
+    )
+    assert allowed["ok"] is True, allowed
+    assert allowed["source"] == readiness.SOURCE_PEER, allowed
+    assert allowed["remedies"] == [], allowed
+
+
+def test_net_readiness_tracks_the_same_receiver_grant_as_the_authorizer(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A real receiver-side grant mutation flips readiness and net_restart together."""
+    from local_operator.network import authorizer as authorizer_mod
+    from local_operator.network import identity, relay, store, types
+
+    receiver_root = root / "receiver"
+    viewer_root = root / "viewer"
+    receiver_root.mkdir()
+    viewer_root.mkdir()
+    receiver = identity.mint(receiver_root, name="receiver")
+    viewer = identity.mint(viewer_root, name="viewer")
+    server = relay.RelayServer(
+        root=receiver_root,
+        identity=receiver,
+        settings=relay.NetworkSettings(port=0, listen_address="127.0.0.1"),
+    )
+    record = types.NetworkRecord(
+        network_id="n_receiver_grant",
+        name="receiver-grants",
+        created_by=receiver.device_id,
+        self_device_id=receiver.device_id,
+        self_role="admin",
+        self_capabilities=sorted(types.capabilities_for_role("admin")),
+    )
+    relay.admit(
+        record,
+        device_id=receiver.device_id,
+        public_key=receiver.public_key,
+        name=receiver.name,
+        role="admin",
+        added_by=receiver.device_id,
+        added_via="self",
+        persist=False,
+    )
+    relay.admit(
+        record,
+        device_id=viewer.device_id,
+        public_key=viewer.public_key,
+        name=viewer.name,
+        role="read",
+        added_by=receiver.device_id,
+        added_via="invite",
+        persist=False,
+    )
+    store.save(record, receiver_root)
+    monkeypatch.setattr(readiness, "collect_peer_facts", lambda *a, **k: {})
+    handler = readiness.make_handler(server)
+    link = SimpleNamespace(network_id=record.network_id, device_id=viewer.device_id)
+    viewer_record = SimpleNamespace(
+        network_id=record.network_id,
+        self_device_id=viewer.device_id,
+    )
+
+    def current_row() -> dict[str, Any]:
+        facts = handler(link, {})
+        return readiness.peer_restart_row(
+            _member(receiver.device_id, receiver.name),
+            facts,
+            record=viewer_record,
+            peer_label=receiver.name,
+        )
+
+    def authorizer_allows() -> bool:
+        current = store.load(record.network_id, receiver_root)
+        member = current.member(viewer.device_id)
+        assert member is not None
+        context = types.LinkContext(
+            link_id="receiver-grant-test",
+            device_id=viewer.device_id,
+            instance_id="i_receiver_grant_test",
+            network_id=current.network_id,
+            epoch=current.epoch,
+            capabilities=frozenset(member.capabilities),
+            phase="member",
+        )
+        try:
+            server.authorizer.check(context, {"op": "net_restart"})
+        except authorizer_mod.Refusal:
+            return False
+        return True
+
+    assert current_row()["code"] == "update_grant_missing"
+    assert authorizer_allows() is False
+
+    with store.mutate(record.network_id, receiver_root) as current:
+        relay.set_member_capabilities(current, device_id=viewer.device_id, grant=("update",))
+        store.save(current, receiver_root)
+
+    granted_row = current_row()
+    assert granted_row["ok"] is True, granted_row
+    assert authorizer_allows() is True
+
+
 def test_not_asked_and_too_old_rows_cover_the_checklist() -> None:
     member = _member()
     not_asked = readiness.not_asked_rows(member, detail="not asked: the peer did not answer")
@@ -3042,3 +3368,506 @@ def test_compose_names_the_running_build_where_one_can_be_read(
 
 def test_wire_capability_is_the_constant(monkeypatch: pytest.MonkeyPatch) -> None:
     assert wire.PEER_READINESS_V1 in wire.LINK_CAPABILITIES
+
+
+# ---------------------------------------------------------------------------
+# (i) The serve daemon: is the process hosting remote sessions current and
+# supervised? (2026-10-28, lop-remote-node-2: `lop serve` served 0.90.1 while
+# the install was 0.90.18, inside an SSH login's session scope, and `ready`
+# reported only the relay's build.)
+# ---------------------------------------------------------------------------
+
+_LOGIN_SCOPE = "/user.slice/user-1000.slice/session-2122.scope"
+_SERVE_UNIT = "/user.slice/user-1000.slice/user@1000.service/app.slice/lop-serve.service"
+
+
+def _serve_fact(
+    *,
+    version: str = "0.90.18",
+    source_ref: str = "",
+    cgroup: str | None = _SERVE_UNIT,
+    platform: str = "linux",
+    install: dict[str, str] | None = None,
+    reloadable: bool = True,
+) -> dict[str, Any]:
+    return {
+        "platform": platform,
+        "install": install if install is not None else {"version": "0.90.18", "source_ref": ""},
+        "daemons": [
+            {
+                "pid": 537864,
+                "state": "live",
+                "identity": "proven",
+                "version": version,
+                "source_ref": source_ref,
+                "reloadable": reloadable,
+                "cgroup": cgroup,
+            }
+        ],
+    }
+
+
+def test_serve_daemon_row_flags_a_stale_daemon_with_the_in_place_reload() -> None:
+    row = readiness.serve_daemon_row(
+        _member(), _facts(serve_daemons=_serve_fact(version="0.90.1")), peer_label="node-2"
+    )
+    assert row["ok"] is False
+    assert row["capability"] == readiness.CAPABILITY_SERVE_DAEMON
+    assert row["code"] == readiness.CODE_SERVE_STALE
+    assert "runs 0.90.1" in row["detail"] and "0.90.18" in row["detail"]
+    assert any("`lop services restart`" in remedy for remedy in row["remedies"])
+    # Equipment that warns, never the reason onboarding fails.
+    assert readiness.row_state(row) == readiness.ROW_STATE_WARN
+    assert readiness.onboarding_failures([row]) == []
+
+
+def test_serve_daemon_row_counts_a_same_version_rebuild_as_stale() -> None:
+    """Both halves, like ``services._serves_current_build``: lop-update rebuilds
+    keep the version and move only the ref."""
+    row = readiness.serve_daemon_row(
+        _member(),
+        _facts(
+            serve_daemons=_serve_fact(
+                source_ref="aaaaaaa", install={"version": "0.90.18", "source_ref": "bbbbbbb"}
+            )
+        ),
+        peer_label="node-2",
+    )
+    assert row["code"] == readiness.CODE_SERVE_STALE
+
+
+def test_serve_daemon_row_flags_a_login_scope_as_unsupervised() -> None:
+    row = readiness.serve_daemon_row(
+        _member(), _facts(serve_daemons=_serve_fact(cgroup=_LOGIN_SCOPE)), peer_label="node-2"
+    )
+    assert row["ok"] is False
+    assert row["code"] == readiness.CODE_UNSUPERVISED
+    assert "session-2122.scope" in row["detail"]
+    assert "reboot" in row["detail"] and "every remote session it hosts" in row["detail"]
+    assert any("service unit" in remedy for remedy in row["remedies"])
+    assert readiness.row_state(row) == readiness.ROW_STATE_WARN
+
+
+def test_serve_daemon_row_names_both_when_stale_and_unsupervised() -> None:
+    """The node's actual state: the code leads with the fix that runs now."""
+    row = readiness.serve_daemon_row(
+        _member(),
+        _facts(serve_daemons=_serve_fact(version="0.90.1", cgroup=_LOGIN_SCOPE)),
+        peer_label="node-2",
+    )
+    assert row["code"] == readiness.CODE_SERVE_STALE
+    assert "0.90.1" in row["detail"] and "session-2122.scope" in row["detail"]
+    assert len(row["remedies"]) == 2
+
+
+def test_serve_daemon_row_is_ok_under_a_unit_on_the_installed_build() -> None:
+    row = readiness.serve_daemon_row(
+        _member(), _facts(serve_daemons=_serve_fact()), peer_label="node-2"
+    )
+    assert row["ok"] is True, row
+    assert "lop-serve.service" in row["detail"]
+    assert "code" not in row
+
+
+def test_serve_daemon_row_does_not_read_cgroups_off_linux() -> None:
+    row = readiness.serve_daemon_row(
+        _member(),
+        _facts(serve_daemons=_serve_fact(cgroup=None, platform="darwin")),
+        peer_label="mac",
+    )
+    assert row["ok"] is True, row
+
+
+def test_serve_daemon_row_from_an_old_peer_is_unknown_never_ok() -> None:
+    row = readiness.serve_daemon_row(_member(), _facts(), peer_label="node-2")
+    assert row["ok"] is False
+    assert row["code"] == readiness.CODE_UNKNOWN
+    assert row["source"] == readiness.SOURCE_UNKNOWN
+
+
+def test_serve_daemon_row_without_an_install_to_compare_is_unknown() -> None:
+    fact = _serve_fact()
+    fact["install"] = None
+    row = readiness.serve_daemon_row(_member(), _facts(serve_daemons=fact), peer_label="node-2")
+    assert row["ok"] is False
+    assert row["code"] == readiness.CODE_UNKNOWN
+
+
+def test_serve_supervision_reads_the_innermost_unit_or_scope() -> None:
+    assert readiness.serve_supervision(_LOGIN_SCOPE) == ("login_session", "session-2122.scope")
+    assert readiness.serve_supervision(_SERVE_UNIT) == ("unit", "lop-serve.service")
+    # R1-m5: only a lop serve unit supervises; any other .service is named, never ok.
+    assert readiness.serve_supervision("/system.slice/sshd.service") == (
+        "other_unit",
+        "sshd.service",
+    )
+    assert readiness.serve_supervision("/user.slice/run-r1.scope")[0] == "unknown"
+    assert readiness.serve_supervision(None)[0] == "unknown"
+
+
+def test_serve_daemons_fact_reads_records_and_creates_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+
+    from local_operator.server import registry as serve_registry
+
+    root = tmp_path / "root"
+    root.mkdir()
+    # A fresh root: the read must not bring run/serve into being.
+    empty = readiness.serve_daemons_fact(root)
+    assert empty["daemons"] == []
+    assert list(root.iterdir()) == []
+
+    record = serve_registry.ServeRecord(
+        pid=os.getpid(),
+        host="127.0.0.1",
+        port=8977,
+        instance_id="i",
+        version="0.90.1",
+        source_ref="",
+        prefix="/p",
+        install_kind="uv-tool",
+        desktop=False,
+        reloadable=True,
+        birth_scheme=procstate.birth_scheme() or "",
+        birth_token=procstate.self_birth_token() or "",
+    )
+    serve_registry.publish(record, root)
+    monkeypatch.setattr(readiness, "_cgroup_of", lambda pid: _LOGIN_SCOPE)
+    before = sorted(str(path) for path in root.rglob("*"))
+    fact = readiness.serve_daemons_fact(root)
+    assert sorted(str(path) for path in root.rglob("*")) == before
+    [daemon] = fact["daemons"]
+    assert daemon["pid"] == os.getpid()
+    assert daemon["version"] == "0.90.1"
+    assert daemon["cgroup"] == _LOGIN_SCOPE
+    assert daemon["reloadable"] is True
+    assert daemon["identity"] == "proven"
+    # R1-m3: the viewer reads neither, and the prefix names the account.
+    assert "prefix" not in daemon and "install_kind" not in daemon
+
+
+def test_collect_peer_facts_carries_serve_daemons(tmp_path: Path) -> None:
+    facts = readiness.collect_peer_facts(tmp_path, home=tmp_path)
+    assert isinstance(facts["serve_daemons"], dict)
+    assert facts["serve_daemons"]["daemons"] == []
+
+
+def test_local_serve_daemon_rows_only_when_a_daemon_is_recorded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert readiness.local_serve_daemon_rows(tmp_path, device_id=VIEWER) == []
+    monkeypatch.setattr(readiness, "serve_daemons_fact", lambda root: _serve_fact(version="0.90.1"))
+    [row] = readiness.local_serve_daemon_rows(tmp_path, device_id=VIEWER)
+    assert row["device_name"] == "this device"
+    assert row["source"] == readiness.SOURCE_LOCAL
+    assert row["code"] == readiness.CODE_SERVE_STALE
+
+
+def test_git_row_says_an_ssh_shell_has_no_github_access_by_design() -> None:
+    row = readiness.git_row(
+        _member(),
+        _facts(
+            git={"user_name": "D", "user_email": "d@e.test"},
+            tooling={"gh_auth": {"hosts_file": False, "has_entry": False}},
+        ),
+        peer_label="cloud-node-1",
+    )
+    assert "An SSH shell on cloud-node-1 has no GitHub access by design" in row["detail"]
+    assert "only sessions Local Operator launches there" in row["detail"]
+
+
+@pytest.mark.parametrize(
+    "tooling",
+    [
+        {"gh_auth": {"hosts_file": True, "has_entry": True}},
+        {"gh_auth": {"hosts_file": True, "has_entry": None}},
+        None,
+    ],
+)
+def test_git_row_github_sentence_is_neutral_unless_the_peer_has_no_gh_login(
+    tooling: Any,
+) -> None:
+    """R1-m4: a peer with its OWN gh login gives an SSH shell GitHub access, so
+    "by design" must not be claimed there (nor when the fact is unknown)."""
+    over: dict[str, Any] = {"git": {"user_name": "D", "user_email": "d@e.test"}}
+    if tooling is not None:
+        over["tooling"] = tooling
+    row = readiness.git_row(_member(), _facts(**over), peer_label="cloud-node-1")
+    assert "no GitHub access by design" not in row["detail"]
+    assert (
+        "An SSH shell on cloud-node-1 is not handed the brokered GitHub credential" in row["detail"]
+    )
+
+
+def test_git_row_strips_terminal_controls_from_the_peers_identity() -> None:
+    """R1-m1/Q2 (pre-existing in git_row): peer text reaches a terminal."""
+    hostile = "D\x1b[2J\x1b]0;pwned\x07an\r\x1b[1A"
+    row = readiness.git_row(
+        _member(),
+        _facts(git={"user_name": hostile, "user_email": "d@e.test\x9b31m"}),
+        peer_label="cloud-node-1",
+    )
+    assert row["ok"] is True
+    assert "commits as Dan <d@e.test>" in row["detail"]
+    assert not any(ord(ch) < 0x20 or 0x7F <= ord(ch) <= 0x9F for ch in row["detail"])
+
+
+def test_compose_reports_this_devices_serve_daemon_unless_a_peer_was_named(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.network import identity, relay
+
+    root = tmp_path / "root-serve"
+    root.mkdir(parents=True)
+    ident = identity.mint(root, name="node-2")
+    server = relay.RelayServer(
+        identity=ident, settings=relay.NetworkSettings(port=0, listen_address="127.0.0.1")
+    )
+    monkeypatch.setattr(
+        readiness, "serve_daemons_fact", lambda root: _serve_fact(cgroup=_LOGIN_SCOPE)
+    )
+    [row] = readiness.compose(server)["checks"]
+    assert row["capability"] == readiness.CAPABILITY_SERVE_DAEMON
+    assert row["code"] == readiness.CODE_UNSUPERVISED
+    assert row["device_id"] == ident.device_id
+    rendered = readiness.render_check_lines([row])
+    assert rendered[0].startswith("warn readiness serve_daemon this device: ")
+    assert rendered[0].endswith(f"— {readiness.NON_GATING_NOTE}")
+
+
+def test_serve_daemon_row_names_every_login_held_daemon_in_one_sentence() -> None:
+    fact = _serve_fact(cgroup=_LOGIN_SCOPE)
+    fact["daemons"].append(dict(fact["daemons"][0], pid=600001))
+    row = readiness.serve_daemon_row(_member(), _facts(serve_daemons=fact), peer_label="node-2")
+    assert row["code"] == readiness.CODE_UNSUPERVISED
+    assert row["detail"].count("held only by a login session") == 1
+    assert "pid 537864 in session-2122.scope, pid 600001 in session-2122.scope" in row["detail"]
+    assert "a reboot ends them and every remote session they host" in row["detail"]
+
+
+# ---------------------------------------------------------------------------
+# #3075 round 1: identity, hostile shapes, bounds (R1-M1/Q4, Q1, Q2, Q3, R1-m2,
+# R1-m3, R1-m5)
+# ---------------------------------------------------------------------------
+
+
+def _record_for(pid: int, **over: Any) -> Any:
+    from local_operator.server import registry as serve_registry
+
+    fields: dict[str, Any] = {
+        "pid": pid,
+        "host": "127.0.0.1",
+        "port": 8977,
+        "instance_id": "i",
+        "version": "0.90.18",
+        "source_ref": "",
+        "prefix": "/p",
+        "install_kind": "uv-tool",
+        "desktop": False,
+        "reloadable": True,
+    }
+    fields.update(over)
+    return serve_registry.ServeRecord(**fields)
+
+
+def test_a_recycled_pid_is_never_judged_as_the_recorded_daemon(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-M1 / Q4: a FRESH record whose pid now belongs to an unrelated process.
+
+    The birth token was recorded for the daemon that died; the process now at
+    that pid (a ``sleep``) was born later, so ``same_birth`` says False. The row
+    must be ``unknown`` and must name nothing about the stranger — never ok,
+    never its cgroup.
+    """
+    from local_operator import services
+    from local_operator.server import registry as serve_registry
+
+    stranger = subprocess.Popen(["sleep", "60"])
+    try:
+        root = tmp_path / "root"
+        root.mkdir()
+        record = _record_for(
+            stranger.pid,
+            birth_scheme=procstate.birth_scheme() or "",
+            birth_token="1",  # the dead daemon's birth: not the stranger's
+        )
+        serve_registry.publish(record, root)
+        monkeypatch.setattr(
+            services,
+            "_current_stamp",
+            lambda: SimpleNamespace(version="0.90.18", source_ref=""),
+        )
+        monkeypatch.setattr(readiness, "_cgroup_of", lambda pid: _SERVE_UNIT)
+        fact = readiness.serve_daemons_fact(root)
+        [daemon] = fact["daemons"]
+        assert daemon["identity"] == "not_this_daemon"
+        assert daemon["cgroup"] is None, "a stranger's cgroup is not ours to report"
+        row = readiness.serve_daemon_row(_member(), _facts(serve_daemons=fact), peer_label="node-2")
+        assert row["ok"] is False and row["code"] == readiness.CODE_UNKNOWN, row
+        assert "another process now holds that pid" in row["detail"]
+        assert "lop-serve.service" not in row["detail"]
+    finally:
+        stranger.kill()
+        stranger.wait()
+
+
+def test_a_record_with_no_birth_is_unproven_and_unknown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Parent binding: never the pid alone. A record from before birth stamps
+    (no ``birth_token``) is ``unknown``, whatever holds the pid."""
+    from local_operator.server import registry as serve_registry
+
+    root = tmp_path / "root"
+    root.mkdir()
+    serve_registry.publish(_record_for(os.getpid()), root)
+    monkeypatch.setattr(readiness, "_cgroup_of", lambda pid: _SERVE_UNIT)
+    [daemon] = readiness.serve_daemons_fact(root)["daemons"]
+    assert daemon["identity"] == "unproven"
+    row = readiness.serve_daemon_row(
+        _member(),
+        _facts(serve_daemons={**_serve_fact(), "daemons": [{**daemon, "cgroup": None}]}),
+        peer_label="node-2",
+    )
+    assert row["code"] == readiness.CODE_UNKNOWN and row["ok"] is False
+
+
+def test_a_wedged_record_is_unknown_never_a_verdict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-M1: a heartbeat that stopped is not the daemon reporting."""
+    from local_operator.server import registry as serve_registry
+
+    root = tmp_path / "root"
+    root.mkdir()
+    record = _record_for(
+        os.getpid(),
+        birth_scheme=procstate.birth_scheme() or "",
+        birth_token=procstate.self_birth_token() or "",
+    )
+    record.heartbeat_at = time.time() - 7200
+    serve_registry.record_path(record.pid, root).parent.mkdir(parents=True)
+    serve_registry.record_path(record.pid, root).write_text(json.dumps(record.to_json()))
+    [daemon] = readiness.serve_daemons_fact(root)["daemons"]
+    assert daemon["state"] == "wedged" and daemon["identity"] == "not_reporting"
+    row = readiness.serve_daemon_row(
+        _member(), _facts(serve_daemons=readiness.serve_daemons_fact(root)), peer_label="n"
+    )
+    assert row["code"] == readiness.CODE_UNKNOWN
+    assert "not answering" in row["detail"]
+
+
+def test_a_daemon_from_a_peer_without_identity_proofs_is_unproven() -> None:
+    """A peer on 1a16c238 sends entries with no ``identity``: unproven, unknown."""
+    fact = _serve_fact()
+    del fact["daemons"][0]["identity"]
+    row = readiness.serve_daemon_row(_member(), _facts(serve_daemons=fact), peer_label="n")
+    assert row["code"] == readiness.CODE_UNKNOWN and row["ok"] is False
+
+
+def test_another_service_holding_the_daemon_is_never_ok() -> None:
+    """R1-m5: sshd.service / a transient unit is a holder, not a supervisor."""
+    row = readiness.serve_daemon_row(
+        _member(),
+        _facts(serve_daemons=_serve_fact(cgroup="/system.slice/sshd.service")),
+        peer_label="node-2",
+    )
+    assert row["ok"] is False
+    assert row["code"] == readiness.CODE_UNSUPERVISED
+    assert "held by another service (pid 537864 under sshd.service)" in row["detail"]
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda f: f.update(daemons="not-a-list"),
+        lambda f: f.update(daemons={"a": 1}),
+        lambda f: f.update(daemons=[1, 2]),
+        lambda f: f.update(daemons=[None]),
+        lambda f: f.update(platform=["linux"]),
+        lambda f: f.update(install=["0.90.19"]),
+        lambda f: f["daemons"][0].update(cgroup=12345),
+        lambda f: f["daemons"][0].update(cgroup=["a"]),
+        lambda f: f["daemons"][0].update(pid={"a": [1]}),
+        lambda f: f["daemons"][0].update(pid=True),
+        lambda f: f["daemons"][0].update(version=["v"]),
+        lambda f: f["daemons"][0].update(source_ref={"r": 1}),
+        lambda f: f["daemons"][0].update(identity=7),
+    ],
+)
+def test_a_malformed_serve_fact_is_unknown_never_ok_and_never_raises(mutate: Any) -> None:
+    """Q1 / R1-m2: every wrong type, at the fact or entry level, is unknown."""
+    fact = _serve_fact()
+    mutate(fact)
+    row = readiness.serve_daemon_row(_member(), _facts(serve_daemons=fact), peer_label="node-2")
+    assert row["ok"] is False and row["code"] == readiness.CODE_UNKNOWN, row
+
+
+def test_a_malformed_serve_fact_leaves_every_other_row_intact() -> None:
+    """Q1: one bad field costs THIS row only — build/git/model still compose."""
+    fact = _serve_fact()
+    fact["daemons"][0]["cgroup"] = 12345
+    facts = _facts(serve_daemons=fact, git={"user_name": "D", "user_email": "d@e.test"})
+    member = _member()
+    git = readiness.git_row(member, facts, peer_label="node-2")
+    model = readiness.model_credential_row(member, facts, viewer=_FakeViewer(), peer_label="node-2")
+    build = readiness.build_row(
+        member,
+        peer_build={"version": "0.90.19"},
+        own_build={"version": "0.90.19"},
+        peer_label="node-2",
+    )
+    serve = readiness.serve_daemon_row(member, facts, peer_label="node-2")
+    assert git["ok"] is True and build["ok"] is True
+    assert model["capability"] == readiness.CAPABILITY_MODEL_CREDENTIAL
+    assert serve["code"] == readiness.CODE_UNKNOWN
+
+
+def test_the_producer_never_raises_on_a_hostile_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Q1, producer side: a record whose fields are the wrong type costs itself."""
+    root = tmp_path / "root"
+    run = root / "run" / "serve"
+    run.mkdir(parents=True)
+    (run / f"{os.getpid()}.json").write_text(
+        json.dumps(
+            {
+                **_record_for(os.getpid()).to_json(),
+                "version": ["v"],
+                "birth_token": {"x": 1},
+            }
+        )
+    )
+    fact = readiness.serve_daemons_fact(root)
+    assert isinstance(fact["daemons"], list)
+
+
+def test_peer_strings_are_terminal_safe_and_the_row_is_bounded() -> None:
+    """Q2 + Q3: escapes stripped; 1,500 daemons with 1,000-char fields render
+    in well under 1 KB."""
+    evil = "\x1b[2J\x1b[31mPWNED\x1b]0;hijacked-title\x07\r\x1b[1A"
+    fact = _serve_fact()
+    fact["install"] = {"version": "0.90.19" + evil, "source_ref": evil}
+    fact["daemons"] = [
+        {
+            "pid": 1000 + index,
+            "state": "live",
+            "identity": "proven",
+            "version": ("0.90.1" + evil) * 60,
+            "source_ref": "r" * 1000,
+            "reloadable": True,
+            "cgroup": "/user.slice/" + "x" * 1000 + "/session-1.scope",
+        }
+        for index in range(1500)
+    ]
+    row = readiness.serve_daemon_row(_member(), _facts(serve_daemons=fact), peer_label="node-2")
+    rendered = "\n".join(readiness.render_check_lines([row]))
+    assert len(rendered.encode()) < 1024, len(rendered)
+    assert not any(ord(ch) < 0x20 and ch != "\n" for ch in rendered)
+    assert not any(0x7F <= ord(ch) <= 0x9F for ch in rendered)
+    assert "more" in rendered
+    assert len(json.dumps(row["observed"])) < 2048

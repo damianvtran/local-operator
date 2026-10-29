@@ -806,6 +806,9 @@ _ROUND1_STORES: tuple[str, ...] = (
     ".config/op/config",
     ".terraform.d/credentials.tfrc.json",
     ".azure/msal_token_cache.json",
+    # #3022 r2 M3: the desktop app's desktop-plane bearer.
+    "Library/Application Support/Local Operator/desktop-token",
+    "Library/Application Support/local-operator-ui/desktop-token",
 )
 
 

@@ -83,10 +83,11 @@ import asyncio
 import logging
 import re
 import unicodedata
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, NoReturn
+from typing import TYPE_CHECKING, Any, Literal, NoReturn, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -96,6 +97,12 @@ from local_operator.config_watch import process_watcher
 from local_operator.server.dependencies import get_config_manager
 from local_operator.server.desktop import require_desktop
 from local_operator.server.features import feature_flags
+from local_operator.server.models.desktop_team_bridge_owner_audit import (
+    OwnerAuditConversationPage,
+    OwnerAuditMessagePage,
+    OwnerAuditThread,
+    owner_audit_projection,
+)
 from local_operator.server.models.schemas import CRUDResponse
 from local_operator.server.routes.desktop_sessions import reply
 from local_operator.team_bridge.types import (
@@ -514,6 +521,13 @@ _READ_REFUSALS: dict[str, tuple[int, str]] = {
     "malformed_page": (
         502,
         "the agent-messages hub answered in a shape this build cannot read",
+    ),
+    # Transient local overload of the notification-avatar renderer, kept apart
+    # from ``malformed_page`` (a bad image) so the desktop never confuses the
+    # two (QA round 2, Q2). No ``Retry-After``: the desktop does not retry it.
+    "renderer_busy": (
+        503,
+        "the notification image renderer is busy; showing initials for now",
     ),
     "wrong_tenant": (
         409,
@@ -1424,10 +1438,30 @@ class ScheduledUpdateIn(_Strict):
     #: The schedule's COMPLETE replacement image set; ``[]`` removes every
     #: image (the hub releases them). Omitted = images unchanged.
     attachment_ids: list[str] | None = Field(default=None, max_length=4)
+    #: The ``version`` of the schedule view this edit was derived from, echoed
+    #: back so the hub (agent-server #223) applies it only to THAT version and
+    #: otherwise answers 409 ``invalid_transition`` ``{rule: concurrent_edit}``
+    #: with nothing written; without it a client editing a stale list would
+    #: silently overwrite another device's edit (its image list in particular).
+    #: Omitted = the hub's own read-then-write check only, the pre-#223 wire.
+    #:
+    #: Old hubs: the hub decodes this body with ``DisallowUnknownFields``, so a
+    #: pre-#223 hub answers 400 to the key. There is no capability flag for it;
+    #: the gate is the read itself: a hub that knows ``expected_version`` is the
+    #: one that returns ``version`` on every schedule response, and a caller may
+    #: only echo a ``version`` it read. Forwarded only when set
+    #: (``exclude_unset``), so a caller that never saw ``version`` never sends it.
+    #:
+    #: ``strict`` and the int64 ceiling mirror the hub's ``*int64`` decode: a
+    #: string, bool, fraction or overflow would be a hub 400, so it fails here.
+    expected_version: int | None = Field(default=None, ge=0, le=2**63 - 1, strict=True)
 
     @model_validator(mode="after")
     def _edit(self) -> "ScheduledUpdateIn":
-        if not self.model_fields_set or any(
+        # ``expected_version`` is a precondition, not a change: on its own the
+        # hub would answer ``empty_patch``, so it does not satisfy this rule.
+        # An explicit null is refused for every field, the precondition included.
+        if not (self.model_fields_set - {"expected_version"}) or any(
             getattr(self, name) is None for name in self.model_fields_set
         ):
             raise ValueError("a schedule edit requires body, send_at or attachment_ids")
@@ -2553,6 +2587,111 @@ async def get_account_avatar(
     )
 
 
+_NOTIFICATION_AVATAR_REQUIRED = frozenset(
+    {"tenant_id", "kind", "theme", "size", "initials", "expected_account_id"}
+)
+_NOTIFICATION_AVATAR_PHOTO = frozenset({"v", "avatar_account_id"})
+
+
+@router.get("/v1/desktop/team-bridge/accounts/{target_account_id}/notification-avatar")
+async def get_notification_avatar(
+    target_account_id: str,
+    request: Request,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> Response:
+    """One precomposed PNG for a Team Bridge OS notification's image slot.
+
+    Capability ``team_bridge_notification_avatar``. The desktop main process
+    calls this (never the renderer with a URL) to warm its display cache, and
+    on a miss waits at most 250 ms before posting with initials anyway (the
+    operator's bounded-wait decision), so this route can never hold a
+    notification back beyond that budget.
+
+    Closed query, every name single-valued:
+
+    * ``tenant_id`` the directory/event tenant (part of the desktop's display
+      cache key; never overrides hub authorization); ``kind`` ``person|person_agent``;
+      ``theme`` ``light|dark``; ``size``
+      ``64|256``; ``initials`` 0-2 letters/digits (may be empty);
+      ``expected_account_id`` the captured VIEWER receipt, as on ``/avatar``.
+    * ``v`` + ``avatar_account_id``: both or neither. With them, the photo is
+      read through the same closed ``/avatar`` relay; without, an initials
+      placeholder is drawn and no network is touched.
+
+    ``avatar_account_id`` must equal the path account: the Team Bridge sender
+    contract pins a ``person_agent``'s avatar to its OWNER's account (which is
+    the path id), so an avatar naming any other account is refused rather than
+    drawn under someone else's name.
+
+    ``private, no-store``: core renders statelessly and keeps no composite. The
+    desktop main process owns display retention (A0: in memory, <= 15 minutes,
+    cleared on auth transitions); an HTTP/disk cache here could not apply its
+    login fence.
+
+    Refusals specific to this route: ``502 malformed_page`` when the hub's
+    bytes are not a bounded PNG/JPEG, and ``503 renderer_busy`` when the
+    renderer's pending queue is full (a burst beyond 8 in flight). The second
+    is transient and carries no ``Retry-After``: the desktop shows initials
+    NOW, does not retry in the post path (the bounded wait has already spent
+    its budget, Team Bridge T2), and never negative-caches it as "no picture",
+    so the next notification from that sender asks again.
+    """
+
+    from local_operator.team_bridge import notification_avatar as na
+
+    query = request.query_params
+    names = set(query)
+    photo_names = names & _NOTIFICATION_AVATAR_PHOTO
+    if (
+        not _NOTIFICATION_AVATAR_REQUIRED <= names
+        or names - _NOTIFICATION_AVATAR_REQUIRED - _NOTIFICATION_AVATAR_PHOTO
+        or photo_names not in (set(), set(_NOTIFICATION_AVATAR_PHOTO))
+        or any(len(query.getlist(key)) != 1 for key in names)
+    ):
+        _raise_read("invalid_request")
+    if (
+        not is_account_id(target_account_id)
+        or not is_account_id(query["expected_account_id"])
+        or not query["tenant_id"].strip()
+        or len(query["tenant_id"]) > 128
+        or query["kind"] not in na.KINDS
+        or query["theme"] not in na.THEMES
+        or query["size"] not in {"64", "256"}
+        or not na.valid_initials(query["initials"])
+        or (photo_names and re.fullmatch(r"[0-9a-f]{16}", query["v"]) is None)
+        or (photo_names and query["avatar_account_id"] != target_account_id)
+    ):
+        _raise_read("invalid_request")
+    try:
+        data = await _conversation_reply(
+            _conversation_client(config_manager).notification_avatar(
+                target_account_id,
+                tenant_id=query["tenant_id"],
+                kind=cast(Literal["person", "person_agent"], query["kind"]),
+                theme=cast(Literal["light", "dark"], query["theme"]),
+                size=int(query["size"]),
+                initials=query["initials"],
+                v=query["v"] if photo_names else None,
+                expected_account_id=query["expected_account_id"],
+            )
+        )
+    except na.RendererBusy:
+        _raise_read("renderer_busy")
+    except na.AvatarImageRejected:
+        # The hub's bytes were not a bounded PNG/JPEG: same class as an
+        # avatar body this relay refuses to serve.
+        _raise_read("malformed_page")
+    return Response(
+        content=data,
+        media_type="image/png",
+        headers={
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "default-src 'none'; sandbox",
+            "Cache-Control": "private, no-store",
+        },
+    )
+
+
 @router.get(
     "/v1/desktop/team-bridge/conversations/{conversation_id}/messages/{message_id}"
     "/attachments/{attachment_id}"
@@ -2839,3 +2978,292 @@ async def conversation_unread(
             client.unread(tenant_id=tenant_id, scope=ACCOUNT_SCOPE if account_wide else None)
         )
     )
+
+
+# -- owner audit (HUMAN-ONLY) --------------------------------------------------
+#
+# "{Chief of staff}'s messages": the agent OWNER's read-only audit of every
+# conversation their own agent is or was in (agent-server #221,
+# docs/TEAM-BRIDGE-CONVERSATIONS.md §16; owner-audit contract v1-v3 + FROZEN).
+#
+# HUMAN-ONLY BODY PATH. These routes serve FULL bodies, including messages the
+# agent's screening rejected or never screened — screening protects the agent's
+# context from injection; it does not keep text from the agent's owner. They
+# exist for the renderer alone: nothing in the agent's runtime (the
+# `team_bridge` tool, read_context, model_boundary, the connector) reaches the
+# client methods behind them, which
+# tests/unit/team_bridge/test_owner_audit_isolation.py pins.
+#
+# READ-ONLY AND STATELESS. No route here posts, reacts, admits, joins or marks
+# anything read, and nothing is persisted: no bridge-store write, no body cache
+# (store.py's no-body-cache rule), and every answer — success or refusal raised
+# here — carries `Cache-Control: private, no-store` like the hub's own.
+#
+# NO ENDPOINT PARAMETER (contract v2 M1). The hub derives the audited agent rows
+# from the signed-in caller + tenant, so the renderer cannot name an endpoint and
+# a non-owner cannot even express the request. Every refusal the hub makes —
+# not the owner, not a member, outside the window, unknown — is ONE uniform 404
+# (`conversation_not_found` / `attachment_not_found`), passed through unchanged
+# so this surface is no more of an existence oracle than the hub.
+#
+# The captured-owner receipt (`expected_account_id`) is REQUIRED on every read:
+# an audit page captured for account A must not be answered while the machine is
+# signed in as B (the attachment routes' #2772 B1 rule, applied from the start).
+
+# SERVED vs SET, the same split ``OWNER_INVITATIONS_CACHE_CONTROL`` documents above:
+# each route here sets ``private, no-store`` so it carries the hub's contract
+# wherever the router is mounted, and the running core's app-wide
+# ``managed_desktop_boundary`` (``server/app.py``) rewrites every ``/v1/desktop/``
+# answer to plain ``no-store``. That is no weaker (``no-store`` keeps the page out
+# of every cache, shared or private), so the SERVED header is ``no-store`` and the
+# value below is what a router-only mount sees.
+OWNER_AUDIT_CACHE_CONTROL = "private, no-store"
+#: Spelled here (not imported from the client) for the httpx boot rule; pinned
+#: equal to ``client.OWNER_AUDIT_ATTACHMENT_MIME_TYPES`` by a test.
+_OWNER_AUDIT_SERVABLE = {"image/png", "image/jpeg", "application/octet-stream"}
+_OWNER_AUDIT_FILE_MIME = "application/octet-stream"
+
+
+@contextmanager
+def _owner_audit_no_store() -> Iterator[None]:
+    """Stamp ``private, no-store`` on any refusal raised inside the block.
+
+    A success gets the header from the route's ``Response``; an
+    ``HTTPException`` is rendered by FastAPI's handler from ``exc.headers``
+    alone, so without this a 404 for someone's conversation would leave with a
+    weaker policy than the page it stands in for (the hub sets the header on
+    refusals too, review #221).
+    """
+
+    try:
+        yield
+    except HTTPException as exc:
+        exc.headers = {**(exc.headers or {}), "Cache-Control": OWNER_AUDIT_CACHE_CONTROL}
+        raise
+
+
+def _owner_audit_query(request: Request, allowed: frozenset[str]) -> dict[str, str]:
+    """The audit routes' query, closed, single-valued and with the receipt REQUIRED.
+
+    An unknown name (``endpoint_id``, ``scope``, ``purpose`` …) is refused before
+    any I/O rather than dropped: the hub refuses the same names, and a renderer
+    that believes it read "as" an endpoint must learn otherwise here. A repeated
+    name is refused too — the URL parser and the hub could pick different values.
+    """
+
+    names = set(request.query_params)
+    if names - allowed or "expected_account_id" not in names:
+        _raise_read("invalid_request")
+    out: dict[str, str] = {}
+    for name in names:
+        values = request.query_params.getlist(name)
+        if len(values) != 1 or not values[0].strip() or len(values[0]) > 512:
+            _raise_read("invalid_request")
+        out[name] = values[0]
+    if not is_account_id(out["expected_account_id"]):
+        _raise_read("invalid_request")
+    if len(out.get("tenant_id", "")) > 128:
+        _raise_read("invalid_request")
+    return out
+
+
+def _owner_audit_int(query: dict[str, str], name: str) -> int | None:
+    """A numeric hint parsed (never interpolated); a bad or negative value is a 422."""
+
+    raw = query.get(name)
+    if raw is None:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        _raise_read("invalid_request")
+    if value < 0:
+        _raise_read("invalid_request")
+    return value
+
+
+async def _owner_audit_reply(awaitable: Any, model: Any) -> Any:
+    """Await one audit read and project it through its contract model.
+
+    The refusal mapping is the conversation family's (``_conversation_reply``),
+    so the hub's uniform 404 arrives as-is. A success the contract cannot read
+    is ``malformed_page`` rather than a half-understood page in the renderer.
+    """
+
+    from pydantic import ValidationError
+
+    payload = await _conversation_reply(awaitable)
+    try:
+        return reply(owner_audit_projection(model, payload))
+    except ValidationError:
+        _raise_read("malformed_page")
+
+
+@router.get(
+    "/v1/desktop/team-bridge/owner-audit/conversations",
+    response_model=CRUDResponse[OwnerAuditConversationPage],
+    # Only the fields the hub SENT: an omitted `left_seq` must not become an
+    # explicit null that reads as state (see the contract module).
+    response_model_exclude_unset=True,
+)
+async def owner_audit_conversations(
+    request: Request,
+    response: Response,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """One page of the conversations the signed-in owner's agent is or was in.
+
+    Result: ``OwnerAuditConversationPage``. Activity-descending; page with the
+    opaque ``cursor`` (the previous page's ``next_cursor``). No read state and
+    no unread counts — auditing never raises a badge.
+    """
+
+    with _owner_audit_no_store():
+        response.headers["Cache-Control"] = OWNER_AUDIT_CACHE_CONTROL
+        query = _owner_audit_query(
+            request, frozenset({"expected_account_id", "tenant_id", "limit", "cursor"})
+        )
+        limit = _owner_audit_int(query, "limit")
+        client = _conversation_client(config_manager)
+        return await _owner_audit_reply(
+            client.owner_audit_conversations(
+                expected_account_id=query["expected_account_id"],
+                tenant_id=query.get("tenant_id"),
+                limit=limit,
+                cursor=query.get("cursor"),
+            ),
+            OwnerAuditConversationPage,
+        )
+
+
+@router.get(
+    "/v1/desktop/team-bridge/owner-audit/conversations/{conversation_id}/messages",
+    response_model=CRUDResponse[OwnerAuditMessagePage],
+    # Only the fields the hub SENT: an omitted `left_seq` must not become an
+    # explicit null that reads as state (see the contract module).
+    response_model_exclude_unset=True,
+)
+async def owner_audit_messages(
+    conversation_id: str,
+    request: Request,
+    response: Response,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """One audited timeline page (``OwnerAuditMessagePage``), newest-first.
+
+    FULL bodies with each message's ``agent_delivery_status``. ``before_seq``
+    (older page) and ``after_seq`` are mutually exclusive, as on the member
+    history route.
+    """
+
+    with _owner_audit_no_store():
+        response.headers["Cache-Control"] = OWNER_AUDIT_CACHE_CONTROL
+        _require_conversation_id(conversation_id)
+        query = _owner_audit_query(
+            request,
+            frozenset({"expected_account_id", "tenant_id", "limit", "before_seq", "after_seq"}),
+        )
+        if "before_seq" in query and "after_seq" in query:
+            _raise_read("invalid_request")
+        limit = _owner_audit_int(query, "limit")
+        before_seq = _owner_audit_int(query, "before_seq")
+        after_seq = _owner_audit_int(query, "after_seq")
+        client = _conversation_client(config_manager)
+        return await _owner_audit_reply(
+            client.owner_audit_messages(
+                conversation_id,
+                expected_account_id=query["expected_account_id"],
+                tenant_id=query.get("tenant_id"),
+                limit=limit,
+                before_seq=before_seq,
+                after_seq=after_seq,
+            ),
+            OwnerAuditMessagePage,
+        )
+
+
+@router.get(
+    "/v1/desktop/team-bridge/owner-audit/conversations/{conversation_id}/messages/{message_id}"
+    "/replies",
+    response_model=CRUDResponse[OwnerAuditThread],
+    # Only the fields the hub SENT: an omitted `left_seq` must not become an
+    # explicit null that reads as state (see the contract module).
+    response_model_exclude_unset=True,
+)
+async def owner_audit_replies(
+    conversation_id: str,
+    message_id: str,
+    request: Request,
+    response: Response,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """One audited thread (``OwnerAuditThread``): root + replies, oldest-first."""
+
+    with _owner_audit_no_store():
+        response.headers["Cache-Control"] = OWNER_AUDIT_CACHE_CONTROL
+        _require_conversation_id(conversation_id)
+        _require_message_id(message_id)
+        query = _owner_audit_query(
+            request, frozenset({"expected_account_id", "tenant_id", "limit", "after_seq"})
+        )
+        limit = _owner_audit_int(query, "limit")
+        after_seq = _owner_audit_int(query, "after_seq")
+        client = _conversation_client(config_manager)
+        return await _owner_audit_reply(
+            client.owner_audit_replies(
+                conversation_id,
+                message_id,
+                expected_account_id=query["expected_account_id"],
+                tenant_id=query.get("tenant_id"),
+                limit=limit,
+                after_seq=after_seq,
+            ),
+            OwnerAuditThread,
+        )
+
+
+@router.get(
+    "/v1/desktop/team-bridge/owner-audit/conversations/{conversation_id}/messages/{message_id}"
+    "/attachments/{attachment_id}"
+)
+async def owner_audit_attachment(
+    conversation_id: str,
+    message_id: str,
+    attachment_id: str,
+    request: Request,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> Response:
+    """One audited attachment's bytes for the human owner.
+
+    Headers follow :func:`get_conversation_attachment`: a closed type map,
+    ``nosniff``, a sandboxing CSP and ``private, no-store``. The audit branch
+    also serves generic FILES (the hub's ``application/octet-stream``); those
+    go out as a download with the hub's fixed name, never inline, so a file can
+    never be rendered by the renderer under a type it chose.
+    """
+
+    with _owner_audit_no_store():
+        _require_conversation_id(conversation_id)
+        _require_message_id(message_id)
+        _require_attachment_id(attachment_id)
+        tenant_id, expected_account_id = _attachment_query(request)
+        client = _conversation_client(config_manager)
+        data, mime = await _conversation_reply(
+            client.owner_audit_attachment(
+                conversation_id,
+                message_id,
+                attachment_id,
+                tenant_id=tenant_id,
+                expected_account_id=expected_account_id,
+            )
+        )
+        if mime not in _OWNER_AUDIT_SERVABLE:  # the client refuses first; defence in depth
+            _raise_read("malformed_page")
+        headers = {
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "default-src 'none'; sandbox",
+            "Cache-Control": OWNER_AUDIT_CACHE_CONTROL,
+        }
+        if mime == _OWNER_AUDIT_FILE_MIME:
+            headers["Content-Disposition"] = 'attachment; filename="attachment.bin"'
+        return Response(content=data, media_type=mime, headers=headers)

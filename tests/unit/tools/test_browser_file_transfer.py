@@ -1061,6 +1061,162 @@ def test_upload_refuses_a_file_inside_the_config_root(
     assert host.calls == []
 
 
+def _upload_ok(host_paths: list[Path]) -> dict[str, Any]:
+    return {
+        "inputs": ["input[type=file]"],
+        "accepted": [
+            {"name": p.name, "path": str(p), "bytes": p.stat().st_size} for p in host_paths
+        ],
+        "refused": [],
+        "accept": "",
+    }
+
+
+def test_upload_attaches_a_file_from_the_sessions_own_scratchpad(
+    isolated_config: Path,
+) -> None:
+    """The reported failure 1: a hidden-input page and a file the session itself wrote.
+
+    Driven through the real `_browser_upload` with the session id the context carries, so
+    this pins the WIRING (`context.session_id` -> `check_upload`) as well as the rule.
+    """
+    pad = isolated_config / "sessions" / "sess0001" / "scratchpad" / "grafana-icon"
+    pad.mkdir(parents=True)
+    icon = pad / "slack-icon-1024.png"
+    icon.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 64)
+    host = FakeHost(methods=("upload",), result=_upload_ok([icon.resolve()]))
+    result = _flow(
+        "upload",
+        host,
+        tool_call_id="t1",
+        state=_surface(),
+        params=_params(action="upload", selector="input[type=file]", paths=[str(icon)]),
+        context=_ctx("sess0001"),
+    )
+    assert not result.is_error, result.text
+    assert host.calls[0][1]["paths"] == [str(icon.resolve())]
+
+
+def test_upload_does_not_attach_another_sessions_scratchpad(
+    isolated_config: Path,
+) -> None:
+    theirs = isolated_config / "sessions" / "sess0002" / "scratchpad" / "theirs.png"
+    theirs.parent.mkdir(parents=True)
+    theirs.write_bytes(b"\x89PNG\r\n\x1a\n" + b"1" * 64)
+    host = FakeHost(methods=("upload",))
+    result = _flow(
+        "upload",
+        host,
+        tool_call_id="t1",
+        state=_surface(),
+        params=_params(action="upload", selector="#f", paths=[str(theirs)]),
+        context=_ctx("sess0001"),
+    )
+    assert result.is_error
+    assert "config directory" in result.text
+    assert host.calls == []
+
+
+def test_upload_wire_payload_keeps_the_full_absolute_path(tmp_path: Path) -> None:
+    """The reported failure 2 (`'x.png' does not exist` for an absolute path).
+
+    Pins that nothing between the model's argument and the wire reduces a path to its
+    basename: the host is handed the FULL resolved absolute path, spaces and all.
+    """
+    folder = tmp_path / "workspace" / "grafana slack icon"
+    folder.mkdir(parents=True)
+    icon = folder / "slack-icon-1024.png"
+    icon.write_bytes(b"\x89PNG\r\n\x1a\n" + b"2" * 64)
+    host = FakeHost(methods=("upload",), result=_upload_ok([icon.resolve()]))
+    result = _flow(
+        "upload",
+        host,
+        tool_call_id="t1",
+        state=_surface(),
+        params=_params(action="upload", selector="input[type=file]", paths=[str(icon)]),
+        context=_ctx(),
+    )
+    assert not result.is_error, result.text
+    sent = host.calls[0][1]["paths"]
+    assert sent == [str(icon.resolve())]
+    assert all(os.path.isabs(p) and "/" in p.strip("/") for p in sent), "never a bare basename"
+
+
+def test_upload_of_a_file_a_sibling_call_is_still_creating_says_so(tmp_path: Path) -> None:
+    """Root cause of failure 2, reproduced: `cp` and `upload` ran in ONE batch.
+
+    The loop runs `shared` tools concurrently, so the upload's gate looked before the copy
+    landed and the (then true) 'does not exist' was reported with only the basename. The
+    refusal now carries the full path and names the same-turn race; once the file exists the
+    identical call succeeds.
+    """
+    late = tmp_path / "workspace" / "icons" / "slack-icon-1024.png"
+    # The folder exists (a `cp` into an existing folder); a missing folder gets no hint.
+    late.parent.mkdir(parents=True)
+    host = FakeHost(methods=("upload",))
+    kwargs: dict[str, Any] = {
+        "tool_call_id": "t1",
+        "state": _surface(),
+        "params": _params(action="upload", selector="input[type=file]", paths=[str(late)]),
+        "context": _ctx(),
+    }
+    result = _flow("upload", host, **kwargs)
+    assert result.is_error
+    assert f"does not exist: {late}" in result.text
+    assert "same turn" in result.text
+    assert host.calls == []
+
+    late.write_bytes(b"\x89PNG\r\n\x1a\n" + b"3" * 64)
+    host.result = _upload_ok([late.resolve()])
+    again = _flow("upload", host, **kwargs)
+    assert not again.is_error, again.text
+
+
+@pytest.mark.parametrize(
+    "raw", ["scratchpad://icon.png", "SCRATCHPAD://sub/icon.png", "file:///tmp/icon.png", "x://y"]
+)
+def test_upload_refuses_a_url_scheme_instead_of_reading_it_as_a_relative_path(
+    tmp_path: Path, raw: str
+) -> None:
+    """`upload` resolves no scheme: `scratchpad://x` used to become `<cwd>/scratchpad:/x`.
+
+    That read as "does not exist" plus a same-turn-race hint for a race that was not there.
+    The refusal names the absolute path to use, prints the pad root when the context has one,
+    and never reaches the gate or the host.
+    """
+    pad = tmp_path / "pad"
+    pad.mkdir()
+    ctx = _ctx()
+    ctx.scratchpad_dir = str(pad)
+    host = FakeHost(methods=("upload",))
+    result = _flow(
+        "upload",
+        host,
+        tool_call_id="t1",
+        state=ctx.browser,
+        params=_params(action="upload", selector="#f", paths=[raw]),
+        context=ctx,
+    )
+    assert result.is_error
+    assert "ABSOLUTE" in result.text and "nothing was touched" in result.text
+    assert str(pad) in result.text
+    assert "same turn" not in result.text and "does not exist" not in result.text
+    assert host.calls == []
+
+
+def test_upload_refusal_does_not_double_the_refused_prefix(tmp_path: Path) -> None:
+    host = FakeHost(methods=("upload",))
+    result = _flow(
+        "upload",
+        host,
+        tool_call_id="t1",
+        state=_surface(),
+        params=_params(action="upload", selector="#f", paths=[str(tmp_path / "nope.png")]),
+        context=_ctx(),
+    )
+    assert result.text.count("refused:") == 1, result.text
+
+
 def test_upload_refuses_the_whole_call_when_one_path_is_refused(tmp_path: Path) -> None:
     good = _uploadable(tmp_path)
     bad = tmp_path / ".env"
@@ -1076,6 +1232,40 @@ def test_upload_refuses_the_whole_call_when_one_path_is_refused(tmp_path: Path) 
     )
     assert result.is_error
     assert "nothing was attached" in result.text
+    assert host.calls == []
+
+
+@pytest.mark.parametrize(
+    ("relative", "label"),
+    [
+        ("attachments/" + "a" * 32 + ".bin", "shared attachment store"),
+        ("uploads/12345678-1234-1234-1234-123456789abc.png", "shared user-upload store"),
+        ("browser/downloads/20261028-abc123de/icon.png", "browser download store"),
+    ],
+)
+def test_upload_shared_store_refusal_guidance(
+    isolated_config: Path, relative: str, label: str
+) -> None:
+    """A class-specific explanation must not become permission to attach a shared file."""
+    target = isolated_config / relative
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"non-sensitive synthetic fixture")
+    host = FakeHost(methods=("upload",))
+    result = _flow(
+        "upload",
+        host,
+        tool_call_id="shared-refusal",
+        state=_surface(),
+        params=_params(action="upload", selector="#f", paths=[str(target)]),
+        context=_ctx(),
+    )
+    assert result.is_error
+    assert label in result.text
+    assert "already authorized for this session" in result.text
+    assert "non-sensitive" in result.text
+    assert "filesystem path" in result.text
+    assert "other-session" in result.text
+    assert result.text.count("refused:") == 1
     assert host.calls == []
 
 

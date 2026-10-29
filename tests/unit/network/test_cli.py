@@ -1661,8 +1661,20 @@ def test_ready_without_a_relay_never_passes_a_check_it_could_not_run(
     assert {row["capability"] for row in caps} == {
         readiness.CAPABILITY_BUILD,
         *readiness.PEER_SIDE_CHECKS,
+        readiness.CAPABILITY_PEER_RESTART,
     }
-    assert all(row["ok"] is False and row["code"] == "not_asked" for row in caps)
+    not_asked = [row for row in caps if row["code"] == "not_asked"]
+    assert {row["capability"] for row in not_asked} == {
+        readiness.CAPABILITY_BUILD,
+        *readiness.PEER_SIDE_CHECKS,
+    }
+    assert all(row["ok"] is False for row in not_asked)
+    restart = next(row for row in caps if row["capability"] == readiness.CAPABILITY_PEER_RESTART)
+    assert restart["code"] == readiness.CODE_UNKNOWN
+    assert restart["remedies"] == [
+        f"if restart is refused, on cloud-node-1, run "
+        f"`lop network member grant {NETWORK} {'d_' + 'a' * 32} update`"
+    ]
     assert payload["ok"] is False and payload["code"] == "unhealthy"
 
     # F1: offline readiness retains the selected session, without inferring
@@ -2243,6 +2255,43 @@ def test_an_unproven_comparison_names_the_build_and_declines_a_verdict(
     assert "build:      0.61.12 — cannot confirm it is current" in out, out
     assert "not reported" not in out, out
     assert "behind" not in out, out
+
+
+def test_a_generation_pinned_unit_names_the_condition_and_install_remedy(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A unit fixed to an old generation needs reinstall, not another restart."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    old = "20261025T122513Z-0.90.1"
+    new = "20261025T123000Z-0.90.2"
+    generations = root / "generations"
+    old_image = generations / old / "venv" / "bin" / "python3"
+    old_image.parent.mkdir(parents=True)
+    old_image.write_text("", encoding="utf-8")
+    monkeypatch.setattr(update_mod, "generations_dir", lambda: generations)
+    monkeypatch.setattr(update_mod, "current_generation", lambda: generations / new)
+    payload = _generation_status(
+        root,
+        monkeypatch,
+        running=old,
+        installed=new,
+        unit=old_image,
+        running_build="0.90.1",
+        installed_build="0.90.2",
+    )
+
+    assert payload["relay_unit_generation_pinned"] is True, payload
+    out = _render_status(monkeypatch, payload, capsys)
+    expected = "build:      0.90.1 — pinned generation; run lop network install"
+    assert expected in out, out
+    line = next(line for line in out.splitlines() if line.startswith("build:"))
+    assert len(line) <= 80, line
+    assert "restart the relay" not in line
+
+    doctor_line, up = net_cli._relay_state()  # noqa: SLF001
+    assert up is True
+    assert "pinned generation; run lop network install" in doctor_line, doctor_line
+    assert len(doctor_line) <= 80, doctor_line
 
 
 def test_a_flow_installed_node_names_the_real_builds_and_never_claims_health(

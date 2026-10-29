@@ -1,0 +1,15 @@
+{
+  "relay.account_policy.title": "کمپیوٹر کی ترتیبات",
+  "relay.account_policy.back": "واپس",
+  "relay.account_policy.loading": "اکاؤنٹ روٹنگ لوڈ ہو رہی ہے…",
+  "relay.account_policy.save": "پالیسی محفوظ کریں",
+  "relay.account_policy.saving": "محفوظ ہو رہا ہے…",
+  "relay.account_policy.saved": "اس کمپیوٹر پر محفوظ کر لیا گیا۔",
+  "relay.account_policy.retry": "دوبارہ کوشش کریں",
+  "relay.account_policy.unavailable": "اس ریلے پر اکاؤنٹ روٹنگ کی ترتیبات دستیاب نہیں۔ اس کمپیوٹر پر Local Operator اپ ڈیٹ کریں۔",
+  "relay.account_policy.error": "تبدیلی کی تصدیق نہیں ہو سکی۔ کنکشن چیک کریں اور موجودہ پالیسی پڑھنے کے لیے صفحہ دوبارہ لوڈ کریں۔",
+  "relay.account_policy.scope": "تبدیلیاں صرف اسی کمپیوٹر پر لاگو ہوں گی۔",
+  "relay.account_policy.entry": "ترتیبات",
+  "relay.account_policy.rejected": "تبدیلی محفوظ نہیں ہوئی۔ درج کی گئی قدر یا اس کمپیوٹر کی ترتیبات چیک کر کے دوبارہ کوشش کریں۔",
+  "relay.account_policy.load_error": "اکاؤنٹ روٹنگ لوڈ نہیں ہو سکی۔ کنکشن چیک کر کے دوبارہ کوشش کریں۔"
+}

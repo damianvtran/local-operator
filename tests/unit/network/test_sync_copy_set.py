@@ -293,6 +293,15 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "lease path, not a pathname or a translated/copyable session entry",
     ),
     # ---- this install's CONFIG, LOG and STORE surface (outside ``sessions/``) ----
+    "local_operator/memory_maintenance.py": (
+        3,
+        "``LOCK_NAME``/``STAMP_NAME``/``ATTEMPT_NAME`` ('.compact.lock', '.compact.stamp', "
+        "'.compact.attempt'): the memory store's unattended-maintenance lock and cadence "
+        "stamps, inside the DEVICE-LEVEL store directory (<config>/memory/), never an entry "
+        "of a session directory. They describe THIS host's compaction/expiry passes (a "
+        "cross-process fcntl lock and wall-clock stamps), so no session copy may carry "
+        "them: a peer inheriting them would skip or back off passes it never ran",
+    ),
     "local_operator/network/mobility.py": (
         1,
         "``DROPPED_ROLES_DIRNAME`` ('dropped-session-roles'): the DEVICE-LEVEL stash a "
@@ -337,6 +346,13 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``<config>/network/credentials/<network_id>/``. Machine-local state about "
         "which sign-in this device must recover, beside the placement document, "
         "never an entry of a session directory and never copied to a peer",
+    ),
+    "local_operator/network/credentials/desktop_approval.py": (
+        1,
+        "``_CREDENTIAL_PREFIX`` ('credential_'): the approval-op registry's record-key "
+        "prefix that claims every ``credential_*`` ``what`` key for this module's family "
+        "refusal. An in-memory dispatch key, not a filename or directory: nothing on "
+        "disk is named by it, so it is not a session-directory entry",
     ),
     # ---- the transcript compression pass's STORE-LEVEL names ----
     "local_operator/session/compression.py": (
@@ -754,6 +770,13 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``.corrupt`` fragment suffixed onto a quarantined store file",
     ),
     "local_operator/network/projection.py": (1, "the tombstone list under ``network/``"),
+    "local_operator/network/relay.py": (
+        1,
+        "``DELIBERATE_STOP_MARKER`` (``relay-stop-requested.json``): the relay's "
+        "deliberate-stop marker at ``<config>/run``, beside ``run/peers`` -- device-local "
+        "runtime state about THIS device's supervised relay process, written by a stop "
+        "verb and consumed by the relay's exit; never a session entry and never synced",
+    ),
     "local_operator/i18n/catalogues.py": (
         2,
         "``CONTEXT_SUFFIX`` (``.context.json``): the suffix of the en-only context "

@@ -174,6 +174,22 @@ Capture cannot block compaction;
 its terminal hint arrives at the next ordinary provider boundary and never
 wakes a session. A crash between commit and capture is retried idempotently.
 
+Capture is bounded per session: its candidates share a 16k-token budget inside the
+50k session quota, and a pass that exceeds it forgets the session's oldest untouched
+captured candidates, never stated facts. Past the session's eviction tombstone
+floor (half of the 5,000 tombstone cap) eviction stops and only the 50k quota binds.
+Goal, progress and next-step are each one row revised in place. Unreviewed captures
+expire 14 days after their last revision (a re-capture refreshes the deadline;
+older rows with no stored deadline use `source_time`, else `created_at`). Any edit
+or move by an agent or person makes the fact deliberate: no expiry, kept on session
+delete, and once edited never evicted. Its label turns `stated` only when its status
+becomes `active` (`lop memory edit` does this); an agent edit or a move keeps the
+`candidate` status and still lists as `captured`. Expired text can be captured
+again; a deliberate forget stays final. Only the host that holds the session
+directory or wrote the capture expires it. An explicit session delete forgets its
+unreviewed captures and keeps its deliberate facts (`lop memory list --session
+ID`); sessions removed by automatic retention keep theirs until they expire.
+
 `memory-session.jsonl` carries session memories on export/move, with a derived
 SQLite index after import. All four scopes also use incremental `net_memory`
 when enabled. Only existing paired peers with the receiver-side **admin** grant
@@ -217,8 +233,18 @@ state are unchanged; superseded revisions become unreadable (`show --version` re
 "Revision unavailable"). A peer that is behind still catches up: it receives the
 retained operation as the state, skips the dropped revisions, and new operations keep
 sequence numbers ABOVE the highest ever used (the counter survives the pass), so no
-peer can be handed a new operation under an identity it already holds. Run it
-explicitly when the store nears its byte cap; it is not on a timer.
+peer can be handed a new operation under an identity it already holds.
+
+Maintenance also runs unattended, at most once per 6 h: the wake supervisor checks
+hourly, and each session runtime offers one pass off-thread when it starts; one-shot
+commands (`lop exec`, `lop memory status`) never run it. A pass expires stale
+captures (at most 500; the rest wait), then compacts with the same plan when it
+expired any, or when reclaimable operations reach 5,000, pages reach 50% of the byte
+cap, or the freelist reaches 25% of pages. VACUUM is skipped when free disk is under
+max(1 GiB, 2× the store). An interrupted pass backs off 1 h. `lop memory status
+--json` shows the last automatic compaction under `maintenance.last_auto_pass` (an
+idle or expiry-only pass without a compaction is not recorded there); `lop memory
+compact` stays the manual path to compact now.
 
 Design inspiration: [Hindsight](https://github.com/vectorize-io/hindsight)'s
 structured retain/recall lifecycle, source/time filtering and bounded retrieval.
