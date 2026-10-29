@@ -132,7 +132,8 @@ def _budget(root: Path, now: float) -> None:
     live = [
         row for row in records
         if row.get("kind") == approvals.KIND_OPERATOR_DEVICE_PAIR
-        and row.get("state") == approvals.STATE_REQUESTED
+        and row.get("state") not in approvals.TERMINAL_STATES
+        and row.get("state") != approvals.STATE_FAILED
     ]
     if live:
         raise _refuse(

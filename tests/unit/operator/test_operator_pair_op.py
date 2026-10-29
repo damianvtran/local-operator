@@ -474,7 +474,72 @@ def test_every_generic_surface_refuses_a_pair_card_and_deny_stays_available(
     assert A.load_record(approval_id, root=root)["state"] == A.STATE_DENIED
 
 
-def test_the_card_lines_name_a_pairing_and_no_terminal_command(root: Path) -> None:
+def test_dedicated_cli_approves_through_typed_engine_with_wrong_code_retry_and_burn(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from local_operator.operator.pair_handlers import approve_pair_request
+
+    _make_key(root)
+    _level(monkeypatch, FILE_ONLY)
+    record = _file(root)
+    approval_id = str(record["approval_id"])
+    right = _phone_code(record, root)
+    wrong = f"{(int(right) + 1) % 1_000_000:06d}"
+    monkeypatch.setattr(
+        "local_operator.operator.handlers.admit_device", lambda config_root, phone_id: 0
+    )
+    assert approve_pair_request(root, approval_id, wrong) == 1
+    assert A.load_record(approval_id, root=root)["state"] == A.STATE_REQUESTED
+    assert approve_pair_request(root, approval_id, right) == 0
+    assert A.load_record(approval_id, root=root)["state"] == A.STATE_CONNECTED
+    assert devices.read_device(root, str(record["device"]["device_id"])) is not None
+    assert "Phone paired on this computer" in capsys.readouterr().out
+
+    burned = _file(root)
+    burned_id = str(burned["approval_id"])
+    bad = f"{(int(_phone_code(burned, root)) + 1) % 1_000_000:06d}"
+    for _ in range(3):
+        assert approve_pair_request(root, burned_id, bad) == 1
+    assert A.load_record(burned_id, root=root)["state"] == A.STATE_DENIED
+    from local_operator.network import approval_ops
+
+    with pytest.raises(MeshRefusal) as raised:
+        approval_ops.require_generic_approvable(burned, burned_id, surface=approval_ops.SURFACE_CLI)
+    assert raised.value.code == "pair_typed_approval_required"
+
+
+def test_dedicated_cli_reviews_again_after_a_cancelled_signature(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.operator.pair_handlers import approve_pair_request
+
+    _make_key(root)
+    _level(monkeypatch, FILE_ONLY)
+    record = _file(root)
+    approval_id = str(record["approval_id"])
+    code = _phone_code(record, root)
+
+    def cancelled(**kwargs: Any) -> str:
+        raise MeshRefusal("approval_signing_unavailable", "The signing prompt was cancelled.")
+
+    monkeypatch.setattr(A, "sign_decision", cancelled)
+    calls = 0
+
+    def cancelled(**kwargs: Any) -> str:
+        nonlocal calls
+        calls += 1
+        raise MeshRefusal("approval_signing_unavailable", "The signing prompt was cancelled.")
+
+    monkeypatch.setattr(A, "sign_decision", cancelled)
+    assert approve_pair_request(root, approval_id, code) == 1
+    assert approval_id in desktop_approval._CANCELLED
+    assert approve_pair_request(root, approval_id, code) == 1
+    # Re-review reaches the SIGNER again; had the cancel latch stuck, the second
+    # call would have refused earlier with credential_prompt_cancelled instead.
+    assert calls == 2
+
+
+def test_the_card_lines_name_the_typed_operator_command(root: Path) -> None:
     """The fallthrough would be the ONBOARDING card ("install anchor", "definitions")."""
     _make_key(root)
     record = _file(root)
