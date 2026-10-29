@@ -401,3 +401,67 @@ def test_the_report_carries_the_cost_block_and_prints_it():
     text = markdown_summary(report)
     assert "$1.25 reported" in text
     assert "unpriced request(s)" in text
+
+
+# ---------------------------------------------------------------------------
+# 7. The rig's logins never touch the fixture store or the operator's
+# ---------------------------------------------------------------------------
+
+def test_seeding_the_rig_requires_an_explicit_store():
+    """`AuthStore()` with no db_path writes to the OPERATOR's database.
+
+    The first implementation did exactly that: four rig credential rows landed in the
+    operator's real store (found and deleted 2026-10-29). The guard is structural now.
+    """
+
+    from local_operator.evaluation.team_bridge_moderation.hubarm import (
+        HubArmError,
+        HubRigState,
+        install_rig_login,
+    )
+
+    state = HubRigState(
+        base_url="http://127.0.0.1:9/v1", tenant="org-a",
+        tokens={"ada": "t-a", "ben": "t-b"},
+        accounts={"ada": "acct-ada", "ben": "acct-ben"},
+        endpoints={"ada": "ep-ada", "ben": "ep-ben"},
+    )
+    import tempfile
+    with pytest.raises(HubArmError) as refused:
+        install_rig_login(Path(tempfile.mkdtemp()), state, role="ben")
+    assert "operator" in str(refused.value)
+
+
+def test_the_rig_store_is_separate_from_the_fixture_store(tmp_path: Path):
+    """A rig login in the fixture store is a MODEL-CREDENTIAL collision, not a detail.
+
+    Measured 2026-10-29 on the first paid hub run: the fixture carried a RADIENT OAuth row
+    holding the rig's token, the provider stack resolved it for model calls, and all 30
+    cases came back "authentication failed (HTTP 401): invalid API key format" before any
+    turn could measure anything.
+    """
+
+    from local_operator.evaluation.team_bridge_moderation.hubarm import (
+        HubRigState,
+        build_arm_clients,
+    )
+    from local_operator.providers.auth_store import AuthStore
+
+    state = HubRigState(
+        base_url="http://127.0.0.1:9/v1", tenant="org-a",
+        tokens={"ada": "t-a", "ben": "t-b"},
+        accounts={"ada": "acct-ada", "ben": "acct-ben"},
+        endpoints={"ada": "ep-ada", "ben": "ep-ben"},
+    )
+    build_arm_clients(state, config_dir=tmp_path)
+
+    fixture = AuthStore(db_path=tmp_path / "auth.db", config_dir=tmp_path)
+    assert fixture.list_credentials("radient") == [], (
+        "the fixture store must hold no rig credential: the model provider reads it"
+    )
+    rig_dir = tmp_path.with_name(tmp_path.name + "-rig-auth")
+    rig = AuthStore(db_path=rig_dir / "auth.db", config_dir=rig_dir)
+    assert {r.data.get("account_id") for r in rig.list_credentials("radient")} == {
+        "acct-ada",
+        "acct-ben",
+    }

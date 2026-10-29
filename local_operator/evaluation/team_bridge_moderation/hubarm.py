@@ -225,6 +225,13 @@ class PeerClient:
         return getattr(self._inner, name)
 
 
+def _rig_store_dir(config_dir: Path) -> Path:
+    """Where the rig's two logins live: beside the fixture, never inside it."""
+
+    path = Path(config_dir)
+    return path.with_name(path.name + "-rig-auth")
+
+
 def install_rig_login(
     config_dir: Path, state: HubRigState, *, role: str, store: Any | None = None
 ) -> int:
@@ -248,7 +255,16 @@ def install_rig_login(
     # zero rows while the write had clearly landed (measured 2026-10-29). Handing both
     # sides the same instance removes that class of ambiguity instead of ordering around it.
     if store is None:
-        store = AuthStore(config_dir=Path(config_dir))
+        # NEVER AN IMPLICIT STORE. ``AuthStore()`` with no ``db_path`` resolves to
+        # ``default_db_path()`` — the OPERATOR'S OWN auth.db — and a caller that thinks it
+        # is writing a scratch fixture silently edits live credentials. Measured
+        # 2026-10-29: four rig rows landed in the operator's store this way and were
+        # removed by id once found. Requiring the store makes that impossible rather than
+        # discouraged.
+        raise HubArmError(
+            "install_rig_login needs an explicit store: an implicit AuthStore() writes to "
+            "the operator's real credential database"
+        )
     access = state.identity(role)
     store.upsert_credential(
         "radient",
@@ -315,7 +331,18 @@ def build_arm_clients(state: HubRigState, *, config_dir: Path) -> tuple[PeerClie
 
     from local_operator.providers.auth_store import AuthStore
 
-    store = AuthStore(config_dir=Path(config_dir))
+    # THE RIG'S CREDENTIALS LIVE IN THEIR OWN STORE, NEVER THE FIXTURE'S. Measured
+    # 2026-10-29 on the first paid hub run: seeding the rig logins into the fixture config
+    # dir put a RADIENT OAuth row where the MODEL PROVIDER stack also looks, so every
+    # request went out with the rig's minted token and came back
+    # "authentication failed (HTTP 401): invalid API key format" - 30 of 30 cases invalid
+    # before a single useful turn. The bridge and the model share a provider name but not
+    # a principal here, so a separate store is the isolation, not a workaround: the
+    # shipped client is handed this store explicitly and resolves nothing else.
+    rig_dir = _rig_store_dir(config_dir)
+    rig_dir.mkdir(parents=True, exist_ok=True)
+    store = AuthStore(db_path=rig_dir / "auth.db", config_dir=rig_dir)
+    config_dir = rig_dir
     eval_id = install_rig_login(config_dir, state, role=DEFAULT_EVAL_ROLE, store=store)
     peer_id = install_rig_login(config_dir, state, role=DEFAULT_PEER_ROLE, store=store)
     return (
@@ -332,7 +359,7 @@ def build_arm_clients(state: HubRigState, *, config_dir: Path) -> tuple[PeerClie
             config_dir=config_dir,
             credential_id=peer_id,
             store=store,
-        ),
+        ),  # config_dir here is the RIG store dir (see above), never the fixture's
     )
 
 
