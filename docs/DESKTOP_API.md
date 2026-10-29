@@ -2559,8 +2559,10 @@ identity guard — refuse before any claim, so a gated revise is neither publish
 nor stranded. A runtime run that raised (or handed off) an item banner does not also
 raise its own completion banner; `error` ends always do.
 
-**All means the entire explicitly requested scope, not the first 50 rows.** On
-an explicit mark-all/dismiss-session gesture, clients enumerate every page of
+**All means the entire explicitly requested scope, not the first 50 rows.**
+With `notification_bulk_selection: 1`, use the server-side selection contract
+below. The following enumeration protocol remains supported for legacy clients:
+on an explicit mark-all/dismiss-session gesture, clients enumerate every page of
 that state/source/priority/session scope with progress/count feedback, freeze
 the FIRST response's `high_water`, pass it as `through_seq` on every later GET,
 and union each page's `observed` tokens. Keep the first page's ask refs; do not
@@ -2568,6 +2570,304 @@ refresh them into a later ask set. Then PATCH batches of at most 500 tokens with
 the same boundary. A filtered action must name its filtered scope; it never
 silently widens to the whole inbox. Read/unread applies to observed live ask
 marks as well as notify revisions, without touching ask logs.
+
+#### Filtered bulk selection and guarded Undo (`notification_bulk_selection: 1`)
+
+This additive desktop capability uses the **existing GET and PATCH routes**.
+Legacy bodies and the relay's shared legacy validator retain their exact
+behavior. The CLI has no new command family; its existing observed-id gestures
+are unchanged. Without this capability, a client must not silently treat the
+loaded page as the entire filtered selection.
+
+Preview an entire scope (not just its loaded pages):
+
+```http
+GET /v1/desktop/notifications?preview=true&state=all&kind=all&bulk_priority=normal_up&count_session_ids=aaaaaaaaaaaa&count_session_ids=bbbbbbbbbbbb
+```
+
+Filters: `state=unread|all|dismissed` (default unread),
+`kind=all|asks|updates` (default all),
+`bulk_priority=any|high|normal_up` (default any; normal_up means high OR normal),
+and optional `session_id` (one exact 12-hex session). `all` excludes dismissed
+updates, just like the ordinary list. Open asks remain visible under unread
+regardless of their read mark; they are always high priority. Preview refuses
+legacy `source`/`priority`, cursor, and client `through_seq` rather than widening
+or ambiguously merging the scope. `count_session_ids` is an optional repeated
+query key, at most 50 session ids: it requests aggregates only, never broadens
+the selection. All response examples use the existing CRUDResponse **`result`**
+wrapper, not a new envelope:
+
+```json
+{"selection":{"token":"<43 URL-safe characters>","through_seq":725,
+ "expires_at":1793200000000,"eligible_count":620,"eligible_unread_count":400,
+ "skipped_ask_count":2,"session_counts":{
+   "aaaaaaaaaaaa":{"eligible_count":300,"eligible_unread_count":200},
+   "bbbbbbbbbbbb":{"eligible_count":0,"eligible_unread_count":0}}},
+ "unread_count":700,"waiting_count":2,"waiting_unread_count":1,"high_water":725}
+```
+
+Preview does not change notification or ask state. It stores only bounded
+selection metadata. Its update count and server watermark are captured in one
+SQLite transaction. **Every content or state write advances `seq`**, including
+read-state changes, so a later arrival, content revision or state ABA cycle
+cannot enter the selected set at commit. Delivery claims deliberately do not
+advance `seq`; that is safe because no bulk path, Undo included, reads or
+writes the delivery fields. A bearer-hash binding plus the
+store-local token namespace prevents reuse after auth rotation or in another
+config/account store. Neither bearer nor notification bodies are stored in the
+selection metadata.
+
+Apply with one request, including any unchecked rows as subtractive exclusions:
+
+```json
+{"op":"dismiss","selection_token":"<token>","excluded_ids":["n_aaaaaaaaaaaaaaaa"]}
+```
+
+`op` is `read|unread|dismiss|undismiss`. `excluded_ids` is optional (0..500
+validated item ids, canonicalized as a sorted set); it can only remove matches,
+never grant access to another row/revision. The token is mutually exclusive
+with all legacy targets. For partial selection, use
+`{op,ids:[{id,revision}],through_seq:<list high_water>,receipt:true}`. This
+opt-in path requires both the list watermark and each observed content revision;
+it excludes asks even for read/unread. Legacy `ids` without `receipt:true`
+keeps its earlier behavior.
+
+Receipts are compact at every result size; they contain no full matching-id list:
+
+```json
+{"changed_count":618,"skipped_count":1,"excluded_count":1,
+ "eligible_count":619,"skipped_ask_count":2,"unread_delta":-399,
+ "session_counts":{"aaaaaaaaaaaa":{"changed_count":299,"unread_delta":-199},
+                   "bbbbbbbbbbbb":{"changed_count":0,"unread_delta":0}},
+ "operation_token":"<token>","through_seq":725,"expires_at":1793200000000,
+ "replayed":false,"unread_count":301,"waiting_count":2,
+ "waiting_unread_count":1,"high_water":1343}
+```
+
+`changed_count` counts actual state transitions only; `skipped_count` counts
+updates that became stale/unavailable or already had the requested state.
+`excluded_count` counts excluded rows still eligible under the frozen boundary
+at commit (a subsequently changed excluded row is stale, not falsely counted
+as changed). `eligible_count` is the original update count minus that exclusion
+count. `unread_delta` is the actual change to the undismissed-update badge;
+per-session deltas cover only the at-most-50 requested scopes. Global badge
+counts are freshly queried after commit and can include concurrent arrivals.
+Replay returns the saved receipt with `replayed:true` and fresh global badges:
+**do not apply its deltas a second time**. The same selection token with a
+different op or exclusion set returns 409 `selection_operation_conflict`.
+
+An optional recount never broadens a frozen selection or extends its expiry.
+Send exclusions in a body, with the read-only `preview` op on the same PATCH
+route:
+
+```json
+{"op":"preview","selection_token":"<token>","excluded_ids":["n_aaaaaaaaaaaaaaaa"]}
+```
+
+`excluded_ids` is optional, at most 500, validated exactly as on a mutation.
+`op:"preview"` changes no item, mints no receipt and is not a replay: the token
+can still be applied afterwards. Its result is the same `{selection, ...counts}`
+shape preview returns, with identical counts to the GET form below. The GET
+recount remains for no or a few exclusions:
+
+```http
+GET /v1/desktop/notifications?preview=true&selection_token=<token>&excluded_ids=n_aaaaaaaaaaaaaaaa&excluded_ids=n_bbbbbbbbbbbbbbbb
+```
+
+**Clients must use the body form for exclusions.** 500 ids in a URL is 16-50 KB,
+and uvicorn/h11 refuse a request head over 16 KiB with `400` whenever it arrives
+in more than one read, before the route runs. No new filters are accepted with an
+existing token. Counts reflect the still-eligible subset; the token, watermark,
+expiry and original informational ask count remain unchanged. Recount after
+commit returns 409 `selection_already_committed`.
+
+Undo uses `PATCH {"op":"undo","operation_token":"<receipt token>"}`. Row
+post-images and complete prior read/dismiss state are persisted **atomically
+with the mutation**, and only actually changed rows are recorded. Undo restores
+only rows whose post-write sequence AND content revision still match. It
+restores read provenance too, never undismisses an entire current filter, never
+rewinds the global sequence, and skips intervening content/state/delivery
+writes. Undo itself is atomic and replayable; its response has the same compact
+counts and deltas (no `excluded_count`). A selection replay after Undo remains
+a replay of the original receipt, not permission to redo it.
+
+**Asks are excluded unconditionally on every receipt-backed path.**
+`skipped_ask_count` is informational: preview counts matching live asks, including
+read asks in unread scope; partial selection counts the supplied ask refs. It
+is not settlement authority, nor a durable enumeration of those asks. The UI
+may offer the existing separately confirmed, reasoned per-ask `moot` settlement
+flow, explicitly labelled irreversible. Neither generic notification dismissal
+nor Undo settles/restores an ask. No `include_asks` flag exists.
+
+Bounds: selection handles expire after 10 minutes; committing starts a 10-minute
+Undo/replay lifetime. At most **128 live handles per store** and **100,000 retained
+row snapshots across all receipts**. Preview matching over 100,000 updates
+returns 413 `selection_too_large`, never a truncated success. Capacity exhaustion
+returns 429 `selection_capacity` or `receipt_capacity` before any item mutation.
+Expired metadata is reclaimed opportunistically by preview/apply; active
+receipts are never evicted. An expired, foreign-scope, or unknown token returns
+409 `selection_unavailable` (intentionally indistinguishable). Malformed or
+mixed targets/filters are 422; ordinary desktop auth/origin gates still apply.
+
+#### Frozen ask-notification reads (`notification_bulk_ask_read: 1`)
+
+The v1 contract above remains update-only, including previously issued tokens
+and receipts. A client that sees this **separate additive capability** may opt
+into v2 at the **initial select-all gesture**, before choosing an operation:
+
+```http
+GET /v1/desktop/notifications?preview=true&include_ask_reads=true&state=all&kind=all
+```
+
+This captures bounded pending-ask identities and their notification read marks
+alongside the update watermark. It does not mark, answer, settle or withdraw an
+ask. There is no second snapshot when the user later chooses read/unread/dismiss:
+the same token is used, and its first mutation binds op/exclusions as in v1.
+Omitting `include_ask_reads` (or setting false) returns the exact v1 semantics.
+Clients must gate combined counts on **both the capability and
+`selection_version: 2`**, not reinterpret v1 update-only counts.
+
+**V2 preview additions** (inside the existing `result.selection`):
+
+```typescript
+type AskReadSelectionCounts = {
+  selection_version: 2;
+  eligible_count: number;              // updates + asks; read/unread targets
+  eligible_unread_count: number;       // unread updates + unread ask marks
+  eligible_update_count: number;
+  eligible_unread_update_count: number;
+  eligible_ask_count: number;
+  eligible_unread_ask_count: number;
+  skipped_ask_count: 0;                // supported read targets, not permission to dismiss
+  operation_counts: Record<"read" | "unread" | "dismiss" | "undismiss", {
+    eligible_count: number;
+    skipped_ask_count: number;
+  }>;
+};
+```
+
+`operation_counts.read` and `.unread` include both populations, with zero
+excluded asks. `.dismiss` and `.undismiss` count updates only and report the
+captured ask population as skipped. Counts are targets, not a prediction that
+already-read/already-unread rows will change. The existing bounded
+`session_counts` entries also gain the four update/ask subtotal fields above;
+their `eligible_count` and `eligible_unread_count` become combined totals.
+Pending asks remain selectable in Unread even after read acknowledgement, just
+like the existing list. `kind=asks`, `kind=updates`, priority and From filters
+retain their current list meaning; Dismissed has no live asks.
+
+Recount uses the **same** body form as v1:
+`PATCH {"op":"preview","selection_token":"<token>","excluded_ids":[...]}`.
+V2 exclusions are mostly ask refs (up to 81 bytes each), so 500 of them in the
+GET query is ~50 KB of URL that h11 refuses with `400`. The GET
+`preview=true&selection_token=...` form answers identically for no or a few
+exclusions. No `include_ask_reads` or other filters may be added to a recount,
+and `reconcile_ids` is refused (`422`): a recount mints no receipt.
+It revalidates only captured refs; new asks/updates never enter, and neither
+watermark nor expiry advances. Exclusions subtract both kinds of identity.
+
+**V2 mutation/Undo additions** (inside existing `result`):
+
+```typescript
+type AskReadMutationCounts = {
+  selection_version: 2;
+  changed_count: number;              // changed_update_count + changed_ask_count
+  changed_update_count: number;
+  changed_ask_count: number;
+  unread_delta: number;               // UPDATE unread badge delta, unchanged meaning
+  waiting_unread_delta: number;       // ASK notification unread badge delta
+  counts_high_water: number;          // POST-OP transaction fence for operation + scope counts
+  reconciliation?: {
+    items: NotificationListItem[];    // existing list projection, real per-row seq
+    absent_ids: string[];             // requested ids not present/readable in this store
+    high_water: number;               // separate coherent notification read snapshot
+  };
+};
+```
+
+The at-most-50 requested session entries gain `changed_update_count`,
+`changed_ask_count` and `waiting_unread_delta`; their existing `changed_count`
+becomes combined, while `unread_delta` stays update-only. Each requested session
+entry additionally carries authoritative **`unread_count`**, counting all
+undismissed unread updates in that session (not only the selection filter),
+queried inside the mutation/Undo transaction after all writes. Its fence is
+`counts_high_water`. Replay returns the original operation's counts and fence;
+a newer client count must not be overwritten by this older snapshot.
+`eligible_count` in a
+mutation is op-specific: combined for read/unread, updates only for dismissal.
+`skipped_count` includes stale, settled or already-at-target acknowledgements.
+`skipped_ask_count` means **asks excluded by the operation**, not failed read
+marks: zero for read/unread and Undo, captured non-excluded asks for dismissal.
+`waiting_count` remains actionable pending questions, unaffected by read state.
+`waiting_unread_count` changes with acknowledgements. Fresh badge counts may
+also reflect concurrent settlement/arrival; neither delta is an authority to
+change actionable waiting count. Apply replay deltas at most once.
+
+**Bounded visible-row reconciliation:** receipt-backed PATCH targets may also
+include `reconcile_ids: ItemID[]` (0..500, validated like the existing id target).
+This is read metadata, never a mutation target: it cannot expand frozen scope,
+change exclusions, or give an ask settlement authority. It is intentionally
+excluded from replay identity, so a replay may refresh a different bounded set
+of cached rows. The optional `result.reconciliation` carries the existing list
+row projection, not detail bodies or ask answers, and authoritative absent IDs.
+**`reconciliation.items` combines notify rows and pending-ask rows**: ask entries
+use the unchanged waiting-row `ask_item` projection (`source: "ask"`, same
+id/read/seq/ask metadata); there is no separate reconciliation `waiting` array.
+Only requested `reconcile_ids` appear. A settled requested ask is in
+`absent_ids`, including when its local journal has settled before the derived
+index catches up.
+The desktop's existing read authorization is store-wide: a requested row outside
+the selected filter may be read without being changed; unknown and other-store
+IDs are uniformly absent. Receipt expiry/auth/scope checks finish before any
+reconciliation read. Legacy requests without this opt-in keep their shape.
+
+Watermark distinctions (no separate `operation_high_water` field exists):
+- `through_seq`: the original **pre-operation selection** boundary.
+- `counts_high_water`: **post-operation** notification transaction boundary,
+  also fencing the authoritative requested-session counts. Saved on replay.
+- `result.high_water`: the existing fresh global badge read, after commit.
+- `reconciliation.high_water`: a **fresh read snapshot** for requested update
+  rows/ask marks; may be newer than the saved operation/count fence on replay.
+  Every row retains its actual `seq`; it is never relabelled with the operation
+  watermark. Ask lifecycle projection follows the existing list's derived
+  index, without claiming a cross-store atomic snapshot.
+
+For example, selection `through_seq=100`, operation `counts_high_water=110`,
+fresh global `high_water=112` and reconciliation `high_water=113` are compatible.
+A reconciled row can legitimately carry `seq=113`. Consumers compare per-row
+sequence before replacement and use the reconciliation fence for removals;
+they must not overwrite a newer cached row/removal with an older response.
+Session badge reconciliation uses `counts_high_water`, not either fresh read's
+newer fence. No unbounded ID list or all-page invalidation is necessary.
+
+**Receipt safety:** a v2 preview stores each ask ref, a lifecycle fingerprint
+(created timestamp, deadline, questions), and its `ref_state` preimage/sequence
+in the notification DB. Apply/Undo revalidate current open refs and mark seq.
+The derived index is checked once; where local ask logs exist, each selected
+session's journal is read/folded once too, so a committed settlement beats a
+stale index. Missing local logs retain the existing mirrored/legacy index path;
+an existing unreadable log fails closed. No per-ref journal scans are used.
+
+Update state, ask **notification marks**, and their receipt post-images commit
+atomically in one notification-DB transaction. **Ask-log reads are not atomic
+with settlement in the separate store.** A settlement racing acknowledgement
+may leave a harmless read mark, never reopen or notify an ask. No code on this
+path writes `asks.jsonl`, queues a notification or changes ask lifecycle.
+Undo restores only actually changed marks whose post-sequence still matches
+and whose ask remains valid/open; settled, revised or subsequently marked refs
+are skipped. A formerly absent mark is restored as an unread tombstone with a
+new seq, preserving the ABA fence. Neither dismissal nor its Undo touches asks,
+even when their refs were included in the initial v2 snapshot.
+
+The existing 100,000-row store-wide receipt bound now covers **both** captured
+ask refs and retained update post-images. Combined selections over100,000 are
+413; retained-capacity exhaustion is429 before mutation. Same auth/store scope,
+128-handle bound,10-minute selection/receipt TTL, expiry cleanup and replay
+fencing. SQLite schema3 adds only `bulk_ask_refs`; v1 handles remain usable.
+A rollback to a backend without the capability cannot promise v2 Undo support;
+clients must not send an outstanding v2 token to a capability-absent server.
+Partial explicit ask reads continue through the existing observed-id path;
+this capability does not broaden v1 `ids+receipt:true`.
 
 `waiting_count` is all pending asks (the group); `waiting_unread_count` is its
 unread subset. The sidebar badge is `unread_count + waiting_unread_count`.

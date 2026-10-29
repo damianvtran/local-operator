@@ -736,6 +736,103 @@ class _CyclePolicy:
     provider: str
 
 
+async def verified_status_capture(
+    *, store: Any, owner: Any, status_fetcher: "Callable[[], Awaitable[Any]] | None"
+) -> "AcceptedCapture":
+    """THE AUTHORITY GATE: a fresh, sealed, verified hub status for this owner.
+
+    Raises ``StoreRefused('policy_stale')`` unless the hub currently serves
+    messaging to this account, the owner's organization is eligible, its
+    endpoint is active, and the committed consent is current for the served
+    version — with the owner generation still live across the read. On
+    success the accepted text floors have advanced and the capture is
+    returned.
+
+    WHY A FUNCTION OF ITS OWN (PR #3063 review M6): this is the part of a
+    screen that is about the HUB's current authority, not the model. The
+    connector hands a message off on a RECORDED read verdict without calling
+    the model again (see ``connector.wake.recorded_read_verdict``), and that
+    handoff must still pass exactly this gate; extracting it lets the cycle
+    and the recorded-verdict path run the same code rather than two copies.
+    """
+
+    from local_operator.team_bridge.store import StoreRefused
+
+    if status_fetcher is None:
+        # None is NOT authority: without a status source there is
+        # nothing to accept, so nothing is published and nothing
+        # dispatches.
+        raise StoreRefused("policy_stale", "no verified status source")
+    fetched = await status_fetcher()
+    if not isinstance(fetched, VerifiedStatus):
+        # R11/2: a public class shape is NOT provenance — an unverified
+        # callback (raw Mapping or a forged wrapper) refuses HERE, before
+        # normalization, floor advance, client creation or spend.
+        raise StoreRefused("policy_stale", "unverified status source")
+    raw = fetched.status
+    if not isinstance(raw, Mapping):
+        raise StoreRefused("policy_stale", "status fetch returned no mapping")
+    law = _normalize_accepted_status(raw, owner, store)
+    if not store.current_generation_is_live(owner):
+        raise StoreRefused("policy_stale", "owner generation lost during the status read")
+    # The FULL law has passed (origin seal, identity, UNIQUE eligible
+    # tenant/endpoint, pinned selector, committed-consent currency):
+    # advance BOTH accepted floors in ONE atomic transaction — a refused
+    # candidate leaves every floor untouched.
+    receipt_pre = store.owner_consent_receipt(owner)
+    if receipt_pre is None:
+        raise StoreRefused("policy_stale", "no committed consent receipt for the owner")
+    if not _consent_receipt_is_current(
+        receipt_pre["consent_version"],
+        law.consent_served_version,
+        law.consent_accepted_versions,
+    ) or not receipt_pre.get("consent_ref"):
+        raise StoreRefused("policy_stale", "consent receipt is not the served version")
+    store.advance_text_floors(
+        owner,
+        [
+            ("guidance", law.guidance_version, law.guidance_sha),
+            ("consent", law.consent_served_version, law.consent_sha),
+        ],
+    )
+    # R12/O1: re-verify the receipt AFTER the floor advance and before
+    # mint/dispatch. A receipt rotated between the law check and the
+    # advance would otherwise mint a capture whose served-vs-current
+    # consent versions disagree — its future reuse would refuse, but
+    # the CURRENT run would already have proceeded on stale consent.
+    receipt = store.owner_consent_receipt(owner)
+    if (
+        receipt is None
+        or receipt_pre["consent_version"] != receipt["consent_version"]
+        or receipt_pre.get("consent_ref") != receipt.get("consent_ref")
+        or not _consent_receipt_is_current(
+            receipt["consent_version"],
+            law.consent_served_version,
+            law.consent_accepted_versions,
+        )
+    ):
+        raise StoreRefused("policy_stale", "consent receipt changed across the floor advance")
+    return AcceptedCapture(
+        _CAPTURE_TOKEN,
+        version=law.version,
+        template_hash=law.template_hash,
+        owner_frame=_full_owner_frame(owner),
+        captured_at=time.time(),
+        credential_id=owner.credential_id,
+        account_id=owner.account_id,
+        hub=owner.canonical_base_url,
+        owner_generation=owner.enrollment_generation,
+        consent_version=receipt["consent_version"],
+        consent_ref=receipt["consent_ref"],
+        consent_served_version=law.consent_served_version,
+        consent_accepted_versions=law.consent_accepted_versions,
+        guidance_version=law.guidance_version,
+        guidance_sha=law.guidance_sha,
+        consent_sha=law.consent_sha,
+        source="sdk-verified",
+    )
+
+
 async def run_screening_cycle(
     *,
     config_dir: "Path",
@@ -851,78 +948,8 @@ async def run_screening_cycle(
         else:
             capture = None
     if capture is None:
-        if status_fetcher is None:
-            # None is NOT authority: without a status source there is
-            # nothing to accept, so nothing is published and nothing
-            # dispatches.
-            raise StoreRefused("policy_stale", "no verified status source")
-        fetched = await status_fetcher()
-        if not isinstance(fetched, VerifiedStatus):
-            # R11/2: a public class shape is NOT provenance — an unverified
-            # callback (raw Mapping or a forged wrapper) refuses HERE, before
-            # normalization, floor advance, client creation or spend.
-            raise StoreRefused("policy_stale", "unverified status source")
-        raw = fetched.status
-        if not isinstance(raw, Mapping):
-            raise StoreRefused("policy_stale", "status fetch returned no mapping")
-        law = _normalize_accepted_status(raw, owner, store)
-        if not store.current_generation_is_live(owner):
-            raise StoreRefused("policy_stale", "owner generation lost during the status read")
-        # The FULL law has passed (origin seal, identity, UNIQUE eligible
-        # tenant/endpoint, pinned selector, committed-consent currency):
-        # advance BOTH accepted floors in ONE atomic transaction — a refused
-        # candidate leaves every floor untouched.
-        receipt_pre = store.owner_consent_receipt(owner)
-        if receipt_pre is None:
-            raise StoreRefused("policy_stale", "no committed consent receipt for the owner")
-        if not _consent_receipt_is_current(
-            receipt_pre["consent_version"],
-            law.consent_served_version,
-            law.consent_accepted_versions,
-        ) or not receipt_pre.get("consent_ref"):
-            raise StoreRefused("policy_stale", "consent receipt is not the served version")
-        store.advance_text_floors(
-            owner,
-            [
-                ("guidance", law.guidance_version, law.guidance_sha),
-                ("consent", law.consent_served_version, law.consent_sha),
-            ],
-        )
-        # R12/O1: re-verify the receipt AFTER the floor advance and before
-        # mint/dispatch. A receipt rotated between the law check and the
-        # advance would otherwise mint a capture whose served-vs-current
-        # consent versions disagree — its future reuse would refuse, but
-        # the CURRENT run would already have proceeded on stale consent.
-        receipt = store.owner_consent_receipt(owner)
-        if (
-            receipt is None
-            or receipt_pre["consent_version"] != receipt["consent_version"]
-            or receipt_pre.get("consent_ref") != receipt.get("consent_ref")
-            or not _consent_receipt_is_current(
-                receipt["consent_version"],
-                law.consent_served_version,
-                law.consent_accepted_versions,
-            )
-        ):
-            raise StoreRefused("policy_stale", "consent receipt changed across the floor advance")
-        capture = AcceptedCapture(
-            _CAPTURE_TOKEN,
-            version=law.version,
-            template_hash=law.template_hash,
-            owner_frame=_full_owner_frame(owner),
-            captured_at=time.time(),
-            credential_id=owner.credential_id,
-            account_id=owner.account_id,
-            hub=owner.canonical_base_url,
-            owner_generation=owner.enrollment_generation,
-            consent_version=receipt["consent_version"],
-            consent_ref=receipt["consent_ref"],
-            consent_served_version=law.consent_served_version,
-            consent_accepted_versions=law.consent_accepted_versions,
-            guidance_version=law.guidance_version,
-            guidance_sha=law.guidance_sha,
-            consent_sha=law.consent_sha,
-            source="sdk-verified",
+        capture = await verified_status_capture(
+            store=store, owner=owner, status_fetcher=status_fetcher
         )
     if capture is None:  # both branches above either set it or raised
         raise StoreRefused("policy_stale", "no verified status source")
