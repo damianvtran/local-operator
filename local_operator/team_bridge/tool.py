@@ -473,6 +473,15 @@ def _failure_text(failure: BaseException) -> str:
     an empty bracket, because there is no server answer to quote and the tool's
     own ``code`` field already says what failed.
 
+    THAT PROXY IS NOT EXACT, and the limit is stated rather than assumed away
+    (review round 1, R1-3): the client also SYNTHESIZES refusals with an
+    ``http_status`` and no exchange at all (``_require_body_within``'s 413
+    ``payload_too_large`, the avatar paths' 409 `account_mismatch`). None is
+    reachable from a wrapped site today, so every message this change can reach
+    keeps its promise; one that became reachable would gain a coded footer (a
+    code, never content). If that ever happens, key the footer on a
+    server-derived marker rather than on the status alone.
+
     The keys are read from the exception, not from a parsed body: every refusal
     shape that reaches here (:class:`~.client.BridgeRefusal` and its subclasses,
     re-coded refusals included) already carries them as attributes, which keeps
