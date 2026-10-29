@@ -633,7 +633,7 @@ def test_windows_stop_handler_turns_sigbreak_into_a_clean_stop(monkeypatch) -> N
     from local_operator.team_bridge.connector import __main__ as entry
 
     installed: dict[int, Any] = {}
-    monkeypatch.setattr(entry.os if hasattr(entry, "os") else os, "name", "nt", raising=False)
+    monkeypatch.setattr(os, "name", "nt", raising=False)
     monkeypatch.setattr(os, "name", "nt")
     monkeypatch.setattr(signal, "SIGBREAK", 21, raising=False)
     monkeypatch.setattr(signal, "signal", lambda sig, handler: installed.__setitem__(sig, handler))

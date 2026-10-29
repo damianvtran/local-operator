@@ -1105,7 +1105,9 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # install, remove, logs for a backend-only machine (guide://team-bridge).
     # Same stdlib-only registration rule as the groups above: the installer,
     # the store and sqlite are imported by the verb that runs.
-    from local_operator.team_bridge_arguments import add_parser as add_team_bridge_parser
+    from local_operator.team_bridge_arguments import (
+        add_parser as add_team_bridge_parser,
+    )
 
     add_team_bridge_parser(subparsers, parent_parser)
 
@@ -2892,7 +2894,9 @@ def config_edit_command(args: argparse.Namespace) -> int:
         if setting.key == "team_bridge.enabled":
             # CLI edits do not visit the desktop settings route. Reconcile at
             # this same explicit event, not on a poll or only at next startup.
-            from local_operator.team_bridge.connector.install import sync_connector_service
+            from local_operator.team_bridge.connector.install import (
+                sync_connector_service,
+            )
 
             sync_connector_service(config_manager.config_dir)
 
@@ -17548,10 +17552,14 @@ def main() -> int:
             return tunnel_main(args)
         elif args.subcommand == "team-bridge":
             if getattr(args, "team_bridge_command", None) == "setup":
-                from local_operator.team_bridge.setup_cli import main as team_bridge_setup
+                from local_operator.team_bridge.setup_cli import (
+                    main as team_bridge_setup,
+                )
 
                 return team_bridge_setup(args)
-            from local_operator.team_bridge.connector.cli import main as team_bridge_main
+            from local_operator.team_bridge.connector.cli import (
+                main as team_bridge_main,
+            )
 
             return team_bridge_main(args)
         elif args.subcommand == "secret":

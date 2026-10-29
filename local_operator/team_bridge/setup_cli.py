@@ -54,7 +54,6 @@ def main(args: argparse.Namespace) -> int:
     """Dispatch only this command; plain English by default, JSON on request."""
 
     from local_operator.paths import config_dir
-
     from local_operator.team_bridge.store import StoreRefused
 
     root = config_dir()
@@ -170,26 +169,33 @@ def render_lines(result: dict[str, Any]) -> list[str]:
     if code == CODE_ENABLE_IN_APP_REQUIRED:
         return [
             text(
-                _k.setup_enable_in_app_required(),
-                account_id=result.get("account_id", ""),
+                _k.setup_enable_in_app_required(
+                    account_id=result.get("account_id", ""),
+                )
             )
         ]
     if code == CODE_DESIGNATION_MISSING:
-        return [text(_k.setup_designation_missing(), account_id=result.get("account_id", ""))]
+        return [
+            text(
+                _k.setup_designation_missing(account_id=result.get("account_id", "")),
+            )
+        ]
     if code == CODE_READY:
         return [
             text(
-                _k.setup_ready(),
-                account_id=result.get("account_id", ""),
-                session=result.get("session", ""),
+                _k.setup_ready(
+                    account_id=result.get("account_id", ""),
+                    session=result.get("session", ""),
+                )
             )
         ]
     if code == CODE_NOT_READY:
         return [
             text(
-                _k.setup_not_ready(),
-                service=result.get("service", ""),
-                detail=result.get("detail", ""),
+                _k.setup_not_ready(
+                    service=result.get("service", ""),
+                    detail=result.get("detail", ""),
+                )
             )
         ]
     return [text(_k.setup_failed())]

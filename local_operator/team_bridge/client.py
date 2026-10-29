@@ -4136,7 +4136,10 @@ class StatusDiscipline:
         # mutation or connector placement belongs to a read-only discipline.
         self._read_only = read_only
         self._client = TeamBridgeClient(
-            config_dir, base_url=base_url, transport=transport, store=store,
+            config_dir,
+            base_url=base_url,
+            transport=transport,
+            store=store,
             credential_id=credential_id,
         )
         self._states: dict[str, _AccountState] = {}
