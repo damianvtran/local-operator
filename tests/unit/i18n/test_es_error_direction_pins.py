@@ -40,26 +40,53 @@ def files():
     return catalogues.load_catalogue("es", "wire.errors.files")
 
 
+def _rejection_direction(value: str) -> None:
+    """Raise unless a rejected-credential message says REJECTED and not ABSENT."""
+    lowered = value.lower()
+    assert "rechaz" in lowered, f"the provider REJECTED the key; the Spanish must say so: {value!r}"
+    for absent in ABSENT_WORDS:
+        assert absent not in lowered, (
+            f"{value!r} reads as a MISSING credential ({absent!r}), which sends the "
+            "reader to the wrong fix"
+        )
+
+
+def _missing_direction(value: str) -> None:
+    """Raise unless a missing-credential message says MISSING and not REFUSED."""
+    lowered = value.lower()
+    assert "no se encontraron" in lowered, f"nothing is stored; say so: {value!r}"
+    assert "rechaz" not in lowered, f"credentials_missing reads as a refusal: {value!r}"
+
+
+def _sign_in_remedy(value: str) -> None:
+    """Raise unless an expired sign-in keeps its start-again instruction."""
+    lowered = value.lower()
+    assert "ya no está disponible" in lowered, f"the state is 'no longer available': {value!r}"
+    assert "empieza de nuevo" in lowered, (
+        f"the remedy is 'Start again'; a dead end leaves the user stuck: {value!r}"
+    )
+
+
+def _ttl_range(value: str) -> None:
+    """Raise unless the ttl range is inclusive and keeps its placeholder."""
+    assert "{maximum}" in value, f"the upper bound is a placeholder: {value!r}"
+    assert "entre 1 y {maximum}" in value, (
+        "the accepted range is inclusive from 1; 'entre' with an explicit upper "
+        f"bound is what carries that: {value!r}"
+    )
+    for exclusive in ("mayor que 1", "más de 1", "menos de {maximum}"):
+        assert exclusive not in value.lower(), f"exclusive wording: {value!r}"
+
+
 def test_a_rejected_key_is_not_a_missing_credential(auth):
     """`key_rejected` is the provider refusing a key that exists."""
-    rejected = auth["wire.errors.auth.key_rejected"].lower()
-    assert "rechaz" in rejected, (
-        f"the provider REJECTED the key; the Spanish must say so: {rejected!r}"
-    )
-    for absent in ABSENT_WORDS:
-        assert absent not in rejected, (
-            f"{rejected!r} reads as a MISSING credential ({absent!r}), which sends "
-            "the reader to the wrong fix"
-        )
+    _rejection_direction(auth["wire.errors.auth.key_rejected"])
 
 
 def test_a_missing_credential_is_not_a_refusal(auth):
     """`credentials_missing` is the opposite direction: nothing stored at all."""
-    missing = auth["wire.errors.auth.credentials_missing"].lower()
-    assert "no se encontraron" in missing
-    assert "rechaz" not in missing, (
-        f"credentials_missing reads as a refusal: {missing!r}"
-    )
+    _missing_direction(auth["wire.errors.auth.credentials_missing"])
+
 
 
 def test_account_not_found_stays_a_lookup_failure(auth):
@@ -70,12 +97,7 @@ def test_account_not_found_stays_a_lookup_failure(auth):
 
 
 def test_sign_in_missing_keeps_the_start_again_remedy(auth):
-    value = auth["wire.errors.auth.sign_in_missing"].lower()
-    assert "ya no está disponible" in value
-    assert "empieza de nuevo" in value, (
-        "the remedy is 'Start again'; a dead end here leaves the user stuck: "
-        f"{value!r}"
-    )
+    _sign_in_remedy(auth["wire.errors.auth.sign_in_missing"])
 
 
 def test_store_unreadable_names_why_it_matters(auth):
@@ -88,14 +110,7 @@ def test_store_unreadable_names_why_it_matters(auth):
 
 
 def test_ttl_range_stays_inclusive_and_keeps_its_placeholder(files):
-    value = files["wire.errors.files.sign_ttl"]
-    assert "{maximum}" in value
-    assert "entre 1 y {maximum}" in value, (
-        "the accepted range is inclusive from 1; 'entre' with an explicit upper "
-        f"bound is what carries that: {value!r}"
-    )
-    for exclusive in ("mayor que 1", "más de 1", "menos de {maximum}"):
-        assert exclusive not in value.lower()
+    _ttl_range(files["wire.errors.files.sign_ttl"])
 
 
 def test_encoding_failure_is_not_a_conversion_instruction(files):
@@ -134,18 +149,22 @@ def test_file_type_refusals_stay_type_refusals(files):
 def test_the_pins_can_fail():
     """A fence nobody has seen fail is a comment.
 
-    Feeds the checks above the inversions they exist to reject, so a typo in the
-    fence fails here instead of passing forever.
+    Calls the SAME helpers the pins use, with the exact inversions they exist to
+    reject, and requires each to raise. A typo in a helper therefore fails here
+    instead of passing forever — which a copy of the assertions would not catch
+    (code-review R1-01 on #3157).
     """
-    inverted_rejection = "no se encontraron credenciales para este proveedor"
-    assert "rechaz" not in inverted_rejection
-    inverted_missing = "el proveedor rechazó las credenciales"
-    assert "no se encontraron" not in inverted_missing
-    dead_end = "este inicio de sesión ya no está disponible"
-    assert "empieza de nuevo" not in dead_end
-    exclusive = "ttl_s debe ser mayor que 1 y menos de {maximum}"
-    assert "entre 1 y {maximum}" not in exclusive
-    wrong_cause = "el archivo es demasiado grande: {mime_type}"
-    assert "tipo" not in wrong_cause
-    rejected_as_absent = "no se encontró la clave de API de este proveedor"
-    assert any(word in rejected_as_absent for word in ABSENT_WORDS)
+    with pytest.raises(AssertionError):
+        _rejection_direction("no se encontraron credenciales para este proveedor")
+    with pytest.raises(AssertionError):
+        _missing_direction("el proveedor rechazó las credenciales")
+    with pytest.raises(AssertionError):
+        _sign_in_remedy("este inicio de sesión ya no está disponible")
+    with pytest.raises(AssertionError):
+        _ttl_range("ttl_s debe ser mayor que 1 y menos de {maximum}")
+    with pytest.raises(AssertionError):
+        _ttl_range("ttl_s debe estar entre 1 y 32768")
+    # …and the helpers accept the shipped strings, so the fence is not simply
+    # always-raising.
+    _rejection_direction("El proveedor rechazó esta clave de API.")
+    _missing_direction("No se encontraron credenciales guardadas para este proveedor.")
