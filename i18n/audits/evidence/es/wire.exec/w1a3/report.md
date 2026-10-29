@@ -1,5 +1,15 @@
 # Spanish audit — wire.exec — round 2 (w1a3)
 
+> **Erratum — 2026-10-29, added after round-2 code review.** The second bullet below says round 1
+> bound "superseded bytes". That is wrong for this namespace, and the bullet is left as written so
+> the correction is visible rather than quietly edited. Measured: round-1 `w1a1`
+> `input_hashes.target.sha256` is `6f9df86c94723eb655c0deed39d298e073c2b7f120c961ac794a0ce435af96e8`,
+> and the bytes this report audits are the same file — the same sha256. No remediation ever moved
+> `wire.exec`, so round 2 re-read the bytes round 1 had already read; it did not audit a remediated
+> file, and the "2 nit" carried here are open on the *same* bytes, not on a repaired copy. Nothing
+> else changes: the verdict, the findings, the cell counts and every hash elsewhere in this report
+> stand as written.
+
 - **Verdict: passed** — 0 blocker, 0 major, 0 minor, 2 nit
 - Audit id `w1a3`, round 2, 2026-10-29; supersedes `w1a1` (round 1, which bound superseded bytes sha256 `6f9df86c94723eb6…`)
 - Auditor: translation-auditor (lopdev team delegation es-w1-auditor-r2), session 3da6fd7a1b13, model **radient/auto** (self-reported; disclosed fallback — see Model)

@@ -5,7 +5,7 @@
   "audit_round": 2,
   "audit_kind": "independent_final_byte_namespace_audit",
   "supersedes": "w1a2",
-  "supersedes_scope": "Supersedes the round-1 record at i18n/audits/evidence/es/wire.slash.library/w1a2/ for the copy that will ship. That record binds the pre-remediation bytes sha256 f6cc726978641736096351eb2f4bc7d754ce848cc6b3b93d8f5523cecaf47875; the translator then applied fixes, and this record binds the FINAL on-disk bytes. Each round-1 finding is re-checked by reading the final value, not by trusting the remediation summary.",
+  "supersedes_scope": "Supersedes the round-1 record at i18n/audits/evidence/es/wire.slash.library/w1a2/ for the copy that will ship. CORRECTED 2026-10-29 (erratum, after round-2 code review): that record's target sha256 is f6cc726978641736096351eb2f4bc7d754ce848cc6b3b93d8f5523cecaf47875, which is identical to the bytes this record binds — no remediation moved this namespace between rounds, so round 2 re-read the same bytes the round-1 audit had already read. Round-1 findings are therefore open on the SAME bytes, not on a remediated copy. Each round-1 finding was still re-checked by reading the value, not by trusting a remediation summary.",
   "locale": "es",
   "namespace": "wire.slash.library",
   "audit_date": "2026-10-29",
@@ -118,5 +118,22 @@
     "The eight es catalogues are UNTRACKED at efcfbe812609; every record binds on-disk sha256 values rather than a committed blob.",
     "The audit model is an auto-routing alias; the concrete backend is not identifiable from the session header.",
     "Evidence files were written but never committed: this role performs no git writes."
+  ],
+  "errata": [
+    {
+      "date": "2026-10-29",
+      "trigger": "round-2 code review of this evidence bundle",
+      "field": "supersedes_scope (record.json) and the header bullet of report.md",
+      "was": "'That record binds the pre-remediation bytes sha256 ...; the translator then applied fixes, and this record binds the FINAL on-disk bytes' / 'round 1, which bound superseded bytes'",
+      "is": "No remediation moved this namespace: round 1 and round 2 bound identical bytes, sha256 f6cc726978641736096351eb2f4bc7d754ce848cc6b3b93d8f5523cecaf47875.",
+      "evidence": "round-1 record input_hashes.target.sha256 == sha256 of the on-disk local_operator/i18n/catalogues/es/wire.slash.library.json, recomputed in round 2.",
+      "unchanged_by_this_correction": [
+        "verdict",
+        "result",
+        "finding_counts",
+        "input_hashes",
+        "findings"
+      ]
+    }
   ]
 }
