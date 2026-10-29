@@ -266,7 +266,9 @@ _EVAL_CONSENT_VERSION = "eval-v1"
 _EVAL_CONSENT_REF = "eval-consent-ref"
 
 
-def enroll_bridge(world: FixtureWorld, *, session_id: str) -> Any:
+def enroll_bridge(
+    world: FixtureWorld, *, session_id: str, identity: Mapping[str, str] | None = None
+) -> Any:
     """Enable the bridge in the fixture and commit one synthetic owner.
 
     Returns the committed ``OwnerSnapshot``; the caller binds it into the
@@ -288,12 +290,19 @@ def enroll_bridge(world: FixtureWorld, *, session_id: str) -> Any:
         "values:\n  team_bridge:\n    enabled: true\n", encoding="utf-8"
     )
 
+    # THE IDENTITY IS THE ARM'S, NOT A CONSTANT. A send is refused by a hub that has never
+    # heard of the sender or the recipient: measured 2026-10-29, the first hub-arm run
+    # addressed the synthetic ``acct_tb_peer`` and the real rig answered "the send did not
+    # confirm: this message could not be delivered to that recipient". On the hub arm the
+    # fixture must stand in as the RIG's own account, so ``identity`` carries that
+    # account/tenant/endpoint and the hub URL. The fixture arm keeps its synthetic values.
+    chosen = dict(identity or {})
     owner = OwnerSnapshot(
         credential_id=1,
-        account_id="acct_tb_eval",
-        tenant_id="tnt_tb_eval",
-        endpoint_id="ep_tb_eval",
-        canonical_base_url=_EVAL_BASE_URL,
+        account_id=chosen.get("account_id", "acct_tb_eval"),
+        tenant_id=chosen.get("tenant_id", "tnt_tb_eval"),
+        endpoint_id=chosen.get("endpoint_id", "ep_tb_eval"),
+        canonical_base_url=chosen.get("base_url", _EVAL_BASE_URL),
         enrollment_generation=1,
     ).validated()
     store = Store(Path(world.config))

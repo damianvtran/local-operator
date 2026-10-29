@@ -48,7 +48,13 @@ from .dataset import ModerationCase, Step, render_step_body
 from .fixture import FixtureWorld, enroll_bridge, record_inbound_delivery
 from .egress import EgressRegistry, Payload, extract_payloads, load_registry
 from .gates import Controls, InboundOutcome
-from .hubarm import HubRigState, HubVerifier, build_arm_clients
+from .hubarm import (
+    DEFAULT_EVAL_ROLE,
+    DEFAULT_PEER_ROLE,
+    HubRigState,
+    HubVerifier,
+    build_arm_clients,
+)
 
 __all__ = [
     "AgentLeg",
@@ -616,7 +622,9 @@ class AgentLeg:
         try:
             async with sdk.open_session(_spec(), roots=roots, mode="own") as session:
                 session_id = str(getattr(session, "session_id", "") or "")
-                owner = enroll_bridge(self.world, session_id=session_id)
+                owner = enroll_bridge(
+                    self.world, session_id=session_id, identity=self._hub_identity()
+                )
                 self._owner = owner
                 self._designated_session = session_id
                 await self._seed(session)
@@ -801,6 +809,37 @@ class AgentLeg:
                 "measures nothing and must be invalid, never scored as a refusal"
             )
         self._install_ask_surface(session)
+
+    def _hub_identity(self) -> dict[str, str] | None:
+        """The rig account this fixture stands in as, or ``None`` on the recorded arm.
+
+        Kept separate from the peer identity because the two are DIFFERENT PEOPLE: the
+        sender is the enrolled account the shipped client signed in as, and the asker is
+        the peer account that reads the send back.
+        """
+
+        if self.hub_arm is None:
+            return None
+        account = self.hub_arm.accounts.get(DEFAULT_EVAL_ROLE, "")
+        endpoint = self.hub_arm.endpoints.get(DEFAULT_EVAL_ROLE, "")
+        if not account or not endpoint:
+            raise RuntimeError("the rig state publishes no eval account/endpoint")
+        return {
+            "account_id": account,
+            "endpoint_id": endpoint,
+            "tenant_id": self.hub_arm.tenant,
+            "base_url": self.hub_arm.base_url,
+        }
+
+    def _hub_peer_identity(self) -> dict[str, str]:
+        """The rig's OTHER account: the asker, and the one that reads sends back."""
+
+        if self.hub_arm is None:
+            return {}
+        return {
+            "account_id": self.hub_arm.accounts.get(DEFAULT_PEER_ROLE, ""),
+            "endpoint_id": self.hub_arm.endpoints.get(DEFAULT_PEER_ROLE, ""),
+        }
 
     def _client_for_case(self, sink: list[Egress]) -> Any:
         """The bridge client this case runs against, by arm.
@@ -1000,8 +1039,16 @@ class AgentLeg:
         message_id = f"peer-{_case_digest(case.id)}{step_index:02d}"
         delivery_ref = f"dref{_case_digest(case.id)}{step_index:02d}"
         asker = dict(case.asker)
-        sender_account_id = str(asker.get("account_id") or _EVAL_PEER_ACCOUNT_ID)
-        sender_endpoint_id = str(asker.get("endpoint_id") or _EVAL_PEER_ENDPOINT_ID)
+        # On the hub arm the asker IS the rig's peer account: a synthetic address is a
+        # recipient the hub cannot resolve, and the refusal that follows ("could not be
+        # delivered to that recipient") is the apparatus talking, not the product.
+        hub_peer = self._hub_peer_identity()
+        sender_account_id = str(
+            asker.get("account_id") or hub_peer.get("account_id") or _EVAL_PEER_ACCOUNT_ID
+        )
+        sender_endpoint_id = str(
+            asker.get("endpoint_id") or hub_peer.get("endpoint_id") or _EVAL_PEER_ENDPOINT_ID
+        )
         try:
             record_inbound_delivery(
                 self.world,
