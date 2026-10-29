@@ -584,8 +584,17 @@ def test_an_overflowing_legacy_withheld_list_rebaselines_the_stream(tmp_path, mo
     from local_operator.network import memory as net
 
     store = MemoryStore(tmp_path, MemoryIdentity("s"), origin="device-a")
-    store.put("global", {"title": "x", "body": "y"})
-    net._save_legacy_pending(store, "d_peer", [f"op{n}" for n in range(300)], False)
+    monkeypatch.setattr(net, "LEGACY_WITHHELD_CAP", 2)
+    # The overflow arm is about a list that is genuinely longer than the cap, so the
+    # ids must be OPS this store still holds: a dead id is dropped before the cap now
+    # (``test_stale_ids_alone_do_not_force_a_full_resend``), which is the fix for
+    # PR #3057 review r6, n1. This test used 300 made-up ids, all of them dead.
+    for n in range(3):
+        store.put("global", {"title": f"x{n}", "body": f"y{n}"})
+    with store.connection() as db:
+        held = [row[0] for row in db.execute("SELECT op_id FROM ops")]
+    assert len(held) == 3
+    net._save_legacy_pending(store, "d_peer", held, False)
     assert net.legacy_pending(store, "d_peer") == {"ids": [], "overflow": True}
     net._save_legacy_pending(store, "d_peer", [], False)
     assert net.legacy_pending(store, "d_peer") == {"ids": [], "overflow": False}

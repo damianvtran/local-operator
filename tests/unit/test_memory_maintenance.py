@@ -885,3 +885,24 @@ def test_owed_ids_whose_op_compaction_dropped_are_pruned(tmp_path: Path) -> None
             "SELECT 1 FROM meta WHERE key=?", (net._legacy_key("peer-legacy"),)
         ).fetchone()
     assert row is None
+
+
+def test_stale_ids_alone_do_not_force_a_full_resend(tmp_path: Path, monkeypatch) -> None:
+    """PR #3057 review r6, n1: the id cap ran BEFORE stale ids were dropped.
+
+    Compaction deletes ops, so a long-lived peer's withheld list accumulates ids this
+    store no longer holds. Counted against ``LEGACY_WITHHELD_CAP`` they collapsed a
+    list that already fit into ``overflow`` — a full redelivery refusal over ids
+    nothing can ever redeliver, which is exactly what the prune exists to prevent.
+    """
+    from local_operator.network import memory as net
+
+    store = _store(tmp_path)
+    held = [
+        store.put("session", {"title": f"Kept {n}", "body": f"owed body {n}"})["version"]
+        for n in range(2)
+    ]
+    monkeypatch.setattr(net, "LEGACY_WITHHELD_CAP", 2)
+    dead = [f"op-compaction-deleted-{n}" for n in range(5)]
+    net._save_legacy_pending(store, "peer-legacy", [*dead, *held], False)
+    assert net.legacy_pending(store, "peer-legacy") == {"ids": held, "overflow": False}
