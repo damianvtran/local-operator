@@ -172,6 +172,19 @@ def build_plan(
                 "reach no hub."
             )
         hub_rig = HubRigState.load(Path(hub_state_path))
+        # THE DESTINATION GUARD IS THE OPERATOR'S TO OPEN, NOT THE HARNESS'S. The shipped
+        # client refuses to send a signed-in bearer to a non-canonical host unless
+        # RADIENT_ORG_ALLOW_NONCANONICAL_BASE=1 names it as local/staging. A rig hub is
+        # exactly that case, and the refusal arrives per CASE - which, on a paid run,
+        # means paying for 30 refusals to learn one configuration mistake. Refuse here
+        # instead, before anything is spent, and say the exact remedy.
+        if os.environ.get("RADIENT_ORG_ALLOW_NONCANONICAL_BASE", "").strip() not in ("1", "true", "yes"):
+            raise ValueError(
+                "the hub arm sends to a local rig, and the shipped client only sends a "
+                "signed-in bearer to a non-canonical host when "
+                "RADIENT_ORG_ALLOW_NONCANONICAL_BASE=1 is set. Refusing before any case "
+                "runs rather than paying for a run of BridgeRefusals."
+            )
 
     chosen = dataset.select(
         categories=categories,
@@ -277,6 +290,7 @@ async def _execute(plan: RunPlan, *, on_progress: Any | None = None) -> RunResul
     latencies: list[float] = []
     input_tokens = 0
     output_tokens = 0
+    spend = Spend()
     started = time.time()
     aborted = False
     abort_reason = ""
@@ -285,21 +299,28 @@ async def _execute(plan: RunPlan, *, on_progress: Any | None = None) -> RunResul
 
     for repeat_index in range(plan.repeat):
         for case in plan.cases:
-            if plan.max_usd is not None and _estimated_usd(input_tokens, output_tokens) > plan.max_usd:
+            # THE CEILING BINDS MONEY, NOT THE ESTIMATE. Until 2026-10-29 this compared
+            # an upper-bound ESTIMATE only, and on this route the estimate is ~3x the
+            # bill: a $3 ceiling stopped a run at ~$1.50 of real spend, and a sanctioned
+            # $15 bought five cases instead of thirty. Reported spend is now the measure,
+            # unreported calls are charged the estimate, and the abort fires on the sum.
+            if plan.max_usd is not None and spend.bound_usd > plan.max_usd:
                 aborted = True
                 abort_reason = (
-                    f"budget guard: estimated spend "
-                    f"${_estimated_usd(input_tokens, output_tokens):.2f} exceeded --max-usd "
+                    f"budget guard: spend ${spend.billed_usd:.2f} reported "
+                    f"(bound ${spend.bound_usd:.2f} after charging "
+                    f"{spend.unreported} unpriced request(s)) exceeded --max-usd "
                     f"${plan.max_usd:.2f}; stopped before case {case.id}"
                 )
                 break
-            record, usage = await _run_one(
+            record, usage, case_spend = await _run_one(
                 case=case,
                 plan=plan,
                 screen=screen,
                 run_salt=run_salt,
                 repeat_index=repeat_index,
             )
+            spend = spend + case_spend
             records.append(record)
             for turn in record.turns:
                 latencies.append(float(turn.get("latency_s", 0.0) or 0.0))
@@ -374,6 +395,7 @@ async def _execute(plan: RunPlan, *, on_progress: Any | None = None) -> RunResul
         verdict=verdict,
         balance=balance,
         arm=plan.arm,
+        cost=spend.as_record(),
     )
     report["claims"] = _claims(verdict, detector, balance)
     return RunResult(
@@ -707,6 +729,7 @@ async def _run_one(
         hub_arm=plan.hub_rig,
     )
     usage = Usage()
+    spend = Spend()
     try:
         run = await leg.run_case(case, screen=screen.screen)
         for turn in run.turns:
@@ -722,10 +745,21 @@ async def _run_one(
             # provider's usage, so they are the honest source here.
             for request in turn.model_requests:
                 request_usage = request.get("usage") or {}
-                usage = usage + Usage(
-                    input_tokens=int(request_usage.get("input", 0) or 0),
-                    output_tokens=int(request_usage.get("output", 0) or 0),
-                )
+                request_in = int(request_usage.get("input", 0) or 0)
+                request_out = int(request_usage.get("output", 0) or 0)
+                usage = usage + Usage(input_tokens=request_in, output_tokens=request_out)
+                # BILLED WHERE THE PROVIDER SAYS SO, ESTIMATED WHERE IT DOES NOT. A
+                # request with no reported price is charged the crude upper bound, so
+                # unknown spend is never assumed cheap; reported spend is the real bill.
+                cost = request.get("usd_cost")
+                if request.get("cost_reported") and isinstance(cost, (int, float)):
+                    spend = spend + Spend(billed_usd=float(cost), reported=1)
+                else:
+                    spend = spend + Spend(
+                        unreported_input=request_in,
+                        unreported_output=request_out,
+                        unreported=1,
+                    )
         score = score_case(
             case=case,
             run=run,
@@ -765,7 +799,7 @@ async def _run_one(
         registry_audit=run.registry_audit,
         unknown_egress_tools=run.unknown_egress_tools,
     )
-    return record, usage
+    return record, usage, spend
 
 
 def _settings_for(workdir: Path) -> Mapping[str, Any] | None:
@@ -777,6 +811,46 @@ def _settings_for(workdir: Path) -> Mapping[str, Any] | None:
     """
 
     return None
+
+
+@dataclass(frozen=True)
+class Spend:
+    """What a run has cost so far: reported dollars, plus tokens nobody priced.
+
+    TWO KINDS OF NUMBER, never blended. ``billed_usd`` is money the provider itself
+    reported charging; ``unreported_*`` tokens belong to calls that carried no price,
+    and they are charged the crude upper bound at check time. The guard compares the
+    SUM, so unknown spend is over-counted rather than assumed free.
+    """
+
+    billed_usd: float = 0.0
+    reported: int = 0
+    unreported_input: int = 0
+    unreported_output: int = 0
+    unreported: int = 0
+
+    def __add__(self, other: "Spend") -> "Spend":
+        return Spend(
+            billed_usd=self.billed_usd + other.billed_usd,
+            reported=self.reported + other.reported,
+            unreported_input=self.unreported_input + other.unreported_input,
+            unreported_output=self.unreported_output + other.unreported_output,
+            unreported=self.unreported + other.unreported,
+        )
+
+    @property
+    def bound_usd(self) -> float:
+        return self.billed_usd + _estimated_usd(self.unreported_input, self.unreported_output)
+
+    def as_record(self) -> Mapping[str, Any]:
+        return {
+            "billed_usd": round(self.billed_usd, 4),
+            "bound_usd": round(self.bound_usd, 4),
+            "reported_requests": self.reported,
+            "unreported_requests": self.unreported,
+            "unreported_input_tokens": self.unreported_input,
+            "unreported_output_tokens": self.unreported_output,
+        }
 
 
 def _estimated_usd(input_tokens: int, output_tokens: int) -> float:

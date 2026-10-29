@@ -53,6 +53,7 @@ __all__ = [
     "PeerClient",
     "RigAccess",
     "build_arm_clients",
+    "install_rig_login",
     "build_hub_client",
     "item_text",
 ]
@@ -224,12 +225,70 @@ class PeerClient:
         return getattr(self._inner, name)
 
 
-def build_hub_client(state: HubRigState, *, role: str, config_dir: Path) -> PeerClient:
-    """A shipped ``TeamBridgeClient`` aimed at the rig hub, bound to ``role``'s identity."""
+def install_rig_login(
+    config_dir: Path, state: HubRigState, *, role: str, store: Any | None = None
+) -> int:
+    """Write ONE Radient OAuth row for ``role`` into ``config_dir``; return its id.
+
+    WHY A CREDENTIAL ROW AND NOT A BYPASS. ``TeamBridgeClient.send`` resolves its bearer
+    through the shipped cascade (``current_access`` -> a PINNED Radient OAuth row), and it
+    refuses with ``BridgeSignInRequired`` when no single row can be pinned. That is the
+    product's sign-in discipline working exactly as designed, so the arm satisfies it the
+    way a real machine does: it signs the fixture in. The row carries the rig's minted
+    token and endpoint; nothing about the client's resolution is bypassed.
+
+    The row lives in the FIXTURE config dir, never the operator's store.
+    """
+
+    from local_operator.providers.auth_store import AuthStore
+
+    # ONE store instance shared with the clients (see ``build_arm_clients``). The client
+    # resolves through a process-shared connection keyed by credential root; seeding a
+    # SEPARATE instance for the same config dir once produced a client whose store listed
+    # zero rows while the write had clearly landed (measured 2026-10-29). Handing both
+    # sides the same instance removes that class of ambiguity instead of ordering around it.
+    if store is None:
+        store = AuthStore(config_dir=Path(config_dir))
+    access = state.identity(role)
+    store.upsert_credential(
+        "radient",
+        {
+            "type": "oauth",
+            "access": access.access_token,
+            "refresh": f"rig-refresh-{role}",
+            "account_id": access.account_id,
+            "api_endpoint": state.base_url,
+        },
+    )
+    for row in store.list_credentials("radient"):
+        if row.credential_type == "oauth" and row.data.get("account_id") == access.account_id:
+            return int(row.id)
+    raise HubArmError(f"the rig login for {role!r} did not persist a pinnable row")
+
+
+def build_hub_client(
+    state: HubRigState,
+    *,
+    role: str,
+    config_dir: Path,
+    credential_id: int | None = None,
+    store: Any | None = None,
+) -> PeerClient:
+    """A shipped ``TeamBridgeClient`` aimed at the rig hub, bound to ``role``'s identity.
+
+    ``credential_id`` pins the row the client resolves its bearer from. The product needs
+    exactly one pinnable row and refuses otherwise; two rig accounts in one store is
+    precisely the ambiguity the pin exists for.
+    """
 
     from local_operator.team_bridge.client import TeamBridgeClient
 
-    inner = TeamBridgeClient(config_dir=Path(config_dir), base_url=state.base_url)
+    inner = TeamBridgeClient(
+        config_dir=Path(config_dir),
+        base_url=state.base_url,
+        credential_id=credential_id,
+        store=store,
+    )
     return PeerClient(inner, state.identity(role))
 
 
@@ -252,11 +311,28 @@ def _message_id_of(result: Any) -> str:
 
 
 def build_arm_clients(state: HubRigState, *, config_dir: Path) -> tuple[PeerClient, PeerClient]:
-    """``(eval_client, peer_client)`` - the replier and the asker, both real."""
+    """``(eval_client, peer_client)`` - the replier and the asker, both real and signed in."""
 
+    from local_operator.providers.auth_store import AuthStore
+
+    store = AuthStore(config_dir=Path(config_dir))
+    eval_id = install_rig_login(config_dir, state, role=DEFAULT_EVAL_ROLE, store=store)
+    peer_id = install_rig_login(config_dir, state, role=DEFAULT_PEER_ROLE, store=store)
     return (
-        build_hub_client(state, role=DEFAULT_EVAL_ROLE, config_dir=config_dir),
-        build_hub_client(state, role=DEFAULT_PEER_ROLE, config_dir=config_dir),
+        build_hub_client(
+            state,
+            role=DEFAULT_EVAL_ROLE,
+            config_dir=config_dir,
+            credential_id=eval_id,
+            store=store,
+        ),
+        build_hub_client(
+            state,
+            role=DEFAULT_PEER_ROLE,
+            config_dir=config_dir,
+            credential_id=peer_id,
+            store=store,
+        ),
     )
 
 
@@ -324,6 +400,13 @@ def item_text(item: Any) -> str:
     message = item.get("message")
     if isinstance(message, Mapping):
         candidates.extend([message.get("text"), message.get("body")])
+        # The MEASURED shape of GET /v1/messaging/messages/{id}: the text lives at
+        # ``message.body.text`` (probed against the live rig 2026-10-29, whose reply was
+        # {"message": {"body": {"text": ...}}, "delivery": {...}}). Without this arm the
+        # first real read-back came back as "no body text" while the body was right there.
+        body = message.get("body")
+        if isinstance(body, Mapping):
+            candidates.append(body.get("text"))
     body = item.get("message_body")
     if isinstance(body, Mapping):
         candidates.append(body.get("text"))

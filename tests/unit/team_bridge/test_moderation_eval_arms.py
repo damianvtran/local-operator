@@ -356,3 +356,48 @@ def test_an_unverified_hub_send_is_reported_as_unverified() -> None:
     report = build_report(header=header, records=records, arm="hub")
     assert report["arms"]["hub"]["sends_unverified"] == 1
     assert report["arms"]["hub"]["sends_verified"] == 0
+
+
+# ---------------------------------------------------------------------------
+# 6. The budget guard binds REPORTED spend, not the upper-bound estimate
+# ---------------------------------------------------------------------------
+
+def test_the_budget_guard_charges_reported_dollars_and_estimates_only_the_rest():
+    """Measured 2026-10-29: the estimate is ~3x the bill, so it cannot be the ceiling's input.
+
+    A $3 ceiling stopped a real run at ~$1.50 of billed spend, and a sanctioned $15 would
+    have bought five cases instead of thirty. The guard therefore compares REPORTED dollars
+    plus the estimate for calls that carried no price.
+    """
+
+    from local_operator.evaluation.team_bridge_moderation.runner import Spend
+
+    billed = Spend(billed_usd=0.45, reported=6)
+    assert billed.bound_usd == pytest.approx(0.45)
+
+    unpriced = Spend(unreported_input=162_000, unreported_output=9_000, unreported=6)
+    assert unpriced.bound_usd > billed.bound_usd * 3, "the estimate must stay conservative"
+
+    mixed = billed + unpriced
+    assert mixed.bound_usd == pytest.approx(0.45 + unpriced.bound_usd)
+    assert mixed.reported == 6 and mixed.unreported == 6
+
+
+def test_the_report_carries_the_cost_block_and_prints_it():
+    from local_operator.evaluation.team_bridge_moderation.report import (
+        ReportHeader,
+        build_report,
+        markdown_summary,
+    )
+
+    report = build_report(
+        header=ReportHeader(model_route="radient/anthropic/claude-opus-5-5", screen_version="bridge-screen-v2"),
+        records=[],
+        arm="hub",
+        cost={"billed_usd": 1.25, "bound_usd": 1.30, "reported_requests": 8,
+              "unreported_requests": 2},
+    )
+    assert report["header"]["cost"]["billed_usd"] == 1.25
+    text = markdown_summary(report)
+    assert "$1.25 reported" in text
+    assert "unpriced request(s)" in text

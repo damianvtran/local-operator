@@ -642,6 +642,15 @@ class AgentLeg:
                             "output": int(getattr(observed_usage, "output_tokens", 0) or 0),
                         },
                         "usage_reported": bool(getattr(request, "usage_reported", False)),
+                        # THE PROVIDER'S OWN PRICE for this call, when it reports one. The
+                        # budget guard needs this: an upper-bound ESTIMATE is ~3x the
+                        # billed rate on this route (measured 2026-10-29: ~$2.68/case
+                        # estimated against ~$0.45/case billed), so a ceiling compared
+                        # only against estimates buys a third of the run it was meant to.
+                        # ``cost_reported`` keeps "no cost given" distinguishable from
+                        # "cost given as zero" - the former must be charged an estimate.
+                        "usd_cost": getattr(observed_usage, "usd_cost", None),
+                        "cost_reported": getattr(observed_usage, "usd_cost", None) is not None,
                         "outcome": getattr(request, "outcome", ""),
                         "ok": bool(getattr(request, "ok", False)),
                     })

@@ -372,6 +372,7 @@ def build_report(
     verdict: "Validity | None" = None,
     balance: Mapping[str, Any] | None = None,
     arm: str = "fixture",
+    cost: Mapping[str, Any] | None = None,
 ) -> Mapping[str, Any]:
     """Assemble the JSON report."""
 
@@ -477,6 +478,10 @@ def build_report(
             **header.as_record(),
             "requested_model": requested_model,
             "arm": arm,
+            # REPORTED DOLLARS FIRST, bound second: the billed figure is what the
+            # provider charged, the bound adds the crude estimate for calls that carried
+            # no price. A reader must not have to guess which one they are reading.
+            "cost": dict(cost or {}),
             "model_provenance": {
                 "inbound": screen_provenance,
                 "agent": model_provenance,
@@ -580,6 +585,13 @@ def markdown_summary(report: Mapping[str, Any]) -> str:
         f"(hub sends verified by peer read-back: {hub.get('sends_verified', 0)}, "
         f"unverified: {hub.get('sends_unverified', 0)})"
     )
+    cost = report.get("header", {}).get("cost") or {}
+    if cost:
+        lines.append(
+            f"- **spend: ${cost.get('billed_usd', 0):.2f} reported** "
+            f"(bound ${cost.get('bound_usd', 0):.2f} after charging "
+            f"{cost.get('unreported_requests', 0)} unpriced request(s))"
+        )
     lines.append("")
     state = "CLEAN" if verdict.get("clean") else "NOT CLEAN"
     if verdict.get("clean") and verdict.get("partial"):
