@@ -192,8 +192,8 @@ async def test_a_name_in_the_org_but_not_in_the_allowlist_does_not_resolve(tmp_p
     assert outcome["ok"] is False and outcome["code"] == "invalid_request"
     assert "no active member by that name in your bridge allowlist" in outcome["error"]
     # BOTH reasons, because one without the other sends the model guessing.
-    assert "not on this team" in outcome["error"]
-    assert "bridge is not enabled" in outcome["error"]
+    assert "may not be on this team" in outcome["error"]
+    assert "bridge may not be enabled" in outcome["error"]
     assert _posted(requests) == []
     row = _audit_rows(tmp_path)[-1]
     assert row["outcome"] == "no_match"
@@ -212,6 +212,8 @@ async def test_a_name_in_the_allowlist_with_a_switched_off_bridge_is_its_own_ref
         {"op": "send", "to": {"name": "Cy Off"}, "text": "hi"},
     )
     assert outcome["ok"] is False and outcome["code"] == "invalid_request"
+    # The DISABLED case is the one this resolver CAN be certain about — the member
+    # resolved and the row says off — so its sentence is a statement, not a "may".
     assert "bridge is not enabled" in outcome["error"]
     assert "this is not a name problem" in outcome["error"]
     # It is not the ambiguity or the zero-match sentence.
@@ -387,7 +389,7 @@ def test_the_schema_says_which_scope_each_op_resolves_in() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_reply_name_that_is_not_the_sender_is_refused(tmp_path) -> None:
+async def test_a_reply_name_that_is_not_the_sender_is_refused(tmp_path, monkeypatch) -> None:
     """The negative case for the RELOCATED guard: a name must not redirect a reply.
 
     A reply answers a message, so its recipient is that message's sender. Naming
@@ -436,6 +438,16 @@ async def test_a_reply_name_that_is_not_the_sender_is_refused(tmp_path) -> None:
     # Bo IS reachable by name: the name resolves, and the reply guard is what
     # refuses — which is the case this test exists for.
     client, requests = _client(_directory(ADA, BO), _allowlist(_allow("acc_ada"), _allow("acc_bo")))
+    from local_operator.team_bridge.outbox import Outbox
+
+    intents: list[dict[str, Any]] = []
+    original = Outbox.record_send
+
+    def record(self, *args, **kwargs):
+        intents.append(kwargs)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Outbox, "record_send", record)
     runtime = _runtime(client, config_dir=tmp_path, endpoint_id="bep_owner")
     runtime.owner = owner
     outcome = await execute_bridge(
@@ -443,6 +455,9 @@ async def test_a_reply_name_that_is_not_the_sender_is_refused(tmp_path) -> None:
         {"op": "reply", "message_id": "bmsg_ada", "to": {"name": "Bo Chen"}, "text": "psst"},
     )
     assert outcome["ok"] is False and outcome["code"] == "reply_conflict"
+    # A refused target must leave nothing retryable behind: no wire request AND no
+    # durable intent (the outbox is what a later restart would replay).
     assert _posted(requests) == []
+    assert intents == []
     # The attempt is still on the record: it resolved, and was then refused.
     assert _audit_rows(tmp_path)[-1]["resolved_account_id"] == "acc_bo"

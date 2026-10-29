@@ -381,18 +381,25 @@ SCOPE_CONVERSATION = ResolutionScope(
 
 #: ``send``/``reply``: the owner's REACHABLE set — the bridge directory
 #: intersected with the owner's own send-allowlist, never directory-wide. A name
-#: that resolves to nobody names the reasons it might not — "not on this team",
-#: "their bridge is off", or "your allowlist does not name them" — because those
-#: are different facts with different next moves for the human, and a model that
-#: cannot tell them apart retries uselessly instead of saying something true.
+#: that resolves to nobody names the reasons it MIGHT not — "not on this team",
+#: "their bridge may not be enabled", "your allowlist may not name them" — because
+#: those are different facts with different next moves for the human, and a model
+#: that cannot tell them apart retries uselessly instead of saying something true.
+#:
+#: "MAY", deliberately, and the enablement clause stays: this resolver cannot see
+#: the organization directory, so it cannot tell which of the three is true, and
+#: the point of the sentence is that the MODEL cannot either — it must ask. The
+#: one case it CAN be sure of (allowlisted but switched off) resolves and then
+#: gets its own sentence from ``resolve_for_delivery``, so wording these as
+#: certainties would be a claim this call site cannot make.
 SCOPE_ALLOWLIST = ResolutionScope(
     name="allowlist",
     where="in your bridge allowlist",
     disambiguator="a more specific label, or an explicit account id",
     miss_hint=(
-        " — either they are not on this team, or their bridge is not enabled, or "
-        "your allowlist does not name them; ask the human which, and an explicit "
-        "account id still sends"
+        " — they may not be on this team, their bridge may not be enabled, or your "
+        "allowlist may not name them; ask the human which, and an explicit account "
+        "id still sends"
     ),
 )
 

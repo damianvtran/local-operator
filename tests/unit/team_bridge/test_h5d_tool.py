@@ -863,9 +863,13 @@ async def test_a_send_name_is_refused_after_the_scope_reads_not_before(
         runtime, {"op": "send", "to": {"name": "Ada Lovelace"}, "text": "synthetic"}
     )
     assert result["ok"] is False and result["code"] == "invalid_request"
-    # BOTH reasons, because a model that cannot tell them apart guesses.
-    assert "not on this team" in result["error"]
-    assert "bridge is not enabled" in result["error"]
+    # EVERY reason it MIGHT be, because a model that cannot tell them apart
+    # guesses instead of telling its human something true; the sentences are
+    # "may" because this resolver cannot see the directory and so cannot say
+    # which is the case.
+    assert "may not be on this team" in result["error"]
+    assert "bridge may not be enabled" in result["error"]
+    assert "allowlist may not name them" in result["error"]
     assert records == []
     # The scope reads happened; nothing was sent.
     assert [request.method for request in requests] == ["GET", "GET"]
