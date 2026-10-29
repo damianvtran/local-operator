@@ -1,0 +1,41 @@
+#!/usr/bin/env python3
+"""Row-label width check for a settings namespace (read-only).
+
+The TUI settings list hard-truncates EVERY row label before painting:
+
+    settings_view.py:4020   truncate_cells(setting.label, _LABEL_BUDGET)
+
+    _VALUE_COLUMN = 34 ; _ROW_INDENT = 2 ; _MARKER_WIDTH = 2
+    _LABEL_BUDGET = 34 - 2 - 2 - 1 = 29 cells
+
+`wire.settings.account_policy.context.json` declares maxCells 29 on its label
+keys, which is this same budget. `wire.settings.hub_defaults.context.json`
+declares maxCells only for its two `help` keys, so the budget for a row label
+in that namespace is absent from the sidecar even though the renderer applies
+it unconditionally.
+
+Usage: python3 labels.py.txt <namespace> [budget]
+"""
+import json
+import sys
+
+NS = sys.argv[1]
+BUDGET = int(sys.argv[2]) if len(sys.argv) > 2 else 29
+BASE = "local_operator/i18n/catalogues"
+en = json.load(open(f"{BASE}/en/{NS}.json", encoding="utf-8"))
+es = json.load(open(f"{BASE}/es/{NS}.json", encoding="utf-8"))
+try:
+    ctx = json.load(open(f"{BASE}/en/{NS}.context.json", encoding="utf-8"))
+except FileNotFoundError:
+    ctx = {}
+
+print(f"== {NS} label budget {BUDGET} cells ==")
+for k in sorted(en):
+    if not (k.endswith(".label") or ctx.get(k, {}).get("role") == "control label"):
+        continue
+    cells = len(es[k])
+    state = "CLIPS" if cells > BUDGET else "fits"
+    shown = es[k][:BUDGET] + "…" if cells > BUDGET else es[k]
+    print(f"{k}: es={cells} en={len(en[k])} maxCells={ctx.get(k, {}).get('maxCells')} -> {state}")
+    if cells > BUDGET:
+        print(f"   rendered at budget: {shown!r}")

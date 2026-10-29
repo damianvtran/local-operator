@@ -1,0 +1,130 @@
+{
+  "schema": 1,
+  "audit_id": "w1a2",
+  "audit_id_assigned_by": "es-w1-auditor-2, audit-id fixed by the wave-1 coordinator delegation",
+  "audit_round": 1,
+  "audit_kind": "independent_current_byte_namespace_audit",
+  "locale": "es",
+  "namespace": "wire.tunnel_setup",
+  "audit_date": "2026-10-29",
+  "audited_revision": "efcfbe812609cbf228c01f11a1fb622f3555b487",
+  "audited_revision_note": "The es catalogue local_operator/i18n/catalogues/es/wire.tunnel_setup.json is UNTRACKED at efcfbe812609cbf228c01f11a1fb622f3555b487 (git status shows it as '??'), so this audit is bound to the on-disk bytes, not to a committed blob: target sha256 f7d4114e7083bf264807d8d1ec6c6515de813a454ba68b5f705b8b40b70893b7. The en source and its sidecar are tracked and were read from that revision.",
+  "key_count": {
+    "en": 5,
+    "target": 5,
+    "context": 5
+  },
+  "verdict": "passed",
+  "result": "clean-with-findings",
+  "verdict_reason": "All five keys read. Every refusal keeps an actionable remedy (check its status / leave create.json unchanged and ask your agent / check the current state), the do-not-assume-rollback warning survives, the deadline-elapsed-after-the-work-was-drained ordering survives, and 'checking' makes no claim that billing or installation has started, which the sidecar forbids. create.json is byte-identical. Two minor findings, both idiom/consistency, neither changing what the user is told to do.",
+  "finding_counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 2,
+    "nit": 0
+  },
+  "unresolved_blocker_major": 0,
+  "auditor": {
+    "agent": "translation-auditor (lopdev team delegation es-w1-auditor-2)",
+    "session_or_instance": "session 1abd0b38e62a",
+    "model": "radient/auto",
+    "model_note": "radient/auto is an auto-routing alias: the session header names the alias, not the concrete backend model, so the backend that performed this audit is not identified by the header. Requested primary anthropic/claude-sonnet-5-5 and the intermediate fallbacks are disclosed above and none of them is claimed as the audit model.",
+    "model_switch_notices": "anthropic/claude-sonnet-5-5 -> openai/gpt-6-astra -> kimi/k3.1-pro -> radient/auto; each transition was a session model-switch notice reading \"provider failure: quota HTTP 429\"",
+    "model_source": "self-reported by this session's model-switch notices; not independently observable",
+    "date": "2026-10-29",
+    "independence": "Independent of the translator: I authored none of this Spanish copy and none of its English source, and I edited nothing while auditing. No catalogue, sidecar, ledger, allowance, generated file or git state was modified; this audit's only writes are its own evidence directory."
+  },
+  "translator": {
+    "agent": "a different translator agent in the same wave (per delegation: copy written by another translator)",
+    "model": "not disclosed to this auditor",
+    "date": "before 2026-10-29",
+    "source": "delegation provenance only; no translator job id was supplied to this auditor"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.tunnel_setup.json",
+      "revision": "efcfbe812609cbf228c01f11a1fb622f3555b487",
+      "sha256": "3854be7dce54dd3aeb9564921ed6a50f0560b32c7ac40955d81be93acd7e2ac1"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/es/wire.tunnel_setup.json",
+      "sha256": "f7d4114e7083bf264807d8d1ec6c6515de813a454ba68b5f705b8b40b70893b7",
+      "tracked": false,
+      "note": "untracked at the audited revision; sha256 is of the on-disk bytes"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/wire.tunnel_setup.context.json",
+      "sha256": "0ff6f387f29ff89b62aa96c73aaffdb47f18ec775588043b63ea56ecd25c4457"
+    }
+  },
+  "findings": [
+    {
+      "id": "es-w1-B04",
+      "severity": "minor",
+      "status": "unresolved",
+      "keys": [
+        "wire.tunnel_setup.deadline"
+      ],
+      "detail": "'una vez drenado el trabajo que tenía a su cargo' renders 'after its owned work was drained'. 'drenado' appears nowhere else in the catalogue and outside queue jargon reads as drainage; the sentence is a desktop refusal whose tone note is 'cautious, actionable'.",
+      "remediation": "El plazo de respuesta de la configuración venció una vez vaciado el trabajo que tenía a su cargo. Comprueba el estado y los pasos completados antes de reintentar."
+    },
+    {
+      "id": "es-w1-B05",
+      "severity": "minor",
+      "status": "unresolved",
+      "keys": [
+        "wire.tunnel_setup.corrupt_intent"
+      ],
+      "detail": "'La solicitud guardada de configuración del teléfono' names the feature differently from the other two keys of the same namespace, which say 'la configuración del acceso telefónico'. 'configuración del teléfono' can read as configuring the phone device itself; the user must recognise this as the phone-access setup whose create.json must be left alone. en's own 'phone setup request' is elliptical, so the drift is inherited, not invented.",
+      "remediation": "La solicitud guardada de configuración del acceso telefónico no es válida. Deja create.json sin cambios y pide a tu agente que recupere la solicitud original antes de reintentar. No se hizo ningún cambio de configuración."
+    }
+  ],
+  "noted_outside_scope": [
+    {
+      "topic": "catalogue-wide rendering of 'phone access' as 'acceso telefónico'",
+      "detail": "'acceso telefónico' is the established rendering (wire.slash.mobile: 'Acceso telefónico de Radient'), so it is consistent and not a finding against this namespace. A Spanish reader can also parse it as telephone/dial-up access; if the wave wants 'acceso desde el teléfono' it must change every surface at once, never this namespace alone.",
+      "severity_if_acted": "locale-wide, not this audit"
+    },
+    {
+      "topic": "es guide kept-English list names 'cache'; the shipped catalogue consistently writes 'caché'",
+      "detail": "wire.settings.json uses 'caché' in ~40 prose strings ('caché de prompts', 'TTL de caché'). This namespace's 'caché' follows the catalogue, so it is not drift introduced here; the conflict is between i18n/style-guides/es.md and the shipped copy and needs a wave-level decision (amend the list or fix the catalogue), not a one-namespace patch.",
+      "severity_if_acted": "locale-wide, not this audit"
+    }
+  ],
+  "check_output": {
+    "commands": [
+      "git rev-parse HEAD; git status --porcelain",
+      "shasum -a 256 of the en, target and sidecar files",
+      "python3 $LOCAL_OPERATOR_SCRATCHPAD/audit_es_w1a2.py",
+      "grep across es/*.json for the terms each judgement rests on",
+      "python3 $LOCAL_OPERATOR_SCRATCHPAD/strict_json_es_w1a2.py (duplicate keys, BOM, control bytes, NFC, trailing newline)"
+    ],
+    "parity_script_exit": 0,
+    "failures": [],
+    "negative_controls": "width-over-maxCells, en-dash-to-hyphen, machine-literal dropped, placeholder dropped: all DETECTED",
+    "checks_run_per_key": [
+      "key-set parity",
+      "ICU brace/argument parity",
+      "placeholder parity",
+      "digit-sequence parity",
+      "en/em-dash and NBSP parity",
+      "byte-identical machine literals",
+      "width against sidecar maxCells",
+      "unsupported es plural categories (few/zero/two)",
+      "untranslated-value detection",
+      "leading/trailing-space and seam parity",
+      "straight-quote and exclamation hygiene"
+    ]
+  },
+  "artifacts": [
+    "report.md",
+    "audit.log"
+  ],
+  "limitations": [
+    "LLM semantic judgement, not native-speaker attestation.",
+    "Static copy audit only: no rendered-frame, runtime-service, eligibility or release claim.",
+    "wire.slash.library has no en sidecar, so its role/tone/width intent is unknown by construction.",
+    "The es catalogue is untracked at the audited revision; the audit binds on-disk sha256 values.",
+    "The audit model is an auto-routing alias; the concrete backend model is not identifiable from the session header."
+  ]
+}

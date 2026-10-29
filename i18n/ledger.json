@@ -7500,7 +7500,7 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "Independent i18n audit round 1 PASS (terminal) at target SHA-256 517fdffc6a2a324e2b6189ab5139ef277fa260994b2954eafa39cddb436d89c8, source 2807f5876ae63e15fd0e47b54ec1e73f6c7f71b368f3439fd00c899ce8c0b54d: https://github.com/damianvtran/local-operator/pull/2968#issuecomment-6412691010. Audited bytes from a git archive of 9f349c5f481, hash-identical at head 772b01275ef. Independence limit: translator and auditor ran on the same model (anthropic/claude-opus-5-5); separation is agent and context; no native-speaker pass. No minors or nits assigned to fr; select.count 17/16 at a four-digit count is a declared out-of-domain overrun. Translation: Translated from the frozen en bytes at PR #2968 head d7e12bd36808 (77 keys; target SHA-256 517fdffc6a2a324e2b6189ab5139ef277fa260994b2954eafa39cddb436d89c8). Translator identity read from the session's runtime metadata (provider anthropic, model claude-opus-5-5). Terminology reuses merged relay.chrome/relay.asks/relay.ask choices. Width: detail-level widths measured with rich cell_len over every plural/select arm (counts 0\u2013999; age.* over their real domains). Over budget: select.count 17/16 only at a four-digit count (1,234 s\u00e9lections). fr age.* use the compact feed form (\u00ab 5 min \u00bb, \u00ab 3 h \u00bb, \u00ab 2 j \u00bb) because \u00ab il y a 5 min \u00bb exceeds 12 cells at two digits."
+      "note": "Independent i18n audit round 1 PASS (terminal) at target SHA-256 517fdffc6a2a324e2b6189ab5139ef277fa260994b2954eafa39cddb436d89c8, source 2807f5876ae63e15fd0e47b54ec1e73f6c7f71b368f3439fd00c899ce8c0b54d: https://github.com/damianvtran/local-operator/pull/2968#issuecomment-6412691010. Audited bytes from a git archive of 9f349c5f481, hash-identical at head 772b01275ef. Independence limit: translator and auditor ran on the same model (anthropic/claude-opus-5-5); separation is agent and context; no native-speaker pass. No minors or nits assigned to fr; select.count 17/16 at a four-digit count is a declared out-of-domain overrun. Translation: Translated from the frozen en bytes at PR #2968 head d7e12bd36808 (77 keys; target SHA-256 517fdffc6a2a324e2b6189ab5139ef277fa260994b2954eafa39cddb436d89c8). Translator identity read from the session's runtime metadata (provider anthropic, model claude-opus-5-5). Terminology reuses merged relay.chrome/relay.asks/relay.ask choices. Width: detail-level widths measured with rich cell_len over every plural/select arm (counts 0–999; age.* over their real domains). Over budget: select.count 17/16 only at a four-digit count (1,234 sélections). fr age.* use the compact feed form (« 5 min », « 3 h », « 2 j ») because « il y a 5 min » exceeds 12 cells at two digits."
     },
     {
       "locale": "es",
@@ -7519,7 +7519,7 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "Independent i18n audit round 1 PASS (terminal) at target SHA-256 e3983025fbc8a4345b5dd5d3ce6b89fa93f21b89f69282878b0c13e9ba89177f, source 2807f5876ae63e15fd0e47b54ec1e73f6c7f71b368f3439fd00c899ce8c0b54d: https://github.com/damianvtran/local-operator/pull/2968#issuecomment-6412691010. Audited bytes from a git archive of 9f349c5f481, hash-identical at head 772b01275ef. Independence limit: translator and auditor ran on the same model (anthropic/claude-opus-5-5); separation is agent and context; no native-speaker pass. Recorded, not gating: IA-X-M1 MINOR (select.read uses status form \"Le\u00eddo\"); IA-X-N1 NIT (age.days 15/14 only at >=1000 days, undeclared); detail.mark_unread 15/14 accepted as declared. Translation: Translated from the frozen en bytes at PR #2968 head d7e12bd36808 (77 keys; target SHA-256 e3983025fbc8a4345b5dd5d3ce6b89fa93f21b89f69282878b0c13e9ba89177f). Translator identity read from the session's runtime metadata (provider anthropic, model claude-opus-5-5). Terminology reuses merged relay.chrome/relay.asks/relay.ask choices. Width: detail.mark_unread 'Marcar no le\u00eddo' 15/14 (keeps the merged relay.chrome 'Marcar como le\u00eddo' verb family; 'No le\u00eddo' alone reads as a status, not an action); select.dismiss 15/14 only at a four-digit count."
+      "note": "Independent i18n audit round 1 PASS (terminal) at target SHA-256 e3983025fbc8a4345b5dd5d3ce6b89fa93f21b89f69282878b0c13e9ba89177f, source 2807f5876ae63e15fd0e47b54ec1e73f6c7f71b368f3439fd00c899ce8c0b54d: https://github.com/damianvtran/local-operator/pull/2968#issuecomment-6412691010. Audited bytes from a git archive of 9f349c5f481, hash-identical at head 772b01275ef. Independence limit: translator and auditor ran on the same model (anthropic/claude-opus-5-5); separation is agent and context; no native-speaker pass. Recorded, not gating: IA-X-M1 MINOR (select.read uses status form \"Leído\"); IA-X-N1 NIT (age.days 15/14 only at >=1000 days, undeclared); detail.mark_unread 15/14 accepted as declared. Translation: Translated from the frozen en bytes at PR #2968 head d7e12bd36808 (77 keys; target SHA-256 e3983025fbc8a4345b5dd5d3ce6b89fa93f21b89f69282878b0c13e9ba89177f). Translator identity read from the session's runtime metadata (provider anthropic, model claude-opus-5-5). Terminology reuses merged relay.chrome/relay.asks/relay.ask choices. Width: detail.mark_unread 'Marcar no leído' 15/14 (keeps the merged relay.chrome 'Marcar como leído' verb family; 'No leído' alone reads as a status, not an action); select.dismiss 15/14 only at a four-digit count."
     },
     {
       "locale": "zh-CN",
@@ -7538,7 +7538,7 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "Independent i18n audit round 1 PASS (terminal) at target SHA-256 a75ddb99367a41c55085fe9d7651601a0f6704350d71e33fbcd600bfc2d8b4b6, source 2807f5876ae63e15fd0e47b54ec1e73f6c7f71b368f3439fd00c899ce8c0b54d: https://github.com/damianvtran/local-operator/pull/2968#issuecomment-6412691010. Audited bytes from a git archive of 9f349c5f481, hash-identical at head 772b01275ef. Independence limit: translator and auditor ran on the same model (anthropic/claude-opus-5-5); separation is agent and context; no native-speaker pass. Recorded, not gating: IA-X-M1 MINOR (select.read \"\u5df2\u8bfb\" status form; \"\u6807\u4e3a\u5df2\u8bfb\" 8/10 fits); IA-ZH-M1 MINOR (11 strings put spaces around digit runs against the zh-CN style guide; merged relay.asks.duration.* has the same deviation, so it is a style-owner consistency question). Translation: Translated from the frozen en bytes at PR #2968 head d7e12bd36808 (77 keys; target SHA-256 a75ddb99367a41c55085fe9d7651601a0f6704350d71e33fbcd600bfc2d8b4b6). Translator identity read from the session's runtime metadata (provider anthropic, model claude-opus-5-5). Terminology reuses merged relay.chrome/relay.asks/relay.ask choices. Width: all budgeted keys fit (max ratio row.repeat 6/6)."
+      "note": "Independent i18n audit round 1 PASS (terminal) at target SHA-256 a75ddb99367a41c55085fe9d7651601a0f6704350d71e33fbcd600bfc2d8b4b6, source 2807f5876ae63e15fd0e47b54ec1e73f6c7f71b368f3439fd00c899ce8c0b54d: https://github.com/damianvtran/local-operator/pull/2968#issuecomment-6412691010. Audited bytes from a git archive of 9f349c5f481, hash-identical at head 772b01275ef. Independence limit: translator and auditor ran on the same model (anthropic/claude-opus-5-5); separation is agent and context; no native-speaker pass. Recorded, not gating: IA-X-M1 MINOR (select.read \"已读\" status form; \"标为已读\" 8/10 fits); IA-ZH-M1 MINOR (11 strings put spaces around digit runs against the zh-CN style guide; merged relay.asks.duration.* has the same deviation, so it is a style-owner consistency question). Translation: Translated from the frozen en bytes at PR #2968 head d7e12bd36808 (77 keys; target SHA-256 a75ddb99367a41c55085fe9d7651601a0f6704350d71e33fbcd600bfc2d8b4b6). Translator identity read from the session's runtime metadata (provider anthropic, model claude-opus-5-5). Terminology reuses merged relay.chrome/relay.asks/relay.ask choices. Width: all budgeted keys fit (max ratio row.repeat 6/6)."
     },
     {
       "locale": "ru",
@@ -7557,7 +7557,7 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "Independent i18n audit round 1 PASS (terminal) at target SHA-256 caf5b24e691507cc49e94142fe58afa8ff11f968ee7a2b771224b0ef9b234980, source 2807f5876ae63e15fd0e47b54ec1e73f6c7f71b368f3439fd00c899ce8c0b54d: https://github.com/damianvtran/local-operator/pull/2968#issuecomment-6412691010. Audited bytes from a git archive of 9f349c5f481, hash-identical at head 772b01275ef. Independence limit: translator and auditor ran on the same model (anthropic/claude-opus-5-5); separation is agent and context; no native-speaker pass. Recorded, not gating: IA-RU-M1 MINOR (detail.mark_unread \"\u041e\u0442\u043c\u0435\u0442\u0438\u0442\u044c \u043d\u043e\u0432\u044b\u043c\" synonym; \"\u041e\u0442\u043c. \u043d\u0435\u043f\u0440\u043e\u0447\u0438\u0442\u0430\u043d\u043d\u044b\u043c\" is 18 and does not fit, accepted as is); IA-RU-N1 NIT (filter.unread overrun starts at count 100, 17/16, not at two digits; corrected in this note); IA-X-N1 NIT (age.days overrun only at >=1000 days). Translation: Translated from the frozen en bytes at PR #2968 head d7e12bd36808 (77 keys; target SHA-256 caf5b24e691507cc49e94142fe58afa8ff11f968ee7a2b771224b0ef9b234980). Translator identity read from the session's runtime metadata (provider anthropic, model claude-opus-5-5). Terminology reuses merged relay.chrome/relay.asks/relay.ask choices. Width: filter.unread 17/16 from count 100, 19/16 at four \u2014 kept byte-identical to the merged relay.chrome.list.filter.unread ('\u041d\u0435\u043f\u0440\u043e\u0447\u0438\u0442\u0430\u043d\u043e \u00b7 {count}', same 16-cell budget, already audited); shortening would split one chip term across two screens."
+      "note": "Independent i18n audit round 1 PASS (terminal) at target SHA-256 caf5b24e691507cc49e94142fe58afa8ff11f968ee7a2b771224b0ef9b234980, source 2807f5876ae63e15fd0e47b54ec1e73f6c7f71b368f3439fd00c899ce8c0b54d: https://github.com/damianvtran/local-operator/pull/2968#issuecomment-6412691010. Audited bytes from a git archive of 9f349c5f481, hash-identical at head 772b01275ef. Independence limit: translator and auditor ran on the same model (anthropic/claude-opus-5-5); separation is agent and context; no native-speaker pass. Recorded, not gating: IA-RU-M1 MINOR (detail.mark_unread \"Отметить новым\" synonym; \"Отм. непрочитанным\" is 18 and does not fit, accepted as is); IA-RU-N1 NIT (filter.unread overrun starts at count 100, 17/16, not at two digits; corrected in this note); IA-X-N1 NIT (age.days overrun only at >=1000 days). Translation: Translated from the frozen en bytes at PR #2968 head d7e12bd36808 (77 keys; target SHA-256 caf5b24e691507cc49e94142fe58afa8ff11f968ee7a2b771224b0ef9b234980). Translator identity read from the session's runtime metadata (provider anthropic, model claude-opus-5-5). Terminology reuses merged relay.chrome/relay.asks/relay.ask choices. Width: filter.unread 17/16 from count 100, 19/16 at four — kept byte-identical to the merged relay.chrome.list.filter.unread ('Непрочитано · {count}', same 16-cell budget, already audited); shortening would split one chip term across two screens."
     },
     {
       "locale": "vi",
@@ -7576,7 +7576,7 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "Independent i18n audit round 1 PASS (terminal) at target SHA-256 4d3a1db432bcf93697cb899957e7b852b87afe0315c1fa3e298c4e24931f2c5a, source 2807f5876ae63e15fd0e47b54ec1e73f6c7f71b368f3439fd00c899ce8c0b54d: https://github.com/damianvtran/local-operator/pull/2968#issuecomment-6412691010. Audited bytes from a git archive of 9f349c5f481, hash-identical at head 772b01275ef. Independence limit: translator and auditor ran on the same model (anthropic/claude-opus-5-5); separation is agent and context; no native-speaker pass. Recorded, not gating: IA-X-M1 MINOR (select.read and confirm.read use status form \"\u0110\u00e3 \u0111\u1ecdc\"; action form is 15/14); IA-X-N1 NIT (age.days overrun only at >=1000 days); detail.mark_read 15/14 and detail.mark_unread 17/14 accepted as declared. Translation: Translated from the frozen en bytes at PR #2968 head d7e12bd36808 (77 keys; target SHA-256 4d3a1db432bcf93697cb899957e7b852b87afe0315c1fa3e298c4e24931f2c5a). Translator identity read from the session's runtime metadata (provider anthropic, model claude-opus-5-5). Terminology reuses merged relay.chrome/relay.asks/relay.ask choices. Width: detail.mark_read 15/14 and detail.mark_unread 17/14 \u2014 '\u0110\u00e1nh d\u1ea5u \u0111\u00e3 \u0111\u1ecdc'/'\u0110\u00e1nh d\u1ea5u ch\u01b0a \u0111\u1ecdc' keep the merged relay.chrome.row.mark_read verb; the bare '\u0110\u00e3 \u0111\u1ecdc'/'Ch\u01b0a \u0111\u1ecdc' fit but read as statuses, not actions. age.minutes uses the established 'ph' abbreviation (relay.asks.duration.minutes) to fit 12 cells."
+      "note": "Independent i18n audit round 1 PASS (terminal) at target SHA-256 4d3a1db432bcf93697cb899957e7b852b87afe0315c1fa3e298c4e24931f2c5a, source 2807f5876ae63e15fd0e47b54ec1e73f6c7f71b368f3439fd00c899ce8c0b54d: https://github.com/damianvtran/local-operator/pull/2968#issuecomment-6412691010. Audited bytes from a git archive of 9f349c5f481, hash-identical at head 772b01275ef. Independence limit: translator and auditor ran on the same model (anthropic/claude-opus-5-5); separation is agent and context; no native-speaker pass. Recorded, not gating: IA-X-M1 MINOR (select.read and confirm.read use status form \"Đã đọc\"; action form is 15/14); IA-X-N1 NIT (age.days overrun only at >=1000 days); detail.mark_read 15/14 and detail.mark_unread 17/14 accepted as declared. Translation: Translated from the frozen en bytes at PR #2968 head d7e12bd36808 (77 keys; target SHA-256 4d3a1db432bcf93697cb899957e7b852b87afe0315c1fa3e298c4e24931f2c5a). Translator identity read from the session's runtime metadata (provider anthropic, model claude-opus-5-5). Terminology reuses merged relay.chrome/relay.asks/relay.ask choices. Width: detail.mark_read 15/14 and detail.mark_unread 17/14 — 'Đánh dấu đã đọc'/'Đánh dấu chưa đọc' keep the merged relay.chrome.row.mark_read verb; the bare 'Đã đọc'/'Chưa đọc' fit but read as statuses, not actions. age.minutes uses the established 'ph' abbreviation (relay.asks.duration.minutes) to fit 12 cells."
     },
     {
       "locale": "ur",
@@ -7595,7 +7595,7 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "Independent i18n audit round 2 PASS (terminal) at target SHA-256 7136acd07a3ac277e07e48db1d2dc765497367d24df6ec2a4bcbb152068f3180, source 2807f5876ae63e15fd0e47b54ec1e73f6c7f71b368f3439fd00c899ce8c0b54d: https://github.com/damianvtran/local-operator/pull/2968#issuecomment-6413121758. Accepted NIT IA-UR-N2 and optional ur select.read form left as follow-ups. Round 1 audit FAILED at the previous target SHA-256 e723f0d19d63103540e27b57e15c051e8873a42f5223bead41baebe1821ea52a (auditor: reviewer (lopdev team, independent i18n audit, session 72df3ec6dc49), anthropic/claude-opus-5-5, 2026-10-26, result failed, findings 1): https://github.com/damianvtran/local-operator/pull/2968#issuecomment-6412691010. IA-UR-1 MAJOR fixed: detail.mark_read and confirm.read \"\u067e\u0691\u06be\u0627 \u06c1\u0648\u0627\" (status) -> \"\u067e\u0691\u06be\u0627 \u06c1\u0648\u0627 \u06a9\u0631\u06cc\u06ba\" (action, 13/14). Same-pass MINOR: receipt.read/receipt.unread aligned to the feminine of \u0627\u0637\u0644\u0627\u0639 (\"# \u067e\u0691\u06be\u06cc \u06c1\u0648\u0626\u06cc \u0646\u0634\u0627\u0646 \u0632\u062f\", \"# \u0646\u0627\u067e\u0691\u06be\u06cc \u0646\u0634\u0627\u0646 \u0632\u062f\"; both plural arms and # kept), matching receipt.dismissed/restored/stale/already and filter.unread \"\u0646\u0627\u067e\u0691\u06be\u06cc\". Not applied: IA-X-M1 select.read action form \"\u067e\u0691\u06be\u0627 \u06c1\u0648\u0627 \u06a9\u0631\u06cc\u06ba\" is 13/10 and does not fit, so it stays \"\u067e\u0691\u06be\u0627 \u06c1\u0648\u0627\". New target SHA-256 7136acd07a3ac277e07e48db1d2dc765497367d24df6ec2a4bcbb152068f3180. Round-2 audit recorded above replaced auditor/status at these bytes. Round 2 scope per the audit: the changed keys plus their toggle and receipt neighbours. Original translation: Translated from the frozen en bytes at PR #2968 head d7e12bd36808 (77 keys; target SHA-256 e723f0d19d63103540e27b57e15c051e8873a42f5223bead41baebe1821ea52a). Translator identity read from the session's runtime metadata (provider anthropic, model claude-opus-5-5). Terminology reuses merged relay.chrome/relay.asks/relay.ask choices. Width: select.dismiss 15/14 only at a four-digit count. age.* use '\u0642\u0628\u0644' (not '\u067e\u06c1\u0644\u06d2') so two-digit hours fit 12 cells; receipt.undo '\u0648\u0627\u067e\u0633 \u0644\u06cc\u06ba' 8/8."
+      "note": "Independent i18n audit round 2 PASS (terminal) at target SHA-256 7136acd07a3ac277e07e48db1d2dc765497367d24df6ec2a4bcbb152068f3180, source 2807f5876ae63e15fd0e47b54ec1e73f6c7f71b368f3439fd00c899ce8c0b54d: https://github.com/damianvtran/local-operator/pull/2968#issuecomment-6413121758. Accepted NIT IA-UR-N2 and optional ur select.read form left as follow-ups. Round 1 audit FAILED at the previous target SHA-256 e723f0d19d63103540e27b57e15c051e8873a42f5223bead41baebe1821ea52a (auditor: reviewer (lopdev team, independent i18n audit, session 72df3ec6dc49), anthropic/claude-opus-5-5, 2026-10-26, result failed, findings 1): https://github.com/damianvtran/local-operator/pull/2968#issuecomment-6412691010. IA-UR-1 MAJOR fixed: detail.mark_read and confirm.read \"پڑھا ہوا\" (status) -> \"پڑھا ہوا کریں\" (action, 13/14). Same-pass MINOR: receipt.read/receipt.unread aligned to the feminine of اطلاع (\"# پڑھی ہوئی نشان زد\", \"# ناپڑھی نشان زد\"; both plural arms and # kept), matching receipt.dismissed/restored/stale/already and filter.unread \"ناپڑھی\". Not applied: IA-X-M1 select.read action form \"پڑھا ہوا کریں\" is 13/10 and does not fit, so it stays \"پڑھا ہوا\". New target SHA-256 7136acd07a3ac277e07e48db1d2dc765497367d24df6ec2a4bcbb152068f3180. Round-2 audit recorded above replaced auditor/status at these bytes. Round 2 scope per the audit: the changed keys plus their toggle and receipt neighbours. Original translation: Translated from the frozen en bytes at PR #2968 head d7e12bd36808 (77 keys; target SHA-256 e723f0d19d63103540e27b57e15c051e8873a42f5223bead41baebe1821ea52a). Translator identity read from the session's runtime metadata (provider anthropic, model claude-opus-5-5). Terminology reuses merged relay.chrome/relay.asks/relay.ask choices. Width: select.dismiss 15/14 only at a four-digit count. age.* use 'قبل' (not 'پہلے') so two-digit hours fit 12 cells; receipt.undo 'واپس لیں' 8/8."
     },
     {
       "locale": "hi",
@@ -7614,7 +7614,7 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "Independent i18n audit round 2 PASS (terminal) at target SHA-256 8a7726aecb5c43747b2f207d4fbb02b0649cf5ae60a47b4835c6bbac6eaaf3cf, source 2807f5876ae63e15fd0e47b54ec1e73f6c7f71b368f3439fd00c899ce8c0b54d: https://github.com/damianvtran/local-operator/pull/2968#issuecomment-6413121758. Round 1 audit FAILED at the previous target SHA-256 f19ea0f7a6fe1df732b997ed41a0433ad9b5dd4481fe08205e40f06e2d745315 (auditor: reviewer (lopdev team, independent i18n audit, session 72df3ec6dc49), anthropic/claude-opus-5-5, 2026-10-26, result failed, findings 1): https://github.com/damianvtran/local-operator/pull/2968#issuecomment-6412691010. IA-HI-1 MAJOR fixed: detail.mark_read and confirm.read \"\u092a\u0922\u093c\u093e \u0939\u0941\u0906\" (status) -> \"\u092a\u0922\u093c\u093e \u0939\u0941\u0906 \u0915\u0930\u0947\u0902\" (action, 8/14). Same-pass MINORs: mark_all -> \"\u0938\u092d\u0940 \u0915\u094b \u092a\u0922\u093c\u093e \u0939\u0941\u0906 \u091a\u093f\u0939\u094d\u0928\u093f\u0924 \u0915\u0930\u0947\u0902\" (18/20, plural agreement); IA-X-M1 select.read -> \"\u092a\u0922\u093c\u093e \u0939\u0941\u0906 \u0915\u0930\u0947\u0902\" (8/10). New target SHA-256 8a7726aecb5c43747b2f207d4fbb02b0649cf5ae60a47b4835c6bbac6eaaf3cf. Round-2 audit recorded above replaced auditor/status at these bytes. Round 2 scope per the audit: the changed keys plus their toggle and receipt neighbours. Original translation: Translated from the frozen en bytes at PR #2968 head d7e12bd36808 (77 keys; target SHA-256 f19ea0f7a6fe1df732b997ed41a0433ad9b5dd4481fe08205e40f06e2d745315). Translator identity read from the session's runtime metadata (provider anthropic, model claude-opus-5-5). Terminology reuses merged relay.chrome/relay.asks/relay.ask choices. Width: all budgeted keys fit (max ratio receipt.undo 8/8)."
+      "note": "Independent i18n audit round 2 PASS (terminal) at target SHA-256 8a7726aecb5c43747b2f207d4fbb02b0649cf5ae60a47b4835c6bbac6eaaf3cf, source 2807f5876ae63e15fd0e47b54ec1e73f6c7f71b368f3439fd00c899ce8c0b54d: https://github.com/damianvtran/local-operator/pull/2968#issuecomment-6413121758. Round 1 audit FAILED at the previous target SHA-256 f19ea0f7a6fe1df732b997ed41a0433ad9b5dd4481fe08205e40f06e2d745315 (auditor: reviewer (lopdev team, independent i18n audit, session 72df3ec6dc49), anthropic/claude-opus-5-5, 2026-10-26, result failed, findings 1): https://github.com/damianvtran/local-operator/pull/2968#issuecomment-6412691010. IA-HI-1 MAJOR fixed: detail.mark_read and confirm.read \"पढ़ा हुआ\" (status) -> \"पढ़ा हुआ करें\" (action, 8/14). Same-pass MINORs: mark_all -> \"सभी को पढ़ा हुआ चिह्नित करें\" (18/20, plural agreement); IA-X-M1 select.read -> \"पढ़ा हुआ करें\" (8/10). New target SHA-256 8a7726aecb5c43747b2f207d4fbb02b0649cf5ae60a47b4835c6bbac6eaaf3cf. Round-2 audit recorded above replaced auditor/status at these bytes. Round 2 scope per the audit: the changed keys plus their toggle and receipt neighbours. Original translation: Translated from the frozen en bytes at PR #2968 head d7e12bd36808 (77 keys; target SHA-256 f19ea0f7a6fe1df732b997ed41a0433ad9b5dd4481fe08205e40f06e2d745315). Translator identity read from the session's runtime metadata (provider anthropic, model claude-opus-5-5). Terminology reuses merged relay.chrome/relay.asks/relay.ask choices. Width: all budgeted keys fit (max ratio receipt.undo 8/8)."
     },
     {
       "locale": "fr",
@@ -7881,8 +7881,7 @@
       },
       "status": "passed",
       "note": "1 added key re-audited at source sha256 aeae79178c5f47584a3af2d7a65a1fdfb45b859f624a089616109a6902438e90 (en/relay.asks.json): relay.asks.card.other = '其他', the free-text row that sits after the agent's options on the phone ask card and opens a text field. Translator: i18n-translator (anthropic/claude-sonnet-5-5, 2026-10-28). Independent auditor: i18n-auditor (lopdev reviewer role, anthropic/claude-sonnet-5-5, 2026-10-28) — a separate agent and session but the same model family, so not a different model. Checked: key parity and order versus en; exactly one added key and no existing value changed; no ICU or plural syntax added; NFC; no bidi or invisible controls; the file re-serialises byte-identically; check.py --catalogues-only reports 0 problems. The value is a bare noun in sentence case that reads as a choice beside enumerated options, per the locale guide and glossary; width is at most 1 character over English (ru), immaterial beside the 'your answer' hint. The whole file's mechanical parity and encoding were re-checked; only the added key was reviewed semantically, and unchanged copy is carried from the previous 77-key audit at d6041075. Result: passed, 0 findings. The value is identical to the repo's own `tui.library.category_other` precedent."
-    }
-,
+    },
     {
       "locale": "ur",
       "namespace": "relay.shell",
@@ -7900,7 +7899,7 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "Two independent Urdu relay audits over translator session 905e702c8399's bytes; neither auditor is the translator and neither edited the tree. Round 1 (base 9dc317f4, all 109 keys): session 49a2149e4f78 (openrouter/moonshotai/kimi-k3.1-pro) raised UR-RELAY-R1-001 MAJOR on relay.shell.usage.as_of \u2014 \u062a\u06a9 reads as until/expiry for an 'as of' cached-at timestamp; the second independent high-visibility audit (session a017851a0ea0, openrouter/moonshotai/kimi-k3.1-pro) read all 109 keys clean. Round 2 on remediation ea2f92e0 (rebased for this integration): 49a2149e4f78 (radient/auto) re-read relay.shell 44/44 and a017851a0ea0 (radient/auto) read the one changed value in depth and proved the other 108 byte-identical; both CLEAN. The fix to \u06a9\u06d2 \u0645\u0637\u0627\u0628\u0642 was verified; no unresolved BLOCKER/MAJOR/MINOR/NIT. This row: relay.shell 44 keys \u2014 round 1 carried the one MAJOR above, fixed and re-audited; round 2 clean on the current bytes with 43 unchanged keys carried. Rendered RTL/bidi isolation, Arabic shaping, font fallback and narrow-width layout were not exercised in either round; no screenshot or native design approval is claimed, and this row records the independent translation audit, not a rendered sign-off."
+      "note": "Two independent Urdu relay audits over translator session 905e702c8399's bytes; neither auditor is the translator and neither edited the tree. Round 1 (base 9dc317f4, all 109 keys): session 49a2149e4f78 (openrouter/moonshotai/kimi-k3.1-pro) raised UR-RELAY-R1-001 MAJOR on relay.shell.usage.as_of — تک reads as until/expiry for an 'as of' cached-at timestamp; the second independent high-visibility audit (session a017851a0ea0, openrouter/moonshotai/kimi-k3.1-pro) read all 109 keys clean. Round 2 on remediation ea2f92e0 (rebased for this integration): 49a2149e4f78 (radient/auto) re-read relay.shell 44/44 and a017851a0ea0 (radient/auto) read the one changed value in depth and proved the other 108 byte-identical; both CLEAN. The fix to کے مطابق was verified; no unresolved BLOCKER/MAJOR/MINOR/NIT. This row: relay.shell 44 keys — round 1 carried the one MAJOR above, fixed and re-audited; round 2 clean on the current bytes with 43 unchanged keys carried. Rendered RTL/bidi isolation, Arabic shaping, font fallback and narrow-width layout were not exercised in either round; no screenshot or native design approval is claimed, and this row records the independent translation audit, not a rendered sign-off."
     },
     {
       "locale": "ur",
@@ -7919,7 +7918,7 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "Two independent Urdu relay audits over translator session 905e702c8399's bytes; neither auditor is the translator and neither edited the tree. Round 1 (base 9dc317f4, all 109 keys): session 49a2149e4f78 (openrouter/moonshotai/kimi-k3.1-pro) raised UR-RELAY-R1-001 MAJOR on relay.shell.usage.as_of \u2014 \u062a\u06a9 reads as until/expiry for an 'as of' cached-at timestamp; the second independent high-visibility audit (session a017851a0ea0, openrouter/moonshotai/kimi-k3.1-pro) read all 109 keys clean. Round 2 on remediation ea2f92e0 (rebased for this integration): 49a2149e4f78 (radient/auto) re-read relay.shell 44/44 and a017851a0ea0 (radient/auto) read the one changed value in depth and proved the other 108 byte-identical; both CLEAN. The fix to \u06a9\u06d2 \u0645\u0637\u0627\u0628\u0642 was verified; no unresolved BLOCKER/MAJOR/MINOR/NIT. This row: relay.session 17 keys \u2014 round 1 clean; round 2 byte-identical, carried rather than re-audited. Rendered RTL/bidi isolation, Arabic shaping, font fallback and narrow-width layout were not exercised in either round; no screenshot or native design approval is claimed, and this row records the independent translation audit, not a rendered sign-off."
+      "note": "Two independent Urdu relay audits over translator session 905e702c8399's bytes; neither auditor is the translator and neither edited the tree. Round 1 (base 9dc317f4, all 109 keys): session 49a2149e4f78 (openrouter/moonshotai/kimi-k3.1-pro) raised UR-RELAY-R1-001 MAJOR on relay.shell.usage.as_of — تک reads as until/expiry for an 'as of' cached-at timestamp; the second independent high-visibility audit (session a017851a0ea0, openrouter/moonshotai/kimi-k3.1-pro) read all 109 keys clean. Round 2 on remediation ea2f92e0 (rebased for this integration): 49a2149e4f78 (radient/auto) re-read relay.shell 44/44 and a017851a0ea0 (radient/auto) read the one changed value in depth and proved the other 108 byte-identical; both CLEAN. The fix to کے مطابق was verified; no unresolved BLOCKER/MAJOR/MINOR/NIT. This row: relay.session 17 keys — round 1 clean; round 2 byte-identical, carried rather than re-audited. Rendered RTL/bidi isolation, Arabic shaping, font fallback and narrow-width layout were not exercised in either round; no screenshot or native design approval is claimed, and this row records the independent translation audit, not a rendered sign-off."
     },
     {
       "locale": "ur",
@@ -7938,7 +7937,7 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "Two independent Urdu relay audits over translator session 905e702c8399's bytes; neither auditor is the translator and neither edited the tree. Round 1 (base 9dc317f4, all 109 keys): session 49a2149e4f78 (openrouter/moonshotai/kimi-k3.1-pro) raised UR-RELAY-R1-001 MAJOR on relay.shell.usage.as_of \u2014 \u062a\u06a9 reads as until/expiry for an 'as of' cached-at timestamp; the second independent high-visibility audit (session a017851a0ea0, openrouter/moonshotai/kimi-k3.1-pro) read all 109 keys clean. Round 2 on remediation ea2f92e0 (rebased for this integration): 49a2149e4f78 (radient/auto) re-read relay.shell 44/44 and a017851a0ea0 (radient/auto) read the one changed value in depth and proved the other 108 byte-identical; both CLEAN. The fix to \u06a9\u06d2 \u0645\u0637\u0627\u0628\u0642 was verified; no unresolved BLOCKER/MAJOR/MINOR/NIT. This row: relay.account_policy 13 keys \u2014 round 1 clean, including the account-policy commit/rejection safety meaning; round 2 byte-identical. Rendered RTL/bidi isolation, Arabic shaping, font fallback and narrow-width layout were not exercised in either round; no screenshot or native design approval is claimed, and this row records the independent translation audit, not a rendered sign-off."
+      "note": "Two independent Urdu relay audits over translator session 905e702c8399's bytes; neither auditor is the translator and neither edited the tree. Round 1 (base 9dc317f4, all 109 keys): session 49a2149e4f78 (openrouter/moonshotai/kimi-k3.1-pro) raised UR-RELAY-R1-001 MAJOR on relay.shell.usage.as_of — تک reads as until/expiry for an 'as of' cached-at timestamp; the second independent high-visibility audit (session a017851a0ea0, openrouter/moonshotai/kimi-k3.1-pro) read all 109 keys clean. Round 2 on remediation ea2f92e0 (rebased for this integration): 49a2149e4f78 (radient/auto) re-read relay.shell 44/44 and a017851a0ea0 (radient/auto) read the one changed value in depth and proved the other 108 byte-identical; both CLEAN. The fix to کے مطابق was verified; no unresolved BLOCKER/MAJOR/MINOR/NIT. This row: relay.account_policy 13 keys — round 1 clean, including the account-policy commit/rejection safety meaning; round 2 byte-identical. Rendered RTL/bidi isolation, Arabic shaping, font fallback and narrow-width layout were not exercised in either round; no screenshot or native design approval is claimed, and this row records the independent translation audit, not a rendered sign-off."
     },
     {
       "locale": "ur",
@@ -7957,7 +7956,7 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "Two independent Urdu relay audits over translator session 905e702c8399's bytes; neither auditor is the translator and neither edited the tree. Round 1 (base 9dc317f4, all 109 keys): session 49a2149e4f78 (openrouter/moonshotai/kimi-k3.1-pro) raised UR-RELAY-R1-001 MAJOR on relay.shell.usage.as_of \u2014 \u062a\u06a9 reads as until/expiry for an 'as of' cached-at timestamp; the second independent high-visibility audit (session a017851a0ea0, openrouter/moonshotai/kimi-k3.1-pro) read all 109 keys clean. Round 2 on remediation ea2f92e0 (rebased for this integration): 49a2149e4f78 (radient/auto) re-read relay.shell 44/44 and a017851a0ea0 (radient/auto) read the one changed value in depth and proved the other 108 byte-identical; both CLEAN. The fix to \u06a9\u06d2 \u0645\u0637\u0627\u0628\u0642 was verified; no unresolved BLOCKER/MAJOR/MINOR/NIT. This row: relay.library 1 key \u2014 round 1 clean; round 2 byte-identical. Rendered RTL/bidi isolation, Arabic shaping, font fallback and narrow-width layout were not exercised in either round; no screenshot or native design approval is claimed, and this row records the independent translation audit, not a rendered sign-off."
+      "note": "Two independent Urdu relay audits over translator session 905e702c8399's bytes; neither auditor is the translator and neither edited the tree. Round 1 (base 9dc317f4, all 109 keys): session 49a2149e4f78 (openrouter/moonshotai/kimi-k3.1-pro) raised UR-RELAY-R1-001 MAJOR on relay.shell.usage.as_of — تک reads as until/expiry for an 'as of' cached-at timestamp; the second independent high-visibility audit (session a017851a0ea0, openrouter/moonshotai/kimi-k3.1-pro) read all 109 keys clean. Round 2 on remediation ea2f92e0 (rebased for this integration): 49a2149e4f78 (radient/auto) re-read relay.shell 44/44 and a017851a0ea0 (radient/auto) read the one changed value in depth and proved the other 108 byte-identical; both CLEAN. The fix to کے مطابق was verified; no unresolved BLOCKER/MAJOR/MINOR/NIT. This row: relay.library 1 key — round 1 clean; round 2 byte-identical. Rendered RTL/bidi isolation, Arabic shaping, font fallback and narrow-width layout were not exercised in either round; no screenshot or native design approval is claimed, and this row records the independent translation audit, not a rendered sign-off."
     },
     {
       "locale": "ur",
@@ -7976,7 +7975,159 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "Two independent Urdu relay audits over translator session 905e702c8399's bytes; neither auditor is the translator and neither edited the tree. Round 1 (base 9dc317f4, all 109 keys): session 49a2149e4f78 (openrouter/moonshotai/kimi-k3.1-pro) raised UR-RELAY-R1-001 MAJOR on relay.shell.usage.as_of \u2014 \u062a\u06a9 reads as until/expiry for an 'as of' cached-at timestamp; the second independent high-visibility audit (session a017851a0ea0, openrouter/moonshotai/kimi-k3.1-pro) read all 109 keys clean. Round 2 on remediation ea2f92e0 (rebased for this integration): 49a2149e4f78 (radient/auto) re-read relay.shell 44/44 and a017851a0ea0 (radient/auto) read the one changed value in depth and proved the other 108 byte-identical; both CLEAN. The fix to \u06a9\u06d2 \u0645\u0637\u0627\u0628\u0642 was verified; no unresolved BLOCKER/MAJOR/MINOR/NIT. This row: relay.login 4 keys on the separate SSR auth gate \u2014 round 1 clean; round 2 byte-identical and unaffected by the SPA shell delta. Rendered RTL/bidi isolation, Arabic shaping, font fallback and narrow-width layout were not exercised in either round; no screenshot or native design approval is claimed, and this row records the independent translation audit, not a rendered sign-off."
+      "note": "Two independent Urdu relay audits over translator session 905e702c8399's bytes; neither auditor is the translator and neither edited the tree. Round 1 (base 9dc317f4, all 109 keys): session 49a2149e4f78 (openrouter/moonshotai/kimi-k3.1-pro) raised UR-RELAY-R1-001 MAJOR on relay.shell.usage.as_of — تک reads as until/expiry for an 'as of' cached-at timestamp; the second independent high-visibility audit (session a017851a0ea0, openrouter/moonshotai/kimi-k3.1-pro) read all 109 keys clean. Round 2 on remediation ea2f92e0 (rebased for this integration): 49a2149e4f78 (radient/auto) re-read relay.shell 44/44 and a017851a0ea0 (radient/auto) read the one changed value in depth and proved the other 108 byte-identical; both CLEAN. The fix to کے مطابق was verified; no unresolved BLOCKER/MAJOR/MINOR/NIT. This row: relay.login 4 keys on the separate SSR auth gate — round 1 clean; round 2 byte-identical and unaffected by the SPA shell delta. Rendered RTL/bidi isolation, Arabic shaping, font fallback and narrow-width layout were not exercised in either round; no screenshot or native design approval is claimed, and this row records the independent translation audit, not a rendered sign-off."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.aida_cadence",
+      "source_sha256": "3bb421a58f2ffa4fec089421d9cb91257fa626d66b2e215b3e120c068bb8e5dd",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w1 es backfill: 2 keys; independent audit w1a3 passed (committed evidence i18n/audits/evidence/es/wire.aida_cadence/w1a3/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.console",
+      "source_sha256": "1a591fbc1f6a939651cfe9bc5c4ff619a5a4ade2099cc9cfb348534d09a0011b",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w1 es backfill: 8 keys; independent audit w1a3 passed (committed evidence i18n/audits/evidence/es/wire.console/w1a3/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.exec",
+      "source_sha256": "041ca802dd4e1329cf1f1b2984311c628f314223f5941b35a7007f5b3d198c94",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w1 es backfill: 17 keys; independent audit w1a3 passed (committed evidence i18n/audits/evidence/es/wire.exec/w1a3/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.host_speed",
+      "source_sha256": "e193473d58c0de1779bcefab06d0e9b1734ee493aea30ea827e4499510282b8c",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w1 es backfill: 2 keys; independent audit w1a3 passed (committed evidence i18n/audits/evidence/es/wire.host_speed/w1a3/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings.account_policy",
+      "source_sha256": "1ad13f8198e28cb19fe0ecb2a6ef9b2a6990bc0d047566b71f5dd5322f594b25",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w1 es backfill: 14 keys; independent audit w1a4 passed (committed evidence i18n/audits/evidence/es/wire.settings.account_policy/w1a4/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings.hub_defaults",
+      "source_sha256": "8720b5719479b638eab24b081f76f97c44ce8d8554cb1b8280f6980182b6740c",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w1 es backfill: 9 keys; independent audit w1a4 passed (committed evidence i18n/audits/evidence/es/wire.settings.hub_defaults/w1a4/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.slash.library",
+      "source_sha256": "0f8615f2ed9ffaf3aeb0288a4ff4b8fc8becd46017a931db9d4b3d9ec32fce46",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w1 es backfill: 2 keys; independent audit w1a3 passed (committed evidence i18n/audits/evidence/es/wire.slash.library/w1a3/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.tunnel_setup",
+      "source_sha256": "3854be7dce54dd3aeb9564921ed6a50f0560b32c7ac40955d81be93acd7e2ac1",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w1 es backfill: 5 keys; independent audit w1a3 passed (committed evidence i18n/audits/evidence/es/wire.tunnel_setup/w1a3/). Open minor/nit findings are dispositioned in that evidence's report.md."
     }
   ]
 }
