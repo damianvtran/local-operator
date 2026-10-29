@@ -160,8 +160,15 @@ def render_lines(result: dict[str, Any]) -> list[str]:
 
     locale = resolve_help_locale()
 
-    def text(message: Any, **kwargs: Any) -> str:
-        return str(message.envelope(locale=locale, **kwargs)["text"])
+    def text(message: Any) -> str:
+        # NO **kwargs FORWARDING (review NIT-1). ``Msg.envelope`` takes exactly
+        # ``code`` and ``locale``; a caller that passes a formatting parameter
+        # here reaches it as an unexpected keyword and raises ``TypeError`` -
+        # which is how four of the five setup outcomes crashed before the
+        # params moved onto the generated key functions. The parameters belong
+        # in the key function's call, where they are type-checked, so this
+        # helper deliberately cannot forward anything.
+        return str(message.envelope(locale=locale)["text"])
 
     code = result.get("code")
     if code == CODE_CONSENT_UI_REQUIRED:

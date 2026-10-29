@@ -1086,7 +1086,14 @@ def _reconcile(config_dir: Path, *, force_off: bool) -> ServiceOutcome:
     try:
         refused = _platform_refusal(config_dir)
         if refused is not None:
-            if refused.code == CODE_ISOLATED:
+            # BOTH PLATFORM REFUSALS ARE OUTCOMES THE OPERATOR NEEDS TO SEE.
+            # ``isolated`` was logged here; ``no_supervisor`` was not, and it
+            # returns from THIS early exit rather than reaching the later
+            # outcome-code tuple, so it escaped every automatic caller (TUI
+            # startup at DEBUG, the mobile service dropping an unread future,
+            # the desktop ignoring the return value). On a backend-only host
+            # that is a receiver that is never placed and never mentioned.
+            if refused.code in (CODE_ISOLATED, CODE_NO_SUPERVISOR):
                 logger.info("bridge connector: %s", refused.detail)
             return refused
         # CHEAP PRE-CHECK, deliberately OUTSIDE the lock and side-effect free.
@@ -1144,6 +1151,16 @@ def _reconcile(config_dir: Path, *, force_off: bool) -> ServiceOutcome:
         CODE_FAILED,
         CODE_SOURCE_CHECKOUT,
         CODE_NO_USER_MANAGER,
+        # NO SUPERVISOR IS THE SILENT-NEVER-INSTALL CASE (review MAJOR-1).
+        # Without this line every automatic caller (TUI startup, the mobile
+        # service, the desktop's install-on-open) discards the refusal at
+        # DEBUG or swallows the future, so a backend-only container/OpenRC/BSD
+        # host places nothing, logs nothing at the default level, and delivers
+        # no messages - indefinitely, with no signal. The explicit verbs were
+        # the only path that said so out loud. It is logged at INFO because the
+        # refusal is the OUTCOME of the sync the caller asked for, not an error
+        # inside it, and its detail carries the foreground command to run.
+        CODE_NO_SUPERVISOR,
     ):
         logger.info("bridge connector service: %s %s", outcome.code, outcome.detail)
     return outcome

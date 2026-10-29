@@ -602,7 +602,10 @@ def test_no_path_returns_the_retired_unsupported_code(user_home, monkeypatch) ->
 def test_windows_native_connector_lock_excludes_a_second_holder(tmp_path) -> None:
     """On real Windows the singleton takes an ``msvcrt`` lock and refuses a second."""
 
-    from local_operator.team_bridge.connector.lock import ConnectorLock, ConnectorLockBusy
+    from local_operator.team_bridge.connector.lock import (
+        ConnectorLock,
+        ConnectorLockBusy,
+    )
 
     first = ConnectorLock(tmp_path, deadline_s=0.3)
     first.acquire()
@@ -633,7 +636,6 @@ def test_windows_stop_handler_turns_sigbreak_into_a_clean_stop(monkeypatch) -> N
     from local_operator.team_bridge.connector import __main__ as entry
 
     installed: dict[int, Any] = {}
-    monkeypatch.setattr(os, "name", "nt", raising=False)
     monkeypatch.setattr(os, "name", "nt")
     monkeypatch.setattr(signal, "SIGBREAK", 21, raising=False)
     monkeypatch.setattr(signal, "signal", lambda sig, handler: installed.__setitem__(sig, handler))

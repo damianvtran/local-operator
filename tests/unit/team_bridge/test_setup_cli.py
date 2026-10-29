@@ -16,9 +16,9 @@ these cells pin three things:
 
 from __future__ import annotations
 
-import pytest
-
 from pathlib import Path
+
+import pytest
 
 from local_operator import settings_io
 from local_operator.config import ConfigManager
@@ -129,6 +129,33 @@ def test_enrolled_but_not_enabled_asks_for_the_app_and_places_nothing(
     assert result["code"] == setup_cli.CODE_ENABLE_IN_APP_REQUIRED
     assert result["account_id"] == "acc_1"
     assert placed == []
+
+
+def test_a_params_carrying_outcome_renders_without_raising(
+    tmp_path: Path, placed: list[str]
+) -> None:
+    """The render path must survive an outcome whose copy takes a parameter.
+
+    Review MINOR-1: thirteen passing cells all rendered outcomes whose copy was
+    parameterless, so nothing caught the case that actually crashed in the field.
+    ``enable_in_app_required`` interpolates ``account_id``; when the parameters
+    were forwarded through ``text(**kwargs)`` into ``Msg.envelope`` - which takes
+    only ``code`` and ``locale`` - this raised ``TypeError`` and, because
+    ``render_lines`` sits outside ``main()``'s guard, dumped a traceback AFTER
+    the receiver had already been placed. The assertion is on the RENDERED TEXT,
+    so a future drift back to forwarding fails here rather than in a terminal.
+    """
+
+    _enrol(tmp_path)
+    _enable(tmp_path, False)
+
+    result = setup_cli.setup(tmp_path)
+    lines = setup_cli.render_lines(result)
+
+    assert result["code"] == setup_cli.CODE_ENABLE_IN_APP_REQUIRED
+    rendered = "\n".join(lines)
+    assert "acc_1" in rendered, f"the parameter never reached the copy: {rendered}"
+    assert "{" not in rendered, f"an unformatted placeholder survived: {rendered}"
 
 
 def test_an_absent_enabled_key_is_treated_as_not_enabled(tmp_path: Path, placed: list[str]) -> None:

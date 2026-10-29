@@ -10,6 +10,7 @@ No test starts a connector or addresses the operator's real launchd domain.
 from __future__ import annotations
 
 import asyncio
+import logging
 import plistlib
 import subprocess
 import time
@@ -232,6 +233,37 @@ async def test_a_host_with_no_supervisor_is_a_noop_with_a_status_code(
     assert "python -m local_operator.team_bridge.connector --config-dir" in outcome.detail
     assert install.connector_state(tmp_path) == install.CODE_NO_SUPERVISOR
     assert not install.plist_path().exists()
+
+
+async def test_the_no_supervisor_refusal_is_logged_for_automatic_callers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The silent-never-install case must say so at the DEFAULT level (MAJOR-1).
+
+    ``no_supervisor`` is the one refusal that used to escape every automatic
+    caller: the TUI startup logs it at DEBUG, the mobile service drops the
+    future unread, and the desktop's install-on-open ignores the outcome. On a
+    backend-only host (a container with no init, OpenRC, BSD) that means the
+    receiver is never placed, nothing is logged, and messages are never
+    delivered - for as long as the machine runs, with no signal anywhere. The
+    explicit verbs were the only path that told the operator.
+
+    The assertion is on the DEFAULT level, not on a configured one, because the
+    defect was that the default had nothing to say.
+    """
+
+    monkeypatch.setattr(supervisors, "supervisor", lambda: None)
+    _commit(tmp_path)
+    with caplog.at_level(logging.INFO, logger=install.logger.name):
+        outcome = install.sync_connector_service(tmp_path)
+    assert outcome.code == install.CODE_NO_SUPERVISOR
+    messages = [record.getMessage() for record in caplog.records]
+    # The DETAIL is what makes the log useful: it names the foreground command a
+    # backend-only host can actually run. Asserting on the code token would pass
+    # on a message that told the operator nothing they could act on.
+    assert any(
+        outcome.detail in message for message in messages
+    ), f"the refusal detail was not logged at INFO: {messages}"
 
 
 async def test_status_distinguishes_missing_installed_and_loaded(service) -> None:
