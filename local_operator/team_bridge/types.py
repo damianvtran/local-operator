@@ -207,6 +207,14 @@ def validate_send_recipient(value: Any) -> dict[str, str]:
     the existing pair-inbox contract, not conversation routing or a human fallback.
     Refusals deliberately do not quote caller-controlled keys or values.
 
+    A DISPLAY NAME never reaches this function from the tool: the tool resolves one
+    (``channel_post`` inside the conversation, ``send``/``reply`` inside the
+    owner's allowlist) and passes on the resolved id, so the pair body it builds
+    here only ever carries an address. A ``{"name": ...}`` that arrives anyway —
+    a direct client caller, a replayed intent, a bug — refuses here, because this
+    layer cannot resolve it and must not forward a string the server would read as
+    an account id.
+
     A BARE STRING is an ACCOUNT id (``"acc_123"`` → ``{"account_id": "acc_123"}``):
     one string is one recipient in one field, so there is nothing to reinterpret
     and no second field that can be lost — the same guarantee the object form
@@ -227,7 +235,14 @@ def validate_send_recipient(value: Any) -> dict[str, str]:
     recipient = validate_recipient_shape(value)
     if "name" in recipient:
         raise InvalidSendRecipient(
-            "only channel_post resolves a display-label recipient; " + RECIPIENT_TEACHING
+            # This is the WIRE guard, not the op policy: the tool resolves a
+            # display-label recipient (channel_post inside the room, send/reply
+            # inside the owner's allowlist) and hands this layer an id. A name
+            # reaching HERE means a caller skipped that resolution, and the pair
+            # body has nowhere to put one — so it refuses rather than forwarding a
+            # string the server would read as an account id.
+            "this wire carries an id, not a resolved recipient; "
+            + RECIPIENT_TEACHING
         )
     return recipient
 

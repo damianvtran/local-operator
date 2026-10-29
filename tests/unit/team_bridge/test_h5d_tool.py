@@ -711,13 +711,14 @@ def test_a_guessed_name_is_refused_with_the_accepted_shapes_and_the_directory(
 ) -> None:
     """The refusal is the correction: a model that guessed a name learns the move.
 
-    This is the PAIR lane, which never resolves a name: it carries no conversation,
-    so it has no least-privilege candidate set, and its scope is a separate
-    decision. (``channel_post`` does resolve one locally, against that
-    conversation's active members — never against the org directory; see
-    ``test_recipient_name_resolution.py``.) A bare "unsupported field" taught the
-    model nothing, so every refusal names BOTH accepted shapes and where the ids
-    come from. It still quotes nothing caller-controlled (no value, no key).
+    This is the WIRE guard, and it is what a name gets when it reaches the pair
+    body without being resolved first. The TOOL resolves one — ``channel_post``
+    inside that conversation's active members, ``send``/``reply`` inside the
+    owner's own allowlist, never the org directory as a whole — and hands this
+    layer an id; see ``test_recipient_name_resolution.py`` and
+    ``test_recipient_name_resolution_send.py``. A bare "unsupported field" taught
+    the model nothing, so every refusal names BOTH accepted shapes and where the
+    ids come from. It still quotes nothing caller-controlled (no value, no key).
     """
     from local_operator.team_bridge.types import (
         RECIPIENT_ACCOUNT_SHAPE,
