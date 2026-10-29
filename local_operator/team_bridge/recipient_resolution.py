@@ -302,6 +302,11 @@ def record_resolution(
 ) -> None:
     """Append ONE resolution row, before the caller may deliver. Raises on failure.
 
+    ``outcome`` is a CLOSED word (:data:`OUTCOMES`) and is checked here rather
+    than trusted: this row is read months later by somebody reconstructing a
+    misdelivery, so a sixth word invented at a call site would quietly become a
+    state nobody queries for. An unknown word is a caller bug and refuses.
+
     The row holds what a reconstruction needs and nothing that belongs to a body:
     the requested display name (the only way to answer "who did they ask for"),
     the resolved account id or null, the matched count, the scope word and the
@@ -314,6 +319,9 @@ def record_resolution(
     consulted and nobody matched — the opposite of what happened.
     """
 
+    word = outcome or _outcome(resolution)
+    if word not in OUTCOMES:
+        raise TeamBridgeTypeError(f"unknown resolution outcome {word!r}; nothing was recorded")
     row = {
         "ts_ms": int(time.time() * 1000),
         "scope": scope.name,
@@ -323,7 +331,7 @@ def record_resolution(
             resolution.resolved.account_id if resolution.resolved is not None else None
         ),
         "matched_count": resolution.matched_count,
-        "outcome": outcome or _outcome(resolution),
+        "outcome": word,
         "candidates": [
             {
                 "display_label": member.display_label,

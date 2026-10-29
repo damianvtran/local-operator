@@ -347,20 +347,35 @@ async def test_a_member_who_has_not_joined_is_not_a_candidate(tmp_path, key, val
 
 
 @pytest.mark.asyncio
-async def test_one_inactive_spelling_outranks_an_active_one(tmp_path) -> None:
+@pytest.mark.parametrize(
+    "extra",
+    [
+        # BOTH orders, because one row only proves the resolver reads a key it
+        # would have read anyway: ``{state: invited, status: active}`` also
+        # excludes under first-key-wins, so the REVERSE row is the one that
+        # fails unless EVERY present state key is consulted.
+        {"state": "invited", "status": "active"},
+        {"state": "active", "status": "invited"},
+        # The third spelling the participant shape has worn, and the one no
+        # other case exercises.
+        {"membership": "left"},
+    ],
+)
+async def test_any_inactive_spelling_outranks_an_active_one(tmp_path, extra) -> None:
     """Fail closed: a row cannot be joined in one spelling and departed in another.
 
     ANY present inactive state excludes the member. Reading only the first key
-    that happens to be present would let ``{state: invited, status: active}``
-    through, which is the guess this resolver exists not to make.
+    that happens to be present would let one of these rows through, which is the
+    guess this resolver exists not to make.
     """
-    mixed = dict(ADA) | {"state": "invited", "status": "active"}
+    mixed = dict(ADA) | extra
     client = RecordingClient(conversation=_conversation(mixed))
     outcome = await execute_bridge(
         _runtime(client, config_dir=tmp_path),
         {"op": "channel_post", "channel_id": CHANNEL, "body": "hi", "to": {"name": "Ada Lovelace"}},
     )
     assert outcome["ok"] is False
+    assert "no active member by that name" in outcome["error"]
     assert _posts_nothing(client)
 
 
@@ -586,3 +601,35 @@ def test_the_published_schema_states_the_matching_rule_and_the_per_op_scope() ->
 def test_the_scope_words_are_one_vocabulary_the_audit_can_be_read_by() -> None:
     assert SCOPE_CONVERSATION.name == "conversation"
     assert SCOPE_CONVERSATION.where == "in this conversation"
+
+
+def test_the_audit_outcome_vocabulary_is_closed_and_enforced(tmp_path) -> None:
+    """A sixth outcome word would become a state nobody queries for."""
+    from local_operator.team_bridge.recipient_resolution import (
+        OUTCOMES,
+        record_resolution,
+    )
+    from local_operator.team_bridge.types import NameResolution, TeamBridgeTypeError
+
+    resolved = NameResolution(
+        requested="Ada Lovelace", matches=(MemberCandidate("acc_ada", "Ada Lovelace", "human"),)
+    )
+    with pytest.raises(TeamBridgeTypeError):
+        record_resolution(
+            config_dir=tmp_path,
+            scope=SCOPE_CONVERSATION,
+            scope_id=CHANNEL,
+            resolution=resolved,
+            outcome="a_word_nobody_queries",
+        )
+    assert not resolution_audit_path(tmp_path).exists()
+    # The documented words all work, and each lands in the row.
+    for word in OUTCOMES:
+        record_resolution(
+            config_dir=tmp_path,
+            scope=SCOPE_CONVERSATION,
+            scope_id=CHANNEL,
+            resolution=resolved,
+            outcome=word,
+        )
+    assert [row["outcome"] for row in _audit_rows(tmp_path)] == list(OUTCOMES)
