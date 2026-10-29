@@ -8778,6 +8778,614 @@
       },
       "status": "passed",
       "note": "Independent audit passed 14/14 keys after one BLOCKER was raised and fixed: an Urdu token in Arabic script stood inside the Devanagari string and was corrected to कोई; the script sweep over all 98 strings is clean. The three states stay distinct: निगरानी में / निगरानी से बाहर (assertive) / निगरानी अज्ञात (modal, no absence claim). Placeholders and code spans byte-identical; width fits rich.cells.cell_len so no exception bullet. No durability or reboot claim."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.agents_help",
+      "source_sha256": "d8118ece7b59b99295fde3496bd3c9ff3184455d75ed31dcee50e5e515fd3bf3",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w2 es backfill: 21 keys; independent audit w2a4 passed (committed evidence i18n/audits/evidence/es/cli.agents_help/w2a4/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.aida_help",
+      "source_sha256": "31e8445b6d8a9540ef524988b0fca3efca111362188f2ba41d6f857499828423",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w2 es backfill: 4 keys; independent audit w2a3 passed (committed evidence i18n/audits/evidence/es/cli.aida_help/w2a3/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.browser",
+      "source_sha256": "a9841deed81927762716c7592a592bb4e3f069d16f6ba0def6becb755b728321",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w2 es backfill: 64 keys; independent audit w2a4 passed (committed evidence i18n/audits/evidence/es/cli.browser/w2a4/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.browser_help",
+      "source_sha256": "7fd47199bb8d443a0fbf7469d635453cd6f57bb7c14efec91862c6b5b0c1b1e6",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w2 es backfill: 20 keys; independent audit w2a2 passed (committed evidence i18n/audits/evidence/es/cli.browser_help/w2a2/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.config_help",
+      "source_sha256": "97f625f6c6e26f8723e471569a0227f8e4da18518f2ab50e444fe93345ab2c8c",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w2 es backfill: 9 keys; independent audit w2a3 passed (committed evidence i18n/audits/evidence/es/cli.config_help/w2a3/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.credential_help",
+      "source_sha256": "2757dc32f5d75d81f639bf689b6423ef64614ad1e91289bb67655e9681266418",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w2 es backfill: 5 keys; independent audit w2a3 passed (committed evidence i18n/audits/evidence/es/cli.credential_help/w2a3/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.exec_help",
+      "source_sha256": "1a44c9ea283ce8c4a9bb8ffab403e9cb36cf4a73fce832d91e79f355448b02eb",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w2 es backfill: 20 keys; independent audit w2a2 passed (committed evidence i18n/audits/evidence/es/cli.exec_help/w2a2/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.exec_runtime",
+      "source_sha256": "3eee7ca31076e48ccf7e1c8854c5647d0859e5341b26b10c8043e53825de72fd",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w2 es backfill: 11 keys; independent audit w2a2 passed (committed evidence i18n/audits/evidence/es/cli.exec_runtime/w2a2/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.exec_worker_help",
+      "source_sha256": "aa501d6d894fdb20462595582d43e435364f200e677a50e52fd8d2b93706a957",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w2 es backfill: 11 keys; independent audit w2a2 passed (committed evidence i18n/audits/evidence/es/cli.exec_worker_help/w2a2/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.global_help",
+      "source_sha256": "c6e91dda89a9b792587f4ac9c594e188b78b8cd529fa1acf51ca783422c3152f",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w2 es backfill: 17 keys; independent audit w2a4 passed (committed evidence i18n/audits/evidence/es/cli.global_help/w2a4/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.hub_help",
+      "source_sha256": "df519de9acb3cdd99fa5ae4cc0c5753b090c43b79f8870c543258c0f4fcdfec6",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w2 es backfill: 12 keys; independent audit w2a4 passed (committed evidence i18n/audits/evidence/es/cli.hub_help/w2a4/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.hub_shared_help",
+      "source_sha256": "5d40860430e36224bd77e95ff8298bd4b80f052f3d910a532947af6e78632b44",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w2 es backfill: 12 keys; independent audit w2a3 passed (committed evidence i18n/audits/evidence/es/cli.hub_shared_help/w2a3/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.install_help",
+      "source_sha256": "f242bfdbf8e80bd7f956ae361985180d7eb797dd4223da8423dc678b6fec61e7",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w2 es backfill: 5 keys; independent audit w2a4 passed (committed evidence i18n/audits/evidence/es/cli.install_help/w2a4/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.login_help",
+      "source_sha256": "66ae3d9bfe16c2830bb0a78ef7b5c768ae194f9f4d972379bbe9d752b35502f7",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w2 es backfill: 2 keys; independent audit w2a3 passed (committed evidence i18n/audits/evidence/es/cli.login_help/w2a3/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.login_status_help",
+      "source_sha256": "17ef2629c0ad8a20c7e0a939d8fb38e594936e0c5dd47a3a1600300c1bf3f0f3",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w2 es backfill: 2 keys; independent audit w2a3 passed (committed evidence i18n/audits/evidence/es/cli.login_status_help/w2a3/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.logout_help",
+      "source_sha256": "2f479fa8e75a73f8897ec74902345bd36ca7117ae275dbf7a9bfbc98a830e453",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w2 es backfill: 2 keys; independent audit w2a3 passed (committed evidence i18n/audits/evidence/es/cli.logout_help/w2a3/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.mcp_help",
+      "source_sha256": "3f5e0f11b186501e6a708ffaba4af294ebdb663175722b58c24143dbf0173417",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w2 es backfill: 19 keys; independent audit w2a1 passed (committed evidence i18n/audits/evidence/es/cli.mcp_help/w2a1/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.memory_help",
+      "source_sha256": "b3b63aeb9c1b27d3e686c2c6ab7378130577255ac5e999296a583cd5bf0c3a13",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w2 es backfill: 1 keys; independent audit w2a3 passed (committed evidence i18n/audits/evidence/es/cli.memory_help/w2a3/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.mobile_help",
+      "source_sha256": "88681bae09adf93216e3e3b990652f7f57654a0438f6bc8c3cc5dd9ebb6eb947",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w2 es backfill: 15 keys; independent audit w2a4 passed (committed evidence i18n/audits/evidence/es/cli.mobile_help/w2a4/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.model_help",
+      "source_sha256": "3b28b1bac7b2bd3d05f781585d27770940a12e549f3d8df456a107b61605008f",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w2 es backfill: 5 keys; independent audit w2a3 passed (committed evidence i18n/audits/evidence/es/cli.model_help/w2a3/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.monitor_help",
+      "source_sha256": "766f6162643fec0c473dd4ffd822e5f1f9590e32caa2bc98793e9d65061161ab",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w2 es backfill: 6 keys; independent audit w2a3 passed (committed evidence i18n/audits/evidence/es/cli.monitor_help/w2a3/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.qwencloud_help",
+      "source_sha256": "6406143d97b406ca752a3fedecf2a69c22d635a5f2e1daf2fd2370ac393ff13b",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w2 es backfill: 5 keys; independent audit w2a3 passed (committed evidence i18n/audits/evidence/es/cli.qwencloud_help/w2a3/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.refresh_help",
+      "source_sha256": "b7168f0a70be23ed3637b1a91abef6dce1eb0d47a21b9fefc9d6104556be730f",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w2 es backfill: 7 keys; independent audit w2a3 passed (committed evidence i18n/audits/evidence/es/cli.refresh_help/w2a3/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.resume_click_help",
+      "source_sha256": "36caf0cd5f4c9f8081281e41a57d0cb7adb573f944ce14f6d0e087e04535a73e",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w2 es backfill: 1 keys; independent audit w2a3 passed (committed evidence i18n/audits/evidence/es/cli.resume_click_help/w2a3/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.send_help",
+      "source_sha256": "ab7d3c4a3ac0696b935d613c2b7596c56dbd3b32a8fdabe29ff2bc3a93a1bfb9",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w2 es backfill: 7 keys; independent audit w2a3 passed (committed evidence i18n/audits/evidence/es/cli.send_help/w2a3/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.serve_help",
+      "source_sha256": "bd0b51271edc67c23978ca23688a9af1ef94a5623b0e86a5e3bbb418a5b243f0",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w2 es backfill: 5 keys; independent audit w2a4 passed (committed evidence i18n/audits/evidence/es/cli.serve_help/w2a4/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.services_help",
+      "source_sha256": "76aca39fb3bfe46be1d31fbfde2176ee525b7ac650961104894a894f71751935",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w2 es backfill: 9 keys; independent audit w2a4 passed (committed evidence i18n/audits/evidence/es/cli.services_help/w2a4/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.sessions_help",
+      "source_sha256": "a250a185a780ab330187560c23dfe5e8d95956da24d417b22e1fc8bb121c2a6a",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w2 es backfill: 47 keys; independent audit w2a4 passed (committed evidence i18n/audits/evidence/es/cli.sessions_help/w2a4/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.stop_help",
+      "source_sha256": "ab8ae153e8749888e2426614c06d1ba672c70bad33d2a44bed46c00004f33d28",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w2 es backfill: 9 keys; independent audit w2a3 passed (committed evidence i18n/audits/evidence/es/cli.stop_help/w2a3/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.teams_help",
+      "source_sha256": "400637df631f938b7c144cf500a64bd5976f3157b25944d4ea3b701d79c69738",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w2 es backfill: 34 keys; independent audit w2a4 passed (committed evidence i18n/audits/evidence/es/cli.teams_help/w2a4/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.update_help",
+      "source_sha256": "78da39b393ee77900255ddfdf92a17220a6eedbecba340e7d925a2fbdf01abf9",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w2 es backfill: 6 keys; independent audit w2a4 passed (committed evidence i18n/audits/evidence/es/cli.update_help/w2a4/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.wake_help",
+      "source_sha256": "eff6775fe3ad39c228dd4c360b22011d9a95c887fa5b7839744f4b532a31ac8a",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w2 es backfill: 17 keys; independent audit w2a1 passed (committed evidence i18n/audits/evidence/es/cli.wake_help/w2a1/). Open minor/nit findings are dispositioned in that evidence's report.md."
     }
   ]
 }

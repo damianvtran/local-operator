@@ -1,0 +1,21 @@
+{
+  "cli.mcp_help.mcp": "Gestionar servidores MCP",
+  "cli.mcp_help.list": "Listar los servidores MCP configurados (todas las fuentes combinadas)",
+  "cli.mcp_help.add": "Añadir un servidor MCP (comando stdio o URL http/sse)",
+  "cli.mcp_help.add_name": "Nombre del servidor",
+  "cli.mcp_help.add_command": "Comando stdio para iniciar el servidor",
+  "cli.mcp_help.add_arg": "Argumento del comando stdio (repetible)",
+  "cli.mcp_help.add_env": "Variable de entorno KEY=VALUE para el servidor stdio (repetible)",
+  "cli.mcp_help.add_url": "URL del servidor HTTP/SSE (alternativa a --command)",
+  "cli.mcp_help.add_scope": "Ámbito de configuración donde escribir (predeterminado: global ~/.local-operator/mcp.json)",
+  "cli.mcp_help.add_oauth": "Activar OAuth para un servidor HTTP remoto",
+  "cli.mcp_help.remove_server": "Eliminar un servidor MCP de un ámbito de configuración",
+  "cli.mcp_help.remove_name": "Nombre del servidor que eliminar",
+  "cli.mcp_help.remove_scope": "Ámbito de configuración del que eliminarlo (predeterminado: global)",
+  "cli.mcp_help.login": "Autenticar un servidor MCP con OAuth",
+  "cli.mcp_help.login_name": "Nombre del servidor que autenticar",
+  "cli.mcp_help.logout": "Eliminar la credencial OAuth guardada de un servidor MCP",
+  "cli.mcp_help.logout_name": "Nombre del servidor del que cerrar sesión",
+  "cli.mcp_help.reauth": "Cerrar sesión en un servidor MCP con OAuth y autorizarlo de nuevo",
+  "cli.mcp_help.reauth_name": "Nombre del servidor que volver a autenticar"
+}

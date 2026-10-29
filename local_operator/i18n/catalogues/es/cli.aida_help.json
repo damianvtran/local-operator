@@ -1,0 +1,6 @@
+{
+  "cli.aida_help.aida": "Notas del perfil de Aida: registrar lo que debe recordar",
+  "cli.aida_help.note": "Añadir una nota en la sección 'About the operator' de system_prompt.md",
+  "cli.aida_help.note_text": "Nota que registrar; omitir para leerla de STDIN",
+  "cli.aida_help.note_description": "Registrar una nota en <config root>/system_prompt.md, dentro de la sección delimitada 'About the operator', para que la vean todas las sesiones y subagentes futuros. El archivo se resuelve a partir de la raíz de configuración y nunca se pasa como argumento; la nota no debe contener los marcadores de sección. Omitir TEXT para leer la nota de STDIN (las notas de varias líneas no necesitan comillas)."
+}

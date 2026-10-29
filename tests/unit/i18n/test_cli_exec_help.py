@@ -235,7 +235,8 @@ def test_twenty_generated_zero_argument_messages_and_english_fallback():
     source = catalogues.load_catalogue("en", "cli.exec_help")
     french = catalogues.load_catalogue("fr", "cli.exec_help")
     chinese = catalogues.load_catalogue("zh-CN", "cli.exec_help")
-    assert set(french) == set(source) == set(chinese)
+    spanish = catalogues.load_catalogue("es", "cli.exec_help")
+    assert set(french) == set(source) == set(chinese) == set(spanish)
     functions = [f for _, f in inspect.getmembers(keys, inspect.isfunction)]
     assert len(source) == len(functions) == 20
     for function in functions:
@@ -253,8 +254,13 @@ def test_twenty_generated_zero_argument_messages_and_english_fallback():
         # bytes are its catalogue value, not the English source.
         assert zh == render_message(chinese[msg.code], msg.params, "zh-CN")
         assert zh != en
-        # A locale without the namespace still falls back to the English source.
-        for locale in ("es", "ru", "vi", "hi", "unknown"):
+        # Spanish carries this namespace after the es W2 wave: its rendered
+        # bytes are its catalogue value, not the English source.
+        es = messages.render(msg.code, msg.params, locale="es")
+        assert es == render_message(spanish[msg.code], msg.params, "es")
+        assert es != en
+        # A locale that does not carry the namespace still falls back to English.
+        for locale in ("ru", "vi", "hi", "unknown"):
             assert messages.render(msg.code, msg.params, locale=locale) == en
     assert "{'required_sections': [...]}" in keys.output_schema().envelope(locale="en")["text"]
 
