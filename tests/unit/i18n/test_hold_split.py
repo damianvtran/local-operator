@@ -104,7 +104,10 @@ def test_active_ledger_carries_the_released_chinese_candidate() -> None:
     # earlier row stays at its superseded hash: one more. Radient Saver LO1
     # (PR #3078) adds the CARRIED 17-key `wire.radient_saver` with its
     # independently audited row at the current English bytes: one more again.
-    assert len(chinese) == 94
+    # The relay composer placeholder slice then appends a fresh zh-CN row for
+    # each of `relay.chrome` (two new placeholder keys) and `relay.health` (the
+    # deleted ended placeholder): two more. Both contributions are counted.
+    assert len(chinese) == 96
     assert all(entry["status"] == "passed" for entry in chinese)
     carried = set(catalogues.namespaces("zh-CN"))
     assert {entry["namespace"] for entry in chinese} == carried
@@ -163,8 +166,10 @@ def test_active_ledger_carries_the_released_chinese_candidate() -> None:
     # The mobile ask card's `Other` row appends a fresh hi `relay.asks` row at
     # the new English bytes; the earlier row stays superseded: one more.
     # Radient Saver LO1 (PR #3078) adds the audited, newly carried
-    # `hi/wire.radient_saver` row: one more again.
-    assert len(hindi) == 49
+    # `hi/wire.radient_saver` row: one more again. The relay composer
+    # placeholder slice then appends fresh hi `relay.chrome` and `relay.health`
+    # rows at the new English bytes: two more.
+    assert len(hindi) == 51
     assert all(entry["status"] == "passed" for entry in hindi)
     _assert_latest_row_is_fresh_and_earlier_rows_superseded(hindi)
 

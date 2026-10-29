@@ -1,0 +1,10 @@
+{
+  "wire.console.title": "Capacidad de la consola",
+  "wire.console.description": "Admisión de terminales activas. El historial completado no consume ranuras de proceso. Los cambios afectan a los inicios futuros y nunca terminan el trabajo en curso.",
+  "wire.console.max_live.label": "Máximo de terminales activas",
+  "wire.console.max_live.help": "32–256; por defecto 128. La memoria gestionada, las celdas de terminal y los recursos nativos disponibles pueden admitir menos terminales. Esto no limita la memoria de los procesos hijos.",
+  "wire.console.max_owner.label": "Terminales de agente por conversación",
+  "wire.console.max_owner.help": "1–32; por defecto 8. Cada conversación comparte la cuota global de terminales activas; las terminales completadas no cuentan.",
+  "wire.console.user_reserved.label": "Ranuras de terminales de usuario",
+  "wire.console.user_reserved.help": "4–32; por defecto 16, limitado a un cuarto del máximo de terminales activas. Los inicios de agente no pueden consumir estas ranuras. El trabajo existente nunca se detiene."
+}

@@ -134,6 +134,29 @@ is **not** a redaction toggle:
   where it lives. There is no directory rule and no extension rule for any
   checkout; adding a root is an amendment under §5, and the commit-clean/`HEAD`-blob
   and audit-record requirements below apply identically in all three.
+* `repo_root` is an optional per-call checkout selector. Omitted or null keeps
+  the session's cwd as the root; selecting a root changes neither session cwd nor
+  configuration/approval state. An explicit root must be an exact checkout or
+  linked worktree root — not a subdirectory — whose origin is
+  `damianvtran/local-operator`, `damianvtran/local-operator-ui` or
+  `damianvtran/local-operator-mobile` **on github.com**, as SSH or HTTPS and
+  exactly `owner/repo`. **One parser, two policies**: the identity is parsed by
+  the same function the per-root gate below uses, but ACCEPTANCE for a selector
+  is host-pinned, because a selector names an arbitrary path the caller chose —
+  a local mirror, another host, a nested path or another owner is refused. The
+  session's own cwd keeps the host-insensitive identity that rule already
+  publishes. Relative selectors resolve against the session cwd, never the
+  process cwd. The selector chooses where to read and grants no access — it is
+  not a permission, and it widens neither the root list above nor any path
+  family.
+
+   **Origin identity is not an authenticity proof.** It guards against accidental
+   cross-repo reads, but it comes from the checkout's own configuration: three
+   commands — `git init`, `git remote add origin <allowlisted>`, and a commit —
+   produce an admitted checkout. The `read_public_copy` result is redaction-exempt
+   by tool name, so no downstream redaction catches a fabricated checkout. The
+   allowlist, pinned committed blob, read-time identity re-check and audit receipt
+   constrain and record the read; they do not establish who authored the bytes.
 * The consumer roots are keyed to **checkout identity, not path shape**: a
   `src/i18n/...` path is served only when the workspace root is the checkout
   root and the **last two path components** of `git remote get-url origin`,
@@ -151,38 +174,55 @@ is **not** a redaction toggle:
   lift redaction. A checkout with no origin, a different `owner/repo`, or an
   unusable origin is refused with a sentence naming the expected identity (both,
   for the shared catalogue root), never the raw URL, which can embed a
-  credential. This repository's own roots carry no identity gate: they are gated
-  by the committed-blob rule below, so a consumer checkout has no route to a
-  core catalogue it does not itself commit.
-* `repo_root` may name a **checkout directory** to read from when the session
-  working directory is not that tree — an independent audit reads a specific
-  branch from a named clone, and the session cannot move its own workspace
-  there. The directory is admitted only when it is inside a git working tree
-  whose `origin` parses (the same last-two-components rule above) to one of
-  `damianvtran/local-operator`, `damianvtran/local-operator-ui` or
-  `damianvtran/local-operator-mobile`. Inside an admitted root the allowlisted
-  roots, the committed-blob rule, the per-checkout identity binding and the
-  audit record apply exactly as they do for the session workspace, and the
-  record additionally carries the resolved identity and root path (two clones
-  of one repository share an identity; only the path says which tree served
-  the bytes). Naming a checkout changes **where** the allowlist applies, never
-  **what** may be read: the `path` argument stays repository-relative and
-  allowlisted, a `..`, absolute or symlinked path out of the admitted root is
-  refused, and a directory that is not a git checkout, has no origin or carries
-  an unrelated origin — as well as a non-directory or a symlinked spelling — is
-  refused with a sentence naming the reason. The identity is read from the
-  checkout's own `origin` configuration, so this is a guard against admitting an
-  unrelated tree and not an authenticity proof (§6). The session-workspace arm is
-  unchanged and asks for no identity.
+  credential. This repository's own roots carry no identity gate of their own:
+  they are gated by the committed-blob rule below, though an explicit
+  `repo_root` still names which checkout serves them, so a core root asked of a
+  consumer checkout is reported as the wrong checkout rather than as an
+  uncommitted file. Either way a consumer checkout has no route to a core
+  catalogue it does not itself commit.
+* A refusal is `refused: <code>` followed by one JSON line of technical repair
+  fields (the accepted repositories and their path families, plus the one
+  requirement that failed: the checkout that was found against the checkout the
+  path needs, the path or driver at fault, the confinement root, the pinned
+  commit). The same object is in the result `details`, but providers never see
+  `details`, so the text line is the model's only copy. The prose explaining
+  those fields is a comment above `ReadPublicCopyParams`, not the published
+  schema: every request pays for schema characters and a context-budget gate
+  measures them, so the schema states the rule tersely and the comment carries
+  it in full. The route adds no new human-facing sentence, in keeping with
+  AGENTS.md "Internationalization is mandatory". The pre-existing refusal
+  sentences are unchanged.
 * It serves **the committed blob only**: the file must be tracked and its
-  working tree clean against `HEAD` (`git ls-files --error-unmatch` plus
-  `git diff --quiet HEAD --`). A working-tree difference or an untracked file is
-  refused, and the bytes returned are `HEAD`'s blob — so a clean CRLF checkout
+  working tree clean against one captured `HEAD` commit (`git ls-files
+  --error-unmatch` plus `git diff --quiet <commit> --`). The immutable commit
+  is used for both comparison and blob retrieval: a concurrent branch switch
+  can cause refusal, never misattribute the returned bytes. A working-tree
+  difference or an untracked file is refused, and the bytes returned are that
+  commit's blob — so a clean CRLF checkout
   still reads correctly. Commit the public copy before auditing it; that keeps
   the route from becoming a two-call bypass (write a secret into a catalogue,
   read it back). The route requires `git` on `PATH`.
 * Git runs with `--no-replace-objects`, so a `git replace` ref cannot substitute
   the served blob while the index/worktree comparison still looks clean.
+  Inherited Git redirection variables are removed, external diff/textconv and
+  fsmonitor hooks are disabled, and optional index writes are disabled. Lazy
+  fetching is disabled and the transport allowlist is empty: missing objects
+  refuse rather than causing network or credential activity. Before comparing
+  working-tree cleanliness, `check-attr` inspects only the selected path's
+  `filter` attribute without executing it; paths requiring a clean/process
+  filter refuse. This deliberately tightens compatibility for filtered public
+  copy rather than executing repository commands under a read-tier tool.
+  Built-in CRLF normalization remains supported; arbitrary custom filters do not.
+* A trusted session confinement applies to the selected root and resolved copy
+  path **before any Git/content read**. Confined Git commands use the existing
+  kernel sandbox or refuse. The sandbox alone is not enough, so the reader also
+  refuses when `git rev-parse --git-dir`, `--git-common-dir` or any
+  `objects/info/alternates` entry resolves outside the confinement root. That
+  closes a measured gap: the macOS sandbox deliberately allows reads of
+  `/private/var/folders` (per-user temp), so a linked worktree confined to its own
+  directory whose common `.git` sat in per-user temp was readable by Git inside
+  the sandbox. The shared sandbox allowlist is unchanged. No root selector
+  broadens confinement or creates a persistent permission grant.
 * The resolved workspace root must equal `git rev-parse --show-toplevel`:
   `ls-files` and `diff` are cwd-relative while `show HEAD:<path>` is
   toplevel-relative, so a workspace below the checkout root could validate one
@@ -192,16 +232,27 @@ is **not** a redaction toggle:
   and no key was given.
 * Every successful read appends a JSON line to
   `<config dir>/audit/public-copy-reads.jsonl` **before** the content is
-  returned: timestamp, session, path, key, character count, SHA-256 and this
-  document. If the record cannot be written, the read is refused. On POSIX the
-  log is opened without following links (`O_NOFOLLOW`, relative to a directory
-  opened the same way, and `O_NONBLOCK` so a FIFO fails the open instead of
-  blocking it), must be a regular file, lives in a `0700` directory and is
-  kept at mode `0600`; a symlinked log or audit directory refuses the read, and
-  an existing permissive file is tightened on the pinned descriptor or the
-  read is refused. Windows has none of those flags: it refuses the two link
-  cases by `lstat`, checks that the opened handle is a regular file, and relies
-  on ACLs rather than mode bits.
+  returned: timestamp, session, path, key, character count, selected-content
+  SHA-256, canonical repository root, repository identity, whether that
+  identity was verified, pinned commit SHA (also recorded as `checkout_head`)
+  and this document. `checkout_head` is captured before the content is served,
+  so a commit landing mid-call can only understate the revision. The identity
+  is re-checked immediately before the blob is served and a change refuses the
+  read, naming the expected and actual reduced identities. The identity is
+  recorded only from the host-pinned GitHub-origin check (the same parser), as `null` with
+  `repository_verified: false` otherwise; the default root keeps its historical
+  looser gate for admission but never claims a verified identity from it. The
+  same provenance is in the result `details` (transcript and audit; not
+  model-visible, because providers never see `details`). The audit store stays
+  the caller's, not the selected repository's. If the record cannot be written,
+  the read is refused. On POSIX the log is opened without following links
+  (`O_NOFOLLOW`, relative to a directory opened the same way, and `O_NONBLOCK`
+  so a FIFO fails the open instead of blocking it), must be a regular file,
+  lives in a `0700` directory and is kept at mode `0600`; a symlinked log or
+  audit directory refuses the read, and an existing permissive file is
+  tightened on the pinned descriptor or the read is refused. Windows has none of
+  those flags: it refuses the two link cases by `lstat`, checks that the opened
+  handle is a regular file, and relies on ACLs rather than mode bits.
 * Nothing else is exempt. `bash`, `read`, `grep` and every other tool still go
   through the normal redaction pass; a genuine secret read with any of them is
   masked exactly as before.
@@ -262,9 +313,7 @@ comment.
   it is not a signature. A process running as the same user can rewrite
   `remote.origin.url` and claim the UI or the mobile identity (either opens
   the shared `src/i18n/catalogues/` root), just as it can reach the files with
-  `bash`. That covers a directory named through `repo_root` too — it is the
-  same origin read, from the named root. The rule removes the
-  accidental/unreviewed-tree class — a
+  `bash`. The rule removes the accidental/unreviewed-tree class — a
   `src/i18n/` tree in an unrelated project no longer qualifies — and the audit
   log records use; it is not a sandbox against a same-user process.
 * The audit log is append-only by construction, not tamper-proof: a process

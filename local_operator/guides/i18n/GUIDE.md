@@ -40,22 +40,23 @@ description: Contribute localized product copy, add message keys or locales, che
    and subagent spawn; context may override the reply language. Setting changes
    affect the next prefix/session, never mutate a cached prefix mid-turn.
 
-**Dated state (2026-10-12):** installed 0.70.4; en/fr/es/ru/vi partially active.
-Hindi core #2267, relay #2281/#2283 and UI #1002 are held on programme gates,
-including required actual-Sonnet design. Chinese slash 50/51 is an incomplete
-audit, **SECURITY HELD**, never a waiver. Urdu/native RTL, remaining clients and
-global enforcement are unfinished. Use the HOWTO's primary links and verify
-fresh state; this guide neither completes these streams nor performs their audits.
-
-**Source supersession (2026-10-13 UTC):** at `641a392040bf`, six partial eligible
-locales include hi; the four PRs above have merged, so their historical OPEN/design
-holds are not current states. Chinese SECURITY HOLD, Urdu/native RTL, remaining
-clients and global enforcement are still unfinished. A new General-language
-picker is requested, not shipped. The HOWTO distinguishes current source, the
-already-cut v0.70.11 tag, measured PyPI and installed 0.70.10; do not conflate them.
-Release invariants run unconditionally at the exact event SHA in `publish.yml`;
-follow the combined-target checks in AGENTS.md, not a narrow docs/version CI green.
-At 2026-10-13 00:29 UTC, 0.70.11 is published (PyPI 200/three files; publisher's
-five jobs successful), while the separately rechecked installed CLI is still
-0.70.10. See the HOWTO's named publication supersession; the General-language
-picker remains a next UI feature request, not shipped.
+**Dated state (2026-10-29):** at core `8e1b54dad165`, the shipped set is
+`en`, `fr`, `es`, `zh-CN`, `ru`, `vi`, `ur` and `hi`;
+`SECURITY_HELD_LOCALES` is empty. The latest GitHub Release is `v0.91.7`
+(2026-10-29 08:33:47 UTC, cut at `9c83492a15f9`); its `publish.yml` run was
+still queued when this was measured, so PyPI still reports `0.91.6` as the
+latest and `0.91.7` has no files there. A GitHub Release is not a PyPI
+publication: the installed generation `20261029T083642Z-9c83492a15f9`
+(`lop --version` reports `v0.91.7`) is that release's commit, so the installed
+runtime matches the release rather than PyPI. Eligibility is not namespace
+completeness: translation and the required independent LLM audit are
+per-namespace, and native-speaker review is explicitly not a gate for any
+locale (operator decision, 2026-10-29). The current allowance debt is 326
+locale/namespace pairs and 7,881 missing keys: `fr` 27/965; `es` 60/1,386;
+`zh-CN` 4/52; `ru` 60/1,386; `vi` 60/1,386; `ur` 56/1,337; `hi` 59/1,369.
+English-pinned namespaces under caller contract remain unfinished, including
+`wire.errors.sdk_spec` / `wire.errors.sdk_startup` and the English-only
+`wire.errors.agents` / `wire.errors.desktop` lane recorded in
+`docs/design/backend-originated-strings.md`. Use the HOWTO's primary links and
+verify fresh repository, release and installed state; never treat this dated
+snapshot as proof that a namespace is translated, audited or contract-complete.

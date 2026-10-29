@@ -11650,7 +11650,20 @@ class Session:
             return self._standing_grants
         from local_operator.team_bridge import ask_issuance as ledger_mod
         from local_operator.team_bridge.authority import authority_fence
+        from local_operator.team_bridge.host import owner_fence_refusal
         from local_operator.team_bridge.store import Store
+
+        # THE STRICT FENCE RUNS ONCE, BEFORE THE LOOP (review round 1 MAJOR 1).
+        # The bridge runtime now exists on every writer session, so presence is no
+        # longer "this is the inbox reader". A non-designated session must return
+        # EMPTY here — never walk the ledger — because the walk's per-row fence
+        # miss calls `ledger.mark_held(...)`, which would let an ordinary turn in
+        # a task session overwrite every real hold reason for the owner
+        # (`standing_no_envelope`, `standing_uncertain`, ...) with
+        # `standing_fence`. The authority contract says a fence miss performs NO
+        # mutation; that has to be true at the entry, not only per row.
+        if owner_fence_refusal(runtime) is not None:
+            return self._standing_grants
 
         ledger = ledger_mod.AskIssuance(runtime.config_dir)
         stale = [
@@ -18789,12 +18802,16 @@ class Session:
     async def _open_pending_body_turn(self, *, selected: tuple[str, str] | None = None) -> None:
         """Claim this session's oldest pending BODY for the turn about to run.
 
-        ONLY a session the bridge runtime already admitted reaches here (owner
-        pinned, generation live, designated, consenting — all inside
-        ``bridge_runtime_for_session``), and only when a read-only check finds a
-        ``pending`` row for THIS session. Anything else leaves
-        ``transform_context`` unset, so an ordinary turn pays nothing and no
-        other session's row is ever served.
+        THE GATE IS THE ROW, NOT THE DESIGNATION (review round 2, MINOR D). The
+        bridge runtime is built for EVERY writer session of the enrolled owner, so
+        presence proves only owner/generation/consent — it no longer proves "this
+        is the chief-of-staff session". What keeps a body out of the wrong session
+        is ``pending_body_reservation_for(owner, session_id)``: reservations are
+        scoped per session, so a non-designated session finds no row and
+        ``open()`` returns False. That scoping is the invariant to preserve; the
+        earlier wording here asserted a designation check the construction no
+        longer performs, which is the same false-contract class as the ask-ledger
+        write fixed in round 1.
         """
 
         self._pending_body_turn = None

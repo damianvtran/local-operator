@@ -631,11 +631,13 @@ class FakeClient:
         after_seq=None,
         endpoint_id=None,
         access=None,
+        expected_account_id=None,
     ):
         FakeClient.behavior["last_replies_kwargs"] = {
             "conversation_id": conversation_id,
             "message_id": message_id,
             "tenant_id": tenant_id,
+            "expected_account_id": expected_account_id,
             "limit": limit,
             "after_seq": after_seq,
             "endpoint_id": endpoint_id,
@@ -3242,18 +3244,63 @@ async def test_conversation_reactions_forward_and_preserve_summary(api):
         "/v1/desktop/team-bridge/conversations/bcv_abc12345/messages/bcmsg_abcdef12/reactions/"
         + quote("👍", safe="")
     )
-    response = await client.put(path, json={"tenant_id": "tnt_1"})
+    receipt = {"tenant_id": "tnt_1", "expected_account_id": "acc_1"}
+    response = await client.put(path, json=receipt)
     assert response.status_code == 200, response.text
     assert response.json()["result"] == summary
     assert FakeClient.behavior["last_react"] == (
         "bcv_abc12345",
         "bcmsg_abcdef12",
         "👍",
-        {"active": True, "tenant_id": "tnt_1"},
+        {"active": True, "tenant_id": "tnt_1", "expected_account_id": "acc_1"},
     )
-    response = await client.delete(path + "?tenant_id=tnt_1")
+    response = await client.delete(path + "?tenant_id=tnt_1&expected_account_id=acc_1")
     assert response.status_code == 200, response.text
-    assert FakeClient.behavior["last_react"][3] == {"active": False, "tenant_id": "tnt_1"}
+    assert FakeClient.behavior["last_react"][3] == {
+        "active": False,
+        "tenant_id": "tnt_1",
+        "expected_account_id": "acc_1",
+    }
+
+
+@pytest.mark.parametrize(
+    "put_body,delete_query",
+    [
+        pytest.param({}, "", id="no-receipt"),
+        pytest.param({"tenant_id": "tnt_1"}, "?tenant_id=tnt_1", id="tenant-only"),
+        pytest.param(
+            {"expected_account_id": "acc_1"}, "?expected_account_id=acc_1", id="owner-only"
+        ),
+        pytest.param(
+            {"tenant_id": "tnt_1", "expected_account_id": "  "},
+            "?tenant_id=tnt_1&expected_account_id=%20",
+            id="blank-owner",
+        ),
+        pytest.param(
+            {"tenant_id": "tnt_1", "expected_account_id": "acc/../x"},
+            "?tenant_id=tnt_1&expected_account_id=acc%2F..%2Fx",
+            id="owner-grammar",
+        ),
+        pytest.param(
+            {"tenant_id": "tnt_1", "expected_account_id": "acc_1", "scope": "account"},
+            "?tenant_id=tnt_1&expected_account_id=acc_1&expected_account_id=acc_2",
+            id="extra-or-repeated",
+        ),
+    ],
+)
+async def test_conversation_reactions_require_the_owner_receipt(api, put_body, delete_query):
+    """The reaction capability promises a REQUIRED receipt: no unguarded path."""
+    from urllib.parse import quote
+
+    client, _root, _d = api
+    path = (
+        "/v1/desktop/team-bridge/conversations/bcv_abc12345/messages/bcmsg_abcdef12/reactions/"
+        + quote("👍", safe="")
+    )
+    assert (await client.put(path, json=put_body)).status_code == 422
+    assert (await client.put(path)).status_code == 422
+    assert (await client.delete(path + delete_query)).status_code == 422
+    assert FakeClient.instances == []
 
 
 async def test_conversation_reactions_refuse_agent_impersonation_and_oversized_input(api):
@@ -3265,7 +3312,8 @@ async def test_conversation_reactions_refuse_agent_impersonation_and_oversized_i
     assert response.status_code == 422
     response = await client.put(path + quote("😀" * 33), json={})
     assert response.status_code == 422
-    response = await client.delete(path + quote("👍") + "?actor_endpoint_id=bep_other")
+    receipt = "?tenant_id=tnt_1&expected_account_id=acc_1"
+    response = await client.delete(path + quote("👍") + receipt + "&actor_endpoint_id=bep_other")
     assert response.status_code == 422
     assert FakeClient.instances == []
 
@@ -3276,9 +3324,18 @@ async def test_conversation_reactions_refuse_agent_impersonation_and_oversized_i
 async def test_conversation_send_forwards_a_thread_root(api):
     client, _root, _d = api
     FakeClient.behavior["conversation_send"] = {"id": "bcmsg_2", "seq": 2}
+    # A threaded reply REQUIRES the captured-owner receipt (`team_bridge_threads`
+    # covers the mutation half too — round-1 review R1), so the forwarding case
+    # carries one; an ordinary send still omits it, as the case below pins.
     response = await client.post(
         "/v1/desktop/team-bridge/conversations/bcv_abc12345/messages",
-        json={"client_ref": "ref-2", "body": "on it", "thread_root_id": "bcmsg_root0001"},
+        json={
+            "client_ref": "ref-2",
+            "body": "on it",
+            "thread_root_id": "bcmsg_root0001",
+            "tenant_id": "org_other",
+            "expected_account_id": "acc_a",
+        },
     )
     assert response.status_code == 200, response.text
     assert FakeClient.behavior["last_send_thread_root_id"] == "bcmsg_root0001"
@@ -3315,7 +3372,7 @@ async def test_conversation_replies_forwards_parsed_hints(api):
     }
     response = await client.get(
         "/v1/desktop/team-bridge/conversations/bcv_abc12345/messages/bcmsg_root0001/replies"
-        "?tenant_id=tnt_1&limit=20&after_seq=2"
+        "?tenant_id=tnt_1&expected_account_id=acc_1&limit=20&after_seq=2"
     )
     assert response.status_code == 200, response.text
     assert response.json()["result"]["root"]["reply_count"] == 2
@@ -3323,6 +3380,7 @@ async def test_conversation_replies_forwards_parsed_hints(api):
         "conversation_id": "bcv_abc12345",
         "message_id": "bcmsg_root0001",
         "tenant_id": "tnt_1",
+        "expected_account_id": "acc_1",
         "limit": 20,
         "after_seq": 2,
         "endpoint_id": None,
@@ -3333,12 +3391,24 @@ async def test_conversation_replies_refuses_bad_input_before_io(api):
     client, _root, _d = api
     calls_before = FakeClient.calls
     base = "/v1/desktop/team-bridge/conversations"
+    root = f"{base}/bcv_abc12345/messages/bcmsg_root0001/replies"
+    owner = "tenant_id=tnt_1&expected_account_id=acc_1"
     for path in (
-        f"{base}/nope/messages/bcmsg_root0001/replies",
-        f"{base}/bcv_abc12345/messages/nope/replies",
-        f"{base}/bcv_abc12345/messages/bcmsg_root0001/replies?after_seq=x",
-        f"{base}/bcv_abc12345/messages/bcmsg_root0001/replies?after_seq=-1",
-        f"{base}/bcv_abc12345/messages/bcmsg_root0001/replies?before_seq=3",
+        f"{base}/nope/messages/bcmsg_root0001/replies?{owner}",
+        f"{base}/bcv_abc12345/messages/nope/replies?{owner}",
+        f"{root}?{owner}&after_seq=x",
+        f"{root}?{owner}&after_seq=-1",
+        f"{root}?{owner}&before_seq=3",
+        # The threads capability promises a REQUIRED receipt: each of these
+        # would otherwise be an unguarded thread read.
+        root,
+        f"{root}?tenant_id=tnt_1",
+        f"{root}?expected_account_id=acc_1",
+        f"{root}?tenant_id=tnt_1&expected_account_id=%20",
+        f"{root}?tenant_id=%20&expected_account_id=acc_1",
+        f"{root}?tenant_id=tnt_1&expected_account_id=acc%2F..%2Fx",
+        f"{root}?{owner}&expected_account_id=acc_2",
+        f"{root}?{owner}&scope=account",
     ):
         response = await client.get(path)
         assert response.status_code == 422, (path, response.text)

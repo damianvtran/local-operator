@@ -327,6 +327,18 @@ MEASURED_TOKENS: dict[str, int] = {
     # repeated op roster left the description and the thread-reply clause moved
     # to thread_root_id's own field note. Every op is still discoverable.
     # Neither the document soft cap nor the start-context budget changes.
+    # 777 -> 1674: the doc now covers the OP SET THE TOOL ACTUALLY HAS. Before this
+    # branch it documented four ops (take_up/ack/send/reply) while main's tool shipped
+    # ten and this branch adds four more; `directory`, `dm`,
+    # `shared_conversations`/`shared_history` and the six
+    # room ops (`channels`, `channel_create`, `channel_post`, `channel_history`,
+    # `channel_thread`, `react`) had no entry at all, so a model reading the reference
+    # had to guess, and the new `dm` blurb forward-references `channel_history` for
+    # reading the reply. Measured by this test's own ledger print ON THIS HEAD (1674),
+    # never carried across. The pair-lane caveat on `send` earns its tokens: without it
+    # an agent answers a DM with `send`, which no Team Bridge UI shows.
+    # Independently, main's #3133 adds the recipient description below; the
+    # converged ledger must include BOTH changes and was measured by this test.
     # 777 -> 839 (tb-send-recipient-ergonomics): the ``to`` parameter publishes
     # its own DESCRIPTION now — both accepted object shapes, the bare account id
     # and where the ids come from — because the schema is the model's first
@@ -334,7 +346,9 @@ MEASURED_TOKENS: dict[str, int] = {
     # nothing. +62 on this opt-in reference; the paired start-context raise is
     # stated in scripts/bench_context_budget.py. Measured by this test's printed
     # table, no other tool's bytes moved.
-    "bridge": 839,
+    # Converged directory/dm + recipient-description ledger: 1,736 tokens,
+    # measured by this test's canonical renderer on the merged tree.
+    "bridge": 1736,
     # Re-measured with this test's canonical isolated renderer: the read-only
     # inspect_ownership operation adds 19 opt-in tokens, not wire prompt cost.
     # 1327 -> 1424 (2026-10-16): the browser `type` secret_ref convention adds
@@ -495,17 +509,17 @@ MEASURED_TOKENS: dict[str, int] = {
     # NEW (redaction policy, PR #2796): the sanctioned public-copy reader.
     # 237 tokens measured through this test's own table; deliberately small —
     # it exists to avoid a bypass, not to be a second file browser.
-    # RE-MEASURED 2026-10-29 (named-checkout reads): 121 -> 206. The whole
-    # delta is the new ``repo_root`` parameter and the sentence that makes it
-    # discoverable — the identity list a checkout must match is model-visible
-    # because a caller whose clone is a fork needs to know before it calls.
-    # Measured through this test's own printed table; every other entry is
-    # byte-identical.
-    # RE-MEASURED 2026-10-29 (QA round 2, Q2-1): 206 -> 214. The ``repo_root``
-    # description now states the spelling rule the code enforces — absolute, with
-    # ``~`` expanded before the check — because a relative spelling is refused.
-    # Re-measured through this test's own printed table, not assumed.
-    "read_public_copy": 214,
+    # RE-MEASURED: 121 -> 162 (#3106, repo_root added) -> 135 (#3106 trim) ->
+    # 133 (merge of #3122, whose `_CONSUMER_CHECKOUTS` registry makes the
+    # `repo_root` description name three checkouts; the same cut still fits the
+    # `--kind child` budget arm, 30,380, which is the tighter ratchet).
+    # Measured through this test's own assertion table after each change, never
+    # carried from CI or guessed:
+    #   .venv/bin/python scripts/run_bounded.py --timeout 300 -- \
+    #     .venv/bin/python -m pytest
+    #     tests/unit/tools/test_tool_docs.py::test_docs_stay_within_the_soft_cap_and_the_token_ledger_is_current
+    # No other entry moved.
+    "read_public_copy": 133,
     "read_variable": 67,
     "secret": 186,
     # Advertised surface re-measured: explicit repeat + confirmed-reuse detail

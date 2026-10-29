@@ -1751,6 +1751,13 @@ CHARS_PER_BILLED_TOKEN = 2.78
 # the MEASURED HEAD plus this file's 55-token band (34,286 + 55), the same rule
 # the older entries above used — not a round number and not a guess.
 #
+# The directory/dm branch publishes four OPS the tool did not have
+# (`directory`, `dm`, `shared_conversations`, `shared_history`) plus the six
+# merged room ops. That is CAPABILITY cost, not discretionary prose: an earlier
+# round on this same feature failed at argument validation because the
+# recipient's accepted shapes were not described where the model looked.
+# Preserve the guidance, and derive the ceiling from the CONVERGED measurement
+# below plus this file's 55-token band, never from the pre-merge branch figure.
 # RATCHETED DOWN 34,341 -> 34,316 (ask/notify dedupe, ``asks/dedupe.py``): the
 # ``ask`` restraint, the ``notify`` description and system.md's has_notify
 # clause now say "an ask notifies — never also notify it; notify is for FYI".
@@ -1781,23 +1788,12 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #   delta                             +306 chars = ~+110
 # The published string arm and its one-line description are the whole of it:
 # +306 chars is the SAME delta the child arm below reports, which is the check.
-# Ceiling = measured head + the 55-band (34,361 + 55).
+# Ceiling = measured head + the 55-token band (34,361 + 55).
 #
-# RAISED 34,416 -> 34,570 with the public-copy reader's ``repo_root``:
-# one OPTIONAL string parameter on an existing tool — rung 1 of the footprint
-# ladder, no new tool and no new schema object — costs the parameter's own
-# description plus one sentence making it discoverable on ``read_public_copy``.
-# That sentence carries the three publishing repository names, because a caller
-# whose checkout is a fork has to know before it calls, not after a refusal.
-# Measured with THIS script on both trees, isolated HOME, the base arm re-derived
-# by restoring ``local_operator/tools/public_copy.py`` from origin/main only:
-#   base (origin/main 98cde255f42)  95,524 chars = ~34,361 billed
-#   head (this branch)              95,951 chars = ~34,515 billed
-#   delta                             +427 chars = ~+154
-# +427 chars is the SAME delta the child arm below reports, which is the check
-# that the delta is that one tool and nothing else. Ceiling = measured head +
-# the 55-token band (34,515 + 55).
-BUDGET_BILLED_TOKENS = 34_570
+# CONVERGED directory/dm ceiling: the two ledgers above are inputs, not a sum.
+# Re-measured on this merged tree with an isolated HOME and this script:
+#   top 95,937 chars / 34,510 billed / 37 schemas; ceiling = 34,510 + 55.
+BUDGET_BILLED_TOKENS = 34_565
 
 #: The SUBAGENT ceiling (``--kind child``), in billed tokens. Same ratchet rules
 #: as ``BUDGET_BILLED_TOKENS`` above. It is a separate number because a child's
@@ -1961,6 +1957,7 @@ BUDGET_BILLED_TOKENS = 34_570
 # pays the same four actions' schema. Measured on the same tree:
 #   30,329 billed   FAIL, 126 over (after the prose trim)
 #   budget 30,380 (measured head + 51 headroom, the same band the parent uses)
+
 # RAISED 30,380 -> 30,520 with the top arm above, for the same bridge ``to``
 # schema: a child surface publishes the bridge tool too, so it carries the same
 # published description and the same string arm. Measured on the same trees:
@@ -1969,15 +1966,11 @@ BUDGET_BILLED_TOKENS = 34_570
 #   delta                             +306 chars = ~+110 (the same +306)
 # Ceiling = measured head + the 55-token band (30,465 + 55, the band used today;
 # the older "51 headroom" entry above is that pass's own arithmetic).
-# RAISED 30,520 -> 30,674 with the top arm's ``repo_root`` parameter: a child
-# surface publishes ``read_public_copy`` too, so it pays the same one parameter
-# description and the same discoverability sentence. Measured on the same trees,
-# base arm re-derived by restoring ``local_operator/tools/public_copy.py`` only:
-#   base (origin/main 98cde255f42)  84,693 chars = ~30,465 billed
-#   head (this branch)              85,120 chars = ~30,619 billed
-#   delta                             +427 chars = ~+154 (the same +427)
-# Ceiling = measured head + the 55-token band (30,619 + 55).
-BUDGET_CHILD_BILLED_TOKENS = 30_674
+# The directory/dm child ceiling is likewise re-derived on the converged tree,
+# because the child inventory carries the same bridge operations and recipient
+# schema. Both ceilings preserve the 55-token headroom band. Measured on the
+# merged tree: 85,106 chars / 30,614 billed; ceiling = 30,614 + 55.
+BUDGET_CHILD_BILLED_TOKENS = 30_669
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:

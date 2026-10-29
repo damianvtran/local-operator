@@ -160,7 +160,7 @@ describe("the phone's resume button", () => {
 		slot = { projection: projection({ cut_off: true, ended: true }), connected: true };
 		rerender(<SessionScreen sessionId="s1" />);
 
-		fireEvent.change(screen.getByPlaceholderText("Send to reopen in your home folder…"), {
+		fireEvent.change(screen.getByPlaceholderText("Ask anything…"), {
 			target: { value: "are you there?" },
 		});
 		fireEvent.click(screen.getByRole("button", { name: "send" }));
@@ -180,7 +180,7 @@ describe("the phone's resume button", () => {
 		slot = { projection: projection({ cut_off: true }), connected: true };
 		rerender(<SessionScreen sessionId="s1" />);
 
-		fireEvent.change(screen.getByPlaceholderText("Message…"), {
+		fireEvent.change(screen.getByPlaceholderText("Ask anything…"), {
 			target: { value: "retry me" },
 		});
 		fireEvent.click(screen.getByRole("button", { name: "send" }));

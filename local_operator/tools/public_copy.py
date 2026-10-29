@@ -55,28 +55,6 @@ nor the reverse; the gate lives in :func:`_committed_public_copy`;
 ``docs/security/redaction-policy.md`` states the exact rule and the same-UID
 residual.
 
-NAMING A CHECKOUT
------------------
-A session's cwd is not always the tree under audit: an independent translation
-audit runs from wherever the agent is and reads a specific branch, and the
-session has no way to move its own workspace there.  So ``repo_root`` may name a
-DIRECTORY.  It is admitted only when its ``origin`` reduces to one of
-:data:`PUBLISHING_REPOSITORIES` (:func:`_admitted_checkout`) — the same
-identities the roots above are spelled for.  Inside an admitted root the
-allowlist, the per-checkout identity binding, the committed-``HEAD`` rule and
-the audit record are the ones above, unchanged, and the record gains the
-resolved identity and path.  The file argument stays repository-relative:
-naming a checkout changes WHERE the allowlist is applied, never WHAT may be
-read, and a directory with no origin, an unrecognised origin or a symlink is
-refused by name.
-
-That identity check separates an UNRELATED tree from a publishing one — it is a
-guard against auditing the wrong repository, not proof of provenance.  It reads
-the checkout's own ``origin`` configuration, so a caller who can run three git
-commands can manufacture a directory that passes it; the controls that remain are
-the allowlist, the committed-blob rule and the audit record, and
-``docs/security/redaction-policy.md`` §6 owns the same-UID residual.
-
 THE TRUST BOUNDARY
 ------------------
 The allowlisted roots are public copy by repository policy
@@ -99,25 +77,27 @@ import subprocess
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from local_operator.harness.types import AgentTool, TextContent, ToolContext, ToolResult
 from local_operator.paths import config_dir
 from local_operator.tools.builtin import _resolve_workspace_path
+from local_operator.tools.confinement import ToolConfinement, confinement_of
 
 #: The tool name the loop exempts from result redaction.  Kept here and in
 #: ``harness/redaction.py`` so the two cannot drift silently: a test asserts the
 #: set is exactly this name.
 TOOL_NAME = "read_public_copy"
 
-#: Public-copy roots, relative to the session working directory (the checkout).
+#: Public-copy roots, relative to the selected checkout (session cwd by default).
 #: These are the only paths this reader will open.  No directory rule and no
 #: extension rule: an exact glob list, so adding a root is a reviewed policy
 #: change rather than an accident.  The list spans three checkouts — this
 #: repository and the two consumer apps — because all publish committed product
-#: copy; a session resolves the roots against its own working directory, so each
-#: checkout only ever exposes its own copy.
+#: copy; a session resolves the roots against its chosen checkout (cwd unless
+#: ``repo_root`` names another), so each checkout only ever exposes its own copy.
 #:
 #: This tuple is the reviewed INVENTORY, not the binding: which checkout may
 #: serve which `src/` root lives in :data:`_CONSUMER_CHECKOUTS`.
@@ -142,12 +122,6 @@ PUBLIC_COPY_GLOBS: tuple[str, ...] = (
     "src/i18n/catalogue.gen.ts",
 )
 
-#: This repository's own identity.  It decides nothing for the session's own
-#: workspace — that is trusted by being the workspace — but a directory NAMED
-#: through ``repo_root`` has to show it is a published tree, and this is the
-#: identity the core roots belong to.
-CORE_REPOSITORY = "damianvtran/local-operator"
-
 #: The consumer checkouts' repository identities.  A `src/` root is served only
 #: when the workspace's `origin` remote parses to the identity that owns it: any
 #: checkout can contain a `src/i18n/` tree, so the path alone must not lift
@@ -155,6 +129,7 @@ CORE_REPOSITORY = "damianvtran/local-operator"
 #: list, in review — not in a path rule.
 UI_REPOSITORY = "damianvtran/local-operator-ui"
 MOBILE_REPOSITORY = "damianvtran/local-operator-mobile"
+CORE_REPOSITORY = "damianvtran/local-operator"
 
 #: The same list as anchored patterns. ``fnmatch``'s ``*`` crosses ``/``, which
 #: would admit ``catalogues/a/b/c.json``; these do not. Kept beside the globs so
@@ -203,17 +178,27 @@ _PUBLIC_COPY_PATTERNS: tuple[re.Pattern[str], ...] = _CORE_PUBLIC_COPY_PATTERNS 
     _MOBILE_MAP_PATTERN,
 )
 
-#: Every checkout whose committed copy this route may serve, derived from the
-#: two tables above rather than restated: the identities a named ``repo_root`` is
-#: admitted by are exactly the identities whose roots the allowlist spells.  This
-#: is a guard against admitting an unrelated tree, NOT an authenticity proof —
-#: the identity is read from the checkout's own ``origin`` configuration, so a
-#: caller who can run three git commands can claim one (disclosed in
-#: :func:`_admitted_checkout`).  Adding a fork here is a reviewed policy change
-#: like adding a glob.
-PUBLISHING_REPOSITORIES: tuple[str, ...] = (CORE_REPOSITORY,) + tuple(
-    identity for identity, _, _ in _CONSUMER_CHECKOUTS
+#: The three reviewed checkouts, derived from :data:`_CONSUMER_CHECKOUTS` so a
+#: new consumer app is ONE edit to the registry.  This is the single answer to
+#: "is this origin one of ours": the default root and an explicit ``repo_root``
+#: both read it, so the two cannot drift apart (#3122 + the ``repo_root`` lane
+#: merged as one mechanism).
+ACCEPTED_REPOSITORIES: tuple[str, ...] = (
+    CORE_REPOSITORY,
+    *(identity for identity, _description, _patterns in _CONSUMER_CHECKOUTS),
 )
+
+#: The same binding as the repair fields a refusal carries: the roots each
+#: checkout may publish.  Derived from :data:`PUBLIC_COPY_GLOBS` and the same
+#: per-app rule the pattern groups encode — both apps keep the catalogue root,
+#: the compiled manifest is each app's own — so there is no second list to keep
+#: in step.
+_SRC_GLOBS: tuple[str, ...] = tuple(glob for glob in PUBLIC_COPY_GLOBS if glob.startswith("src/"))
+_FAMILY_GLOBS: dict[str, list[str]] = {
+    CORE_REPOSITORY: [glob for glob in PUBLIC_COPY_GLOBS if not glob.startswith("src/")],
+    UI_REPOSITORY: [glob for glob in _SRC_GLOBS if glob != "src/i18n/catalogue.gen.ts"],
+    MOBILE_REPOSITORY: [glob for glob in _SRC_GLOBS if glob != "src/i18n/keys.gen.ts"],
+}
 
 #: The policy document this route cites.  The tool's details carry it so a
 #: transcript reader can find the rule that permitted the read.
@@ -233,23 +218,91 @@ _AUDIT_DIRNAME = "audit"
 _AUDIT_FILENAME = "public-copy-reads.jsonl"
 
 
+# NOT a docstring: pydantic copies a class docstring into the published schema's
+# ``description`` and every request pays for it, so the contract lives here.
+#
+# ``repo_root`` CONTRACT (the schema states it tersely; this is the full rule):
+#   * it only SELECTS which checkout is read -- read-only, never moves the session;
+#   * it must be the exact checkout/worktree root, not a subdirectory of it;
+#   * that checkout's GitHub origin must be one of ``ACCEPTED_REPOSITORIES``;
+#   * the public-copy allowlist is NOT widened -- ``path`` is still matched against
+#     the same patterns, relative to the selected root;
+#   * a confinement refusal answers ``refused: <code>`` plus one JSON line of repair
+#     fields (``_next_step``), so the schema carries no refusal prose.
 class ReadPublicCopyParams(BaseModel):
-    """Arguments for the sanctioned public-copy reader."""
-
     model_config = ConfigDict(extra="forbid")
 
-    path: str = Field(description="Repository-relative public i18n copy path.")
-    key: str | None = Field(
-        default=None,
-        description="Catalogue/message key; required for key modules and maps.",
-    )
+    path: str = Field(description="Repo-relative public copy path.")
     repo_root: str | None = Field(
         default=None,
         description=(
-            "Absolute path of a publishing-repository checkout to read from, when the"
-            " session cwd is not that checkout; `~` is expanded, a relative spelling is"
-            " refused."
+            "Checkout/worktree root, not a subdir; origin damianvtran/local-operator, "
+            "-ui or -mobile. Read-only."
         ),
+    )
+    key: str | None = Field(
+        default=None,
+        description="Message key; required for key modules/maps.",
+    )
+
+
+#: Line one of the legacy "run it from a checkout" refusal; the structured hint
+#: below is appended to it only when the caller did not pass ``repo_root``.
+_NOT_A_CHECKOUT = "the workspace is not a git checkout"
+
+
+class _ConfinementRefusal(Exception):
+    """A confinement refusal that must not be re-read as an unreadable copy.
+
+    WHY ITS OWN TYPE. ``_git`` raises this from inside a ``try`` whose
+    ``except (OSError, subprocess.SubprocessError)`` exists to report an
+    unreadable copy, and ``PermissionError`` IS an ``OSError``: the structured
+    confinement refusal used to be swallowed there and re-emitted as
+    "could not read the committed copy of <path> (<refusal>)" -- a doubled
+    message with no code and no repair fields (review R3-1). Carrying the body
+    on a type outside that handler keeps the fail-closed behaviour identical
+    (still refuse, still never run Git unwrapped) while letting the caller
+    answer with the code the other refusals use.
+    """
+
+    def __init__(self, body: dict[str, Any]) -> None:
+        self.body = body
+        super().__init__(str(body.get("code", "public_copy_confinement_unavailable")))
+
+
+def _next_step(**fields: Any) -> dict[str, Any]:
+    """Technical fields every structured refusal shares.
+
+    NO PROSE HERE. This route's refusals reach the model (and the card
+    headline), and AGENTS.md "Internationalization is mandatory" keeps new
+    human-facing English out of code. A code plus the accepted repositories,
+    path families and the one requirement that failed is enough for the caller
+    to repair its own call; the ``repo_root`` CONTRACT comment above
+    :class:`ReadPublicCopyParams` explains what those fields mean once.
+    """
+    return {
+        "accepted_repositories": list(ACCEPTED_REPOSITORIES),
+        "path_families": _FAMILY_GLOBS,
+        **fields,
+    }
+
+
+def _refusal(
+    tool_call_id: str, code: str, *, sentence: str | None = None, **fields: Any
+) -> ToolResult:
+    """A refusal as ``refused: <code>`` plus one JSON line of repair fields.
+
+    The first line keeps the shape every other refusal here has (and the card
+    headline); the second is what makes it actionable. ``details`` carries the
+    same object for the transcript, but providers never see ``details`` (see
+    ``Message.tool_result``), so the text line is the only copy the model gets.
+    """
+    body = {"code": code, **fields}
+    return _text(
+        tool_call_id,
+        f"refused: {sentence or code}\n{json.dumps(body, sort_keys=True, ensure_ascii=False)}",
+        details={"refusal": body},
+        is_error=True,
     )
 
 
@@ -331,115 +384,46 @@ def _origin_identity(url: str) -> str:
     return "/".join(parts[-2:]).lower()
 
 
-def _admitted_checkout(raw: str) -> tuple[Path, str, str | None]:
-    """The checkout ``repo_root`` names, with its identity, or a refusal sentence.
+def _trusted_origin_identity(url: str) -> str:
+    """The same parse, host-pinned: ``owner/repo`` or ``""`` for a non-GitHub host.
 
-    WHY A DIRECTORY ARGUMENT IS NOT A FILE ARGUMENT
-    -----------------------------------------------
-    An independent translation audit reads copy from a checkout the session is
-    not standing in: the session cwd is wherever the agent happens to be (often
-    the home directory), while the branch under audit lives in a named clone.
-    With no audited way to say which tree, that audit has only a redaction
-    bypass — the workaround this module exists to replace.
+    ONE PARSER, TWO POLICIES. :func:`_origin_identity` is the only thing that
+    reads a URL; this wraps it with the host question so the two callers can hold
+    different rules without a second parser to drift:
 
-    So the caller may name a DIRECTORY, admitted only when its ``origin`` remote
-    reduces (through the same :func:`_origin_identity` the ``src/`` gate uses) to
-    one of :data:`PUBLISHING_REPOSITORIES`.  Naming a checkout changes WHERE the
-    untouched allowlist is applied, never WHAT may be read: the file argument
-    stays repository-relative, :func:`_committed_public_copy` still serves the
-    ``HEAD`` blob and still re-derives the identity of the root it reads, and
-    the audit record still precedes the content.
+    * an explicit ``repo_root`` is an arbitrary path the CALLER chose, so it must
+      be accepted only from a real github.com origin, exactly ``owner/repo``, and
+      only if that identity is one of :data:`ACCEPTED_REPOSITORIES` — a local
+      mirror, another host, a nested path or another owner is a refusal;
+    * a session's own cwd keeps the host-insensitive identity #3122 publishes
+      (the checkout is where the session already is, and that is not this PR's
+      contract to change);
+    * provenance is labelled verified only from this host-pinned form (D1/D4).
 
-    The spelling must be ABSOLUTE once ``~`` is expanded.  A relative one is
-    resolved by ``Path.resolve()`` against the harness PROCESS's working
-    directory — a directory the caller cannot see or predict — so ``repo_root:
-    "branch-a"`` would audit a tree the caller never named and the receipt would
-    record it as if they had.  Refusing is the only answer that keeps the receipt
-    truthful (review m-2).
-
-    Refusals name the reason, because the caller's next move differs: a NUL or a
-    symlink is a malformed argument, a relative spelling is ambiguous, a
-    non-directory is not a checkout, a directory outside a git working tree is
-    not a clone at all, a missing origin cannot be shown to be a publishing
-    checkout, and an unrecognised origin is a DIFFERENT repository.  The raw
-    origin URL is never echoed (it can embed a credential); only the reduced
-    identity reaches the message.
-
-    WHAT THIS IDENTITY CHECK IS NOT
-    -------------------------------
-    It is a guard against ADMITTING AN UNRELATED TREE, not proof of provenance.
-    It reads the repository's own ``origin`` configuration, so three commands
-    (``git init``, ``git remote add origin <allowlisted>``, commit) manufacture a
-    directory that passes it — a disclosure, not a bug to paper over: the route's
-    real controls are the allowlist, the committed-blob rule and the audit
-    record, and the same-UID residual in ``docs/security/redaction-policy.md`` §6
-    already owns the rest.  What it does stop is the accident — auditing the
-    wrong repository, or a ``src/i18n/`` tree that merely looks like copy.
+    Origin is a repository-policy assertion, not cryptographic attestation: the
+    same-UID residual remains, so the served bytes are the ``HEAD`` blob and
+    neither rule widens the allowlist.
     """
-    if "\x00" in raw:
-        return Path(), "", "repo_root must not contain NUL; it names a directory"
-    try:
-        spelled = Path(raw).expanduser()
-    except RuntimeError:
-        # ``~user`` naming nobody: ``expanduser`` raises rather than returning.
-        return Path(), "", f"repo_root {raw} names no user this platform can resolve"
-    if not spelled.is_absolute():
-        return (
-            Path(),
-            "",
-            (
-                f"repo_root must be an absolute path; {raw!r} would resolve against the"
-                " harness process's working directory, not this session's"
-            ),
-        )
-    if spelled.is_symlink():
-        # The identity check would describe the TARGET while the refusal the
-        # caller reads would name the link; ask for the directory itself.
-        return Path(), "", f"repo_root {raw} is a symlink; name the checkout directory itself"
-    try:
-        root = spelled.resolve()
-    except (OSError, ValueError) as exc:
-        return Path(), "", f"repo_root {raw} could not be resolved ({exc})"
-    if not root.is_dir():
-        return Path(), "", f"repo_root {root} is not a directory"
-
-    def _git(*args: str) -> subprocess.CompletedProcess[bytes]:
-        return subprocess.run(
-            ["git", "-C", str(root), "--no-replace-objects", *args],
-            capture_output=True,
-            check=False,
-            timeout=10,
-        )
-
-    try:
-        inside = _git("rev-parse", "--is-inside-work-tree")
-        if inside.returncode != 0 or inside.stdout.strip() != b"true":
-            return Path(), "", f"repo_root {root} is not inside a git working tree"
-        origin = _git("remote", "get-url", "origin")
-    except (OSError, subprocess.SubprocessError) as exc:
-        return Path(), "", f"repo_root {root} could not be inspected ({exc})"
-    identity = (
-        _origin_identity(origin.stdout.decode("utf-8", "replace")) if origin.returncode == 0 else ""
-    )
-    if not identity:
-        return (
-            Path(),
-            "",
-            (
-                f"repo_root {root} has no usable git origin; a named checkout must be a"
-                " clone of one of: " + ", ".join(PUBLISHING_REPOSITORIES)
-            ),
-        )
-    if identity not in PUBLISHING_REPOSITORIES:
-        return (
-            Path(),
-            "",
-            (
-                f"repo_root {root} is a checkout of {identity}, not one of the publishing"
-                " repositories: " + ", ".join(PUBLISHING_REPOSITORIES)
-            ),
-        )
-    return root, identity, None
+    value = url.strip()
+    if "://" in value:
+        try:
+            parsed = urlsplit(value)
+        except ValueError:
+            return ""
+        if parsed.scheme not in ("ssh", "https") or parsed.hostname != "github.com":
+            return ""
+        repo_path = parsed.path
+    else:
+        scp = re.fullmatch(r"[^@/]*@?github\.com:(.+)", value, flags=re.IGNORECASE)
+        if scp is None:
+            return ""
+        repo_path = scp.group(1)
+    # EXACTLY ``owner/repo``: a nested path (``extra/owner/repo``) has the same
+    # tail the parser reports but is a different repository, so it must not
+    # claim the reviewed name.
+    if not re.fullmatch(r"/?[^/]+/[^/]+/?", repo_path):
+        return ""
+    return _origin_identity(value)
 
 
 #: The audit log's open flags.  ``O_NONBLOCK`` is for the FIFO case: with
@@ -521,28 +505,17 @@ def _record_read(
     chars: int,
     digest: str,
     context: ToolContext,
-    checkout: str | None = None,
-    checkout_root: Path | None = None,
-    checkout_head: str | None = None,
+    provenance: dict[str, str],
 ) -> Path:
     """Append one audit record; raise when it cannot be written.
 
     The caller turns the exception into a refused read.  Returning content
     without its record is the one outcome this route may not have: it would be
     a silent bypass with a policy name on it.
-
-    ``checkout`` is present only for a read from a NAMED checkout.  Then the
-    record also carries that root's path — two clones of the same repository
-    share an identity and only the path says which tree served the bytes — and
-    the ``checkout_head`` commit the blob came from, because the same path in the
-    same worktree on two commits differs only by digest, and an audit record that
-    cannot name the revision cannot be reconciled with the ledger row it was
-    taken to support (review m-3).  A session-workspace read keeps exactly the
-    fields it always had, so existing consumers of this log parse it unchanged.
     """
     path = _audit_path()
     session = Path(context.session_dir).name if context.session_dir else "unknown"
-    record: dict[str, Any] = {
+    record = {
         "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "tool": TOOL_NAME,
         "session": session,
@@ -551,11 +524,8 @@ def _record_read(
         "chars": chars,
         "sha256": digest,
         "policy": POLICY_DOCUMENT,
+        **provenance,
     }
-    if checkout is not None:
-        record["checkout"] = checkout
-        record["checkout_root"] = str(checkout_root) if checkout_root is not None else None
-        record["checkout_head"] = checkout_head
     line = json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n"
     # O_APPEND keeps concurrent readers' records whole without a lock file; a
     # single write of a short line is atomic on the local filesystem.
@@ -596,18 +566,87 @@ def _read_key_source(text: str, key: str) -> str:
     return "\n".join(matches[:_MAX_KEY_LINES])
 
 
+def _metadata_outside(
+    root: Path,
+    confinement: ToolConfinement,
+    git: Any,
+) -> dict[str, Any] | None:
+    """A refusal when Git would read repository metadata outside the confinement root.
+
+    WHY THIS EXISTS. The kernel sandbox allows reads of ``/private/var/folders``
+    (``confinement.py``, "WHAT THIS DOES NOT COVER"), which is where macOS puts
+    the default temp directory. A linked worktree confined to its own directory
+    but whose common ``.git`` lives in per-user temp therefore let Git read it
+    inside the sandbox, so the reader was no stricter than ``bash`` there. Code
+    review called that clean on a rig whose ``TMPDIR`` hid it (the sandbox
+    denied ``/tmp`` and the home directory); QA and design re-ran it at the
+    macOS default and it failed. The sandbox allowlist is shared with every
+    other tool and is deliberately left alone: the reader refuses instead.
+
+    CHECKED: the git dir, the common dir, and every ``objects/info/alternates``
+    entry (the same class: Git follows them to read objects). Fails closed:
+    anything unreadable or unresolvable refuses.
+    """
+
+    def _resolved(args: tuple[str, ...]) -> Path | None:
+        result = git(*args)
+        text = result.stdout.decode("utf-8", "replace").strip()
+        if result.returncode != 0 or not text:
+            return None
+        candidate = Path(text)
+        try:
+            return (candidate if candidate.is_absolute() else root / candidate).resolve()
+        except (OSError, ValueError):
+            return None
+
+    def _refused(what: str) -> dict[str, Any]:
+        return {
+            "code": "public_copy_git_metadata_outside_confinement",
+            "reason": what,
+            "confinement_root": str(confinement.root),
+            "repo_root": str(root),
+        }
+
+    git_dir = _resolved(("rev-parse", "--git-dir"))
+    common_dir = _resolved(("rev-parse", "--git-common-dir"))
+    if git_dir is None or common_dir is None:
+        return _refused("git_metadata_unresolvable")
+    for label, location in (("git_dir", git_dir), ("git_common_dir", common_dir)):
+        if not confinement.contains(location):
+            return _refused(f"{label}_outside_root")
+    alternates = common_dir / "objects" / "info" / "alternates"
+    try:
+        entries = alternates.read_text(encoding="utf-8").splitlines() if alternates.exists() else []
+    except (OSError, UnicodeDecodeError):
+        return _refused("alternates_unreadable")
+    for entry in entries:
+        if not entry.strip() or entry.lstrip().startswith("#"):
+            continue
+        target = Path(entry.strip())
+        try:
+            target = (target if target.is_absolute() else alternates.parent / target).resolve()
+        except (OSError, ValueError):
+            return _refused("alternates_unresolvable")
+        if not confinement.contains(target):
+            return _refused("alternates_outside_root")
+    return None
+
+
 def _committed_public_copy(
     root: Path,
     relative: str,
     *,
-    allowed_checkouts: tuple[tuple[str, str], ...] = (),
-    required_identity: str | None = None,
-    named_root: bool = False,
-) -> tuple[bytes, str | None, str | None]:
-    """The committed blob for ``relative``, its refusal, and the served ``HEAD``.
+    explicit_root: bool = False,
+    confinement: ToolConfinement | None = None,
+) -> tuple[bytes, dict[str, Any], str | dict[str, Any] | None]:
+    """The committed blob for ``relative``, or a refusal.
+
+    A refusal is a legacy sentence (``str``, the pre-existing wording, kept
+    verbatim) or a ``dict`` with a ``code`` plus repair fields, which the caller
+    renders through :func:`_refusal`.
 
     ``HEAD`` is the committed copy, and this reader serves THAT blob rather than
-    the working-tree file. Six consequences, all measured in review:
+    the working-tree file. Consequences, all measured in review:
 
     * a working-tree secret cannot be read back (the write-a-secret bypass);
     * a clean checkout with ``core.autocrlf=true`` (Git for Windows' default)
@@ -621,106 +660,243 @@ def _committed_public_copy(
       toplevel-relative, so a workspace below the toplevel could validate one
       file and serve another;
     * a consumer checkout's roots need checkout identity, not path shape (review
-      S-1); ``allowed_checkouts`` gates that check here so all git probing
+      S-1); :func:`_publishing_checkouts` says which checkouts may publish the
+      root, and that check happens inside this function so all Git probing
       shares one wrapper;
-    * ``required_identity`` re-derives the identity HERE, in the same wrapper
-      call that serves the bytes, so the identity a receipt records is the one
-      the serving repository had — not the one an earlier admission probe saw
-      (review m-4). The alternative, documenting the window instead, leaves a
-      receipt that can be false in the log an audit is reconciled against, and
-      the check costs one already-shared git call.
-
-    ``named_root`` changes only the SENTENCES: a caller who named a checkout
-    cannot "run read_public_copy from the checkout root", so that arm is told to
-    name the root ``git rev-parse --show-toplevel`` reports (review n-1).
-
-    The third element is the commit the blob was requested from — read in this
-    same wrapper, immediately BEFORE the ``show``, so a commit landing mid-call
-    makes the record understate the revision rather than overstate it; the body
-    digest remains the exact answer for the bytes. It is ``None`` when git did
-    not report one.
+    * the origin is re-derived immediately before ``show`` so a mid-call
+      checkout/configuration change cannot serve under an identity admitted only
+      earlier. ``commit`` and its audit-facing ``checkout_head`` alias are read
+      BEFORE the blob; a commit landing mid-call can only make the receipt
+      understate the revision, never attribute bytes to a later one.
 
     The helper is synchronous and runs off the event loop
     (:func:`execute_read_public_copy` awaits it in a thread).
     """
 
     def _git(*args: str) -> subprocess.CompletedProcess[bytes]:
-        return subprocess.run(
-            ["git", "-C", str(root), "--no-replace-objects", *args],
-            capture_output=True,
-            check=False,
-            timeout=10,
+        argv = ["git", "-C", str(root), "--no-replace-objects", "-c", "core.fsmonitor=false", *args]
+        if confinement is not None:
+            wrapped = confinement.wrap(argv)
+            if wrapped is None:
+                # Fields only: ``execute_read_public_copy`` wraps a dict refusal
+                # through ``_next_step``, so prose here would bypass the
+                # fields-only rule the other refusals follow (the ``repo_root``
+                # CONTRACT comment above ``ReadPublicCopyParams``).
+                raise _ConfinementRefusal(
+                    {
+                        "code": "public_copy_confinement_unavailable",
+                        "reason": "host_cannot_confine_git",
+                        "confinement_root": str(confinement.root),
+                        "fix": "read from an unconfined session or a host with a kernel sandbox",
+                    }
+                )
+            argv = wrapped
+        # A caller's Git environment must not redirect -C to another index,
+        # object store or worktree. Reads also must not invoke configured diff
+        # helpers, credential helpers, fsmonitor hooks or optional index writes.
+        env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+        env.update(
+            GIT_CONFIG_NOSYSTEM="1",
+            GIT_CONFIG_GLOBAL=os.devnull,
+            GIT_TERMINAL_PROMPT="0",
+            GIT_OPTIONAL_LOCKS="0",
+            # A missing promisor blob must fail, never turn a copy read into
+            # network/credential work. The empty transport allowlist also
+            # closes lazy-fetch fallback on Git builds predating its opt-out.
+            GIT_NO_LAZY_FETCH="1",
+            GIT_ALLOW_PROTOCOL="",
         )
+        return subprocess.run(argv, capture_output=True, check=False, timeout=10, env=env)
 
-    subject = "the named checkout" if named_root else "the workspace"
-    not_a_checkout = f"{subject} is not a git checkout"
     try:
         inside = _git("rev-parse", "--is-inside-work-tree")
         if inside.returncode != 0 or inside.stdout.strip() != b"true":
-            return b"", not_a_checkout, None
+            return b"", {}, "the workspace is not a git checkout"
         top = _git("rev-parse", "--show-toplevel")
         if top.returncode != 0 or not top.stdout.strip():
-            return b"", not_a_checkout, None
+            return b"", {}, "the workspace is not a git checkout"
         checkout_root = Path(top.stdout.decode("utf-8", "replace").strip()).resolve()
         if checkout_root != root:
-            if named_root:
-                return (
-                    b"",
-                    (
-                        f"the named checkout root {root} is not the checkout root"
-                        f" {checkout_root}; name the directory that"
-                        " `git rev-parse --show-toplevel` reports, not one below it"
-                    ),
-                    None,
-                )
             return (
                 b"",
+                {},
                 (
                     f"the workspace root {root} is not the checkout root {checkout_root}; "
                     "run read_public_copy from the checkout root"
                 ),
-                None,
             )
-        if allowed_checkouts or required_identity is not None:
-            origin = _git("remote", "get-url", "origin")
-            identity = (
-                _origin_identity(origin.stdout.decode("utf-8", "replace"))
-                if origin.returncode == 0
-                else ""
+        if confinement is not None:
+            escaped = _metadata_outside(root, confinement, _git)
+            if escaped is not None:
+                return b"", {}, escaped
+        origin = _git("remote", "get-url", "origin")
+        origin_url = origin.stdout.decode("utf-8", "replace") if origin.returncode == 0 else ""
+        identity = _origin_identity(origin_url)
+        # ONE PARSER, TWO POLICIES (see :func:`_trusted_origin_identity`). The
+        # SAME registry answers both questions — ``_CONSUMER_CHECKOUTS`` plus
+        # this repository, via :func:`_publishing_checkouts` — and the only
+        # difference is which spelling of the identity is asked:
+        #   * a session's own cwd keeps #3122's host-insensitive identity;
+        #   * ``repo_root`` is a path the caller chose, so it must be a real
+        #     github.com origin of a pinned repository. Accepting a mirror or a
+        #     lookalike host there would answer "read THAT repository" with
+        #     whatever directory the caller handed over.
+        publishers = _publishing_checkouts(relative)
+        core_publishes = any(pattern.fullmatch(relative) for pattern in _CORE_PUBLIC_COPY_PATTERNS)
+        # RECORD ONLY WHAT THE STRICT CHECK PROVED: provenance is a trust claim,
+        # so ``repository`` comes from the host-pinned spelling and is ``None``
+        # when that check did not pass (design D1/D4).
+        verified = _trusted_origin_identity(origin_url) or None
+        selected = verified if explicit_root else identity
+        if explicit_root and selected not in ACCEPTED_REPOSITORIES:
+            return (
+                b"",
+                {},
+                {
+                    "code": "public_copy_repository_not_allowed",
+                    # Only a parsed identity is ever named, never the raw origin
+                    # (it can embed a credential).
+                    "reason": "origin_not_accepted",
+                    "checkout_is": selected,
+                    "path_needs": [name for name, _ in publishers]
+                    or ([CORE_REPOSITORY] if core_publishes else []),
+                },
             )
-            if required_identity is not None and identity != required_identity:
+        if publishers and selected not in {name for name, _ in publishers}:
+            if explicit_root:
                 return (
                     b"",
-                    (
-                        f"the origin of {root} is now {identity or 'unusable'}, not the"
-                        f" {required_identity} this call admitted; name the checkout again"
-                    ),
-                    None,
+                    {},
+                    {
+                        "code": "public_copy_repository_not_allowed",
+                        "reason": "wrong_checkout_for_path",
+                        "checkout_is": selected,
+                        "path_needs": [name for name, _ in publishers],
+                    },
                 )
-            if allowed_checkouts and identity not in {
-                allowable for allowable, _ in allowed_checkouts
-            }:
-                return b"", _checkout_refusal(relative, allowed_checkouts, identity), None
+            return b"", {}, _checkout_refusal(relative, publishers, identity)
+        if explicit_root and core_publishes and selected != CORE_REPOSITORY:
+            # A core root asked of a consumer checkout names the checkout that
+            # serves it instead of reporting the file as uncommitted (U1/J).
+            return (
+                b"",
+                {},
+                {
+                    "code": "public_copy_repository_not_allowed",
+                    "reason": "wrong_checkout_for_path",
+                    "checkout_is": selected,
+                    "path_needs": [CORE_REPOSITORY],
+                },
+            )
+        # Capture once: a concurrent branch switch may make the cleanliness
+        # comparison refuse, but can never relabel bytes from another commit.
+        head = _git("rev-parse", "--verify", "HEAD^{commit}")
+        commit = head.stdout.decode("ascii", "replace").strip()
+        if head.returncode != 0 or not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", commit):
+            return (
+                b"",
+                {},
+                {"code": "public_copy_commit_unavailable", "reason": "head_has_no_commit"},
+            )
+        provenance = {
+            "repository_root": str(root),
+            "repository": verified,
+            "repository_verified": verified is not None,
+            "commit": commit,
+            # Keep the established commit field and the review-required explicit
+            # checkout_head alias identical: both name the one immutable commit
+            # captured before validation and served below, never a later HEAD.
+            "checkout_head": commit,
+        }
         tracked = _git("ls-files", "--error-unmatch", "--", relative)
         if tracked.returncode != 0:
-            return b"", f"{relative} is not committed at HEAD; commit the public copy first", None
-        clean = _git("diff", "--quiet", "HEAD", "--", relative)
+            return b"", {}, f"{relative} is not committed at HEAD; commit the public copy first"
+        # --no-ext-diff/--no-textconv do not disable clean/process filters:
+        # Git can execute one while refreshing its worktree hash. A read-tier
+        # tool must refuse such paths before diff, not run repository commands
+        # with the caller's write authority. check-attr itself runs no filter.
+        attributes = _git("check-attr", "-z", "--all", "--", relative)
+        fields = attributes.stdout.split(b"\0")
+        # --all distinguishes absence from an actual driver literally named
+        # "unspecified" or "unset". A named-attribute query renders those
+        # strings identically to its absence/disabled sentinels.
+        if attributes.returncode != 0 or len(fields) % 3 != 1:
+            return (
+                b"",
+                {},
+                {
+                    "code": "public_copy_filter_not_supported",
+                    "reason": "attributes_unreadable",
+                    "path": relative,
+                },
+            )
+        if b"filter" in fields[1::3]:
+            declared = fields[2::3][fields[1::3].index(b"filter")]
+            return (
+                b"",
+                {},
+                {
+                    "code": "public_copy_filter_not_supported",
+                    "reason": "path_declares_git_filter",
+                    "path": relative,
+                    "filter": declared.decode("utf-8", "replace")[:80],
+                },
+            )
+        clean = _git("diff", "--no-ext-diff", "--no-textconv", "--quiet", commit, "--", relative)
         if clean.returncode == 1:
             return (
                 b"",
-                f"{relative} differs from HEAD; commit the public copy before auditing it",
-                None,
+                {},
+                (f"{relative} differs from HEAD; commit the public copy before auditing it"),
             )
         if clean.returncode != 0:
-            return b"", f"could not compare {relative} with HEAD", None
-        head = _git("rev-parse", "HEAD")
-        served = head.stdout.decode("utf-8", "replace").strip() if head.returncode == 0 else None
-        blob = _git("show", f"HEAD:{relative}")
+            return b"", {}, f"could not compare {relative} with HEAD"
+        # Re-check identity beside the blob read, not merely during the earlier
+        # admission checks: a checkout/config swap must not serve bytes under a
+        # stale repository name. Only reduced identities reach the refusal; a raw
+        # origin URL can contain credentials.
+        current_origin = _git("remote", "get-url", "origin")
+        current_url = (
+            current_origin.stdout.decode("utf-8", "replace")
+            if current_origin.returncode == 0
+            else ""
+        )
+        current_identity = _origin_identity(current_url)
+        current_selected = (
+            _trusted_origin_identity(current_url) if explicit_root else current_identity
+        )
+        if current_selected != selected:
+            return (
+                b"",
+                {},
+                (
+                    f"the origin of {root} changed during the read: expected "
+                    f"{selected or 'unusable'}, actual {current_selected or 'unusable'}; "
+                    "name the checkout again"
+                ),
+            )
+        blob = _git("show", f"{commit}:{relative}")
         if blob.returncode != 0:
-            return b"", f"{relative} is not committed at HEAD; commit the public copy first", None
-        return blob.stdout, None, served or None
+            # Reaching here means the path is tracked AND the worktree equals the
+            # pinned tree (the diff above returned 0), so the path IS committed
+            # and only its object is missing: a partial clone whose fetch is
+            # disabled on purpose. Saying "not committed" sent auditors to commit
+            # a file that already is (QA Q1).
+            return (
+                b"",
+                {},
+                {
+                    "code": "public_copy_blob_unavailable",
+                    "reason": "object_missing_locally",
+                    "path": relative,
+                    "commit": commit,
+                },
+            )
+        return blob.stdout, provenance, None
+    except _ConfinementRefusal as exc:
+        return b"", {}, exc.body
     except (OSError, subprocess.SubprocessError) as exc:
-        return b"", f"could not read the committed copy of {relative} ({exc})", None
+        return b"", {}, f"could not read the committed copy of {relative} ({exc})"
 
 
 async def execute_read_public_copy(
@@ -750,54 +926,73 @@ async def execute_read_public_copy(
             "path must be a non-empty repository-relative path",
             is_error=True,
         )
-    repo_root_arg: str | None = None
-    if arguments.get("repo_root") is not None:
-        repo_root_arg = str(arguments["repo_root"])
-        if not repo_root_arg:
-            # An empty string is a caller that meant a checkout and did not name
-            # one; falling back to the session workspace would read a tree they
-            # did not ask for.
-            return _text(tool_call_id, "repo_root must name a directory", is_error=True)
 
-    root = Path(context.cwd).expanduser().resolve()
-    checkout: str | None = None
-    if repo_root_arg is not None:
-        # OFF THE EVENT LOOP. Admission shells out to `git` up to three times;
-        # a checkout on a stalled mount would otherwise freeze streaming, the UI
-        # and every concurrent tool call for the length of its timeouts (review
-        # M-1 measured a 4.0 s heartbeat gap on a 2 s-per-call git stub). The
-        # cwd arm never probed git here, so this is the only call site.
-        admitted, checkout, refusal = await asyncio.to_thread(_admitted_checkout, repo_root_arg)
-        if refusal is not None:
-            return _text(tool_call_id, f"refused: {refusal}", is_error=True)
-        root = admitted
-    # One resolver for both arms: ``_resolve_workspace_path`` is the single
-    # normalisation (``~``, ``..``, symlinks, NUL) the rest of the tool surface
-    # uses, and the admitted checkout replaces the session cwd as its root.
+    selected = arguments.get("repo_root")
+    explicit_root = selected is not None
+    if explicit_root and (not isinstance(selected, str) or not selected.strip()):
+        return _refusal(
+            tool_call_id,
+            "public_copy_invalid_repo_root",
+            **_next_step(
+                reason="repo_root_blank_or_not_a_string", fix="pass a checkout path or omit"
+            ),
+        )
+    if explicit_root and Path(path_arg).is_absolute():
+        return _refusal(
+            tool_call_id,
+            "public_copy_path_must_be_relative",
+            **_next_step(reason="absolute_path_with_repo_root", path=path_arg),
+        )
+    try:
+        candidate = Path(str(selected)).expanduser() if explicit_root else Path(context.cwd)
+        if explicit_root and not candidate.is_absolute():
+            candidate = Path(context.cwd) / candidate
+        root = candidate.resolve(strict=explicit_root)
+    except (OSError, ValueError):
+        return _refusal(
+            tool_call_id,
+            "public_copy_invalid_repo_root",
+            **_next_step(reason="repo_root_does_not_exist", repo_root=str(selected)),
+        )
+    confinement = confinement_of(context)
+    if confinement is not None:
+        denial = confinement.path_denial(root)
+        if denial is not None:
+            return _text(tool_call_id, denial, is_error=True)
     resolved, inside, resolvable = _resolve_workspace_path(path_arg, str(root))
+    if confinement is not None:
+        denial = confinement.path_denial(resolved, resolvable=resolvable)
+        if denial is not None:
+            return _text(tool_call_id, denial, is_error=True)
     if not resolvable or not inside:
         return _text(
             tool_call_id,
-            (
-                "refused: the path is not inside this session's workspace"
-                if checkout is None
-                else f"refused: the path is not inside the named checkout {root}"
-            ),
+            "refused: the path is not inside this session's workspace",
             is_error=True,
         )
     try:
         relative = resolved.relative_to(root).as_posix()
     except ValueError:
-        return _text(
-            tool_call_id,
-            (
-                "refused: the path escapes the workspace"
-                if checkout is None
-                else f"refused: the path escapes the named checkout {root}"
-            ),
-            is_error=True,
-        )
+        return _text(tool_call_id, "refused: the path escapes the workspace", is_error=True)
     if not _matches_public_copy(relative):
+        if explicit_root:
+            return _refusal(
+                tool_call_id,
+                "public_copy_path_not_allowed",
+                **_next_step(
+                    # ``.git`` (a directory, or the file a linked worktree has) is
+                    # only present at a checkout root: no Git process is needed
+                    # to tell "you gave me a subdirectory" from "wrong path".
+                    reason=(
+                        "path_outside_allowlist_relative_to_repo_root"
+                        if (root / ".git").exists()
+                        else "repo_root_is_not_the_checkout_root"
+                    ),
+                    path=relative,
+                    repo_root=str(root),
+                    hint="repo_root must be the exact checkout root; path is relative to it",
+                ),
+            )
         return _text(
             tool_call_id,
             (
@@ -813,18 +1008,25 @@ async def execute_read_public_copy(
     # verbatim. ``_committed_public_copy`` serves the HEAD blob and refuses a
     # working-tree difference or an untracked file; it is also why a CRLF
     # checkout works (Git's comparison, not raw byte equality).
-    blob, refusal, checkout_head = await asyncio.to_thread(
+    blob, provenance, refusal = await asyncio.to_thread(
         _committed_public_copy,
         root,
         relative,
-        allowed_checkouts=_publishing_checkouts(relative),
-        # For a named root the identity is re-derived HERE, in the call that
-        # serves the bytes, so a directory swapped between admission and the read
-        # is refused instead of served under the admitted identity's name (m-4).
-        required_identity=checkout,
-        named_root=checkout is not None,
+        explicit_root=explicit_root,
+        confinement=confinement,
     )
+    if isinstance(refusal, dict):
+        return _refusal(tool_call_id, refusal.pop("code"), **_next_step(**refusal))
     if refusal is not None:
+        if not explicit_root and refusal == _NOT_A_CHECKOUT:
+            # THE FIRST PLACE A HOME-ROOT SESSION FAILS (UX U2): name the option
+            # that exists for exactly this, as fields, with no new prose.
+            return _refusal(
+                tool_call_id,
+                "public_copy_workspace_not_a_checkout",
+                sentence=refusal,
+                **_next_step(reason="session_cwd_is_not_a_checkout", fix="pass repo_root"),
+            )
         return _text(tool_call_id, f"refused: {refusal}", is_error=True)
     try:
         text = blob.decode("utf-8")
@@ -859,9 +1061,7 @@ async def execute_read_public_copy(
             chars=len(body),
             digest=digest,
             context=context,
-            checkout=checkout,
-            checkout_root=root if checkout is not None else None,
-            checkout_head=checkout_head,
+            provenance=provenance,
         )
     except OSError as exc:
         # FAIL CLOSED. A route whose use is not recorded is not this route.
@@ -871,20 +1071,15 @@ async def execute_read_public_copy(
             is_error=True,
         )
 
-    details: dict[str, Any] = {
+    details = {
         "path": relative,
         "key": key,
         "public_copy": True,
         "policy": POLICY_DOCUMENT,
         "audit_log": str(audit_file),
         "sha256": digest,
+        **provenance,
     }
-    if checkout is not None:
-        # The receipt says WHICH tree served the bytes and WHICH revision of it,
-        # not merely that a tree did.
-        details["checkout"] = checkout
-        details["checkout_root"] = str(root)
-        details["checkout_head"] = checkout_head
     return _text(tool_call_id, body, details=details)
 
 
@@ -893,14 +1088,7 @@ def build_read_public_copy_tool() -> AgentTool:
     return AgentTool(
         name=TOOL_NAME,
         label="Read public copy",
-        description=(
-            "Read committed public i18n copy through the audited route: a catalogue "
-            "key, a key-module line, or a generated key map. Allowlisted; every read "
-            "is recorded. repo_root names a publishing repository's checkout to read "
-            "when the session cwd is not one (origin must be "
-            + ", ".join(PUBLISHING_REPOSITORIES)
-            + "); the path stays relative and allowlisted."
-        ),
+        description=("Read allowlisted public i18n copy: key, key-module line or map; audited."),
         parameters=ReadPublicCopyParams.model_json_schema(),
         approval_tier="read",
         concurrency="shared",

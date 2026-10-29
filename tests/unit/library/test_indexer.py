@@ -431,14 +431,38 @@ def test_the_thumbnail_queue_is_deduplicated(tmp_path, monkeypatch) -> None:
     image.write_bytes(png())
     session(root, SESSION, write_rows("w1", 1.0, image))
     indexer.rebuild_now(root)
+    # Hold the real worker inside its thumbnail write: queue membership and the
+    # pending set must not change while the enqueue contract is under inspection.
+    worker_at_write = threading.Event()
+    release_worker = threading.Event()
+    real_ensure_thumbnail = indexer.LibraryStore.ensure_thumbnail
+
+    def held_ensure_thumbnail(self: indexer.LibraryStore, *args: Any, **kwargs: Any) -> str | None:
+        # Only the real worker is gated: a read-path caller must not be able to
+        # satisfy the handshake on the worker's behalf.
+        if threading.current_thread().name != "library-thumbs":
+            return real_ensure_thumbnail(self, *args, **kwargs)
+        worker_at_write.set()
+        if not release_worker.wait(timeout=60):
+            raise AssertionError("thumbnail worker was not released from its write gate")
+        return real_ensure_thumbnail(self, *args, **kwargs)
+
+    monkeypatch.setattr(indexer.LibraryStore, "ensure_thumbnail", held_ensure_thumbnail)
     index = indexer.ensure_started(root)
     try:
+        # The startup sweep owns this read; without its handshake the assertion
+        # races that unrelated thumbnail instead of measuring the three enqueues.
+        assert worker_at_write.wait(timeout=60), (
+            f"thumbnail worker {index._thumb_thread} never reached its write gate; "
+            f"pending={sorted(index._thumb_pending)} queued={index._thumb_queue.qsize()}"
+        )
         index.enqueue_thumbnail("la_0123456789abcdef", 480)
         index.enqueue_thumbnail("la_0123456789abcdef", 480)
         index.enqueue_thumbnail("la_0123456789abcdef", 240)
         assert index._thumb_queue.qsize() == 2, "one entry per (asset, width)"
         assert ("la_0123456789abcdef", 480) in index._thumb_pending
     finally:
+        release_worker.set()
         index.stop()
 
 

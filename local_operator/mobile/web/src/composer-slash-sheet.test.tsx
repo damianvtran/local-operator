@@ -93,7 +93,7 @@ function renderComposer(): HTMLTextAreaElement {
 			onCloseEffort={() => {}}
 		/>,
 	);
-	return screen.getByPlaceholderText("Message…") as HTMLTextAreaElement;
+	return screen.getByPlaceholderText("Ask anything…") as HTMLTextAreaElement;
 }
 
 afterEach(() => {

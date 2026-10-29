@@ -384,19 +384,41 @@ const CONNECTING_STATUS = "Connecting…";
    ways of saying one thing). It appears only when there IS a draft that cannot
    go, which is the moment the question is asked. */
 const SENDING_HINT = `${CONNECTING_STATUS} — send again when this one lands.`;
-/* D1: the placeholder must FIT the textarea's narrowest resting width (184px
+/* THE EMPTY FIELD SAYS WHAT THE READER CAN DO, mirroring the desktop UI's
+   composer (`ui.chat.composer.placeholder.idle` / `.waiting`): ask while the
+   session is idle, steer while a turn is running. "In progress" is
+   `projection.streaming` — the same flag the header's subtitle reads for its
+   "Working" rung (`components/session-subtitle.tsx`) and the send button reads
+   to switch to the `steer` op, so the field, the button and the header cannot
+   disagree. An ENDED session reads as idle: a send there does wake it (in the
+   home folder), but that is behaviour, not field copy — the operator found
+   "Send to reopen in your home folder…" described plumbing, not the reader's
+   next step, and the header's `Ended` + Resume already carry the state.
+
+   D1: the placeholder must FIT the textarea's narrowest resting width (184px
    beside the mic at 390×844) or the empty box wraps to two lines and the
    first keystroke collapses it 45→24 with a visible reflow above the
-   composer (design round 1, D1). The old string measured 188.5px at 16px
-   system-ui — 4.5px over — this one measures 77.8px, which survives narrower
-   viewports and font fallbacks too. The product name is carried by the app
-   shell (document title, header mark). */
-/* English until the composer's own copy is extracted (QA Q-3). The field's
-   DIRECTION is what keeps this readable: an empty draft resolves LTR (the
-   placeholder's own language), so the RTL document cannot move its trailing
-   ellipsis to the visual start ("…Message", QA Q-6), and the field follows the
-   draft's own first strong character once the reader types. */
-const COMPOSER_PLACEHOLDER = "Message…";
+   composer (design round 1, D1). The desktop strings ("Ask anything. @ adds
+   files, / runs commands") are ~300px and cannot fit, so the relay carries
+   its own first-clause variants. Measured at 16px with the macOS system UI
+   font (CoreText; the widest of each locale's idle/steer pair): en 124.4
+   "Steer the agent…", es 156.4, fr 164.5, hi 107.6, ru 172.8, ur 139.4,
+   vi 162.7, zh-CN 120.4 — all under 184 (the old "Message…" was 77.8). es
+   was shortened to "Pregunta lo que sea…" because "…lo que quieras…"
+   measured 184.3. The margin is thinner than "Message…" had, so a new
+   locale or a longer rewording must be re-measured against 184. The
+   product name is carried by the app shell (document title, header mark).
+
+   The field's DIRECTION follows the placeholder's own script while the draft
+   is empty (`textDirection`), so an RTL placeholder keeps its trailing
+   ellipsis at its visual end and an LTR one cannot have it moved to the
+   visual start by the RTL document ("…Message", QA Q-6); once the reader
+   types, the field follows the draft's first strong character. */
+function composerPlaceholder(streaming: boolean): string {
+	return streaming
+		? messageRuntime.t("relay.chrome.composer.placeholder.steer")
+		: messageRuntime.t("relay.chrome.composer.placeholder.idle");
+}
 
 /* THE CLUSTER'S BOX, IN ONE PLACE. The composer is the biggest thing on this
    screen that arrives with the projection, and the conversation's first frame
@@ -525,9 +547,15 @@ function PaperclipGlyph() {
 }
 
 export function ComposerFrame() {
+	/* The frame is drawn BEFORE the projection arrives, so it cannot know
+	   whether a turn is running; it carries the idle copy, which is what the
+	   live composer shows for every state except a running turn (ended
+	   included). A frame that matches the live field for the common case is
+	   the no-pop contract `session-view.first-frame.test.tsx` pins. */
+	const placeholder = composerPlaceholder(false);
 	return <div className={COMPOSER_SHELL} aria-hidden>
 		<div className={COMPOSER_INPUT_ROW}>
-			<div className={COMPOSER_FIELD_BOX}><textarea disabled aria-hidden rows={1} tabIndex={-1} placeholder={COMPOSER_PLACEHOLDER} dir="ltr" className={COMPOSER_FIELD} /></div>
+			<div className={COMPOSER_FIELD_BOX}><textarea disabled aria-hidden rows={1} tabIndex={-1} placeholder={placeholder} dir={textDirection(placeholder)} className={COMPOSER_FIELD} /></div>
 			<span className={cn(COMPOSER_ROUND, COMPOSER_LEADING, "text-ink-disabled")}><PaperclipGlyph /></span>
 			<div className={COMPOSER_CHIP_ROW}><span className={COMPOSER_CHIP} /></div>
 			<div className={COMPOSER_ACTION_CLUSTER}>
@@ -592,8 +620,8 @@ export function Composer({
 	    screen passes `sessionHealth(...) === "ended"` (review round 2, R2-2 =
 	    U7). Not `projection.ended` alone: a conversation opened from history is
 	    a disk rebuild with no running owner (`pid: 0`, `ended: false`), the dot
-	    calls it Ended, and a send to it is the same wake, so the placeholder
-	    and the failure copy must say the same thing the header does. Defaults
+	    calls it Ended, and a send to it is the same wake, so the failure copy
+	    must say the same thing the header does. Defaults
 	    to the projection's own flag for callers without the screen's health. */
 	ended: boolean;
 	short?: boolean;
@@ -754,6 +782,7 @@ export function Composer({
 	   is the path that respawns the session, and one act must not read as two
 	   different controls. */
 	const showResume = projection.stop_reason === "aborted" && !ended;
+	const placeholder = composerPlaceholder(projection.streaming);
 
 	/* WHICH word, when it does, follows the verdict the notice above it states.
 	   `aborted` covers a deliberate stop and a harness cut-off alike, and the
@@ -1533,16 +1562,9 @@ export function Composer({
 								void addFiles(files);
 							}
 						}}
-						/* SAY IT BEFORE THE TAP (UX round 1, U4; first raised as
-						   U18). The ended band said "a send reopens it in your home
-						   folder" above the field; with the band gone, the empty field
-						   says it where the reader is about to type. Live sessions
-						   keep the plain placeholder. */
-						placeholder={ended
-							? messageRuntime.t("relay.health.ended_placeholder")
-							: COMPOSER_PLACEHOLDER}
+						placeholder={placeholder}
 						aria-label={messageRuntime.t("relay.chrome.composer.label")}
-						dir={textDirection(text)}
+						dir={textDirection(text || placeholder)}
 						disabled={disabled}
 						rows={1}
 						enterKeyHint="send"

@@ -8227,6 +8227,424 @@
         "note": "Second independent audit commissioned by the radientdev manager; it has NOT run. Auditor identity, model and date are deliberately unrecorded until it reports — this row is not a second-audit pass."
       },
       "note": "wire.radient_saver (17 keys) at en d83072e27ad3cc0711da1f5e37056d8958e6ad9a450de5ce31ddf617c1aedba8, target SHA-256 add4272c7eb814caff075653105fabdf2bf6c979f941bc326fc2c5ffbcc37abe. Independent audit passed clean: 0 findings. Provenance: translator `translator` agent on anthropic/claude-opus-5-5 and independent auditor `translation-auditor` agent on kimi/k3.1-pro, both 2026-10-28, no provider fallback on either; dispositions as relayed by the radientdev manager for PR #3078 (the audit reports are not posted on the PR thread). Audit depth, stated plainly: docs/I18N.md asks high-visibility/safety copy for a second independent audit, and this namespace carries the S-32 sentence (\"Saver never sends your AI provider's credentials to Radient\") and the credit-charging terms. It had ONE independent audit for this locale; no second independent audit has been run and none is claimed. SA-1 remediation (PR #3078 audit finding SA-1, major, source-level): wire.radient_saver.mode.help now states the charge basis — the tokens Saver removes, paid in Radient credits — and that the customer's own AI-provider bill is unchanged; no percentage or savings claim was added. Only that key changed in this locale; the other 16 values are the audited bytes. en moved d83072e27ad3cc0711da1f5e37056d8958e6ad9a450de5ce31ddf617c1aedba8 -> 70114d73b15d50b9ac3eaa54a251e5a67233c48511bc33d2c09d49602fa68e2d and this row's target bytes moved to 5e69bf4627aad85452db97e8432d47626c63eb44c821d194b91217d747b8f8e5. The delta was SELF-TRANSLATED by the coder session that implemented this change (a radientdev coder subagent) — no `i18n-translator` agent was delegated, which is the docs/I18N.md step-3 process the independent audit exists to check, so read this row with that deviation in view. Model, taken from the session's own provider-route record rather than assumed: the final bytes were authored on openrouter/deepseek/deepseek-v4.1-flash-1017, and the first pass of the same two sentences on anthropic/claude-sonnet-5-5; both ran as provider fallbacks from the pinned primary kimi/k3.1-pro (provider quota, the last switch reporting HTTP 402), not by choice. Audit depth, stated plainly and not softened: the audit above covers the PREVIOUS bytes; NO independent audit of this mode.help delta has run. A second independent audit is commissioned and PENDING (`second_audit`), so these bytes are unaudited until it reports and that field is filled in. `status` stays `passed` for the row's completed first-audit chain — keeping the locale in the ship set, which a stale row would silently drop — and this note records the gap rather than letting the status field imply coverage it does not have. ROUND 3 (PR #3078 re-audit findings SA-2 MAJOR, M-1..M-4, N-1; code-review R6-2): the SA-1 sentence \"Your bill from your AI provider is unchanged\" was a promise about a third party's invoice the product cannot keep (Saver sends the provider less history) and is REPLACED: Saver charges only Radient credits, priced on the tokens it removes, never the provider account, and the provider still bills on its own terms for what it receives; no savings, percentage or up/down claim. \"covers\" became \"priced on\" (M-3); fr pronoun reference (M-2), ru \"списывается\" (M-1), vi pronoun count and ur repeated connector (N-1) addressed; help shortened (M-4). R6-2: the `auto` choice is unreachable in LO1 (`SaverDecision(False, \"auto_unavailable\")`), so its two keys (mode.choice.auto.label/description) are RETIRED from this namespace in all 8 locales and from the settings choices; the namespace now carries 15 keys. en moved 70114d73b15d50b9ac3eaa54a251e5a67233c48511bc33d2c09d49602fa68e2d -> d392bc5d9617626599b6e2836f35c6cf6479ea3313fa072d1eddd087adcb7507; this row's target bytes are c1fb256ccbe65c34607fb9448f534a404ad7abaed1608184927a4660cb9aa6b1. Translator, stated plainly: SELF-TRANSLATED by the implementing radientdev coder session on anthropic/claude-opus-5-5 (the session's own selected_model record; no provider fallback recorded for this round). Delegation to an `i18n-translator` was attempted per docs/I18N.md step 3 and was IMPOSSIBLE: the coder session's toolset has no `task` tool, so this is a second disclosed deviation from step 3, for a maintainer to accept or reject. The `translator` field describes ONLY the mode.help delta (see its `scope`); the other 14 values keep the original `translator` agent's audited bytes. No independent audit of the round-3 bytes has run; `second_audit` stays pending."
+    },
+    {
+      "locale": "fr",
+      "namespace": "relay.chrome",
+      "source_sha256": "0456005a0730d99a27656f1b0413b751c5916630e4c56aad346238e25c0c5994",
+      "translator": {
+        "agent": "coder (lopdev session 6999135b36d2)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team, independent i18n audit, session 64d7798cdbd3)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent i18n delta audit round 1 PASS (terminal) at target SHA-256 7fcb90164e52be98e209b6a88fcc0b0818785f2ee6825bcbd2fcefe7fb032104, source 0456005a0730d99a27656f1b0413b751c5916630e4c56aad346238e25c0c5994: https://github.com/damianvtran/local-operator/pull/3127#issuecomment-6486271247. Audited bytes read from origin/fix/relay-composer-placeholder 07984929b35. New keys composer.placeholder.idle/.steer: idiom, glossary 'agent', register, U+2026 ellipsis and D1 fit (CoreText 16pt system UI re-measured independently, all under 184px) passed with 0 findings; the 83 other keys are value-identical to origin/main and carry the prior passed row forward. Independence limit: translator (coder, session 6999135b36d2) and auditor ran on the same model (anthropic/claude-opus-5-5); separation is agent and context; no native-speaker pass. Source-semantic pass only; rendered relay geometry pending in the PR. Translation: Relay composer placeholder slice (fix/relay-composer-placeholder): 2 new keys composer.placeholder.idle/.steer translated from the frozen en bytes (85 keys; target SHA-256 7fcb90164e52be98e209b6a88fcc0b0818785f2ee6825bcbd2fcefe7fb032104); the other 83 values are byte-identical to the prior passed row. Source: the desktop UI's audited ui.chat.composer.placeholder.idle/.waiting first clauses; widths measured at 16px system-ui against the 184px D1 budget (PR body)."
+    },
+    {
+      "locale": "es",
+      "namespace": "relay.chrome",
+      "source_sha256": "0456005a0730d99a27656f1b0413b751c5916630e4c56aad346238e25c0c5994",
+      "translator": {
+        "agent": "coder (lopdev session 6999135b36d2)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team, independent i18n audit, session 64d7798cdbd3)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent i18n delta audit round 1 PASS (terminal) at target SHA-256 a2d25deb40633c2b478babb7c9fd0dd3bdc0b2cd77c4010fedd1c205b9840097, source 0456005a0730d99a27656f1b0413b751c5916630e4c56aad346238e25c0c5994: https://github.com/damianvtran/local-operator/pull/3127#issuecomment-6486271247. Audited bytes read from origin/fix/relay-composer-placeholder 07984929b35. New keys composer.placeholder.idle/.steer: idiom, glossary 'agent', register, U+2026 ellipsis and D1 fit (CoreText 16pt system UI re-measured independently, all under 184px) passed with 0 findings; the 83 other keys are value-identical to origin/main and carry the prior passed row forward. Independence limit: translator (coder, session 6999135b36d2) and auditor ran on the same model (anthropic/claude-opus-5-5); separation is agent and context; no native-speaker pass. Source-semantic pass only; rendered relay geometry pending in the PR. Translation: Relay composer placeholder slice (fix/relay-composer-placeholder): 2 new keys composer.placeholder.idle/.steer translated from the frozen en bytes (85 keys; target SHA-256 a2d25deb40633c2b478babb7c9fd0dd3bdc0b2cd77c4010fedd1c205b9840097); the other 83 values are byte-identical to the prior passed row. Source: the desktop UI's audited ui.chat.composer.placeholder.idle/.waiting first clauses; widths measured at 16px system-ui against the 184px D1 budget (PR body)."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "relay.chrome",
+      "source_sha256": "0456005a0730d99a27656f1b0413b751c5916630e4c56aad346238e25c0c5994",
+      "translator": {
+        "agent": "coder (lopdev session 6999135b36d2)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team, independent i18n audit, session 64d7798cdbd3)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent i18n delta audit round 1 PASS (terminal) at target SHA-256 d47a5d58a73a92f53c160fe26429432db2a8ea63a48e92cd5e18109b2efcf89e, source 0456005a0730d99a27656f1b0413b751c5916630e4c56aad346238e25c0c5994: https://github.com/damianvtran/local-operator/pull/3127#issuecomment-6486271247. Audited bytes read from origin/fix/relay-composer-placeholder 07984929b35. New keys composer.placeholder.idle/.steer: idiom, glossary 'agent', register, U+2026 ellipsis and D1 fit (CoreText 16pt system UI re-measured independently, all under 184px) passed with 0 findings; the 83 other keys are value-identical to origin/main and carry the prior passed row forward. Independence limit: translator (coder, session 6999135b36d2) and auditor ran on the same model (anthropic/claude-opus-5-5); separation is agent and context; no native-speaker pass. Source-semantic pass only; rendered relay geometry pending in the PR. Translation: Relay composer placeholder slice (fix/relay-composer-placeholder): 2 new keys composer.placeholder.idle/.steer translated from the frozen en bytes (85 keys; target SHA-256 d47a5d58a73a92f53c160fe26429432db2a8ea63a48e92cd5e18109b2efcf89e); the other 83 values are byte-identical to the prior passed row. Source: the desktop UI's audited ui.chat.composer.placeholder.idle/.waiting first clauses; widths measured at 16px system-ui against the 184px D1 budget (PR body)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "relay.chrome",
+      "source_sha256": "0456005a0730d99a27656f1b0413b751c5916630e4c56aad346238e25c0c5994",
+      "translator": {
+        "agent": "coder (lopdev session 6999135b36d2)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team, independent i18n audit, session 64d7798cdbd3)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent i18n delta audit round 1 PASS (terminal) at target SHA-256 b91a1a1c7dd20c1fa97dc1957f80b1351b60b5b2b8153c2b05393273e42ee91c, source 0456005a0730d99a27656f1b0413b751c5916630e4c56aad346238e25c0c5994: https://github.com/damianvtran/local-operator/pull/3127#issuecomment-6486271247. Audited bytes read from origin/fix/relay-composer-placeholder 07984929b35. New keys composer.placeholder.idle/.steer: idiom, glossary 'agent', register, U+2026 ellipsis and D1 fit (CoreText 16pt system UI re-measured independently, all under 184px) passed with 0 findings; the 83 other keys are value-identical to origin/main and carry the prior passed row forward. Independence limit: translator (coder, session 6999135b36d2) and auditor ran on the same model (anthropic/claude-opus-5-5); separation is agent and context; no native-speaker pass. Source-semantic pass only; rendered relay geometry pending in the PR. Translation: Relay composer placeholder slice (fix/relay-composer-placeholder): 2 new keys composer.placeholder.idle/.steer translated from the frozen en bytes (85 keys; target SHA-256 b91a1a1c7dd20c1fa97dc1957f80b1351b60b5b2b8153c2b05393273e42ee91c); the other 83 values are byte-identical to the prior passed row. Source: the desktop UI's audited ui.chat.composer.placeholder.idle/.waiting first clauses; widths measured at 16px system-ui against the 184px D1 budget (PR body)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "relay.chrome",
+      "source_sha256": "0456005a0730d99a27656f1b0413b751c5916630e4c56aad346238e25c0c5994",
+      "translator": {
+        "agent": "coder (lopdev session 6999135b36d2)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team, independent i18n audit, session 64d7798cdbd3)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent i18n delta audit round 1 PASS (terminal) at target SHA-256 8c45d9220ce6e1a053b53413cbd63a3fd69573ef29f9f017a15b2c9bc256e5dd, source 0456005a0730d99a27656f1b0413b751c5916630e4c56aad346238e25c0c5994: https://github.com/damianvtran/local-operator/pull/3127#issuecomment-6486271247. Audited bytes read from origin/fix/relay-composer-placeholder 07984929b35. New keys composer.placeholder.idle/.steer: idiom, glossary 'agent', register, U+2026 ellipsis and D1 fit (CoreText 16pt system UI re-measured independently, all under 184px) passed with 0 findings; the 83 other keys are value-identical to origin/main and carry the prior passed row forward. Independence limit: translator (coder, session 6999135b36d2) and auditor ran on the same model (anthropic/claude-opus-5-5); separation is agent and context; no native-speaker pass. Source-semantic pass only; rendered relay geometry pending in the PR. Translation: Relay composer placeholder slice (fix/relay-composer-placeholder): 2 new keys composer.placeholder.idle/.steer translated from the frozen en bytes (85 keys; target SHA-256 8c45d9220ce6e1a053b53413cbd63a3fd69573ef29f9f017a15b2c9bc256e5dd); the other 83 values are byte-identical to the prior passed row. Source: the desktop UI's audited ui.chat.composer.placeholder.idle/.waiting first clauses; widths measured at 16px system-ui against the 184px D1 budget (PR body)."
+    },
+    {
+      "locale": "ur",
+      "namespace": "relay.chrome",
+      "source_sha256": "0456005a0730d99a27656f1b0413b751c5916630e4c56aad346238e25c0c5994",
+      "translator": {
+        "agent": "coder (lopdev session 6999135b36d2)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team, independent i18n audit, session 64d7798cdbd3)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent i18n delta audit round 1 PASS (terminal) at target SHA-256 9f91c63962b7a4ff4392bb32b93d5dec4b6a4e9bb399f4eb690d918232f2cb59, source 0456005a0730d99a27656f1b0413b751c5916630e4c56aad346238e25c0c5994: https://github.com/damianvtran/local-operator/pull/3127#issuecomment-6486271247. Audited bytes read from origin/fix/relay-composer-placeholder 07984929b35. New keys composer.placeholder.idle/.steer: idiom, glossary 'agent', register, U+2026 ellipsis and D1 fit (CoreText 16pt system UI re-measured independently, all under 184px) passed with 0 findings; the 83 other keys are value-identical to origin/main and carry the prior passed row forward. Independence limit: translator (coder, session 6999135b36d2) and auditor ran on the same model (anthropic/claude-opus-5-5); separation is agent and context; no native-speaker pass. Source-semantic pass only; rendered relay geometry pending in the PR. Translation: Relay composer placeholder slice (fix/relay-composer-placeholder): 2 new keys composer.placeholder.idle/.steer translated from the frozen en bytes (85 keys; target SHA-256 9f91c63962b7a4ff4392bb32b93d5dec4b6a4e9bb399f4eb690d918232f2cb59); the other 83 values are byte-identical to the prior passed row. Source: the desktop UI's audited ui.chat.composer.placeholder.idle/.waiting first clauses; widths measured at 16px system-ui against the 184px D1 budget (PR body)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "relay.chrome",
+      "source_sha256": "0456005a0730d99a27656f1b0413b751c5916630e4c56aad346238e25c0c5994",
+      "translator": {
+        "agent": "coder (lopdev session 6999135b36d2)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team, independent i18n audit, session 64d7798cdbd3)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent i18n delta audit round 1 PASS (terminal) at target SHA-256 a521665a12b61ae031b2429fce45eeca0bf9d00381ae59aef7cc4f99dc7083f8, source 0456005a0730d99a27656f1b0413b751c5916630e4c56aad346238e25c0c5994: https://github.com/damianvtran/local-operator/pull/3127#issuecomment-6486271247. Audited bytes read from origin/fix/relay-composer-placeholder 07984929b35. New keys composer.placeholder.idle/.steer: idiom, glossary 'agent', register, U+2026 ellipsis and D1 fit (CoreText 16pt system UI re-measured independently, all under 184px) passed with 0 findings; the 83 other keys are value-identical to origin/main and carry the prior passed row forward. Independence limit: translator (coder, session 6999135b36d2) and auditor ran on the same model (anthropic/claude-opus-5-5); separation is agent and context; no native-speaker pass. Source-semantic pass only; rendered relay geometry pending in the PR. Translation: Relay composer placeholder slice (fix/relay-composer-placeholder): 2 new keys composer.placeholder.idle/.steer translated from the frozen en bytes (85 keys; target SHA-256 a521665a12b61ae031b2429fce45eeca0bf9d00381ae59aef7cc4f99dc7083f8); the other 83 values are byte-identical to the prior passed row. Source: the desktop UI's audited ui.chat.composer.placeholder.idle/.waiting first clauses; widths measured at 16px system-ui against the 184px D1 budget (PR body)."
+    },
+    {
+      "locale": "fr",
+      "namespace": "relay.health",
+      "source_sha256": "e060aed0898c7aa9951f7abf18c6792cc4629ee490b10546aabd36aac8187f5b",
+      "translator": {
+        "agent": "coder (lopdev session 6999135b36d2)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team, independent i18n audit, session 64d7798cdbd3)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent i18n audit round 1 PASS (terminal) at target SHA-256 af3ac7a7cd3eb258228cda49c7c7c1e366f02983e9c3a1a41983589e7e8487ec, source e060aed0898c7aa9951f7abf18c6792cc4629ee490b10546aabd36aac8187f5b: https://github.com/damianvtran/local-operator/pull/3127#issuecomment-6486271247. Deletion-only hash refresh: relay.health.ended_placeholder removed (en and locale, with its en context entry); the 8 remaining keys are byte-identical in value and order to origin/main's passed row, so nothing was retranslated — this audit verifies the deletion, it does not re-review unchanged copy. Independence limit: translator (coder, session 6999135b36d2) and auditor ran on the same model (anthropic/claude-opus-5-5); separation is agent and context; no native-speaker pass. Source-semantic pass only; rendered relay geometry pending in the PR. Translation: Relay composer placeholder slice (fix/relay-composer-placeholder): deletes the now-unused relay.health.ended_placeholder; the remaining 8 values are byte-identical to the prior doubly-audited row (target SHA-256 af3ac7a7cd3eb258228cda49c7c7c1e366f02983e9c3a1a41983589e7e8487ec). A deletion-only delta, but the en hash moved, so an independent auditor must confirm the byte identity before this row passes; until then the locale stays out of shipped.json."
+    },
+    {
+      "locale": "es",
+      "namespace": "relay.health",
+      "source_sha256": "e060aed0898c7aa9951f7abf18c6792cc4629ee490b10546aabd36aac8187f5b",
+      "translator": {
+        "agent": "coder (lopdev session 6999135b36d2)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team, independent i18n audit, session 64d7798cdbd3)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent i18n audit round 1 PASS (terminal) at target SHA-256 563c533f52fbc21b240979fba164e4e0768ff57f2882025d592280fc56638c62, source e060aed0898c7aa9951f7abf18c6792cc4629ee490b10546aabd36aac8187f5b: https://github.com/damianvtran/local-operator/pull/3127#issuecomment-6486271247. Deletion-only hash refresh: relay.health.ended_placeholder removed (en and locale, with its en context entry); the 8 remaining keys are byte-identical in value and order to origin/main's passed row, so nothing was retranslated — this audit verifies the deletion, it does not re-review unchanged copy. Independence limit: translator (coder, session 6999135b36d2) and auditor ran on the same model (anthropic/claude-opus-5-5); separation is agent and context; no native-speaker pass. Source-semantic pass only; rendered relay geometry pending in the PR. Translation: Relay composer placeholder slice (fix/relay-composer-placeholder): deletes the now-unused relay.health.ended_placeholder; the remaining 8 values are byte-identical to the prior doubly-audited row (target SHA-256 563c533f52fbc21b240979fba164e4e0768ff57f2882025d592280fc56638c62). A deletion-only delta, but the en hash moved, so an independent auditor must confirm the byte identity before this row passes; until then the locale stays out of shipped.json."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "relay.health",
+      "source_sha256": "e060aed0898c7aa9951f7abf18c6792cc4629ee490b10546aabd36aac8187f5b",
+      "translator": {
+        "agent": "coder (lopdev session 6999135b36d2)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team, independent i18n audit, session 64d7798cdbd3)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent i18n audit round 1 PASS (terminal) at target SHA-256 c4892a4de82249195a405e2e195d3aa6859ffe432951a6ba899866009260217c, source e060aed0898c7aa9951f7abf18c6792cc4629ee490b10546aabd36aac8187f5b: https://github.com/damianvtran/local-operator/pull/3127#issuecomment-6486271247. Deletion-only hash refresh: relay.health.ended_placeholder removed (en and locale, with its en context entry); the 8 remaining keys are byte-identical in value and order to origin/main's passed row, so nothing was retranslated — this audit verifies the deletion, it does not re-review unchanged copy. Independence limit: translator (coder, session 6999135b36d2) and auditor ran on the same model (anthropic/claude-opus-5-5); separation is agent and context; no native-speaker pass. Source-semantic pass only; rendered relay geometry pending in the PR. Translation: Relay composer placeholder slice (fix/relay-composer-placeholder): deletes the now-unused relay.health.ended_placeholder; the remaining 8 values are byte-identical to the prior doubly-audited row (target SHA-256 c4892a4de82249195a405e2e195d3aa6859ffe432951a6ba899866009260217c). A deletion-only delta, but the en hash moved, so an independent auditor must confirm the byte identity before this row passes; until then the locale stays out of shipped.json."
+    },
+    {
+      "locale": "ru",
+      "namespace": "relay.health",
+      "source_sha256": "e060aed0898c7aa9951f7abf18c6792cc4629ee490b10546aabd36aac8187f5b",
+      "translator": {
+        "agent": "coder (lopdev session 6999135b36d2)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team, independent i18n audit, session 64d7798cdbd3)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent i18n audit round 1 PASS (terminal) at target SHA-256 515b4828008259d5ac2985bd501c86c4a8085eba29e4681ad75ef361f51c11db, source e060aed0898c7aa9951f7abf18c6792cc4629ee490b10546aabd36aac8187f5b: https://github.com/damianvtran/local-operator/pull/3127#issuecomment-6486271247. Deletion-only hash refresh: relay.health.ended_placeholder removed (en and locale, with its en context entry); the 8 remaining keys are byte-identical in value and order to origin/main's passed row, so nothing was retranslated — this audit verifies the deletion, it does not re-review unchanged copy. Independence limit: translator (coder, session 6999135b36d2) and auditor ran on the same model (anthropic/claude-opus-5-5); separation is agent and context; no native-speaker pass. Source-semantic pass only; rendered relay geometry pending in the PR. Translation: Relay composer placeholder slice (fix/relay-composer-placeholder): deletes the now-unused relay.health.ended_placeholder; the remaining 8 values are byte-identical to the prior doubly-audited row (target SHA-256 515b4828008259d5ac2985bd501c86c4a8085eba29e4681ad75ef361f51c11db). A deletion-only delta, but the en hash moved, so an independent auditor must confirm the byte identity before this row passes; until then the locale stays out of shipped.json."
+    },
+    {
+      "locale": "vi",
+      "namespace": "relay.health",
+      "source_sha256": "e060aed0898c7aa9951f7abf18c6792cc4629ee490b10546aabd36aac8187f5b",
+      "translator": {
+        "agent": "coder (lopdev session 6999135b36d2)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team, independent i18n audit, session 64d7798cdbd3)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent i18n audit round 1 PASS (terminal) at target SHA-256 177a77a4c83ee877f7dcaa01ada1c1f9fc5e89df181e878aa730f1ad51203b09, source e060aed0898c7aa9951f7abf18c6792cc4629ee490b10546aabd36aac8187f5b: https://github.com/damianvtran/local-operator/pull/3127#issuecomment-6486271247. Deletion-only hash refresh: relay.health.ended_placeholder removed (en and locale, with its en context entry); the 8 remaining keys are byte-identical in value and order to origin/main's passed row, so nothing was retranslated — this audit verifies the deletion, it does not re-review unchanged copy. Independence limit: translator (coder, session 6999135b36d2) and auditor ran on the same model (anthropic/claude-opus-5-5); separation is agent and context; no native-speaker pass. Source-semantic pass only; rendered relay geometry pending in the PR. Translation: Relay composer placeholder slice (fix/relay-composer-placeholder): deletes the now-unused relay.health.ended_placeholder; the remaining 8 values are byte-identical to the prior doubly-audited row (target SHA-256 177a77a4c83ee877f7dcaa01ada1c1f9fc5e89df181e878aa730f1ad51203b09). A deletion-only delta, but the en hash moved, so an independent auditor must confirm the byte identity before this row passes; until then the locale stays out of shipped.json."
+    },
+    {
+      "locale": "ur",
+      "namespace": "relay.health",
+      "source_sha256": "e060aed0898c7aa9951f7abf18c6792cc4629ee490b10546aabd36aac8187f5b",
+      "translator": {
+        "agent": "coder (lopdev session 6999135b36d2)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team, independent i18n audit, session 64d7798cdbd3)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent i18n audit round 1 PASS (terminal) at target SHA-256 c82869677b2cff5b4bb063e71fe99f9d5a67ecedf48c190100542024c9b38779, source e060aed0898c7aa9951f7abf18c6792cc4629ee490b10546aabd36aac8187f5b: https://github.com/damianvtran/local-operator/pull/3127#issuecomment-6486271247. Deletion-only hash refresh: relay.health.ended_placeholder removed (en and locale, with its en context entry); the 8 remaining keys are byte-identical in value and order to origin/main's passed row, so nothing was retranslated — this audit verifies the deletion, it does not re-review unchanged copy. Independence limit: translator (coder, session 6999135b36d2) and auditor ran on the same model (anthropic/claude-opus-5-5); separation is agent and context; no native-speaker pass. Source-semantic pass only; rendered relay geometry pending in the PR. Translation: Relay composer placeholder slice (fix/relay-composer-placeholder): deletes the now-unused relay.health.ended_placeholder; the remaining 8 values are byte-identical to the prior doubly-audited row (target SHA-256 c82869677b2cff5b4bb063e71fe99f9d5a67ecedf48c190100542024c9b38779). A deletion-only delta, but the en hash moved, so an independent auditor must confirm the byte identity before this row passes; until then the locale stays out of shipped.json."
+    },
+    {
+      "locale": "hi",
+      "namespace": "relay.health",
+      "source_sha256": "e060aed0898c7aa9951f7abf18c6792cc4629ee490b10546aabd36aac8187f5b",
+      "translator": {
+        "agent": "coder (lopdev session 6999135b36d2)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team, independent i18n audit, session 64d7798cdbd3)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent i18n audit round 1 PASS (terminal) at target SHA-256 1df31b48794129045fa807f5f1c181d74c1054de7e068689c46989bd9f01103b, source e060aed0898c7aa9951f7abf18c6792cc4629ee490b10546aabd36aac8187f5b: https://github.com/damianvtran/local-operator/pull/3127#issuecomment-6486271247. Deletion-only hash refresh: relay.health.ended_placeholder removed (en and locale, with its en context entry); the 8 remaining keys are byte-identical in value and order to origin/main's passed row, so nothing was retranslated — this audit verifies the deletion, it does not re-review unchanged copy. Independence limit: translator (coder, session 6999135b36d2) and auditor ran on the same model (anthropic/claude-opus-5-5); separation is agent and context; no native-speaker pass. Source-semantic pass only; rendered relay geometry pending in the PR. Translation: Relay composer placeholder slice (fix/relay-composer-placeholder): deletes the now-unused relay.health.ended_placeholder; the remaining 8 values are byte-identical to the prior doubly-audited row (target SHA-256 1df31b48794129045fa807f5f1c181d74c1054de7e068689c46989bd9f01103b). A deletion-only delta, but the en hash moved, so an independent auditor must confirm the byte identity before this row passes; until then the locale stays out of shipped.json."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.aida_cadence",
+      "source_sha256": "3bb421a58f2ffa4fec089421d9cb91257fa626d66b2e215b3e120c068bb8e5dd",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "es W1 backfill: 2 keys. Translated by an `i18n-translator` agent and audited by a different `i18n-auditor` agent (both sessions on the `radient/auto` route after provider-quota fallbacks — disclosed, not pinned). Independent full-pass audit `w1a3` (round 2) binds exactly these bytes: 0 unresolved blocker/major. Round 1 (`w1a1`/`w1a2`) preceded remediation and binds superseded bytes; its findings are carried in the w1a3 report. Evidence: i18n/audits/evidence/es/wire.aida_cadence/w1a3/. Open minor/nit findings are dispositioned in that report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.console",
+      "source_sha256": "1a591fbc1f6a939651cfe9bc5c4ff619a5a4ade2099cc9cfb348534d09a0011b",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "es W1 backfill: 8 keys. Translated by an `i18n-translator` agent and audited by a different `i18n-auditor` agent (both sessions on the `radient/auto` route after provider-quota fallbacks — disclosed, not pinned). Independent full-pass audit `w1a3` (round 2) binds exactly these bytes: 0 unresolved blocker/major. Round 1 (`w1a1`/`w1a2`) preceded remediation and binds superseded bytes; its findings are carried in the w1a3 report. Evidence: i18n/audits/evidence/es/wire.console/w1a3/. Open minor/nit findings are dispositioned in that report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.exec",
+      "source_sha256": "041ca802dd4e1329cf1f1b2984311c628f314223f5941b35a7007f5b3d198c94",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "es W1 backfill: 17 keys. Translated by an `i18n-translator` agent and audited by a different `i18n-auditor` agent (both sessions on the `radient/auto` route after provider-quota fallbacks — disclosed, not pinned). This namespace's bytes did NOT move during remediation: round 1 (`w1a1`) and round 2 (`w1a3`, a full pass) both read the same file, and `w1a3` binds exactly the shipped bytes with 0 unresolved blocker/major. Evidence: i18n/audits/evidence/es/wire.exec/w1a1/ and …/w1a3/. Open minor/nit findings are dispositioned in the w1a3 report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.host_speed",
+      "source_sha256": "e193473d58c0de1779bcefab06d0e9b1734ee493aea30ea827e4499510282b8c",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "es W1 backfill: 2 keys. Translated by an `i18n-translator` agent and audited by a different `i18n-auditor` agent (both sessions on the `radient/auto` route after provider-quota fallbacks — disclosed, not pinned). Independent full-pass audit `w1a3` (round 2) binds exactly these bytes: 0 unresolved blocker/major. Round 1 (`w1a1`/`w1a2`) preceded remediation and binds superseded bytes; its findings are carried in the w1a3 report. Evidence: i18n/audits/evidence/es/wire.host_speed/w1a3/. Open minor/nit findings are dispositioned in that report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings.account_policy",
+      "source_sha256": "1ad13f8198e28cb19fe0ecb2a6ef9b2a6990bc0d047566b71f5dd5322f594b25",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "es W1 backfill: 14 keys. Translated by an `i18n-translator` agent and audited by a different `i18n-auditor` agent (both sessions on the `radient/auto` route after provider-quota fallbacks — disclosed, not pinned). Composite audit: full-pass round 2 `w1a3` over all 14 keys plus delta round 3 `w1a4` binding the two keys changed afterwards; `w1a4` supersedes `w1a3` for those keys and `w1a3` remains the audit of record for the unchanged rest. 0 unresolved blocker/major on these bytes. Evidence: i18n/audits/evidence/es/wire.settings.account_policy/w1a3/ and …/w1a4/. Open minor/nit findings are dispositioned in those report.md files."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings.hub_defaults",
+      "source_sha256": "8720b5719479b638eab24b081f76f97c44ce8d8554cb1b8280f6980182b6740c",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "es W1 backfill: 9 keys. Translated by an `i18n-translator` agent and audited by a different `i18n-auditor` agent (both sessions on the `radient/auto` route after provider-quota fallbacks — disclosed, not pinned). Composite audit: round 2 `w1a3` returned **failed** on 1 major (`es-w1-C03`, `agents.help` cut rather than wrapped at 113 cells); the remediation replaced that key and round 3 `w1a4` (delta) binds the shipped bytes and **passed** — `w1a4` supersedes `w1a3` for the two changed keys, while `w1a3` remains the audit of record for the unchanged rest and its failure is recorded, not erased. 0 unresolved blocker/major on the shipped bytes. Evidence: i18n/audits/evidence/es/wire.settings.hub_defaults/w1a3/ and …/w1a4/."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.slash.library",
+      "source_sha256": "0f8615f2ed9ffaf3aeb0288a4ff4b8fc8becd46017a931db9d4b3d9ec32fce46",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "es W1 backfill: 2 keys. Translated by an `i18n-translator` agent and audited by a different `i18n-auditor` agent (both sessions on the `radient/auto` route after provider-quota fallbacks — disclosed, not pinned). This namespace's bytes did NOT move during remediation: round 1 (`w1a2`) and round 2 (`w1a3`, a full pass) both read the same file, and `w1a3` binds exactly the shipped bytes with 0 unresolved blocker/major. Evidence: i18n/audits/evidence/es/wire.slash.library/w1a2/ and …/w1a3/. Open minor/nit findings are dispositioned in the w1a3 report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.tunnel_setup",
+      "source_sha256": "3854be7dce54dd3aeb9564921ed6a50f0560b32c7ac40955d81be93acd7e2ac1",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "es W1 backfill: 5 keys. Translated by an `i18n-translator` agent and audited by a different `i18n-auditor` agent (both sessions on the `radient/auto` route after provider-quota fallbacks — disclosed, not pinned). Independent full-pass audit `w1a3` (round 2) binds exactly these bytes: 0 unresolved blocker/major. Round 1 (`w1a1`/`w1a2`) preceded remediation and binds superseded bytes; its findings are carried in the w1a3 report. Evidence: i18n/audits/evidence/es/wire.tunnel_setup/w1a3/. Open minor/nit findings are dispositioned in that report.md."
     }
   ]
 }
