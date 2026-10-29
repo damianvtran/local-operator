@@ -159,6 +159,8 @@ class _Rec(_Source):
     plain_forms: int = 0
     #: An attachment's own byte count: the ceiling for the receipt's size slot.
     media_bytes: int = 0
+    #: The receipt slot values THIS record's own image_refs may print.
+    media_slots: frozenset[str] = frozenset()
     #: The verbs a read-only group summary may name for THIS call, derived the
     #: way the reducer derives them (`reduce_v2.call`): the tool name for a
     #: read tool, else the first word of the shell command after `cd DIR &&`.
@@ -178,10 +180,105 @@ def _media_bytes(content: Any) -> int:
     total = 0
     for block in content if isinstance(content, list) else []:
         if isinstance(block, dict) and block.get("type") == "image_ref":
-            size = block.get("bytes")
-            if isinstance(size, int) and not isinstance(size, bool) and size > 0:
+            size = _json_int(block.get("bytes"))
+            if size:
                 total += size
     return total
+
+
+def _json_str(value: Any) -> str:
+    """A JSON value as a string, or "" — pyright cannot narrow `dict.get`."""
+    return value if isinstance(value, str) else ""
+
+
+def _json_int(value: Any) -> int:
+    """A JSON value as a small non-negative int, or 0 (`_small_int`'s rule)."""
+    return value if _small_int(value) else 0
+
+
+def _render_bytes(size: int) -> str:
+    """`reduce_v2._bytes`, mirrored: `274 B`, `18.4 kB`, `2.1 MB`."""
+    if size < 1000:
+        return f"{size} B"
+    if size < 1_000_000:
+        return f"{size / 1000:.1f} kB"
+    return f"{size / 1_000_000:.1f} MB"
+
+
+def _row_media_slots(content: Any) -> frozenset[str]:
+    """The slot VALUES one row's own image_refs may print in a receipt.
+
+    Bound PER REF, not span-wide (security round 8, S-24): admitting every
+    value the span holds let an epoch pair A's digest with B's mime and
+    dimensions. Each value is the reducer's own rendering of THAT block's
+    fields, under the reducer's own grammar bounds (`_MIME_RE`, `_small_int`),
+    so a forged or transplanted value has nothing to match (S-25: the size is
+    the exact `_bytes()` string, never a value within a tolerance of it).
+    """
+    out: set[str] = set()
+    for block in content if isinstance(content, list) else []:
+        if not isinstance(block, dict) or block.get("type") != "image_ref":
+            continue
+        mime = _json_str(block.get("mime"))
+        if mime and _MIME_RE.fullmatch(mime):
+            out.add(mime)
+        width, height = _json_int(block.get("width")), _json_int(block.get("height"))
+        if width and height:
+            out.add(f"{width}x{height}")
+        size = _json_int(block.get("bytes"))
+        if size:
+            out.add(_render_bytes(size))
+    return frozenset(out)
+
+
+def _media_receipts(span: Sequence[dict[str, Any]]) -> list[str]:
+    """The receipt lines `reduce_v2.media_receipt` writes for this span's images.
+
+    THE NON-AMPLIFICATION DENOMINATOR HAS TO COUNT THESE. `parts` holds text
+    blocks, so an image row contributed NOTHING to the span side while the
+    epoch carries ~49 cl100k tokens of receipt for it: 3 images measured 0.898x
+    accepted and 4 images 1.126x refused on an honest epoch, and a refusal is
+    charged at full (security round 8, S-27). The receipt is a function of the
+    span's own image_ref fields — mime, dimensions, bytes, digest, url — so
+    rendering it here adds only what the client really sent.
+
+    Mirrored from the reducer in order: the FIRST occurrence of a digest gets
+    the full receipt, a repeat gets the "same as an earlier attachment" form.
+    `seen` is always false for the first occurrence because a span is measured
+    from an empty dedupe context.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for row in span:
+        content = row.get("content")
+        for block in content if isinstance(content, list) else []:
+            if not isinstance(block, dict) or block.get("type") != "image_ref":
+                continue
+            raw = block.get("sha256")
+            digest = raw[:12] if isinstance(raw, str) and _DIGEST_FULL.fullmatch(raw) else "invalid"
+            mime = _json_str(block.get("mime"))
+            kind = mime if _MIME_RE.fullmatch(mime) else "media"
+            width, height = _json_int(block.get("width")), _json_int(block.get("height"))
+            dims = f" {width}x{height}" if width and height else ""
+            size = _json_int(block.get("bytes"))
+            bytes_note = _render_bytes(size) + " " if size else ""
+            sense = "audible" if kind.startswith("audio") else "visible"
+            if digest in seen:
+                out.append(
+                    f"[radient:{kind} sha256={digest} — same as an earlier attachment; "
+                    f"not {sense} now]"
+                )
+                continue
+            seen.add(digest)
+            what = "image" if kind.startswith("image") or kind == "media" else kind
+            url = _json_str(block.get("url"))
+            url_note = f" url={url}" if _URL_SAFE_RE.fullmatch(url) else ""
+            out.append(
+                f"[radient:{what} omitted — {kind}{dims} {bytes_note}sha256={digest}"
+                f"{url_note}; it was {sense} when first sent and is not {sense} now; "
+                f"describe it only from what was said about it]".replace("  ", " ")
+            )
+    return out
 
 
 def _texts(content: Any) -> list[str]:
@@ -279,6 +376,7 @@ def source_records(
                 chars=len(text),
                 block_types=types,
                 media_bytes=_media_bytes(row.get("content")),
+                media_slots=_row_media_slots(row.get("content")),
             )
             records["error" if failed else "result"].append(rec)
             call_position = calls.get(str(row.get("tool_call_id", "")))
@@ -299,6 +397,7 @@ def source_records(
                     # onto the call line (`call read: … [radient:image …]`).
                     block_types=call.block_types | rec.block_types,
                     media_bytes=call.media_bytes + rec.media_bytes,
+                    media_slots=call.media_slots | rec.media_slots,
                     merged_with=identity,
                 )
         else:
@@ -332,6 +431,7 @@ def source_records(
                             chars=0,
                             block_types=frozenset({"image_ref"}),
                             media_bytes=_media_bytes([block]),
+                            media_slots=_row_media_slots([block]),
                         )
                     )
         for call in row.get("tool_calls") or []:
@@ -729,6 +829,19 @@ _TEMPLATE_WORDS = frozenset("""
 #: A 12-hex digest: the reducer's `sha256=H12` slot. Must be derived from the
 #: span's own bytes (a media digest or a `_b64_note` digest), never arbitrary.
 _HEX12 = re.compile(r"[0-9a-f]{12}")
+#: A full digest as `media_receipt` accepts it before truncating to 12 chars.
+_DIGEST_FULL = re.compile(r"[0-9a-f]{12,64}")
+#: `reduce_v2._MIME_RE` / `_URL_SAFE_RE`: a receipt field is client-supplied
+#: JSON, so it must match its grammar before it can become a record or a slot.
+_MIME_RE = re.compile(r"[a-z]{1,20}/[A-Za-z0-9.+-]{1,60}")
+_URL_SAFE_RE = re.compile(r"https?://[A-Za-z0-9._~:/?#@!$&'()*+,;=%-]{1,300}")
+
+
+def _small_int(value: Any, limit: int = 100_000) -> bool:
+    """`reduce_v2._small_int`: a plain non-negative int under `limit` (no bool)."""
+    return isinstance(value, int) and not isinstance(value, bool) and 0 <= value < limit
+
+
 #: Slot-token shapes that are allowed without being source text, but bounded.
 #: The reducer's `_size()` forms: `812`, `11.2k`, `1.5`.
 _NUMBER = re.compile(r"\d{1,9}(?:\.\d)?k?")
@@ -911,7 +1024,12 @@ def _check_slots(
         # text than the span holds.
         ceiling = span_bound if _DEDUPE.match(text) else bound
         tokens = _slot_tokens(text)
+        #: Indexes of tokens a preceding one already accounted for (a size's
+        #: unit word is part of the size, not a slot of its own).
+        claimed: set[int] = set()
         for position, token in enumerate(tokens):
+            if position in claimed:
+                continue
             if _NUMBER.fullmatch(token):
                 # `11.2k` is a size; compare its magnitude, never the literal.
                 # `_size()` rounds to one decimal, so a size may exceed the
@@ -922,7 +1040,18 @@ def _check_slots(
                 # forged size passed the ceiling (the mutation row for the
                 # attachment's byte ceiling stayed green until this).
                 unit = tokens[position + 1] if position + 1 < len(tokens) else ""
-                scale = _UNIT_SCALE.get(unit, 1000 if token.endswith("k") else 1)
+                if unit in _UNIT_SCALE:
+                    # A BYTE SIZE IN A RECEIPT IS EXACT (S-25). `_bytes()` is a
+                    # fixed rendering of the attachment's own `bytes`, so there
+                    # is no rounding step to allow for: the value must be one
+                    # this record's own image_ref prints. The old rule accepted
+                    # anything within `ceiling * 1.05 + 64`, which let a forged
+                    # `9.9 MB` sit inside a 1.2 MB attachment's ceiling.
+                    if f"{token} {unit}" not in record.media_slots:
+                        raise SaverRejected("provenance")
+                    claimed.add(position + 1)
+                    continue
+                scale = 1000 if token.endswith("k") else 1
                 if float(token.rstrip("k")) * scale > ceiling * 1.05 + 64:
                     raise SaverRejected("provenance")
                 continue
@@ -930,7 +1059,7 @@ def _check_slots(
                 if token in media or token in derived or token in record.text:
                     continue
                 raise SaverRejected("provenance")
-            if token in record.block_types or token in media:
+            if token in record.block_types or token in record.media_slots:
                 continue
             if scans[0] <= 0:
                 raise SaverRejected("busy")
@@ -1487,7 +1616,12 @@ def check_records(
     # it replaced (S-18's second half). It runs before the mapping so a cost
     # violation is NAMED as one; behind the mapping the candidate-try cap
     # refused the same epoch as `busy`, which reads as "retry later".
-    span_text = "\n".join(parts)
+    # The span side is the text the reducer reads PLUS one receipt line per
+    # image it carries: `parts` holds text blocks, so without these an image row
+    # added nothing to the denominator while the epoch paid ~49 cl100k tokens of
+    # receipt for it (S-27). Appended after the text because only the total is
+    # compared.
+    span_text = "\n".join(list(parts) + _media_receipts(span))
     if _ruler_tokens(text) >= _ruler_tokens(span_text):
         raise SaverRejected("provenance")
     # THE DISCLOSURE CHANNEL, charged on BOTH sides and only once the epoch's

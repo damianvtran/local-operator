@@ -25,9 +25,7 @@ def test_auto_never_resolves_on() -> None:
 def test_an_explicit_session_choice_still_wins_over_the_auto_refusal() -> None:
     """`opt_in` is unaffected, and a session that explicitly asked is not `auto`."""
     assert resolve_saver({"radient": {"saver": {"mode": "opt_in"}}}, _READY).source == "default"
-    chosen = resolve_saver(
-        {"radient": {"saver": {"mode": "auto"}}}, _READY, session_choice=True
-    )
+    chosen = resolve_saver({"radient": {"saver": {"mode": "auto"}}}, _READY, session_choice=True)
     assert chosen.on is True and chosen.source == "session"
 
 
