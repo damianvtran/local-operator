@@ -84,11 +84,13 @@ import logging
 import os
 import shutil
 import stat
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, NamedTuple
 
+from local_operator.paths import DEFAULT_CONFIG_DIRNAME
 from local_operator.session import compression
 from local_operator.session.retention import (
     _SIDECAR_NAMES,
@@ -240,6 +242,40 @@ STORE_MARKER_NAME = ".local-operator-store"
 #: ``enabled``) or ``"cli"`` (``lop sessions cleanup``), which is the first
 #: question after "why": who did it.
 CLEANUP_LOG_NAME = ".cleanup-log.jsonl"
+
+#: Env var that lets a TEST PROCESS delete from the operator's own store.
+#:
+#: WHY A VARIABLE AND NOT A CONFIG KEY: the run this guard refuses is not a
+#: user asking for something, it is a test rig that reached the wrong store.
+#: The exception therefore has to be visible in the command that grants it
+#: (``env LOCAL_OPERATOR_ALLOW_TEST_STORE_DELETIONS=1 pytest …``) rather than
+#: buried in a settings file the operator cannot see. Values accepted are
+#: :data:`_TRUTHY` and nothing else — ``"0"``, ``"false"`` and the empty
+#: string are NOT an opt-in, because the guard reads this variable only to
+#: find an ENABLED override, never to find a disabled one.
+ALLOW_TEST_STORE_DELETIONS_ENV = "LOCAL_OPERATOR_ALLOW_TEST_STORE_DELETIONS"
+
+#: The only spellings that opt a test process in (case-insensitive).
+_TRUTHY = frozenset({"1", "true", "yes", "on"})
+
+#: Path from a home directory to the ``sessions/`` store that lives under it,
+#: spelled once for :func:`_live_session_stores`. Built from the same two names
+#: every other reader uses instead of a literal ``".local-operator/sessions"``.
+LIVE_STORE_RELATIVE = (DEFAULT_CONFIG_DIRNAME, SESSIONS_DIRNAME)
+
+#: Modules whose PRESENCE means this interpreter is a test run. ``PYTEST_
+#: CURRENT_TEST`` covers the per-test phase and is the primary signal; these
+#: two cover collection, session fixtures and teardown, where that variable is
+#: already unset but the process is still pytest.
+_TEST_RUN_MODULES = ("pytest", "_pytest")
+
+#: The ``policy`` of the row :func:`_annotate_failed_removal` appends when a
+#: receipt was written and the removal then failed. It is deliberately NOT the
+#: policy of the receipt it corrects: the census reads a row naming a session
+#: as PROOF the directory left, so a failure row carrying the original policy
+#: would have explained away a later, genuinely unrecorded disappearance.
+#: ``census._NON_REMOVAL_POLICIES`` carries this value for that reason.
+REMOVAL_FAILED_POLICY = "removal-failed"
 
 #: Where a committed mesh handoff parks the source directory until it is deleted
 #: (``<config>/network/handed-away/``), and how long an entry may sit there before
@@ -881,6 +917,121 @@ def mark_store(sessions_dir: Path) -> None:
         logger.debug("session cleanup: cannot mark store %s: %s", sessions_dir, exc)
 
 
+def _truthy_opt_in(value: str | None) -> bool:
+    """Whether ``value`` is an explicit opt-in (:data:`_TRUTHY`), not merely set."""
+    return value is not None and value.strip().lower() in _TRUTHY
+
+
+def _real_home() -> Path | None:
+    """The operator's home directory taken from PASSWD, not from ``$HOME``.
+
+    The isolation recipe every rig on this machine uses is ``env -i HOME=<tmp>``,
+    so ``$HOME`` is precisely the thing a redirected run has already pointed
+    somewhere else — trusting it here would make the guard agree with the run it
+    is meant to refuse. The passwd entry names the home the OPERATOR's store is
+    actually under. ``None`` on a platform without ``pwd`` (Windows), where
+    :func:`_live_session_stores` falls back to the expanduser form.
+    """
+    try:
+        import pwd
+
+        home = pwd.getpwuid(os.getuid()).pw_dir
+    except (ImportError, KeyError, OSError, AttributeError):
+        return None
+    return Path(home) if home else None
+
+
+def _live_session_stores() -> tuple[Path, ...]:
+    """Every resolved ``sessions/`` path that IS the operator's real store.
+
+    ONE SOURCE ON PURPOSE, and it is the passwd home rather than ``$HOME``.
+    Every rig on this machine isolates by pointing ``HOME`` at a scratch
+    directory (``env -i HOME=<tmp>``), and under that recipe ``$HOME`` names a
+    TEMPORARY store that the guard must clear — folding ``Path.home()`` in here
+    would refuse exactly the runs the isolation exists to make safe, which is how
+    a guard gets switched off instead of trusted. The passwd entry is the home
+    the operator's real store lives under whatever this process was told. Where
+    ``pwd`` does not exist (Windows) the expanduser form is the only answer
+    available, and it is used only there.
+
+    Resolved, and tolerant: a home that cannot be resolved is dropped rather than
+    raising, since a guard that crashes on a missing path refuses nothing at all.
+    """
+    home = _real_home()
+    if home is None:
+        home = Path(os.path.expanduser("~"))
+    try:
+        return (home.joinpath(*LIVE_STORE_RELATIVE).resolve(),)
+    except OSError:
+        return ()
+
+
+def _test_run_reason() -> str | None:
+    """Why THIS process is a test run; ``None`` when it is not one.
+
+    Three independent signals, each cheap, because the two directions cost very
+    different things: a false positive refuses a deletion that a one-word
+    environment variable lets through, while a false negative lets a test suite
+    delete from the operator's live store — which is exactly what happened on
+    2026-08-24 (a rig's suite ran against the real ``$HOME`` and a real session
+    directory was gone afterwards, with no record of which process removed it).
+
+    ``PYTEST_CURRENT_TEST`` is set by pytest for the duration of each test and is
+    the documented signal; the module check covers the phases around it (import
+    time, session fixtures, teardown) where a test process is still a test
+    process but that variable is unset; the argv check catches ``python -m
+    pytest`` launched before any import has happened.
+    """
+    current = os.environ.get("PYTEST_CURRENT_TEST")
+    if current:
+        return f"pytest is running a test (PYTEST_CURRENT_TEST={current.split(' ')[0]})"
+    for name in _TEST_RUN_MODULES:
+        if name in sys.modules:
+            return f"the pytest module is imported in this interpreter ({name})"
+    entry = os.path.basename(sys.argv[0] or "")
+    if entry.startswith(("pytest", "py.test")):
+        return f"the entry point is {entry}"
+    return None
+
+
+def _live_store_refusal(store: Path) -> str | None:
+    """Why a TEST RUN must not remove anything from ``store``; ``None`` if it may.
+
+    THE GAP THIS CLOSES (measured 2026-08-24, then again on 2026-10-29). Every
+    other guard in this module asks whether the TARGET is a legitimate store:
+    marked, directly under ``sessions/``, inside the config dir the process was
+    given. A test process handed the operator's own config dir passes all four,
+    because on paper it is doing something legal — the question nobody asked was
+    "should THIS PROCESS be touching the live store at all". A lane's pytest run
+    executed against the real ``$HOME`` that night and a real session directory
+    was gone afterwards; a receipt names the removal now (``remove_session_dir``
+    writes one before it deletes), but nothing had refused the process, so the
+    receipt recorded the loss instead of preventing it.
+
+    ``store`` is the ALREADY-RESOLVED ``sessions/`` directory: :func:`_refusal`
+    has resolved it before calling, so a symlink into the real store cannot
+    launder itself past this comparison either.
+
+    FAIL CLOSED, and the refusal names the escape hatch: an unmarked path that
+    merely LOOKS live is not this guard's problem (the marker check precedes it),
+    but a marked live store under a test run is refused with the variable that
+    grants the exception spelled out, because a refusal an operator cannot act on
+    is how a guard gets deleted instead of understood.
+    """
+    if _truthy_opt_in(os.environ.get(ALLOW_TEST_STORE_DELETIONS_ENV)):
+        return None
+    test_run = _test_run_reason()
+    if test_run is None:
+        return None
+    if store in _live_session_stores():
+        return (
+            f"this is the operator's LIVE store {store} and this process is a test run "
+            f"({test_run}); point the run at a temporary store, or set "
+            f"{ALLOW_TEST_STORE_DELETIONS_ENV}=1 to allow this one deliberately"
+        )
+    return None
+
+
 def _refusal(target: Path, config_dir: Path | None) -> str | None:
     """Why :func:`remove_session_dir` must not touch ``target``; ``None`` if it may.
 
@@ -911,6 +1062,13 @@ def _refusal(target: Path, config_dir: Path | None) -> str | None:
         return f"not directly under a '{SESSIONS_DIRNAME}/' directory"
     if not store_marker_path(parent).is_file():
         return f"store carries no {STORE_MARKER_NAME} marker"
+    # BEFORE the config-dir comparison, deliberately: a test process handed the
+    # operator's real config dir passes that comparison, and "this is the live
+    # store and you are a test run" is the more actionable sentence of the two
+    # once both are true.
+    live_test_run = _live_store_refusal(parent)
+    if live_test_run is not None:
+        return live_test_run
     if config_dir is not None:
         try:
             expected = (config_dir / SESSIONS_DIRNAME).resolve()
@@ -1011,6 +1169,13 @@ def remove_session_dir(
         "actor": actor,
         "pid": os.getpid(),
         "path": os.fspath(target.absolute()),
+        # WHICH guards cleared it, named rather than implied. Before this the row
+        # recorded the DECISION (policy/reason/actor) but not the gate that
+        # allowed it, so a reader could not tell an ordinary removal from one
+        # that had also passed the operator-hold check or survived the store
+        # identity proof. Both gates run on every removal here, so both are
+        # named; a future gate must add itself to this list.
+        "guards": ["refusal", "holds"],
         **contents,
     }
     if not _append_cleanup_log(target.parent, record):
@@ -1042,7 +1207,30 @@ def remove_session_dir(
     # The bounded widen-and-retry removal — the ``onexc`` hook, the pre-widen
     # fallback walk and the module's single ``rmtree`` call site — lives in
     # ``_bounded_rmtree``, shared with the scratchpad-content pass.
-    _bounded_rmtree(target)
+    try:
+        _bounded_rmtree(target)
+    except BaseException as exc:
+        # THE RECEIPT ABOVE ALREADY EXISTS, and a removal that did not happen must
+        # not be described by it as one that did. The log is append-only, so the
+        # correction is a FOLLOWING row rather than a withdrawal — rewriting the
+        # previous line would lose it if this process died mid-rewrite, which is
+        # the same reason the receipt is written first. ``BaseException`` on
+        # purpose: a KeyboardInterrupt inside the walk leaves the directory on
+        # disk, and a receipt claiming otherwise is wrong whichever signal caused
+        # it. The row is re-raised through unchanged so callers still see the
+        # failure they always did.
+        _annotate_failed_removal(target.parent, record, exc)
+        raise
+    if config_dir is not None:
+        # The two DERIVED sidecars keyed by this session id live OUTSIDE the
+        # directory (they are written outside it on purpose — see
+        # ``session_files/ledger.py`` on reordering the recency-ranked list), so
+        # nothing under ``target`` ever contained them and no removal ever took
+        # them. Measured on the reference host 2026-10-29: 6,767
+        # ``cache/session_files/*.json`` against 3,442 session directories, and
+        # 4,261 ``wakes/spooled/.*.lock`` files with ZERO spooled rows — pure
+        # accumulation of files keyed to conversations that are gone.
+        _drop_session_sidecars(config_dir, target.name)
     if config_dir is not None:
         # The ask INDEX lives OUTSIDE the session directory (see
         # ``asks/store.py`` on why the cross-session view cannot be a scan of
@@ -1070,6 +1258,120 @@ def remove_session_dir(
         except Exception:  # noqa: BLE001 — retention is the backstop
             logger.debug("session cleanup: could not drop the inbox items", exc_info=True)
     return True
+
+
+def _annotate_failed_removal(
+    sessions_dir: Path, record: dict[str, Any], exc: BaseException
+) -> None:
+    """Append the row that says the receipt above it did NOT happen. Never raises.
+
+    WHY A SECOND ROW AND NOT A REWRITE: the log is append-only because the first
+    write has to survive the process that made it. Editing the receipt in place
+    would lose the whole line if this process died during the edit — the failure
+    mode the ordering exists to prevent — so the correction is a following row
+    that points back at the receipt it corrects (``receipt_at``) and names the
+    policy and reason that receipt carried (``failed_policy``/``failed_reason``).
+
+    THE POLICY IS :data:`REMOVAL_FAILED_POLICY`, not the original: the census
+    reads any row naming a session as proof the directory left, so a failure row
+    that kept the original policy would silently explain away a LATER, genuinely
+    unrecorded disappearance. ``census._NON_REMOVAL_POLICIES`` excludes it.
+
+    Swallowing here is deliberate and narrow: this runs on the failure path, and
+    its own failure must not replace the exception the caller is about to see.
+    """
+    try:
+        _append_cleanup_log(
+            sessions_dir,
+            {
+                "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                "session": record.get("session", ""),
+                "policy": REMOVAL_FAILED_POLICY,
+                "reason": f"removal failed after its receipt ({type(exc).__name__})",
+                "actor": record.get("actor", ""),
+                "pid": os.getpid(),
+                "path": record.get("path", ""),
+                "failed_policy": record.get("policy", ""),
+                "failed_reason": record.get("reason", ""),
+                "receipt_at": record.get("at", ""),
+                "error": f"{type(exc).__name__}: {exc}",
+            },
+        )
+    except Exception:  # noqa: BLE001 — see the docstring: never replace the raise
+        logger.debug("session cleanup: could not annotate a failed removal", exc_info=True)
+
+
+def _drop_session_sidecars(config_dir: Path, session_id: str) -> None:
+    """Remove the per-session sidecars that live OUTSIDE the session directory.
+
+    Called once the directory is GONE, by both removers that take an established
+    session out of the store: :func:`remove_session_dir` and the source half of a
+    committed mesh move (:func:`hand_off_session_dir`). Three files, each keyed by
+    session id and each recreated from scratch if a session with that id is ever
+    built again:
+
+    * ``<config>/cache/session_files/<id>.json`` — a cache of what the directory's
+      transcript contained; past the directory it caches a scan of nothing;
+    * ``<config>/wakes/spooled/<id>.json`` — an obligation to deliver a spooled
+      turn to a conversation nobody can open any more;
+    * ``<config>/wakes/spooled/.<id>.lock`` — the mutex around writing that row.
+
+    NONE OF THEM WAS EVER INSIDE THE DIRECTORY, which is why no removal ever took
+    them: ``session_files/ledger.py`` writes the cache outside it on purpose (a
+    sidecar inside would move the directory's mtime and reorder the
+    recency-ranked list), and ``wakes/spooled.py`` keeps the spool beside the
+    store rather than in the conversation. Measured on the reference host
+    2026-10-29: 6,767 cache entries against 3,442 session directories and 4,261
+    spool locks with ZERO spooled rows.
+
+    THE LOCK IS THE ONE FILE THAT NEEDS CARE. ``wakes/lock.py`` states the rule —
+    a lock file is never unlinked by anyone while it may be contended, because a
+    waiter holding the old inode and a new writer creating a fresh one are two
+    holders of "the" lock. So it is unlinked only while THIS call holds it, and a
+    busy or unopenable one is left where it is: the same file's own argument is
+    that a writer cannot target a session directory that is not there, so a
+    leftover lock on a dead session is inert, and one that is contended right now
+    belongs to a process still finishing a write. Never raises: this runs after the
+    bytes are gone, and a leftover sidecar is bytes, not a loss.
+    """
+    try:
+        from local_operator.session_files import ledger as session_files_ledger
+
+        session_files_ledger.cache_path(config_dir, session_id).unlink()
+    except FileNotFoundError:
+        pass
+    except Exception:  # noqa: BLE001 — best effort, see the docstring
+        logger.debug("session cleanup: could not drop the file-scan cache entry", exc_info=True)
+    try:
+        from local_operator.wakes import spooled as spooled_store
+        from local_operator.wakes.lock import (
+            WakeLockBusy,
+            WakeLockUnavailable,
+            WakeWriteLock,
+        )
+
+        if spooled_store.spooled_path(config_dir, session_id).exists():
+            spooled_store.clear_spooled_turn(config_dir, session_id)
+        spooled_directory = spooled_store.spooled_dir(config_dir)
+        lock_file = spooled_directory / spooled_store.lock_name(session_id)
+        if lock_file.exists():
+            holder = WakeWriteLock(
+                spooled_directory,
+                name=spooled_store.lock_name(session_id),
+                timeout_s=0.0,
+            )
+            try:
+                with holder:
+                    lock_file.unlink()
+            except (WakeLockBusy, WakeLockUnavailable):
+                logger.debug(
+                    "session cleanup: left the spool lock for %s in place (busy or unopenable)",
+                    session_id,
+                )
+    except FileNotFoundError:
+        pass
+    except Exception:  # noqa: BLE001 — best effort, see the docstring
+        logger.debug("session cleanup: could not drop the spooled-wake sidecars", exc_info=True)
 
 
 class HandOffOutcome(NamedTuple):
@@ -1211,6 +1513,13 @@ def hand_off_session_dir(
             quarantine,
             exc_info=True,
         )
+    else:
+        # The session has LEFT this store, so its outside sidecars would be exactly
+        # as orphaned here as after a plain removal (see
+        # :func:`_drop_session_sidecars`). Only on success: a quarantined tree that
+        # could not be deleted is still this device's copy, and its cache entry is
+        # still the right answer for a recovery by hand.
+        _drop_session_sidecars(Path(config_dir), target.name)
     return HandOffOutcome(True, "")
 
 

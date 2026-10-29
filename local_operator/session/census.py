@@ -71,6 +71,7 @@ from typing import Any, Callable
 from local_operator.session.cleanup import (
     CLEANUP_LOG_NAME,
     CONTENTS_MAX_ENTRIES,
+    REMOVAL_FAILED_POLICY,
     measure_session_dir,
 )
 from local_operator.session.retention import SESSIONS_DIRNAME
@@ -109,8 +110,11 @@ UNACCOUNTED_CONTENT_POLICY = "unaccounted-content-removal"
 #: content row (``delegated_scratchpad``) or a ``hold-release`` says nothing
 #: about the directory, so neither clears a vanished session; and the census's
 #: own rows are explicitly excluded so a re-scan cannot use its own report as
-#: the explanation.
-_NON_REMOVAL_POLICIES = frozenset({"delegated_scratchpad", "hold-release"})
+#: the explanation. ``removal-failed`` is the row ``remove_session_dir`` appends
+#: when its receipt was written and the removal then FAILED: it names the session
+#: and says the directory is still there, so counting it as an explanation would
+#: let it silently cover a later, genuinely unrecorded disappearance.
+_NON_REMOVAL_POLICIES = frozenset({"delegated_scratchpad", "hold-release", REMOVAL_FAILED_POLICY})
 
 
 def census_path(sessions_dir: Path) -> Path:
