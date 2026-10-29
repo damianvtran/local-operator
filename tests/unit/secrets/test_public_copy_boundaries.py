@@ -535,6 +535,64 @@ async def test_a_ui_tree_without_the_ui_identity_is_refused(
     assert UI_VALUE not in result.text
 
 
+#: A credential a clone URL can carry in its userinfo.  Built from parts so no secret
+#: scanner reads the literal as a real token; the test only needs a string to search for.
+_ORIGIN_CREDENTIAL = "origin" + "-userinfo-" + "credential"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("maker", "path"),
+    [
+        (_ui_repo, UI_CATALOGUE),
+        (_mobile_repo, MOBILE_MAP),
+        (_mobile_repo, UI_KEYS),
+        (_ui_repo, MOBILE_MAP),
+    ],
+    ids=[
+        "shared-root-from-ui",
+        "mobile-map-from-mobile",
+        "ui-map-from-mobile",
+        "mobile-map-from-ui",
+    ],
+)
+@pytest.mark.parametrize(
+    "origin",
+    [
+        f"https://user:{_ORIGIN_CREDENTIAL}@github.com/someone/else.git",
+        f"https://{_ORIGIN_CREDENTIAL}@github.com/someone/else",
+    ],
+    ids=["user-and-password", "token-as-user"],
+)
+async def test_the_refusal_never_echoes_a_credential_bearing_origin_url(
+    maker, path: str, origin: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The refusal sentence reaches the model, so it must not carry the raw origin.
+
+    An origin URL can embed a credential in its userinfo.  The refusal names only
+    the parsed ``owner/repo``; a mutation that interpolated the raw URL into the
+    sentence left every other test green, so the "never echo it" promise was
+    unpinned.  Every refusing root is covered, including the shared one whose
+    sentence names two identities.
+    """
+    root = maker(tmp_path, origin=origin)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+
+    result = await execute_read_public_copy(
+        "call-origin-echo",
+        {"path": path, "key": "wire.slash.credential"},
+        None,
+        None,
+        _context(root, tmp_path),
+    )
+
+    assert result.is_error
+    assert "someone/else" in result.text  # the parsed identity is what is named
+    assert _ORIGIN_CREDENTIAL not in result.text
+    assert origin not in result.text
+    assert "github.com" not in result.text
+
+
 @pytest.mark.asyncio
 async def test_a_mobile_checkout_refuses_the_ui_generated_map(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

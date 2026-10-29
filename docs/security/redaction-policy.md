@@ -240,8 +240,9 @@ comment.
   does not change `HEAD`; it is served for the same reason.
 * The checkout-identity rule reads the checkout's own `origin` configuration;
   it is not a signature. A process running as the same user can rewrite
-  `remote.origin.url` and claim the UI identity, just as it can reach the files
-  with `bash`. The rule removes the accidental/unreviewed-tree class — a
+  `remote.origin.url` and claim the UI or the mobile identity (either opens
+  the shared `src/i18n/catalogues/` root), just as it can reach the files with
+  `bash`. The rule removes the accidental/unreviewed-tree class — a
   `src/i18n/` tree in an unrelated project no longer qualifies — and the audit
   log records use; it is not a sandbox against a same-user process.
 * The audit log is append-only by construction, not tamper-proof: a process
