@@ -9386,6 +9386,54 @@
       },
       "status": "passed",
       "note": "w2 es backfill: 17 keys; independent audit w2a1 passed (committed evidence i18n/audits/evidence/es/cli.wake_help/w2a1/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "ru",
+      "namespace": "relay.shell",
+      "source_sha256": "f53b23560b88b531ef8fc3274bc396676f26e755ad4ff9ad87ce368cebdee560",
+      "translator": {
+        "agent": "i18n-translator (lopdev lane, session 736ae0f34230)",
+        "model": "anthropic/claude-opus-5-5 (pinned; the harness disclosed provider-quota fallbacks to claude-sonnet-5-5, gpt-6-astra, k3.1-pro and radient/auto during the session, then returned to the pin)",
+        "date": "2026-10-29"
+      },
+      "status": "pending-independent-audit",
+      "note": "lopdev relay batch: 44 keys. Awaiting independent audit; no auditor recorded here. en Title-Case headings rendered sentence case; usage windows as neuter adjectives (5-часовое/7-дневное); allowance→лимит, paid/included split as Лимит тарифа/Платный лимит; usage-запросы plural args kept verbatim"
+    },
+    {
+      "locale": "ru",
+      "namespace": "relay.session",
+      "source_sha256": "a4ae148de969d4a2e8541aca5b4b99ad311d9ef112a0d056fc21fcf90e7e0129",
+      "translator": {
+        "agent": "i18n-translator (lopdev lane, session 736ae0f34230)",
+        "model": "anthropic/claude-opus-5-5 (pinned; the harness disclosed provider-quota fallbacks to claude-sonnet-5-5, gpt-6-astra, k3.1-pro and radient/auto during the session, then returned to the pin)",
+        "date": "2026-10-29"
+      },
+      "status": "pending-independent-audit",
+      "note": "lopdev relay batch: 17 keys. Awaiting independent audit; no auditor recorded here. lowercase placeholders and button labels kept lowercase; conversation→беседа per shipped ru relay.chrome, new session→новая сессия"
+    },
+    {
+      "locale": "ru",
+      "namespace": "relay.account_policy",
+      "source_sha256": "0019b08106e6f7762194b164b9b9b37054a8cfade759aa2f6490787a73dea890",
+      "translator": {
+        "agent": "i18n-translator (lopdev lane, session 736ae0f34230)",
+        "model": "anthropic/claude-opus-5-5 (pinned; the harness disclosed provider-quota fallbacks to claude-sonnet-5-5, gpt-6-astra, k3.1-pro and radient/auto during the session, then returned to the pin)",
+        "date": "2026-10-29"
+      },
+      "status": "pending-independent-audit",
+      "note": "lopdev relay batch: 13 keys. Awaiting independent audit; no auditor recorded here. account routing→маршрутизация аккаунтов (аккаунт per shipped ru copy); error keeps the unknown-commit sense (не удалось подтвердить) distinct from rejected (не сохранено)"
+    },
+    {
+      "locale": "ru",
+      "namespace": "relay.library",
+      "source_sha256": "ad478c433a4db3e725994766c724a2e8e92176f015f8283e71dc13b87185466a",
+      "translator": {
+        "agent": "i18n-translator (lopdev lane, session 736ae0f34230)",
+        "model": "anthropic/claude-opus-5-5 (pinned; the harness disclosed provider-quota fallbacks to claude-sonnet-5-5, gpt-6-astra, k3.1-pro and radient/auto during the session, then returned to the pin)",
+        "date": "2026-10-29"
+      },
+      "status": "pending-independent-audit",
+      "note": "lopdev relay batch: 1 keys. Awaiting independent audit; no auditor recorded here. asset→материал (few/many genitives 2/5 checked); «ассет» rejected as jargon with no shipped ru precedent"
     }
   ]
 }
