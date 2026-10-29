@@ -1,0 +1,18 @@
+import os, subprocess, sys
+from pathlib import Path
+root=Path.cwd();pad=Path(os.environ['LOCAL_OPERATOR_SCRATCHPAD'])
+iso=pad/'work'/'isolated-check-home';iso.mkdir(exist_ok=True)
+env={'PATH':os.environ['PATH'],'HOME':str(iso),'LOCAL_OPERATOR_CONFIG_DIR':str(iso/'.local-operator'),'GIT_CONFIG_SYSTEM':'/dev/null','GIT_TERMINAL_PROMPT':'0','GIT_ASKPASS':'/usr/bin/false','PYTHONDONTWRITEBYTECODE':'1'}
+py='/Users/damian/local-operator/.venv/bin/python'
+with (pad/'work'/'checks-after.log').open('w') as log:
+ for cmd in [[py,'scripts/i18n/check.py','--catalogues-only'],[py,'scripts/i18n/check.py'],[py,'scripts/i18n/generate.py','--check']]:
+  log.write('$ '+' '.join(cmd)+'\n');log.flush()
+  result=subprocess.run(cmd,cwd=root,env=env,capture_output=True,text=True,timeout=300)
+  log.write(result.stdout+result.stderr+'[exit '+str(result.returncode)+']\n\n');log.flush()
+  print(cmd[-1],result.returncode,flush=True)
+ # No generation write: deriving the expected publication set is read-only.
+ cmd=[py,'-c','from scripts.i18n.generate import _shipped_locales; print(_shipped_locales())']
+ log.write('$ '+' '.join(cmd)+'\n')
+ result=subprocess.run(cmd,cwd=root,env=env,capture_output=True,text=True,timeout=120)
+ log.write(result.stdout+result.stderr+'[exit '+str(result.returncode)+']\n')
+ print('eligibility',result.stdout.strip(),flush=True)

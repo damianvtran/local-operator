@@ -565,7 +565,7 @@ def test_a_stored_secret_cannot_admit_a_device_even_without_a_purpose(
     code, fed = _sudo_secret_install(tmp_path, monkeypatch, *staged)
 
     assert code == 2 and fed == []
-    assert "admits a device" in capsys.readouterr().err
+    assert "confirms a phone" in capsys.readouterr().err
 
 
 def test_a_stored_secret_may_still_revoke_a_device(

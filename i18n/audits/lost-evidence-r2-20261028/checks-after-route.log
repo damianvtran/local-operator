@@ -1,0 +1,25 @@
+$ /Users/damian/local-operator/.venv/bin/python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+[exit 0]
+
+$ /Users/damian/local-operator/.venv/bin/python scripts/i18n/check.py
+advisory: local_operator/memory_cli.py: 81 literal(s) against a ceiling of 39
+advisory: local_operator/memory_maintenance.py: 3 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/memory_triage.py: 10 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/procname.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/session_factory.py: 16 literal(s) against a ceiling of 15
+advisory: local_operator/supervisors.py: 9 literal(s) against a ceiling of 6
+advisory: local_operator/update.py: 57 literal(s) against a ceiling of 53
+check.py: ok — 34 file(s) scanned, 872 literal(s) at or below the baseline, catalogues consistent; 7 advisory finding(s) (report-only until activated)
+[exit 0]
+
+$ /Users/damian/local-operator/.venv/bin/python scripts/i18n/generate.py --check
+generate.py --check: committed artifacts are stale — regenerate with
+  .venv/bin/python scripts/i18n/generate.py
+(the emitter is pinned to Node 24 — CI's setup-node major — and its output is normalised to be node-major stable; see the note in scripts/i18n/emit.mjs)
+  changed: local_operator/i18n/data/shipped.json
+[exit 1]
+
+$ /Users/damian/local-operator/.venv/bin/python -c from scripts.i18n.generate import _shipped_locales; print(_shipped_locales())
+['en', 'fr', 'es', 'zh-CN', 'ur']
+[exit 0]

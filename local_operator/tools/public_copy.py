@@ -29,24 +29,31 @@ an argument the caller supplies, so another tool cannot borrow it.
 
 WHICH CHECKOUTS
 ---------------
-Two separate checkouts publish copy through this route: this repository
-(``local_operator/i18n/...`` plus the mobile web key maps) and the companion
-UI repository (``src/i18n/catalogues/*/*.json`` and ``src/i18n/keys.gen.ts``).
-The UI checkout is a different repository, but its committed product copy is
-equally public — an auditor has to be able to read a catalogue key where it
-lives, and the alternative is the workaround this route exists to replace. The
-roots stay an EXACT GLOB LIST in both checkouts: no directory rule
-(``src/i18n/*``) and no extension rule (``*.json`` under any root), because
-either would admit files nobody reviewed as public copy. The commit-clean /
-``HEAD``-blob / audit-log requirements below apply equally to both.
+Three separate checkouts publish copy through this route: this repository
+(``local_operator/i18n/...`` plus the mobile web key maps) and the two consumer
+apps that ship their own translated copy — the companion UI repository
+(``src/i18n/catalogues/*/*.json`` and ``src/i18n/keys.gen.ts``) and the companion
+mobile repository (``src/i18n/catalogues/*/*.json`` and
+``src/i18n/catalogue.gen.ts``). A consumer checkout is a different repository,
+but its committed product copy is equally public — an auditor has to be able to
+read a catalogue key where it lives, and the alternative is the workaround this
+route exists to replace. The roots stay an EXACT GLOB LIST in all three
+checkouts: no directory rule (``src/i18n/*``) and no extension rule (``*.json``
+under any root), because either would admit files nobody reviewed as public
+copy. The commit-clean / ``HEAD``-blob / audit-log requirements below apply
+equally to all three.
 
 The ``src/`` roots are additionally bound to checkout identity: they are
-exposed only when the workspace's ``origin`` remote names the UI repository and
-the workspace is the root of its checkout. A path is not an identity — any
-repository, including one created on the spot, can hold a ``src/i18n/`` tree —
-so ``git remote get-url origin`` must resolve to :data:`UI_REPOSITORY`. The gate
-lives in :func:`_committed_public_copy`; ``docs/security/redaction-policy.md``
-states the exact rule and the same-UID residual.
+exposed only when the workspace's ``origin`` remote names the consumer
+repository that OWNS that root, and the workspace is the root of its checkout.
+A path is not an identity — any repository, including one created on the spot,
+can hold a ``src/i18n/`` tree — so ``git remote get-url origin`` must parse to
+the identity :data:`_CONSUMER_CHECKOUTS` binds to the path. The binding is per
+checkout, not one shared list, because both apps generated compiled manifests
+under ``src/i18n/`` and the UI's map must not be served from a mobile checkout
+nor the reverse; the gate lives in :func:`_committed_public_copy`;
+``docs/security/redaction-policy.md`` states the exact rule and the same-UID
+residual.
 
 THE TRUST BOUNDARY
 ------------------
@@ -85,40 +92,50 @@ TOOL_NAME = "read_public_copy"
 #: Public-copy roots, relative to the session working directory (the checkout).
 #: These are the only paths this reader will open.  No directory rule and no
 #: extension rule: an exact glob list, so adding a root is a reviewed policy
-#: change rather than an accident.  The list spans two checkouts — this
-#: repository and the companion UI repository — because both publish committed
-#: product copy; a session resolves the roots against its own working directory,
-#: so each checkout only ever exposes its own copy.
+#: change rather than an accident.  The list spans three checkouts — this
+#: repository and the two consumer apps — because all publish committed product
+#: copy; a session resolves the roots against its own working directory, so each
+#: checkout only ever exposes its own copy.
 #:
-#: The `src/` roots additionally require checkout IDENTITY (:data:`UI_REPOSITORY`):
-#: a path shape is not an identity, and any repository — including one the agent
-#: creates itself — can contain a `src/i18n/` tree (review S-1).
+#: This tuple is the reviewed INVENTORY, not the binding: which checkout may
+#: serve which `src/` root lives in :data:`_CONSUMER_CHECKOUTS`.
+#:
+#: The `src/` roots additionally require checkout IDENTITY
+#: (:data:`_CONSUMER_CHECKOUTS`): a path shape is not an identity, and any
+#: repository — including one the agent creates itself — can contain a
+#: `src/i18n/` tree (review S-1).
 PUBLIC_COPY_GLOBS: tuple[str, ...] = (
     # This repository: TUI/server catalogues, key modules and mobile web maps.
     "local_operator/i18n/catalogues/*/*.json",
     "local_operator/i18n/keys/*.py",
     "local_operator/mobile/web/src/i18n/keys.gen.ts",
     "local_operator/mobile/web/src/i18n/bundled.gen.ts",
-    # The companion UI checkout: a separate repository whose committed product
-    # copy is equally public.  Its roots are spelled from that checkout's own
-    # root, so they cannot alias a path inside this repository.
+    # The consumer checkouts: separate repositories whose committed product copy
+    # is equally public.  Their roots are spelled from each checkout's own root,
+    # so they cannot alias a path inside this repository.  The catalogue root is
+    # shared — both apps keep `catalogues/<locale>/<key>.json` — while the
+    # generated map differs per app and is bound per app below.
     "src/i18n/catalogues/*/*.json",
     "src/i18n/keys.gen.ts",
+    "src/i18n/catalogue.gen.ts",
 )
 
-#: The companion UI checkout's repository identity.  The `src/` roots are served
-#: only when the workspace's `origin` remote names this repository: any checkout
-#: can contain a `src/i18n/` tree, so the path alone must not lift redaction
-#: (review S-1).  A fork that wants the same treatment belongs in this list, in
-#: review — not in a path rule.
+#: The consumer checkouts' repository identities.  A `src/` root is served only
+#: when the workspace's `origin` remote parses to the identity that owns it: any
+#: checkout can contain a `src/i18n/` tree, so the path alone must not lift
+#: redaction (review S-1).  A fork that wants the same treatment belongs in this
+#: list, in review — not in a path rule.
 UI_REPOSITORY = "damianvtran/local-operator-ui"
+MOBILE_REPOSITORY = "damianvtran/local-operator-mobile"
 
 #: The same list as anchored patterns. ``fnmatch``'s ``*`` crosses ``/``, which
 #: would admit ``catalogues/a/b/c.json``; these do not. Kept beside the globs so
-#: the human-readable list and the enforcement list are edited together.  The
-#: UI patterns are a separate tuple because they carry the identity requirement
-#: above; :data:`_PUBLIC_COPY_PATTERNS` is their concatenation and no call site
-#: matches against the UI tuple alone except the identity gate itself.
+#: the human-readable list and the enforcement list are edited together.
+#:
+#: The `src/` patterns are grouped per checkout because the identity gate is per
+#: checkout: a mobile checkout must not serve the UI's generated map, and the
+#: reverse.  The shapes are defined once and referenced from both groups, so the
+#: catalogue root cannot drift between the two apps.
 _CORE_PUBLIC_COPY_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"local_operator/i18n/catalogues/[^/]+/[^/]+\.json"),
     re.compile(r"local_operator/i18n/keys/[^/]+\.py"),
@@ -126,15 +143,36 @@ _CORE_PUBLIC_COPY_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"local_operator/mobile/web/src/i18n/bundled\.gen\.ts"),
 )
 
+#: Anchored at ``src/``, so a lookalike deeper in a tree
+#: (``vendor/src/i18n/keys.gen.ts``) is still refused.
+_SRC_CATALOGUE_PATTERN = re.compile(r"src/i18n/catalogues/[^/]+/[^/]+\.json")
+_UI_MAP_PATTERN = re.compile(r"src/i18n/keys\.gen\.ts")
+_MOBILE_MAP_PATTERN = re.compile(r"src/i18n/catalogue\.gen\.ts")
+
 _UI_PUBLIC_COPY_PATTERNS: tuple[re.Pattern[str], ...] = (
-    # Anchored at ``src/``, so a lookalike deeper in a tree
-    # (``vendor/src/i18n/keys.gen.ts``) is still refused.
-    re.compile(r"src/i18n/catalogues/[^/]+/[^/]+\.json"),
-    re.compile(r"src/i18n/keys\.gen\.ts"),
+    _SRC_CATALOGUE_PATTERN,
+    _UI_MAP_PATTERN,
 )
 
-_PUBLIC_COPY_PATTERNS: tuple[re.Pattern[str], ...] = (
-    _CORE_PUBLIC_COPY_PATTERNS + _UI_PUBLIC_COPY_PATTERNS
+_MOBILE_PUBLIC_COPY_PATTERNS: tuple[re.Pattern[str], ...] = (
+    _SRC_CATALOGUE_PATTERN,
+    _MOBILE_MAP_PATTERN,
+)
+
+#: Which identity may publish which `src/` root.  ``(identity, description,
+#: patterns)``: the description is what the refusal sentence names, so a caller
+#: who used the wrong checkout is told which checkout the root belongs to without
+#: the raw URL (which can embed a credential).  Ordered, so a refusal for a root
+#: two checkouts share names them in a stable order.
+_CONSUMER_CHECKOUTS: tuple[tuple[str, str, tuple[re.Pattern[str], ...]], ...] = (
+    (UI_REPOSITORY, "companion UI checkout", _UI_PUBLIC_COPY_PATTERNS),
+    (MOBILE_REPOSITORY, "mobile app checkout", _MOBILE_PUBLIC_COPY_PATTERNS),
+)
+
+_PUBLIC_COPY_PATTERNS: tuple[re.Pattern[str], ...] = _CORE_PUBLIC_COPY_PATTERNS + (
+    _SRC_CATALOGUE_PATTERN,
+    _UI_MAP_PATTERN,
+    _MOBILE_MAP_PATTERN,
 )
 
 #: The policy document this route cites.  The tool's details carry it so a
@@ -189,9 +227,34 @@ def _matches_public_copy(relative: str) -> bool:
     return any(pattern.fullmatch(relative) for pattern in _PUBLIC_COPY_PATTERNS)
 
 
-def _requires_ui_checkout(relative: str) -> bool:
-    """Whether ``relative`` belongs to the companion UI checkout's roots."""
-    return any(pattern.fullmatch(relative) for pattern in _UI_PUBLIC_COPY_PATTERNS)
+def _publishing_checkouts(relative: str) -> tuple[tuple[str, str], ...]:
+    """The ``(identity, description)`` pairs whose checkout publishes ``relative``.
+
+    Empty for this repository's own roots: they carry no identity gate.  A root
+    shaped like a consumer app's is bound to the identity that owns it, so the
+    UI's generated map is never served from a mobile checkout and the reverse.
+    """
+    return tuple(
+        (identity, description)
+        for identity, description, patterns in _CONSUMER_CHECKOUTS
+        if any(pattern.fullmatch(relative) for pattern in patterns)
+    )
+
+
+def _checkout_refusal(relative: str, required: tuple[tuple[str, str], ...], identity: str) -> str:
+    """The refusal sentence for a ``src/`` root served from the wrong checkout.
+
+    Names the expected identity (or both, when two checkouts publish the same
+    relative root) and the parsed identity of this workspace — never the raw
+    URL, which can embed a credential and whose text reaches the model.
+    """
+    sources = " or ".join(f"the {description}'s copy" for _, description in required)
+    identities = [name for name, _ in required]
+    if len(identities) == 1:
+        requirement = f"this workspace is not {identities[0]}"
+    else:
+        requirement = f"this workspace is neither {' nor '.join(identities)}"
+    return f"{relative} is {sources}; {requirement} (origin: {identity or 'unusable'})"
 
 
 def _origin_identity(url: str) -> str:
@@ -199,10 +262,10 @@ def _origin_identity(url: str) -> str:
 
     Git hands back three shapes for a GitHub remote: the scp form
     (``git@github.com:owner/repo.git``), an ssh/https URL, or a local path.  Only
-    the last two path components matter, and only :data:`UI_REPOSITORY` matches
-    them, so a lookalike repository in another namespace does not qualify.  The
-    raw URL is never echoed: it can embed a credential, and this string reaches
-    the model-visible refusal sentence.
+    the last two path components matter, and only the identities in
+    :data:`_CONSUMER_CHECKOUTS` match them, so a lookalike repository in another
+    namespace does not qualify.  The raw URL is never echoed: it can embed a
+    credential, and this string reaches the model-visible refusal sentence.
     """
     value = url.strip().rstrip("/")
     if value.endswith(".git"):
@@ -359,7 +422,7 @@ def _read_key_source(text: str, key: str) -> str:
 
 
 def _committed_public_copy(
-    root: Path, relative: str, *, requires_ui_identity: bool = False
+    root: Path, relative: str, *, allowed_checkouts: tuple[tuple[str, str], ...] = ()
 ) -> tuple[bytes, str | None]:
     """The committed blob for ``relative``, or a refusal sentence.
 
@@ -377,9 +440,9 @@ def _committed_public_copy(
       and ``diff`` are cwd-relative while ``show HEAD:<path>`` is
       toplevel-relative, so a workspace below the toplevel could validate one
       file and serve another;
-    * the UI roots need checkout identity, not path shape (review S-1);
-      ``requires_ui_identity`` gates that check here so all git probing shares
-      one wrapper.
+    * a consumer checkout's roots need checkout identity, not path shape (review
+      S-1); ``allowed_checkouts`` gates that check here so all git probing
+      shares one wrapper.
 
     The helper is synchronous and runs off the event loop
     (:func:`execute_read_public_copy` awaits it in a thread).
@@ -406,18 +469,15 @@ def _committed_public_copy(
                 f"the workspace root {root} is not the checkout root {checkout_root}; "
                 "run read_public_copy from the checkout root"
             )
-        if requires_ui_identity:
+        if allowed_checkouts:
             origin = _git("remote", "get-url", "origin")
             identity = (
                 _origin_identity(origin.stdout.decode("utf-8", "replace"))
                 if origin.returncode == 0
                 else ""
             )
-            if identity != UI_REPOSITORY:
-                return b"", (
-                    f"{relative} is the companion UI checkout's copy; this workspace"
-                    f" is not {UI_REPOSITORY} (origin: {identity or 'unusable'})"
-                )
+            if identity not in {allowable for allowable, _ in allowed_checkouts}:
+                return b"", _checkout_refusal(relative, allowed_checkouts, identity)
         tracked = _git("ls-files", "--error-unmatch", "--", relative)
         if tracked.returncode != 0:
             return b"", f"{relative} is not committed at HEAD; commit the public copy first"
@@ -491,7 +551,10 @@ async def execute_read_public_copy(
     # working-tree difference or an untracked file; it is also why a CRLF
     # checkout works (Git's comparison, not raw byte equality).
     blob, refusal = await asyncio.to_thread(
-        _committed_public_copy, root, relative, requires_ui_identity=_requires_ui_checkout(relative)
+        _committed_public_copy,
+        root,
+        relative,
+        allowed_checkouts=_publishing_checkouts(relative),
     )
     if refusal is not None:
         return _text(tool_call_id, f"refused: {refusal}", is_error=True)
