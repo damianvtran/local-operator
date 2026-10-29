@@ -662,8 +662,14 @@ def _preflight_credentials(route: tuple[str, str], workdir: Path) -> str | None:
     provider = route[0]
     config_dir = workdir / "config"
     config_dir.mkdir(parents=True, exist_ok=True)
+    # CHECK THE STORE THE RUN WILL ACTUALLY READ. Measured 2026-10-29: this preflight
+    # constructed ``AuthStore(config_dir=...)`` with no ``db_path``, and that constructor
+    # falls back to ``default_db_path()`` — the OPERATOR's database. So it resolved the
+    # operator's own signed-in session and reported success while the run, isolated under
+    # its own HOME, found nothing and answered every request 401. A preflight that reads
+    # a different store than the run is worse than none: it certifies the wrong thing.
     try:
-        store = AuthStore(config_dir=config_dir)
+        store = AuthStore(db_path=config_dir / "auth.db", config_dir=config_dir)
         key = asyncio.run(store.get_api_key(provider, read_only=True))
     except Exception as error:  # noqa: BLE001 - an unusable store is a preflight answer
         return (

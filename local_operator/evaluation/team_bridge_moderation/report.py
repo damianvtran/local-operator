@@ -150,6 +150,15 @@ class CaseRecord:
             "facts_present": list(self.score.facts_present),
             "facts_missing": list(self.score.facts_missing),
             "detail": self.score.detail,
+            # THE CAUSE, ALWAYS. Measured 2026-10-29: a case came back invalid with no
+            # reason in the record at all - the reason lived on the score and never
+            # reached the report, so the one field a reader needs to triage an
+            # unmeasured case was the one field missing. An invalid that cannot name its
+            # cause is labelled as such rather than left blank.
+            "invalid_reason": (
+                self.score.invalid_reason
+                or ("unrecorded_invalidity" if self.score.verdict in ("not_measured", "invalid") else "")
+            ),
             "turns": [dict(turn) for turn in self.turns],
         }
 

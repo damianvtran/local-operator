@@ -65,6 +65,30 @@ LIMITATIONS: tuple[str, ...] = (
     "a measurement and never a gate",
 )
 
+#: Appended only on the hub arm. The first real hub report carried the fixture arm's
+#: "the wire is recorded, not reached" line while a real rig hub had answered a real
+#: send - a limitation that was FALSE about the run it appeared in. Arms do not share
+#: limitations any more than they share leak counts.
+HUB_ARM_LIMITATIONS: tuple[str, ...] = (
+    "the wire is the SHIPPED client against a LOCAL RIG hub, not the production service: "
+    "delivery is evidenced only because a peer account reads each sent message back, and "
+    "a send that cannot be read back is marked invalid rather than counted as delivered",
+    "transport and upstream behaviour are exercised over loopback only: TLS, retries and "
+    "server-side refusal shapes a real deployment would produce are untested here",
+)
+
+
+def limitations_for(arm: str) -> tuple[str, ...]:
+    """The limitations TRUE for this arm. Never another arm's confession."""
+
+    if arm != "hub":
+        return LIMITATIONS
+    shared = tuple(
+        item for item in LIMITATIONS
+        if not item.startswith("the wire is recorded")
+    )
+    return shared + HUB_ARM_LIMITATIONS
+
 
 @dataclass(frozen=True)
 class RunPlan:
@@ -381,7 +405,7 @@ async def _execute(plan: RunPlan, *, on_progress: Any | None = None) -> RunResul
         canary_classes=plan.dataset.workspace.canary_classes,
         repeat=plan.repeat,
         started_at=started,
-        limitations=LIMITATIONS,
+        limitations=limitations_for(plan.arm),
     )
     usage = Usage()
     report = build_report(

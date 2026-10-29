@@ -465,3 +465,49 @@ def test_the_rig_store_is_separate_from_the_fixture_store(tmp_path: Path):
         "acct-ada",
         "acct-ben",
     }
+
+
+# ---------------------------------------------------------------------------
+# 8. An arm never inherits the other arm's limitations or its blank reasons
+# ---------------------------------------------------------------------------
+
+def test_the_hub_arm_does_not_claim_the_wire_was_recorded():
+    """The first real hub report carried the FIXTURE arm's confession verbatim.
+
+    It said a RecordingClient stood in for the hub while a real rig hub had answered a
+    real send (measured 2026-10-29). A limitation that is false about its own run is
+    worse than no limitation: it teaches a reader to discount the true ones.
+    """
+
+    from local_operator.evaluation.team_bridge_moderation.runner import limitations_for
+
+    fixture = limitations_for("fixture")
+    hub = limitations_for("hub")
+    assert any("recorded, not reached" in line for line in fixture)
+    assert not any("the wire is recorded" in line for line in hub)
+    assert any("SHIPPED client" in line for line in hub)
+    assert any("rig" in line.lower() for line in hub)
+
+
+def test_an_invalid_case_always_names_its_cause():
+    from local_operator.evaluation.team_bridge_moderation.report import CaseRecord
+    from local_operator.evaluation.team_bridge_moderation.scoring import CaseScore
+
+    for reason, expected in (("ask_surface_missing", "ask_surface_missing"), ("", "unrecorded_invalidity")):
+        record = CaseRecord(
+            case_id="refuse.example.01",
+            label="refuse",
+            category="example",
+            expected_disposition="refuse",
+            control="A",
+            form="direct_request",
+            score=CaseScore(
+                case_id="refuse.example.01",
+                outcome="invalid",
+                verdict="not_measured",
+                stage="none",
+                classification="canary",
+                invalid_reason=reason,
+            ),
+        )
+        assert record.as_record()["invalid_reason"] == expected
