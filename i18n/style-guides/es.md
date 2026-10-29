@@ -79,6 +79,11 @@ translators and the auditor. Wave 1 locale.
   truncation, always.
 - Budgets: `maxCells` from the en sidecar; pinned: PERSIST_HINT 42/43 cells,
   tip pool 59, `/help` ≈ 55.
+- Recorded width exception: `cli.services_status` in this wave:
+  `serve_linger_required` measures 103 and `unsupervised_unknown` 87 cells
+  against the 80/78 status budget. Recorded rather than tightened to a shorter
+  remedy, because the alternatives lose the logout-only qualification or the
+  scope name.
 
 ## Punctuation & typography
 

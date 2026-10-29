@@ -8,12 +8,20 @@
     "role": "Warning below an unsupervised serve daemon"
   },
   "cli.services_status.unsupervised_unknown": {
-    "note": "Used when /proc cannot resolve a service or scope. Unknown cgroup resolution must be reported as unsupervised, never guessed supervised.",
-    "role": "Warning below a serve daemon whose supervision cannot be proven"
+    "note": "Used only when cgroup membership was READ and showed no service. Unknown procfs must use supervision_unknown instead, never this negative claim.",
+    "role": "Supervision result after a successful cgroup read with no service"
+  },
+  "cli.services_status.supervision_unknown": {
+    "note": "Used when /proc/PID/cgroup could not be read. Do not add claims about whether systemd can restart the process; only evidence is absent. The following install line remains appropriate.",
+    "role": "Supervision is unknown because the process cgroup was unreadable"
   },
   "cli.services_status.install_service": {
-    "note": "command is the complete CLI command with its current daemon port. It installs a distinct serve user unit, not the network relay unit.",
+    "note": "command is the complete CLI command with its current daemon port. It installs a separate serve unit, not the relay unit.",
     "role": "Action that installs supervision for an unsupervised serve daemon"
+  },
+  "cli.services_status.install_service_help": {
+    "note": "One-line help for the lop serve --install-service flag. Kept in this namespace because cli.services_help is already carried by fr and zh-CN; a new key there would stale both ledger rows and force allowance growth in the five locales that do not carry it. Technical names (Linux, serve, systemd) stay as written; CLI help wraps, so there is no cell budget.",
+    "role": "CLI flag help for lop serve --install-service"
   },
   "cli.services_status.restart_supervision_limit": {
     "note": "Distinguishes an in-place build reload from adding a systemd supervisor; restart semantics themselves do not change.",
@@ -36,7 +44,7 @@
     "role": "Successful user-unit enablement"
   },
   "cli.services_status.serve_linger_required": {
-    "note": "The install is successful but not durable across logout; loginctl enable-linger remains a prerequisite.",
+    "note": "The install is successful but not durable across logout; loginctl enable-linger remains a prerequisite. Must fit the repo's 80-column status budget without wrapping.",
     "role": "Durability warning after enabling a serve unit"
   },
   "cli.services_status.serve_install_not_serving": {

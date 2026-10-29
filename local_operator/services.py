@@ -1851,20 +1851,21 @@ def _proc_root() -> Path:
 _CGROUP_UNIT = re.compile(r"(?:^|/)([A-Za-z0-9_.@\\-]+\.service)$")
 
 
-def _serve_supervision(pid: int) -> tuple[str | None, str | None]:
-    """``(unit, scope)`` for this serve PID, never inferred from an installed unit.
+def _serve_supervision(pid: int) -> tuple[str | None, str | None, bool]:
+    """``(unit, scope, unreadable)`` for this PID, never inferred from a unit file.
 
     A service name anywhere other than the leaf is a parent (notably
-    ``user@UID.service``), not the process's supervisor. An unreadable procfs and
-    a transient/session scope both answer ``(None, scope-or-None)``: supervision
-    is affirmative evidence, so absence of evidence is never the relay's name.
+    ``user@UID.service``), not the process's supervisor. An unreadable procfs is
+    UNKNOWN, not proof of no supervisor: only affirmative cgroup evidence may
+    carry the negative claim, so the degraded state never asserts what it cannot
+    show.
     """
     if not sys.platform.startswith("linux"):
-        return None, None
+        return None, None, False
     try:
         rows = (_proc_root() / str(pid) / "cgroup").read_text(encoding="utf-8").splitlines()
     except OSError:
-        return None, None
+        return None, None, True
     # cgroup v2 is one unified ``0::`` row. If a host exposes several hierarchies,
     # any real service membership is still affirmative evidence of supervision.
     rows = [row.partition("::")[2] for row in rows if "::" in row]
@@ -1872,11 +1873,19 @@ def _serve_supervision(pid: int) -> tuple[str | None, str | None]:
         if not path:
             continue
         scope = path.rsplit("/", 1)[-1]
+        # A `.scope` TERMINATES the search: a transient unit's own slice is named
+        # after it (``systemd-run --scope --unit=foo`` lands the process in
+        # ``app.slice/foo.scope``), so scanning past one would report a
+        # non-existent ``foo.service`` — measured by QA on systemd 252.
+        if scope.endswith(".scope"):
+            return None, scope, False
+        # Only a LEAF unit can be the process's own supervisor: an ordinary
+        # service placed under an application service's cgroup is not thereby
+        # supervised by that parent either.
         match = _CGROUP_UNIT.search(path)
-        if match and not match.group(1).startswith("user@"):
-            return match.group(1), scope if scope.endswith(".scope") else None
-    leaf = rows[-1].rsplit("/", 1)[-1] if rows else ""
-    return None, leaf if leaf.endswith(".scope") else None
+        if match and match.end() == len(path) and not match.group(1).startswith("user@"):
+            return match.group(1), None, False
+    return None, None, False
 
 
 def _serve_supervision_lines(record: Any) -> list[str]:
@@ -1884,21 +1893,22 @@ def _serve_supervision_lines(record: Any) -> list[str]:
     from local_operator.i18n.keys import cli_services_status as copy
     from local_operator.i18n.text import tr
 
-    unit, scope = _serve_supervision(record.pid)
+    unit, scope, unreadable = _serve_supervision(record.pid)
     if unit is not None:
         return ["  " + tr("cli.services_status")(copy.supervised_by(unit=unit))]
     if not sys.platform.startswith("linux"):
         return []
     text = tr("cli.services_status")
+    remedy = text(copy.install_service(command=f"lop serve --install-service --port {record.port}"))
+    # UNKNOWN IS NOT A NEGATIVE CLAIM (review R1, design D1): when procfs cannot
+    # be read, neither supervision nor restartability was established, so this
+    # branch keeps the remedy and drops both assertions.
+    if unreadable:
+        return ["  " + text(copy.supervision_unknown()), "  " + remedy]
     state = (
         text(copy.unsupervised_scope(scope=scope)) if scope else text(copy.unsupervised_unknown())
     )
-    return [
-        f"  {state}",
-        "  "
-        + text(copy.install_service(command=f"lop serve --install-service --port {record.port}")),
-        "  " + text(copy.restart_supervision_limit()),
-    ]
+    return ["  " + state, "  " + remedy, "  " + text(copy.restart_supervision_limit())]
 
 
 def _daemon_status_lines(record: Any, stamp: Any) -> list[str]:

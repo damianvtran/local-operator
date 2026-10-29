@@ -15,6 +15,7 @@ they are so specific:
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -717,7 +718,6 @@ def test_status_lines_describe_the_serve_pids_actual_supervision(
         "0::/user.slice/user-1000.slice/session-2122.scope\n", encoding="utf-8"
     )
     monkeypatch.setattr(services, "_proc_root", lambda: tmp_path / "proc")
-    monkeypatch.setattr(services.sys, "platform", "linux")
     lines = services.status_lines()
     assert "supervised relay: local-operator-network.service" in lines
     assert "  unsupervised: session-2122.scope; systemd cannot restart it" in lines
@@ -730,6 +730,15 @@ def test_status_lines_describe_the_serve_pids_actual_supervision(
         encoding="utf-8",
     )
     assert "  supervised by: local-operator-serve.service" in services.status_lines()
+
+    # UNKNOWN IS NOT A NEGATIVE CLAIM (review R1, design D1): an unreadable cgroup
+    # must not assert either supervision or non-restartability.
+    (proc / "cgroup").unlink()
+    unknown = services.status_lines()
+    assert "  supervision unknown: no systemd unit could be resolved" in unknown
+    assert not any("systemd cannot restart it" in line for line in unknown)
+    assert not any("cannot supervise it" in line for line in unknown)
+    assert "  install it with `lop serve --install-service --port 1111`" in unknown
 
 
 def test_status_lines_stay_silent_about_units_that_are_not_installed(
@@ -789,7 +798,7 @@ def test_linux_serve_unit_installs_without_linger_or_relay_lifecycle_coupling(
     monkeypatch.setattr(supervisors, "systemctl_user", systemctl)
     monkeypatch.setattr(services.http.client, "HTTPConnection", _HealthConnection)
     monkeypatch.setattr(
-        services, "_serve_supervision", lambda _pid: (services.SERVE_SYSTEMD_UNIT, None)
+        services, "_serve_supervision", lambda _pid: (services.SERVE_SYSTEMD_UNIT, None, False)
     )
     result = services.install_linux_serve_service(8977)
     unit = home / ".config/systemd/user/local-operator-serve.service"
@@ -819,8 +828,7 @@ def test_linux_serve_unit_installs_without_linger_or_relay_lifecycle_coupling(
     assert '"-m"' not in rendered
     assert " -m local_operator.cli serve --port 8977" in rendered
     assert result["lines"][-1] == (
-        "linger is off: this unit will not survive logout until "
-        "`loginctl enable-linger` succeeds"
+        "linger is off: run `loginctl enable-linger` to keep this unit after logout"
     )
 
 
@@ -846,13 +854,42 @@ def test_serve_supervision_requires_a_service_leaf_and_survives_unreadable_proc(
 ) -> None:
     monkeypatch.setattr(services.sys, "platform", "linux")
     monkeypatch.setattr(services, "_proc_root", lambda: tmp_path / "proc")
-    assert services._serve_supervision(42) == (None, None)
+    assert services._serve_supervision(42) == (None, None, True)
     pid = tmp_path / "proc/42"
     pid.mkdir(parents=True)
     (pid / "cgroup").write_text(
         "0::/user.slice/user-1000.slice/user@1000.service\n", encoding="utf-8"
     )
-    assert services._serve_supervision(42) == (None, None)
+    assert services._serve_supervision(42) == (None, None, False)
+    (pid / "cgroup").write_text(
+        "0::/user.slice/user-1000.slice/user@1000.service/app.slice/example.service\n",
+        encoding="utf-8",
+    )
+    assert services._serve_supervision(42) == ("example.service", None, False)
+    (pid / "cgroup").write_text(
+        "0::/user.slice/user-1000.slice/user@1000.service/app.slice/"
+        "example.service/session-1.scope\n",
+        encoding="utf-8",
+    )
+    assert services._serve_supervision(42) == (None, "session-1.scope", False)
+
+
+def test_install_service_dispatch_returns_before_runtime_warming(monkeypatch) -> None:
+    """The installer is not a foreground serve invocation with an extra side effect."""
+    from local_operator import cli
+
+    seen: list[int] = []
+    monkeypatch.setattr(
+        "local_operator.services.install_linux_serve_service",
+        lambda port: seen.append(port) or {"ok": True, "lines": ["enabled fixture unit"]},
+    )
+    monkeypatch.setattr(
+        "local_operator.session.runtime.standby.enable_warming",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("must not warm a runtime")),
+    )
+    monkeypatch.setattr(sys, "argv", ["lop", "serve", "--install-service", "--port", "8977"])
+    assert cli.main() == 0
+    assert seen == [8977]
 
 
 def test_the_documented_wait_default_is_the_one_used(

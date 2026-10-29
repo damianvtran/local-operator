@@ -1,0 +1,16 @@
+{
+  "cli.services_status.install_service": "`{command}` से इसे इंस्टॉल करें",
+  "cli.services_status.install_service_help": "केवल Linux: serve की systemd उपयोगकर्ता यूनिट स्थापित और सक्षम करें",
+  "cli.services_status.restart_supervision_limit": "`lop services restart` इसे फिर से लोड कर सकता है, लेकिन निगरानी में नहीं ला सकता",
+  "cli.services_status.serve_install_isolated_home": "यूनिट फ़ाइल लिखी गई, लेकिन यह HOME उपयोगकर्ता के systemd प्रबंधक का होम नहीं है; कुछ भी सक्षम नहीं किया गया",
+  "cli.services_status.serve_install_linux_only": "serve सेवा इंस्टॉल करने के लिए Linux पर systemd --user आवश्यक है; macOS पर serve अपरिवर्तित है",
+  "cli.services_status.serve_install_not_serving": "serve यूनिट सक्षम हुई, लेकिन अपनी ही प्रक्रिया को सेवा नहीं दे रही: {error}",
+  "cli.services_status.serve_install_wrong_cgroup": "serve यूनिट ने उत्तर दिया, लेकिन उसके PID का cgroup local-operator-serve.service की पुष्टि नहीं करता",
+  "cli.services_status.serve_linger_required": "linger बंद है: लॉगआउट के बाद यह यूनिट बनाए रखने के लिए `loginctl enable-linger` चलाएँ",
+  "cli.services_status.serve_unit_enabled": "systemd उपयोगकर्ता सेवा सक्षम की गई: {unit}",
+  "cli.services_status.serve_unit_written": "यूनिट फ़ाइल लिखी गई: {unit}",
+  "cli.services_status.supervised_by": "निगरानी में: {unit}",
+  "cli.services_status.supervision_unknown": "निगरानी अज्ञात: कोई systemd यूनिट निर्धारित नहीं हो सकी",
+  "cli.services_status.unsupervised_scope": "निगरानी से बाहर: {scope}; systemd इसे पुनः प्रारंभ नहीं कर सकता",
+  "cli.services_status.unsupervised_unknown": "निगरानी से बाहर: कोई systemd यूनिट नहीं मिली; systemd इसे पुनः प्रारंभ नहीं कर सकता"
+}

@@ -85,6 +85,7 @@ from local_operator.i18n.keys import cli_resume_click_help as _rc
 from local_operator.i18n.keys import cli_send_help as _se
 from local_operator.i18n.keys import cli_serve_help as _sv
 from local_operator.i18n.keys import cli_services_help as _sr
+from local_operator.i18n.keys import cli_services_status as _svc
 from local_operator.i18n.keys import cli_sessions_help as _sh
 from local_operator.i18n.keys import cli_stop_help as _st
 from local_operator.i18n.keys import cli_teams_help as _th
@@ -998,7 +999,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
     serve_parser.add_argument(
         "--install-service",
         action="store_true",
-        help="Linux only: install and enable the serve systemd user unit",
+        help=_svc.install_service_help().envelope(locale=help_locale)["text"],
     )
     serve_parser.add_argument(
         "--listener-fd",

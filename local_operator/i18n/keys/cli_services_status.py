@@ -14,6 +14,10 @@ def install_service(*, command: str) -> Msg:
     return Msg("cli.services_status.install_service", {"command": command})
 
 
+def install_service_help() -> Msg:
+    return Msg("cli.services_status.install_service_help", {})
+
+
 def restart_supervision_limit() -> Msg:
     return Msg("cli.services_status.restart_supervision_limit", {})
 
@@ -48,6 +52,10 @@ def serve_unit_written(*, unit: str) -> Msg:
 
 def supervised_by(*, unit: str) -> Msg:
     return Msg("cli.services_status.supervised_by", {"unit": unit})
+
+
+def supervision_unknown() -> Msg:
+    return Msg("cli.services_status.supervision_unknown", {})
 
 
 def unsupervised_scope(*, scope: str) -> Msg:
