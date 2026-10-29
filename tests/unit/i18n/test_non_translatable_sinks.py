@@ -20,7 +20,10 @@ REPO = Path(__file__).resolve().parents[3]
 #: pinned so deleting code cannot turn a finding-free scan into a "pass"
 #: without also deleting the pragma record.
 PATHS = {
-    "local_operator/tools/team_tool.py": 4,
+    # 5: the roster/override lines the model reads (tier, effort, saver, the
+    # aliases row, the "roster:" header). One more than before the Saver pin
+    # landed, which is why this moved rather than the file being allowlisted.
+    "local_operator/tools/team_tool.py": 5,
     "local_operator/supplements/generator.py": 13,
     "local_operator/evaluation/runner/episode.py": 8,
 }

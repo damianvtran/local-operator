@@ -70,10 +70,6 @@ def profile() -> Msg:
     return Msg("cli.exec_help.profile", {})
 
 
-def saver() -> Msg:
-    return Msg("cli.exec_help.saver", {})
-
-
 def status() -> Msg:
     return Msg("cli.exec_help.status", {})
 

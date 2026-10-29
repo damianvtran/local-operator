@@ -2432,17 +2432,17 @@
       "source_sha256": "d2c78470f5117bc99248f3835e1b2d3fd41c57b4400b70d28a2f5bc4fcb233df",
       "translator": {
         "agent": "coder (radientdev; self-translated, no i18n-translator delegation)",
-        "model": "kimi/k3.1-pro (fallback after quota failures)",
+        "model": "kimi/k3.1-pro (fallback after anthropic/claude-opus-5-5 and openai/gpt-6-astra quota failures)",
         "date": "2026-10-29",
-        "note": "Translated new command-surface strings; existing values retain their earlier translations."
+        "scope": "the 9 new wire.radient_saver.command.* keys only; the 15 pre-existing keys keep the prior translator recorded in the note"
       },
       "auditor": {
-        "agent": "local-operator session 28fad0ae283a (independent i18n auditor)",
-        "model": "radient/auto (provider fallbacks disclosed in PR #3143 comment 6494342521)",
+        "agent": "local-operator i18n audits: round 1 session 28fad0ae283a, round 2 session 231831e5a20e",
+        "model": "radient/auto (provider fallbacks disclosed in the two PR comments)",
         "date": "2026-10-29",
-        "result": "findings",
-        "findings": 2,
-        "note": "Round 1 (PR #3143 comment 6494342521). Copy findings were ur/hi I1 (leading U+200F) and the I5/I6 wording minors; ledger-level I2/I3/I4 apply to every row in this delta and are not per-locale copy defects. NOT a pass: round 2 is scoped to the remediation commit."
+        "result": "copy-cleared-ledger-not-cleared",
+        "findings": 4,
+        "note": "Round 1 (PR #3143 comment 6494342521) raised I1-I6; round 2 (comment 6494646811) verified the copy fixes and cleared the COPY, not these rows. It required the prior translator restored, the key counts corrected and I4 dispositioned — all done in this commit. A narrow round 3 produces the clearance; this row is NOT passed."
       },
       "status": "pending-independent-audit",
       "second_audit": {
@@ -2453,7 +2453,7 @@
         "scope": "round-3 SA-2 remediation of wire.radient_saver.mode.help (PR #3078)",
         "note": "Second independent audit commissioned by the radientdev manager; it has NOT run. Auditor identity, model and date are deliberately unrecorded until it reports — this row is not a second-audit pass."
       },
-      "note": "Previously passed: auditor `translation-auditor` on kimi/k3.1-pro (2026-10-28, findings 0). That pass covered the 17 pre-existing keys; the 9 command keys are new here. This delta's new copy is coder-authored on kimi/k3.1-pro and recorded as pending; the independent audit ran as round 1 and raised findings, fixed in the remediation commit. Status stays pending-independent-audit until an independent round-2 audit passes. I4: the pre-existing `second_audit` block stays `pending` with its PR #3078 mode.help scope; this coder does not resolve that programme decision or flip this row to passed — the round-2 auditor or the programme owner does."
+      "note": "Prior translator of the 15 pre-existing keys: the `translator` agent on anthropic/claude-opus-5-5 produced the 14 values other than `mode.help`; `mode.help` was self-translated by the radientdev coder on that same model in round 3 (SA-2), 2026-10-28. Prior auditor: `translation-auditor` on kimi/k3.1-pro, 2026-10-28, findings 0 — independent of that translator. This delta adds 9 command keys (15 + 9 = 24) that this coder self-authored on kimi/k3.1-pro, 2026-10-29; they are unaudited pending round 3. I4 disposition (choice (a)): `second_audit` is a PROGRAMME-LEVEL field for a different audit scope — its own text names `round-3 SA-2 remediation of wire.radient_saver.mode.help (PR #3078)` — and this row's `status` does not assert that separate audit completed. It is left in place, unedited and `pending`. Chosen over clearing or removing it because its scope is an outstanding credential-safety obligation, not a duplicate of this namespace's pass. Consequence stated rather than hidden: `generate._shipped_locales()` reads only `status`/`source_sha256`, so it cannot see `second_audit`; the programme owner must disposition that field independently of any flip here."
     }
   ]
 }

@@ -286,7 +286,9 @@ def test_extracted_sites_ratchet_without_activating_legacy_cli(i18n_check):
     # CLI20 into a whole-CLI extraction. Scan only these existing sink calls
     # with the production scanner and prove a reintroduced literal is rejected.
     calls = _help_calls()
-    assert len(calls) == 20
+    # 21 since LO2 added `exec --saver`: the census counts the help call
+    # SITES in `add_startup_arguments`, so a new flag moves it by one.
+    assert len(calls) == 21
     source = "\n".join(ast.unparse(call) for call in calls)
     assert i18n_check.scan_source("local_operator/cli.py", source) == []
     next(k for k in calls[0].keywords if k.arg == "help").value = ast.Constant(

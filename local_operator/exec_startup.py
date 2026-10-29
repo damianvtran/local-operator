@@ -15,6 +15,7 @@ from typing import Any
 
 from local_operator.i18n.keys import cli_exec_help as _eh
 from local_operator.i18n.keys import wire_exec as _wd
+from local_operator.i18n.keys import wire_radient_saver as _rs
 from local_operator.i18n.text import tr
 
 logger = logging.getLogger(__name__)
@@ -195,7 +196,14 @@ def add_startup_arguments(parser: argparse.ArgumentParser, *, help_locale: str =
         nargs="?",
         const="on",
         choices=("on", "off", "inherit"),
-        help=_eh.saver().envelope(locale=help_locale)["text"],
+        # The Saver family's own sentence rather than a new `cli.exec_help` key.
+        # A new key in that namespace would have to be translated into every
+        # locale that does not carry it (the coverage gate names each missing
+        # ID), growing the shrink-only allowance by five entries for one line of
+        # `--help` prose. This sentence already says what the flag does and is
+        # audited in all seven locales; argparse prints the three accepted words
+        # beside it, so the choice vocabulary is not lost.
+        help=_rs.command_description().envelope(locale=help_locale)["text"],
     )
     parser.add_argument(
         "--workstream",
