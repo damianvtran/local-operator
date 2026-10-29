@@ -115,6 +115,12 @@ class RunResult:
     records: tuple[CaseRecord, ...]
     aborted: bool = False
     abort_reason: str = ""
+    #: The run's own validity verdict, handed straight to the CLI's exit ladder so the
+    #: report and the exit code can never disagree (``_exit_code`` reads THIS, never a
+    #: re-derived predicate). ``None`` means no verdict was produced, which the CLI treats
+    #: as untrustworthy rather than computing one of its own.
+    validity: Validity | None = None
+    detector: Mapping[str, Any] = field(default_factory=dict)
 
 
 def build_plan(
@@ -125,6 +131,7 @@ def build_plan(
     categories: Sequence[str] = (),
     controls: Sequence[str] = (),
     limit: int | None = None,
+    case_ids: Sequence[str] = (),
     include_variants: bool = True,
     screen_version: str = "",
     judge_route: tuple[str, str] | None = None,
@@ -146,6 +153,7 @@ def build_plan(
         categories=categories,
         controls=controls,
         limit=limit,
+        case_ids=case_ids,
         include_variants=include_variants,
     )
     if not chosen:
@@ -162,13 +170,49 @@ def build_plan(
         repeat=max(1, int(repeat)),
         max_usd=max_usd,
         seed=seed,
-        # "Whole dataset" is a property of the FILTER, not of the count: a --category or
-        # --limit run is partial even if it happens to select every case in one category.
-        full_dataset=not categories and not controls and limit is None,
+        # "Whole dataset" is a property of the FILTER, not of the count: a --category,
+        # --case-id or --limit run is partial even if it selects every case in one category.
+        full_dataset=not categories and not controls and not case_ids and limit is None,
     )
 
 
 async def run(plan: RunPlan, *, on_progress: Any | None = None) -> RunResult:
+    """Execute the plan under an isolated ``HOME`` and return the report.
+
+    WHY THE REDIRECT LIVES HERE, IN THE LIBRARY RATHER THAN IN THE CLI (measured
+    2026-10-29 on the first real invocation): every case came back ``invalid`` with
+    ``case_failure:SessionIsolationError`` and zero model calls made. The SDK's
+    isolation guard checks three roots, and :class:`SessionRoots` can only declare
+    two of them - config dir and agent home. The third is the model-listing cache,
+    which ``catalogue.default_cache_dir`` derives from ``$HOME`` directly
+    (``~/.local-operator/cache``), so a run launched from the operator's own shell
+    resolved its cache to the operator's real home while every declared root looked
+    isolated. The SDK refuses that state on purpose and it is right to: the run would
+    have read and written the operator's cache while reporting itself isolated.
+
+    The guard names two remedies and they are NOT equivalent. ``allow_ambient=True``
+    is an opt-out: it would let the run keep reading and writing the operator's cache,
+    which is the behaviour the guard exists to prevent. Redirecting ``HOME`` to a
+    scratch home inside the run's own workdir is the documented method (AGENTS.md
+    §Isolating a run) and is what this wrapper does. It is a context manager rather
+    than a bare assignment so the caller's ``HOME`` is restored even when a case
+    crashes the run.
+    """
+
+    previous = os.environ.get("HOME")
+    scratch_home = plan.workdir / "home"
+    scratch_home.mkdir(parents=True, exist_ok=True)
+    os.environ["HOME"] = str(scratch_home)
+    try:
+        return await _execute(plan, on_progress=on_progress)
+    finally:
+        if previous is None:
+            os.environ.pop("HOME", None)
+        else:
+            os.environ["HOME"] = previous
+
+
+async def _execute(plan: RunPlan, *, on_progress: Any | None = None) -> RunResult:
     """Execute the plan and return the report. One case at a time, always.
 
     ORDER MATTERS AND IS THE FIX FOR B2. Before a single model call the harness proves
@@ -287,6 +331,7 @@ async def run(plan: RunPlan, *, on_progress: Any | None = None) -> RunResult:
         started_at=started,
         limitations=LIMITATIONS,
     )
+    usage = Usage()
     report = build_report(
         header=header,
         records=records,
@@ -634,6 +679,18 @@ async def _run_one(
                 input_tokens=turn.inbound.usage.input_tokens,
                 output_tokens=turn.inbound.usage.output_tokens,
             )
+            # AGENT TURN TOKENS COUNT AGAINST THE BUDGET TOO (measured 2026-10-29, first
+            # real run). The first version added only the inbound screen's usage, so a
+            # --max-usd ceiling watched the cheapest half of the spend: one allow case
+            # measured 719 screening tokens against ~82,000 agent tokens, i.e. the guard
+            # was seeing 0.9% of the run. The agent's own request records carry the
+            # provider's usage, so they are the honest source here.
+            for request in turn.model_requests:
+                request_usage = request.get("usage") or {}
+                usage = usage + Usage(
+                    input_tokens=int(request_usage.get("input", 0) or 0),
+                    output_tokens=int(request_usage.get("output", 0) or 0),
+                )
         score = score_case(
             case=case,
             run=run,

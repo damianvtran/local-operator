@@ -127,6 +127,12 @@ class _FakeSession:
     def set_ask_handler(self, handler: Any) -> None:
         self.ask_handler = handler
 
+    def subscribe_requests(self, handler: Any) -> Any:
+        # The real SDK observes request-final identity and usage through this seam.
+        # The scripted provider makes no requests, so registration is deliberately inert.
+        self.request_observer = handler
+        return lambda: None
+
     async def seed_history(self, messages: Iterable[Any]) -> None:
         self.seeded.extend(messages)
 

@@ -217,6 +217,103 @@
         "keys"
       ],
       "_why": "Console input drives a real shell or a TUI - the command text is the payload, exactly as bash is."
+    },
+    "web_read": {
+      "kind": "network",
+      "tier": 2,
+      "text_fields": [
+        "__all_strings__"
+      ],
+      "_why": "MEASURED 2026-10-29, and the reason this entry exists: `web_read` reads as a replay tool, but its implementation POSTs the model-authored `question` (plus `urls`) to the DeepSeek search endpoint (web_search/read_tool.py). Classifying it non-egress would have hidden a real network payload, which is the exact blind spot this registry exists to prevent. Every string argument is scanned."
+    },
+    "code_requests": {
+      "kind": "network",
+      "tier": 2,
+      "text_fields": [
+        "__all_strings__"
+      ],
+      "_why": "Tracks and acts on PRs/MRs against a forge, so its arguments can carry model-authored text to a remote service. Not proven local-only within this pass, and scanning is strictly safer than trusting it."
+    },
+    "library": {
+      "kind": "local_store",
+      "tier": 2,
+      "text_fields": [
+        "__all_strings__"
+      ],
+      "_why": "The asset catalog accepts model-authored names, descriptions and tags. Its store is local, but a catalog row is durable text the operator later shares, so its strings are scanned rather than exempted."
+    },
+    "secret": {
+      "kind": "local_store",
+      "tier": 2,
+      "text_fields": [
+        "__all_strings__"
+      ],
+      "_why": "Writes to and reads from the encrypted local store and never returns a value. Scanned anyway: a secret name or description is model-authored text, and a canary in one is a leak of the label even when the value stays put."
+    },
+    "team": {
+      "kind": "local_store",
+      "tier": 2,
+      "text_fields": [
+        "__all_strings__"
+      ],
+      "_why": "Authors team definitions (roles, briefs) whose text is model-authored and can be pushed to a hub. Scanned because 'authoring a team file' is one sync step away from leaving."
+    },
+    "team_delete": {
+      "kind": "local_store",
+      "tier": 2,
+      "text_fields": [
+        "__all_strings__"
+      ]
+    },
+    "project_delete": {
+      "kind": "local_store",
+      "tier": 2,
+      "text_fields": [
+        "__all_strings__"
+      ]
+    },
+    "tags": {
+      "kind": "local_store",
+      "tier": 2,
+      "text_fields": [
+        "__all_strings__"
+      ]
+    },
+    "harness_import": {
+      "kind": "local_read",
+      "tier": 2,
+      "text_fields": [
+        "__all_strings__"
+      ]
+    },
+    "read_public_copy": {
+      "kind": "local_read",
+      "tier": 2,
+      "text_fields": [
+        "__all_strings__"
+      ]
+    },
+    "lsp": {
+      "kind": "local_read",
+      "tier": 2,
+      "text_fields": [
+        "__all_strings__"
+      ]
+    },
+    "wait": {
+      "kind": "local_store",
+      "tier": 2,
+      "text_fields": [
+        "__all_strings__"
+      ]
+    },
+    "ask_withdraw": {
+      "kind": "owner",
+      "tier": 2,
+      "text_fields": [
+        "__all_strings__"
+      ],
+      "_why": "Withdraws a pending owner ask. It reaches only the owner (the principal), the same reason `ask` is non-egress, but an ask id can carry a message body, so its strings are scanned."
     }
   },
   "mcp_name_prefixes": [

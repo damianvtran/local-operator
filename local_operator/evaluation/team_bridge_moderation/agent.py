@@ -45,7 +45,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from .dataset import ModerationCase, Step, render_step_body
-from .fixture import FixtureWorld, enroll_bridge
+from .fixture import FixtureWorld, enroll_bridge, record_inbound_delivery
 from .egress import EgressRegistry, Payload, extract_payloads, load_registry
 from .gates import Controls, InboundOutcome
 
@@ -180,6 +180,9 @@ class TurnRecord:
     #: the tool's own validated AskQuestion objects.
     asks: tuple[Any, ...] = ()
     assistant_text: str = ""
+    #: Request-final model identities observed while this turn ran. These are
+    #: metadata only (requested/served routes, upstream host and usage), never prose.
+    model_requests: tuple[Mapping[str, Any], ...] = ()
     latency_s: float = 0.0
     failure: str = ""
     #: A turn that did not measure anything. Never a refusal, never a hold: see
@@ -199,7 +202,9 @@ class TurnRecord:
                 "failure": self.inbound.failure,
                 "template": self.inbound.template_version,
                 "prompt_sha256": self.inbound.prompt_sha256,
-                "latency_s": round(self.inbound.latency_s, 3),
+                "requested_model": self.inbound.model,
+                "served_model": self.inbound.model_identity,
+                "input_tokens": self.inbound.usage.input_tokens,
                 "usage": {
                     "input": self.inbound.usage.input_tokens,
                     "output": self.inbound.usage.output_tokens,
@@ -216,6 +221,7 @@ class TurnRecord:
             "observed_unknown_tools": list(self.observed_unknown_tools),
             "extraction_problems": list(self.extraction_problems),
             "assistant_chars": len(self.assistant_text),
+            "model_requests": [dict(request) for request in self.model_requests],
             "latency_s": round(self.latency_s, 3),
             "failure": self.failure,
         }
@@ -270,6 +276,12 @@ class CaseRun:
     @property
     def tool_calls(self) -> tuple[ToolCall, ...]:
         return tuple(call for turn in self.turns for call in turn.tool_calls)
+
+
+#: The peer identity a case's asker gets when the case does not name one. Fixed rather
+#: than random so a reply's destination is stable across the two runs of a delta pair.
+_EVAL_PEER_ACCOUNT_ID = "acct_tb_peer"
+_EVAL_PEER_ENDPOINT_ID = "ep_tb_peer"
 
 
 class RecordingClient:
@@ -505,6 +517,14 @@ class AgentLeg:
         self._case_residual_payloads: list[Any] = []
         #: The owner-ask surface state: "installed" or "missing" (review R3 M2).
         self.ask_surface = "missing"
+        #: The committed bridge owner for the current case, set in ``run_case``. The
+        #: inbound envelope must be written against the same snapshot the runtime was
+        #: built with, so the instance carries it rather than threading it through.
+        self._owner: Any = None
+        #: The DESIGNATED session id committed at enrolment. The envelope write validates
+        #: against it, and a resumed or scripted session does not always carry it back on
+        #: ``session.session_id``, so the leg remembers the id it actually enrolled.
+        self._designated_session: str = ""
         self.ask = RecordingAskSurface()
         self.provider = provider
         self.model_id = model_id
@@ -582,9 +602,39 @@ class AgentLeg:
             async with sdk.open_session(_spec(), roots=roots, mode="own") as session:
                 session_id = str(getattr(session, "session_id", "") or "")
                 owner = enroll_bridge(self.world, session_id=session_id)
+                self._owner = owner
+                self._designated_session = session_id
                 await self._seed(session)
 
             async with sdk.open_session(_spec(resume=session_id), roots=roots, mode="own") as session:
+                observations: list[Mapping[str, Any]] = []
+
+                def observe(request: Any) -> None:
+                    # Append metadata only: this synchronous callback runs on the model
+                    # loop, so it must never perform I/O or change the provider outcome.
+                    observed_usage = getattr(request, "usage", None)
+                    observations.append({
+                        "request_id": getattr(request, "request_id", ""),
+                        "requested_model": "/".join(filter(None, (
+                            getattr(request, "requested_provider", None),
+                            getattr(request, "requested_model_id", None),
+                        ))),
+                        "served_model": "/".join(filter(None, (
+                            getattr(request, "served_provider", None),
+                            getattr(request, "served_model_id", None),
+                        ))),
+                        "served_identity_source": getattr(request, "served_identity_source", ""),
+                        "upstream_host": getattr(request, "upstream_host", None),
+                        "usage": {
+                            "input": int(getattr(observed_usage, "input_tokens", 0) or 0),
+                            "output": int(getattr(observed_usage, "output_tokens", 0) or 0),
+                        },
+                        "usage_reported": bool(getattr(request, "usage_reported", False)),
+                        "outcome": getattr(request, "outcome", ""),
+                        "ok": bool(getattr(request, "ok", False)),
+                    })
+
+                unsubscribe = session.subscribe_requests(observe)
                 self._install_runtime(session, sink, owner=owner)
                 # THE REGISTRY TEST (design §7.6 / review R1 B3): enumerate the tools
                 # the runtime actually built and name every one that is neither a known
@@ -610,6 +660,8 @@ class AgentLeg:
                                 index=index,
                                 sink=sink,
                                 screen=screen,
+                                observations=observations,
+                                step_index=index,
                             )
                         )
                     run.turns = tuple(turns)
@@ -635,6 +687,7 @@ class AgentLeg:
                     run.extraction_problems = tuple(self._case_extraction_problems)
                 finally:
                     await collector.stop()
+                    unsubscribe()
         except Exception as error:  # noqa: BLE001 - a broken case is recorded, not fatal
             run.failure = f"{type(error).__name__}: {error}"
             # Even a crashed case keeps what it observed: losing the mid-run unknown
@@ -778,7 +831,10 @@ class AgentLeg:
         index: int,
         sink: list[Egress],
         screen: Callable[..., Any],
+        observations: list[Mapping[str, Any]] | None = None,
+        step_index: int = 0,
     ) -> TurnRecord:
+        request_mark = len(observations) if observations is not None else 0
         body = render_step_body(step)
         started = time.monotonic()
 
@@ -832,6 +888,30 @@ class AgentLeg:
             record.invalid = True
             record.invalid_reason = "session_protocol_missing_receive_peer_message"
             return record
+        # THE ENVELOPE, BEFORE THE HANDOFF (measured 2026-10-29). Without it the session
+        # renders an empty ``from_account`` and the bridge tool has no addressable
+        # recipient, so NO reply can ever leave - which would make a refusal-heavy run
+        # indistinguishable from one where the reply path was simply unreachable.
+        message_id = f"peer-{_case_digest(case.id)}{step_index:02d}"
+        delivery_ref = f"dref{_case_digest(case.id)}{step_index:02d}"
+        asker = dict(case.asker)
+        sender_account_id = str(asker.get("account_id") or _EVAL_PEER_ACCOUNT_ID)
+        sender_endpoint_id = str(asker.get("endpoint_id") or _EVAL_PEER_ENDPOINT_ID)
+        try:
+            record_inbound_delivery(
+                self.world,
+                self._owner,
+                message_id=message_id,
+                delivery_ref=delivery_ref,
+                session_id=self._designated_session or str(getattr(session, "session_id", "") or ""),
+                sender_account_id=sender_account_id,
+                sender_endpoint_id=sender_endpoint_id,
+            )
+        except Exception as error:  # noqa: BLE001 - a missing envelope is INVALID, not a hold
+            record.invalid = True
+            record.invalid_reason = f"envelope_write_failed:{type(error).__name__}"
+            record.latency_s = time.monotonic() - started
+            return record
         try:
             await deliver(
                 body,
@@ -841,6 +921,21 @@ class AgentLeg:
                     "source": "team_bridge",
                     "conversation_name": str(case.surface),
                     "model_label": str(case.asker.get("kind") or "agent"),
+                    "account_id": sender_account_id,
+                    "endpoint_id": sender_endpoint_id,
+                },
+                message_id=message_id,
+                bridge_meta={
+                    # The version tag is REQUIRED by ``validate_bridge_meta``; without it
+                    # the receive hook drops the locator and the card arrives anonymous
+                    # again (measured: "bridge_meta is missing its version tag").
+                    "v": "1",
+                    "message_id": message_id,
+                    "delivery_ref": delivery_ref,
+                    "thread_id": f"thread_{message_id}",
+                    "type": "request",
+                    "sender_name": str(asker.get("display_name") or asker.get("name") or ""),
+                    "organization": str(asker.get("organization") or ""),
                 },
                 custom_type=_bridge_custom_type(),
             )
@@ -873,6 +968,8 @@ class AgentLeg:
         # "" so a decline reads as "no delivery and no reply" = unmeasured.
         record.egress = tuple(await self._judge_egress(list(sink), case))
         record.assistant_text = _assistant_text(events)
+        if observations is not None:
+            record.model_requests = tuple(observations[request_mark:])
         # The owner asks raised during THIS turn, exactly as the tool rendered them.
         record.asks = tuple(self.ask.records[ask_mark:])
         # Fold the per-observation findings up at once, so a tool that only appears
@@ -917,6 +1014,17 @@ class AgentLeg:
                 )
             )
         return judged
+
+
+def _case_digest(case_id: str) -> str:
+    """A stable 20-hex-char tag for one case id.
+
+    ``hash()`` is salted per process and would mint different envelope ids on every
+    run, so a delta pair (control off vs on) would not be comparing the same
+    identifiers. A digest is deterministic and collision-safe at this scale.
+    """
+
+    return hashlib.sha256(case_id.encode("utf-8")).hexdigest()[:20]
 
 
 def _bridge_custom_type() -> str:

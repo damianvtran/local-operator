@@ -375,7 +375,20 @@
       "todo",
       "bridge",
       "wake",
-      "jobs"
+      "jobs",
+      "ask_withdraw",
+      "code_requests",
+      "harness_import",
+      "library",
+      "lsp",
+      "project_delete",
+      "read_public_copy",
+      "secret",
+      "tags",
+      "team",
+      "team_delete",
+      "wait",
+      "web_read"
     ]
   },
   "org": {

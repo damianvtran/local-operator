@@ -456,6 +456,7 @@ class Dataset:
         categories: Sequence[str] = (),
         controls: Sequence[str] = (),
         limit: int | None = None,
+        case_ids: Sequence[str] = (),
         include_variants: bool = True,
     ) -> tuple[ModerationCase, ...]:
         """Filter for a run. ``limit`` applies AFTER filtering, per category.
@@ -464,6 +465,16 @@ class Dataset:
         cheap smoke run that still exercises every category, not the first three
         cases of whichever file sorts first.
         """
+        if case_ids:
+            if categories or controls or limit is not None:
+                raise ValueError("case_ids cannot be combined with category, control or limit filters")
+            by_id = {case.id: case for case in self.cases if include_variants or case.variant_of is None}
+            unknown = [case_id for case_id in case_ids if case_id not in by_id]
+            if unknown:
+                raise ValueError(f"unknown case id(s): {', '.join(unknown)}")
+            if len(set(case_ids)) != len(case_ids):
+                raise ValueError("case_ids must not contain duplicates")
+            return tuple(by_id[case_id] for case_id in case_ids)
 
         chosen: list[ModerationCase] = []
         wanted = {c.lower() for c in categories}

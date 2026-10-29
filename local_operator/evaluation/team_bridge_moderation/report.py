@@ -407,12 +407,63 @@ def build_report(
         for record in records
         for turn in record.turns
     )
-    stage_tokens = {"inbound": inbound_tokens, "agent": input_tokens, "total": input_tokens + inbound_tokens}
+    inbound_output = sum(
+        int(turn.get("inbound", {}).get("output_tokens", 0) or 0)
+        for record in records
+        for turn in record.turns
+    )
+    # THE AGENT HALF, from the provider's own usage stamps. Before 2026-10-29 the report
+    # printed the SCREEN's token count under "agent", so a run reported 719 agent tokens
+    # for one case whose agent turns actually spent ~82,000. A budget that reads the
+    # report would have concluded the run was ~100x cheaper than it was.
+    agent_tokens = sum(
+        int((request.get("usage") or {}).get("input", 0) or 0)
+        for record in records
+        for turn in record.turns
+        for request in turn.get("model_requests", ())
+    )
+    agent_output = sum(
+        int((request.get("usage") or {}).get("output", 0) or 0)
+        for record in records
+        for turn in record.turns
+        for request in turn.get("model_requests", ())
+    )
+    stage_tokens = {
+        "inbound": inbound_tokens,
+        "agent": agent_tokens,
+        "total": inbound_tokens + agent_tokens,
+    }
+    estimated_usd = (
+        (inbound_tokens + agent_tokens) / 1_000_000
+    ) * 15.0 + (
+        (inbound_output + agent_output) / 1_000_000
+    ) * 75.0
+    requested_model = header.model_route
+    model_provenance = sorted({
+        str(identity)
+        for record in records
+        for turn in record.turns
+        for request in turn.get("model_requests", ())
+        if (identity := request.get("served_model"))
+    })
+    screen_provenance = sorted({
+        str(turn["inbound"]["served_model"])
+        for record in records
+        for turn in record.turns
+        if turn.get("inbound", {}).get("served_model")
+    })
 
     measured = [r for r in records if r.score.verdict != "not_measured"]
     summary = _group_summary(records)
     return {
-        "header": header.as_record(),
+        "header": {
+            **header.as_record(),
+            "requested_model": requested_model,
+            "model_provenance": {
+                "inbound": screen_provenance,
+                "agent": model_provenance,
+            },
+        },
         "abort_reason": abort_reason,
         "summary": {
             **summary,
@@ -424,7 +475,9 @@ def build_report(
             "latency_p50_s": round(statistics.median(latency_s), 3) if latency_s else 0.0,
             "latency_p95_s": round(_percentile(latency_s, 0.95), 3),
             "tokens": stage_tokens,
-            "output_tokens": output_tokens,
+            "estimated_usd": estimated_usd,
+            "model": requested_model,
+            "output_tokens": inbound_output + agent_output,
             "measured_cases": len(measured),
         },
         "by_category": {name: _group_summary(items) for name, items in sorted(by_category.items())},
@@ -497,6 +550,10 @@ def markdown_summary(report: Mapping[str, Any]) -> str:
         for reason in verdict["reasons"]:
             lines.append(f"- {reason}")
         lines.append("")
+    lines.append(f"- requested model: `{summary.get('model', header.get('model_route', '?'))}`")
+    provenance = header.get("model_provenance", {})
+    lines.append(f"- served screen models: `{provenance.get('inbound', [])}`")
+    lines.append(f"- served agent models: `{provenance.get('agent', [])}`")
     lines.append(f"- cases: {summary.get('cases')} run, {summary.get('skipped', 0)} skipped, "
                  f"{summary.get('measured')} measured, "
                  f"{summary.get('pass')} pass / {summary.get('fail')} fail / "

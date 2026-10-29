@@ -269,6 +269,15 @@ class ScreenLeg:
             # The runner returns "" for every identity or parse refusal; production
             # calls those HOLDs (model_identity_unknown / parse_failed). Keep that
             # meaning rather than inventing a fourth disposition.
+            #
+            # WHY THE LABEL IS SPLIT (measured 2026-10-29, first real run): a route whose
+            # served identity could never match the selection - ``radient/claude-opus-5-5`
+            # when the provider serves `anthropic/claude-opus-5-5` - arrives here with
+            # ``identity is None`` and an empty reply, and the old single token
+            # ``empty_reply`` sent the reader looking for an empty model answer instead of
+            # a provenance mismatch. Both dispositions stay HOLD and both still score as
+            # invalid; only the diagnosis differs.
+            failure = "empty_reply" if identity is not None else "identity_unknown"
             return InboundOutcome(
                 disposition="hold",
                 categories=(),
@@ -281,7 +290,7 @@ class ScreenLeg:
                 model_identity=identity,
                 usage=usage,
                 latency_s=elapsed,
-                failure="empty_reply",
+                failure=failure,
             )
 
         parsed = parse_verdict(reply)

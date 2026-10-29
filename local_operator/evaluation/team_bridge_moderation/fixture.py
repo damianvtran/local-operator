@@ -306,6 +306,136 @@ def enroll_bridge(world: FixtureWorld, *, session_id: str) -> Any:
     return owner
 
 
+#: The screening artifacts the envelope write validates against. They are FIXED rather
+#: than derived: the eval measures the OUTBOUND direction, so the inbound screen's own
+#: receipt is scaffolding, and a stable digest keeps two runs comparable.
+_EVAL_BODY_SHA256 = "9f2a" * 16
+_EVAL_TEMPLATE_SHA256 = "aa11" * 16
+_EVAL_ENVELOPE_DIGEST = "bb22" * 16
+_EVAL_ADMISSION_REVISION = "eval-rev-1"
+_EVAL_POLICY_EPOCH = 1
+_EVAL_PROMPT_VERSION = "eval-prompt-v1"
+
+
+def record_inbound_delivery(
+    world: FixtureWorld,
+    owner: Any,
+    *,
+    message_id: str,
+    delivery_ref: str,
+    session_id: str,
+    sender_account_id: str,
+    sender_endpoint_id: str,
+    body_sha256: str = _EVAL_BODY_SHA256,
+    display_digest: str = _EVAL_ENVELOPE_DIGEST,
+) -> dict[str, Any]:
+    """Record the connector's screened-delivery envelope for one inbound card.
+
+    WHY THIS EXISTS (measured 2026-10-29, first real runs). The harness delivered the
+    asker's message with ``receive_peer_message`` while skipping the envelope the real
+    connector writes first. The session renders ``from_account=`` from THAT envelope
+    (never from the sender dict), so every card arrived with an empty sender identity,
+    and the ``bridge`` tool - which accepts exactly one of ``endpoint_id``/``account_id``
+    - had no addressable recipient. The agent tried to reply, the tool refused with
+    "send/reply require exactly one endpoint_id or account_id", and the case scored as
+    a delivery failure the MODEL did not cause. Worse, on a branch with no outbound
+    gate a refusal-heavy run would then report "zero leaks" while nothing could ever
+    have left - the exact false clean this harness exists to prevent.
+
+    What is real: the store's own ``write_screened_request_delivery`` validator, the
+    claim/policy/receipt rows it checks, and the session's envelope read. What is
+    synthetic: the screening receipt's verdict (``allow``) and the fixture identities.
+    """
+
+    import sqlite3
+    import time
+
+    from local_operator.team_bridge import store as bridge_store
+
+    store = bridge_store.Store(Path(world.config))
+    store.active_owner()  # force schema creation through the real _init
+    claim_token = f"eval-claim-{message_id}"
+    key = bridge_store._owner_key(owner)
+    conn = sqlite3.connect(store._path)
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute(
+            "INSERT OR REPLACE INTO claims (owner_key, message_id, session_id, token, "
+            "generation, expires_at, state) VALUES (?,?,?,?,?,?,?)",
+            (
+                key,
+                message_id,
+                session_id,
+                claim_token,
+                int(owner.enrollment_generation),
+                time.time() + 300,
+                "held",
+            ),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO screening_policy (owner_key, version, template_sha256, "
+            "default_model, revision, epoch, accepted_at) VALUES (?,?,?,?,?,?,?)",
+            (
+                key,
+                "eval-v1",
+                _EVAL_TEMPLATE_SHA256,
+                "eval-model",
+                _EVAL_ADMISSION_REVISION,
+                _EVAL_POLICY_EPOCH,
+                time.time(),
+            ),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO screening_receipts (owner_key, message_id, body_sha256, "
+            "template_sha256, prompt_version, model, verdict, categories, envelope_digest, "
+            "admission_revision, policy_epoch, creator_generation, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                key,
+                message_id,
+                body_sha256,
+                _EVAL_TEMPLATE_SHA256,
+                _EVAL_PROMPT_VERSION,
+                "eval-model",
+                "allow",
+                "[]",
+                _EVAL_ENVELOPE_DIGEST,
+                _EVAL_ADMISSION_REVISION,
+                _EVAL_POLICY_EPOCH,
+                int(owner.enrollment_generation),
+                time.time(),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    envelope = store.write_screened_request_delivery(
+        owner,
+        delivery_ref=delivery_ref,
+        message_id=message_id,
+        designated_session=session_id,
+        display_digest=display_digest,
+        body_sha256=body_sha256,
+        claim_token=claim_token,
+        request={
+            "thread_id": f"thread_{message_id}",
+            "message_kind": "request",
+            "request_state": "pending",
+            "request_expires_at": "",
+            "request_ref": "",
+            "sender_account_id": sender_account_id,
+            "sender_endpoint_id": sender_endpoint_id,
+            "recipient_account_id": str(owner.account_id),
+            "recipient_endpoint_id": str(owner.endpoint_id),
+        },
+    )
+    try:
+        store.mark_delivery_phase(owner, delivery_ref, "delivered")
+    except Exception:  # noqa: BLE001 - a phase write is bookkeeping, never the measurement
+        pass
+    return dict(envelope or {})
+
+
 #: Roots a fixture must never be built under. Named individually so the refusal
 #: reads as a deliberate guard rather than a path check that happened to fire.
 _PROTECTED_SUFFIXES = (".local-operator", ".ssh", ".config", "Library", "Documents", "Downloads", "Desktop")

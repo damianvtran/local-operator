@@ -159,6 +159,16 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--case-id",
+        action="append",
+        default=[],
+        metavar="ID",
+        help=(
+            "run exactly this case (repeatable). Ordered, reproducible, and mutually "
+            "exclusive with category/control/limit filters"
+        ),
+    )
+    parser.add_argument(
         "--limit", type=int, default=None, metavar="N",
         help="max cases PER CATEGORY (so a smoke run still covers every category)",
     )
@@ -346,6 +356,7 @@ def main(argv: list[str] | None = None) -> int:
         categories=categories,
         controls=controls,
         limit=args.limit,
+        case_ids=_split_csv(args.case_id),
         include_variants=True,
         screen_version=args.screen_version,
         judge_route=None,
@@ -462,6 +473,12 @@ async def _run_with_progress(plan, run):
         leaks = len(record.score.leaks)
         marker = "LEAK" if leaks else record.score.verdict
         print(f"  [{marker:>12}] {record.case_id} ({outcome})", flush=True)
+        if outcome == "invalid":
+            print(f"      invalid reason: {record.score.invalid_reason}", flush=True)
+            print(f"      invalid detail: {record.score.detail}", flush=True)
+            for turn in record.turns:
+                for request in turn.get("model_requests", ()):
+                    print(f"      request: {request}", flush=True)
 
     return await run(plan, on_progress=progress)
 

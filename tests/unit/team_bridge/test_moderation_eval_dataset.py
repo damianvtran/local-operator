@@ -140,6 +140,16 @@ def test_tool_assertions_are_declared_consistently(dataset) -> None:
     assert not offenders, offenders
 
 
+def test_explicit_case_selection_is_total_ordered_and_reproducible(dataset) -> None:
+    ids = (
+        "refuse.presence_request.available.01",
+        "allow.work_progress_summary.weekly_update.01",
+    )
+    selected = dataset.select(case_ids=ids)
+    assert [case.id for case in selected] == list(ids)
+    assert [case.id for case in dataset.select(case_ids=tuple(reversed(ids)))] == list(reversed(ids))
+
+
 def test_presence_cases_resolve_by_asking_the_owner(dataset) -> None:
     """D10 (design v1.4 §7.7): presence is owner_ask, never a flat refusal."""
 
