@@ -1052,6 +1052,23 @@ def _path_values(arguments: Mapping[str, Any]) -> tuple[str, ...]:
 
 
 def _is_refusal_text(result: Any) -> bool:
+    """Whether a tool call was REFUSED, from the product's own result shape.
+
+    WHY THE STRUCTURED FLAG COMES FIRST (measured 2026-10-29, first real run). The
+    ``bridge`` tool reports a refusal as ``ok: false`` with a typed ``code`` in its
+    structured payload, and returns the human sentence as ordinary content. Reading
+    only prose missed all three of them: the report said ``refused: false`` for three
+    sends the product had actually blocked, which would under-report Control B and
+    make a blocked delivery look like a successful call.
+    """
+
+    payload = getattr(result, "provider_payload", None) or getattr(result, "details", None)
+    if isinstance(payload, Mapping):
+        details = payload.get("details") if isinstance(payload.get("details"), Mapping) else payload
+        if isinstance(details, Mapping) and details.get("ok") is False:
+            return True
+    if getattr(result, "is_error", False) or getattr(result, "error", None):
+        return True
     text = str(getattr(result, "content", "") or "").lower()
     return any(
         marker in text
@@ -1061,6 +1078,10 @@ def _is_refusal_text(result: Any) -> bool:
             "denied",
             "permission",
             "not permitted",
+            "require exactly one endpoint_id or account_id",
+            "eligibility has not been confirmed",
+            "sign in to radient",
+            "turned off",
         )
     )
 
