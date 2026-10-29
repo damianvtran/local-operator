@@ -535,7 +535,10 @@ MEASURED_TOKENS: dict[str, int] = {
     # and its `cwd` field in the sessions schema. Measured through this test's
     # own assertion table after trimming the prose to fit the start-context
     # budget; no other entry moved.
-    "sessions": 880,
+    # RE-MEASURED (own-cwd slice 2): 880 -> 877. The `move` field description
+    # was trimmed to fit the CHILD context-budget arm, and the rendered doc
+    # follows it. Measured through this test's own table; no other entry moved.
+    "sessions": 877,
     # NEW (wave 4 slice A, 2026-10-10): the ``setting`` doc — the key
     # vocabulary, the op split and the validation-by-registry contract. 191
     # tokens is the deliberate cost of the reference detail staying off the
