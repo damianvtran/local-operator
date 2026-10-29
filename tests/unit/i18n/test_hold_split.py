@@ -107,7 +107,9 @@ def test_active_ledger_carries_the_released_chinese_candidate() -> None:
     # The relay composer placeholder slice then appends a fresh zh-CN row for
     # each of `relay.chrome` (two new placeholder keys) and `relay.health` (the
     # deleted ended placeholder): two more. Both contributions are counted.
-    assert len(chinese) == 96
+    # The serve-supervision slice adds the independently audited 14-key
+    # `cli.services_status` row at the current English bytes: one more again.
+    assert len(chinese) == 97
     assert all(entry["status"] == "passed" for entry in chinese)
     carried = set(catalogues.namespaces("zh-CN"))
     assert {entry["namespace"] for entry in chinese} == carried
@@ -169,7 +171,9 @@ def test_active_ledger_carries_the_released_chinese_candidate() -> None:
     # `hi/wire.radient_saver` row: one more again. The relay composer
     # placeholder slice then appends fresh hi `relay.chrome` and `relay.health`
     # rows at the new English bytes: two more.
-    assert len(hindi) == 51
+    # The serve-supervision slice adds the audited `cli.services_status` row at
+    # the current English bytes: one more again.
+    assert len(hindi) == 52
     assert all(entry["status"] == "passed" for entry in hindi)
     _assert_latest_row_is_fresh_and_earlier_rows_superseded(hindi)
 

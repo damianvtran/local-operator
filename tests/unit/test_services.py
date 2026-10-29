@@ -849,6 +849,64 @@ def test_serve_unit_install_refuses_to_change_macos(
     assert "macOS serve is unchanged" in result["lines"][0]
 
 
+def test_a_pure_v1_host_warns_instead_of_failing_the_install(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An unadjudicable cgroup shape must not turn a good install into a failure.
+
+    Review R1 residual: the installer reuses the parser, so on a host whose
+    cgroup rows the parser cannot read (a pure-v1 layout) it reported
+    ``ok=False`` for a unit `systemctl` had just enabled and that answered
+    ``/health`` as its own MainPID. The install is real; only the confirmation is
+    missing, so the receipt warns and keeps ``ok=True``.
+    """
+    from local_operator import procname, supervisors
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(home / "cfg"))
+    monkeypatch.setattr(services.sys, "platform", "linux")
+    monkeypatch.setattr(supervisors, "supervisor", lambda: supervisors.SYSTEMCTL)
+    monkeypatch.setattr(supervisors, "systemd_unit_is_addressable", lambda _unit: True)
+    monkeypatch.setattr(supervisors, "enable_linger", lambda: True)
+    monkeypatch.setattr(supervisors, "linger_enabled", lambda: True)
+    monkeypatch.setattr(supervisors, "output_redirect_lines", lambda _log: [])
+    monkeypatch.setattr(procname, "supervised_image", lambda: home / "bin" / "lop")
+
+    def systemctl(*args: str) -> Any:
+        if args[:1] == ("is-active",):
+            return SimpleNamespace(returncode=0, stdout="active\n", stderr="")
+        if args[:1] == ("show",):
+            return SimpleNamespace(returncode=0, stdout="4242\n", stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    class _HealthResponse:
+        status = 200
+
+        def read(self) -> bytes:
+            return b'{"result":{"pid":4242}}'
+
+    class _HealthConnection:
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            pass
+
+        def request(self, *_args: Any, **_kwargs: Any) -> None:
+            pass
+
+        def getresponse(self) -> _HealthResponse:
+            return _HealthResponse()
+
+    monkeypatch.setattr(supervisors, "systemctl_user", systemctl)
+    monkeypatch.setattr(services.http.client, "HTTPConnection", _HealthConnection)
+    # The v1 host's truthful answer from this parser.
+    monkeypatch.setattr(services, "_serve_supervision", lambda _pid: (None, None, True))
+
+    result = services.install_linux_serve_service(8977)
+    assert result["ok"] is True, result
+    assert any("supervision unknown" in line for line in result["lines"]), result["lines"]
+
+
 def test_serve_supervision_requires_a_service_leaf_and_survives_unreadable_proc(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -872,6 +930,58 @@ def test_serve_supervision_requires_a_service_leaf_and_survives_unreadable_proc(
         encoding="utf-8",
     )
     assert services._serve_supervision(42) == (None, "session-1.scope", False)
+
+    # READABLE BUT UNPARSEABLE IS UNKNOWN (review R1 residual, design D3): a file
+    # this parser cannot adjudicate must not become proof that nobody supervises
+    # the process. The pure-v1 shape below is the real host family: RHEL/CentOS 7,
+    # Ubuntu 18.04 and Debian 10 have no `0::` row at all.
+    (pid / "cgroup").write_text("not a cgroup file\n", encoding="utf-8")
+    assert services._serve_supervision(42) == (None, None, True)
+
+    # AND A PURE-v1 MEMBERSHIP IS RESOLVED, not merely reported as unknown: the
+    # path follows the second colon, so a supervised v1 daemon names its unit.
+    (pid / "cgroup").write_text(
+        "12:pids:/user.slice/user-1000.slice/user@1000.service\n"
+        "1:name=systemd:/user.slice/user-1000.slice/user@1000.service/app.slice/"
+        "local-operator-serve.service\n",
+        encoding="utf-8",
+    )
+    assert services._serve_supervision(42) == ("local-operator-serve.service", None, False)
+
+    # A pure-v1 transient scope is still a scope, not a mis-read service.
+    (pid / "cgroup").write_text(
+        "1:name=systemd:/user.slice/user-1000.slice/user@1000.service/app.slice/"
+        "v1-transient.scope\n",
+        encoding="utf-8",
+    )
+    assert services._serve_supervision(42) == (None, "v1-transient.scope", False)
+
+
+def test_the_unsupervised_branch_without_a_scope_keeps_both_claims(
+    pointer: dict[str, Any], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The converse of R1: where absence IS evidenced, both claims stay (review MINOR 2).
+
+    A process cgroup'd into a slice with no unit and no scope is the affirmative
+    case — the hierarchy was read and named no supervisor — so "systemd cannot
+    restart it" and "cannot supervise it" are true there and must survive. Only
+    the UNKNOWN branch drops them, and a renderer that dropped them here would
+    quietly stop telling the operator what the remedy cannot do.
+    """
+    monkeypatch.setattr(services.sys, "platform", "linux")
+    monkeypatch.setattr(services, "serve_daemon_reports", _fleet([_record(pid=4242)]))
+    monkeypatch.setattr(services, "_supervised_daemon_plists", lambda: [])
+    monkeypatch.setattr(services, "_linux_supervised_unit", lambda: None)
+    monkeypatch.setattr(services, "_install_may_repoint_daemons", lambda: True)
+    proc = tmp_path / "proc" / "4242"
+    proc.mkdir(parents=True)
+    # Read, and the leaf is a slice: no unit, and nothing scope-shaped to name.
+    (proc / "cgroup").write_text("0::/system.slice\n", encoding="utf-8")
+    monkeypatch.setattr(services, "_proc_root", lambda: tmp_path / "proc")
+
+    lines = services.status_lines()
+    assert "  unsupervised: no systemd unit could be resolved; systemd cannot restart it" in lines
+    assert "  `lop services restart` can reload it, but cannot supervise it" in lines
 
 
 def test_install_service_dispatch_returns_before_runtime_warming(monkeypatch) -> None:

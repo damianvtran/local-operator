@@ -57,8 +57,9 @@ translators and the auditor.
   decomposed combining-mark sequences, which break width counting and
   rendering in the TUI.
 - Recorded width exception: `cli.services_status` in this wave:
-  `unsupervised_unknown` reads 84 cells against the 78-cell indented budget.
-  `serve_linger_required` is exactly 80 and fits its 80-cell budget.
+  `unsupervised_unknown` reads 84 cells with `rich.cells.cell_len` against the
+  78-cell indented budget. `serve_linger_required` is exactly 80 and fits its
+  80-cell budget.
 
 ## Punctuation & typography
 

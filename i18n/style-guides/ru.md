@@ -58,8 +58,8 @@ translators and the auditor.
   tip pool 59, `/help` ≈ 55.
 - Recorded width exception: `cli.services_status` in this wave:
   `serve_linger_required` measures 97 and `restart_supervision_limit` 84 cells
-  against the 80/78 status budget. `unsupervised_unknown` measures 74 and FITS,
-  so it is not covered here.
+  with `rich.cells.cell_len` against the 80/78 status budget.
+  `unsupervised_unknown` measures 74 and FITS, so it is not covered here.
 
 ## Punctuation & typography
 

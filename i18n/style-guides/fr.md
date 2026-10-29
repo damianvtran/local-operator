@@ -71,10 +71,10 @@ for `fr`; when this file and a habit disagree, this file wins.
   tip pool 59, `/help` ≈ 55. French typographic spaces (U+202F) count one
   cell each — account for them.
 - Recorded width exception: `cli.services_status` in this wave:
-  `serve_linger_required` measures 102 and `unsupervised_unknown` 92 cells
-  against the 80/78 status budget. The durability clause and the scope name
-  lengthen them; shortening either drops the logout-only qualification this
-  copy exists to keep.
+  `serve_linger_required` measures 102 and `unsupervised_unknown` 92 cells with
+  `rich.cells.cell_len` against the 80/78 status budget. The durability clause
+  and the scope name lengthen them; shortening either drops the logout-only
+  qualification this copy exists to keep.
 
 ## Punctuation & typography
 

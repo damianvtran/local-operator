@@ -80,9 +80,11 @@ RTL & bidi section before translating a single string.
   change.
 - Recorded width exception: `cli.services_status` in this wave:
   `serve_linger_required` reads 89, `restart_supervision_limit` 81 and
-  `unsupervised_unknown` 80 cells against the 80/78 status budget. Recorded
-  rather than shortened: the LTR islands (`loginctl enable-linger`, `lop
-  services restart`) stay byte-identical and cannot be abbreviated.
+  `unsupervised_unknown` 80 cells with `rich.cells.cell_len` against the 80/78
+  status budget. Recorded rather than shortened: the LTR islands (`loginctl
+  enable-linger`, `lop services restart`) stay byte-identical and cannot be
+  abbreviated; the 80-cell break lands inside the interpolated install command,
+  which is a renderer concern, not a wording one.
 
 ## Punctuation & typography
 

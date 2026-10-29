@@ -1641,7 +1641,15 @@ def install_linux_serve_service(port: int = 1111) -> dict[str, Any]:
             "persistent": False,
             "lines": [*lines, text(copy.serve_install_not_serving(error=last_error))],
         }
-    if _serve_supervision(managed_pid)[0] != SERVE_SYSTEMD_UNIT:
+    installed_unit, _, supervised_unknown = _serve_supervision(managed_pid)
+    if supervised_unknown:
+        # WARN, DO NOT FAIL: the unit enabled and answered, and a cgroup shape this
+        # parser cannot adjudicate (notably a pure-v1 host) is the check's blind
+        # spot, not proof the install failed. The warning REUSES the audited
+        # status wording instead of adding a fifteenth translatable string, which
+        # would invalidate every locale's ledger row for this namespace.
+        lines.append(text(copy.supervision_unknown()))
+    elif installed_unit != SERVE_SYSTEMD_UNIT:
         return {
             "ok": False,
             "unit": SERVE_SYSTEMD_UNIT,
@@ -1851,25 +1859,48 @@ def _proc_root() -> Path:
 _CGROUP_UNIT = re.compile(r"(?:^|/)([A-Za-z0-9_.@\\-]+\.service)$")
 
 
+def _cgroup_paths(text: str) -> list[str]:
+    """The cgroup path from every row of a ``/proc/<pid>/cgroup`` file.
+
+    BOTH formats are parsed deliberately, because the caller must not mistake an
+    unreadable shape for evidence. A cgroup-v2 row is ``0::<path>``; a v1 row is
+    ``<hierarchy-id>:<controller-list>:<path>``, so the path is whatever follows
+    the second colon. Pure-v1 hosts (RHEL/CentOS 7, Ubuntu 18.04, Debian 10) have
+    no ``0::`` row at all, and reading only that form made a supervised daemon
+    read as unsupervised (review round 2 reproduced it: v1-only supervised
+    returned the confirmed-negative tuple, and the installer's identity check
+    then failed an install that had actually succeeded).
+    """
+    paths: list[str] = []
+    for line in text.splitlines():
+        parts = line.split(":", 2)
+        if len(parts) == 3 and parts[2].strip():
+            paths.append(parts[2].strip())
+    return paths
+
+
 def _serve_supervision(pid: int) -> tuple[str | None, str | None, bool]:
     """``(unit, scope, unreadable)`` for this PID, never inferred from a unit file.
 
     A service name anywhere other than the leaf is a parent (notably
-    ``user@UID.service``), not the process's supervisor. An unreadable procfs is
-    UNKNOWN, not proof of no supervisor: only affirmative cgroup evidence may
-    carry the negative claim, so the degraded state never asserts what it cannot
-    show.
+    ``user@UID.service``), not the process's supervisor. The third element is
+    UNKNOWN rather than "no supervisor": it is set when the cgroup could not be
+    read, and also when it was read but yielded no path this parser can
+    adjudicate. Only affirmative evidence may carry the negative claim, so the
+    degraded state never asserts what it cannot show.
     """
     if not sys.platform.startswith("linux"):
         return None, None, False
     try:
-        rows = (_proc_root() / str(pid) / "cgroup").read_text(encoding="utf-8").splitlines()
+        text = (_proc_root() / str(pid) / "cgroup").read_text(encoding="utf-8")
     except OSError:
         return None, None, True
-    # cgroup v2 is one unified ``0::`` row. If a host exposes several hierarchies,
-    # any real service membership is still affirmative evidence of supervision.
-    rows = [row.partition("::")[2] for row in rows if "::" in row]
-    for path in rows:
+    paths = _cgroup_paths(text)
+    # READABLE BUT UNPARSEABLE IS UNKNOWN, not unsupervised: an empty parse means
+    # this parser cannot see the process's hierarchy, not that no unit exists.
+    if not paths:
+        return None, None, True
+    for path in paths:
         if not path:
             continue
         scope = path.rsplit("/", 1)[-1]
@@ -1881,9 +1912,10 @@ def _serve_supervision(pid: int) -> tuple[str | None, str | None, bool]:
             return None, scope, False
         # Only a LEAF unit can be the process's own supervisor: an ordinary
         # service placed under an application service's cgroup is not thereby
-        # supervised by that parent either.
+        # supervised by that parent either. The pattern is anchored, so its match
+        # already ends at the path's end.
         match = _CGROUP_UNIT.search(path)
-        if match and match.end() == len(path) and not match.group(1).startswith("user@"):
+        if match and not match.group(1).startswith("user@"):
             return match.group(1), None, False
     return None, None, False
 
