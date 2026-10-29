@@ -4,7 +4,7 @@
   "relay.shell.list.section.active": "Активные сессии",
   "relay.shell.list.section.previous": "Прошлые сессии",
   "relay.shell.list.theme": "выбрать тему",
-  "relay.shell.session.waiting": "ожидание проекции…",
+  "relay.shell.session.waiting": "ожидание отображения сессии…",
   "relay.shell.session.connecting": "подключение к сессии…",
   "relay.shell.usage.title": "использование",
   "relay.shell.usage.cached": "Использование из кэша. Обновление у провайдера не запрашивается.",
