@@ -1197,3 +1197,44 @@ def test_a_healed_file_reaches_ready_quickly_every_time(tmp_path, monkeypatch) -
         )
         assert elapsed < 5.0
         indexer.reset_for_tests()
+
+
+def test_a_database_removed_under_the_process_is_migrated_before_the_next_read(
+    tmp_path, monkeypatch
+) -> None:
+    """A config directory cleared under a live process must not read as damage.
+
+    CI 40812326996: a leaked library worker reconciled a file whose derived
+    schema was gone and logged ``IndexUnavailable: no such table: idx_sessions``
+    with a traceback, which the i18n entrypoint test caught on stderr. The store
+    caches "this PATH is migrated" per process, but readiness belongs to the
+    FILE: ``sqlite3.connect`` happily CREATES an empty database at a path whose
+    file was removed, and the cached verdict then skipped every CREATE. The
+    first read answered with a missing-table error for an index that only needed
+    its migration. The same path can outlive its file through a cache clear, a
+    stale-tmp reaper, or a test removing its config root.
+    """
+    root = config_root(monkeypatch, tmp_path)
+    asset = tmp_path / "kept.txt"
+    asset.write_text("x")
+    session(root, SESSION, write_rows("w1", 1.0, asset))
+    indexer.rebuild_now(root)
+    store = LibraryStore(root)
+    assert LibraryStore(root).sessions(), "precondition: one indexed session"
+
+    store.path.unlink()
+
+    # Healing, not refusal: the rows are gone with the file (it was derived), so
+    # an empty catalog is the honest answer, and the next scan refills it.
+    assert LibraryStore(root).sessions() == {}
+    with LibraryStore(root).read() as connection:
+        tables = {
+            row[0]
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+    assert {"idx_sessions", "idx_state", "assets", "asset_tags"}.issubset(tables)
+
+    # And the authoritative half came back too: the metadata store keys its own
+    # readiness cache by the same path and would otherwise skip its DDL.
+    assert MetadataStore(root).ensure_schema() is True
+    assert indexer.rebuild_now(root) >= 1

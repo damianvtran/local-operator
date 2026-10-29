@@ -553,8 +553,16 @@ class LibraryStore:
     _bootstrap_lock = threading.Lock()
     #: Paths whose derived schema this PROCESS has verified. Class-level for
     #: the same reason as ``MetadataStore._ready_paths``: one store per list
-    #: request must not re-run DDL on the read path.
+    #: request must not re-run DDL on the read path. Readiness is only ever
+    #: trusted for the FILE named by :attr:`_ready_identity` — see
+    #: :meth:`_forget_stale_ready` for what a path-keyed cache alone costs.
     _ready_paths: set[str] = set()
+    #: ``path key -> (st_dev, st_ino)`` of the file whose schema this process
+    #: bootstrapped. ``_ready_paths`` answers "did this process run the DDL for
+    #: this PATH"; this answers "is the file behind that path still the one it
+    #: ran for". Two different questions, and the derived index broke when they
+    #: were answered as one — see :meth:`_forget_stale_ready`.
+    _ready_identity: dict[str, tuple[int, int]] = {}
     #: Paths whose recovery FAILED. A torn authoritative table leaves the derived
     #: tables empty and readable, so a request would otherwise answer an endless
     #: "building" with zero rows instead of the typed 503 (R4-1). Every read and
@@ -568,10 +576,67 @@ class LibraryStore:
 
     # -- connections --------------------------------------------------------
 
+    def _forget_stale_ready(self) -> None:
+        """Drop a cached "ready" whose FILE is no longer the one we migrated.
+
+        WHY A STAT ON EVERY CONNECT. ``_ready_paths`` is keyed by PATH, but
+        readiness is a property of the FILE. The path outlives the file: a user
+        clearing the cache, a stale-tmp reaper, a crash recovery that swings a
+        rebuilt database in, or a test that removes its config root while the
+        process still holds a worker thread for it. ``sqlite3.connect`` then
+        CREATES an empty database, the cached "ready" skips every CREATE, and
+        the first read fails ``no such table: idx_sessions`` — an index that
+        merely needs its schema reads as damage. That surfaced as a traceback at
+        WARNING on the CLI's stderr from the background reconciler, where a
+        recoverable, expected state should never be an exception report.
+
+        Cost is one ``stat`` per connect, dwarfed by the connect itself, and it
+        buys the cache telling the truth. ``_ready_identity`` is what makes the
+        check exact: a rebuilt-but-present file keeps the path and changes the
+        inode, and its schema must be bootstrapped for the NEW file, not
+        inherited from the one it replaced.
+        """
+        if self._key not in self._ready_paths:
+            return
+        try:
+            stat = self.path.stat()
+        except OSError:
+            stat = None
+        if (
+            stat is not None
+            and stat.st_size > 0
+            and self._ready_identity.get(self._key) == (stat.st_dev, stat.st_ino)
+        ):
+            return
+        self._ready_paths.discard(self._key)
+        self._ready_identity.pop(self._key, None)
+        # The AUTHORITATIVE tables lived in the same file and ``MetadataStore``
+        # keys its own readiness cache by the same path, so it would skip its
+        # DDL for the new inode and leave ``assets`` missing too.
+        MetadataStore._ready_paths.discard(self._key)
+        # DEBUG, not INFO: the CLI routes INFO to stderr, and a self-heal of a
+        # DERIVED file is not news a user can act on. Logged at INFO it was the
+        # remaining way this state could still dirty a caller's stderr (CI
+        # 40812326996) — the traceback became this one line and the assertion on
+        # an empty stderr still failed. The WARNING in ``indexer._log_worker_failure``
+        # covers the case this cannot fix.
+        logger.debug("library: index file replaced under %s; re-running its schema", self.path)
+
+    def _mark_ready(self) -> None:
+        """Record this path as migrated AND which file that verdict is about."""
+        self._ready_paths.add(self._key)
+        try:
+            stat = self.path.stat()
+        except OSError:  # pragma: no cover - a migrated path exists by definition
+            self._ready_identity.pop(self._key, None)
+            return
+        self._ready_identity[self._key] = (stat.st_dev, stat.st_ino)
+
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
         if self._key in self._failed_paths:
             raise IndexUnavailable("library index is unreadable", corrupt=True)
+        self._forget_stale_ready()
         if self._key not in self._ready_paths:
             self._recover_if_flagged()
         try:
@@ -684,7 +749,7 @@ class LibraryStore:
                     (STATE_BACKFILL_DONE,),
                 )
                 connection.commit()
-                self._ready_paths.add(self._key)
+                self._mark_ready()
                 return True
             except IndexUnavailable:
                 raise
@@ -753,7 +818,7 @@ class LibraryStore:
             self._recreate_derived()
             if not self._integrity_ok():
                 raise sqlite3.DatabaseError("integrity check failed after recreating the index")
-            self._ready_paths.add(self._key)
+            self._mark_ready()
             self._failed_paths.discard(self._key)
             self._persist_recovery_failure(False)
             logger.info("library: derived index rebuilt after an unreadable file")
@@ -776,7 +841,7 @@ class LibraryStore:
         # authoritative rows are copied into a freshly created derived schema),
         # so record the healthy verdict explicitly: a later boot must not have to
         # guess whether an absent row means "never failed".
-        self._ready_paths.add(self._key)
+        self._mark_ready()
         self._persist_recovery_failure(False)
         return True
 
@@ -1005,7 +1070,7 @@ class LibraryStore:
                 self._recreate_derived()
                 if not self._integrity_ok():
                     raise sqlite3.DatabaseError("authoritative tables are unreadable")
-                self._ready_paths.add(self._key)
+                self._mark_ready()
                 self._failed_paths.discard(self._key)
                 self._persist_recovery_failure(False)
                 return True
