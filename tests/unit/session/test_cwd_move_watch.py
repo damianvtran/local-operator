@@ -1,7 +1,15 @@
 """The cwd-move consumer: consume at an idle boundary, never mid-work.
 
-Fake handle, no RuntimeServer: the risk this pins is the GATE, and the gate is
-all it drives. The real server adds the watcher's cadence, not its predicate.
+The GATE tests below drive ``_apply_queued_cwd_move`` against a fake server: the
+risk they pin is the predicate, and the predicate is all they touch.
+
+The WATCHER tests at the end are the real thing — a real ``RuntimeServer``, its
+real ``_queued_move_watch`` coroutine, its real ``announce_retiring`` — because
+the claim they guard is about the LOOP: this runtime starts the watcher at boot
+for every session, so a watcher with nothing to do must exit rather than spin,
+and one holding a cwd intent must consume it even though no mesh move exists.
+The two behaviours live in the dispatch order inside ``_queued_move_run``, which
+no fake-server test reaches.
 """
 
 from __future__ import annotations
@@ -180,3 +188,155 @@ def test_the_retiring_frame_carries_cwd_additively() -> None:
     source = inspect.getsource(RuntimeServer._announce_retiring_on_loop)
     assert '"cwd": cwd,' in source
     assert 'cwd: str = "",' in inspect.getsource(RuntimeServer.announce_retiring)
+
+
+def test_the_viewer_stages_the_frame_cwd_for_adoption(tmp_path: Path) -> None:
+    """The RECEIVING half of the frame contract, on the real handler.
+
+    A cwd-move announcement is not a drain: it carries no ``draining`` and no
+    ``updating``, so the handler must record the destination and paint nothing.
+    The destination is STAGED rather than assigned — ``_cwd`` is read by
+    ``_bind_under_lock`` inside the bind lock, so writing it here would race that
+    read and the successor could boot at the old path (the measured blocker the
+    field exists for). The second half asserts the additive direction: a frame
+    from a runtime that predates this key must not CLEAR a staged destination.
+    """
+    from local_operator.session.attached import AttachedSession
+
+    facade = AttachedSession.__new__(AttachedSession)
+    facade._pending_frame_cwd = ""  # type: ignore[attr-defined]
+    facade._drain_callback = None  # type: ignore[attr-defined]
+    destination = str(tmp_path / "dest")
+
+    facade._on_retiring_frame({"op": "retiring", "reason": "cwd-move", "cwd": destination})
+    assert facade._pending_frame_cwd == destination
+
+    facade._on_retiring_frame({"op": "retiring", "reason": "build"})
+    assert facade._pending_frame_cwd == destination, "an older frame must not un-stage it"
+
+
+# ---------------------------------------------------------------------------
+# THE WATCHER ITSELF. Everything above drives one method against a fake server;
+# these drive the coroutine the runtime really starts.
+# ---------------------------------------------------------------------------
+
+
+class _RealHandle:
+    """The handle seam a real ``RuntimeServer`` reads, and nothing else.
+
+    Deliberately not ``_Handle`` above: that double reimplements ``may_refresh``
+    so the GATE can be spelled out per case. Here the server is real and the
+    handle is an idle session — one answer, no parametrisation — so a change in
+    the server's own dispatch is what the assertions see.
+    """
+
+    #: The runtime hops through this attribute when a handle publishes a loop;
+    #: ``None`` is the in-process host the real dispatch runs inline for.
+    session_loop = None
+
+    def __init__(self, session_id: str, cwd: str) -> None:
+        self.session_id = session_id
+        self.cwd = cwd
+        self.calls: list[str] = []
+
+    @property
+    def session_projection_seed(self) -> Any:
+        from local_operator.mobile.types import SessionProjection
+
+        return SessionProjection(
+            session_id=self.session_id,
+            pid=0,
+            kind="tui",
+            conversation_name="own-cwd watcher",
+            cwd=self.cwd,
+            model_label="test/model",
+        )
+
+    def may_refresh(self) -> str:
+        return ""
+
+    def begin_retire(self, cause: str, detail: str = "") -> bool:
+        self.calls.append(f"begin_retire:{cause}")
+        return True
+
+    def request_stop(self) -> None:
+        self.calls.append("request_stop")
+
+
+def _real_server(
+    tmp_path: Path,
+) -> tuple[RuntimeServer, _RealHandle, list[tuple[str, dict[str, Any]]]]:
+    """A REAL ``RuntimeServer`` pointed at ``tmp_path`` as its config root.
+
+    The two attributes set here are the two the boot path sets before the watcher
+    starts (``_config_root`` from ``config_dir()``, the record's session id from
+    the seed), so the watcher reads the same marker file it reads in production.
+    The announcement is spied by CALLING THROUGH: the real frame construction and
+    the real record rewrite still run, and only the arguments are recorded.
+    """
+    handle = _RealHandle(OWN, str(tmp_path))
+    server = RuntimeServer(handle, kind="tui")  # type: ignore[arg-type]
+    server._config_root = tmp_path
+    server._record.session_id = OWN
+    announced: list[tuple[str, dict[str, Any]]] = []
+    real_announce = server.announce_retiring
+
+    async def spy(reason: str, **kwargs: Any) -> None:
+        announced.append((reason, kwargs))
+        await real_announce(reason, **kwargs)
+
+    server.announce_retiring = spy  # type: ignore[method-assign]
+    return server, handle, announced
+
+
+@pytest.mark.asyncio
+async def test_the_real_watcher_exits_when_there_is_no_intent_at_all(tmp_path: Path) -> None:
+    """Boot starts this watcher for EVERY session, so nothing-to-do must EXIT.
+
+    A watcher that kept its half-second cadence here would re-read a missing
+    marker forever in every idle runtime on the machine — the cost this asserts
+    against is the loop, not the read. ``wait_for`` is the discriminator: a
+    watcher that does not return trips it instead of hanging the suite.
+    """
+    import asyncio
+
+    server, handle, announced = _real_server(tmp_path)
+    await asyncio.wait_for(server._queued_move_watch(), timeout=5)
+    assert handle.calls == [], "an idle session is never latched for a move it never got"
+    assert announced == [], "and nothing is announced to viewers"
+    assert server._queued_move_stage == ""
+    assert cwd_move.read_move_intent(tmp_path, OWN) is None
+
+
+@pytest.mark.asyncio
+async def test_the_real_watcher_consumes_a_cwd_intent_with_no_mesh_move(tmp_path: Path) -> None:
+    """The dispatch order: a cwd intent is consumed BEFORE the mesh gate.
+
+    THE REGRESSION THIS PINS is the watcher's old first line, which returned the
+    moment ``_queued_move`` (the MESH request) was unset. A cwd move never sets
+    it: the intent is a document on disk. So the whole feature would have failed
+    silently — the tool queues, and the runtime that is supposed to act on it
+    returns in the same instant.
+
+    ``_queued_move_stage`` becoming ``retiring`` and the latch/stop order is the
+    same sequence the fake-server gate tests pin; what is new here is that the
+    REAL coroutine reaches it, which is what makes the ordering claim true.
+    """
+    import asyncio
+
+    destination = tmp_path / "dest"
+    destination.mkdir()
+    intent = cwd_move.enqueue_self_move(
+        tmp_path, OWN, requested_cwd=str(destination), effective_cwd=str(tmp_path), owner_pid=1
+    )
+    server, handle, announced = _real_server(tmp_path)
+    assert server._queued_move is None, "a cwd move is not a mesh move"
+
+    await asyncio.wait_for(server._queued_move_watch(), timeout=5)
+
+    assert handle.calls == ["begin_retire:cwd-move", "request_stop"]
+    assert announced == [("cwd-move", {"cwd": intent.destination_cwd})]
+    assert server._queued_move_stage == "retiring"
+    # THE CONFIRMATION IS THE SUCCESSOR'S, still: this runtime only leaves.
+    stored = cwd_move.read_move_intent(tmp_path, OWN)
+    assert stored is not None and stored.stage == cwd_move.STAGE_QUEUED
