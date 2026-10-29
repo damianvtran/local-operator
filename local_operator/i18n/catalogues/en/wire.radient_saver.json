@@ -12,7 +12,7 @@
   "wire.radient_saver.notice.signed_out": "Radient Saver is paused for this session because you are not signed in to Radient. Run /login radient to use it.",
   "wire.radient_saver.notice.no_credit": "Radient Saver is paused for this session because your Radient balance is empty. Add credit at console.radienthq.com to use it.",
   "wire.radient_saver.notice.rate_limited": "Radient Saver is busy, so your full history is sent until it accepts requests again.",
-  "wire.radient_saver.notice.disabled": "Radient Saver is not available with this configuration, so your full history is sent.",
+  "wire.radient_saver.notice.disabled": "Radient Saver is not available with this configuration, so your full history is sent. Turn it on in /settings under Radient Saver, then /saver on.",
   "wire.radient_saver.notice.oversize": "One message in this conversation is too large for Radient Saver, so it stays unshortened. Saver keeps working on the rest of the conversation.",
   "wire.radient_saver.command.description": "Set Radient Saver for this session",
   "wire.radient_saver.command.radient_description": "Radient Saver (/radient saver)",
@@ -21,7 +21,8 @@
   "wire.radient_saver.command.disabled": "Radient Saver is off for this session. Your global setting is unchanged; /saver inherit follows it again.",
   "wire.radient_saver.command.inherited": "Radient Saver now follows the global setting and agent designation for this session.",
   "wire.radient_saver.command.status.on": "Radient Saver: on for this session. Use /saver off to disable it or /saver inherit to follow the global setting.",
-  "wire.radient_saver.command.status.off": "Radient Saver: off for this session. Use /saver on to enable it.",
+  "wire.radient_saver.command.status.off": "Radient Saver: off for this session. Use /saver on to enable it; if the global setting is off, turn it on in /settings under Radient Saver.",
   "wire.radient_saver.command.badge": "saver",
-  "wire.radient_saver.notice.unknown_balance": "Radient Saver could not check your Radient balance just now, so nothing changed. Try /saver on again in a moment."
+  "wire.radient_saver.notice.unknown_balance": "Radient Saver could not check your Radient balance just now, so nothing changed. Try /saver on again in a moment.",
+  "wire.radient_saver.notice.no_session": "Radient Saver needs an open conversation; open one and try again."
 }

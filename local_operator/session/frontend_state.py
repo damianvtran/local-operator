@@ -3774,10 +3774,9 @@ class FrontendSessionState(BaseModel):
     #: turn. Reporting it here made the badge claim ON for a request the gate
     #: refused and OFF for one it served (review M3 / UX U3), so the field now
     #: carries the setting the user sees, from ``command.saver_state``.
-    radient_saver_on: bool = False
+    saver_on: bool = False
     #: The session's own tri-state override (``None`` follows the global setting
     #: and the agent's pin), so a surface can say WHY Saver is on or off.
-    radient_saver_choice: bool | None = None
     last_usage: FrontendUsage | None = None
     usage_components: list[FrontendUsage] = Field(default_factory=list)
     context_tokens: int | None = None
@@ -7988,13 +7987,21 @@ class FrontendStateStore:
         # the manager's ledger), but one call is what keeps them provably the
         # same number.
         ledger = _ledger_cost(session)
-        from local_operator.saver.command import saver_on
+        from local_operator.saver.command import published_saver_on
 
         changes = dict(
             # Canonical because a follower cannot inspect the owner's session or
             # its credentials; the badge otherwise goes stale after a routed slash.
-            radient_saver_on=saver_on(session),
-            radient_saver_choice=getattr(session, "radient_saver_choice", None),
+            # The REQUEST answer, not the setting (review round 2, M2-1): after a
+            # zero-balance read the choice still says on while the turn refuses to
+            # splice, and a field named "on" must not describe a state the next
+            # request contradicts.
+            saver_on=published_saver_on(session),
+            # NO tri-state here: the badge and `/saver status` read the published
+            # ON, which is the request answer. A second field carrying the raw
+            # setting had no reader and spent ~36 B of the 1 MiB attach frame,
+            # which is at zero slack by test — a later surface that needs the
+            # choice can add it back deliberately, with its own budget.
             attention=dict(getattr(session, "_attention", {}) or {}),
             cwd=str(getattr(session, "cwd", "") or getattr(session, "_cwd", "") or os.getcwd()),
             # A BLANK TITLE NEVER OVERWRITES A SET ONE (review round 1, F1). The

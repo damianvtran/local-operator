@@ -12,7 +12,7 @@
   "wire.radient_saver.notice.signed_out": "Radient Saver इस सत्र के लिए रुका हुआ है, क्योंकि आप Radient में साइन इन नहीं हैं। इसे इस्तेमाल करने के लिए /login radient चलाएँ।",
   "wire.radient_saver.notice.no_credit": "Radient Saver इस सत्र के लिए रुका हुआ है, क्योंकि आपका Radient बैलेंस ख़त्म हो गया है। इसे इस्तेमाल करने के लिए console.radienthq.com पर क्रेडिट जोड़ें।",
   "wire.radient_saver.notice.rate_limited": "Radient Saver व्यस्त है, इसलिए जब तक वह फिर से अनुरोध स्वीकार नहीं करने लगता, आपका पूरा इतिहास भेजा जाएगा।",
-  "wire.radient_saver.notice.disabled": "Radient Saver इस कॉन्फ़िगरेशन में उपलब्ध नहीं है, इसलिए आपका पूरा इतिहास भेजा जाता है।",
+  "wire.radient_saver.notice.disabled": "इस कॉन्फ़िगरेशन के साथ Radient Saver उपलब्ध नहीं है, इसलिए पूरा इतिहास भेजा जाता है। इसे /settings में Radient Saver के अंतर्गत चालू करें, फिर /saver on।",
   "wire.radient_saver.notice.oversize": "इस बातचीत का एक संदेश Radient Saver के लिए बहुत बड़ा है, इसलिए उसे छोटा नहीं किया जाता। Saver बाक़ी बातचीत पर काम करता रहता है।",
   "wire.radient_saver.command.description": "इस सत्र के लिए Radient Saver सेट करें",
   "wire.radient_saver.command.radient_description": "Radient Saver (/radient saver)",
@@ -21,7 +21,8 @@
   "wire.radient_saver.command.disabled": "इस सत्र के लिए Radient Saver बंद है। आपकी वैश्विक सेटिंग नहीं बदली; /saver inherit अब फिर उसका पालन करता है।",
   "wire.radient_saver.command.inherited": "इस सत्र में Radient Saver अब वैश्विक सेटिंग और एजेंट निर्धारण का पालन करता है।",
   "wire.radient_saver.command.status.on": "Radient Saver: इस सत्र के लिए चालू है। बंद करने के लिए /saver off या वैश्विक सेटिंग का पालन करने के लिए /saver inherit का उपयोग करें।",
-  "wire.radient_saver.command.status.off": "Radient Saver: इस सत्र के लिए बंद है। चालू करने के लिए /saver on का उपयोग करें।",
+  "wire.radient_saver.command.status.off": "Radient Saver: इस सत्र के लिए बंद है। चालू करने के लिए /saver on का उपयोग करें; यदि वैश्विक सेटिंग बंद है तो उसे /settings में Radient Saver के अंतर्गत चालू करें।",
   "wire.radient_saver.command.badge": "saver",
-  "wire.radient_saver.notice.unknown_balance": "Radient Saver अभी आपका Radient बैलेंस जाँच नहीं सका, इसलिए कुछ नहीं बदला। थोड़ी देर में /saver on फिर आज़माएँ।"
+  "wire.radient_saver.notice.unknown_balance": "Radient Saver अभी आपका Radient बैलेंस जाँच नहीं सका, इसलिए कुछ नहीं बदला। थोड़ी देर में /saver on फिर आज़माएँ।",
+  "wire.radient_saver.notice.no_session": "Radient Saver के लिए एक खुला सत्र चाहिए; एक खोलें और फिर कोशिश करें।"
 }

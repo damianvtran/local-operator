@@ -463,15 +463,17 @@ _DROP_LADDER: tuple[str, ...] = (
     # whole word. A band tight enough to drop one static dial should keep the
     # expensive one visible.
     "fast",
-    # Beside `fast` and shed just before it (design round 1, D2). The old rung
-    # put Saver directly under `duration`, so it survived to 96 columns while
-    # `fast` survived to 66 — at 80 columns the indicator this feature exists to
-    # provide was gone and the dial next to it stayed. The old reason ("already
-    # visible in /saver status") separated nothing: `/fast status` is equally
-    # recoverable, and `fast`'s own stated reason — it is the segment that is
-    # COSTING MONEY while it shows — is equally true of Saver, which bills
-    # Radient credits per token removed. `fast` still outlives it because it
-    # spends 4 cells against Saver's 6 and is the more transient reading.
+    # Beside `fast` and shed just AFTER it — later in this tuple means kept
+    # longer (design round 1, D2; the rung's direction was written backwards
+    # until design round 2's D7 caught it). The old placement put Saver directly
+    # under `duration`, so it survived to 96 columns while `fast` survived to 66:
+    # at 80 columns the indicator this feature exists to provide was gone and the
+    # dial next to it stayed. The old reason ("already visible in /saver status")
+    # separated nothing — `/fast status` is equally recoverable — and `fast`'s own
+    # stated reason ("the one segment COSTING MONEY while it shows") is equally
+    # true of Saver, which bills Radient credits per token removed. Saver now
+    # outlives `fast`: it is the CONSENT mark for sending history off the machine,
+    # so it is the last of the two a narrow band should drop.
     "saver",
     # The active /team roster and /agent profile (U2). Both are STATIC session
     # settings the user chose — like `effort`, they do not change while the user

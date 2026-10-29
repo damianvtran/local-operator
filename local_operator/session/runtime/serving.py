@@ -8604,22 +8604,31 @@ class ServingSessionHandle(SessionHandle):
             return await self._effort_slash(session, args, SlashResult)
         if command == "fast":
             return self._fast_slash(session, args, SlashResult)
-        if command in {"saver", "radient"}:
+        # ONE BRANCH PER WORD, spelled `command ==`, not a set membership: the
+        # dispatch-surface guard reads this body for `command == "<name>"` and a
+        # tuple membership is invisible to it, which is how `/saver` came to be
+        # advertised as authoritative_session while the reader believed nothing
+        # dispatched it (measured: `test_the_runtime_dispatches_every_slash_command
+        # _it_advertises`).
+        if command == "saver":
             from local_operator.saver.command import saver_slash
 
-            if command == "radient":
-                word, _, rest = args.partition(" ")
-                if word != "saver":
-                    from local_operator.i18n.keys import wire_radient_saver
-                    from local_operator.i18n.text import tr
-
-                    return SlashResult(
-                        kind="notice",
-                        text=str(tr("wire.radient_saver")(wire_radient_saver.command_usage())),
-                        style="warning",
-                    )
-                args = rest
             result = await saver_slash(session, args, SlashResult)
+            self._notify()
+            return result
+        if command == "radient":
+            from local_operator.i18n.keys import wire_radient_saver
+            from local_operator.i18n.text import tr
+            from local_operator.saver.command import saver_slash
+
+            word, _, rest = args.partition(" ")
+            if word != "saver":
+                return SlashResult(
+                    kind="notice",
+                    text=str(tr("wire.radient_saver")(wire_radient_saver.command_usage())),
+                    style="warning",
+                )
+            result = await saver_slash(session, rest, SlashResult)
             self._notify()
             return result
         if command == "approvals":

@@ -69,7 +69,6 @@ async def main() -> None:
             model_label=MODEL_LABEL,
             cwd="~/proj",
             saver=_saver_label(session),
-            reserve_saver=True,
         )
         await _settle(app, pilot)
         off_row = app._status.render_text(100).plain
