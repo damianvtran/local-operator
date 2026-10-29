@@ -627,9 +627,10 @@ def test_a_bare_string_recipient_is_the_account_id_and_nothing_else() -> None:
 
     assert validate_send_recipient("acct_123") == {"account_id": "acct_123"}
     # NO id GRAMMAR is imposed on the bare form: the ids this suite and the
-    # measured run actually use must pass, and ``is_account_id`` would reject
-    # ``acct-ada``/``acc_2``. The SERVER owns the id shape; this client only
-    # refuses what cannot be an id at all (empty, padded, internal whitespace).
+    # measured run actually use must pass. ``is_account_id`` is the WRONG guard
+    # here — its ``acc_`` grammar does not admit the ``acct-ada`` spelling, so it
+    # would refuse real ids while the server owns the id shape. This client only
+    # refuses what cannot be an id at all: empty, padded, internal whitespace.
     for identifier in ("acct-123", "acc_2", "9f8a7b6c-1234-4abc-9def-0123456789ab"):
         assert validate_send_recipient(identifier) == {"account_id": identifier}
     # Pydantic is the tool's first door: it must hand on the canonical pair, or

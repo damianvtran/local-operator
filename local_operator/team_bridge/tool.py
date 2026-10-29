@@ -207,9 +207,10 @@ def _closed_recipient_schema(schema: dict[str, Any]) -> None:
     # of several at the top level; the string and null arms fail the ``type``
     # test and are left exactly as published. The pop is deliberately UNGUARDED:
     # if a serializer ever publishes the object branch without ``propertyNames``
-    # this must fail loudly here (a KeyError at import) rather than quietly leave
-    # a recipient object open to extra keys — that silence is the bug class the
-    # recipient validation exists to prevent.
+    # this must fail loudly HERE (a KeyError while the schema is built —
+    # ``BridgeToolParams.model_json_schema()``, i.e. session start) rather than
+    # quietly leave a recipient object open to extra keys — that silence is the
+    # bug class the recipient validation exists to prevent.
     for branch in schema.get("anyOf", [schema]):
         if branch.get("type") == "object":
             names = branch.pop("propertyNames")["enum"]
