@@ -143,7 +143,16 @@ def add_parser(subparsers: Any) -> None:
         "--approve",
         default="",
         metavar="DEVICE_ID",
-        help="Confirm one paired phone on this computer (this asks for your approval)",
+        help=(
+            "Confirm a paired phone, or with --code approve a filed pairing request id "
+            "by typing the phone's six digits (this asks for your approval)"
+        ),
+    )
+    devices_parser.add_argument(
+        "--code",
+        default="",
+        metavar="SIX_DIGITS",
+        help="With --approve APPROVAL_ID, the six digits shown on the phone",
     )
     devices_parser.add_argument(
         "--confirm",

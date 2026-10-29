@@ -263,6 +263,57 @@ def _decode_spki(encoded: str) -> bytes | None:
     return devices.decode_spki(encoded)
 
 
+def approve_pair_request(root: Path, approval_id: str, code: str) -> int:
+    """The interim human surface for a phone-filed typed approval.
+
+    This is NOT the generic CLI approver. It prints the op's own disclosure, checks
+    the phone's SAS through its persistent receipt path, then pins both digests for
+    ``approve_and_apply``. The generic approver stays refused because it has no code.
+    """
+    import sys
+
+    from local_operator.network import approvals
+    from local_operator.network.credentials import desktop_approval
+    from local_operator.network.types import MeshRefusal
+    from local_operator.operator import pair_op
+
+    try:
+        record = approvals.load_record(approval_id, root=root)
+        if record.get("kind") != approvals.KIND_OPERATOR_DEVICE_PAIR:
+            raise MeshRefusal(
+                "pair_operation_mismatch",
+                "That id is not a phone pairing request. Nothing was approved.",
+            )
+        for line in pair_op.card_lines(record):
+            print(line)
+        # Re-reading and displaying the card is the explicit retry after a dismissed
+        # OS prompt; it clears the engine's cancel latch without changing the record.
+        desktop_approval.refetched([approval_id])
+        facts = pair_op.disclosure(record)
+        # Wrong codes are charged here, BEFORE the typed engine can reach a signer;
+        # a correct code leaves exactly the acknowledgement the store guard requires.
+        pair_op.check_ack(approval_id, code=code, root=root)
+        outcome = desktop_approval.approve_and_apply(
+            root,
+            approval_id,
+            op=pair_op.OP,
+            request_digest=str(record["request_digest"]),
+            disclosure_digest_=desktop_approval.disclosure_digest(facts),
+        )
+    except MeshRefusal as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    print(f"Pairing decision signed with {outcome['signed']['key_id']}.")
+    if outcome.get("applied", {}).get("ok"):
+        print("Phone paired on this computer. It can now approve and loosen requests.")
+        return 0
+    print(
+        outcome.get("applied", {}).get("message", "The phone was not installed."),
+        file=sys.stderr,
+    )
+    return 1
+
+
 def describe_devices(args: argparse.Namespace) -> int:
     """``lop operator devices`` — paired phones, pending requests, and revocation.
 
@@ -297,6 +348,12 @@ def describe_devices(args: argparse.Namespace) -> int:
     authorise = str(getattr(args, "authorise", "") or "")
     approve = str(getattr(args, "approve", "") or "")
     confirm = bool(getattr(args, "confirm", False))
+    code = str(getattr(args, "code", "") or "")
+    if code:
+        if not approve or confirm or revoke or authorise:
+            print("--code requires only --approve APPROVAL_ID", file=sys.stderr)
+            return 2
+        return approve_pair_request(root, approve, code)
 
     paired = devices.list_devices(root)
     pending = devices.list_pending(root)

@@ -1025,8 +1025,8 @@ def card_lines(record: Mapping[str, Any]) -> list[str]:
 
     WHY IT CANNOT FALL THROUGH TO THE ONBOARDING CARD: the fallback calls this an anchor
     install and lists "definitions, MCP servers, git identity and logins", which is a
-    different action entirely. Nothing here names the approve command: this kind is refused
-    on the terminal, so a command would be an instruction that cannot work.
+    different action entirely. The GENERIC terminal approver stays refused: the dedicated
+    operator command carries the code, whereas it has no acknowledgement field.
     """
     facts = disclosure(dict(record))
     lines = [
@@ -1038,8 +1038,9 @@ def card_lines(record: Mapping[str, Any]) -> list[str]:
         f"It reaches this computer {facts['via_words']}, and its certificate would last "
         f"{facts['lifetime_days']} days.",
         f"Requested from {facts['requested_from']}; signed by key {facts['signing_principal']}.",
-        "Type the six digits the phone shows on this computer's approval sheet to finish. "
-        "The terminal and the TUI cannot approve a pairing.",
+        "Type the six digits the phone shows with `lop operator devices --approve "
+        "<approval-id> --code <six digits>` on this computer to finish. The in-conversation "
+        "approval card is not available yet.",
         "Anything that runs programs as you on this computer can work out those digits, so "
         "the sheet warns when this computer cannot prove a person approved.",
     ]
@@ -1057,8 +1058,9 @@ class _PairOp:
     ``file_only_signing = True`` is the operator's decision, not a default (a-2a8b: "Allow,
     with the warning and a 'Set up Touch ID' offer"), which is why the row carries
     ``unproven_human`` and the sheet offers the upgrade. ``cli_approvable = False`` is the
-    first lock: the six digits have to be typed, and neither the terminal verb nor the TUI
-    can show the code check, so both refuse this kind (deny stays available).
+    first lock on the GENERIC approvers: the six digits have to be typed, and neither the
+    generic terminal verb nor the TUI can carry the code check, so both refuse this kind
+    (deny stays available). The dedicated `operator devices --code` path is typed instead.
     """
 
     op = OP
