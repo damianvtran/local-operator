@@ -9403,7 +9403,7 @@
         "model": "radient/auto",
         "date": "2026-10-29",
         "result": "passed",
-        "findings": 2
+        "findings": 0
       }
     },
     {
@@ -9441,7 +9441,7 @@
         "model": "radient/auto",
         "date": "2026-10-29",
         "result": "passed",
-        "findings": 2
+        "findings": 0
       }
     },
     {
@@ -9460,7 +9460,7 @@
         "model": "radient/auto",
         "date": "2026-10-29",
         "result": "passed",
-        "findings": 2
+        "findings": 0
       }
     }
   ]
