@@ -98,6 +98,10 @@ def notice_unavailable() -> Msg:
     return Msg("wire.radient_saver.notice.unavailable", {})
 
 
+def notice_unknown_balance() -> Msg:
+    return Msg("wire.radient_saver.notice.unknown_balance", {})
+
+
 def section_description() -> Msg:
     return Msg("wire.radient_saver.section.description", {})
 

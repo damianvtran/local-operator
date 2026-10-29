@@ -13230,7 +13230,6 @@ class OperatorApp(App[None]):
             effort=_effort_label(session),
             fast=_fast_label(session),
             saver=_saver_label(session),
-            reserve_saver=True,
             # The active /agent profile and /team roster segments (U2). Read
             # defensively via getattr: an embedded-SDK or test double may not
             # expose these accessors, and a missing one must leave the segment
@@ -13613,7 +13612,6 @@ class OperatorApp(App[None]):
             effort=_effort_label(state),
             fast=_fast_label(state),
             saver=_saver_label(state),
-            reserve_saver=True,
             agent_profile=str(getattr(state, "active_agent", "") or ""),
             team=self._team_band_text(str(getattr(state, "active_team", "") or "")),
             cwd=str(getattr(state, "cwd", "") or ""),
@@ -13887,7 +13885,6 @@ class OperatorApp(App[None]):
             effort=_effort_label(session),
             fast=_fast_label(session),
             saver=_saver_label(session),
-            reserve_saver=True,
             # The profile/team segments must survive the swap: takeover is a
             # transport rotation, not a conversation change, so the band may
             # not drop (and later re-add) segments the canonical state never
@@ -44417,8 +44414,6 @@ class OperatorApp(App[None]):
         elif command == "/fast":
             self._cmd_fast(arg, notice)
         elif command in {"/saver", "/radient"}:
-            from local_operator.saver.command import saver_slash
-
             if command == "/radient":
                 word, _, rest = arg.partition(" ")
                 if word != "saver":
@@ -44428,17 +44423,7 @@ class OperatorApp(App[None]):
                     self._system_notice(str(tr("wire.radient_saver")(wire_radient_saver.command_usage())), "warning")
                     return
                 arg = rest
-            from dataclasses import dataclass
-
-            @dataclass
-            class SaverNotice:
-                kind: str
-                text: str
-                style: str
-
-            result = saver_slash(self._session, arg, SaverNotice)
-            self._system_notice(result.text, result.style)
-            self._status.update(saver=_saver_label(self._session))
+            self._cmd_saver(arg, notice)
         elif command == "/theme":
             self._cmd_theme(arg, notice)
         elif command == "/language":
@@ -46146,7 +46131,6 @@ class OperatorApp(App[None]):
                 effort=_effort_label(session),
                 fast=_fast_label(session),
                 saver=_saver_label(session),
-            reserve_saver=True,
                 context_window=_context_window(session),
             )
         # The access note answers "can I use the model I just switched to". On
@@ -46837,6 +46821,32 @@ class OperatorApp(App[None]):
             self._fast_choice = False
             return spec
         return spec.model_copy(update={"fast_mode": True})
+
+    def _cmd_saver(self, arg: str, notice: NoticeFn) -> None:
+        """Run the shared handler and publish ONLY after the journal write.
+
+        The handler is async because the write is. Painting the notice and the
+        band in the same tick as a scheduled write is what left both frontends
+        showing the pre-write state beside a notice claiming the new one
+        (review M2). The worker runs on this app's loop, so the notice, the
+        publish and the band update all land once the row exists.
+        """
+        self.run_worker(self._saver_command(arg, notice), thread=False, group="saver")
+
+    async def _saver_command(self, arg: str, notice: NoticeFn) -> None:
+        from dataclasses import dataclass
+
+        from local_operator.saver.command import saver_slash
+
+        @dataclass
+        class SaverNotice:
+            kind: str
+            text: str
+            style: str
+
+        result = await saver_slash(self._session, arg, SaverNotice)
+        self._system_notice(result.text, result.style)
+        self._status.update(saver=_saver_label(self._session))
 
     def _cmd_fast(self, arg: str, notice: NoticeFn) -> None:
         """``/fast`` — toggle fast mode; ``/fast on|off|status`` — set or report it.
@@ -52998,6 +53008,13 @@ class OperatorApp(App[None]):
             label = getattr(self._session, "model_label", "") or "this model"
             picker.set_notice("" if levels else _effort_unavailable(label))
             return
+        if message.command in {"saver", "radient"}:
+            # Same reason `/fast` states its list here: the words ARE the
+            # command's whole argument grammar, and showing a provider list
+            # instead is what made `/saver on` unrunnable (UX round 1, U1).
+            picker.set_choices(self._saver_argument_choices(message.command))
+            picker.set_notice("")
+            return
         if message.command == "aida":
             # THE RESERVED WORDS, not the provider fall-through (UX round 1,
             # U1). The fall-through is the provider vocabulary and is wrong for
@@ -53055,6 +53072,45 @@ class OperatorApp(App[None]):
         # above.
         if message.command == "login" and choices:
             picker.set_notice_rungs(LOGIN_ORDERING_NOTICE_RUNGS)
+
+    def _saver_argument_choices(self, command: str) -> list[ArgumentChoice]:
+        """The words ``/saver`` accepts, offered at BOTH spellings (UX U1).
+
+        These commands had no branch in ``on_argument_query_opened``, so the
+        handler fell through to the PROVIDER list `/login` offers: typing
+        ``/saver on`` opened 16 providers, ``on`` fuzzy-matched a row, and Enter
+        rewrote the buffer to ``/saver openrouter``. The documented enable form
+        could not be typed at all. The `/aida` branch above is the same fix.
+
+        ``status`` sorts FIRST so Enter under ``/radient`` (where the rows are
+        compound, because the command takes its subcommand first) picks the
+        read-only word: filling ``saver status`` and running it reports state
+        instead of spending credit, which is the right default for a control
+        that changes what leaves the machine.
+        """
+        words = ("status", "on", "off", "inherit")
+        described = {
+            "status": "report this session's state, nothing changes",
+            "on": "shorten this conversation's history from the next turn",
+            "off": "send this conversation's full history",
+            "inherit": "follow the global setting and the agent's designation",
+        }
+        if command == "radient":
+            # `/radient` takes its subcommand first, so each row completes the
+            # WHOLE argument — one keystroke from `/radient ` to a usable word.
+            # The rows still match a typed ``saver `` prefix, which is what makes
+            # the second slot reachable without a two-level list.
+            return [
+                ArgumentChoice(
+                    name=f"saver {word}",
+                    display=f"saver {word}",
+                    description=described[word],
+                )
+                for word in words
+            ]
+        return [
+            ArgumentChoice(name=word, description=described[word]) for word in words
+        ]
 
     def on_refresh_argument_choices(self, message: RefreshArgumentChoices) -> None:
         """Refill an open argument list whose rows depend on a sub-slot.
@@ -64121,20 +64177,32 @@ def _read_stored_frontend_state(directory: Path, session_id: str) -> Any | None:
 
 
 def _saver_label(session: Any) -> str:
-    """The localized Saver badge only when this session's gate resolves on."""
+    """The localized Saver badge, or "" when this session is not opted in.
+
+    ONE RULE (design round 1, D1 + UX U4): the word is painted iff Saver is on
+    for THIS session, and off paints NOTHING rather than a reserved gap. The
+    reserved-gap version shipped a dim glyph with an empty value in every band
+    for every user, which is the one thing a band segment must not do — its
+    presence is the message. The reading comes from the same
+    ``command.saver_state`` the slash command answers from, so the badge, the
+    status line and the turn path cannot disagree.
+
+    Both shapes are read: a routed frontend publishes ``radient_saver_on``, and
+    the owner computes it locally. Neither is trusted over the other — a
+    published ``False`` on a session that IS on would blank the badge, so the
+    local read wins whenever the session object is the real thing.
+    """
     if session is None:
         return ""
-    published = getattr(session, "radient_saver_on", None)
-    if isinstance(published, bool):
-        from local_operator.i18n.keys import wire_radient_saver
-        from local_operator.i18n.text import tr
-
-        return str(tr("wire.radient_saver")(wire_radient_saver.command_badge())) if published else ""
     from local_operator.i18n.keys import wire_radient_saver
     from local_operator.i18n.text import tr
     from local_operator.saver.command import saver_on
 
-    return str(tr("wire.radient_saver")(wire_radient_saver.command_badge())) if saver_on(session) else ""
+    return (
+        str(tr("wire.radient_saver")(wire_radient_saver.command_badge()))
+        if saver_on(session)
+        else ""
+    )
 
 
 def _fast_label(session) -> str:
