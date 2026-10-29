@@ -80,7 +80,7 @@ _MANIFEST_MEMO_CAP = 64
 #: GIL; a burst of opens that all start one starves the refresh threads the opens
 #: are actually waiting on (QA Q4: 13 opens published 2/13 and one build took
 #: 34.96 s).
-_MATERIALIZE_MAX = 4
+_MATERIALIZE_MAX = 2
 
 #: Companion builds run on their OWN threads. On the loop's default executor they
 #: queued ahead of the small `to_thread` reads a poll needs (a 13-session sweep
@@ -90,11 +90,14 @@ _MATERIALIZE_MAX = 4
 #: pool would outlive every test that started it.
 _MATERIALIZE_SLOTS = threading.BoundedSemaphore(_MATERIALIZE_MAX)
 
-#: Re-arm budget for a saturated pool (see schedule_materialize): 40 attempts at
-#: 50 ms is ~2 s of queueing before a session is given up for this publication.
-_MATERIALIZE_RETRIES: dict[tuple[str, str], int] = {}
-_MATERIALIZE_RETRIES_MAX = 40
-_MATERIALIZE_RETRY_S = 0.05
+#: How long a session must be QUIET before its companion is published. A burst
+#: keeps re-arming this, so nothing is published while it runs; the last
+#: derivation offered wins.
+_MATERIALIZE_IDLE_S = 2.0
+_PENDING: dict[
+    tuple[str, str], tuple[str | Path, ti.TranscriptIndex, asyncio.AbstractEventLoop]
+] = {}
+_TIMERS: dict[tuple[str, str], asyncio.TimerHandle] = {}
 
 #: How long a materialisation may wait for the session's own refresh before
 #: giving up. The derivation it needs is the refresh's output, so chaining is the
@@ -467,15 +470,57 @@ def publish(root: str | Path, sid: str, index: ti.TranscriptIndex) -> str | None
 
 
 def _rearm(root: str | Path, sid: str, index: ti.TranscriptIndex) -> None:
-    """Re-offer a session whose build could not get a slot.
-
-    A thin wrapper so the retry cannot be mistaken for a fresh request: the
-    registry entry is cleared first, because the previous task has already
-    returned (it re-armed instead of building), and ``schedule_materialize``
-    refuses a session that looks in-flight.
-    """
-    _MIGRATIONS.pop(ti._key(root, sid), None)
+    """Compatibility shim: a re-offer goes through the coalescing hook."""
     schedule_materialize(root, sid, index)
+
+
+def _arm(key: tuple[str, str], sid: str, loop: asyncio.AbstractEventLoop) -> None:
+    """Arm the single idle timer this session owns, replacing any previous one."""
+    previous = _TIMERS.pop(key, None)
+    if previous is not None:
+        previous.cancel()
+    try:
+        _TIMERS[key] = loop.call_later(_MATERIALIZE_IDLE_S, lambda: _publish_when_idle(key, sid))
+    except RuntimeError:  # the loop closed between the read and the arm
+        _PENDING.pop(key, None)
+
+
+def _publish_when_idle(key: tuple[str, str], sid: str) -> None:
+    """Publish the session's pending derivation once it is quiet — never in a burst.
+
+    THE BURST RULE. While the session has a refresh in flight, or every build slot
+    is taken, the pending derivation goes back for ONE more quiet period (one
+    timer, coalesced). Only a quiet session with a free slot builds, and the build
+    runs on its own short-lived daemon thread so it never queues ahead of the small
+    reads a poll needs.
+    """
+    _TIMERS.pop(key, None)
+    entry = _PENDING.pop(key, None)
+    if entry is None:
+        return
+    root, index, loop = entry
+    if key in ti._IN_FLIGHT or not _MATERIALIZE_SLOTS.acquire(blocking=False):
+        _PENDING[key] = entry
+        _arm(key, sid, loop)
+        return
+    future: asyncio.Future[None] = loop.create_future()
+
+    def run_build() -> None:
+        try:
+            publish(root, sid, index)
+        except (OSError, ValueError, sqlite3.Error):
+            remember_failure(root, sid, source_of(index))
+            logger.debug("read-model publication unavailable for %s", sid, exc_info=True)
+        finally:
+            _MATERIALIZE_SLOTS.release()
+            try:
+                loop.call_soon_threadsafe(
+                    lambda: None if future.done() else future.set_result(None)
+                )
+            except RuntimeError:
+                pass
+
+    threading.Thread(target=run_build, name=f"read-model-{sid}", daemon=True).start()
 
 
 async def _await_future(future: asyncio.Future[None]) -> None:
@@ -830,23 +875,25 @@ def frame_facts(
 
 
 def schedule_materialize(root: str | Path, sid: str, index: ti.TranscriptIndex) -> None:
-    """Publish a companion for an ALREADY-DERIVED index, after the paint.
+    """Offer a completed derivation for publication, coalesced onto an idle timer.
 
-    THE COMPANION IS NEVER ON THE REFRESH CRITICAL PATH (round-2 scope): the
-    canonical document is written exactly as base writes it, and this hook runs
-    afterwards with the completed derivation already in hand — so it neither
-    hydrates a second time nor makes an append wait ~1.3 s. Exact HITs reach it
-    the same way, which is what removes the old "migration rewrites the document
-    on every open" loop entirely: nothing here touches the canonical file.
+    NEVER PUBLISHES FROM HERE (QA round 4, cell 2, measured on a real daemon).
+    This is called from the read paths an open is already waiting on
+    (``checkpoints_view``, the frame's probe), and a build started there competes
+    with the answer that open needs: a 13-way burst published **0/13** while the
+    opens ran, and the publications that did land took **23.2-106.3 s** each. So
+    this only records the LATEST derivation for the session and (re)arms that
+    session's single idle timer; ``_publish_when_idle`` does the work once the
+    session has been quiet for ``_MATERIALIZE_IDLE_S``. A newer derivation replaces
+    the pending one instead of queueing behind it, and a session busy with its own
+    refresh keeps deferring — never churning, because one timer per session is all
+    that is ever armed.
 
-    A failed build is remembered per SOURCE signature (``failed``), so a torn-tail
-    journal does not retry on every open; the next derivation moves the signature
-    and is tried normally.
+    ``_MATERIALIZE_MAX`` bounds how many builds run concurrently after idle.
     """
-    if index.publication_identity is None and not index.journal_generation:
+    if not index.journal_generation:
         return
-    source = source_of(index)
-    if failed(root, sid, source):
+    if failed(root, sid, source_of(index)):
         return
     # ONE head read, not two (round-3 N2): the token this pass would publish is
     # derived from the index it was handed, and the head only has to say whether
@@ -856,105 +903,11 @@ def schedule_materialize(root: str | Path, sid: str, index: ti.TranscriptIndex) 
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
-        # A worker thread cannot own a task; the loop-side callers schedule it.
+        # A worker thread cannot own a timer; the loop-side callers arm it.
         return
     key = ti._key(root, sid)
-    # Single-flight per SESSION, but never a global drop: the pool's width is what
-    # bounds concurrency, and a registry cap here silently abandoned every session
-    # past the fourth in a burst (13 opens published 6/13 with nothing left to
-    # reschedule them).
-    if key in _MIGRATIONS:
-        return
-    # An open may already be refreshing THIS session. Do NOT skip: skipping is
-    # what made a 13-way burst publish 0/13, because every session in a burst has
-    # a refresh in flight at the moment the hook runs and nothing ever schedules
-    # the build afterwards. Chain onto that refresh instead, bounded, so the build
-    # waits for the derivation it needs and still runs.
-    refresh = ti._IN_FLIGHT.get(key)
-    pending = refresh[1] if refresh is not None else None
-    started = time.monotonic()
-
-    def build() -> None:
-        if time.monotonic() - started >= ti._PAINT_HOLD_CEILING_S:
-            return
-        try:
-            publish(root, sid, index)
-        except (OSError, ValueError, sqlite3.Error):
-            remember_failure(root, sid, source)
-            logger.debug("read-model publication unavailable for %s", sid, exc_info=True)
-
-    async def run() -> None:
-        try:
-            if pending is not None and not pending.done():
-                try:
-                    await asyncio.wait_for(asyncio.shield(pending), _MATERIALIZE_CHAIN_S)
-                except (asyncio.TimeoutError, Exception):  # noqa: BLE001
-                    pass
-            held = ti._PAINT_RELEASED.get(key)
-            if held is not None and held[0] is loop and not held[1].is_set():
-                try:
-                    await asyncio.wait_for(held[1].wait(), _MATERIALIZE_START_S)
-                except asyncio.TimeoutError:
-                    # The hold outlived the start budget: give this build up.
-                    # Deferring it to a background queue is how a burst turns into
-                    # a 35 s tail; the next poll that finds no companion simply
-                    # schedules again, once the open is done.
-                    return
-            future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
-
-            def run_build() -> None:
-                try:
-                    build()
-                finally:
-                    _MATERIALIZE_SLOTS.release()
-                    try:
-                        future.get_loop().call_soon_threadsafe(
-                            lambda: None if future.done() else future.set_result(None)
-                        )
-                    except RuntimeError:
-                        # MINOR-1: the loop can be closed under teardown (observed
-                        # as "Event loop is closed" from this thread in the real
-                        # suite). The build is finished and the slot is already
-                        # released above; there is no waiter left to wake.
-                        pass
-
-            if not _MATERIALIZE_SLOTS.acquire(blocking=False):
-                # Every slot is building. RE-ARM rather than drop: a drop is how a
-                # burst ended up publishing 5/13, because nothing schedules a
-                # session after the open that would have. The counter is the ONLY
-                # bound that survives four stuck builds, so it must not be reset by
-                # the re-arm itself (review round 4 measured 111 re-arms of one
-                # session because it was).
-                attempts = _MATERIALIZE_RETRIES.get(key, 0)
-                if attempts >= _MATERIALIZE_RETRIES_MAX:
-                    _MIGRATIONS.pop(key, None)
-                    return
-                _MATERIALIZE_RETRIES[key] = attempts + 1
-                loop.call_later(_MATERIALIZE_RETRY_S, lambda: _rearm(root, sid, index))
-                return
-            # A slot is held: the queue wait is over for this publication, so the
-            # re-arm budget resets here and nowhere earlier.
-            _MATERIALIZE_RETRIES.pop(key, None)
-            threading.Thread(target=run_build, name=f"read-model-{sid}", daemon=True).start()
-            worker = asyncio.create_task(_await_future(future))
-            try:
-                await asyncio.shield(worker)
-            except asyncio.CancelledError:
-                await worker
-                raise
-        except Exception:  # noqa: BLE001 - an optimization never fails a read
-            logger.debug("read-model materialisation unavailable for %s", sid, exc_info=True)
-        finally:
-            _MIGRATIONS.pop(key, None)
-
-    task = loop.create_task(run(), name=f"index-read-model-{sid}")
-    _MIGRATIONS[key] = task
-
-    def finished(done: asyncio.Task[None]) -> None:
-        if _MIGRATIONS.get(key) is done:
-            _MIGRATIONS.pop(key, None)
-
-    task.add_done_callback(finished)
+    _PENDING[key] = (root, index, loop)
+    _arm(key, sid, loop)
 
 
 def _companion_exists(root: str | Path, sid: str, index: ti.TranscriptIndex) -> bool:
@@ -1143,7 +1096,10 @@ def reset_for_tests() -> None:
     with _MEMO_LOCK:
         _MANIFEST_MEMO.clear()
     _FAILED.clear()
-    _MATERIALIZE_RETRIES.clear()
+    _PENDING.clear()
+    for handle in list(_TIMERS.values()):
+        handle.cancel()
+    _TIMERS.clear()
     # A build that was still running when the suite moved on leaves its slot
     # taken; a fresh semaphore is what makes the next test start from a known
     # pool state.

@@ -274,6 +274,9 @@ async def test_a_torn_tail_source_is_remembered_across_four_opens(tmp_path, monk
         task = next(iter(rm._MIGRATIONS.values()), None)
         if task is not None:
             await task
+    # Publication now waits for the session to go QUIET (a burst must attempt
+    # nothing), so the one remembered failure only shows up after the idle timer.
+    await asyncio.sleep(rm._MATERIALIZE_IDLE_S + 1.0)
     assert len(attempts) == 1, attempts
     document = ti.index_path(tmp_path, SID).stat().st_mtime_ns
     assert rm.header(tmp_path, SID).state == "missing"
@@ -718,57 +721,65 @@ def test_a_stale_head_still_yields_the_naming_sidecar(publication):
 
 
 @pytest.mark.asyncio
-async def test_a_saturated_pool_bounds_its_rearms(tmp_path, monkeypatch):
-    """Round-4 MAJOR-2: with every slot stuck, the re-arm must stop.
+async def test_a_burst_publishes_nothing_and_coalesces(tmp_path, monkeypatch):
+    """QA round 4, cell 2: a burst must not attempt a single publication.
 
-    The counter used to be reset by the re-arm itself, so four stuck builds meant
-    unbounded 20 Hz churn per waiting session (measured: 111 re-arms of one).
+    The rule the daemon measurement produced: while opens are running, this hook
+    may only RECORD and re-arm. One timer per session (a later derivation replaces
+    the pending one), nothing built, nothing attempted.
     """
     _journal(tmp_path)
     index = ti.refresh_index(tmp_path, SID)
     assert index is not None
-    _materialize(tmp_path, index)
     rm.reset_for_tests()
-    held = [rm._MATERIALIZE_SLOTS.acquire(blocking=False) for _ in range(rm._MATERIALIZE_MAX)]
-    assert all(held), "the pool did not have the slots to hold"
-    rearms: list[int] = []
-    real_rearm = rm._rearm
+    built: list[str] = []
+    real_publish = rm.publish
 
-    def counting(root, sid, idx):
-        rearms.append(1)
-        return real_rearm(root, sid, idx)
+    def spy(root, sid, idx):
+        built.append(sid)
+        return real_publish(root, sid, idx)
 
-    monkeypatch.setattr(rm, "_rearm", counting)
+    monkeypatch.setattr(rm, "publish", spy)
+    for _ in range(13):
+        rm.schedule_materialize(tmp_path, SID, index)
+    await asyncio.sleep(0.6)  # well inside the idle window
+    assert built == [], "a publication was attempted inside the burst"
+    assert len(rm._PENDING) == 1 and len(rm._TIMERS) == 1, (rm._PENDING, rm._TIMERS)
+    # Quiet long enough, and the one coalesced derivation publishes.
+    await asyncio.sleep(rm._MATERIALIZE_IDLE_S + 1.5)
+    assert built == [SID], built
+    assert rm.header(tmp_path, SID).state == "ready"
+
+
+@pytest.mark.asyncio
+async def test_a_busy_session_keeps_deferring_without_churn(tmp_path, monkeypatch):
+    """A session with a refresh in flight is never published, and re-arms once."""
+    _journal(tmp_path)
+    index = ti.refresh_index(tmp_path, SID)
+    assert index is not None
+    rm.reset_for_tests()
+    built: list[str] = []
+    monkeypatch.setattr(rm, "publish", lambda *a, **k: built.append(str(a[1])))
+    key = ti._key(tmp_path, SID)
+    armed: list[int] = []
+    real_arm = rm._arm
+
+    def counting(k, sid, loop):
+        armed.append(1)
+        return real_arm(k, sid, loop)
+
+    monkeypatch.setattr(rm, "_arm", counting)
+    # Pretend this session is mid-refresh for the whole experiment.
+    ti._IN_FLIGHT[key] = (None, asyncio.get_running_loop().create_future())
     try:
-        # A derivation with NO published companion, or the hook returns before it
-        # ever looks for a slot.
-        path = tmp_path / "sessions" / SID / "transcript.jsonl"
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(
-                json.dumps(
-                    {
-                        "id": "u9",
-                        "ts": 9.0,
-                        "type": "message",
-                        "payload": {
-                            "kind": "message",
-                            "role": "user",
-                            "content": [{"text": "another turn"}],
-                        },
-                    }
-                )
-                + "\n"
-            )
-        derived = ti.refresh_index(tmp_path, SID)
-        assert derived is not None
-        rm.schedule_materialize(tmp_path, SID, derived)
-        await asyncio.sleep(3.0)
-        assert len(rearms) <= rm._MATERIALIZE_RETRIES_MAX, len(rearms)
-        assert len(rearms) > 0, "the hook did not re-arm at all"
-        assert not [k for k in rm._MIGRATIONS], "a task stayed registered after the cap"
+        rm.schedule_materialize(tmp_path, SID, index)
+        await asyncio.sleep(rm._MATERIALIZE_IDLE_S * 3)
+        assert built == [], "a busy session was published"
+        # One arm per quiet period, not a churn: three idle windows, three arms.
+        assert 2 <= len(armed) <= 6, armed
+        assert len(rm._TIMERS) == 1
     finally:
-        for _ in held:
-            rm._MATERIALIZE_SLOTS.release()
+        ti._IN_FLIGHT.pop(key, None)
 
 
 def test_collection_keeps_the_referenced_token(publication):
