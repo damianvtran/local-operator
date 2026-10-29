@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -574,3 +575,89 @@ def test_security_hold_cannot_be_bypassed_by_partial_or_forged_passes(
     # fr proves that ordinary partial namespace eligibility remains supported.
     # Even fabricated passes do not constitute explicit security disposition.
     assert i18n_generate._shipped_locales() == ["en", "fr"]
+
+
+def _bundle_locale_maps(bundle: str) -> dict[str, set[str]]:
+    """`namespace -> locales` from the generated namespace/locale map.
+
+    Parsed by indentation rather than imported: the artifact is TypeScript and
+    this test judges the COMMITTED bytes, not a re-import of them.
+    """
+    namespaces = re.findall(r'^  "([^"]+)": \{$', bundle, re.MULTILINE)
+    blocks = re.split(r'^  "[^"]+": \{$', bundle, flags=re.MULTILINE)[1:]
+    found: dict[str, set[str]] = {}
+    for namespace, block in zip(namespaces, blocks):
+        found[namespace] = set(re.findall(r'^    "([^"]+)": \{$', block, re.MULTILINE))
+    return found
+
+
+def test_committed_bundle_emits_every_shipped_locale_that_is_complete(i18n_generate) -> None:
+    """A locale complete in EVERY owned namespace must be IN the bundle.
+
+    Completeness is the only door to a non-English SPA: `generate.py` emits a
+    locale only when it cleared every owned namespace (the `covering`
+    intersection), and `uiLocaleFor` re-checks the same precondition at render
+    time. So the failure that no green suite would otherwise see is a COMPLETE
+    locale that the emitter skipped — every catalogue audited, every gate
+    satisfied, and the surface silently English anyway.
+
+    The expectation is derived from the committed catalogues and shipped
+    manifest, never from today's artifact: fr (#3131) and zh-CN (#3121) enter
+    the bundle by landing their translations, with no edit here.
+    """
+    bundle = (REPO / "local_operator/mobile/web/src/i18n/bundled.gen.ts").read_text(
+        encoding="utf-8"
+    )
+    emitted = _bundle_locale_maps(bundle)
+    shipped = json.loads((REPO / "local_operator/i18n/data/shipped.json").read_text())["locales"]
+    # The owned list and the shipped manifest are the two inputs the emitter
+    # reads; re-declaring either here would make the test agree with its own
+    # copy of the rule instead of with the rule.
+    owned = i18n_generate.OWNED_SPA_NAMESPACES
+    assert set(emitted) <= set(owned)
+    catalogues_dir = REPO / "local_operator/i18n/catalogues"
+    complete: set[str] = set(shipped)
+    for namespace in owned:
+        english = json.loads((catalogues_dir / "en" / f"{namespace}.json").read_text())
+        for locale in shipped:
+            path = catalogues_dir / locale / f"{namespace}.json"
+            carried = set(json.loads(path.read_text())) if path.is_file() else set()
+            if locale == "en" or set(english) <= carried:
+                continue
+            complete.discard(locale)
+    for namespace in owned:
+        # Every emitted locale is complete: a partial one would be dropped by
+        # `uiLocaleFor` anyway, so shipping its bytes buys nothing but weight.
+        assert emitted[namespace] == complete, (namespace, sorted(complete))
+    assert "en" in complete
+
+
+def test_bundled_spa_module_drops_a_locale_complete_for_only_some_owned_namespaces(
+    generated, i18n_generate, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One missing owned namespace drops the locale ENTIRELY, not partially.
+
+    The runtime refuses a per-key mix of two languages under one page language,
+    so an incomplete locale's bytes are weight with no rendering behind them.
+    Pinned at the emitter because the alternative — bundling what exists and
+    trusting the runtime to refuse it — ships a client that grows with every
+    partial translation wave and one that flips language mid-namespace the day
+    someone "fixes" the gate.
+    """
+    root, emitted = generated
+    monkeypatch.setattr(i18n_generate, "_shipped_locales", lambda: ("en", "fr"))
+    for namespace in ("relay.shell", "relay.session"):
+        (root / "en" / f"{namespace}.json").write_text(json.dumps({f"{namespace}.label": "Label"}))
+    (root / "fr").mkdir(exist_ok=True)
+    (root / "fr" / "relay.shell.json").write_text(json.dumps({"relay.shell.label": "Étiquette"}))
+    partial = i18n_generate._planned_files(emitted)[
+        i18n_generate.REPO / "local_operator/mobile/web/src/i18n/bundled.gen.ts"
+    ]
+    assert '"fr"' not in partial
+    (root / "fr" / "relay.session.json").write_text(
+        json.dumps({"relay.session.label": "Étiquette"})
+    )
+    whole = i18n_generate._planned_files(emitted)[
+        i18n_generate.REPO / "local_operator/mobile/web/src/i18n/bundled.gen.ts"
+    ]
+    assert whole.count('"fr": {') == 2
