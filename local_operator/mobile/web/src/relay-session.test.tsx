@@ -24,7 +24,7 @@
  */
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { BUNDLED_CHUNKS } from "./i18n/bundled.gen";
+import { BUNDLED_CHUNKS, BUNDLED_OWNED } from "./i18n/bundled.gen";
 import { RESOLVED_LOCALES } from "./i18n/runtime";
 import { localeBundleLoader, messageRuntime, useLocaleSnapshot } from "./store";
 
@@ -136,6 +136,39 @@ describe("relay.session extraction", () => {
 		// And the "translated" key still paints English, because the bundle is not
 		// complete enough to select at all.
 		expect(messageRuntime.t("relay.session.past.heading")).toBe("past sessions");
+	});
+
+	it("rejects a nearly-complete owned bundle whose single missing key would mix two languages", () => {
+		// The completeness gate is PER KEY, not per namespace. This locale carries all
+		// twelve owned namespaces and every English key but one — the only shape that
+		// fails when the per-key check is what is doing the work. It has to exist here:
+		// in a lazy-chunk tree nothing registers a locale by itself, so a one-namespace
+		// partial bundle (the test above) is rejected by the missing-namespace branch
+		// and stays green even if that clause is deleted. Verified by mutation, run by
+		// hand on this head: remove `every(key => key in translated)` from
+		// `uiLocaleFor` and this test goes red — ur is accepted and the siblings paint
+		// the fixture — while the test above stays green.
+		const dropped = Object.keys(BUNDLED_OWNED["relay.session"].en)[0];
+		const droppedEnglish = BUNDLED_OWNED["relay.session"].en[dropped];
+		for (const [namespace, entries] of Object.entries(BUNDLED_OWNED)) {
+			const english = entries.en;
+			expect(english).toBeTruthy();
+			messageRuntime.registerBundle(namespace, "ur", Object.fromEntries(
+				Object.entries(english)
+					.filter(([key]) => key !== dropped)
+					.map(([key, text]) => [key, `UR-FIXTURE ${text}`]),
+			));
+		}
+		// ONE dropped key rejects the whole locale: the page stays English rather than
+		// rendering eleven and a half namespaces of fixture under an `en` tag.
+		expect(messageRuntime.uiLocaleFor("ur")).toBe("en");
+		expect(messageRuntime.t(dropped as keyof typeof BEFORE)).toBe(droppedEnglish);
+		// Its siblings do not keep the fixture either — that is what whole-surface means,
+		// in the same namespace and in another one. (The reviewer's suggested wording had
+		// the siblings NOT falling back; `uiLocaleFor` is whole-surface, so the
+		// discriminating direction is that they do.)
+		expect(messageRuntime.t("relay.session.list.empty_hint")).toBe("start one below, or from the TUI on your machine");
+		expect(messageRuntime.t("relay.shell.list.empty")).toBe("no sessions running");
 	});
 
 	it("bumps the local revision on a same-locale registration through the one store channel", () => {

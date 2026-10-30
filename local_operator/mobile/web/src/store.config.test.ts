@@ -9,9 +9,9 @@
  */
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { BUNDLED_OWNED } from "./i18n/bundled.gen";
+import { BUNDLED_CHUNKS, BUNDLED_OWNED } from "./i18n/bundled.gen";
 import { RESOLVED_LOCALES } from "./i18n/runtime";
-import { initializeLocaleMetadata, messageRuntime, retainConfigStream, useLanguage, useLocaleSnapshot } from "./store";
+import { initializeLocaleMetadata, localeBundleLoader, messageRuntime, retainConfigStream, useLanguage, useLocaleSnapshot } from "./store";
 
 import { FetchStreamFixture as Stream, settleStream } from "./sse-test-fixture";
 
@@ -77,22 +77,37 @@ describe("retainConfigStream", () => {
 		// product, but with no owned relay catalogue, so its preference may not
 		// claim copy nobody translated. It is DERIVED from the generated manifest
 		// rather than named, because the shipped set moves while a branch is open:
-		// vi shipped with #3163 while es (#3164) and hi (#3166) waves are still in
-		// flight, and a hardcoded locale goes red the day one of them lands and
-		// invites a "fix" that deletes this assertion. Measured on this tree:
-		// shipped en/fr/ru/vi/ur/zh-CN, so the pick is es.
+		// vi shipped with #3163, es with #3172, and the hi catalogue (#3166) is still
+		// in flight, and a hardcoded locale goes red the day one of them lands and
+		// invites a "fix" that deletes this assertion. Shipped-ness is read from
+		// `BUNDLED_CHUNKS`, never `BUNDLED_OWNED`: the eager map is English only, so
+		// asking it would call every locale unshipped and pick one that has copy.
 		const unshipped = RESOLVED_LOCALES.find(
-			locale => locale !== "en" && !Object.values(BUNDLED_OWNED).some(bundle => locale in bundle),
+			locale => locale !== "en" && !(locale in BUNDLED_CHUNKS),
 		);
+		// Before any frame opens the request, a SHIPPED locale owns no registered copy
+		// and is therefore English: read straight off the registry, so no async path
+		// can have moved it. (The frame-time half below is the same claim seen through
+		// the store; the unshipped arm pins it for a locale no chunk can ever cover.)
+		expect(messageRuntime.uiLocaleFor("fr")).toBe("en");
 		const close = retainConfigStream();
 		try {
 			await settleStream(); expect(Stream.instances).toHaveLength(1);
 			const source = Stream.instances[0];
 			await act(async () => { source.emit("config", JSON.stringify({ language: "fr" })); await settleStream(); });
 			expect(languageHook.result.current).toBe("fr");
-			// #3131 ships fr's owned relay bundles, so a fr backend preference paints
-			// French copy: uiLocale follows an owned copy that exists rather than the
-			// preference alone.
+			// A frame publishes the PREFERENCE at once and only STARTS the locale's
+			// chunk request (`BUNDLED_CHUNKS`), so the surface is still the whole English
+			// bundle here: uiLocale follows copy that has actually been registered, never
+			// the preference alone.
+			expect(snapshotHook.result.current).toMatchObject({ backendLocale: "fr", uiLocale: "en", direction: "ltr" });
+			expect(document.documentElement.lang).toBe("en"); expect(document.documentElement.dir).toBe("ltr");
+			// The other half of the same contract: once the chunk lands — awaited through
+			// the store's own loader, the door the frame already opened — French copy
+			// exists and the UI and the document both move to it. Asserting only one of
+			// these halves goes green on a store that never follows the copy OR on one
+			// that claims a language nobody has.
+			await act(async () => { await localeBundleLoader.ensure("fr"); });
 			expect(snapshotHook.result.current).toMatchObject({ backendLocale: "fr", uiLocale: "fr", direction: "ltr" });
 			expect(document.documentElement.lang).toBe("fr"); expect(document.documentElement.dir).toBe("ltr");
 			const previous = snapshotHook.result.current;
