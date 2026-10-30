@@ -43,14 +43,6 @@ if TYPE_CHECKING:
     from local_operator.session.protocol import SessionProtocol
 
 from local_operator.i18n.keys import cli_exec_worker_help as _ehw
-from local_operator.i18n.text import tr
-
-#: RFC §3.1 render point for this slice's copy (the mirror flags' help text).
-#: The worker's parser is built for a HUMAN running
-#: ``python -m local_operator.exec_worker --help``; a spawned worker never
-#: renders it, so resolving through the process's active locale is enough and
-#: needs no locale parameter (``exec_mode``'s shape).
-_t = tr("cli.exec_worker_help")
 
 #: Exit code for an interrupted (SIGTERM/SIGINT) run — distinct from the
 #: engine's 0/1 success/error codes so job ledgers can tell them apart.
@@ -58,46 +50,80 @@ EXIT_INTERRUPTED = 130
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Parse the worker's mirror flags (see ``exec_mode.build_worker_argv``)."""
+    """Parse the worker's mirror flags (see ``exec_mode.build_worker_argv``).
+
+    HELP RESOLVES ITS OWN LOCALE, the way ``cli.build_cli_parser`` and
+    ``exec_startup.add_startup_arguments`` already do: ``--help`` exits inside
+    ``parse_args``, before any boot activation could run, so a parser that read
+    the process's active locale rendered English for a human whose ``lop exec
+    --help`` beside it was Spanish. One reader (``i18n.cli_help``), one shape.
+    """
+    from local_operator.i18n.cli_help import help_locale as resolve_help_locale
+
+    help_locale = resolve_help_locale()
     parser = argparse.ArgumentParser(
         prog="local_operator.exec_worker",
         description="Run one local-operator prompt headless (background exec worker)",
     )
-    parser.add_argument("--prompt", type=str, required=True, help=_t(_ehw.prompt()))
+    parser.add_argument(
+        "--prompt",
+        type=str,
+        required=True,
+        help=_ehw.prompt().envelope(locale=help_locale)["text"],
+    )
     parser.add_argument(
         "--json",
         action="store_true",
         dest="json_mode",
-        help=_t(_ehw.json()),
+        help=_ehw.json().envelope(locale=help_locale)["text"],
     )
-    parser.add_argument("--yolo", action="store_true", help=_t(_ehw.yolo()))
+    parser.add_argument(
+        "--yolo",
+        action="store_true",
+        help=_ehw.yolo().envelope(locale=help_locale)["text"],
+    )
     parser.add_argument(
         "--train",
         action="store_true",
-        help=_t(_ehw.train()),
+        help=_ehw.train().envelope(locale=help_locale)["text"],
     )
-    parser.add_argument("--agent", type=str, default=None, help=_t(_ehw.agent()))
+    parser.add_argument(
+        "--agent",
+        type=str,
+        default=None,
+        help=_ehw.agent().envelope(locale=help_locale)["text"],
+    )
     parser.add_argument(
         "--agent-id",
         type=str,
         default=None,
         dest="agent_id",
-        help=_t(_ehw.agent_id()),
+        help=_ehw.agent_id().envelope(locale=help_locale)["text"],
     )
     parser.add_argument(
         "--job-id",
         type=str,
         default=None,
         dest="job_id",
-        help=_t(_ehw.job_id()),
+        help=_ehw.job_id().envelope(locale=help_locale)["text"],
     )
     parser.add_argument(
         "--control",
         action="store_true",
-        help=_t(_ehw.control()),
+        help=_ehw.control().envelope(locale=help_locale)["text"],
     )
-    parser.add_argument("--hosting", type=str, default=None, help=_t(_ehw.hosting()))
-    parser.add_argument("--model", type=str, default=None, help=_t(_ehw.model()))
+    parser.add_argument(
+        "--hosting",
+        type=str,
+        default=None,
+        help=_ehw.hosting().envelope(locale=help_locale)["text"],
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        help=_ehw.model().envelope(locale=help_locale)["text"],
+    )
     parser.add_argument(
         "--resume",
         type=str,
@@ -107,7 +133,7 @@ def build_parser() -> argparse.ArgumentParser:
         # to continue a session. Without this the flag was accepted by the front
         # end, dropped at the process boundary, and the worker started a fresh
         # session while reporting success.
-        help=_t(_ehw.resume()),
+        help=_ehw.resume().envelope(locale=help_locale)["text"],
     )
     from local_operator.exec_startup import add_startup_arguments
 
@@ -465,6 +491,17 @@ def main() -> int:
     the same about the runtime's entry.
     """
     parsed = build_parser().parse_args()
+    # THE WORKER'S RUNTIME LANGUAGE. A spawned (``--background``) worker is its
+    # own process: ``cli.main``'s boot activation belongs to the launcher, so
+    # nothing here had moved off the renderer's ``en`` default and the
+    # ``cli.exec_runtime`` chrome ``headless_print`` materialises at import
+    # rendered English under an ``es`` config. AFTER the parse, like the CLI,
+    # because a ``--json`` worker's stdout is one ``printable_event`` document
+    # per line and a machine-readable payload must not vary with the language.
+    if not getattr(parsed, "json_mode", False):
+        from local_operator.i18n.boot import activate_resolved_locale
+
+        activate_resolved_locale()
     # THE JOB LOG IS THIS PROCESS'S STDERR, so console logging is what makes the
     # worker's diagnostics reach the record a person reads — including the
     # one-shot SIGHUP survival line, which was silently discarded before this

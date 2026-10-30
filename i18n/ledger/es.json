@@ -1,0 +1,2015 @@
+{
+  "schema": 1,
+  "locale": "es",
+  "entries": [
+    {
+      "locale": "es",
+      "namespace": "tui.status",
+      "source_sha256": "2403f9c4f37b40264f575929627b99a0bcabb0baf1bcb6a0b951c6c31ec6843a",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit passed: 7 keys, mechanical+idiom clean (one/many/other renders verified); 'trabajo' judged correct; 1 MINOR fit note on tunnel.parked accepted (no maxCells; normal-width unaffected) — runs ran deepseek-flash (anthropic quota fallback from pinned sonnet)."
+    },
+    {
+      "locale": "es",
+      "namespace": "tui.transcript",
+      "source_sha256": "bc4e3f558a065106dfbe264755001d48008b218124f44334bfed90bb8535dfdd",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit passed: 10 keys; mechanical/idiom/terminology clean; queued strict-prefix + esc offer verified; sender.unknown matches harness comms.py vocabulary; 1 NIT: record 'runtime' as kept-English in the es guide — runs ran deepseek-flash (anthropic quota fallback from pinned sonnet)."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.errors",
+      "source_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Empty-namespace carry verified byte-identical to en (sha256 ca3d163b...; 3 bytes '{}'+LF); valns OK; 0 findings; no message content. Batch pass with the other empty stubs — runs ran deepseek-flash (anthropic quota fallback from pinned sonnet)."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.exec",
+      "source_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Empty-namespace carry verified byte-identical to en (sha256 ca3d163b...; 3 bytes '{}'+LF); valns OK; 0 findings; no message content. Batch pass with the other empty stubs — runs ran deepseek-flash (anthropic quota fallback from pinned sonnet)."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.incidents",
+      "source_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Empty-namespace carry verified byte-identical to en (sha256 ca3d163b...; 3 bytes '{}'+LF); valns OK; 0 findings; no message content. Batch pass with the other empty stubs — runs ran deepseek-flash (anthropic quota fallback from pinned sonnet)."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.notices",
+      "source_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Empty-namespace carry verified byte-identical to en (sha256 ca3d163b...; 3 bytes '{}'+LF); valns OK; 0 findings; no message content. Batch pass with the other empty stubs — runs ran deepseek-flash (anthropic quota fallback from pinned sonnet)."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "01a17628b72419d9e8f2809fd8c2317dc960eab698046ac55048ebcdd58ac2fe",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-12"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-12",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Team Bridge H1 six-key delta; independent audit (session 796a7bef253a) passed 0 findings, delta-scoped. Prior 8-key acceptance (0 B/M; 1 MINOR + 2 NITs) carried at base 23613202e3. Translator session 31b7f522b4e5; both runs openai/gpt-6.1-sol (announced Anthropic fallback)."
+    },
+    {
+      "locale": "es",
+      "namespace": "tui.welcome",
+      "source_sha256": "cd5bb5b95c8e71d4bf89fdc7f26bede91dee8fadedb5ef786a7f3e7731c57a50",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round-1 audit FAILED (4 MAJOR/1 MINOR/1 NIT - term divergences); fix round applied 6/6; round-2 recheck PASSED (labels settings-exact; widths <=57/59; keyed ex-sub 28/30; valns OK). Runs ran deepseek-flash (anthropic quota fallback from pinned sonnet). Post-review recheck passed (design D2 remediation): classification_off 'ya no sugiere' (55/57, 2 cells headroom); changed set = exactly that 1 key vs 97a85c44; 29/30 values byte-identical; valns OK."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.errors.settings",
+      "source_sha256": "a3d05f4d250d92e8cda0f01a92c356957edbf67de5ddee19f8ec949b5d2f30bf",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit passed: 12 keys; valns OK; check.py catalogue checks clean for this namespace; mechanical+idiom+terminology clean (parámetros de consulta, prompt del sistema, credencial split adjudicated) — runs ran deepseek-flash (anthropic quota fallback from pinned sonnet)."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.slash",
+      "source_sha256": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round-2 recheck passed: 5 fix keys verified vs en (add/remove typed subverbs byte-exact; approvals/effort fitted trades kept; workstreams=flujos de trabajo; read typed); changed set = the 5; valns OK; 0 B/M — runs ran deepseek-flash (anthropic quota fallback from pinned sonnet). Post-audit EN edit 2026-10-14 (additive; /hub unblock): wire.slash.hub added ahead of the command and carries the en text pending its delta translation. No pre-existing value byte moved; no new translation or audit performed; source_sha256 refreshed to the new en file so the six-locale ship set is unchanged."
+    },
+    {
+      "locale": "es",
+      "namespace": "tui.transcript",
+      "source_sha256": "d39f5d6c42e5a4ef6885661a05da0371646ed8616718ba5f61aacf43b78f5dcf",
+      "translator": {
+        "agent": "coder/e8b8156e7ac1",
+        "model": "openai/gpt-6.1-sol (initial draft) + deepseek/deepseek-flash (R2 remediation, after the 12:22:04Z model transition)",
+        "date": "2026-10-12"
+      },
+      "auditor": {
+        "agent": "i18n-auditor/hub-es-native-audit-recovery",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-12",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Fresh UNION ledger for the 17-key tui.transcript source. Whole-17 coverage is TRANSITIVE and changed-keys-only: old 10 carried from the prior ledger entry, 4 R1-unchanged new keys re-attested, and R2 fixed keys (actions, reply_requested, steered) freshly re-audited — no full-17 re-audit is claimed. R2 native audit passed: 96d02f38241b/scratchpad/es-native-delta-audit-r2-model-corrected.json sha256 c5340386f2fce6e1d2fd8a5921b9964bb4a2edfd192d9cb5cf5d4a6722584a15; original R2 proof retained, report metadata-corrected (model claim corrected to actual generation usage). Translator trajectory: GPT initial draft, then Deepseek remediation after the recorded 12:22:04Z transition (phase note: session e8b8156e7ac1 scratchpad media-rig/translator-provenance-correction.md). | 2026-10-28: lost-evidence re-audit supersedes this historical claim; original provenance/hash retained. Current-byte record: i18n/audits/evidence/es/tui.transcript/le28r2/record.json. Verdict PASS; 0 unresolved blocker/major; prior rendered geometry unverifiable."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "1bf55380720a231664c146e1d70cb455a693be4fdbf677c305061c307236f8da",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-12"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-15",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Structural-deletion-only; NO linguistic re-audit. Carry translator/audit provenance entries[6]; no retranslation. Auditor i18n-auditor/openai/gpt-6.1-sol. Retained bytes identical; context absent both. Target bcc5239f7d9649e61a837350819c61ea4ae2ee8d3507181c0e9d147445bcb940"
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "847a96559d9feaefcc4951ac3a945c6ac44fddc06b8821f9a1fb2e42f2db3f8d",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-16"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-16",
+        "result": "passed",
+        "findings": 2
+      },
+      "status": "passed",
+      "note": "asks.lapsed_visible_for 12-key delta; translator job 48a476fce2b3 (session 5b0b65d644fb), independent auditor job 814557735932; both anthropic/claude-opus-5-5, no fallback — independent at agent level, same model family (disclosed). A-es-1 MINOR fixed (asks.description 'a la vez' -> 'de inmediato'); A-es-2 MINOR fixed (help 'Cuánto' ambiguity -> 'Tiempo visible de una pregunta sin respuesta tras vencer.', 57/58). Prior acceptance carried."
+    },
+    {
+      "locale": "es",
+      "namespace": "tui.transcript",
+      "source_sha256": "13915d6c6dcec0da9fd892c1cb74c23546045717c1d3400d264e8608e75876ba",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-16"
+      },
+      "auditor": {
+        "agent": "translation-reviewer (lopdev) / bc5209588225",
+        "model": "anthropic/claude-sonnet-5-5; openai/gpt-6-astra final adjudication",
+        "date": "2026-10-28",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
+      },
+      "status": "passed",
+      "note": "Fresh INDEPENDENT audit of the CARRIED content against the new en source (13915d6c6dcec0da9fd892c1cb74c23546045717c1d3400d264e8608e75876ba): 17/17 keys with en key-set parity, argument tuples (name+kind) and order parity, and complete CLDR plural categories per locale; the one changed key (tui.transcript.group.actions, ICU singular noun) was verified to render correctly at count 1 in this locale, and none of the locale's own bytes were touched by this branch. Verdict passed, findings 0. Two accepted dispositions: MINOR - es/fr 'many' omits the 'de' preposition vs the guide example, documented as a deviation on the en sidecar; NIT - the guide-example mismatch is guide-side only. Re-attestation of carried translations: no retranslation, no locale byte moved; this row supersedes the prior passed row for the same (locale, namespace) and records the audit that earned the new source hash. | 2026-10-28 fresh independent current-byte audit; PASS, 0 B/M. Record: i18n/audits/evidence/es/tui.transcript/le28r2/record.json. Historical rows retained; no lost geometry/native proof recreated. Human/native sign-off waived, not an audit waiver. Routed receipts (en source + locale catalogue) in the record; en context sidecar not routable. Judgement was direct-read; receipts confirm bytes only."
+    },
+    {
+      "locale": "es",
+      "namespace": "tui.review",
+      "source_sha256": "39c168340e3bac3f47e3a94358026e10b99806ce4147427e6fd7c70334e00a61",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "one MINOR (state_merged: merge kept English per glossary §Wave-2) fixed by the implementer after audit; no re-audit required. Independent audit: 73 keys; mechanical/ICU/glossary clean. Auditor ran openai/gpt-6.1-sol because anthropic/claude-sonnet-5-5 hit quota before the substantive audit."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "86fb2dc48425f95faf1d364930d8c737da725bb8cf1ca5880c8f716cad946845",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-18",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "LOH-5 slice 4 speech.transcription.cleanup 10-key delta; translator job 99a768096f98 after the round-1 audit findings; independent auditor job c1af9ff290d2 (different agent session) reported 0 BLOCKER/MAJOR/MINOR, 2 non-gating NITs now applied; both runs deepseek/deepseek-flash, same model family (disclosed); source hash pinned to the current en bytes."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "d1bc117e26fd79c55663c7ba1972304509a42370213f90924b0b9dc6ec81f63a",
+      "translator": {
+        "agent": "coder",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": "coder",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-18",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "20-key Librarian settings delta (enabled/name/cadence.*) translated in the feature slice and checked for key + placeholder parity by scripts/i18n/check.py; no independent linguistic audit was run — disclosed on PR #2627."
+    },
+    {
+      "locale": "es",
+      "namespace": "tui.schedule",
+      "source_sha256": "6caa74d9248ba9ccfdd6e61ef97976a8a7fcb76ed47cb7cca30911c980f601d7",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "clean terminal; no findings. Independent audit: 61 keys; mechanical/ICU/glossary clean. Auditor ran openai/gpt-6.1-sol because anthropic/claude-sonnet-5-5 hit quota before the substantive audit."
+    },
+    {
+      "locale": "es",
+      "namespace": "tui.projects_edit",
+      "source_sha256": "dd911df0afbd69461e9831a8a5b7b6218795b6c2aee7c3f1be12a0a9aaaa3650",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-10-18",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round 1 auditor openai/gpt-6.1-sol found F1 MAJOR confirm_remove, F2 MAJOR remove_needs_row and F3 MINOR key_hint_edit over the actual footer/hint widths (57/71/57 vs 49/43/50 cells). All three shortened to 42/44/40 cells; round 2 independent re-audit on anthropic/claude-sonnet-5-5 measured the actual painters and passed. All 35 values semantically audited; ICU/placeholders/y-n/register/typography/glossary clean. Final fix: ¿Quitar hito “{name}”? · y quitar · n dejar."
+    },
+    {
+      "locale": "es",
+      "namespace": "tui.authoring",
+      "source_sha256": "7431acf3288cc3766cf37135badb29511737120ab52fc518bf514311ee488d13",
+      "translator": {
+        "agent": "coder (i18n-translator)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": "translation-reviewer (lopdev) / bc5209588225",
+        "model": "anthropic/claude-sonnet-5-5; openai/gpt-6-astra final adjudication",
+        "date": "2026-10-28",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
+      },
+      "status": "passed",
+      "note": "Terminal independent audit: all 40 keys reviewed against English, glossary and locale guide; exact key/simple-placeholder parity, validation/refusal meaning, y/n direction and command grammar pass. Real OperatorApp candidate preview at 60x24 and 100x24: fields inner 58/98, hints inner 56/96 cells; fixed labels/cycles fit, hints one row, read-only receipt wraps safely. Pending-locale preview used an isolated in-memory eligibility override only, never shipped code. Actual auditor model openai/gpt-6.1-sol after anthropic/claude-sonnet-5-5 quota fallback; auditor did not translate or implement. Evidence: session fef2c7321a9a scratchpad/audit/audit-report.md and geometry-report.json. No unresolved findings. | 2026-10-20 LOH-9 S2 one-key delta (tui.authoring.scope_conversation, translated in-slice): key/ICU parity checked by scripts/i18n/check.py; no independent linguistic audit of this delta — disclosed on the PR. | 2026-10-22 LOH-9 S4 promote delta (eight keys: promote_usage, promote_plan, promote_replace_plan, promote_mixed_plan, promote_receipt_created, promote_receipt_replaced, promote_receipt_keeps, promote_failed; the earlier promote_receipt key was split into created/replaced/keeps and removed; translated in-slice). An independent i18n audit (reviewer lane, session e88ccd60c58b, 2026-10-22) reported 11 findings (1 blocker, 1 major, 4 minors, 5 nits); Independent re-audit at ae290d74ab (patch-identical at rebased head e6ca5424c3): all 11 findings verified fixed against the committed bytes; six-locale set restored (generate.py --check: 88 artifacts byte-identical; shipped_locales() = en, fr, es, ru, vi, hi); key/placeholder parity, past-tense receipts and destructive-first plans hold in all five locales; 0 unresolved. Key/ICU parity is machine-checked by scripts/i18n/check.py. | 2026-10-28: lost-evidence re-audit supersedes this historical claim; original provenance/hash retained. Current-byte record: i18n/audits/evidence/es/tui.authoring/le28r2/record.json. Verdict FINDINGS; 0 unresolved blocker/major; prior rendered geometry unverifiable. | 2026-10-28 fresh independent current-byte audit; FINDINGS, 0 B/M. Record: i18n/audits/evidence/es/tui.authoring/le28r2/record.json. Historical rows retained; no lost geometry/native proof recreated. Human/native sign-off waived, not an audit waiver. Routed receipts (en source + locale catalogue) in the record; en context sidecar not routable. Judgement was direct-read; receipts confirm bytes only."
+    },
+    {
+      "locale": "es",
+      "namespace": "tui.team_authoring",
+      "source_sha256": "b956c90f98b9542da3fc8b9b9af1d1d797d36617f4230ffd4f616382445e9d6c",
+      "translator": {
+        "agent": "coder (i18n-translator)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": "translation-reviewer (lopdev) / bc5209588225",
+        "model": "anthropic/claude-sonnet-5-5; openai/gpt-6-astra final adjudication",
+        "date": "2026-10-28",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
+      },
+      "status": "passed",
+      "note": "Terminal independent LLM semantic audit: all 35 keys reviewed against English source/context, glossary and locale guides; exact key and simple-placeholder parity, punctuation, validation meanings and literal command/member grammar pass. No ICU plural/select messages occur. Real styled OperatorApp candidate previews at 60x24 and 100x24: labels 57/97 cells available; hints 56/96 wrap without clipping; pinned legend and discard question fit. Namespace command footer is 50 cells; combined legacy listing prose wraps safely in real transcript captures. Top/settled frame pairs are pixel-identical. Pending-locale preview used only an isolated in-memory shipped-eligibility override, not a production policy change. Vietnamese NFC and backend token policy checked; no inherit/tier/effort keys occur in this namespace. Actual auditor model openai/gpt-6.1-sol after anthropic/claude-sonnet-5-5 quota fallback; auditor did not translate or implement. Evidence: session 2c6f8e92a731 scratchpad/audit/preview.py, preview.log, geometry-report.json, reviewed-inputs.json, rendered montages and audit-report.md. No unresolved translation findings. This pass is not whole-feature design/QA or native terminal/font sign-off. | 2026-10-22 LOH-9 S4 one-key delta (tui.team_authoring.promote_hint, translated in-slice): key/ICU parity checked by scripts/i18n/check.py; no independent linguistic audit of this delta — disclosed on the PR. | 2026-10-28: lost-evidence re-audit supersedes this historical claim; original provenance/hash retained. Current-byte record: i18n/audits/evidence/es/tui.team_authoring/le28r2/record.json. Verdict PASS; 0 unresolved blocker/major; prior rendered geometry unverifiable. | 2026-10-28 fresh independent current-byte audit; PASS, 0 B/M. Record: i18n/audits/evidence/es/tui.team_authoring/le28r2/record.json. Historical rows retained; no lost geometry/native proof recreated. Human/native sign-off waived, not an audit waiver. Routed receipts (en source + locale catalogue) in the record; en context sidecar not routable. Judgement was direct-read; receipts confirm bytes only."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "b111eefb4ffaa2f114d4eec6f89908c70d08638233c25b45c64fa049416a0ab1",
+      "translator": {
+        "agent": "coder",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent four-key scratchpad settings delta audit (i18n-auditor, anthropic/claude-sonnet-5-5, 2026-10-19) at 0b208b2159: semantics, session scope, per-write/immediate enforcement, explicit cap+bytes labels, 16 MiB–8 GiB bounds, 256 MiB default, glossary/register/typography, key/argument parity and NFC all checked. No blocker/major, no accepted MINOR. Certifies this delta composed with the prior independent audit of unchanged namespace content; not a fresh whole-namespace audit. Translation authored in the implementation slice (coder, deepseek-flash) and independently audited. Independent width-delta recheck at a171e247d3eacb4dd170b725c098e59b3a69a5fc by i18n-auditor (anthropic/claude-sonnet-5-5), 2026-10-19: shortened es/fr/ru/vi cap labels pass semantics, idiom and byte-unit checks at 28/27/24/26 Rich cells respectively (unchanged hi/en: 19/27), all within 29 cells; only these four catalogue values changed, English source hash remains b111eefb4ffaa2f114d4eec6f89908c70d08638233c25b45c64fa049416a0ab1, and zero blocker/major or accepted MINOR findings remain. | 2026-10-28: lost-evidence re-audit supersedes this historical claim; original provenance/hash retained. Current-byte record: i18n/audits/evidence/es/wire.settings/le28r2/record.json. Verdict FINDINGS; 0 unresolved blocker/major; prior rendered geometry unverifiable."
+    },
+    {
+      "locale": "es",
+      "namespace": "tui.viewer",
+      "source_sha256": "741c34bd0dbed2d1834e53a8546b39bb2d086e16df24f2ed786b6108c8a40a4b",
+      "translator": {
+        "agent": "independent translation subagent (task fd31363d4a28)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "independent mechanical+meaning audit refresh (manager-relayed)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round-1 remediation: manager-relayed independent audit refresh PASS, no T-findings. Only literal keyboard prefix added to legend; removing it restores the prior audited file byte-for-byte (previous source 25d9badcd4b0058224b5f8eb6f3218185d2e00174fee7f0ac146e39b7761a4ed, original translation task fd31363d4a28, original audit f6d9e259a63a). Existing translated words unchanged. Candidate SHA-256 c3358107c5f3c32427c32fb8f7e74c2942536c2337d9ceee5aa895d1fbc6b9e5."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.memory",
+      "source_sha256": "319e23e6e4a6abee4e9549655142bebb5402563902c6f0497f3ee761fb53aec7",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PASS: overflow ES-1..ES-3 + ES-9 fixed; labels 'Localizadores como contexto' 27c, 'Sincronización de memoria' 25c, 'Ámbitos a sincronizar' 21c, all <=29 untruncated; only sync.label changed from audited d1d41b39. Record:."
+    },
+    {
+      "locale": "es",
+      "namespace": "tui.tags",
+      "source_sha256": "509d4e9ff9c7a90b3cf574a0ebc56432d37919aaddb74e6a6aa8ad945f8bd8bd",
+      "translator": {
+        "agent": "coder",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20"
+      },
+      "auditor": {
+        "agent": "reviewer",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent re-audit passed: 27 keys; tui.tags.invalid now quotes the literal reserved token `Untagged`, verified against session_tags.py (only casefold() == 'untagged' is refused; localized labels are accepted). Translator=coder, auditor=reviewer (independent); actual model deepseek/deepseek-flash. Target file sha256 96bfab4939ede7e68a15159a166a5a57cc452cc65afa2ae559d39294ea24d1cb. 0 findings."
+    },
+    {
+      "locale": "es",
+      "namespace": "relay.session.tags",
+      "source_sha256": "7254ba273a4148ddef8279161682ada6405745a9b1634c59a2c5b6ec9e677af0",
+      "translator": {
+        "agent": "translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-21"
+      },
+      "auditor": {
+        "agent": "translation-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-21",
+        "result": "passed",
+        "findings": 4
+      },
+      "status": "passed",
+      "note": "Initial ES-1 minor (confirm lost its object), ES-2 nit (idiomatic hacer de), ES-3/ES-4 fit notes. ES-1 and ES-2 fixed; fit notes closed by the status-cell min-w-14/nowrap fix. Re-audit round 2 PASS."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "b5e2474576210634073deea8b9bd36083136129e76356277dcf1c78f3fa84c7d",
+      "translator": {
+        "agent": "feature coder subagent s1-client-flag (task 2b9eb14e84e1)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (round 2, independent)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent remote_compute six-key delta audit (i18n-auditor, deepseek/deepseek-flash, session c8e73eaf4141, 2026-10-19). Read all 6/6 values against the en source and sidecars (preview that moves work to Radient-hosted compute, default off); key/placeholder parity clean (no ICU in these keys); 'Radient' kept in every locale. Translator model is not recorded in feature commit 091db91ef, so none is claimed. 1 MINOR fixed: enabled.help measured 74 cells, exactly the 74-cell /settings detail line at 80x24 (rendered, not estimated) and past the ~67-cell en budget, so the row had no margin; tightened to 'Vista previa: envía trabajo al cómputo alojado por Radient en tu malla.' (71). 'malla' for mesh matches the catalogue's network/mesh_updates keys; 'solo local' / 'se permiten ejecuciones remotas' accepted as idiomatic tú register; no unresolved blocker/major. Round 2 independent re-audit (delta: only remote_compute_enabled.help, re-read against the new en 'bound to one mesh network'): the dangling 'ligado' became the predicate 'y lo vincula', this section's 'vincular' term, so the participle can no longer attach to 'cómputo'; 'tuya' dropped for width (72 cells), 'una malla' keeps the single-network reading; 'Radient' untranslated; no containment claim; tú register unchanged. 0 unresolved blocker/major."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.exec_remote_help",
+      "source_sha256": "c555648c19dd25af507951dc828f3fffbedc44feb579192c9c3fa7c6952e365e",
+      "translator": {
+        "agent": "feature coder subagents s3-exec-remote, s3-translate, s3-rem-exec, s3-contract-fix, s3e-rem2",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (independent)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "Round-2 independent audit at 198284d81 against the real wire contract (per-outcome finished_* keys, retrying, status_network_*), 37 wire + 11 help keys re-read in full. Round-1 fixes verified landed: status_unknown 'seguimos pendientes', tenant 'confirmada por Radient' in submitted and detached, no isolation/containment claim. 1 MINOR fixed: retrying now says 'seguimos pendientes' instead of 'seguimos esperando', matching the audited status_unknown wording for the same still-watching sense. Placeholders, newlines and flags byte-identical; es typography has no space before : ; (unlike fr). Real `lop exec --help` re-rendered per locale at COLUMNS=80 and 100 (LOP_LANG, isolated HOME): the remote-compute block peaks at 78/96 cells against en's 77/98, every line inside the terminal."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.remote_compute",
+      "source_sha256": "d1d9119a235c1a8c09306f42438115f5211ede16addf80a8f88d6f78860367a8",
+      "translator": {
+        "agent": "feature coder subagents s3-exec-remote, s3-translate, s3-rem-exec, s3-contract-fix, s3e-rem2, api-override-client, override-rem",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (independent, scoped re-audit)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round-2 independent audit at 198284d81 against the real wire contract (per-outcome finished_* keys, retrying, status_network_*), 37 wire + 11 help keys re-read in full. Round-1 fixes verified landed: status_unknown 'seguimos pendientes', tenant 'confirmada por Radient' in submitted and detached, no isolation/containment claim. 1 MINOR fixed: retrying now says 'seguimos pendientes' instead of 'seguimos esperando', matching the audited status_unknown wording for the same still-watching sense. Placeholders, newlines and flags byte-identical; es typography has no space before : ; (unlike fr). Real `lop exec --help` re-rendered per locale at COLUMNS=80 and 100 (LOP_LANG, isolated HOME): the remote-compute block peaks at 78/96 cells against en's 77/98, every line inside the terminal.  Scoped Round-3 independent re-audit at fe8c4a67c (delta 794e3a2a9..fe8c4a67c): only the 3 keys that commit added — replayed, run_identity_mismatch and unreadable_envelope — were re-read against the en source and its sidecar notes; `git diff 794e3a2a9..fe8c4a67c -- local_operator/i18n/catalogues` confirms no other value moved (unreachable only gained a trailing comma). replayed was read for the 200-vs-201 sense: the key matched an earlier submission, the sentence names THAT run and says no new run was created — it cannot be read as a fresh run starting; {run_id}, {answered} and {asked_for} each appear exactly once and byte-identically. Width measured with UUID-length (36-cell) ids in place of each placeholder, against en 137/195/117 cells. 1 MAJOR fixed: run_identity_mismatch read 'Radient respondió por … no por …', which asserts answering ON A RUN'S BEHALF; it now uses the construction this namespace already uses for the same fact (network_mismatch 'respondió con'): 'respondió con la ejecución remota {answered}, no con la ejecución {asked_for} solicitada'. unreadable_envelope keeps 'esta versión' (finished_unknown/status_unknown) for build; replayed's 'no se creó ninguna nueva' is read as the run and left alone. Rendered 158/225/139 cells; run_identity_mismatch wraps to 3 terminal lines at 80 columns, as en does there. Result: passed, nothing unresolved; shipped re-eligibility restored (six-locale set). Scoped Round-4 independent re-audit at 6a7dd801d (delta 120494660..6a7dd801d): only the 3 keys that commit added — api_override, api_override_invalid and preview_not_enabled — were re-read against the en source and its sidecar notes; `git diff 120494660..6a7dd801d -- local_operator/i18n/catalogues` confirms nothing else moved (3 ids per locale plus 3 sidecar entries, 33 insertions, 0 deletions). api_override was read for the consequence the sidecar demands: the Radient LOGIN and the requests leave for {host} instead of the default Radient API, and the variable is to be unset unless the reader controls that host — no locale softens it into 'test server' and every locale also says why ({host} is named and the variable is named). {host} appears exactly once and byte-identically in each of the five; api_override_invalid is ONE sentence naming the accepted shape and every refused class; preview_not_enabled says THIS ACCOUNT, YET and preview, and reads as neither an error nor a permanent refusal. NFC, no NBSP (U+00A0) and no ASCII apostrophe anywhere in the three keys. Width in cells against en's 185/233/69: es 230/282/84, fr 212/285/74, hi 154/200/51, ru 218/283/85, vi 213/280/72 — each inside its own guide's growth band, and none of the three carries maxCells. shipped re-eligibility restored: six-locale set (en, fr, es, ru, vi, hi). 0 findings: tú register throughout ('tus credenciales', 'Quita esa variable'), subjunctive after 'salvo que' correct, no space before ';'. 1 MINOR accepted: 'sin credenciales' renders userinfo — userinfo IS user:password inside a base URL, and it is the word the sibling locales use; no change."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "c1e237c4dd3c2ea236f9e39d15cf4d0b34a231841357aee5a389f34201a73582",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-22"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-22",
+        "result": "passed",
+        "findings": 3
+      },
+      "status": "passed",
+      "note": "session.compression 8-key delta (settings section + switch + age row). Translator job b1a1db1d58c6; independent auditor job 4c7749084e22, a different agent that read only the en source, sidecars, style guides and the produced catalogue. Both runs deepseek/deepseek-flash — independent at agent level, same model family (disclosed). Audit verdict PASS WITH FINDINGS: 0 blocker, 0 major, 1 MINOR (A-es-1: choice.true 'anteriores a' -> 'tras la antigüedad de abajo', the cleanup row's own phrase) and 2 NITs (A-es-2 label -> 'Comprimir las antiguas'; A-ru-1 'читаются обратно' -> 'распаковываются при чтении'), all applied verbatim from the auditor's own suggested wording and re-checked mechanically (keys, cell widths, prefix bytes). Prior acceptance for this namespace carried; no other key touched."
+    },
+    {
+      "locale": "es",
+      "namespace": "tui.palette",
+      "source_sha256": "e3bf15fd1036f7e4aeed39dbc3800e0dd1e6736f0e0ad211cac6d6f0ada9a95f",
+      "translator": {
+        "agent": "translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-23"
+      },
+      "auditor": {
+        "agent": "translation-reviewer (lopdev) / bc5209588225",
+        "model": "anthropic/claude-sonnet-5-5; openai/gpt-6-astra final adjudication",
+        "date": "2026-10-28",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
+      },
+      "status": "passed",
+      "note": "Independent audit passed: 7 keys, 0 findings. Audited target sha256 864ba429feea9305a2a672ae57b71ebbf22a54ee92881276cd4d24f80493f106. Report: sessions/7bc94e70c275/scratchpad/audit-es.json. | 2026-10-28: lost-evidence re-audit supersedes this historical claim; original provenance/hash retained. Current-byte record: i18n/audits/evidence/es/tui.palette/le28r2/record.json. Verdict PASS; 0 unresolved blocker/major; prior rendered geometry unverifiable. | 2026-10-28 fresh independent current-byte audit; PASS, 0 B/M. Record: i18n/audits/evidence/es/tui.palette/le28r2/record.json. Historical rows retained; no lost geometry/native proof recreated. Human/native sign-off waived, not an audit waiver. Routed receipts (en source + locale catalogue) in the record; en context sidecar not routable. Judgement was direct-read; receipts confirm bytes only."
+    },
+    {
+      "locale": "es",
+      "namespace": "tui.asks",
+      "source_sha256": "e3ac8769116d2e2c38107b1918c200dd4ff846f3b1b9b092933e3bf91d787d7e",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-23"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (OpenAI Codex)",
+        "model": "openai/gpt-5",
+        "date": "2026-10-23",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit by a separate agent on a different model family (OpenAI Codex, gpt-5), read only over the worktree. Rounds 1 and 2 audited R5's copy and its remediation; THIS round adds one key, the lapsed door's receipt, whose whole point is to read the SAME as the phone's line for the same act (design round 2, D8). The translations reuse each locale's existing wording for that phone key verbatim, so the two surfaces cannot drift; the auditor confirmed the five strings match their phone counterparts and raise no finding. THE FIVE SHIPPED LOCALES' BYTES ARE IN THIS TREE and auditable here. Urdu and zh-CN candidates are NOT in this tree by design (the package pins six active locales; zh-CN is security-held) — their allowance rows carry that debt under each locale's standing owner and payoff."
+    },
+    {
+      "locale": "es",
+      "namespace": "relay.ask",
+      "source_sha256": "2ead3ad32467d6e7c7a7a4aa96a4bde65f7451687fe0878f8dedb464340b24e7",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-23"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (OpenAI Codex)",
+        "model": "openai/gpt-5",
+        "date": "2026-10-23",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit by a separate agent on a different model family (OpenAI Codex, gpt-5), read only over the worktree. R5's round-1 copy was audited last round (12 findings, round 2 PASS on all seven candidate locales). THIS round covers the round-1 remediation's new and changed keys: the dismissal receipts, the fleet refusal, the agent-named `moot` note and `esc cancel`. The auditor raised 10 findings — 6 width overruns, 4 notes that addressed the operator instead of naming what the agent stops doing — all applied; its re-check returned 14 of 15 PASS, and the one residual note (that the French fleet-refusal fragment opens in lower case) is settled by the English source's own fragment register, which that brief now states. THE FIVE SHIPPED LOCALES' BYTES ARE IN THIS TREE and auditable here. Urdu and zh-CN candidates are NOT in this tree by design (the package pins six active locales; zh-CN is security-held) — their allowance rows carry that debt under each locale's standing owner and payoff, not a per-PR date."
+    },
+    {
+      "locale": "es",
+      "namespace": "tui.notices",
+      "source_sha256": "4a159689628113c32a2df75a9e3d98d74aab790c9946848307bb267318731510",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-chat",
+        "date": "2026-10-24"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-chat",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "First catalogue for this namespace. 30 keys (tui.notices) / 84 keys (wire.errors.desktop), key set and placeholder name+kind multiset identical to en. Round 1: auditor FAILED 14 fidelity findings in es/fr wire.errors.desktop (two agents_config_* rows substituted an unrelated sentence; six smaller slips), ru capitalisation note. Round 2 after corrections: AUDIT RESULT: passed, no regressions. Glossary: 'fast' reuses the adjective already shipped in wire.slash.fast; 'standard speed' matches the configure.py wording."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.errors.desktop",
+      "source_sha256": "9a164be42a80d9bf0f60ad2a9f1d76fd1601855a4d19ffac3bf35d6bef11f76d",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-chat",
+        "date": "2026-10-24"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-chat",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "First catalogue for this namespace. 30 keys (tui.notices) / 84 keys (wire.errors.desktop), key set and placeholder name+kind multiset identical to en. Round 1: auditor FAILED 14 fidelity findings in es/fr wire.errors.desktop (two agents_config_* rows substituted an unrelated sentence; six smaller slips), ru capitalisation note. Round 2 after corrections: AUDIT RESULT: passed, no regressions. Glossary: 'fast' reuses the adjective already shipped in wire.slash.fast; 'standard speed' matches the configure.py wording."
+    },
+    {
+      "locale": "es",
+      "namespace": "relay.asks",
+      "source_sha256": "d6041075826aa17e0a86f0d47081faf0ec796057cb95cece2f47e6f57051b3cc",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "unrecorded (not disclosed in 8ad70ccf12)",
+        "date": "2026-10-20"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "9 changed keys reviewed. title_* now use 'consultas' as the section noun (distinct from 'preguntas'); dock.timed_out uses 'con el tiempo agotado', the same agotar family as the status line and badge, closing the round-1 one-state-word finding; kind_approval/kind_secret are now noun labels ('aprobación necesaria'/'secreto solicitado') matching kind_question; read_timeout is 'se agotó el tiempo de lectura'; gate.body uses 'retiene' (holds), not 'detiene'. All changed plurals render correctly at 0/1/2/5/1e6, including 'de preguntas' for many. 0 new findings. Round-1 NIT on the unchanged gate.unpaired_middle ('primero' placement) remains. PASS. Round-2 re-audit (source d6041075) of the changed keys after d2f1cca; all 77 keys re-checked mechanically, unchanged copy carried from the round-1 audit. Mechanical: key set/order vs en, ICU parse, argument names/order/kinds (number->plural permitted by arguments_match), NFC, no bidi controls — clean; plural selectors validated against the locale table and renders checked. Auditor deepseek/deepseek-flash, the same model family as the round-1 auditor (fresh worktree/session, so not an independent model); translator model unrecorded in 8ad70ccf12."
+    },
+    {
+      "locale": "es",
+      "namespace": "relay.approvals",
+      "source_sha256": "5efd5d666d1c498de506541c8bbd339204b5919950395934bfcf188476030ce0",
+      "translator": {
+        "agent": "implementation session (clause split authored in commit 3d0f77762a; no translator job id recorded)",
+        "model": "unrecorded",
+        "date": "2026-10-25"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team) - re-attestation pass by translation-reviewer",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-25",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Re-attestation at 3d0f77762a (translation-reviewer, lopdev), five clause keys read as ONE composed sentence. Composed: Las dos primeras opciones cambian **esta sesión** solamente; la última cambia el **valor predeterminado de todas las sesiones** siguientes. Meaning preserved: the restriction is on 'esta sesión', the contrast is on the last choice and the global default, and 'siguientes' carries 'that follow it'. Bold: 'esta sesión' and 'valor predeterminado de todas las sesiones' - complete noun phrases; 'el' stays plain for the same reason en leaves 'the' plain. Seams: 'solamente;' is precisely why 'between' starts with the particle - es.md forbids a space before ';' and the join supplies one, so the boundary choice is correct and all four joins are clean. NIT: 'solamente' after the object is emphatic but idiomatic; 'solo' before the verb would be terser and is the more usual UI wording, so this is a preference, not a defect. 0 blocker/major findings. Confidence: high. LIMITATION: same model as the first pass; agent/context independence only. Evidence: i18n/audits/evidence/es/relay.approvals/ap25b1/record.json"
+    },
+    {
+      "locale": "es",
+      "namespace": "relay.chrome",
+      "source_sha256": "f30049d1ec7bce1d0586d8d5d380368e64fb0ac841d91b9b04c1625d17688aac",
+      "translator": {
+        "agent": "translator (lopdev session d69e1fa9cd3c)",
+        "model": "radient/auto",
+        "date": "2026-10-25"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev session 56f831d2290f)",
+        "model": "radient/auto",
+        "date": "2026-10-25",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent terminal delta audit chrome25-es-a2: no unresolved blocker/major. R1 coverage carries forward for byte-identical keys, with old→new hash proof in the audit. Current target SHA-256 416f3d6c884403ea962f158b1718f3743352674b9e7ffc5a47aed4c7520df333. Translator and independent auditor identities are recorded from on-disk runtime metadata; radient/auto is the harness selector, underlying provider model not exposed and not inferred. Independent second safety round chrome25-safety-b2 also passed these bytes. Evidence: https://github.com/damianvtran/local-operator/pull/2934#issuecomment-6401749804. Verbose R1/remediation/R2 chains are retained outside the repository per AGENTS.md; compact byte hashes and actual independent identities are public in that receipt. Source-semantic pass only, not native/live translated-relay proof."
+    },
+    {
+      "locale": "es",
+      "namespace": "relay.transcript",
+      "source_sha256": "022aa6209663626fc99cf06572bc09c09ac80eaf95b8264a80ec45cf56c74870",
+      "translator": {
+        "agent": "coder (lopdev session ef5eb20789f4)",
+        "model": "unrecorded-pre-crash",
+        "date": "2026-10-26"
+      },
+      "auditor": {
+        "agent": "independent reviewer (lopdev session 9a889887f521)",
+        "model": "openai/gpt-6-astra",
+        "date": "2026-10-26",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "keys": [
+        "relay.transcript.composer.queued",
+        "relay.transcript.fold.failed_label",
+        "relay.transcript.fold.more",
+        "relay.transcript.fold.partial_label",
+        "relay.transcript.fold.python",
+        "relay.transcript.fold.shell",
+        "relay.transcript.fold.unit",
+        "relay.transcript.label.ask",
+        "relay.transcript.label.job",
+        "relay.transcript.label.messages",
+        "relay.transcript.label.peer",
+        "relay.transcript.label.steered",
+        "relay.transcript.label.wake",
+        "relay.transcript.older.failed",
+        "relay.transcript.session.unread_refused",
+        "relay.transcript.turn.actions",
+        "relay.transcript.turn.completed",
+        "relay.transcript.turn.condensed",
+        "relay.transcript.turn.took"
+      ],
+      "note": "Independent round-2 translation audit clean and terminal on 2d5e414a414a506fe5b6bcceae91b8bf8eefe109, scoped to f0d3d6a4e92d2b40f390a418bb06894e99a38854..2d5e414a414a506fe5b6bcceae91b8bf8eefe109; unchanged round-1 coverage retained. All 27 requested replacements matched; 621 cross-runtime render comparisons passed. Original translation session ef5eb20789f4 launched on anthropic/claude-opus-5-5, but its actual served translation model was not recorded before the crash and is not inferred. Resumed bookkeeping by session 9950d5426bc4, served openai/gpt-6-astra; not the original translator. Auditor served openai/gpt-6-astra after disclosed quota fallbacks. Audit receipt: relay-transcript-audit-r2.md, retained by coordinating session 44f93fd45b09. Copy/audit pass only; not native/live translated-relay activation evidence."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "025dbbbbf0e830b16dac6f469b43b507c61fbae022f5f69bf3fde5bd8606ccca",
+      "translator": {
+        "agent": "coder (lopdev; session 8b2ab2114905)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-26"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev; session 0c779908a054)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-26",
+        "result": "passed",
+        "findings": 2
+      },
+      "status": "passed",
+      "note": "PR #2985 3-key delta (cache TTL help; subagent label+help). Independent translation audit rounds 1-2: 2 finding(s) applied verbatim; round 2 clean, 0 open B/M. Same model as translator (disclosed). Other keys carried."
+    },
+    {
+      "locale": "es",
+      "namespace": "relay.health",
+      "source_sha256": "b98c70197410d105aaf857fca3d4bc671552de15e2aeda6764ea76685997c571",
+      "translator": {
+        "agent": "translator (lopdev; two runs: fr/es/ru/vi and zh-CN/hi/ur)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-27"
+      },
+      "auditor": {
+        "agent": "translation-auditor A (lopdev session 6038f76924dc) + translation-auditor B, second independent audit for safety copy (lopdev session f6c010722753)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-27",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "keys": [
+        "relay.health.dropped_detail",
+        "relay.health.ended_detail",
+        "relay.health.ended_placeholder",
+        "relay.health.ended_send_failed",
+        "relay.health.live",
+        "relay.health.live_detail",
+        "relay.health.quiet_detail",
+        "relay.health.reconnecting",
+        "relay.health.reconnecting_detail"
+      ],
+      "note": "Round-2 delta on c53c9a5: 7 new keys (dropped_detail, ended_detail, ended_placeholder, ended_send_failed, quiet_detail, reconnecting, reconnecting_detail) translated in two translator runs (fr/es/ru/vi and zh-CN/hi/ur); live and live_detail carried byte-identical from the round-1 audit. Doubly audited, independently of the translator: translation-auditor A (lopdev session 6038f76924dc) and translation-auditor B, a second independent audit for safety copy (lopdev session f6c010722753), 9/9 keys against en sha256 b98c70197410d105aaf857fca3d4bc671552de15e2aeda6764ea76685997c571. Both audits back-translated the delivery semantics: no queueing promise, no duplicate risk, correct actor. 1 finding: E1 nit applied (B confirmed) — quiet_detail reads \"cuando la sesión se ponga al día.\"; bytes integrated with that one audited substitution. Copy/audit pass only; not native/live rendered-relay evidence."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.errors.desktop",
+      "source_sha256": "a56418b1deb7b2cab5ebdf47a01e5930d5ecf76010dbee4d0f3a10dafc9297d8",
+      "translator": {
+        "agent": "i18n-translator (lopdev team)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-10-26"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team; session 458e3917f821)",
+        "model": "anthropic/claude-sonnet-5-5 (fallback from deepseek/deepseek-flash after a provider 402; the catalogue reading ran mostly on the fallback, the opening survey and ledger/regeneration steps on deepseek/deepseek-flash)",
+        "date": "2026-10-27",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "4-key delta audit (skill_not_editable, skill_alias_occupied, skill_local_changes_unpublished, skill_stale) against en a56418b1 and its context sidecar; 0 blocker/major. skill_local_changes_unpublished verified to say the unpublished edits are lost on remove and that only an explicit 'remove anyway' discards them. Placeholder/ICU parity recomputed independently over all 88 keys (ordered argument lists equal; all 616 values render through runtime.render_message). The other 84 keys are byte-unchanged from the rows at 9a164be4 (commit cdae7456 is +4 lines per locale) and were NOT re-audited here. Minor/nit findings are reported on PR #3013 and were not applied. Model disclosure: the translator ran anthropic/claude-sonnet-5-5 and most of this audit's reading ran on that same model (fallback from deepseek/deepseek-flash, provider 402). Agent/session independence holds; MODEL independence from the translator is NOT claimed. Treat as a single-model audit. Findings: 1 minor (skill_not_editable 'Aqui esta habilidad' garden-path), 2 nits. Incidental, out of scope and not graded: carried keys answer_epoch_mismatch, aside_unavailable, aside_max_turns, aside_still_running diverge in meaning from en."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.errors.notifications",
+      "source_sha256": "f02bf1bc28f9c9e549a3ad8c34ead880315f4b39d25c36a869a1b3c5110f362c",
+      "translator": {
+        "agent": "L1-core-notify coder",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-25"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team, audit-es) (37d9c9f0df44)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-25",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent current-byte audit: i18n/audits/evidence/es/wire.errors.notifications/nt25a1/record.json. Input and companion hashes verified. Minor/fit notes retained in report; no native/rendered claim."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.slash.notifications_page",
+      "source_sha256": "9440f547bbf4e982c949202fd5ddb78a784a3d6da0f7e88694eb9ffdc3bc6594",
+      "translator": {
+        "agent": "L1-core-notify coder",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-25"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team, audit-es) (37d9c9f0df44)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-25",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "Independent current-byte audit: i18n/audits/evidence/es/wire.slash.notifications_page/nt25a1/record.json. Input and companion hashes verified. Minor/fit notes retained in report; no native/rendered claim."
+    },
+    {
+      "locale": "es",
+      "namespace": "tui.notifications",
+      "source_sha256": "b405d23feb36ff29a4f75895513ec027cab13e4420a71ea05a83e515d8b20224",
+      "translator": {
+        "agent": "coder/i18n translator lane (lopdev session ccd1179944f3)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-26"
+      },
+      "auditor": {
+        "agent": "independent i18n-auditor / reviewer (lopdev, session b4869f40ac63)",
+        "model": "kimi/k3.1-pro (fallback from anthropic/claude-opus-5-5 via anthropic/claude-sonnet-5-5 and openai/gpt-6-astra)",
+        "date": "2026-10-26",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round-2 delta audit on PR #2943 head 897ffb54fef0f6a889bb135a22c80f7eebc3e0e5 (catalogue bytes identical to 0bffa9f447f). Source en SHA-256 b405d23feb36ff29a4f75895513ec027cab13e4420a71ea05a83e515d8b20224 (75 keys), context 1b4fcb28e063b7e646809d801675dfbda00f691ba7cec57edab6a322d0cab4d4. 75/75 keys, order==en, 71 carried values byte-identical to the prior audited target, arguments (count plural, updates plural, source simple) in English order, both plurals carry every CLDR category of this locale with no empty arm, all 72 count x updates sample combinations rendered through local_operator.i18n.runtime.render_message (counts 0,1,2,3,5,6,11,21,22,25,101,1234 x updates 0,1,2,5,6,11), locale number grouping intact, NFC, no bidi controls, trailing LF/no BOM/no CR, re-serialises byte-identically. Widths via rich cell_len: hints within maxCells (hint_mark_all<=12, hint_confirm<=10, hint_cancel<=8); confirm_dismiss_session <=96 for every arm with a 13-cell source. zh-CN/ur/hi nesting of updates inside each count arm accepted: count/updates categories still selected independently and count is printed via {count, number}. ur arrow convention untouched (back still U+2192); the ur sentence painted through the real display_tr isolate path and resolved with fribidi, Latin source and y/n correct. IA2-1 is the fr U+202F typographic regression; fr deliberately left pending_audit. Verdict PASS for this locale only; auditor served kimi/k3.1-pro after the disclosed provider-quota fallback chain; auditor authored none of this delta. Evidence: i18n/audits/evidence/es/tui.notifications/nd2/ plus PR #2943 comment \"i18n audit - round 2\"."
+    },
+    {
+      "locale": "es",
+      "namespace": "relay.notifications",
+      "source_sha256": "2807f5876ae63e15fd0e47b54ec1e73f6c7f71b368f3439fd00c899ce8c0b54d",
+      "translator": {
+        "agent": "coder/i18n translator lane (lopdev session e0fbf6386238)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-26"
+      },
+      "auditor": {
+        "agent": "reviewer (lopdev team, independent i18n audit, session 72df3ec6dc49)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-26",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent i18n audit round 1 PASS (terminal) at target SHA-256 e3983025fbc8a4345b5dd5d3ce6b89fa93f21b89f69282878b0c13e9ba89177f, source 2807f5876ae63e15fd0e47b54ec1e73f6c7f71b368f3439fd00c899ce8c0b54d: https://github.com/damianvtran/local-operator/pull/2968#issuecomment-6412691010. Audited bytes from a git archive of 9f349c5f481, hash-identical at head 772b01275ef. Independence limit: translator and auditor ran on the same model (anthropic/claude-opus-5-5); separation is agent and context; no native-speaker pass. Recorded, not gating: IA-X-M1 MINOR (select.read uses status form \"Leído\"); IA-X-N1 NIT (age.days 15/14 only at >=1000 days, undeclared); detail.mark_unread 15/14 accepted as declared. Translation: Translated from the frozen en bytes at PR #2968 head d7e12bd36808 (77 keys; target SHA-256 e3983025fbc8a4345b5dd5d3ce6b89fa93f21b89f69282878b0c13e9ba89177f). Translator identity read from the session's runtime metadata (provider anthropic, model claude-opus-5-5). Terminology reuses merged relay.chrome/relay.asks/relay.ask choices. Width: detail.mark_unread 'Marcar no leído' 15/14 (keeps the merged relay.chrome 'Marcar como leído' verb family; 'No leído' alone reads as a status, not an action); select.dismiss 15/14 only at a four-digit count."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "a31ff23241581dddb24f3cd2b93444a408734bbcb0957b0068a97806bf7c36d3",
+      "translator": {
+        "agent": "coder (lopdev; session c8ef7d0911ec; PR #3072 remediation 3bc73b5c003)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": "audit-es-wire-settings (independent reviewer) / aa5ed662a068",
+        "model": "anthropic/claude-sonnet-5-5; openai/gpt-6-astra final adjudication",
+        "date": "2026-10-28",
+        "result": "passed",
+        "findings": 5,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
+      },
+      "status": "passed",
+      "note": "PR #3072 2-key delta (1h cache-TTL help x2; main 0 = global no-1h switch, subagent key = size gate only). Independent translation audit round 1: 0 minor/nit finding(s) applied verbatim; 0 B/M. Same model as translator (disclosed). Other keys carried. | 2026-10-28 fresh independent current-byte audit; FINDINGS, 0 B/M. Record: i18n/audits/evidence/es/wire.settings/le28r2/record.json. Historical rows retained; no lost geometry/native proof recreated. Human/native sign-off waived, not an audit waiver. Routed receipts (en source + locale catalogue) in the record; en context sidecar not routable. Judgement was direct-read; receipts confirm bytes only."
+    },
+    {
+      "locale": "es",
+      "namespace": "relay.asks",
+      "source_sha256": "aeae79178c5f47584a3af2d7a65a1fdfb45b859f624a089616109a6902438e90",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-10-28",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "1 added key re-audited at source sha256 aeae79178c5f47584a3af2d7a65a1fdfb45b859f624a089616109a6902438e90 (en/relay.asks.json): relay.asks.card.other = 'Otro', the free-text row that sits after the agent's options on the phone ask card and opens a text field. Translator: i18n-translator (anthropic/claude-sonnet-5-5, 2026-10-28). Independent auditor: i18n-auditor (lopdev reviewer role, anthropic/claude-sonnet-5-5, 2026-10-28) — a separate agent and session but the same model family, so not a different model. Checked: key parity and order versus en; exactly one added key and no existing value changed; no ICU or plural syntax added; NFC; no bidi or invisible controls; the file re-serialises byte-identically; check.py --catalogues-only reports 0 problems. The value is a bare noun in sentence case that reads as a choice beside enumerated options, per the locale guide and glossary; width is at most 1 character over English (ru), immaterial beside the 'your answer' hint. The whole file's mechanical parity and encoding were re-checked; only the added key was reviewed semantically, and unchanged copy is carried from the previous 77-key audit at d6041075. Result: passed, 0 findings."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.radient_saver",
+      "source_sha256": "d392bc5d9617626599b6e2836f35c6cf6479ea3313fa072d1eddd087adcb7507",
+      "translator": {
+        "agent": "coder (radientdev subagent; self-translated, no i18n-translator delegation)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28",
+        "scope": "wire.radient_saver.mode.help only (round 3, SA-2); the other 14 values are the original `translator` agent's audited bytes",
+        "note": "Round-3 bytes. Rounds 1-2 of this delta (SA-1) were self-translated on openrouter/deepseek/deepseek-v4.1-flash-1017 (first pass anthropic/claude-sonnet-5-5), fallbacks from kimi/k3.1-pro; those bytes are superseded."
+      },
+      "auditor": {
+        "agent": "translation-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-28",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "second_audit": {
+        "status": "pending",
+        "agent": "pending",
+        "model": "pending",
+        "date": null,
+        "scope": "round-3 SA-2 remediation of wire.radient_saver.mode.help (PR #3078)",
+        "note": "Second independent audit commissioned by the radientdev manager; it has NOT run. Auditor identity, model and date are deliberately unrecorded until it reports — this row is not a second-audit pass."
+      },
+      "note": "wire.radient_saver (17 keys) at en d83072e27ad3cc0711da1f5e37056d8958e6ad9a450de5ce31ddf617c1aedba8, target SHA-256 cf603e305c73c823a23014117b37b3cfec1f9b413d04add420d6e1c5f760f21e. Round 1: 1 NIT, fixed; round-2 delta re-audit passed on kimi/k3.1-pro. Provenance: translator `translator` agent on anthropic/claude-opus-5-5 and independent auditor `translation-auditor` agent on kimi/k3.1-pro, both 2026-10-28, no provider fallback on either; dispositions as relayed by the radientdev manager for PR #3078 (the audit reports are not posted on the PR thread). Audit depth, stated plainly: docs/I18N.md asks high-visibility/safety copy for a second independent audit, and this namespace carries the S-32 sentence (\"Saver never sends your AI provider's credentials to Radient\") and the credit-charging terms. It had ONE independent audit for this locale (plus the round-2 delta re-audit of the fix); no second independent audit has been run and none is claimed. SA-1 remediation (PR #3078 audit finding SA-1, major, source-level): wire.radient_saver.mode.help now states the charge basis — the tokens Saver removes, paid in Radient credits — and that the customer's own AI-provider bill is unchanged; no percentage or savings claim was added. Only that key changed in this locale; the other 16 values are the audited bytes. en moved d83072e27ad3cc0711da1f5e37056d8958e6ad9a450de5ce31ddf617c1aedba8 -> 70114d73b15d50b9ac3eaa54a251e5a67233c48511bc33d2c09d49602fa68e2d and this row's target bytes moved to 7c6bfb27fe1ac3a775248cc607e324d9bbf59d3b97a2b08157161274f1f7b89d. The delta was SELF-TRANSLATED by the coder session that implemented this change (a radientdev coder subagent) — no `i18n-translator` agent was delegated, which is the docs/I18N.md step-3 process the independent audit exists to check, so read this row with that deviation in view. Model, taken from the session's own provider-route record rather than assumed: the final bytes were authored on openrouter/deepseek/deepseek-v4.1-flash-1017, and the first pass of the same two sentences on anthropic/claude-sonnet-5-5; both ran as provider fallbacks from the pinned primary kimi/k3.1-pro (provider quota, the last switch reporting HTTP 402), not by choice. Audit depth, stated plainly and not softened: the audit above covers the PREVIOUS bytes; NO independent audit of this mode.help delta has run. A second independent audit is commissioned and PENDING (`second_audit`), so these bytes are unaudited until it reports and that field is filled in. `status` stays `passed` for the row's completed first-audit chain — keeping the locale in the ship set, which a stale row would silently drop — and this note records the gap rather than letting the status field imply coverage it does not have. ROUND 3 (PR #3078 re-audit findings SA-2 MAJOR, M-1..M-4, N-1; code-review R6-2): the SA-1 sentence \"Your bill from your AI provider is unchanged\" was a promise about a third party's invoice the product cannot keep (Saver sends the provider less history) and is REPLACED: Saver charges only Radient credits, priced on the tokens it removes, never the provider account, and the provider still bills on its own terms for what it receives; no savings, percentage or up/down claim. \"covers\" became \"priced on\" (M-3); fr pronoun reference (M-2), ru \"списывается\" (M-1), vi pronoun count and ur repeated connector (N-1) addressed; help shortened (M-4). R6-2: the `auto` choice is unreachable in LO1 (`SaverDecision(False, \"auto_unavailable\")`), so its two keys (mode.choice.auto.label/description) are RETIRED from this namespace in all 8 locales and from the settings choices; the namespace now carries 15 keys. en moved 70114d73b15d50b9ac3eaa54a251e5a67233c48511bc33d2c09d49602fa68e2d -> d392bc5d9617626599b6e2836f35c6cf6479ea3313fa072d1eddd087adcb7507; this row's target bytes are eba753b17862c3397d4f618d4ecc075924c69af562ff0fa9d0b5602ae11d9dcc. Translator, stated plainly: SELF-TRANSLATED by the implementing radientdev coder session on anthropic/claude-opus-5-5 (the session's own selected_model record; no provider fallback recorded for this round). Delegation to an `i18n-translator` was attempted per docs/I18N.md step 3 and was IMPOSSIBLE: the coder session's toolset has no `task` tool, so this is a second disclosed deviation from step 3, for a maintainer to accept or reject. The `translator` field describes ONLY the mode.help delta (see its `scope`); the other 14 values keep the original `translator` agent's audited bytes. No independent audit of the round-3 bytes has run; `second_audit` stays pending."
+    },
+    {
+      "locale": "es",
+      "namespace": "relay.chrome",
+      "source_sha256": "0456005a0730d99a27656f1b0413b751c5916630e4c56aad346238e25c0c5994",
+      "translator": {
+        "agent": "coder (lopdev session 6999135b36d2)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team, independent i18n audit, session 64d7798cdbd3)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent i18n delta audit round 1 PASS (terminal) at target SHA-256 a2d25deb40633c2b478babb7c9fd0dd3bdc0b2cd77c4010fedd1c205b9840097, source 0456005a0730d99a27656f1b0413b751c5916630e4c56aad346238e25c0c5994: https://github.com/damianvtran/local-operator/pull/3127#issuecomment-6486271247. Audited bytes read from origin/fix/relay-composer-placeholder 07984929b35. New keys composer.placeholder.idle/.steer: idiom, glossary 'agent', register, U+2026 ellipsis and D1 fit (CoreText 16pt system UI re-measured independently, all under 184px) passed with 0 findings; the 83 other keys are value-identical to origin/main and carry the prior passed row forward. Independence limit: translator (coder, session 6999135b36d2) and auditor ran on the same model (anthropic/claude-opus-5-5); separation is agent and context; no native-speaker pass. Source-semantic pass only; rendered relay geometry pending in the PR. Translation: Relay composer placeholder slice (fix/relay-composer-placeholder): 2 new keys composer.placeholder.idle/.steer translated from the frozen en bytes (85 keys; target SHA-256 a2d25deb40633c2b478babb7c9fd0dd3bdc0b2cd77c4010fedd1c205b9840097); the other 83 values are byte-identical to the prior passed row. Source: the desktop UI's audited ui.chat.composer.placeholder.idle/.waiting first clauses; widths measured at 16px system-ui against the 184px D1 budget (PR body)."
+    },
+    {
+      "locale": "es",
+      "namespace": "relay.health",
+      "source_sha256": "e060aed0898c7aa9951f7abf18c6792cc4629ee490b10546aabd36aac8187f5b",
+      "translator": {
+        "agent": "coder (lopdev session 6999135b36d2)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team, independent i18n audit, session 64d7798cdbd3)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent i18n audit round 1 PASS (terminal) at target SHA-256 563c533f52fbc21b240979fba164e4e0768ff57f2882025d592280fc56638c62, source e060aed0898c7aa9951f7abf18c6792cc4629ee490b10546aabd36aac8187f5b: https://github.com/damianvtran/local-operator/pull/3127#issuecomment-6486271247. Deletion-only hash refresh: relay.health.ended_placeholder removed (en and locale, with its en context entry); the 8 remaining keys are byte-identical in value and order to origin/main's passed row, so nothing was retranslated — this audit verifies the deletion, it does not re-review unchanged copy. Independence limit: translator (coder, session 6999135b36d2) and auditor ran on the same model (anthropic/claude-opus-5-5); separation is agent and context; no native-speaker pass. Source-semantic pass only; rendered relay geometry pending in the PR. Translation: Relay composer placeholder slice (fix/relay-composer-placeholder): deletes the now-unused relay.health.ended_placeholder; the remaining 8 values are byte-identical to the prior doubly-audited row (target SHA-256 563c533f52fbc21b240979fba164e4e0768ff57f2882025d592280fc56638c62). A deletion-only delta, but the en hash moved, so an independent auditor must confirm the byte identity before this row passes; until then the locale stays out of shipped.json."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.aida_cadence",
+      "source_sha256": "3bb421a58f2ffa4fec089421d9cb91257fa626d66b2e215b3e120c068bb8e5dd",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "es W1 backfill: 2 keys. Translated by an `i18n-translator` agent and audited by a different `i18n-auditor` agent (both sessions on the `radient/auto` route after provider-quota fallbacks — disclosed, not pinned). Independent full-pass audit `w1a3` (round 2) binds exactly these bytes: 0 unresolved blocker/major. Round 1 (`w1a1`/`w1a2`) preceded remediation and binds superseded bytes; its findings are carried in the w1a3 report. Evidence: i18n/audits/evidence/es/wire.aida_cadence/w1a3/. Open minor/nit findings are dispositioned in that report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.console",
+      "source_sha256": "1a591fbc1f6a939651cfe9bc5c4ff619a5a4ade2099cc9cfb348534d09a0011b",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "es W1 backfill: 8 keys. Translated by an `i18n-translator` agent and audited by a different `i18n-auditor` agent (both sessions on the `radient/auto` route after provider-quota fallbacks — disclosed, not pinned). Independent full-pass audit `w1a3` (round 2) binds exactly these bytes: 0 unresolved blocker/major. Round 1 (`w1a1`/`w1a2`) preceded remediation and binds superseded bytes; its findings are carried in the w1a3 report. Evidence: i18n/audits/evidence/es/wire.console/w1a3/. Open minor/nit findings are dispositioned in that report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.exec",
+      "source_sha256": "041ca802dd4e1329cf1f1b2984311c628f314223f5941b35a7007f5b3d198c94",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "es W1 backfill: 17 keys. Translated by an `i18n-translator` agent and audited by a different `i18n-auditor` agent (both sessions on the `radient/auto` route after provider-quota fallbacks — disclosed, not pinned). This namespace's bytes did NOT move during remediation: round 1 (`w1a1`) and round 2 (`w1a3`, a full pass) both read the same file, and `w1a3` binds exactly the shipped bytes with 0 unresolved blocker/major. Evidence: i18n/audits/evidence/es/wire.exec/w1a1/ and …/w1a3/. Open minor/nit findings are dispositioned in the w1a3 report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.host_speed",
+      "source_sha256": "e193473d58c0de1779bcefab06d0e9b1734ee493aea30ea827e4499510282b8c",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "es W1 backfill: 2 keys. Translated by an `i18n-translator` agent and audited by a different `i18n-auditor` agent (both sessions on the `radient/auto` route after provider-quota fallbacks — disclosed, not pinned). Independent full-pass audit `w1a3` (round 2) binds exactly these bytes: 0 unresolved blocker/major. Round 1 (`w1a1`/`w1a2`) preceded remediation and binds superseded bytes; its findings are carried in the w1a3 report. Evidence: i18n/audits/evidence/es/wire.host_speed/w1a3/. Open minor/nit findings are dispositioned in that report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings.account_policy",
+      "source_sha256": "1ad13f8198e28cb19fe0ecb2a6ef9b2a6990bc0d047566b71f5dd5322f594b25",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "es W1 backfill: 14 keys. Translated by an `i18n-translator` agent and audited by a different `i18n-auditor` agent (both sessions on the `radient/auto` route after provider-quota fallbacks — disclosed, not pinned). Composite audit: full-pass round 2 `w1a3` over all 14 keys plus delta round 3 `w1a4` binding the two keys changed afterwards; `w1a4` supersedes `w1a3` for those keys and `w1a3` remains the audit of record for the unchanged rest. 0 unresolved blocker/major on these bytes. Evidence: i18n/audits/evidence/es/wire.settings.account_policy/w1a3/ and …/w1a4/. Open minor/nit findings are dispositioned in those report.md files."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings.hub_defaults",
+      "source_sha256": "8720b5719479b638eab24b081f76f97c44ce8d8554cb1b8280f6980182b6740c",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "es W1 backfill: 9 keys. Translated by an `i18n-translator` agent and audited by a different `i18n-auditor` agent (both sessions on the `radient/auto` route after provider-quota fallbacks — disclosed, not pinned). Composite audit: round 2 `w1a3` returned **failed** on 1 major (`es-w1-C03`, `agents.help` cut rather than wrapped at 113 cells); the remediation replaced that key and round 3 `w1a4` (delta) binds the shipped bytes and **passed** — `w1a4` supersedes `w1a3` for the two changed keys, while `w1a3` remains the audit of record for the unchanged rest and its failure is recorded, not erased. 0 unresolved blocker/major on the shipped bytes. Evidence: i18n/audits/evidence/es/wire.settings.hub_defaults/w1a3/ and …/w1a4/."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.slash.library",
+      "source_sha256": "0f8615f2ed9ffaf3aeb0288a4ff4b8fc8becd46017a931db9d4b3d9ec32fce46",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "es W1 backfill: 2 keys. Translated by an `i18n-translator` agent and audited by a different `i18n-auditor` agent (both sessions on the `radient/auto` route after provider-quota fallbacks — disclosed, not pinned). This namespace's bytes did NOT move during remediation: round 1 (`w1a2`) and round 2 (`w1a3`, a full pass) both read the same file, and `w1a3` binds exactly the shipped bytes with 0 unresolved blocker/major. Evidence: i18n/audits/evidence/es/wire.slash.library/w1a2/ and …/w1a3/. Open minor/nit findings are dispositioned in the w1a3 report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.tunnel_setup",
+      "source_sha256": "3854be7dce54dd3aeb9564921ed6a50f0560b32c7ac40955d81be93acd7e2ac1",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "es W1 backfill: 5 keys. Translated by an `i18n-translator` agent and audited by a different `i18n-auditor` agent (both sessions on the `radient/auto` route after provider-quota fallbacks — disclosed, not pinned). Independent full-pass audit `w1a3` (round 2) binds exactly these bytes: 0 unresolved blocker/major. Round 1 (`w1a1`/`w1a2`) preceded remediation and binds superseded bytes; its findings are carried in the w1a3 report. Evidence: i18n/audits/evidence/es/wire.tunnel_setup/w1a3/. Open minor/nit findings are dispositioned in that report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.services_status",
+      "source_sha256": "ae14884d1c5a795724b95b29f8abe620975e96cc895384923788faa1b22611df",
+      "translator": {
+        "agent": "local-operator implementer (coder role)",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "Independent audit passed: supervision_unknown hedges (no se pudo resolver) as the unreadable-cgroup branch requires, while unsupervised_unknown stays assertive. 14/14 keys, placeholders and code spans byte-identical. 1 MINOR accepted: width (103/87 cells vs 80/78), recorded in style-guides/es.md. No durability or reboot claim."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.agents_help",
+      "source_sha256": "d8118ece7b59b99295fde3496bd3c9ff3184455d75ed31dcee50e5e515fd3bf3",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w2 es backfill: 21 keys; independent audit w2a4 passed (committed evidence i18n/audits/evidence/es/cli.agents_help/w2a4/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.aida_help",
+      "source_sha256": "31e8445b6d8a9540ef524988b0fca3efca111362188f2ba41d6f857499828423",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w2 es backfill: 4 keys; independent audit w2a3 passed (committed evidence i18n/audits/evidence/es/cli.aida_help/w2a3/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.browser",
+      "source_sha256": "a9841deed81927762716c7592a592bb4e3f069d16f6ba0def6becb755b728321",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w2 es backfill: 64 keys; independent audit w2a4 passed (committed evidence i18n/audits/evidence/es/cli.browser/w2a4/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.browser_help",
+      "source_sha256": "7fd47199bb8d443a0fbf7469d635453cd6f57bb7c14efec91862c6b5b0c1b1e6",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w2 es backfill: 20 keys; independent audit w2a2 passed (committed evidence i18n/audits/evidence/es/cli.browser_help/w2a2/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.config_help",
+      "source_sha256": "97f625f6c6e26f8723e471569a0227f8e4da18518f2ab50e444fe93345ab2c8c",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w2 es backfill: 9 keys; independent audit w2a3 passed (committed evidence i18n/audits/evidence/es/cli.config_help/w2a3/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.credential_help",
+      "source_sha256": "2757dc32f5d75d81f639bf689b6423ef64614ad1e91289bb67655e9681266418",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w2 es backfill: 5 keys; independent audit w2a3 passed (committed evidence i18n/audits/evidence/es/cli.credential_help/w2a3/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.exec_help",
+      "source_sha256": "1a44c9ea283ce8c4a9bb8ffab403e9cb36cf4a73fce832d91e79f355448b02eb",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w2 es backfill: 20 keys; independent audit w2a2 passed (committed evidence i18n/audits/evidence/es/cli.exec_help/w2a2/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.exec_runtime",
+      "source_sha256": "3eee7ca31076e48ccf7e1c8854c5647d0859e5341b26b10c8043e53825de72fd",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w2 es backfill: 11 keys; independent audit w2a2 passed (committed evidence i18n/audits/evidence/es/cli.exec_runtime/w2a2/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.exec_worker_help",
+      "source_sha256": "aa501d6d894fdb20462595582d43e435364f200e677a50e52fd8d2b93706a957",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w2 es backfill: 11 keys; independent audit w2a2 passed (committed evidence i18n/audits/evidence/es/cli.exec_worker_help/w2a2/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.global_help",
+      "source_sha256": "c6e91dda89a9b792587f4ac9c594e188b78b8cd529fa1acf51ca783422c3152f",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w2 es backfill: 17 keys; independent audit w2a4 passed (committed evidence i18n/audits/evidence/es/cli.global_help/w2a4/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.hub_help",
+      "source_sha256": "df519de9acb3cdd99fa5ae4cc0c5753b090c43b79f8870c543258c0f4fcdfec6",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w2 es backfill: 12 keys; independent audit w2a4 passed (committed evidence i18n/audits/evidence/es/cli.hub_help/w2a4/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.hub_shared_help",
+      "source_sha256": "5d40860430e36224bd77e95ff8298bd4b80f052f3d910a532947af6e78632b44",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w2 es backfill: 12 keys; independent audit w2a3 passed (committed evidence i18n/audits/evidence/es/cli.hub_shared_help/w2a3/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.install_help",
+      "source_sha256": "f242bfdbf8e80bd7f956ae361985180d7eb797dd4223da8423dc678b6fec61e7",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w2 es backfill: 5 keys; independent audit w2a4 passed (committed evidence i18n/audits/evidence/es/cli.install_help/w2a4/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.login_help",
+      "source_sha256": "66ae3d9bfe16c2830bb0a78ef7b5c768ae194f9f4d972379bbe9d752b35502f7",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w2 es backfill: 2 keys; independent audit w2a3 passed (committed evidence i18n/audits/evidence/es/cli.login_help/w2a3/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.login_status_help",
+      "source_sha256": "17ef2629c0ad8a20c7e0a939d8fb38e594936e0c5dd47a3a1600300c1bf3f0f3",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w2 es backfill: 2 keys; independent audit w2a3 passed (committed evidence i18n/audits/evidence/es/cli.login_status_help/w2a3/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.logout_help",
+      "source_sha256": "2f479fa8e75a73f8897ec74902345bd36ca7117ae275dbf7a9bfbc98a830e453",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w2 es backfill: 2 keys; independent audit w2a3 passed (committed evidence i18n/audits/evidence/es/cli.logout_help/w2a3/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.mcp_help",
+      "source_sha256": "3f5e0f11b186501e6a708ffaba4af294ebdb663175722b58c24143dbf0173417",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w2 es backfill: 19 keys; independent audit w2a1 passed (committed evidence i18n/audits/evidence/es/cli.mcp_help/w2a1/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.memory_help",
+      "source_sha256": "b3b63aeb9c1b27d3e686c2c6ab7378130577255ac5e999296a583cd5bf0c3a13",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w2 es backfill: 1 keys; independent audit w2a3 passed (committed evidence i18n/audits/evidence/es/cli.memory_help/w2a3/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.mobile_help",
+      "source_sha256": "88681bae09adf93216e3e3b990652f7f57654a0438f6bc8c3cc5dd9ebb6eb947",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w2 es backfill: 15 keys; independent audit w2a4 passed (committed evidence i18n/audits/evidence/es/cli.mobile_help/w2a4/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.model_help",
+      "source_sha256": "3b28b1bac7b2bd3d05f781585d27770940a12e549f3d8df456a107b61605008f",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w2 es backfill: 5 keys; independent audit w2a3 passed (committed evidence i18n/audits/evidence/es/cli.model_help/w2a3/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.monitor_help",
+      "source_sha256": "766f6162643fec0c473dd4ffd822e5f1f9590e32caa2bc98793e9d65061161ab",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w2 es backfill: 6 keys; independent audit w2a3 passed (committed evidence i18n/audits/evidence/es/cli.monitor_help/w2a3/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.qwencloud_help",
+      "source_sha256": "6406143d97b406ca752a3fedecf2a69c22d635a5f2e1daf2fd2370ac393ff13b",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w2 es backfill: 5 keys; independent audit w2a3 passed (committed evidence i18n/audits/evidence/es/cli.qwencloud_help/w2a3/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.refresh_help",
+      "source_sha256": "b7168f0a70be23ed3637b1a91abef6dce1eb0d47a21b9fefc9d6104556be730f",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w2 es backfill: 7 keys; independent audit w2a3 passed (committed evidence i18n/audits/evidence/es/cli.refresh_help/w2a3/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.resume_click_help",
+      "source_sha256": "36caf0cd5f4c9f8081281e41a57d0cb7adb573f944ce14f6d0e087e04535a73e",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w2 es backfill: 1 keys; independent audit w2a3 passed (committed evidence i18n/audits/evidence/es/cli.resume_click_help/w2a3/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.send_help",
+      "source_sha256": "ab7d3c4a3ac0696b935d613c2b7596c56dbd3b32a8fdabe29ff2bc3a93a1bfb9",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w2 es backfill: 7 keys; independent audit w2a3 passed (committed evidence i18n/audits/evidence/es/cli.send_help/w2a3/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.serve_help",
+      "source_sha256": "bd0b51271edc67c23978ca23688a9af1ef94a5623b0e86a5e3bbb418a5b243f0",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w2 es backfill: 5 keys; independent audit w2a4 passed (committed evidence i18n/audits/evidence/es/cli.serve_help/w2a4/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.services_help",
+      "source_sha256": "76aca39fb3bfe46be1d31fbfde2176ee525b7ac650961104894a894f71751935",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w2 es backfill: 9 keys; independent audit w2a4 passed (committed evidence i18n/audits/evidence/es/cli.services_help/w2a4/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.sessions_help",
+      "source_sha256": "a250a185a780ab330187560c23dfe5e8d95956da24d417b22e1fc8bb121c2a6a",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w2 es backfill: 47 keys; independent audit w2a4 passed (committed evidence i18n/audits/evidence/es/cli.sessions_help/w2a4/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.stop_help",
+      "source_sha256": "ab8ae153e8749888e2426614c06d1ba672c70bad33d2a44bed46c00004f33d28",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w2 es backfill: 9 keys; independent audit w2a3 passed (committed evidence i18n/audits/evidence/es/cli.stop_help/w2a3/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.teams_help",
+      "source_sha256": "400637df631f938b7c144cf500a64bd5976f3157b25944d4ea3b701d79c69738",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w2 es backfill: 34 keys; independent audit w2a4 passed (committed evidence i18n/audits/evidence/es/cli.teams_help/w2a4/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.update_help",
+      "source_sha256": "78da39b393ee77900255ddfdf92a17220a6eedbecba340e7d925a2fbdf01abf9",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w2 es backfill: 6 keys; independent audit w2a4 passed (committed evidence i18n/audits/evidence/es/cli.update_help/w2a4/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.wake_help",
+      "source_sha256": "eff6775fe3ad39c228dd4c360b22011d9a95c887fa5b7839744f4b532a31ac8a",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w2 es backfill: 17 keys; independent audit w2a1 passed (committed evidence i18n/audits/evidence/es/cli.wake_help/w2a1/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.errors.agents",
+      "source_sha256": "7800f04d031a9a97222f383dea74878acadb12d9d9382b16ba638990b77627c7",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w3 es backfill: 44 keys; independent audit w3a1 passed (committed evidence i18n/audits/evidence/es/wire.errors.agents/w3a1/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.errors.auth",
+      "source_sha256": "9d48edaa61269239e132201224c1c7d6cf89ef198598f0ec6c99c1f3ade542f6",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w3 es backfill: 12 keys; independent audit w3-a2 passed (committed evidence i18n/audits/evidence/es/wire.errors.auth/w3-a2/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.errors.files",
+      "source_sha256": "ccfeb1ea55e0fed62213846cb669f28075b20e91e361f380456772d433983f64",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w3 es backfill: 11 keys; independent audit w3-a2 passed (committed evidence i18n/audits/evidence/es/wire.errors.files/w3-a2/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.errors.media",
+      "source_sha256": "1c109f63b8d3ce00657a47836199ce8ff924bb8e4bd999fda9f1d64f760a823b",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w3 es backfill: 20 keys; independent audit w3a1 passed (committed evidence i18n/audits/evidence/es/wire.errors.media/w3a1/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.slash",
+      "source_sha256": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
+      "translator": {
+        "agent": "i18n-translator (session e537e741e8d1)",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session 56bf28217956; instance 56bf28217956-slash2-es)",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PR #3088 width rewrite, re-audited at the committed bytes. 9 of 52 values rewritten by i18n-translator (session e537e741e8d1) (actual model radient/auto; provider-quota fallback); round-1 audit e7a6d684b88a-slash-es rejected the shortened bytes (0B/1M/5m/5n) and round-2 independent audit 56bf28217956-slash2-es on the new bytes passed 0B/0M/2m/4n. target sha256 b577fc64e6ab7369a58f02d4b4653367f9169cf1a015b16168e02dae6bfc5c3b; en source unchanged (b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202). Evidence: i18n/audits/evidence/es/wire.slash/es29s2/record.json (receipt.json + verdicts copied verbatim). Previous rows for this pair described audits of the pre-rewrite values and are superseded."
+    },
+    {
+      "locale": "es",
+      "namespace": "relay.account_policy",
+      "source_sha256": "0019b08106e6f7762194b164b9b9b37054a8cfade759aa2f6490787a73dea890",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 3
+      },
+      "status": "passed",
+      "note": "w4w5 es backfill: 13 keys; independent audit w4a4 passed on the shipped bytes (target sha256 71956128095ae4afebaf4aa26356db6acf9796a100332d503fbcc785ab178453, evidence i18n/audits/evidence/es/relay.account_policy/w4a4/). Two findings were raised and closed across rounds: w4a3 'equipo' -> 'máquina' (the locale binds equipo to TEAM), w4a4 'relay' -> 'relé' (glossary §relay). One open nit (AP-03) is dispositioned in the w4a4 report.md. Note the row's source_sha256 is the ENGLISH source hash; the target binding lives in the cited record."
+    },
+    {
+      "locale": "es",
+      "namespace": "relay.library",
+      "source_sha256": "ad478c433a4db3e725994766c724a2e8e92176f015f8283e71dc13b87185466a",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "radient/auto (self-reported)",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "w4w5 es backfill: 1 keys; independent audit w4a3 passed (committed evidence i18n/audits/evidence/es/relay.library/w4a3/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "relay.login",
+      "source_sha256": "9a59686bcd0e3641a5a807ea2b778cb385e591060c26c7fb994bea95e4de5bc5",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "radient/auto (self-reported)",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w4w5 es backfill: 4 keys; independent audit w4a2 passed (committed evidence i18n/audits/evidence/es/relay.login/w4a2/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "relay.session",
+      "source_sha256": "a4ae148de969d4a2e8541aca5b4b99ad311d9ef112a0d056fc21fcf90e7e0129",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "radient/kimi-k2.5",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "w4w5 es backfill: 17 keys; independent audit w4a2 passed (committed evidence i18n/audits/evidence/es/relay.session/w4a2/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "relay.shell",
+      "source_sha256": "f53b23560b88b531ef8fc3274bc396676f26e755ad4ff9ad87ce368cebdee560",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "radient/kimi-k2.5",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 6
+      },
+      "status": "passed",
+      "note": "w4w5 es backfill: 44 keys; independent audit w4a3 passed (committed evidence i18n/audits/evidence/es/relay.shell/w4a3/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "mobile.setup",
+      "source_sha256": "6249b10379beb9b2433746416fa7baff061265a1b9315d47465140cd5fcf61e9",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 12
+      },
+      "status": "passed",
+      "note": "w4w5 es backfill: 76 keys; independent audit w5a1 passed (committed evidence i18n/audits/evidence/es/mobile.setup/w5a1/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    }
+  ]
+}
