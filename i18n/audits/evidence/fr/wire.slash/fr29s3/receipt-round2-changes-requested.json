@@ -1,0 +1,352 @@
+{
+  "instance": "b682afa67e4b-slash2-fr",
+  "locale": "fr",
+  "scope": "wire.slash",
+  "scope_path": "local_operator/i18n/catalogues/fr/wire.slash.json",
+  "tree": "/Users/damian/lo-core-fix",
+  "tree_head": "7159e2a30927831f5dfb88f84c588eac07770e5d",
+  "tree_dirty": true,
+  "dirty_files": [
+    "es",
+    "fr",
+    "hi",
+    "ru",
+    "ur",
+    "vi",
+    "zh-CN"
+  ],
+  "audit_date": "2026-10-29",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "b682afa67e4b",
+    "model": "radient/auto",
+    "actual_model_source": "fallback chain under provider quota: session opened on anthropic/claude-sonnet-5-5, switched to openai/gpt-6-astra then kimi/k3.1-pro then radient/auto before the first source read; recorded so the model is not overstated",
+    "independent_from_translator_session": true,
+    "independent_from_previous_audit": true,
+    "independence_note": "Previous round: session 9412375334be in checkout /Users/damian/lo-core-3088, fr sha256 a4b0e65f…. This round: session b682afa67e4b in /Users/damian/lo-core-fix, fr sha256 e5b19e5e…. I authored neither the values nor the prior receipt; I read the receipt only as a claim list."
+  },
+  "input_sha256": {
+    "en": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
+    "context": "32b3475a5808048a6eeaae462fee0feb55405fca77026e41b9609a516d74a215",
+    "target": "e5b19e5efd76f2c8d3c9d7d51804557d7fa156da9e241c65357b343b012ea944"
+  },
+  "baseline_sha256_fr_at_round1": "a4b0e65fb71fb16f8a42526f206fa58ce4ab4d127ce915dae727fcd98f5b6d33",
+  "counts": {
+    "BLOCKER": 0,
+    "MAJOR": 1,
+    "MINOR": 4,
+    "NIT": 1
+  },
+  "verdict": "changes_requested",
+  "namespaces": {
+    "wire.slash": {
+      "status": "changes_requested",
+      "keys_audited": 52,
+      "keys_changed_in_delta": 16,
+      "sha256": {
+        "en": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
+        "target": "e5b19e5efd76f2c8d3c9d7d51804557d7fa156da9e241c65357b343b012ea944"
+      },
+      "findings": [
+        {
+          "id": "R2-1",
+          "key": "wire.slash.approvals",
+          "english": "Show or set tool approval mode for this session",
+          "current": "Régler l’approbation des outils de cette session",
+          "severity": "MAJOR",
+          "introduced_by_fix": true,
+          "carries_previous": "m1",
+          "problem": "The half en spends on the READ path is gone: en says 'Show or set', fr says only 'Régler' (set), and 'mode' is gone too. Bare /approvals reports the mode — app.py:30658 docstring, 'Bare /approvals reports, which is also how a user who cannot remember what they pressed finds out'; the routed handler returns the report on the no-argument branch. So the one row a user consults to learn what is in force now reads as a setter only, on the safety setting where checking matters most. Round 1 (m1) asked for the NOUN phrase 'Approbation des outils de cette session'; the remediation added a verb instead, and the verb is what removed the report half — the subject half (m1's own complaint) is repaired.",
+          "suggestion": "Mode d'approbation des outils de cette session",
+          "suggestion_cells": 46,
+          "alternatives": [
+            {
+              "text": "Approbation des outils de cette session",
+              "cells": 39,
+              "note": "round 1's own form"
+            },
+            {
+              "text": "Voir ou régler l'approbation des outils (cette session)",
+              "cells": 55,
+              "note": "keeps both verbs, at the wrap edge"
+            }
+          ],
+          "current_cells": 48,
+          "english_cells": 47,
+          "budget_note": "46 cells: inside the 51 figure."
+        },
+        {
+          "id": "R2-2",
+          "key": "wire.slash.fork",
+          "english": "Branch this chat; --switch here, --window elsewhere; <message> starts work",
+          "current": "Cloner ce chat ; --switch/--window, <message> lance",
+          "severity": "MINOR",
+          "introduced_by_fix": true,
+          "carries_previous": "M1",
+          "problem": "(a) The two flags do different things and the merged spelling hides which is which: --switch reboots this terminal onto the fork (app.py:13948 comment, 'fork.mode = switch prints its receipt and then reboots onto the fork') while --window opens a separate window (app.py:20054, 'this launcher cannot switch sessions; use /fork --window'). en states both effects ('here' / 'elsewhere'); '--switch/--window' can even be read as one flag name. (b) 'chat' is the only 'chat' in this file — the fr corpus says 'conversation' in 7 other keys — introduced by this rewrite. (c) '<message> lance' is elliptical. Round 1's M1 defect (missing <message>, missing object) IS repaired: both are present.",
+          "trade_is_forced": "The full form ('Cloner ce chat ; --switch ici, --window ailleurs ; <message> lance') is 60 cells and does not fit. The only in-budget form that keeps the two qualifiers and the argument is 'Fork ; --switch ici, --window ailleurs ; <message>' at 50 — which costs the French verb and 'ce chat'.",
+          "suggestion": null,
+          "recommended": "Accept at 51 cells if merged flag spelling is acceptable to the reviewer; otherwise the 50-cell 'Fork ; --switch ici, --window ailleurs ; <message>' is the only form that keeps the distinction. Do not restore the full 60-cell sentence — the picker would truncate it.",
+          "current_cells": 51,
+          "english_cells": 74
+        },
+        {
+          "id": "R2-3",
+          "key": "wire.slash.delete",
+          "english": "Delete this conversation for good; asks to confirm",
+          "current": "Supprimer cette conversation ; demande confirmation",
+          "severity": "MINOR",
+          "introduced_by_fix": true,
+          "carries_previous": "M3",
+          "problem": "'for good' is gone. The row no longer says the deletion is permanent, one row from /archive whose fr text says 'toujours reprenable par id' — the contrast that makes /delete the deliberate choice is now carried only by 'demande confirmation'. M3's defect (no object) IS repaired: the conversation is named.",
+          "suggestion": "Supprimer cette conversation sans retour (à confirmer)",
+          "suggestion_cells": 54,
+          "alternatives": [
+            {
+              "text": "Supprimer cette conversation sans retour",
+              "cells": 42,
+              "note": "keeps permanence, drops the confirmation clause"
+            },
+            {
+              "text": "Supprimer cette conversation ; sans retour",
+              "cells": 42,
+              "note": "same, punctuation variant"
+            }
+          ],
+          "note": "54 cells is 3 over the 51 working figure but inside the ~55 the registry cites as the wrap threshold (slash_commands.py:1829); 42 is the safe form.",
+          "current_cells": 51,
+          "english_cells": 50,
+          "budget_note": "54 cells: three over the 51 working figure, one under the ~55 wrap threshold. If 51 is binding, use the 42-cell 'sans retour' form and accept losing the confirmation clause."
+        },
+        {
+          "id": "R2-4",
+          "key": "wire.slash.effort",
+          "english": "Show or set reasoning effort (shift+tab cycles)",
+          "current": "Voir ou régler l’effort (shift+tab alterne)",
+          "severity": "MINOR",
+          "introduced_by_fix": true,
+          "carries_previous": "M4",
+          "problem": "'reasoning' is gone: 'l'effort' alone does not say effort at WHAT. The /effort row is adjacent so it stays readable, but en spends a noun on the qualifier and an in-budget form keeps it. M4's defect (dropped 'Show or', dropped 'cycles') IS repaired: 'Voir ou régler' and 'alterne' are both back.",
+          "suggestion": "Effort de raisonnement (shift+tab alterne)",
+          "suggestion_cells": 42,
+          "alternatives": [
+            {
+              "text": "Effort de raisonnement : voir ou régler (shift+tab)",
+              "cells": 51,
+              "note": "keeps both verbs, drops 'alterne'"
+            }
+          ],
+          "current_cells": 43,
+          "english_cells": 47,
+          "budget_note": "42 cells: comfortably inside budget, and it trades the verb pair for the subject noun — the same noun-first shape round 1 itself recommended for /approvals and /language."
+        },
+        {
+          "id": "R2-5",
+          "key": "wire.slash.links",
+          "english": "Open a link from this conversation in a browser",
+          "current": "Ouvrir un lien dans le navigateur",
+          "severity": "MINOR",
+          "introduced_by_fix": true,
+          "carries_previous": "n2",
+          "problem": "The source clause is gone. en names both ends — a link FROM this conversation, opened IN a browser; /links picks a URL out of the conversation (app.py:23802, 'pick a URL out of the conversation and open it'). The previous value named the conversation and not the browser; the rewrite swapped one clause for the other, so the row now says where a link goes but not which links it offers. This is round 1's n2 suggestion applied verbatim.",
+          "suggestion": "Ouvrir un lien de la conversation dans le navigateur",
+          "suggestion_cells": 52,
+          "alternatives": [
+            {
+              "text": "Ouvrir un de ces liens dans le navigateur",
+              "cells": 41,
+              "note": "both ends, comfortably inside budget"
+            }
+          ],
+          "current_cells": 33,
+          "english_cells": 50,
+          "budget_note": "52 cells: one over the 51 working figure carried from round 1, inside the ~55 wrap threshold slash_commands.py cites (e.g. ':1829'). The 41-cell alternative is the safe choice if 51 is binding."
+        },
+        {
+          "id": "R2-6",
+          "key": "wire.slash.agent",
+          "english": "List agents, switch an agent's class, or speak to this session as one",
+          "current": "Agents : lister, changer la classe, ou en attacher",
+          "severity": "NIT",
+          "introduced_by_fix": false,
+          "carries_previous": "B1 (secondary remark)",
+          "problem": "'changer la classe' has no referent. Round 1 recorded this inside B1 ('« changer la classe » also drops « d'un agent »') and the remediation repaired the reversed third clause without it. 'sa classe' costs zero cells.",
+          "suggestion": "Agents : lister, changer sa classe, ou en attacher",
+          "suggestion_cells": 50,
+          "current_cells": 50,
+          "english_cells": 69
+        }
+      ],
+      "previous_findings": [
+        {
+          "id": "B1",
+          "key": "wire.slash.agent",
+          "status": "fixed",
+          "evidence": "The reversal is gone: 'ou en attacher' states the attach action, and attaching is what the command does (app.py:57588 `_agent_attach_slash_result`, '/agent <name> [<message>]'; detach path returns 'no agent active'). 'en attacher' states the mechanism where en states the effect, which is acceptable for a terse row; the missing referent on 'la classe' survives as NIT R2-6."
+        },
+        {
+          "id": "M1",
+          "key": "wire.slash.fork",
+          "status": "fixed_with_regression",
+          "evidence": "'<message>' is back (byte-identical) and 'ce chat' names the object. New MINOR R2-2: 'ici'/'ailleurs' merged into '--switch/--window' and a lone 'chat' against the file's 'conversation'."
+        },
+        {
+          "id": "M2",
+          "key": "wire.slash.stop",
+          "status": "fixed",
+          "evidence": "'une autre (nom/pid)' is back, so the target set is complete again. Cost: the '/resume la rouvre' clause is gone. Restoring it measures 68 cells against a 51 working figure, so the loss is not fixable in budget — recorded as observation O1, not as a finding (do NOT fix it by letting the picker truncate)."
+        },
+        {
+          "id": "M3",
+          "key": "wire.slash.delete",
+          "status": "fixed_with_regression",
+          "evidence": "The object is back ('cette conversation'), which was M3's defect. New MINOR R2-3: 'for good' is gone."
+        },
+        {
+          "id": "M4",
+          "key": "wire.slash.effort",
+          "status": "fixed_with_regression",
+          "evidence": "'Voir ou régler' and 'alterne' are both back. New MINOR R2-4: 'de raisonnement' is gone."
+        },
+        {
+          "id": "m1",
+          "key": "wire.slash.approvals",
+          "status": "fixed_with_regression",
+          "evidence": "The subject is identifiable again ('des outils' is back), which was m1's defect. But the rewrite added the verb 'Régler' and thereby dropped the report half en states — promoted to MAJOR R2-1. 'mode' is still absent."
+        },
+        {
+          "id": "m2",
+          "key": "wire.slash.model",
+          "status": "fixed",
+          "evidence": "'/model default : défaut à venir' carries the future scope en states ('for new sessions'). Terse but not wrong; a fuller 'défaut pour les prochaines sessions' measures 56."
+        },
+        {
+          "id": "m3",
+          "key": "wire.slash.team",
+          "status": "fixed",
+          "evidence": "'demande au manager' replaces 'écrire', restoring the request path, and the three clauses are now consistently nominal."
+        },
+        {
+          "id": "m4",
+          "key": "wire.slash.language",
+          "status": "fixed",
+          "evidence": "'Langue de l'interface ; auto suit le système' (44 cells) restores the qualifier and keeps 'auto suit le système'."
+        },
+        {
+          "id": "n1",
+          "key": "wire.slash.mcp",
+          "status": "fixed",
+          "evidence": "'serveurs' and 'gérer' are both back; 'add/remove' and 'OAuth' are byte-identical to en."
+        },
+        {
+          "id": "n2",
+          "key": "wire.slash.reload",
+          "status": "fixed",
+          "evidence": "Reload's object is back and the sidebar's object is back ('les conversations'), which was n2's complaint. Two residuals: the sidebar lost \"'focus' keys the list\" (O2, unfixable in budget) and the applied links suggestion traded the source clause for the destination — raised as R2-5, not as an open n2."
+        },
+        {
+          "id": "n3",
+          "key": "wire.slash.theme",
+          "status": "fixed",
+          "evidence": "'avec les flèches' replaces 'aux flèches'."
+        },
+        {
+          "id": "n4",
+          "key": "wire.slash.failovers",
+          "status": "fixed",
+          "evidence": "'le modèle actif' replaces 'le maillon actif', removing the invented chain metaphor and naming what serves."
+        },
+        {
+          "id": "n5",
+          "key": "wire.slash.clear",
+          "status": "fixed",
+          "evidence": "'Vider la transcription (historique intact)' replaces 'Effacer'."
+        }
+      ],
+      "observations": [
+        {
+          "id": "O1",
+          "key": "wire.slash.stop",
+          "note": "The '/resume la rouvre' cross-reference cannot be restored: 68 cells. Do not restore it by letting the picker truncate; en itself is 66 and its tail is cut too.",
+          "status": "accepted_not_flagged"
+        },
+        {
+          "id": "O2",
+          "key": "wire.slash.sidebar",
+          "note": "'les conversations' is back but \"'focus' keys the list\" is gone. With the explanation the row is 62 cells; the 53-cell 'cible' variant needs an object it does not carry, so the bare literal is the best available form. Accepted, not counted.",
+          "status": "accepted_not_flagged"
+        },
+        {
+          "id": "O3",
+          "key": "wire.slash.language",
+          "note": "The verb pair ('Show or set') is now a noun phrase. This is round 1's own suggestion and a noun phrase asserts nothing false; recorded rather than re-raised, but it is the same shape as R2-1 — the difference is that 'Régler' positively narrows the claim.",
+          "status": "accepted_not_flagged"
+        },
+        {
+          "id": "O4",
+          "key": "wire.slash.project",
+          "note": "66 cells, the only fr value over 55; unchanged by this revision. en is 56 on the same row and 8 en rows exceed 55 (agent 69, fork 74, stop 66, team 69 …), so the overflow is a source-tree condition, not a fr regression; not raised as a new finding (round-2 scope).",
+          "status": "accepted_not_flagged"
+        },
+        {
+          "id": "O5",
+          "key": "wire.slash.aida",
+          "note": "'ou lui écrire' still renders en's 'send a request' weakly, now that /team says 'demande au manager'. Unchanged key; noted for the next pass.",
+          "status": "accepted_not_flagged"
+        },
+        {
+          "id": "O6",
+          "key": "wire.slash.mcp",
+          "note": "'gérer OAuth' drops en's 'grant'; any fuller form ('gérer l'accès OAuth') measures 57.",
+          "status": "accepted_not_flagged"
+        },
+        {
+          "id": "O7",
+          "key": "wire.slash.reload",
+          "note": "'actuelle' dropped; the definite article carries 'the current install' — accepted.",
+          "status": "accepted_not_flagged"
+        }
+      ]
+    }
+  },
+  "verified_clean": {
+    "structure": "52/52 keys, same key set, identical order, valid JSON (parsed by the repo's own catalogues.load_catalogue and by json.load)",
+    "placeholders_and_tokens": "every technical token byte-identical: <message>, --switch, --window, shift+tab, esc, 'focus', read, /model default, /goal --clear, --copy, --stop, <goal>, <n>, add/remove, PyPI, OAuth. One deliberate absence: /resume in wire.slash.stop (recorded as O1, not a token defect)",
+    "icu": "no ICU/brace expressions in this namespace; no plural categories to check",
+    "identical_to_english": "none (no value equals its en string)",
+    "width": "every one of the 16 changed values is <= 51 cells; the file's only value over the ~55 wrap threshold is wire.slash.project (66), unchanged (O4)",
+    "typography": "U+202F before every : ; ! ? with a plain space after; U+2019 for all French apostrophes; the only ASCII apostrophes are the 'focus' literal, which must stay byte-identical"
+  },
+  "method": {
+    "widths": "rich.cells.cell_len (the picker's own measure, imported from the runtime venv) — U+202F counts 1 cell",
+    "budget": "The 51-cell figure carried from round 1 is a working target, not a source constant: slash_commands.py's own comments cite ~55 as the wrap point (e.g. ':1829'), 56/46 by terminal width, and en exceeds 51 in 16 of 52 keys and 55 in 8. The 16 changed fr values are all <= 51, so the delta is stricter than source; a suggestion at 52-54 is inside the envelope en itself occupies.",
+    "semantics": "claims checked against source in this tree, not against the round-1 receipt: app.py _cmd_approvals docstring (bare /approvals reports), _approvals_slash_result, _effort_slash_result, _agent_attach_slash_result, /links docstring, fork.mode=switch/--window comments, /sidebar 'focus' argument, /notifications read",
+    "scope": "all 16 values changed by the remediation judged against en; the other 36 keys scanned for parity/tokens/typography but not re-litigated (round-2 scope)"
+  },
+  "artifacts": {
+    "checks": {
+      "path": "slash-audit2/fr/checks.py",
+      "note": "independent parity/token/width/typography script, run with the runtime venv"
+    },
+    "cells": {
+      "path": "slash-audit2/fr/cells.py",
+      "note": "cell counts for current values and every suggested rewrite"
+    },
+    "log": {
+      "path": "slash-audit2/fr/audit.log",
+      "note": "execution log — commands that actually ran, with their output"
+    },
+    "validator": {
+      "path": "slash-audit2/fr/check.out",
+      "command": "python3 scripts/i18n/check.py (repo-wide validator)",
+      "result": "started 20:44, cancelled after ~11 min with no output written; it did not finish, so no result from it is claimed",
+      "replacement": "catalogue-level checks performed directly: the repo's own catalogues.load_catalogue (52/52 keys parsed) plus checks.py's key-set/argument/ICU/width/typography pass"
+    }
+  },
+  "audit_notes_not_execution_log": false,
+  "execution_log": "slash-audit2/fr/audit.log — every command in it was run; the receipt's claims rest on that output",
+  "ledger_row": {
+    "written": false,
+    "reason": "The operator scoped this run to a read-only re-audit ('Do not edit anything'), so no ledger or evidence-bundle edit was made in the tree. The audit-ledger row and i18n/audits/evidence bundle remain to be recorded by the implementing session from this receipt."
+  }
+}
