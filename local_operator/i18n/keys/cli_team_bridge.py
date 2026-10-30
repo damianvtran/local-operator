@@ -185,6 +185,59 @@ def status_no_supervisor_note(*, command: str) -> Msg:
     return Msg("cli.team_bridge.status.no_supervisor_note", {"command": command})
 
 
+def status_screening(*, held: str, breaker: str, rejected: str) -> Msg:
+    return Msg(
+        "cli.team_bridge.status.screening",
+        {"held": held, "breaker": breaker, "rejected": rejected},
+    )
+
+
+def status_screening_breaker(*, state: str, remaining: str, failures: int | float) -> Msg:
+    return Msg(
+        "cli.team_bridge.status.screening_breaker",
+        {"state": state, "remaining": remaining, "failures": failures},
+    )
+
+
+def status_screening_healthy() -> Msg:
+    return Msg("cli.team_bridge.status.screening_healthy", {})
+
+
+def status_screening_held(*, count: int | float, codes: str, age: str) -> Msg:
+    return Msg(
+        "cli.team_bridge.status.screening_held",
+        {"count": count, "codes": codes, "age": age},
+    )
+
+
+def status_screening_held_class(
+    *,
+    count: int | float,
+    codes: str,
+    age: str,
+    failure_class: str,
+) -> Msg:
+    return Msg(
+        "cli.team_bridge.status.screening_held_class",
+        {"count": count, "codes": codes, "age": age, "failure_class": failure_class},
+    )
+
+
+def status_screening_held_none() -> Msg:
+    return Msg("cli.team_bridge.status.screening_held_none", {})
+
+
+def status_screening_rejected(*, count: int | float, categories: str) -> Msg:
+    return Msg(
+        "cli.team_bridge.status.screening_rejected",
+        {"count": count, "categories": categories},
+    )
+
+
+def status_screening_rejected_none() -> Msg:
+    return Msg("cli.team_bridge.status.screening_rejected_none", {})
+
+
 def status_state(*, state: str) -> Msg:
     return Msg("cli.team_bridge.status.state", {"state": state})
 

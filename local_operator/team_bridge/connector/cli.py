@@ -125,6 +125,89 @@ def _last_check(root: Path) -> float | None:
     return float(value) if isinstance(value, (int, float)) else None
 
 
+def _screening(root: Path) -> dict[str, Any] | None:
+    """Held / breaker / rejected screening counts, or ``None`` when unknowable.
+
+    WHY: screening that parks or rejects a message used to be silent — the
+    owner saw no delivery and no reason. This is the receiver's one place to
+    say so. Read-only (``Store.screening_status_readonly``: ``mode=ro``, never
+    creates a store); counts, codes and categories only. Any store failure is
+    ``None`` — a status command never fails on its own diagnostics, and the
+    refusal's own text is not echoed (it may name the database path's error).
+    """
+
+    import sqlite3
+
+    from local_operator.team_bridge.store import Store, StoreRefused
+
+    try:
+        store = Store(root)
+        owner = store.active_owner_readonly()
+        if owner is None:
+            return None
+        return store.screening_status_readonly(owner)
+    except (StoreRefused, sqlite3.Error):
+        return None
+
+
+def _compact_age(seconds: float) -> str:
+    """``41m`` / ``2h 10m`` / ``30s``: minute precision once past a minute."""
+
+    from local_operator.i18n.format import format_duration
+    from local_operator.i18n.text import active_locale
+
+    whole = int(seconds)
+    return format_duration(whole if whole < 60 else whole - whole % 60, active_locale())
+
+
+def _counts(mapping: dict[str, int]) -> str:
+    # Codes and categories are technical identifiers (closed vocabularies),
+    # interpolated verbatim; only the sentence around them is localized.
+    return ", ".join(f"{name} {count}" for name, count in mapping.items())
+
+
+def _screening_line(screening: dict[str, Any], *, now: float) -> Any:
+    """The ONE human screening line as a keyed message (rendered by the caller)."""
+
+    held = screening["held"]
+    breaker = screening["breaker"]
+    rejected = screening["rejected_24h"]
+    if held["count"] == 0 and rejected["count"] == 0 and breaker["failures"] == 0:
+        return _k.status_screening_healthy()
+    t = _tr()
+    if held["count"] == 0:
+        held_text = t(_k.status_screening_held_none())
+    else:
+        age = _compact_age(held["oldest_age_s"] or 0.0)
+        codes = _counts(held["by_code"])
+        failure_class = held.get("dominant_failure_class")
+        held_text = t(
+            _k.status_screening_held_class(
+                count=held["count"], codes=codes, age=age, failure_class=failure_class
+            )
+            if failure_class
+            else _k.status_screening_held(count=held["count"], codes=codes, age=age)
+        )
+    if breaker["state"] == "open":
+        state = "open"
+    else:
+        state = "failing" if breaker["failures"] else "closed"
+    remaining = _compact_age(max(0.0, (breaker["open_until"] or now) - now))
+    breaker_text = t(
+        _k.status_screening_breaker(state=state, remaining=remaining, failures=breaker["failures"])
+    )
+    rejected_text = (
+        t(
+            _k.status_screening_rejected(
+                count=rejected["count"], categories=_counts(rejected["by_category"])
+            )
+        )
+        if rejected["count"]
+        else t(_k.status_screening_rejected_none())
+    )
+    return _k.status_screening(held=held_text, breaker=breaker_text, rejected=rejected_text)
+
+
 def _status(root: Path, *, as_json: bool) -> int:
     import os
 
@@ -134,6 +217,7 @@ def _status(root: Path, *, as_json: bool) -> int:
     state = install.connector_state(root)
     enrolment = _enrolment_state(root)
     last = _last_check(root)
+    screening = _screening(root)
     log = install.log_path(root)
     journal = install.journal_hint()
     linger: bool | None = None
@@ -155,6 +239,8 @@ def _status(root: Path, *, as_json: bool) -> int:
                     "last_check": last,
                     "linger": linger,
                     "foreground_command": install.foreground_command(root),
+                    # ``None`` when not enrolled or unreadable; see _screening.
+                    "screening": screening,
                 }
             )
         )
@@ -172,6 +258,8 @@ def _status(root: Path, *, as_json: bool) -> int:
     else:
         when = time.strftime("%Y-%m-%d %H:%M:%S %Z", time.localtime(last))
         print(t(_k.status_last_check(when=when)))
+    if screening is not None:
+        print(t(_screening_line(screening, now=time.time())))
     if linger is not None:
         print(t(_k.status_linger(state="yes" if linger else "no", command=linger_command)))
     if state == install.CODE_ISOLATED:

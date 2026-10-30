@@ -1002,6 +1002,56 @@ class OwnerReceipt:
     consent_ref: str
 
 
+def screening_hold_message_id(value: str) -> str:
+    """The bare message id a ``screening_holds.message_id`` row names.
+
+    WHY THIS EXISTS. ``screening_holds.message_id`` carries TWO shapes: the bare
+    id (``bcmsg_…`` / ``bmsg_…``, written by the screener and by pair holds)
+    and the composite conversation feed ref
+    ``message_available:conversation_id=<bcv>/<bcmsg>/<seq>/<n>/<kind>…``
+    (canonicalised by :func:`_contentless_delivery_key` on every hold write and
+    on :meth:`Store.delete_hold`). Receipts and attempts are keyed by the BARE
+    id. A reader that looks a held message up by bare id alone misses every
+    composite row — which is how held messages were once reported as having
+    "vanished" — and a reader that counts rows counts one message twice when
+    both shapes exist for it. Every status reader goes through this ONE parser
+    so a held message is counted once whatever shape its row has, and can be
+    joined to its receipt.
+
+    READ-ONLY by contract: this maps a stored key to a join key; it never
+    rewrites the stored key (the loop and ``delete_hold`` depend on the
+    composite spelling). A malformed composite answers the raw value unchanged
+    — it still counts as one held message under its own key, and nothing about
+    it is echoed — rather than raising inside a status read.
+    """
+
+    from local_operator.team_bridge.types import (
+        CONVERSATION_FEED_KIND,
+        CONVERSATION_FEED_TYPE,
+        parse_conversation_ref_value,
+    )
+
+    prefix = f"{CONVERSATION_FEED_TYPE}:{CONVERSATION_FEED_KIND}="
+    if not value.startswith(prefix):
+        return value
+    ref = parse_conversation_ref_value(value[len(prefix) :])
+    return ref.message_id if ref is not None else value
+
+
+#: A status read emits stored strings only when they are closed-vocabulary
+#: CODES. ``hold_code`` comes from a closed set and ``failure_class`` from a
+#: sibling writer, but both are TEXT columns: anything that is not a short
+#: lowercase code reads as ``other`` so no free text can ride a status line.
+_STATUS_CODE = re.compile(r"[a-z0-9_]{1,64}")
+
+#: The window the rejected count looks back over.
+SCREENING_REJECT_WINDOW_S = 24 * 3600.0
+
+
+def _status_code(value: Any) -> str:
+    return value if isinstance(value, str) and _STATUS_CODE.fullmatch(value) else "other"
+
+
 def _contentless_delivery_key(value: str) -> str:
     """Canonicalise only the declared conversation-ref namespace, without names.
 
@@ -2029,6 +2079,129 @@ class Store:
                 (_owner_key(owner), hold_code),
             ).fetchone()
             return int(row["n"]) if row is not None else 0
+
+    def screening_status_readonly(
+        self, owner: OwnerSnapshot, *, now: float | None = None
+    ) -> dict[str, Any] | None:
+        """Held / breaker / rejected screening counts for this live owner (read-only).
+
+        WHY THIS EXISTS. When screening parks a message (a hold) or moderates
+        it ``reject``, the owner previously saw only silence: 46 messages sat in
+        ``screening_holds`` for up to 90 minutes and four rejections left no
+        signal anywhere. ``lop team-bridge receiver status`` and the desktop
+        status read both render this one answer.
+
+        CONTENT LAW. Counts, closed codes, categories, ages and timestamps
+        only — never a body, a model reply, a reason or a sender label. The
+        query selects no other column, codes are filtered through
+        :data:`_STATUS_CODE`, and categories through the closed screening
+        vocabulary. Read-only over an EXISTING store; never creates, migrates
+        or writes.
+
+        COUNTING. Hold rows are normalised by :func:`screening_hold_message_id`
+        and counted once per bare message id; a message that already has a
+        receipt is not "held by screening" (its leftover row is the loop's to
+        retire) and is excluded. When one message has rows in both shapes the
+        composite (canonical) row's code wins. ``failure_class`` is read only
+        when that column exists (a sibling change adds it); absent, the
+        dominant class is ``None``.
+
+        ``None`` for an absent store or a fenced owner. Unreadable raises
+        :class:`StoreRefused` like every ``_connect_readonly`` caller.
+        """
+
+        at = time.time() if now is None else float(now)
+        with self._connect_readonly() as conn:
+            if conn is None:
+                return None
+            if self._live_generation(conn, owner) != owner.enrollment_generation:
+                return None
+            key = _owner_key(owner)
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(screening_holds)")}
+            failure_column = ", failure_class" if "failure_class" in columns else ""
+            holds = conn.execute(
+                f"SELECT message_id, hold_code, created_at{failure_column} "
+                "FROM screening_holds WHERE owner_key = ?",
+                (key,),
+            ).fetchall()
+            receipted = {
+                str(row["message_id"])
+                for row in conn.execute(
+                    "SELECT message_id FROM screening_receipts WHERE owner_key = ?", (key,)
+                )
+            }
+            rejects = conn.execute(
+                "SELECT categories FROM screening_receipts "
+                "WHERE owner_key = ? AND verdict = 'reject' AND created_at >= ?",
+                (key, at - SCREENING_REJECT_WINDOW_S),
+            ).fetchall()
+            breaker = conn.execute(
+                "SELECT failures, open_until FROM screening_breaker WHERE account_scope = ?",
+                (self._account_scope(owner),),
+            ).fetchone()
+
+        # One entry per bare message id: (canonical?, code, oldest created_at, class).
+        held: dict[str, tuple[bool, str, float, str | None]] = {}
+        for row in holds:
+            stored = str(row["message_id"])
+            bare = screening_hold_message_id(stored)
+            if bare in receipted:
+                continue
+            canonical = bare != stored
+            code = _status_code(row["hold_code"])
+            created = float(row["created_at"] or at)
+            raw_class = row["failure_class"] if failure_column else None
+            failure = _status_code(raw_class) if raw_class is not None else None
+            prior = held.get(bare)
+            if prior is not None:
+                created = min(created, prior[2])
+                if prior[0] and not canonical:
+                    code, canonical = prior[1], True
+                failure = failure if failure is not None else prior[3]
+            held[bare] = (canonical, code, created, failure)
+
+        by_code: dict[str, int] = {}
+        classes: dict[str, int] = {}
+        for _canonical, code, _created, failure in held.values():
+            by_code[code] = by_code.get(code, 0) + 1
+            if failure is not None:
+                classes[failure] = classes.get(failure, 0) + 1
+        oldest = min((entry[2] for entry in held.values()), default=None)
+        # Highest count wins; a tie resolves alphabetically so the answer is stable.
+        dominant = min(classes, key=lambda name: (-classes[name], name)) if classes else None
+
+        by_category: dict[str, int] = {}
+        for row in rejects:
+            try:
+                decoded = json.loads(row["categories"])
+            except (TypeError, ValueError):
+                decoded = None
+            names = decoded if isinstance(decoded, list) and decoded else ["unknown"]
+            for name in names:
+                category = name if name in _CLOSED_CATEGORIES else "unknown"
+                by_category[category] = by_category.get(category, 0) + 1
+
+        failures = int(breaker["failures"]) if breaker is not None else 0
+        open_until = float(breaker["open_until"]) if breaker is not None else 0.0
+        return {
+            "held": {
+                "count": len(held),
+                "by_code": dict(sorted(by_code.items(), key=lambda item: (-item[1], item[0]))),
+                "oldest_age_s": max(0.0, at - oldest) if oldest is not None else None,
+                "dominant_failure_class": dominant,
+            },
+            "breaker": {
+                "state": "open" if open_until > at else "closed",
+                "failures": failures,
+                "open_until": open_until if open_until > 0 else None,
+            },
+            "rejected_24h": {
+                "count": len(rejects),
+                "by_category": dict(
+                    sorted(by_category.items(), key=lambda item: (-item[1], item[0]))
+                ),
+            },
+        }
 
     def designated_session_for_readonly(self, owner: OwnerSnapshot) -> str | None:
         """The designated CoS session id, read-only, under the same live fence.
