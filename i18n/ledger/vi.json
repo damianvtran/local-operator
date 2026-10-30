@@ -1041,6 +1041,82 @@
       },
       "status": "passed",
       "note": "Independent audit passed: supervision_unknown hedges (không thể xác định); unsupervised_unknown stays assertive. 14/14 keys, placeholders byte-identical. 1 MINOR accepted: width (unsupervised_unknown 84 vs 78; serve_linger_required exactly 80), recorded in style-guides/vi.md. No durability or reboot claim."
+    },
+    {
+      "locale": "vi",
+      "namespace": "relay.shell",
+      "source_sha256": "f53b23560b88b531ef8fc3274bc396676f26e755ad4ff9ad87ce368cebdee560",
+      "translator": {
+        "agent": "i18n-translator (lopdev lane, session 2ff662d60afd)",
+        "model": "radient/auto (provider-quota fallback chain from anthropic/claude-opus-5-5; this copy was authored under radient/auto)",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev reviewer lane, session 99eeb16e7599)",
+        "model": "radient/auto (provider-quota fallback chain from openai/gpt-6-astra via anthropic/claude-sonnet-5-5 and kimi/k3.1-pro; this audit ran under radient/auto)",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "Independent audit by a different agent at head 35c7be9989db. Read every value against en, glossary §2 and style-guides/vi.md; ICU argument names/kinds and plural arms verified with the repo parser; NFC, ellipsis and quote typography checked; terminology compared with already-shipped catalogues/vi/**. Runtime renders checked through render_message(locale='vi'): unit_credits/tokens/requests at counts 0/1/2/5, remaining/used/percent/reset/as_of; numbers and dates follow the vi formatter (1.234,5; 29 thg 10, 2026; 14:05). Terminology matches shipped vi (lượng sử dụng, hạn mức, tín dụng, nhà cung cấp, nhóm mô hình, chủ đề). relay.shell.session.waiting renders the session's live view («khung nhìn phiên»), agreeing with zh-CN 会话视图 and ur سیشن کا منظر — a view, not a screen-optical projection. FIXED (1 minor): usage.blocked «Chi phí không khả dụng» → «Không thể chi tiêu»; the state is the paid fallback being unspendable (usage-sheet.tsx gates on available === false), and the sibling eligibility key already says chi tiêu. 0 open blocker/major. 44 keys. Not checked: native-speaker review, rendered layout/width, device run. Target vi catalogue SHA-256 c9bc6290df34b194e8a95e4d40a343c5b98407fadb606b6ddfa9e6bf5b6290e4."
+    },
+    {
+      "locale": "vi",
+      "namespace": "relay.session",
+      "source_sha256": "a4ae148de969d4a2e8541aca5b4b99ad311d9ef112a0d056fc21fcf90e7e0129",
+      "translator": {
+        "agent": "i18n-translator (lopdev lane, session 2ff662d60afd)",
+        "model": "radient/auto (provider-quota fallback chain from anthropic/claude-opus-5-5; this copy was authored under radient/auto)",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev reviewer lane, session 99eeb16e7599)",
+        "model": "radient/auto (provider-quota fallback chain from openai/gpt-6-astra via anthropic/claude-sonnet-5-5 and kimi/k3.1-pro; this audit ran under radient/auto)",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit by a different agent at head 35c7be9989db. Read every value against en, glossary §2 and style-guides/vi.md; ICU argument names/kinds and plural arms verified with the repo parser; NFC, ellipsis and quote typography checked; terminology compared with already-shipped catalogues/vi/**. No findings. Lowercase sentence-case hints preserved, TUI kept as a Latin token, «cuộc trò chuyện», «tin nhắn», «thư mục làm việc», «mô hình» all consistent with shipped vi. 0 blocker/major/minor. 17 keys. Not checked: native-speaker review, rendered layout/width, device run. Target vi catalogue SHA-256 85ae31504ebf7a8482a9b5aef39909fe94163a4512d84580188713db9c0cdfb3."
+    },
+    {
+      "locale": "vi",
+      "namespace": "relay.account_policy",
+      "source_sha256": "0019b08106e6f7762194b164b9b9b37054a8cfade759aa2f6490787a73dea890",
+      "translator": {
+        "agent": "i18n-translator (lopdev lane, session 2ff662d60afd)",
+        "model": "radient/auto (provider-quota fallback chain from anthropic/claude-opus-5-5; this copy was authored under radient/auto)",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev reviewer lane, session 99eeb16e7599)",
+        "model": "radient/auto (provider-quota fallback chain from openai/gpt-6-astra via anthropic/claude-sonnet-5-5 and kimi/k3.1-pro; this audit ran under radient/auto)",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "Independent audit by a different agent at head 35c7be9989db. Read every value against en, glossary §2 and style-guides/vi.md; ICU argument names/kinds and plural arms verified with the repo parser; NFC, ellipsis and quote typography checked; terminology compared with already-shipped catalogues/vi/**. Error/refusal copy reads as failure, remedy imperative consistent («Hãy …»), «định tuyến tài khoản» and «chính sách» match shipped vi routing/settings vocabulary. FIXED (1 minor): unavailable «… trên chuyển tiếp này.» → «… trên máy chủ chuyển tiếp này.»; bare «chuyển tiếp» is a verb, not a place, so the error named no location; «máy chủ» is the settled server word. 0 open blocker/major. 13 keys. Not checked: native-speaker review, rendered layout/width, device run. Target vi catalogue SHA-256 c6b9b697d4c960c957f668e2d8021c07f06e0d7690dff6f8a9084a69e39e75ba."
+    },
+    {
+      "locale": "vi",
+      "namespace": "relay.library",
+      "source_sha256": "ad478c433a4db3e725994766c724a2e8e92176f015f8283e71dc13b87185466a",
+      "translator": {
+        "agent": "i18n-translator (lopdev lane, session 2ff662d60afd)",
+        "model": "radient/auto (provider-quota fallback chain from anthropic/claude-opus-5-5; this copy was authored under radient/auto)",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev reviewer lane, session 99eeb16e7599)",
+        "model": "radient/auto (provider-quota fallback chain from openai/gpt-6-astra via anthropic/claude-sonnet-5-5 and kimi/k3.1-pro; this audit ran under radient/auto)",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit by a different agent at head 35c7be9989db. Read every value against en, glossary §2 and style-guides/vi.md; ICU argument names/kinds and plural arms verified with the repo parser; NFC, ellipsis and quote typography checked; terminology compared with already-shipped catalogues/vi/**. Single plural key; other-only arm per the vi guide renders correctly (# at 0/1/2/21). «tài nguyên» matches the shipped vi resource wording. 0 blocker/major/minor. 1 keys. Not checked: native-speaker review, rendered layout/width, device run. Target vi catalogue SHA-256 3841bfe2c60bcf0496d5f57ad237dfc71ee92bf396fdd4ed4a296655e1ab7c85."
     }
   ]
 }

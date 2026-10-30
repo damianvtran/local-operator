@@ -1041,6 +1041,82 @@
       },
       "status": "passed",
       "note": "Independent audit passed: supervision_unknown hedges (не удалось определить); unsupervised_unknown stays assertive. 14/14 keys, placeholders byte-identical. 1 MINOR accepted: width (serve_linger_required 97, restart_supervision_limit 84 vs 80/78; unsupervised_unknown 74 fits), recorded in style-guides/ru.md. No durability or reboot claim."
+    },
+    {
+      "locale": "ru",
+      "namespace": "relay.shell",
+      "source_sha256": "f53b23560b88b531ef8fc3274bc396676f26e755ad4ff9ad87ce368cebdee560",
+      "translator": {
+        "agent": "i18n-translator (lopdev lane, session 736ae0f34230)",
+        "model": "anthropic/claude-opus-5-5 (pinned; the harness disclosed provider-quota fallbacks to claude-sonnet-5-5, gpt-6-astra, k3.1-pro and radient/auto during the session, then returned to the pin)",
+        "date": "2026-10-29"
+      },
+      "status": "passed",
+      "note": "Independent translation audit (ru), terminal: 44 keys against en source sha256 f53b23560b88b531ef8fc3274bc396676f26e755ad4ff9ad87ce368cebdee560, target ru file sha256 4eacb6595d7103c0842ade151aca10219deeee49d47ecdfeb8a38c95f272b35b. Mechanical: key set and order identical to en; ICU parse clean; 23 argument occurrences (22 distinct name+slot when the repeated {value} in the date/time pairs of usage.reset and usage.as_of is counted once) with 0 name/kind mismatches, matching the translator's claim; unit_credits/unit_tokens/unit_requests carry one/few/many/other and were rendered through runtime.render_message(locale='ru') at 0/1/2/5/21/22/25/1,5 — кредит/кредита/кредитов, токен/токена/токенов, запрос/запроса/запросов — with fractional other on the genitive singular as the en sidecar requires; percent, date and time reach the formatter only ('осталось 123 450 %', 'Сброс 29 окт. 2026 г., 14:05', NBSP grouping '1 234,5'), no hand-written separator to double-format; typography clean (U+2026 x3, no ASCII ellipsis or quotes, no hand-inserted NBSP, Latin only in USD). ONE MAJOR found by this audit and fixed here, disclosed in PR #3162 and below; no unresolved blocker/major remains. FIX (auditor): relay.shell.session.waiting — en 'waiting for projection…'; previous ru 'ожидание проекции…'; new ru 'ожидание отображения сессии…'. Reason: the en sidecar (relay.shell.context.json) names 'projection' as daemon jargon for the session's live view/state snapshot and requires the intended meaning ('waiting for the session view to arrive'); 'проекция' reads in Russian as a screen/optical projection — on a paired-phone product, a plausible misreading as screen mirroring — and both peer locales that carry the file translate the view (zh-CN '正在等待会话视图……', ur 'سیشن کا منظر آنے کا انتظار ہے…'). Other 43 values byte-identical to the translator's target. Translator's open questions judged, both accepted with reasons: (1) '5-часовое'/'7-дневное'/'Месячное' read correctly as usage-window labels in the rendered row ('Лимит тарифа · 5-часовое: осталось 40%'): the ellipsis is licensed by the sibling 'Неизвестное окно', which supplies the noun, and 'За всё время' is the idiomatic Russian 'Lifetime'; (2) 'Лимит тарифа' reads as the INCLUDED plan allowance rather than a cap — it sits in a parallel лимит taxonomy beside 'Платный лимит' and 'Лимит семейства моделей', and usage.continue frames it as consumable ('исчерпан; расход кредитов продолжится'). Not verified: no native-speaker pass, no rendered relay layout or width measurement, no device run.",
+      "auditor": {
+        "agent": "translation-auditor (lopdev reviewer role, independent i18n audit, session 6fe27b5eb252)",
+        "model": "radient/auto (pinned kimi/k3.1-pro hit provider quota, HTTP 429; the harness disclosed descent anthropic/claude-sonnet-5-5 → openai/gpt-6-astra → radient/auto during this audit; the provider model behind radient/auto is not exposed and is not inferred)",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      }
+    },
+    {
+      "locale": "ru",
+      "namespace": "relay.session",
+      "source_sha256": "a4ae148de969d4a2e8541aca5b4b99ad311d9ef112a0d056fc21fcf90e7e0129",
+      "translator": {
+        "agent": "i18n-translator (lopdev lane, session 736ae0f34230)",
+        "model": "anthropic/claude-opus-5-5 (pinned; the harness disclosed provider-quota fallbacks to claude-sonnet-5-5, gpt-6-astra, k3.1-pro and radient/auto during the session, then returned to the pin)",
+        "date": "2026-10-29"
+      },
+      "status": "passed",
+      "note": "Independent translation audit (ru), terminal: 17 keys against en source sha256 a4ae148de969d4a2e8541aca5b4b99ad311d9ef112a0d056fc21fcf90e7e0129, target ru file sha256 a54a29a78e1502be0de0a9b9a98945701ef1829f88901f2f7f64d3e6dda85286. Mechanical: key set and order identical to en; no ICU arguments; typography clean (U+2026 x4, no ASCII ellipsis). Casing checked key by key against the en sidecars: every key whose tone says 'lowercase' is lowercase in ru, and 'Поиск по беседам…' keeps its capital because its own en source and sidecar are capital. Terminology checked against SHIPPED ru that predates this PR, not only against this file: conversation→беседа and session→сессия follow the glossary and relay.chrome (relay.chrome.session.back 'Назад к беседам', list.new_label 'Новая сессия', drawer.past 'Прошлые сессии'); 'back to sessions' renders 'назад к сессиям' because the en key says sessions, while the conversation-flavoured siblings use беседа; working directory→рабочий каталог matches shipped wire.settings.display_composer_cwd ('Полоса: рабочий каталог'). Semantic pass: 'начните беседу ниже или в TUI на компьютере' keeps both clauses of 'start one below, or from the TUI on your machine'. No findings. Not verified: no native-speaker pass, no rendered relay layout check, no device run. Note for a native pass: en itself alternates conversation/session across this namespace (search/no_matches say conversations, back/past say sessions); ru mirrors it faithfully and the inconsistency, if it is one, is upstream English.",
+      "auditor": {
+        "agent": "translation-auditor (lopdev reviewer role, independent i18n audit, session 6fe27b5eb252)",
+        "model": "radient/auto (pinned kimi/k3.1-pro hit provider quota, HTTP 429; the harness disclosed descent anthropic/claude-sonnet-5-5 → openai/gpt-6-astra → radient/auto during this audit; the provider model behind radient/auto is not exposed and is not inferred)",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      }
+    },
+    {
+      "locale": "ru",
+      "namespace": "relay.account_policy",
+      "source_sha256": "0019b08106e6f7762194b164b9b9b37054a8cfade759aa2f6490787a73dea890",
+      "translator": {
+        "agent": "i18n-translator (lopdev lane, session 736ae0f34230)",
+        "model": "anthropic/claude-opus-5-5 (pinned; the harness disclosed provider-quota fallbacks to claude-sonnet-5-5, gpt-6-astra, k3.1-pro and radient/auto during the session, then returned to the pin)",
+        "date": "2026-10-29"
+      },
+      "status": "passed",
+      "note": "Independent translation audit (ru), terminal: 13 keys against en source sha256 0019b08106e6f7762194b164b9b9b37054a8cfade759aa2f6490787a73dea890, target ru file sha256 4e8a8457043dbcbcaeace048fbb5ca17a4fdb7c6d622f5aec656c650e9f60fb7. Mechanical: key set and order identical to en; no ICU arguments; typography clean (U+2026 x3). State direction verified against the en sidecars, the category this screen can fail: error 'Не удалось подтвердить изменение…' states an UNCONFIRMED commit and never asserts the write failed, which is exactly what its sidecar demands (commit status UNKNOWN); rejected 'Изменение не сохранено…' asserts the known-4xx not-saved state; load_error is a distinct load failure; saved is the only success string and saving/loading are neutral progress. Negation preserved in every negative key. Terminology against shipped ru: аккаунт for the routing account (wire.settings.retry_usageawareaccountpick.*, tui.authoring.promote_*), учётная запись left to credentials, ретранслятор per the glossary relay row, 'перезагрузите страницу' for a bare 'reload' as ur also does. Register: formal вы imperatives throughout, no ты forms, infinitive action labels, sentence case only. No findings. Not verified: no native-speaker pass, no rendered layout check, no device run.",
+      "auditor": {
+        "agent": "translation-auditor (lopdev reviewer role, independent i18n audit, session 6fe27b5eb252)",
+        "model": "radient/auto (pinned kimi/k3.1-pro hit provider quota, HTTP 429; the harness disclosed descent anthropic/claude-sonnet-5-5 → openai/gpt-6-astra → radient/auto during this audit; the provider model behind radient/auto is not exposed and is not inferred)",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      }
+    },
+    {
+      "locale": "ru",
+      "namespace": "relay.library",
+      "source_sha256": "ad478c433a4db3e725994766c724a2e8e92176f015f8283e71dc13b87185466a",
+      "translator": {
+        "agent": "i18n-translator (lopdev lane, session 736ae0f34230)",
+        "model": "anthropic/claude-opus-5-5 (pinned; the harness disclosed provider-quota fallbacks to claude-sonnet-5-5, gpt-6-astra, k3.1-pro and radient/auto during the session, then returned to the pin)",
+        "date": "2026-10-29"
+      },
+      "status": "passed",
+      "note": "Independent translation audit (ru), terminal: 1 key against en source sha256 ad478c433a4db3e725994766c724a2e8e92176f015f8283e71dc13b87185466a, target ru file sha256 a3dab4290b60192273da37218273b3c8a3db0de71e01ed2e804bd7da6bea3b38. Mechanical: key parity; one plural argument; arms one/few/many/other; rendered at 0/1/2/5/21/22/25/1,5 — '1 материал', '2 материала', '5 материалов', '1,5 материала' — fractional other on the genitive singular; NBSP grouping in '1 000 000 материалов' comes from the formatter, not the string. Terminology: asset→материал. There is no shipped ru precedent for 'asset' (the term appears in no pre-PR ru catalogue), so this was judged against the surface: docs/design/library.md defines an asset as one durable generated image/video/audio/PPTX artifact, where 'материал' is ordinary Russian and 'ассет' is jargon. Accepted, lowercase per the sidecar. Residual risk left to a native pass: 'материал' can also read as physical material. No findings beyond that note. Not verified: no native-speaker pass, no rendered grid check, no device run.",
+      "auditor": {
+        "agent": "translation-auditor (lopdev reviewer role, independent i18n audit, session 6fe27b5eb252)",
+        "model": "radient/auto (pinned kimi/k3.1-pro hit provider quota, HTTP 429; the harness disclosed descent anthropic/claude-sonnet-5-5 → openai/gpt-6-astra → radient/auto during this audit; the provider model behind radient/auto is not exposed and is not inferred)",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      }
     }
   ]
 }

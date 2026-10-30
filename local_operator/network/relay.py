@@ -9427,6 +9427,7 @@ class RelayServer:
         "there is more above this page".
         """
         from local_operator.harness.rows import visible_transcript_rows
+        from local_operator.session import index_read_model
         from local_operator.session.open_frame import (
             OPEN_FRAME_MAX_BYTES,
             OPEN_FRAME_MAX_EXTRA_ROWS,
@@ -9555,7 +9556,8 @@ class RelayServer:
             # the journal's END, and a ``before_id`` page is owed its rows.
             if attempt == 0 and index is None and before_id is None:
                 index_at = time.monotonic()
-                index = self._stored_frame_index(session_id)
+                source = sources[0] if sources and all(s == sources[0] for s in sources) else None
+                index = self._stored_frame_source(session_id, source)
                 index_at_first_page = index is not None
                 if open_trace.enabled():
                     open_trace.mark(
@@ -9588,7 +9590,8 @@ class RelayServer:
                 break
         if index is None:
             index_at = time.monotonic()
-            index = self._stored_frame_index(session_id)
+            source = sources[0] if sources and all(s == sources[0] for s in sources) else None
+            index = self._stored_frame_source(session_id, source)
             if open_trace.enabled():
                 open_trace.mark(
                     "b.index",
@@ -9614,10 +9617,35 @@ class RelayServer:
                     collected = collected[-keep:]
                     has_more = page_rows[stop - 1][1]
                     sources = sources[: page_rows[stop - 1][2]]
+        source = sources[0] if sources and all(s == sources[0] for s in sources) else None
+        facts = None
+        if isinstance(index, index_read_model.FrameSummary):
+            projected = self._stored_projection(
+                index_read_model.frame_facts,
+                self.root,
+                session_id,
+                collected_ids=[row["id"] for row in collected],
+                reaches_eof=before_id is None,
+                order_ids=order_ids or [],
+                source=source,
+            )
+            if projected.state == "ready":
+                facts, index = projected.value, None
+            else:
+                # The original no-wait fallback remains admitted when a summary
+                # was valid but the selected projection cannot prove completeness.
+                index = self._stored_frame_index(session_id)
+        if index is not None and source != (
+            index.sig.get("inode"),
+            index.sig.get("size"),
+            index.sig.get("mtime"),
+        ):
+            index = None
         kept, reached = align_page(collected, limit)
         result = build_frame(
             kept,
             index=index,
+            resolved_runs=facts.runs if facts is not None else None,
             # ``building`` is what a cold index answers (see
             # ``_stored_frame_index``); ``build_frame`` replaces it with
             # ``ready`` whenever an index was in hand, whatever the run list
@@ -9658,8 +9686,9 @@ class RelayServer:
         # may then have dropped the oldest rows — the page's user row first — so
         # a page could report ``head_cut: false`` while its oldest run WAS cut.
         answer["head_cut"] = (not reached or result.capped) and answer["has_more"]
-        if journal_order:
-            source = sources[0] if sources and all(s == sources[0] for s in sources) else None
+        if journal_order and not (
+            facts is not None and index_read_model.apply_order(answer, facts)
+        ):
             self._stored_journal_order(
                 answer, session_id, source, order_ids or [], complete=complete
             )
@@ -9874,6 +9903,50 @@ class RelayServer:
             # refused by name, never trimmed.
             raise MeshRefusal("page_too_large", "this source read cannot fit one link record")
         return detail
+
+    def _stored_frame_source(self, session_id: str, source: tuple[int, int, float] | None) -> Any:
+        """Already on the owner request worker: bounded immutable projection first.
+
+        Keep relay's no-wait policy and resident fast path. Summary success is
+        not selection authority; the caller must resolve its exact frame later.
+        """
+        from local_operator.session import index_read_model, transcript_index
+
+        resident = transcript_index.fresh_resident(self.root, session_id)
+        if resident is not None:
+            expected = (
+                resident.sig.get("inode"),
+                resident.sig.get("size"),
+                resident.sig.get("mtime"),
+            )
+            return resident if source == expected else None
+        projected = self._stored_projection(index_read_model.summary, self.root, session_id, source)
+        if projected.state == "ready":
+            return projected.value
+        return self._stored_frame_index(session_id)
+
+    def _stored_projection(self, operation: Any, *args: Any, **kwargs: Any) -> Any:
+        """Run SQLite through the relay's existing page worker, never its link reader.
+
+        THE WAIT IS THE READ MODEL'S OWN, NOT THE PAGE READ'S. This hop runs on a
+        LINK thread, and ``SESSION_HISTORY_PAGE_READ_BOUND_S`` is 60 s: a broken
+        or slow companion could therefore park a peer's link thread for a minute
+        for an optimization it can simply skip. When the bound expires the caller
+        falls back to the original rederive path, which is the answer it would
+        have produced anyway.
+        """
+        from local_operator.session import index_read_model as rm
+
+        with self._page_loop_lock:
+            loop = self._page_loop_locked()
+            future = asyncio.run_coroutine_threadsafe(
+                asyncio.to_thread(operation, *args, **kwargs), loop
+            )
+        try:
+            return future.result(timeout=rm.READ_MODEL_WAIT_S)
+        except TimeoutError:
+            future.cancel()
+            return rm.Result("stale", reason="read-model wait bound")
 
     def _stored_frame_index(self, session_id: str) -> Any:
         """The transcript-index facts for one open-frame page, or ``None`` (cold).

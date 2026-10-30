@@ -1,0 +1,15 @@
+{
+  "relay.account_policy.title": "Cài đặt máy tính",
+  "relay.account_policy.back": "Quay lại",
+  "relay.account_policy.loading": "Đang tải định tuyến tài khoản…",
+  "relay.account_policy.save": "Lưu chính sách",
+  "relay.account_policy.saving": "Đang lưu…",
+  "relay.account_policy.saved": "Đã lưu trên máy tính này.",
+  "relay.account_policy.retry": "Thử lại",
+  "relay.account_policy.unavailable": "Cài đặt định tuyến tài khoản không khả dụng trên máy chủ chuyển tiếp này. Hãy cập nhật Local Operator trên máy tính này.",
+  "relay.account_policy.error": "Không thể xác nhận thay đổi. Hãy kiểm tra kết nối và tải lại để đọc chính sách hiện tại.",
+  "relay.account_policy.scope": "Thay đổi chỉ áp dụng cho máy tính này.",
+  "relay.account_policy.entry": "cài đặt",
+  "relay.account_policy.rejected": "Thay đổi chưa được lưu. Hãy kiểm tra giá trị hoặc cài đặt của máy tính này rồi thử lại.",
+  "relay.account_policy.load_error": "Không thể tải định tuyến tài khoản. Hãy kiểm tra kết nối rồi thử lại."
+}
