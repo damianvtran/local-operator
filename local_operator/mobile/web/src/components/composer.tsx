@@ -41,7 +41,7 @@ import { WorkingDirectoryChip } from "./directory-sheet";
 import { SkillTray } from "./skill-tray";
 import { cn } from "../lib/cn";
 import { isolate, textDirection } from "../lib/bidi";
-import { blockingPending } from "../lib/asks";
+import { aboveComposerOccupied } from "../lib/asks";
 import {
 	isLeadingSkillToken,
 	skillMatches,
@@ -1661,11 +1661,17 @@ export function Composer({
 				<SkillTray
 					rows={skillRows}
 					onPick={onSkillPick}
-					/* A waiting question outranks the list (design D5) — the
-					   BLOCKING one, not the raw `pending`: on a runtime that publishes
-					   `asks`, a `kind: "ask"` pending is the dock's one-line mirror and
-					   draws no card, so it must not shrink the tray (m8/U8). */
-					questionPending={blockingPending(projection.pending, projection.asks) != null}
+					/* TWO ROWS WHEN ANYTHING ABOVE THE COMPOSER DRAWS (design D5,
+					   QA round 4 Q-R4-1). `blockingPending` alone answered "no card"
+					   for a queued ask the runtime also mirrors into `pending` —
+					   correct as far as it goes, except that same state draws the
+					   32 px dock in the slot. The cap therefore reads the ONE
+					   predicate for "the slot has something in it": the blocking
+					   card OR the dock (`aboveComposerOccupied`, whose dock half is
+					   the `outstandingAsks` gate `AskDock` draws behind). An EMPTY
+					   mirror still keeps the 45 % cap, so a slot with nothing in it
+					   costs the list no height (m8/U8). */
+					questionPending={aboveComposerOccupied(projection.pending, projection.asks)}
 				/>
 			) : null}
 			<div className={COMPOSER_SHELL}>

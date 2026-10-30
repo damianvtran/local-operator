@@ -32,8 +32,9 @@
  *    way: a slash draft closes the skill tray (`isSlashDraft` in
  *    `components/composer.tsx`), so `/team x $skill` is out of scope and no
  *    second copy of the claim rule exists here. One caret, one list.
- *  - NO FUZZY MATCHING. The TUI ranks with its corpus-wide scorer; a phone
- *    picker is tap-only, so rows are a case-insensitive PREFIX of the typed
+ *  - NO FUZZY MATCHING. The TUI ranks with its corpus-wide scorer; the phone
+ *    picker has no ranked keyboard selection (the arrows walk the list in
+ *    catalogue order), so rows are a case-insensitive PREFIX of the typed
  *    name. The lowercase-noise gate is kept (`$PATH`, `$5`, a bare inline `$`
  *    stay closed), because a wrongly opened list is a draft-rewriting hazard,
  *    not merely noise — see `skillMatches`.
@@ -199,8 +200,8 @@ export function isLeadingSkillToken(text: string, token: SkillToken): boolean {
  * LEADING has no such rule (the sigil is the first thing typed; nothing else
  * can be meant): a bare `$` lists everything and any prefix narrows it.
  *
- * Matching is a case-insensitive PREFIX, never the TUI's fuzzy scorer — a
- * tap-only list has no keyboard ranking to earn, and a prefix is the rule a
+ * Matching is a case-insensitive PREFIX, never the TUI's fuzzy scorer — a list
+ * walked in catalogue order has no ranking to earn, and a prefix is the rule a
  * user can predict from what they typed. See the module note for the named
  * divergence.
  */

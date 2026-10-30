@@ -17,7 +17,8 @@
 //  - a fresh send asks for expansion (`expand_skills`) only when it carries `$`;
 //  - the tray is CAPPED IN COLUMN UNITS, dismisses on an outside tap, a blur or
 //    Escape, stays shut on a restored draft, opens mid-composition, and yields
-//    two rows only for a BLOCKING question (not an ask's dock mirror);
+//    two rows whenever the above-composer slot draws a card or an ask's dock;
+//    an asks-present EMPTY mirror (nothing drawn) keeps the 45 % cap;
 //  - the rows' keyboard route is ArrowDown/ArrowUp from the field (sequential
 //    focus cannot reach them), with Enter/Space native and Escape back out;
 //  - a catalogue name the `$` grammar cannot express is never offered.
@@ -206,6 +207,22 @@ const QUEUED: PendingAsk = {
 			persist: false,
 		},
 	],
+};
+
+/** A blocking approval: one card, no asks capability, so the card is the only
+    thing above the composer. */
+const APPROVAL: SessionProjection["pending"] = {
+	request_id: "approval-1",
+	kind: "approval",
+	title: "Run the migration against the staging store?",
+	detail: "",
+	options: [
+		{ label: "Allow", description: "" },
+		{ label: "Deny", description: "" },
+	],
+	secret: false,
+	question_index: 0,
+	question_total: 1,
 };
 
 afterEach(() => {
@@ -429,18 +446,34 @@ describe("the skill tray", () => {
 		expect(within(tray() as HTMLElement).getAllByRole("button")).toHaveLength(3);
 	});
 
-	it("keeps the 45 % cap for an ask's dock MIRROR — no card, no shrink (m8/U8)", async () => {
-		/* A runtime that publishes `asks` mirrors its queued ask into `pending`.
-		   The mirror draws the one-line dock, not a card, so it must not shrink
-		   the tray. `blockingPending` is the repo's one derivation of "a card is
-		   on screen" (lib/asks.ts); the raw `pending` would take the cap and
-		   leave an empty slot for a card that is not there. */
+	it("drops to two rows for a REAL open ask whose dock draws (Q-R4-1)", async () => {
+		/* The runtime publishes the queued ask (`asks`) AND mirrors it into
+		   `pending`. `blockingPending` resolves the mirror to no card, but the
+		   32 px dock still draws in the above-composer slot. The cap must yield
+		   to it: at the 508 px keyboard column QA measured the 45 % tray leaving
+		   the slot 4.5 px and the dock 0 px visible (round 4). */
 		const field = mount("p1", ASK, [QUEUED]);
+		type(field, "$", 1);
+		await waitFor(() => expect(tray()).toBeTruthy());
+		expect((tray() as HTMLElement).style.maxHeight).toBe("calc(2 * 2.75rem + 0.5rem)");
+	});
+
+	it("keeps the 45 % cap for an asks-present EMPTY mirror — nothing draws (m8/U8)", async () => {
+		/* The same `kind: "ask"` pending with `asks: []` renders NO card and NO
+		   dock. A slot with nothing in it must not cost the list its height. */
+		const field = mount("p1", ASK, []);
 		type(field, "$", 1);
 		await waitFor(() => expect(tray()).toBeTruthy());
 		expect((tray() as HTMLElement).style.maxHeight).toBe(
 			"calc(var(--lo-vvh, 100dvh) * 0.45)",
 		);
+	});
+
+	it("drops to two rows for a blocking approval (D5)", async () => {
+		const field = mount("p1", APPROVAL);
+		type(field, "$", 1);
+		await waitFor(() => expect(tray()).toBeTruthy());
+		expect((tray() as HTMLElement).style.maxHeight).toBe("calc(2 * 2.75rem + 0.5rem)");
 	});
 
 	it("opens mid-composition — Android composes every Latin word (M1)", async () => {
@@ -552,15 +585,27 @@ describe("the skill tray", () => {
 		expect(rows).toHaveLength(3);
 
 		/* `dispatchEvent` returns false exactly when `preventDefault` ran — the
-		   caret must not move while the list takes the key. */
+		   caret must not move while the list takes the key (m12 pins the caret
+		   itself, not only the cancellation). */
 		expect(fireEvent.keyDown(field, { key: "ArrowDown" })).toBe(false);
 		await waitFor(() => expect(document.activeElement).toBe(rows[0]));
+		expect(field.selectionStart).toBe(1);
+		expect(field.selectionEnd).toBe(1);
 		/* Focus moved INTO the list, which is not a dismissal (the blur guard). */
 		expect(tray()).toBeTruthy();
 
 		fireEvent.keyDown(rows[0], { key: "ArrowDown" });
 		await waitFor(() => expect(document.activeElement).toBe(rows[1]));
 		fireEvent.keyDown(rows[1], { key: "ArrowUp" });
+		await waitFor(() => expect(document.activeElement).toBe(rows[0]));
+
+		/* ArrowUp at the first row hands the key back to the field, and the
+		   caret is still where it was (m12). */
+		fireEvent.keyDown(rows[0], { key: "ArrowUp" });
+		await waitFor(() => expect(document.activeElement).toBe(field));
+		expect(field.selectionStart).toBe(1);
+		expect(field.selectionEnd).toBe(1);
+		fireEvent.keyDown(field, { key: "ArrowDown" });
 		await waitFor(() => expect(document.activeElement).toBe(rows[0]));
 
 		/* A focused button's Enter/Space is its NATIVE activation; the click it
@@ -587,6 +632,7 @@ describe("the skill tray", () => {
 		await waitFor(() => expect(tray()).toBeNull());
 		expect(document.activeElement).toBe(field);
 		expect(field.value).toBe("$");
+		expect(field.selectionStart).toBe(1);
 	});
 
 	it("closes when focus leaves a row for a control outside the tray (U7)", async () => {
@@ -628,6 +674,61 @@ describe("the skill tray", () => {
 		/* A modified arrow is a text gesture (selection, word/paragraph move),
 		   not list navigation. */
 		expect(fireEvent.keyDown(field, { key: "ArrowDown", shiftKey: true })).toBe(true);
+		expect(document.activeElement).toBe(field);
+	});
+
+	it("leaves Alt/Ctrl arrows to the field while the list is open (m11)", async () => {
+		const field = mount();
+		field.focus();
+		type(field, "$", 1);
+		await waitFor(() => expect(tray()).toBeTruthy());
+
+		/* Word/paragraph moves and selection gestures stay the field's: the
+		   guard's modifier clause is what keeps a hardware keyboard's text
+		   editing working under an open list. */
+		for (const init of [{ altKey: true }, { ctrlKey: true }]) {
+			expect(fireEvent.keyDown(field, { key: "ArrowDown", ...init })).toBe(true);
+			expect(document.activeElement).toBe(field);
+			expect(tray()).toBeTruthy();
+		}
+	});
+
+	it("does not walk the rows on a modified or composing arrow (m11)", async () => {
+		const field = mount();
+		field.focus();
+		type(field, "$", 1);
+		await waitFor(() => expect(tray()).toBeTruthy());
+		const rows = within(tray() as HTMLElement).getAllByRole("button") as HTMLButtonElement[];
+		fireEvent.keyDown(field, { key: "ArrowDown" });
+		await waitFor(() => expect(document.activeElement).toBe(rows[0]));
+
+		/* The wrapper's handler repeats the field's rule, because a key pressed
+		   on a row never reaches the field: a modified arrow is a text gesture
+		   and an IME's arrow picks candidates, so neither moves focus. */
+		for (const init of [
+			{ shiftKey: true },
+			{ altKey: true },
+			{ ctrlKey: true },
+			{ metaKey: true },
+			{ isComposing: true },
+		]) {
+			expect(fireEvent.keyDown(rows[0], { key: "ArrowDown", ...init })).toBe(true);
+			expect(document.activeElement).toBe(rows[0]);
+		}
+	});
+
+	it("does not take an Escape aimed outside the list (m9/m11)", async () => {
+		const field = mount();
+		field.focus();
+		type(field, "$", 1);
+		await waitFor(() => expect(tray()).toBeTruthy());
+
+		/* The document capture listener is scoped to `[data-skill-tray]`: an
+		   Escape aimed at another control belongs to that control, so the list
+		   stays open and the key is not cancelled. */
+		const attach = screen.getByLabelText("attach image");
+		expect(fireEvent.keyDown(attach, { key: "Escape" })).toBe(true);
+		expect(tray()).toBeTruthy();
 		expect(document.activeElement).toBe(field);
 	});
 

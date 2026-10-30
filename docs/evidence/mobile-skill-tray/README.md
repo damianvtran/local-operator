@@ -51,6 +51,7 @@ reproduces.
 | `ask-470-light` / `-dark` | 470 | 96 | 96 / 360 | 168 | 352 → 462 |
 | `ask-320-light` / `-dark` | 568 | 96 | 96 / 360 | 222 | 406 → 560 |
 | `ask-844-light` / `-dark` | 844 | 96 | 96 / 360 | 271.1 | 682 → 836 |
+| `ask-dock-508-light` / `-dark` | 508 | **96** (two rows) | 96 / 360 | **44** (32 px dock inside) | 346 → 500 |
 
 The before row is round 1's measurement reproduced exactly (432 → 586 against a
 508 foot, 78 px clipped, only the top 12 of the send disc's 44 px on screen).
@@ -91,6 +92,23 @@ the card has room to spare. That is the one state where the round-2 design
 report's target said "unchanged" (it measured a 234 px slot with the eight-row
 tray, the state this PR's 45 % cap produces without an ask); the verdict — whole
 card, nothing clipped — is the same either way, and only the number moves.
+
+**With a queued ask waiting — a dock, not a card (Q-R4-1):**
+
+- `ask-dock-508-light` / `-dark` — a real open ask: the runtime publishes the
+  `asks` row and mirrors it into `pending`, so `blockingPending` draws no card,
+  but the 32 px dock is on screen. The two-row cap applies (96 px), the slot
+  keeps **44 px** and the dock sits whole inside it, and the composer's send
+  disc is whole (410 → 454 against the 500 px composer foot). Before the fix
+  the 45 % cap applied: tray 228.6 px, slot 29.4 px, and the dock (78 → 110)
+  running past the slot's 101.4 bottom edge — clipped out of view. QA's
+  390×508 fixture measured slot 4.5 px and 0 px of dock visible; the numbers
+  move with the fixture's card height, the state does not. The asks sheet, which
+  opens by default on a cold load, is dismissed before the frame so the measured
+  surface is the dock itself.
+- Measured, not framed: the same state at 390×844 is tray 96, slot 44, dock
+  32 px inside it (the 45 % cap did not clip there; the defect was the keyboard
+  column).
 
 ## What is not evidenced here
 
