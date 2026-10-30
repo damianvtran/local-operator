@@ -15,6 +15,7 @@
 import { useLayoutEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { cn } from "../lib/cn";
+import { isolateTechnicalRuns } from "../lib/bidi";
 
 let keySeq = 0;
 function key(): string {
@@ -38,12 +39,17 @@ function renderInline(text: string): ReactNode[] {
 	let last = 0;
 	for (const m of text.matchAll(INLINE_RE)) {
 		const idx = m.index ?? 0;
-		if (idx > last) out.push(text.slice(last, idx));
+		if (idx > last) {
+			/* Plain prose: paths and URLs get an isolate so an RTL paragraph cannot
+			   detach their leading "/" or trailing punctuation (QA Q-6). */
+			out.push(isolateTechnicalRuns(text.slice(last, idx)));
+		}
 		const [full, code, linkText, href, bold1, bold2, strike, italic1, italic2] = m;
 		if (code !== undefined) {
 			out.push(
 				<code
 					key={key()}
+					dir="ltr"
 					className="rounded-xs bg-sunken px-0.5 font-mono text-mono-sm"
 				>
 					{code.slice(1, -1)}
@@ -492,7 +498,7 @@ function MarkdownTable({ lines }: { lines: readonly string[] }) {
 						{Array.from({ length: columns }, (_, column) => (
 							<th
 								key={`${head[column] ?? ""}-${column}`}
-								className="border-b border-hairline px-2 py-1 text-left font-semibold text-ink"
+								className="border-b border-hairline px-2 py-1 text-start font-semibold text-ink"
 							>
 								{renderInline(head[column] ?? "")}
 							</th>
@@ -535,6 +541,7 @@ export function Markdown({ text }: { text: string }) {
 							   (a URL, a hash) instead of letting it widen the column. */
 							<pre
 								key={key()}
+								dir="ltr"
 								className="max-w-full rounded-sm bg-sunken p-2 font-mono text-mono-sm leading-snug whitespace-pre-wrap [overflow-wrap:anywhere]"
 							>
 								{b.lines.join("\n")}
@@ -555,7 +562,7 @@ export function Markdown({ text }: { text: string }) {
 						);
 					case "ul":
 						return (
-							<ul key={key()} className="flex list-disc flex-col gap-0.5 pl-5">
+							<ul key={key()} className="flex list-disc flex-col gap-0.5 ps-5">
 								{b.lines.map((li) => (
 									<li key={key()}>{renderInline(li)}</li>
 								))}
@@ -565,7 +572,7 @@ export function Markdown({ text }: { text: string }) {
 						return (
 							<ol
 								key={key()}
-								className="flex list-decimal flex-col gap-0.5 pl-5"
+								className="flex list-decimal flex-col gap-0.5 ps-5"
 							>
 								{b.lines.map((li) => (
 									<li key={key()}>{renderInline(li)}</li>
@@ -576,7 +583,7 @@ export function Markdown({ text }: { text: string }) {
 						return (
 							<div
 								key={key()}
-								className="border-l-2 border-control pl-3 text-ink-muted"
+								className="border-s-2 border-control ps-3 text-ink-muted"
 							>
 								{b.lines.map((q) => (
 									<div key={key()}>{renderInline(q)}</div>

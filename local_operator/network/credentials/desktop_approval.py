@@ -240,15 +240,18 @@ def operation(record: Mapping[str, Any]) -> str | None:
     if not ops:
         return None
     found = approval_ops.get(ops[0]) if len(ops) == 1 else None
-    if found is not None and set(what) == {ops[0], "anchor"}:
+    # The finite op's shape is its module's ONE predicate (#3087 r1, R1-2), never a second
+    # literal here; other ops keep the registry's envelope rule (the op plus its anchor)
+    # and validate their own payload in ``disclosure``.
+    if found is not None and (
+        finite_share.exact_shape(record)
+        if ops[0] == finite_share.OP
+        else set(what) == {ops[0], "anchor"}
+    ):
         if found.intent(dict(record)) is not None:
             return ops[0]
     if finite_share.OP in what:
-        raise _refuse(
-            "finite_disclosure_invalid",
-            "The finite-share request is not the exact typed shape this build can validate "
-            "and disclose. Nothing was approved; request a new finite-share recovery.",
-        )
+        raise finite_share.disclosure_invalid()
     raise _refuse(
         "credential_approval_unsupported",
         "This credential request uses an operation this build cannot validate and disclose "

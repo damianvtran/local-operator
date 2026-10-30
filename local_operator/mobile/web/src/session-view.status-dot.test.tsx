@@ -21,7 +21,11 @@ const RECONNECTING_DETAIL = "This phone lost its connection to your computer and
 const DROPPED_DETAIL = "Your computer can't reach this session right now and keeps trying. Until it does, a send fails straight away and your text stays in the message box.";
 const QUIET_DETAIL = "This session on your computer has stopped responding — it may be busy or stuck. A send can show a failure and still arrive once it catches up. Retrying won't send it twice.";
 const ENDED_DETAIL = "History is kept. Send a message or tap Resume to reopen it in your home folder.";
-const ENDED_PLACEHOLDER = "Send to reopen in your home folder…";
+/* The composer's own placeholders (relay.chrome.composer.placeholder.*): an
+   ended session reads like an idle one — sending still wakes it, but that is
+   behaviour, not field copy (operator finding, 2026-10-28). */
+const IDLE_PLACEHOLDER = "Ask anything…";
+const STEER_PLACEHOLDER = "Steer the agent…";
 const ENDED_SEND_FAILED = "This session has ended and couldn't be reopened just now. Try again, or tap “Ended” at the top and choose Resume.";
 
 const mocks = vi.hoisted(() => ({
@@ -379,22 +383,32 @@ describe("Resume is also where actions live: the ⋮ menu (UX U3)", () => {
 	});
 });
 
-describe("the ended composer says what a send does BEFORE the tap (UX U4)", () => {
-	it("swaps the placeholder on an ended session only", () => {
+describe("the composer's placeholder follows what the reader can do", () => {
+	it("asks on an idle session and on an ended one alike", () => {
 		slot = { projection: projection({ ended: true }), connected: true };
 		const ended = render(<SessionScreen sessionId="s1" />);
-		expect(screen.getByRole("textbox", { name: /message/i }).getAttribute("placeholder")).toBe(ENDED_PLACEHOLDER);
+		expect(control().dataset.health).toBe("ended");
+		expect(screen.getByRole("textbox", { name: /message/i }).getAttribute("placeholder")).toBe(IDLE_PLACEHOLDER);
 		ended.unmount();
 		slot = { projection: projection(), connected: true };
 		render(<SessionScreen sessionId="s1" />);
-		expect(screen.getByRole("textbox", { name: /message/i }).getAttribute("placeholder")).toBe("Message…");
+		expect(screen.getByRole("textbox", { name: /message/i }).getAttribute("placeholder")).toBe(IDLE_PLACEHOLDER);
+	});
+
+	it("steers while a turn is running (`projection.streaming`)", () => {
+		slot = { projection: projection({ streaming: true, activity: "thinking" }), connected: true };
+		const { rerender } = render(<SessionScreen sessionId="s1" />);
+		expect(screen.getByRole("textbox", { name: /message/i }).getAttribute("placeholder")).toBe(STEER_PLACEHOLDER);
+		slot = { projection: projection({ streaming: false }), connected: true };
+		rerender(<SessionScreen sessionId="s1" />);
+		expect(screen.getByRole("textbox", { name: /message/i }).getAttribute("placeholder")).toBe(IDLE_PLACEHOLDER);
 	});
 
 	/* ROUND 2, R2-2 = U7: the composer reads the SAME "ended" the header dot
 	   does. A conversation opened from history is a disk rebuild with no
 	   running owner (`pid: 0`, `ended: false`) — the dot says "Ended" there, and
-	   a send to it is the same wake, so the composer must say the same before
-	   and after the tap, not the live wording. */
+	   a send to it is the same wake, so the failure copy after the tap must be
+	   the ended wording, not the live one. */
 	it("treats a history rebuild with no running owner (pid 0) as ended too", async () => {
 		const api = await import("./api");
 		mocks.sendCommand.mockRejectedValueOnce(new api.HttpError(502, "bad gateway"));
@@ -402,7 +416,7 @@ describe("the ended composer says what a send does BEFORE the tap (UX U4)", () =
 		render(<SessionScreen sessionId="s1" />);
 		expect(control().dataset.health).toBe("ended");
 		const field = screen.getByRole("textbox", { name: /message/i });
-		expect(field.getAttribute("placeholder")).toBe(ENDED_PLACEHOLDER);
+		expect(field.getAttribute("placeholder")).toBe(IDLE_PLACEHOLDER);
 		fireEvent.change(field, { target: { value: "who won?" } });
 		fireEvent.click(screen.getByRole("button", { name: "send" }));
 		await waitFor(() => expect(screen.getByRole("alert").textContent).toContain(ENDED_SEND_FAILED));

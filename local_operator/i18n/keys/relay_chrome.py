@@ -42,6 +42,14 @@ def composer_model_label(*, label: str) -> Msg:
     return Msg("relay.chrome.composer.model_label", {"label": label})
 
 
+def composer_placeholder_idle() -> Msg:
+    return Msg("relay.chrome.composer.placeholder.idle", {})
+
+
+def composer_placeholder_steer() -> Msg:
+    return Msg("relay.chrome.composer.placeholder.steer", {})
+
+
 def composer_spend_label(*, label: str) -> Msg:
     return Msg("relay.chrome.composer.spend_label", {"label": label})
 

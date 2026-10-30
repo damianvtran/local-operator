@@ -231,13 +231,92 @@ def build_clients_sync(config_manager: Any) -> tuple[chk.ClientFor, str]:
 
 
 def _state_of(check: chk.ItemCheck) -> str | None:
-    if check.classification is None or check.verdict != "available":
+    """The classification to persist, or None when the verdict leaves no fact to keep.
+
+    ``local-only`` SURVIVES an ``up-to-date`` verdict, and that is the whole point
+    of this gate: the verdict answers the PULL (there is nothing to fetch), while
+    the classification is the PUBLISH-side fact (the hub has not seen these
+    bytes). Dropping it here meant one check was enough to make a locally edited
+    copy read clean-too, so no projection could say "Modified" / "local changes
+    not published" until the hub moved by itself. Nothing downstream may read
+    this as an incoming update: the row is stored ``up-to-date``, apply and
+    apply-all select on ``verdict == "available"``, and ``auto_will_apply``
+    requires the ``available``/``updating`` state.
+
+    Every other up-to-date result keeps nothing: an equal pair is the absence of a
+    fact, not a fact to report.
+    """
+
+    if check.classification is None:
+        return None
+    if check.verdict != "available" and check.classification.state != "local-only":
         return None
     return check.classification.state
 
 
+def _differs_from_remote(c: chk.ItemCheck) -> bool:
+    """Whether the local copy still differs from the hub's, by the CHECK's fingerprints.
+
+    For the NO-WRITE arms only: nothing has changed since the check, so its two
+    fingerprints still describe both sides. A missing side (an absent copy) is not a
+    difference -- there are no local bytes to be unpublished.
+    """
+
+    return c.local_fp is not None and c.remote_fp is not None and c.local_fp != c.remote_fp
+
+
+def _confirmed_gone_predicate(
+    *,
+    agents: Any,
+    teams: Any,
+    config_dir: Path,
+    agents_complete: bool = True,
+    baselines_complete: bool = True,
+) -> Callable[[str, str], bool]:
+    """Per-key "is this item really gone?", the second half of the prune gate.
+
+    Every answer is EVIDENCE, never "this pass did not list it" (round-2 Q4):
+
+    * agent -- deleted, or still on disk but NO LONGER LINKED: ``agents/<id>``
+      absent from a directory that can be listed (a delete removes the directory
+      and keeps the baseline), or the registry reads the definition and it
+      carries no ``hub:`` marker. The Tags editor lets a person remove that
+      marker, and an unlinked row is no longer a link -- it would otherwise keep
+      its ``local-only`` row for ever, the very symptom this PR removes
+      (round-3 M1);
+    * team -- ``team_confirmed_gone``: absent AND no ``.<id>.*`` swap artifact, i.e.
+      its registry's documented mid-save gap keeps the row;
+    * skill -- NO baseline file (existence, not readability: an unreadable record is
+      skipped by ``iter_baselines`` and looks exactly like a removed link).
+
+    THE COMPLETENESS GATE IS PER KIND (round-3 m2): one unreadable, unrelated
+    ``agent.yml`` is a reason to keep AGENT rows, not to freeze the team and
+    skill rows whose own evidence is intact. A kind this predicate does not
+    know is never confirmed gone.
+    """
+
+    def confirmed_gone(kind: str, local_id: str) -> bool:
+        if kind == "agent":
+            return (
+                agents_complete
+                and agents is not None
+                and chk.agent_confirmed_gone(agents, local_id)
+            )
+        if kind == "team":
+            return teams is not None and chk.team_confirmed_gone(teams, local_id)
+        if kind == "skill":
+            return baselines_complete and chk.skill_confirmed_gone(config_dir, local_id)
+        return False
+
+    return confirmed_gone
+
+
 def record_checks(
-    ctx: HubSyncContext, checks: Sequence[chk.ItemCheck], *, live: set[str] | None = None
+    ctx: HubSyncContext,
+    checks: Sequence[chk.ItemCheck],
+    *,
+    live: set[str] | None = None,
+    confirmed_gone: Callable[[str, str], bool] | None = None,
 ) -> None:
     """Fold check results into the status store (one locked write)."""
 
@@ -269,7 +348,7 @@ def record_checks(
             if c.sync_contract is not None and c.served_by:
                 _fold_capability(doc, c.sync_contract, c.served_by)
         if live is not None:
-            st.prune_items(doc, live)
+            st.prune_items(doc, live, confirmed_gone)
 
     ctx.store().mutate(fold)
 
@@ -462,6 +541,35 @@ def record_publish_origin(
     return True
 
 
+def _retire_local_only(config_dir: Any, kind: Kind, local_id: str) -> None:
+    """Clear one status row's publish-side ``local-only`` mark, if it has one.
+
+    ONE definition for the paths that retire the mark WITHOUT a store mutate
+    already in flight: an ACCEPTED manual publication (agent publish/republish,
+    team publish -- the routes and the CLI both arrive at
+    :func:`seed_receipt_after_publish` only after the hub's 2xx) and an unpull
+    (no local bytes are left to be unpublished). The push folds that already write
+    the row (``record_push_outcome``, ``_reconcile_landed_commit``) clear it inside
+    their own mutate instead of taking the lock twice.
+
+    BEST-EFFORT by construction: ``StatusStore.mutate`` skips on a busy lock and
+    this never raises, because the caller's own operation already succeeded and
+    the next check re-derives the row anyway.
+    """
+
+    key = st.item_key(kind, local_id)
+
+    def fold(doc: dict[str, Any]) -> None:
+        item = doc.get("items", {}).get(key)
+        if item is not None:
+            st.clear_local_only(item)
+
+    try:
+        st.StatusStore(config_dir).mutate(fold)
+    except OSError:
+        logger.debug("could not clear the local-only mark for %s %s", kind, local_id)
+
+
 def published_hub_id(kind: Kind, result: Mapping[str, Any]) -> str | None:
     """The hub id an accepted publication created or updated.
 
@@ -514,6 +622,14 @@ def seed_receipt_after_publish(
     scope the user chose -- so a published row is a CONFIRMED link instead of
     one the inventory reports as unresolved. It is recorded independently of the
     receipt: a server that answers no ETag still proved where the row went.
+
+    THE UNPUBLISHED-CHANGES MARK IS RETIRED ON ACCEPTANCE, AFTER the origin fence and
+    BEFORE the receipt guards. The fence comes first because an acceptance for a
+    DIFFERENT hub row never saw this link's bytes: a publish that mints a new
+    listing, or a republish/scope the fence refuses, must not clear the linked
+    row's mark (round-2 m2). The revision guard comes after, because a server that
+    answers no ETag still accepted the publication and the fact does not depend on
+    what this machine manages to record (round-1 Q2).
     """
 
     if origin is not None:
@@ -523,6 +639,8 @@ def seed_receipt_after_publish(
             config_dir, kind, local_id, hub_id=hub_id, origin=origin, accepted=accepted
         ):
             return False
+    # ACCEPTED, and (when the caller named one) proven to be THIS row's origin.
+    _retire_local_only(config_dir, kind, local_id)
     if not revision:
         return False
     from dataclasses import replace as dc_replace
@@ -663,19 +781,43 @@ def check_items(
     """Network check of linked items; folds the outcome into the store."""
 
     out: list[chk.ItemCheck] = []
+    # THE PRUNE NEEDS TWO THINGS, and "the enumeration did not mention it" is
+    # neither of them (round-2 Q4). One: a listing that could be read COMPLETELY --
+    # an unreadable ``agent.yml``, a vanished ``agents/`` directory or an
+    # unlistable baselines directory makes the answer partial, not empty. Two: a
+    # per-ITEM answer that the item is really gone (``_confirmed_gone_predicate``),
+    # because a complete listing still omits a team mid-swap and a skill whose
+    # baseline file is corrupt. Both doubts are cheap to honour and expensive to
+    # get wrong: dropping a row also drops the retry schedule, the pull/push
+    # cadence and the ``applied`` backup pointer it was carrying.
+    # The registries are hoisted so the SAME instances the arms enumerated answer
+    # the later questions; a fresh one would re-scan into a second opinion.
+    # COMPLETENESS IS TRACKED PER KIND (round-3 m2): one bystander's broken
+    # ``agent.yml`` used to freeze every kind's prune, including rows whose own
+    # evidence was intact.
+    agents_complete = True
+    baselines_complete = True
+    agents: Any = None
+    teams: Any = None
     if "agent" in kinds:
+        agents = ctx.agents()
         out.extend(
             chk.check_hub_agents(
-                ctx.agents(),
+                agents,
                 client_for_tenant=ctx.client_for_tenant,
                 names=names,
                 only_ids=only_ids,
             )
         )
+        agents_complete = chk.agent_inventory_complete(agents)
     if "team" in kinds:
+        teams = ctx.teams()
         out.extend(
             chk.check_hub_teams(
-                ctx.teams(), client_for_tenant=ctx.client_for_tenant, names=names, only_ids=only_ids
+                teams,
+                client_for_tenant=ctx.client_for_tenant,
+                names=names,
+                only_ids=only_ids,
             )
         )
     if "skill" in kinds:
@@ -687,6 +829,7 @@ def check_items(
                 only_ids=only_ids,
             )
         )
+        baselines_complete = prov.baselines_dir_listable(ctx.config_dir)
     for c in out:
         _adopt_if_equal(ctx, c)
     # THE ORIGIN REPAIR: a baseline written before links carried an origin has
@@ -699,10 +842,36 @@ def check_items(
         for c in out:
             attach_served_origin(ctx, c, source=source)
     if record:
-        live = None
-        if names is None and only_ids is None and set(kinds) == {"agent", "team"}:
+        # PRUNE ONLY ON A FULL CHECK, AND ONLY WHAT IT COVERED. ``live`` is a
+        # GLOBAL set: ``prune_items`` deletes every stored key it does not name,
+        # so a partial check (one kind, a name scope, an id set) must pass None
+        # and touch nothing it did not look at. A full default check -- every
+        # kind, no name or id scope -- enumerates every link that still has an
+        # item, so a stored row it did not see belongs to a deleted agent/team
+        # or a removed link and is dropped. THIS IS THE ONLY PATH THAT REMOVES A
+        # DEAD ROW: when the default kinds gained ``skill`` (#2398) the gate
+        # still read ``{"agent", "team"}`` and no caller matched it, so orphaned
+        # rows lived forever -- invisible until an up-to-date row carrying a
+        # ``local-only`` mark became listable (round-1 Q1: deleted agents and
+        # teams kept advertising unpublished changes). The kind set is derived
+        # from KIND_ORDER so a new kind cannot reopen that gap -- AND ONLY WITH
+        # BOTH DOUBTS ANSWERED, per kind: that kind's listing was complete
+        # (``agents_complete``/``baselines_complete``, checked inside the
+        # predicate) and the per-item answer confirms the item is gone. A row
+        # missing from a listing that could not read it is kept, with all its
+        # bookkeeping (round-2 Q4, round-3 m2).
+        live: set[str] | None = None
+        confirmed_gone: Any = None
+        if names is None and only_ids is None and set(kinds) == set(KIND_ORDER):
             live = {st.item_key(c.kind, c.local_id) for c in out}
-        record_checks(ctx, out, live=live)
+            confirmed_gone = _confirmed_gone_predicate(
+                agents=agents,
+                teams=teams,
+                config_dir=ctx.config_dir,
+                agents_complete=agents_complete,
+                baselines_complete=baselines_complete,
+            )
+        record_checks(ctx, out, live=live, confirmed_gone=confirmed_gone)
     return out
 
 
@@ -1348,7 +1517,7 @@ def _apply_skill(
             # a classification that is not a genuine equal pair refuses.
             _mark_integrated(ctx, c, agreement=True)
             _seed_receipt_if_agreed(ctx, c, merged.to_json())
-        fold(st.settle_unchanged)
+        fold(lambda item: st.settle_unchanged(item, remote_differs=_differs_from_remote(c)))
         return ItemMergeReport(c.kind, c.local_id, c.name, c.hub_id, "unchanged")
     if dry_run:
         return ItemMergeReport(
@@ -1405,7 +1574,18 @@ def _apply_skill(
     _mark_integrated(ctx, c, integrated=True)
     _seed_receipt_if_agreed(ctx, c, merged.to_json())
     summary = _summary(results)
-    fold(lambda item: st.settle_applied(item, summary, None))
+    # Did the write keep the LOCAL side? Then the hub still has not seen it and the
+    # row keeps its unpublished-changes mark (round-1 m3). The comparison mirrors
+    # the check's own: the alias is re-rendered on write, so the local document is
+    # compared under the REMOTE's name, exactly as ``check_hub_skills`` does.
+    compared = local_write
+    remote_name = str((c.remote or {}).get("name") or "")
+    if remote_name and compared.name != remote_name:
+        compared = compared.with_name(remote_name)
+    remote_differs = c.remote_fp is not None and (
+        prov.fingerprint_snapshot("skill", compared.to_json()) != c.remote_fp
+    )
+    fold(lambda item: st.settle_applied(item, summary, None, remote_differs=remote_differs))
     return ItemMergeReport(
         c.kind,
         c.local_id,
@@ -1472,7 +1652,7 @@ def _apply_skill_bundle(
         )
 
     def unchanged() -> ItemMergeReport:
-        fold(st.settle_unchanged)
+        fold(lambda item: st.settle_unchanged(item, remote_differs=_differs_from_remote(c)))
         return ItemMergeReport(c.kind, c.local_id, c.name, c.hub_id, "unchanged")
 
     if record is None or record.identity is None or record.local_alias is None:
@@ -1769,7 +1949,7 @@ def apply_one(
             except (prov.BaselineError, OSError):
                 logger.debug("could not advance baseline", exc_info=True)
             _seed_receipt_if_agreed(ctx, c, c.local)
-            fold(lambda item: st.settle_unchanged(item))
+            fold(lambda item: st.settle_unchanged(item, remote_differs=_differs_from_remote(c)))
         return report
     if dry_run:
         return _with(report, outcome="would-merge")
@@ -1800,7 +1980,12 @@ def apply_one(
     except Exception as exc:  # noqa: BLE001 - one item's failure never ends the run
         logger.warning("hub apply failed for %s %s", c.kind, c.name, exc_info=True)
         return fail("hub-error", f"could not write the update: {exc}")
-    fold(lambda item: st.settle_applied(item, summary, backup))
+    # The WRITTEN copy vs the hub's bytes: a merge that kept the local side is
+    # still unpublished, and the row must say so until a push lands (round-1 m3).
+    remote_differs = c.remote_fp is not None and (
+        prov.fingerprint_fields(c.kind, written) != c.remote_fp
+    )
+    fold(lambda item: st.settle_applied(item, summary, backup, remote_differs=remote_differs))
     return _with(report, outcome="merged", applied=True, backup=backup)
 
 
@@ -1960,10 +2145,20 @@ def status_snapshot(ctx: HubSyncContext) -> dict[str, Any]:
         if error_class and error_class != "no-credential" and state != "updating":
             state = "failed"
         counts[state] = counts.get(state, 0) + 1
-        # An up-to-date item is listed only when it carries the sign-in fact
-        # (``no-credential``): the user has no login for an item they have linked, and
-        # this list is the only place the UI can learn it (UX round 2, U11).
-        if state == "up-to-date" and item.get("error_class") != "no-credential":
+        # An up-to-date item is listed only when it carries a fact the client
+        # cannot learn anywhere else. Two such facts exist (UX round 2, U11):
+        # no sign-in (``no-credential`` -- this list is the only place the UI can
+        # learn that a linked item is unreachable without it), and unpublished
+        # local edits (``local-only`` -- up to date to PULL, but the hub has not
+        # seen the person's bytes, and this row is how the sidebar can say so
+        # after a check). The second rides the row's OWN state and classification:
+        # it is never counted or worded as an available update, and the apply
+        # eligibility above/below stays false for it because the state is not
+        # ``available``.
+        listed_up_to_date = (
+            item.get("error_class") == "no-credential" or item.get("classification") == "local-only"
+        )
+        if state == "up-to-date" and not listed_up_to_date:
             continue
         auto = settings.auto_for(kind)
         items.append(
@@ -2065,28 +2260,50 @@ def check_report(c: chk.ItemCheck) -> ItemMergeReport:
     )
 
 
-def clear_failure(ctx: HubSyncContext, kind: str, name: str) -> None:
+def _store_items_for(
+    doc: dict[str, Any], kind: str, name: str | None, local_id: str | None
+) -> list[dict[str, Any]]:
+    """The status-store rows one retry addresses: by ``local_id`` exactly, else by name.
+
+    Display names are NOT unique (two agents ``Coder`` and ``coder`` are both
+    legal), so the name arm can match several rows and the desktop's per-row
+    actions address by ``local_id`` instead. The id arm reads the store key
+    directly (``kind:local_id``), so it can never select a row of another kind
+    or a second row that happens to share the name.
+    """
+
+    items = doc.get("items", {})
+    if local_id is not None:
+        item = items.get(st.item_key(kind, local_id))
+        return [item] if item is not None else []
+    wanted = (name or "").strip().casefold()
+    return [
+        item
+        for item in items.values()
+        if item.get("kind") == kind and str(item.get("name", "")).casefold() == wanted
+    ]
+
+
+def clear_failure(
+    ctx: HubSyncContext, kind: str, name: str | None, *, local_id: str | None = None
+) -> None:
     """Retire an item's stale failure after a manual retry proved it computes (U10)."""
 
-    wanted = name.strip().casefold()
-
     def fold(doc: dict[str, Any]) -> None:
-        for item in doc.get("items", {}).values():
-            if item.get("kind") == kind and str(item.get("name", "")).casefold() == wanted:
-                st.clear_failure(item)
+        for item in _store_items_for(doc, kind, name, local_id):
+            st.clear_failure(item)
 
     ctx.store().mutate(fold)
 
 
-def clear_retry(ctx: HubSyncContext, kind: str, name: str) -> None:
+def clear_retry(
+    ctx: HubSyncContext, kind: str, name: str | None, *, local_id: str | None = None
+) -> None:
     """Manual Retry: user intent outranks the schedule (B4.3). Clears attempts and the timer."""
 
-    wanted = name.strip().casefold()
-
     def fold(doc: dict[str, Any]) -> None:
-        for item in doc.get("items", {}).values():
-            if item.get("kind") == kind and str(item.get("name", "")).casefold() == wanted:
-                st.clear_retry(item)
+        for item in _store_items_for(doc, kind, name, local_id):
+            st.clear_retry(item)
 
     ctx.store().mutate(fold)
 
@@ -2761,6 +2978,7 @@ def record_push_outcome(ctx: HubSyncContext, c: Any, outcome: Any) -> None:
             if item is not None:
                 item["last_pushed_at"] = st.now_iso()
                 st.clear_push_skipped(item)
+                st.clear_local_only(item)
 
         ctx.store().mutate(fold)
         return
@@ -3996,6 +4214,11 @@ def unpull_skill(ctx: HubSyncContext, *, link_id: str) -> dict[str, Any]:
             raise LinkError(
                 getattr(error, "code", "") or "local-concurrent-edit", str(error)
             ) from None
+        # THE BYTES ARE GONE, SO THE MARK GOES WITH THEM (round-1 Q3). An unpull
+        # leaves no local copy to be "unpublished"; the next check re-derives the
+        # row from the link (an absent copy reads ``available``), but until then
+        # the status row would advertise local changes that no longer exist.
+        _retire_local_only(ctx.config_dir, record.kind, record.local_id)
         snapshot = links_snapshot(ctx)
         row = next((link for link in snapshot["links"] if link["link_id"] == link_id), None)
         if row is None:
@@ -5779,6 +6002,7 @@ def _reconcile_landed_commit(
         if item is not None:
             item["last_pushed_at"] = st.now_iso()
             st.clear_push_skipped(item)
+            st.clear_local_only(item)
 
     ctx.store().mutate(fold)
     if not is_this_proposal:
@@ -5808,7 +6032,12 @@ def _push_answer(identity: LinkIdentity, check: chk.ItemCheck, outcome: Any) -> 
             "applied": outcome.state == "pushed",
             "backup": None,
             "error_class": outcome.reason or None,
-            "classification": None,
+            # The check's own classification, never a blank: a push is computed
+            # AGAINST that check, and ``local-only`` is the fact that makes the
+            # push meaningful in the first place (the hub has not seen these
+            # bytes). Hardcoding None here is why core never reported local-only
+            # on the publish side.
+            "classification": check.classification.state if check.classification else None,
             "skipped_reason": outcome.reason if outcome.state == "skipped" else None,
             "fields": [],
             "link_id": identity.link_id,

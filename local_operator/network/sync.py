@@ -422,6 +422,16 @@ EXCLUDED_ENTRIES: dict[str, str] = {
     # entry of a session directory at all, so it belongs on this side of the copy
     # set's answer rather than in ``COPY_SET_NAMES``.
     "definitions.json": "the definitions index, which lives beside the sessions tree",
+    # The recipient-resolution audit log
+    # (``team_bridge.recipient_resolution.RESOLUTION_AUDIT_FILENAME``): one owner's
+    # record of every display name the bridge tool resolved to a member, written
+    # BESIDE the sessions tree (``<config>/team_bridge/recipient_resolutions.jsonl``)
+    # exactly like the native store and the outbox. It is device- and owner-scoped
+    # accountability data, not session content: a copied log would claim THIS machine
+    # resolved names it never saw, which is the opposite of what it is for.
+    "recipient_resolutions.jsonl": (
+        "one owner's name-resolution audit log, which lives beside the sessions tree"
+    ),
     # Lists jobs owned by the SOURCE's process; the destination's roster is its
     # own, and a copied one would name subagents that do not exist here.
     "subagent-roster.v1.json": "the source process's subagent roster",

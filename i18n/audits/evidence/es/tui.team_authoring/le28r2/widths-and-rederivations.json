@@ -1,0 +1,71 @@
+{
+  "form_raw_string_cell_widths": {
+    "max": 100,
+    "over56": [
+      "tui.team_authoring.invalid_aliases",
+      "tui.team_authoring.invalid_members",
+      "tui.team_authoring.invalid_name",
+      "tui.team_authoring.notice_read_only",
+      "tui.team_authoring.overrides_hint",
+      "tui.team_authoring.revision_changed"
+    ],
+    "over58": [
+      "tui.team_authoring.invalid_aliases",
+      "tui.team_authoring.invalid_name",
+      "tui.team_authoring.notice_read_only",
+      "tui.team_authoring.overrides_hint",
+      "tui.team_authoring.revision_changed"
+    ],
+    "over96": [
+      "tui.team_authoring.notice_read_only"
+    ],
+    "en_over56": [
+      "tui.team_authoring.invalid_aliases",
+      "tui.team_authoring.notice_read_only",
+      "tui.team_authoring.overrides_hint"
+    ],
+    "cells": {
+      "tui.team_authoring.create": 12,
+      "tui.team_authoring.edit": 22,
+      "tui.team_authoring.name": 6,
+      "tui.team_authoring.label": 8,
+      "tui.team_authoring.description": 13,
+      "tui.team_authoring.manager": 11,
+      "tui.team_authoring.members": 8,
+      "tui.team_authoring.aliases": 5,
+      "tui.team_authoring.instructions": 13,
+      "tui.team_authoring.project": 20,
+      "tui.team_authoring.members_hint": 45,
+      "tui.team_authoring.aliases_hint": 51,
+      "tui.team_authoring.instructions_hint": 56,
+      "tui.team_authoring.overrides_hint": 94,
+      "tui.team_authoring.legend": 41,
+      "tui.team_authoring.discard": 51,
+      "tui.team_authoring.invalid_name": 60,
+      "tui.team_authoring.required_manager": 27,
+      "tui.team_authoring.required_instructions": 39,
+      "tui.team_authoring.invalid_members": 57,
+      "tui.team_authoring.invalid_aliases": 65,
+      "tui.team_authoring.saved": 22,
+      "tui.team_authoring.no_change": 23,
+      "tui.team_authoring.revision_changed": 61,
+      "tui.team_authoring.missing": 46,
+      "tui.team_authoring.usage_edit": 22,
+      "tui.team_authoring.usage_new": 41,
+      "tui.team_authoring.registry_missing": 53,
+      "tui.team_authoring.footer": 50,
+      "tui.team_authoring.save_error": 28,
+      "tui.team_authoring.notice_read_only": 100,
+      "tui.team_authoring.new_hint": 15,
+      "tui.team_authoring.edit_hint": 26,
+      "tui.team_authoring.subcommand": 10,
+      "tui.team_authoring.talk_hint": 31,
+      "tui.team_authoring.promote_hint": 49
+    }
+  },
+  "settings_nonchoice_labels_over29": [],
+  "settings_english_nonchoice_labels_over29": [],
+  "prior_claims_rederived": {},
+  "numeric_token_differences": [],
+  "qualification": "Scalar measurements, not rendered layout evidence. Lengths of strings containing placeholders include placeholder spelling, not all runtime value lengths."
+}

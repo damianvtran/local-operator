@@ -97,8 +97,8 @@ announcement; it waits in the transcript for the user to look. Assistant
 text comes back to the sender only on a mesh send (`peer=…`), whose receipt
 carries the turn's last assistant text; on the same-machine path only the
 delivery detail returns, so a bare acknowledgement reaches nobody. When the
-user must decide or know something, use `ask`: it is the only route that
-actively reaches them.
+user must decide something, use `ask`: it is the only route that actively
+reaches them. An FYI result belongs in `notify`, never beside an ask.
 
 ### Worked examples
 

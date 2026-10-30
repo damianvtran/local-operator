@@ -69,6 +69,7 @@ import {
 	useMarkNotice,
 	useNotificationsBlock,
 	usePinMarks,
+	useLocaleSnapshot,
 	useSessions,
 } from "../store";
 import { WideViewButton } from "../components/wide-view-button";
@@ -758,6 +759,9 @@ function usePaintedRows(
 }
 
 export function SessionListScreen() {
+	/* A live language write changes copy this screen has already painted; the
+	   snapshot is the ONE locale authority, so subscribing repaints it (QA Q-1). */
+	useLocaleSnapshot();
 	const { sessions, connected, revision } = useSessions();
 	const capabilities = useCapabilities();
 	const notificationsBlock = useNotificationsBlock();

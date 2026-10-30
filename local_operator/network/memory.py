@@ -244,8 +244,31 @@ def legacy_pending(memory: MemoryStore, peer: str) -> dict[str, Any]:
         return {"ids": [], "overflow": False}
     with memory.connection() as db:
         row = db.execute("SELECT value FROM meta WHERE key=?", (_legacy_key(peer),)).fetchone()
-    value = json.loads(row[0]) if row else {}
-    return {"ids": list(value.get("ids", [])), "overflow": bool(value.get("overflow"))}
+        value = json.loads(row[0]) if row else {}
+        ids = _still_held(db, list(value.get("ids", [])))
+    return {"ids": ids, "overflow": bool(value.get("overflow"))}
+
+
+def _still_held(db: Any, ids: list[str]) -> list[str]:
+    """``ids`` minus any op this store no longer holds, order kept.
+
+    WHY: journal compaction (now automatic, ``memory_maintenance``) can delete an
+    owed op — a superseded revision, or a put under a tombstone. Nothing can ever
+    redeliver it, so keeping its id made a still-legacy peer report
+    ``withheld_pending`` for an op that no longer exists (PR #3057 review r5, m1).
+    Dropping it loses nothing: the op's successor (the head or the tombstone) is
+    an ordinary journal row the stream already carries.
+    """
+    if not ids:
+        return ids
+    held: set[str] = set()
+    for start in range(0, len(ids), 500):  # SQLite's bound-parameter ceiling
+        chunk = ids[start : start + 500]
+        marks = ",".join("?" * len(chunk))
+        held.update(
+            row[0] for row in db.execute(f"SELECT op_id FROM ops WHERE op_id IN ({marks})", chunk)
+        )
+    return [op_id for op_id in ids if op_id in held]
 
 
 def _owed(pending: dict[str, Any]) -> int | str:
@@ -256,9 +279,15 @@ def _owed(pending: dict[str, Any]) -> int | str:
 
 def _save_legacy_pending(memory: MemoryStore, peer: str, ids: list[str], overflow: bool) -> None:
     ids = list(dict.fromkeys(ids))
-    if len(ids) > LEGACY_WITHHELD_CAP:
-        ids, overflow = [], True
     with memory.connection() as db:
+        # Drop ids this store no longer holds BEFORE the cap. Journal compaction deletes
+        # superseded ops, so a long-lived peer's withheld list accumulates dead ids that
+        # nothing can ever redeliver; counting those against ``LEGACY_WITHHELD_CAP``
+        # collapsed a list that already fit into ``overflow`` — a full resend forced by
+        # ids that no longer exist (PR #3057 review r6, n1).
+        ids = _still_held(db, ids)
+        if len(ids) > LEGACY_WITHHELD_CAP:
+            ids, overflow = [], True
         if ids or overflow:
             db.execute(
                 "INSERT OR REPLACE INTO meta VALUES (?,?)",

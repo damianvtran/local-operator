@@ -1,0 +1,7 @@
+{
+  "cli.serve_help.serve": "Iniciar el servidor FastAPI",
+  "cli.serve_help.host": "Dirección del host (predeterminado: 127.0.0.1). Solo loopback por política: se rechaza cualquier asociación a otra dirección. El servicio de archivos no tiene restricciones en conexiones loopback; para acceder a esta API en remoto, usa un túnel explícito o reenvío de puertos SSH.",
+  "cli.serve_help.port": "Puerto del servidor (predeterminado: 1111)",
+  "cli.serve_help.reload": "Activar la recarga en caliente del servidor",
+  "cli.serve_help.listener_fd": "Adoptar un socket de escucha ya asociado en lugar de asociar uno. Lo establece un daemon que reemplaza su propia imagen de proceso con una nueva compilación (`server/reload`), para que el puerto nunca quede sin servicio. No es un flag para el usuario."
+}

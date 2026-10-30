@@ -1,0 +1,109 @@
+{
+  "schema": 1,
+  "audit_id": "w1a2",
+  "audit_id_assigned_by": "es-w1-auditor-2, audit-id fixed by the wave-1 coordinator delegation",
+  "audit_round": 1,
+  "audit_kind": "independent_current_byte_namespace_audit",
+  "locale": "es",
+  "namespace": "wire.console",
+  "audit_date": "2026-10-29",
+  "audited_revision": "efcfbe812609cbf228c01f11a1fb622f3555b487",
+  "audited_revision_note": "The es catalogue local_operator/i18n/catalogues/es/wire.console.json is UNTRACKED at efcfbe812609cbf228c01f11a1fb622f3555b487 (git status shows it as '??'), so this audit is bound to the on-disk bytes, not to a committed blob: target sha256 61f0a242644b1adfe6afaf29f113849a88745f650a93d6f91a6da09b5605bac8. The en source and its sidecar are tracked and were read from that revision.",
+  "key_count": {
+    "en": 8,
+    "target": 8,
+    "context": 8
+  },
+  "verdict": "passed",
+  "result": "clean-with-findings",
+  "verdict_reason": "All eight keys read. Live admission is kept distinct from retained history, the never-terminate-running-work and never-stopped guarantees survive, every range and default (32–256 / 128, 1–32 / 8, 4–32 / 16, one quarter of the live ceiling) is byte-identical with en dashes intact, and agent starts still cannot consume reserved slots. 'terminales activas' renders 'live terminal(s)' consistently across all four strings. One nit on label length.",
+  "finding_counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 1
+  },
+  "unresolved_blocker_major": 0,
+  "auditor": {
+    "agent": "translation-auditor (lopdev team delegation es-w1-auditor-2)",
+    "session_or_instance": "session 1abd0b38e62a",
+    "model": "radient/auto",
+    "model_note": "radient/auto is an auto-routing alias: the session header names the alias, not the concrete backend model, so the backend that performed this audit is not identified by the header. Requested primary anthropic/claude-sonnet-5-5 and the intermediate fallbacks are disclosed above and none of them is claimed as the audit model.",
+    "model_switch_notices": "anthropic/claude-sonnet-5-5 -> openai/gpt-6-astra -> kimi/k3.1-pro -> radient/auto; each transition was a session model-switch notice reading \"provider failure: quota HTTP 429\"",
+    "model_source": "self-reported by this session's model-switch notices; not independently observable",
+    "date": "2026-10-29",
+    "independence": "Independent of the translator: I authored none of this Spanish copy and none of its English source, and I edited nothing while auditing. No catalogue, sidecar, ledger, allowance, generated file or git state was modified; this audit's only writes are its own evidence directory."
+  },
+  "translator": {
+    "agent": "a different translator agent in the same wave (per delegation: copy written by another translator)",
+    "model": "not disclosed to this auditor",
+    "date": "before 2026-10-29",
+    "source": "delegation provenance only; no translator job id was supplied to this auditor"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.console.json",
+      "revision": "efcfbe812609cbf228c01f11a1fb622f3555b487",
+      "sha256": "1a591fbc1f6a939651cfe9bc5c4ff619a5a4ade2099cc9cfb348534d09a0011b"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/es/wire.console.json",
+      "sha256": "61f0a242644b1adfe6afaf29f113849a88745f650a93d6f91a6da09b5605bac8",
+      "tracked": false,
+      "note": "untracked at the audited revision; sha256 is of the on-disk bytes"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/wire.console.context.json",
+      "sha256": "453aadc8095e93122719cef9b8da2ed9f8b57170449804e6af716fe684ef2dd9"
+    }
+  },
+  "findings": [
+    {
+      "id": "es-w1-B06",
+      "severity": "nit",
+      "status": "unresolved",
+      "keys": [
+        "wire.console.user_reserved.label"
+      ],
+      "detail": "45 cells against 33 in en (+36%), above the es guide's 15-25% expansion guidance. The sidecar supplies no maxCells for this namespace, so no budget is breached on the evidence available; this is a rendered-check flag, not a proven clip.",
+      "remediation": "Ranuras reservadas para el usuario (32 cells); the help line already says 'estas ranuras' and the section title names the console. Alternatively keep the current text and confirm the settings row width in a rendered pass."
+    }
+  ],
+  "noted_outside_scope": [],
+  "check_output": {
+    "commands": [
+      "git rev-parse HEAD; git status --porcelain",
+      "shasum -a 256 of the en, target and sidecar files",
+      "python3 $LOCAL_OPERATOR_SCRATCHPAD/audit_es_w1a2.py",
+      "grep across es/*.json for the terms each judgement rests on",
+      "python3 $LOCAL_OPERATOR_SCRATCHPAD/strict_json_es_w1a2.py (duplicate keys, BOM, control bytes, NFC, trailing newline)"
+    ],
+    "parity_script_exit": 0,
+    "failures": [],
+    "negative_controls": "width-over-maxCells, en-dash-to-hyphen, machine-literal dropped, placeholder dropped: all DETECTED",
+    "checks_run_per_key": [
+      "key-set parity",
+      "ICU brace/argument parity",
+      "placeholder parity",
+      "digit-sequence parity",
+      "en/em-dash and NBSP parity",
+      "byte-identical machine literals",
+      "width against sidecar maxCells",
+      "unsupported es plural categories (few/zero/two)",
+      "untranslated-value detection",
+      "leading/trailing-space and seam parity",
+      "straight-quote and exclamation hygiene"
+    ]
+  },
+  "artifacts": [
+    "report.md",
+    "audit.log"
+  ],
+  "limitations": [
+    "LLM semantic judgement, not native-speaker attestation.",
+    "Static copy audit only: no rendered-frame, runtime-service, eligibility or release claim.",
+    "wire.slash.library has no en sidecar, so its role/tone/width intent is unknown by construction.",
+    "The es catalogue is untracked at the audited revision; the audit binds on-disk sha256 values.",
+    "The audit model is an auto-routing alias; the concrete backend model is not identifiable from the session header."
+  ]
+}

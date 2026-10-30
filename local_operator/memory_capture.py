@@ -24,12 +24,14 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, NamedTuple
 
 from local_operator.memory import (
+    CAPTURE_AUTHOR,
     MAX_REVISIONS,
     MAX_TOMBSTONES,
     MemoryError,
     MemoryStore,
     _dump,
     guard,
+    is_expiry_tombstone,
     validate_fact,
     validate_op,
 )
@@ -1323,7 +1325,9 @@ def _evict(
     eligible: author ``deterministic-capture``, status ``candidate``, source kind
     ``compaction`` and a single head — anything the agent or operator stored,
     corrected or left in conflict is deliberate and is never evicted, and is not
-    charged to the budget either. ``protected`` (this pass's rows and the live state
+    charged to the budget either. A row past its expiry deadline is neither: the
+    expiry sweep reaps it with a tombstone that stays re-capturable, so eviction
+    must not reach it first. ``protected`` (this pass's rows and the live state
     heads) is skipped. "Oldest" is the oldest ``source_time``: a refresh restamps it,
     so a fact still being restated is the newest, not the oldest.
 
@@ -1334,15 +1338,31 @@ def _evict(
     in which the budget no longer binds, so it is reported rather than silent
     (review m2).
     """
+    from local_operator.memory_maintenance import CAPTURE_TTL_S
+
     session = store.identity.session_id
+    # A row already past its deadline is OUT of both the budget and the eligible set.
+    # Every read path skips a past deadline, so a charged expired row buys nothing and
+    # would evict live text to pay for something invisible; and evicting it would be
+    # the ONE irreversible act here — an eviction is an ordinary tombstone, while the
+    # expiry sweep forgets the same row with an EXPIRY tombstone that leaves the text
+    # re-capturable when the session resumes. The sweep owns that decision, so this pass
+    # must not take it first (#3057 review r6, m1). The deadline formula is
+    # ``memory_maintenance._EXPIRED_SQL``'s, so the two passes agree on when a row is
+    # stale: the stored stamp, else a legacy deadline derived from the row's own time.
+    deadline = (
+        "coalesce(json_extract(fact,'$.expires_at'), "
+        "coalesce(json_extract(fact,'$.source_time'), json_extract(fact,'$.created_at')) + ?)"
+    )
     rows = db.execute(
         "SELECT entity_id,op_id,tokens FROM current WHERE scope='session' AND owner=? "
         "AND json_extract(fact,'$.source.author')='deterministic-capture' "
         "AND json_extract(fact,'$.status')='candidate' "
         "AND json_extract(fact,'$.source.kind')='compaction' "
+        f"AND {deadline} > ? "
         "ORDER BY coalesce(json_extract(fact,'$.source_time'),0), "
         "json_extract(fact,'$.created_at'), entity_id",
-        (session,),
+        (session, CAPTURE_TTL_S, time.time()),
     ).fetchall()
     used = sum(int(row[2]) for row in rows)
     if used <= CAPTURE_SESSION_TOKENS:
@@ -1457,6 +1477,15 @@ def persist(
     if not isinstance(skipped, int) or skipped < 0:
         raise MemoryError("Invalid capture skip count.")
     timestamp = time.time() if committed_at is None else committed_at
+    # Unreviewed captures expire CAPTURE_TTL_S after their LAST revision (operator
+    # decision D2): each refresh below writes a new revision with a new deadline,
+    # so a fact the session keeps re-capturing lives while the session works. An
+    # integer deadline, not the float timestamp: the stamp is charged to the item's
+    # wire-token cap, and a 17-digit float costs more of it than seconds precision
+    # is worth. Deliberate facts never pass through here, so they never get one.
+    from local_operator.memory_maintenance import CAPTURE_TTL_S
+
+    expires_at = int(timestamp) + CAPTURE_TTL_S
     facts: dict[str, dict[str, Any]] = {}
     state: dict[str, dict[str, Any]] = {}
     # The tag of the previous admitted row: a state tag's bullets fold only while
@@ -1471,11 +1500,12 @@ def persist(
                     status="candidate",
                     created_at=timestamp,
                     source_time=timestamp,
+                    expires_at=expires_at,
                     source={
                         "session": store.identity.session_id,
                         "entry": marker_id,
                         "kind": "compaction",
-                        "author": "deterministic-capture",
+                        "author": CAPTURE_AUTHOR,
                     },
                 )
             )
@@ -1569,8 +1599,26 @@ def persist(
             # never fuzzy consolidation. Stable entities prevent repeated
             # compactions filling the ACTIVE bank; each committed marker still has
             # a distinct idempotent causal op.
-            operation_id = hashlib.sha256((entity + "|" + marker_id).encode()).hexdigest()
             ops = store._ops(db, entity)
+            # A capture entity that EXPIRED — every tombstone on it is an expiry
+            # tombstone (``is_expiry_tombstone``), recognisable from synced data
+            # whichever host wrote it — is re-admitted under a chained, still
+            # deterministic entity ``sha256(entity|expiry tombstone)``, so a
+            # session resumed after its captures went stale re-learns the same
+            # text, and two passes over it land on one entity. Any other
+            # tombstone (a person or an agent forgot it) keeps the text out. The
+            # lowest op id picks the link when two hosts both expired it.
+            # Bounded: each link needs a 14-day expiry of the previous one. State
+            # chains need none of this: ``_state_entity`` already rolls a
+            # forgotten generation to a fresh one.
+            while entity not in chains:
+                tombstones = [op for op in ops if op["kind"] == "tombstone"]
+                if not tombstones or not all(is_expiry_tombstone(op) for op in tombstones):
+                    break
+                link = min(op["op_id"] for op in tombstones)
+                entity = hashlib.sha256((entity + "|" + link).encode()).hexdigest()
+                ops = store._ops(db, entity)
+            operation_id = hashlib.sha256((entity + "|" + marker_id).encode()).hexdigest()
             if any(op["kind"] == "tombstone" for op in ops):
                 continue
             if any(op["op_id"] == operation_id for op in ops):
@@ -1586,6 +1634,10 @@ def persist(
                     len(heads) != 1
                     or current["status"] != "candidate"
                     or current["source"].get("kind") != "compaction"
+                    # An agent's correction that kept status ``candidate`` is
+                    # still deliberate: ``put`` rewrites the author on every
+                    # revision it writes, so only capture's own rows match.
+                    or current["source"].get("author") != CAPTURE_AUTHOR
                     or (current["source_time"] or 0) > timestamp
                     or len(ops) >= MAX_REVISIONS
                 ):

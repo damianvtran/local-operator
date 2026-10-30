@@ -191,12 +191,16 @@ def test_french_locale_reaches_each_owned_message_and_falls_back(monkeypatch):
         ).is_file()
         en_values = catalogues.load_catalogue("en", "cli." + namespace + "_help")
         fr_values = catalogues.load_catalogue("fr", "cli." + namespace + "_help")
+        es_values = catalogues.load_catalogue("es", "cli." + namespace + "_help")
         assert set(fr_values) == set(en_values)
+        assert set(es_values) == set(en_values)
         alias = {"stop": "_st", "refresh": "_re", "monitor": "_mn"}[namespace]
         for key, value in en_values.items():
             message = getattr(MODULES[alias], key.rsplit(".", 1)[1])
             assert message().envelope(locale="fr")["text"] == fr_values[key]
             assert fr_values[key] != value
-            # A shipped locale without this namespace still reads the source.
-            assert message().envelope(locale="es")["text"] == value
+            # Spanish carries this namespace after the es W2 wave: it reads its
+            # own copy, and that copy is not the English source.
+            assert message().envelope(locale="es")["text"] == es_values[key]
+            assert es_values[key] != value
     assert parser.prog

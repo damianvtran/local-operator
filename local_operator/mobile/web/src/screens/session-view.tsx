@@ -58,6 +58,7 @@ import {
 	retainSessionListStream,
 	usePinMarks,
 	useProjection,
+	useLocaleSnapshot,
 	useRouteTitle,
 	useSessions,
 } from "../store";
@@ -244,7 +245,7 @@ function Header({
 				aria-label={messageRuntime.t("relay.chrome.session.back")}
 				className={cn(HEADER_CONTROL, "text-ink-muted")}
 			>
-				‹
+				<span aria-hidden dir="ltr" className="lo-directional">‹</span>
 			</button>
 			<div className="min-w-0 flex-1">
 				{/* THE STATUS DOT (operator request, replacing the ended banner): the
@@ -359,6 +360,9 @@ export function SessionScreen({
 	sessionId: string;
 	jobId?: string;
 }) {
+	/* A live language write changes copy this screen has already painted; the
+	   snapshot is the ONE locale authority, so subscribing repaints it (QA Q-1). */
+	useLocaleSnapshot();
 	const { projection, connected } = useProjection(sessionId);
 	/* THE ROUTE'S OWN TAB TITLE (U4, batch 2). A phone's task switcher and share
 	 * sheet read `document.title`, and a session wearing the list's `(3) local
@@ -682,7 +686,7 @@ export function SessionScreen({
 							aria-label={messageRuntime.t("relay.chrome.session.back")}
 							className={cn(HEADER_CONTROL, "text-ink-muted")}
 						>
-							‹
+							<span aria-hidden dir="ltr" className="lo-directional">‹</span>
 						</button>
 						{/* The title's own slot, empty: `truncate` + `flex-1` in a row whose
 						    height is set by the control beside it. */}
@@ -810,6 +814,7 @@ export function SessionScreen({
 					pid={sessionId}
 					entries={projection.transcript}
 					peerCycles={projection.peer_cycles === 1}
+					headPinned={projection.transcript_head_pinned}
 					pending={pendingEchoes}
 					streaming={projection.streaming}
 					topInset={0}

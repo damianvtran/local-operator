@@ -183,7 +183,7 @@ describe("SessionScreen and queued asks", () => {
 		   1, D1) and is `aria-hidden` + disabled, so the ACTIONABLE field is the
 		   one without the marker. */
 		const field = screen
-			.getAllByPlaceholderText("Message…")
+			.getAllByPlaceholderText("Ask anything…")
 			.find((el) => !el.hasAttribute("aria-hidden")) as HTMLElement;
 		fireEvent.change(field, { target: { value: "an ordinary message" } });
 		fireEvent.keyDown(field, { key: "Enter" });

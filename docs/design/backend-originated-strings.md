@@ -272,6 +272,50 @@ language. `zh-CN` and `ur` have zero catalogue files today and are not shipped;
 when they ship, their bundle is the same shape and their RTL layout comes from
 that existing capability field.
 
+### 4.2 Reading copy from a named checkout
+
+An independent translation auditor must read a specific branch where it lives,
+and the session's working directory is not that tree: the agent runs wherever it
+runs (often the home directory), and no session can move its own workspace onto
+the branch under audit. Without a sanctioned way to say WHICH tree, the only
+route left is a redaction bypass — the workaround `read_public_copy` exists to
+replace.
+
+So that tool takes an optional `repo_root`: the directory of a checkout to read
+from. The directory is admitted only when its git `origin` parses to one of the
+publishing repositories (`damianvtran/local-operator`,
+`damianvtran/local-operator-ui`, `damianvtran/local-operator-mobile`) — the same
+identities its allowlisted roots are spelled for, through the same parser the
+`src/` identity binding uses. A relative selector is resolved against the
+session cwd, never the process cwd. Inside an admitted root the allowlist, the
+committed-`HEAD`-blob rule and the audit record are unchanged, and the record
+adds the resolved identity, root path and `checkout_head` revision. The file
+argument stays repository-relative: naming a checkout changes where the
+allowlist is applied, never what may be read.
+
+This is why it is still an audited route rather than a filesystem reader: the
+caller can name a **published tree**, not a file; a directory that is not a git
+checkout, has no origin, or carries an unrelated origin (a fork, another
+project's clone), or is not the checkout root, is refused with technical repair
+fields naming the reason; and a `..`, absolute or symlinked path that leaves
+the admitted root is refused before the allowlist is consulted. Origin identity
+is checked again immediately before the blob is served, so a mid-call change is
+refused rather than recorded under the previously admitted identity.
+
+**What the origin check is not.** It is a guard against admitting an unrelated
+tree, not an authenticity proof. The identity is the checkout's own `origin`
+configuration, so three commands — `git init`, `git remote add origin
+<allowlisted>`, commit — produce a directory that passes it, and this route's
+result is exempt from redaction by tool name, so nothing downstream will catch
+that. The controls that do hold are the allowlist (only the reviewed roots can be
+read), the committed-blob rule (the bytes are the recorded `checkout_head`
+commit's blob in a clean checkout), the read-time identity re-check and the
+audit record (identity, root, revision and body digest, before the content is
+returned). None establishes who authored the bytes: the commit can be entirely
+local to the fabricated checkout. The same-UID residual in
+`docs/security/redaction-policy.md` §6 states the rest; a cryptographic check is
+not available offline for a checkout the caller clones.
+
 ## 5. Do-not-key boundary
 
 | Content | Treatment |

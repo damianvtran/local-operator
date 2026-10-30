@@ -97,9 +97,11 @@ from local_operator.team_bridge.settings import (
     record_default_enrollment,
     record_local_enabled,
     record_local_enabled_if_unset,
+    record_local_session_if_unset,
 )
 from local_operator.team_bridge.types import (
     ATTACHMENT_ID_PATTERN,
+    validate_member_mention,
     validate_send_recipient,
 )
 
@@ -655,6 +657,24 @@ OWNER_AUDIT_SCOPE_SENTENCE = (  # i18n: ignore local guard; a code path, never s
 #: this class, ``_send`` with a hand-built or concatenated path, a ``getattr``
 #: with a computed name reaching something else — is refused before a byte
 #: moves (#3022 R1-1). A static scan cannot see a built string; this can.
+# Grant mutations use the same scoped-dispatch discipline as the human-only
+# audit. A hand-built `_send` URL cannot grant the model access to its owner's
+# conversations. Only the desktop-only grant/revoke methods enter this scope;
+# static reach tests keep those methods out of model-context callers.
+_COS_READ_GRANT_SCOPE: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "team_bridge_cos_read_grant_scope", default=False
+)
+
+
+@contextlib.contextmanager
+def _cos_read_grant_scope() -> Any:
+    token = _COS_READ_GRANT_SCOPE.set(True)
+    try:
+        yield
+    finally:
+        _COS_READ_GRANT_SCOPE.reset(token)
+
+
 _OWNER_AUDIT_SCOPE: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "team_bridge_owner_audit_scope", default=False
 )
@@ -669,7 +689,7 @@ def _owner_audit_scope() -> Any:
         _OWNER_AUDIT_SCOPE.reset(token)
 
 
-def _refuse_unscoped_owner_audit(path: str) -> None:
+def _refuse_unscoped_owner_audit(path: str, method: str = "GET") -> None:
     """Refuse a hub request on the owner-audit family outside its four methods.
 
     Matched after percent-decoding and collapsing slashes and case, so
@@ -707,6 +727,16 @@ def _refuse_unscoped_owner_audit(path: str) -> None:
             http_status=400,
         )
     normalized = re.sub(r"/+", "/", decoded).lower()
+    if (
+        method.upper() in ("PUT", "DELETE")
+        and normalized.rstrip("/").endswith("/cos-read")
+        and not _COS_READ_GRANT_SCOPE.get()
+    ):
+        raise BridgeRefusal(
+            "cos_read_grant_not_in_scope",
+            "A conversation share may be changed only through the desktop share routes.",
+            http_status=403,
+        )
     # The CONVERSATIONS family, not every ``/agents/owned`` path: the owner's
     # agent-invitations read (``…/agents/owned/invitations``, #3045) shares the
     # prefix and is an ordinary metadata read, so a prefix-wide check turned it
@@ -1332,7 +1362,7 @@ class TeamBridgeClient:
         # Every hub request in this class ends here, so the owner-audit path
         # gate lives here: no caller can reach `/agents/owned` by spelling the
         # path itself (#3022 R1-1).
-        _refuse_unscoped_owner_audit(path)
+        _refuse_unscoped_owner_audit(path, method)
         # ONE AsyncClient per request is H1's bounded-CRUD shape: every op is a
         # single small JSON round trip and nothing here runs on a loop. The
         # connector (H4) needs a PERSISTENT client with an owned ``aclose()``
@@ -1587,7 +1617,11 @@ class TeamBridgeClient:
         return await self._send("GET", "/messaging/settings", params=params)
 
     async def directory(
-        self, tenant_id: str, *, access: OAuthAccess | None = None
+        self,
+        tenant_id: str,
+        *,
+        access: OAuthAccess | None = None,
+        expected_account_id: str | None = None,
     ) -> dict[str, Any]:
         """The organization's member directory (§6.1): who an agent may address.
 
@@ -1596,12 +1630,18 @@ class TeamBridgeClient:
         caller's membership, and the server refuses a tenant the account cannot
         see (§6.5). The payload is the frozen desktop shape
         ``{members:[{account_id, display_label, role, bridge_enabled,
-        bridge_state}]}`` and is passed through untouched — this client never
-        re-orders, trims or renames a member row.
+        bridge_state, agent:{endpoint_id, name, state}}]}`` and is passed
+        through untouched — this client never re-orders, trims or renames a
+        member row. ``agent`` is optional per member; when present, its
+        ``endpoint_id`` is the address used to open a chief-of-staff DM.
         """
 
         return await self._send(
-            "GET", "/messaging/directory", params={"tenant_id": tenant_id}, access=access
+            "GET",
+            "/messaging/directory",
+            params={"tenant_id": tenant_id},
+            access=access,
+            expected_account_id=expected_account_id,
         )
 
     async def tenant_state(
@@ -2284,6 +2324,15 @@ class TeamBridgeClient:
             # transaction, but it fires the D2a connector hook, which runs
             # launchctl. Off the loop a first install costs one worker thread;
             # on it, it would freeze every route for the length of a bootstrap.
+            # Default the wake designation to THIS account's chief of staff when
+            # the person never chose one (settings.record_local_session_if_unset
+            # has the incident and the rule): never over an explicit choice, and
+            # never "whatever session happens to be open". In a worker thread
+            # for the same loop-freeze reason as the commit below.
+            try:
+                await asyncio.to_thread(record_local_session_if_unset, self._config_dir)
+            except Exception:  # noqa: BLE001 - no designation is badge-only, not an error
+                pass
             local = _local_settings_snapshot(self._config_dir)
             committed = await asyncio.to_thread(
                 commit_settings_enrollment,
@@ -2438,7 +2487,7 @@ class TeamBridgeClient:
         self,
         *,
         tenant_id: str,
-        to: Mapping[str, str],
+        to: Mapping[str, str] | str,
         type: str,
         text: str,
         client_ref: str,
@@ -2453,11 +2502,13 @@ class TeamBridgeClient:
         thread, it never stands alone — a thread_id-only body is a 400): it
         is either ``{"endpoint_id": …}`` or ``{"account_id": …}``, exactly one
         of the two, and the server resolves the account form without an
-        existence oracle. ``client_ref`` is caller-owned and REQUIRED — retries
-        reuse the same ref and the server answers the identical replay with the
-        original message (same key + different body → ``409
-        idempotency_key_reused``; the durable outbox is what makes the retry
-        carry the same ref across restarts).
+        existence oracle. A BARE STRING is accepted as the account id
+        (``validate_send_recipient`` is the ONE place that maps it, so the tool
+        and this client cannot read it differently). ``client_ref`` is
+        caller-owned and REQUIRED — retries reuse the same ref and the server
+        answers the identical replay with the original message (same key +
+        different body → ``409 idempotency_key_reused``; the durable outbox is
+        what makes the retry carry the same ref across restarts).
 
         Decision replies never travel this path as free text (§13.5): the
         decide call carries the ``ask_ref`` receipt and the outcome message is
@@ -3040,6 +3091,7 @@ class TeamBridgeClient:
         origin_session_id: str | None = None,
         thread_root_id: str | None = None,
         attachment_ids: Sequence[str] | None = None,
+        mentions: Sequence[Mapping[str, Any]] | None = None,
         access: OAuthAccess | None = None,
         expected_account_id: str | None = None,
     ) -> dict[str, Any]:
@@ -3059,6 +3111,17 @@ class TeamBridgeClient:
         the list is non-empty: a hub without the attachments capability
         refuses unknown fields, so a text-only send must stay byte-identical
         to the pre-attachment wire.
+
+        ``mentions`` directs the message at named members. Each row is the
+        hub's own Send-policy mention shape — the one the scheduled-send body
+        already carries (``{kind, account_id[, endpoint_id]}``) — and every row
+        is validated by
+        :func:`~local_operator.team_bridge.types.validate_member_mention` HERE,
+        at serialization, not only by the tool: a mention the tool built and
+        this body dropped would post an UNDIRECTED message that looks exactly
+        like a directed one in the server's answer. Omitted when empty, so an
+        undirected post remains byte-identical to the pre-mention wire (the same
+        capability-negotiation rule the attachments key follows).
         """
 
         body: dict[str, Any] = {"client_ref": client_ref, "body": text}
@@ -3075,6 +3138,8 @@ class TeamBridgeClient:
             body["origin_session_id"] = origin_session_id
         if thread_root_id:
             body["thread_root_id"] = thread_root_id
+        if mentions:
+            body["mentions"] = [validate_member_mention(entry) for entry in mentions]
         return await self._send(
             "POST",
             f"/messaging/conversations/{conversation_id}/messages",
@@ -3093,12 +3158,18 @@ class TeamBridgeClient:
         after_seq: int | None = None,
         endpoint_id: str | None = None,
         access: OAuthAccess | None = None,
+        expected_account_id: str | None = None,
     ) -> dict[str, Any]:
         """One thread: ``{root, replies (oldest-first), has_more, next_after_seq?}``.
 
         Same membership gate and body rule as history: for an agent member a
         reply's body is present only after that endpoint admitted it, so a
         thread is never a side door around screening.
+
+        ``expected_account_id`` is the desktop's captured-owner receipt (the
+        desktop route REQUIRES it; the agent tool, which reads as the runtime's
+        own pinned identity, omits it). It is compared against the exact
+        dispatch snapshot in :meth:`_authorized` and is never sent upstream.
         """
 
         params: dict[str, Any] = {}
@@ -3115,6 +3186,126 @@ class TeamBridgeClient:
             f"/messaging/conversations/{conversation_id}/messages/{message_id}/replies",
             params=params or None,
             access=access,
+            expected_account_id=expected_account_id,
+        )
+
+    # -- chief-of-staff read grant ---------------------------------------------
+    #
+    # The OPERATOR-CONSENTED read (agent-server docs/TEAM-BRIDGE-CONVERSATIONS.md
+    # §17): a human grants their OWN chief of staff read access to ONE
+    # agent-capable conversation they are an active member of. Distinct from the
+    # owner audit below in both directions: the audit is the human reading their
+    # agent's rooms (human-only, unscreened); this is the agent reading a room
+    # its human explicitly shared with it.
+    #
+    # WHO CALLS WHAT. ``cos_read_grant``/``cos_read_revoke`` are HUMAN acts: the
+    # desktop route family calls them for the renderer, and the bridge tool must
+    # never (pinned in test_cos_read_grant.py) — an agent cannot widen its own
+    # access. ``cos_read_conversations``/``cos_read_messages`` are the agent's
+    # reads: they carry ``actor_endpoint_id`` and the hub checks that endpoint is
+    # the signed-in account's own chief of staff holding an active grant; every
+    # refusal is a uniform ``conversation_not_found``, and every page served is
+    # an append-only ``cos_read`` audit event on the hub. Nothing is cached here.
+
+    async def cos_read_grant(
+        self,
+        conversation_id: str,
+        *,
+        tenant_id: str,
+        expected_account_id: str,
+        access: OAuthAccess | None = None,
+    ) -> dict[str, Any]:
+        """Share one conversation with the caller's own chief of staff (human act)."""
+
+        with _cos_read_grant_scope():
+            return await self._send(
+                "PUT",
+                f"/messaging/conversations/{conversation_id}/cos-read",
+                body={"tenant_id": tenant_id},
+                access=access,
+                expected_account_id=expected_account_id,
+            )
+
+    async def cos_read_revoke(
+        self,
+        conversation_id: str,
+        *,
+        tenant_id: str,
+        expected_account_id: str,
+        access: OAuthAccess | None = None,
+    ) -> dict[str, Any]:
+        """Withdraw that share; idempotent (human act)."""
+
+        with _cos_read_grant_scope():
+            return await self._send(
+                "DELETE",
+                f"/messaging/conversations/{conversation_id}/cos-read",
+                params={"tenant_id": tenant_id},
+                access=access,
+                expected_account_id=expected_account_id,
+            )
+
+    async def cos_read_conversations(
+        self,
+        *,
+        actor_endpoint_id: str,
+        expected_account_id: str,
+        tenant_id: str | None = None,
+        limit: int | None = None,
+        cursor: str | None = None,
+        access: OAuthAccess | None = None,
+    ) -> dict[str, Any]:
+        """The conversations the owner shared with this chief of staff (metadata)."""
+
+        params: dict[str, Any] = {"actor_endpoint_id": actor_endpoint_id}
+        if tenant_id:
+            params["tenant_id"] = tenant_id
+        if limit is not None:
+            params["limit"] = int(limit)
+        if cursor:
+            params["cursor"] = cursor
+        return await self._send(
+            "GET",
+            "/messaging/cos-read/conversations",
+            params=params,
+            access=access,
+            expected_account_id=expected_account_id,
+        )
+
+    async def cos_read_messages(
+        self,
+        conversation_id: str,
+        *,
+        actor_endpoint_id: str,
+        expected_account_id: str,
+        tenant_id: str | None = None,
+        thread_root_id: str | None = None,
+        limit: int | None = None,
+        before_seq: int | None = None,
+        after_seq: int | None = None,
+        access: OAuthAccess | None = None,
+    ) -> dict[str, Any]:
+        """One page of a shared conversation (or one thread with ``thread_root_id``).
+
+        Bodies are the granting HUMAN's view, not screened for the agent: the
+        caller (the bridge tool) wraps them as untrusted data, and nothing here
+        stores them.
+        """
+
+        params: dict[str, Any] = {"actor_endpoint_id": actor_endpoint_id}
+        if tenant_id:
+            params["tenant_id"] = tenant_id
+        if limit is not None:
+            params["limit"] = int(limit)
+        if before_seq is not None:
+            params["before_seq"] = int(before_seq)
+        if after_seq is not None:
+            params["after_seq"] = int(after_seq)
+        path = f"/messaging/conversations/{conversation_id}/cos-read/messages"
+        if thread_root_id:
+            path = f"{path}/{thread_root_id}/replies"
+        return await self._send(
+            "GET", path, params=params, access=access, expected_account_id=expected_account_id
         )
 
     # -- owner audit (HUMAN-ONLY) --------------------------------------------
@@ -3443,8 +3634,8 @@ class TeamBridgeClient:
         have zero freshness lifetime: every reuse requires upstream membership
         authorization and a matching conditional 304 under that same login.
         """
-        from local_operator.paths import config_dir
-        from local_operator.team_bridge.avatar_cache import AVATAR_CACHE, Entity
+        from local_operator.team_bridge import avatar_cache
+        from local_operator.team_bridge.avatar_cache import Entity
         from local_operator.team_bridge.types import is_account_id
 
         if (
@@ -3455,42 +3646,29 @@ class TeamBridgeClient:
             or size not in (64, 256)
         ):
             raise ValueError("invalid avatar request")
-        self._require_destination()
-        store = self._auth_store()
-        scope = (str((self._config_dir or config_dir()).resolve()), self._base_url)
-        row = self._pinned_row()
-        if row is None:
-            AVATAR_CACHE.admit(scope, None)
-            raise BridgeSignInRequired(SIGN_IN_SENTENCE)
-        incarnation = store.native_login_incarnation(row.id)
+        scope, authority = self._avatar_authority(expected_account_id)
 
         def check_owner() -> None:
-            current = self._pinned_row()
-            if (
-                not incarnation
-                or current is None
-                or current.id != row.id
-                or current.data.get("account_id") != expected_account_id
-                or store.native_login_incarnation(row.id) != incarnation
-            ):
-                AVATAR_CACHE.admit(scope, None)
+            try:
+                current = self._avatar_authority(expected_account_id)
+            except BridgeSignInRequired:
+                current = None
+            if current != (scope, authority):
+                avatar_cache.admit(scope, None)
                 raise BridgeRefusal(
                     ACCOUNT_MISMATCH_CODE, ACCOUNT_MISMATCH_SENTENCE, http_status=409
                 )
 
-        check_owner()
-        authority = (row.id, expected_account_id, incarnation)
-        AVATAR_CACHE.admit(scope, authority)
         key = (scope, authority, target_account_id, v, size)
         try:
             access = await self._guarded_access(expected_account_id)
         except (BridgeRefusal, BridgeSignInRequired):
-            AVATAR_CACHE.admit(scope, None)
+            avatar_cache.admit(scope, None)
             raise
         check_owner()
-        if access is None or access.credential_id != row.id:
+        if access is None or access.credential_id != authority[0]:
             raise BridgeRefusal(ACCOUNT_MISMATCH_CODE, ACCOUNT_MISMATCH_SENTENCE, http_status=409)
-        cached = AVATAR_CACHE.get(key)
+        cached = avatar_cache.AVATAR_CACHE.get(key)
         try:
             response = await self._dispatch(
                 "GET",
@@ -3503,15 +3681,15 @@ class TeamBridgeClient:
                 if_none_match=cached.etag if cached else None,
             )
         except httpx.HTTPError as failure:
-            AVATAR_CACHE.discard(key)
+            avatar_cache.AVATAR_CACHE.discard(key)
             raise BridgeUnreachable() from failure
         except BridgeRefusal:
-            AVATAR_CACHE.discard(key)
+            avatar_cache.AVATAR_CACHE.discard(key)
             raise
         check_owner()
         # Remove before interpreting the response: errors, malformed 304s and
         # no-store must never leave an entity available for a later retry.
-        AVATAR_CACHE.discard(key)
+        avatar_cache.AVATAR_CACHE.discard(key)
         if response.status_code >= 400:
             raise _refusal(response)
         etag = response.headers.get("etag")
@@ -3519,7 +3697,7 @@ class TeamBridgeClient:
         if response.status_code == 304 and cached is not None:
             if (etag is None or etag == cached.etag) and not response.content:
                 if storable:
-                    AVATAR_CACHE.put(key, cached)
+                    avatar_cache.AVATAR_CACHE.put(key, cached)
                 return cached.body, cached.mime
         mime = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
         if response.status_code != 200 or mime not in ATTACHMENT_MIME_TYPES or not response.content:
@@ -3531,8 +3709,111 @@ class TeamBridgeClient:
         # Only a bounded HTTP entity-tag can authorize conditional reuse. No
         # synthetic validators: an upstream without ETag simply cold-fetches.
         if storable and etag and re.fullmatch(r'(?:W/)?"[\x21\x23-\x7e]{0,254}"', etag):
-            AVATAR_CACHE.put(key, Entity(response.content, mime, etag))
+            avatar_cache.AVATAR_CACHE.put(key, Entity(response.content, mime, etag))
         return response.content, mime
+
+    def _avatar_authority(
+        self, expected_account_id: str
+    ) -> tuple[tuple[str, str], tuple[int, str, str]]:
+        """``(scope, authority)`` for the CURRENT login, exactly as ``fetch_avatar`` keys it.
+
+        Local only (no refresh, no network): the notification composite uses it
+        to fence its render to the same login ``fetch_avatar`` authorized under.
+        Refuses like ``fetch_avatar`` does when the captured viewer is not the
+        signed-in login.
+        """
+
+        from local_operator.paths import config_dir
+        from local_operator.team_bridge import avatar_cache
+
+        self._require_destination()
+        store = self._auth_store()
+        scope = (str((self._config_dir or config_dir()).resolve()), self._base_url)
+        row = self._pinned_row()
+        if row is None:
+            avatar_cache.admit(scope, None)
+            raise BridgeSignInRequired(SIGN_IN_SENTENCE)
+        incarnation = store.native_login_incarnation(row.id)
+        if not incarnation or row.data.get("account_id") != expected_account_id:
+            avatar_cache.admit(scope, None)
+            raise BridgeRefusal(ACCOUNT_MISMATCH_CODE, ACCOUNT_MISMATCH_SENTENCE, http_status=409)
+        authority = (row.id, expected_account_id, incarnation)
+        avatar_cache.admit(scope, authority)
+        return scope, authority
+
+    async def notification_avatar(
+        self,
+        sender_account_id: str,
+        *,
+        tenant_id: str,
+        kind: Literal["person", "person_agent"],
+        theme: Literal["light", "dark"],
+        size: int,
+        initials: str,
+        v: str | None,
+        expected_account_id: str,
+    ) -> bytes:
+        """Render only after current-avatar authorization, never from stale bytes.
+
+        The directory join belongs to the tenant-scoped desktop caller. Here
+        tenant is validated as part of the closed contract (the desktop keys its
+        display cache by it), NOT a replacement for the existing hub avatar
+        authorization. No-photo placeholders make no network request. The login
+        captured before network/CPU work is checked afterwards too; a queued
+        decode cannot return an image from a previous login.
+
+        Stateless: the composite is returned and forgotten. Display retention
+        is the desktop main process's (A0: in memory, <= 15 minutes, cleared on
+        auth transitions); see ``notification_avatar``'s module docstring.
+        """
+        from local_operator.team_bridge import avatar_cache
+        from local_operator.team_bridge import notification_avatar as na
+        from local_operator.team_bridge.types import is_account_id
+
+        if (
+            not is_account_id(sender_account_id)
+            or not is_account_id(expected_account_id)
+            or not tenant_id.strip()
+            or len(tenant_id) > 128
+            or kind not in na.KINDS
+            or theme not in na.THEMES
+            or type(size) is not int
+            or size not in na.SIZES
+            or not na.valid_initials(initials)
+            or (v is not None and re.fullmatch(r"[0-9a-f]{16}", v) is None)
+        ):
+            raise ValueError("invalid notification avatar request")
+        scope, authority = self._avatar_authority(expected_account_id)
+
+        def check_owner() -> None:
+            try:
+                current = self._avatar_authority(expected_account_id)
+            except BridgeSignInRequired:
+                current = None
+            if current != (scope, authority):
+                avatar_cache.admit(scope, None)
+                raise BridgeRefusal(
+                    ACCOUNT_MISMATCH_CODE, ACCOUNT_MISMATCH_SENTENCE, http_status=409
+                )
+
+        variant = na.Variant(kind=kind, theme=theme, size=size, initials=initials)
+        photo: bytes | None = None
+        if v is not None:
+            # The raw entity keeps its own rules (revalidated per use, no-store
+            # honoured) in ``fetch_avatar``; nothing derived from it is kept here.
+            photo, _mime = await self.fetch_avatar(
+                sender_account_id, v=v, size=size, expected_account_id=expected_account_id
+            )
+        check_owner()
+        data = await na.render(
+            variant,
+            origin=self._base_url,
+            account_id=sender_account_id,
+            photo=photo,
+            check_owner=check_owner,
+        )
+        check_owner()
+        return data
 
     async def fetch_attachment(
         self,
@@ -3601,6 +3882,7 @@ class TeamBridgeClient:
         tenant_id: str | None = None,
         actor_endpoint_id: str | None = None,
         access: OAuthAccess | None = None,
+        expected_account_id: str | None = None,
     ) -> dict[str, Any]:
         """Set (``active=True`` -> PUT) or clear (DELETE) one emoji reaction.
 
@@ -3614,6 +3896,12 @@ class TeamBridgeClient:
         ``allow`` admission for the message first). It rides in the body for
         PUT and in the query for DELETE, because a DELETE body is not reliably
         forwarded by every proxy between here and the hub.
+
+        ``expected_account_id`` is the desktop's captured-owner receipt (the
+        desktop routes REQUIRE it): compared against the exact dispatch
+        snapshot before any byte moves, refused as ``account_mismatch``, and
+        never forwarded upstream. The agent tool omits it and reacts as the
+        runtime's own pinned identity.
         """
 
         path = (
@@ -3626,8 +3914,16 @@ class TeamBridgeClient:
         if actor_endpoint_id:
             fields["actor_endpoint_id"] = actor_endpoint_id
         if active:
-            return await self._send("PUT", path, body=fields, access=access)
-        return await self._send("DELETE", path, params=fields or None, access=access)
+            return await self._send(
+                "PUT", path, body=fields, access=access, expected_account_id=expected_account_id
+            )
+        return await self._send(
+            "DELETE",
+            path,
+            params=fields or None,
+            access=access,
+            expected_account_id=expected_account_id,
+        )
 
     async def conversation_read(
         self,
@@ -4557,6 +4853,11 @@ class StatusDiscipline:
                 # Never over an explicit value: a Turn off / settings edit that
                 # landed after the commit above keeps its ``false``.
                 record_local_enabled_if_unset(config_dir)
+                # The default-on enrolment never had a designation to commit
+                # (nobody chose one), so it was badge-only; point it at the
+                # chief of staff, the account's expected wake destination. The
+                # next status read mirrors the setting into the native record.
+                record_local_session_if_unset(config_dir)
         except Exception:  # noqa: BLE001 - no local authority beats a loud failure
             pass
         # Adopt the post-enrolment answer: returning B after enrolling would
@@ -4702,7 +5003,10 @@ class StatusDiscipline:
         committed owner: the setting the user chose must reach the native record
         on the next fresh answer without reopening the consent dialog. Clearing
         the row withdraws wake consent (§13.6: empty stays badge-only), and the
-        designation is never guessed from "the current session".
+        designation is never guessed from "the current session". The ONE
+        default is the account's chief-of-staff session, written into the
+        setting by the enable paths only while it is empty
+        (``settings.record_local_session_if_unset``).
         """
 
         if self._config_dir is None or check.state != STATE_READY:

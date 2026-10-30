@@ -22,7 +22,8 @@ import { Chip } from "../components/ui/chip";
 import { Sheet } from "../components/ui/sheet";
 import { cn } from "../lib/cn";
 import { navigate } from "../router";
-import { messageRuntime } from "../store";
+import { textDirection } from "../lib/bidi";
+import { messageRuntime, useLocaleSnapshot } from "../store";
 import type { LibraryAsset, LibraryListing } from "../types";
 
 type SortId = "recent" | "name" | "kind" | "size" | "created" | "modified";
@@ -87,6 +88,8 @@ function activeFilterCount(filters: Filters): number {
 }
 
 export function LibraryScreen() {
+	/* Repaint on a live language write (QA Q-1): `t()` alone never re-renders. */
+	useLocaleSnapshot();
 	const [query, setQuery] = useState("");
 	const [filters, setFilters] = useState<Filters>(EMPTY_FILTERS);
 	const [listing, setListing] = useState<LibraryListing | null>(null);
@@ -195,6 +198,15 @@ export function LibraryScreen() {
 		),
 	];
 
+	/* The empty state's two lines are hard-coded English today (the library
+	   lane's extraction debt, QA Q-3), so they are painted from variables that
+	   let each element take the direction of the text it actually shows. */
+	const narrowed = query !== "" || activeFilterCount(filters) > 0;
+	const emptyTitle = narrowed ? "no matching assets" : "no assets yet";
+	const emptyHint = narrowed
+		? "Try a different search or clear the filters."
+		: "Files a conversation creates or mentions will appear here.";
+
 	return (
 		<div className="mx-auto flex h-dvh w-full max-w-[var(--lo-column-max,28rem)] flex-col overflow-hidden">
 			<header className="flex items-center gap-1 px-2 pt-[max(env(safe-area-inset-top),0.75rem)] pb-1">
@@ -204,7 +216,7 @@ export function LibraryScreen() {
 					aria-label="back to sessions"
 					className="flex min-h-11 min-w-11 items-center justify-center rounded-sm text-ink-muted active:bg-elevated"
 				>
-					‹
+					<span aria-hidden dir="ltr" className="lo-directional">‹</span>
 				</button>
 				<h1 className="min-w-0 flex-1 truncate px-1 text-heading text-ink">library</h1>
 				<button
@@ -238,7 +250,12 @@ export function LibraryScreen() {
 					type="search"
 					value={query}
 					onChange={(event) => setQuery(event.target.value)}
+					/* The placeholder is still English (Q-3). The field's direction
+					   follows its content: empty resolves LTR (the placeholder's own
+					   language, so its ellipsis stays trailing in the RTL document),
+					   and an Urdu query flips it back. */
 					placeholder="search assets…"
+					dir={textDirection(query)}
 					aria-label="search assets"
 					className="min-h-11 w-full rounded-md border border-control bg-surface px-3 text-body text-ink outline-none placeholder:text-ink-dim"
 				/>
@@ -302,13 +319,14 @@ export function LibraryScreen() {
 					</div>
 				) : rows.length === 0 ? (
 					<div className="flex flex-col items-center gap-1 py-10 text-center">
-						<p className="text-body text-ink-muted">
-							{query || activeFilterCount(filters) ? "no matching assets" : "no assets yet"}
+						<p className="text-body text-ink-muted" dir={textDirection(emptyTitle)}>
+							{emptyTitle}
 						</p>
-						<p className="text-body-sm text-ink-dim">
-							{query || activeFilterCount(filters)
-								? "Try a different search or clear the filters."
-								: "Files a conversation creates or mentions will appear here."}
+						{/* Untranslated copy is isolated rather than left to bidi: measured
+						   before this, the final full stop started the next line in the RTL
+						   layout (i18n QA Q-6 / design D3). */}
+						<p className="text-body-sm text-ink-dim" dir={textDirection(emptyHint)}>
+							{emptyHint}
 						</p>
 					</div>
 				) : (
@@ -354,7 +372,7 @@ export function LibraryScreen() {
 								setSortOpen(false);
 							}}
 							aria-pressed={filters.sort === option.id}
-							className="flex min-h-11 items-center justify-between gap-2 rounded-sm px-2 text-left text-body text-ink active:bg-surface"
+							className="flex min-h-11 items-center justify-between gap-2 rounded-sm px-2 text-start text-body text-ink active:bg-surface"
 						>
 							{option.label}
 							{filters.sort === option.id ? (
@@ -471,7 +489,7 @@ export function LibraryScreen() {
 						<button
 							type="button"
 							onClick={() => askAbout(menuAsset)}
-							className="flex min-h-11 items-center rounded-sm px-2 text-left text-body text-ink active:bg-surface"
+							className="flex min-h-11 items-center rounded-sm px-2 text-start text-body text-ink active:bg-surface"
 						>
 							ask about this asset
 						</button>
@@ -479,7 +497,7 @@ export function LibraryScreen() {
 							<button
 								type="button"
 								onClick={() => openSource(menuAsset)}
-								className="flex min-h-11 items-center rounded-sm px-2 text-left text-body text-ink active:bg-surface"
+								className="flex min-h-11 items-center rounded-sm px-2 text-start text-body text-ink active:bg-surface"
 							>
 								open source conversation
 							</button>
@@ -487,21 +505,21 @@ export function LibraryScreen() {
 						<button
 							type="button"
 							onClick={() => void patchFavorite(menuAsset)}
-							className="flex min-h-11 items-center rounded-sm px-2 text-left text-body text-ink active:bg-surface"
+							className="flex min-h-11 items-center rounded-sm px-2 text-start text-body text-ink active:bg-surface"
 						>
 							{menuAsset.favorite ? "remove from favorites" : "add to favorites"}
 						</button>
 						<a
 							href={libraryBytesUrl(menuAsset.id, true)}
 							onClick={() => setMenuAsset(null)}
-							className="flex min-h-11 items-center rounded-sm px-2 text-left text-body text-ink active:bg-surface"
+							className="flex min-h-11 items-center rounded-sm px-2 text-start text-body text-ink active:bg-surface"
 						>
 							download
 						</a>
 						<button
 							type="button"
 							onClick={() => void copyId(menuAsset)}
-							className="flex min-h-11 items-center rounded-sm px-2 text-left text-body text-ink active:bg-surface"
+							className="flex min-h-11 items-center rounded-sm px-2 text-start text-body text-ink active:bg-surface"
 						>
 							copy asset id
 						</button>

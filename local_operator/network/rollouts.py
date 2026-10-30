@@ -17,8 +17,8 @@ WHAT THIS FILE OWNS (RU §8.2 item 3, first half; the trigger note §4/§6):
   a codeless refusal retried on the cadence (the wire's "not now", never a
   claim of why — round 2, R2-2), a CODED ``no_grant`` member parked for
   the rollout with the remedy recorded, and a member whose channel does not
-  serve the target YET parked ``deferred (target_not_published)`` on the
-  backoff ladder until PyPI catches up or the window closes.
+  serve the target YET parked ``deferred (target_not_published)`` on its
+  own short publish-wait ladder until PyPI catches up or the window closes.
   Every state re-enters from the record; the record is the only state.
 - **The origin-side audit rows** — ``update_rollout_started`` (durable, written
   by S3b's hook through :func:`open_record`'s callers), ``update_member_state``
@@ -100,6 +100,19 @@ CADENCE_S = 300.0
 #: (RU §10). There is no give-up counter; the record's window is the bound.
 FAIL_BACKOFF_S: tuple[float, ...] = (300.0, 600.0, 1200.0, 2400.0, 7200.0)
 
+#: The not-yet-published wait's ladder (seconds), then its cap: 2, 5, 10 min,
+#: then every 15 min until the window closes. Deliberately NOT
+#: :data:`FAIL_BACKOFF_S`: that ladder guards against hammering a member whose
+#: install keeps breaking, where each attempt is expensive and a fast retry
+#: changes nothing. A publish wait is the opposite on both counts — PyPI lag
+#: after a tag is minutes (0.90.17: 21.5 min), and the ask that probes it is one
+#: small frame the member answers with a single index lookup. On the failure
+#: ladder an hour of lag pushed the next ask 2 h out, so on 2026-10-28 a member
+#: sat 98 min behind an already-published 0.91.1. The cap bounds the cost of a
+#: version that never appears (an upload PyPI refused) to four tiny asks an
+#: hour; the record's window is still the one bound that ends them.
+NOT_PUBLISHED_BACKOFF_S: tuple[float, ...] = (120.0, 300.0, 600.0, 900.0)
+
 #: The record's own window (seconds; RU §6.1) — the one bound that ends
 #: automatic retries.
 WINDOW_S = 86400.0
@@ -116,6 +129,25 @@ RECEIPT_CAP = 20
 #: What a receipt's detail (and any audit ``reason``) may carry of the
 #: member's sentence (chars; the audit detail value cap is 200).
 DETAIL_CAP = 200
+
+
+def cap_sentence(text: str, cap: int = DETAIL_CAP) -> str:
+    """``text`` within ``cap`` characters, cut on a word boundary with an ellipsis.
+
+    A plain slice cut a member's receipt mid-word through its own remedy (QA
+    round 1 on #3093, Q4: ``run `lop services restart` on this d``). A cut
+    that lands inside a word steps back to the last space when one is near
+    (the ``resume`` clipping rule), so the reader sees whole words and a mark
+    that the sentence goes on; the structured fields carry what was cut.
+    """
+    if len(text) <= cap:
+        return text
+    cut = text[: cap - 1]
+    spaced = cut.rsplit(" ", 1)[0]
+    if len(spaced) >= cap - 40:
+        cut = spaced
+    return cut.rstrip(" ,.;:") + "…"
+
 
 #: The member states that mean "nothing more will happen to this member
 #: without a new rollout" (the §3 vocabulary map's record column). ``failed``
@@ -142,8 +174,8 @@ RULE_REFUSAL_CODES: tuple[str, ...] = ("target_not_published", "editable_install
 #: 404 nearly always means "not YET": 0.90.17's member was refused at 05:30:38Z
 #: and the wheel landed at 05:52:05Z, and 0.90.14 closed the same way, each
 #: rollout ending ``partial`` with nothing left to retry it. The member is
-#: parked ``deferred`` with this code on its own :data:`FAIL_BACKOFF_S` ladder
-#: (counted in ``waits``, so ``fails`` keeps meaning "the install broke") and is
+#: parked ``deferred`` with this code on its own :data:`NOT_PUBLISHED_BACKOFF_S`
+#: ladder (counted in ``waits``, so ``fails`` keeps meaning "the install broke") and is
 #: re-asked until it installs, the record's window lapses, or a newer rollout
 #: supersedes this one. Those two bounds are the ones every other retry already
 #: has; no new deadline exists. A 404 can also mean NEVER (an upload PyPI
@@ -555,9 +587,10 @@ def summary(record: Mapping[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _backoff_s(fails: int) -> float:
-    index = min(max(fails, 1), len(FAIL_BACKOFF_S)) - 1
-    return FAIL_BACKOFF_S[index]
+def _backoff_s(fails: int, ladder: tuple[float, ...] = FAIL_BACKOFF_S) -> float:
+    """The rung for the ``fails``-th consecutive miss on ``ladder``; its last rung is the cap."""
+    index = min(max(fails, 1), len(ladder)) - 1
+    return ladder[index]
 
 
 #: How many ``left_busy`` ids a member's answer may put into the durable record
@@ -578,6 +611,56 @@ def _left_busy_ids(answer: Mapping[str, Any]) -> list[str]:
         if ident:
             ids.append(str(ident)[:80])
     return ids
+
+
+#: The serve states a member's answer may put on the record; anything else is
+#: dropped, because the value comes from a paired peer (the LEFT_BUSY_CAP rule).
+SERVE_STATES = frozenset({"moved", "current", "none", "stale", "unknown"})
+
+
+def _serve_fact(answer: Mapping[str, Any]) -> dict[str, Any]:
+    """The member's serve fact, bounded, or ``{}`` for a member that sent none.
+
+    An older member's answer carries no ``serve``; ``{}`` is the honest value
+    then — the record must not read "moved" or "stale" for a fact nobody
+    reported.
+    """
+    raw = answer.get("serve")
+    if not isinstance(raw, Mapping) or str(raw.get("state") or "") not in SERVE_STATES:
+        return {}
+    fact: dict[str, Any] = {"state": str(raw["state"])}
+    stale = raw.get("stale")
+    if isinstance(stale, list):
+        fact["stale"] = [
+            {"pid": _bounded_pid(row.get("pid")), "version": str(row.get("version") or "")[:40]}
+            for row in stale[:LEFT_BUSY_CAP]
+            if isinstance(row, Mapping)
+        ]
+    # ``stuck`` (QA Q1 on #3093): alive-but-not-serving daemons, named by pid and
+    # the status verdict word. ``moved`` (review n2): which pids moved, so a
+    # `--json` reader of a ``moved`` member can tell. Both bounded like ``stale``.
+    stuck = raw.get("stuck")
+    if isinstance(stuck, list):
+        fact["stuck"] = [
+            {"pid": _bounded_pid(row.get("pid")), "verdict": str(row.get("verdict") or "")[:20]}
+            for row in stuck[:LEFT_BUSY_CAP]
+            if isinstance(row, Mapping)
+        ]
+    moved = raw.get("moved")
+    if isinstance(moved, list):
+        fact["moved"] = [_bounded_pid(pid) for pid in moved[:LEFT_BUSY_CAP]]
+    if raw.get("remedy"):
+        fact["remedy"] = str(raw.get("remedy"))[:80]
+    return fact
+
+
+def _bounded_pid(value: Any) -> int:
+    """A peer-supplied pid as an int, 0 when it is not one."""
+    try:
+        pid = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return pid if 0 < pid < 2**31 else 0
 
 
 def classify_answer(
@@ -613,7 +696,7 @@ def classify_answer(
             "next_ask_at": now + floor,
             "cause": cause,
             "outcome": outcome,
-            "detail": message[:DETAIL_CAP],
+            "detail": cap_sentence(message),
             "version": version,
             "method": method,
             # CONSECUTIVE-failure count, so every non-failure answer resets it
@@ -624,8 +707,8 @@ def classify_answer(
             # The not-published wait's own rung counter. CARRIED, not reset, by
             # every other answer (agent review round 1 on #3028, m3): a busy or
             # dropped ask between two 404s says nothing about whether PyPI has
-            # the wheel yet, so restarting the ladder at 5 min would re-poll the
-            # channel faster for no new fact. Only that arm advances it, and a
+            # the wheel yet, so restarting the ladder at its first rung would
+            # re-poll the channel faster for no new fact. Only that arm advances it, and a
             # settled member (the done arm) or ``--resume`` clears it.
             "waits": waits,
         }
@@ -637,7 +720,14 @@ def classify_answer(
         # ``left_busy`` rides alongside as data (QA round 1 on #3028, Q2): the
         # sentence can be cut at DETAIL_CAP with two or three named sessions,
         # and the ids are what a `--json` reader and the audit row need.
-        return moved(state) | {"waits": 0, "left_busy": _left_busy_ids(answer)}
+        # ``serve`` rides the same way (2026-10-28): whether the member's
+        # `lop serve` came along, so a STALE one is on the record and its audit
+        # row rather than only in the member's own log.
+        return moved(state) | {
+            "waits": 0,
+            "left_busy": _left_busy_ids(answer),
+            "serve": _serve_fact(answer),
+        }
     if state == "busy" or code == "update_in_progress":
         # Skip-then-retry: parked on the cadence, a FRESH probe each time, and
         # nothing was touched on the member (its own sentence rides `detail`).
@@ -681,8 +771,9 @@ def classify_answer(
     if code == NOT_PUBLISHED_CODE and state == "refused":
         # THE MEMBER said its channel 404s this exact version. That is "not
         # YET" far more often than "never" (see :data:`NOT_PUBLISHED_CODE`):
-        # park it on the backoff ladder and ask again, bounded by the window
-        # and by supersede like every other retry. ``state == "refused"`` is
+        # park it on the publish-wait ladder (:data:`NOT_PUBLISHED_BACKOFF_S`,
+        # short and capped, never the failure ladder) and ask again, bounded by
+        # the window and by supersede like every other retry. ``state == "refused"`` is
         # what tells this apart from the ORIGIN's own pre-frame refusal (a
         # stamp that is not a version), which carries no state and stays a
         # terminal rule refusal below.
@@ -690,7 +781,7 @@ def classify_answer(
         return moved(
             "deferred",
             new_code=NOT_PUBLISHED_CODE,
-            floor=_backoff_s(next_waits),
+            floor=_backoff_s(next_waits, NOT_PUBLISHED_BACKOFF_S),
             cause="policy",
             outcome="refused",
         ) | {"waits": next_waits}
@@ -761,6 +852,10 @@ def _audit_member_state(
             # The ids the member deliberately left on its old build (QA Q2):
             # the reason above is capped and may have lost the names.
             detail["left_busy"] = list(update.get("left_busy") or [])
+        if "serve" in update:
+            from local_operator.network.meshupdate import serve_audit
+
+            detail.update(serve_audit(update.get("serve") or {}))
         event = AuditEvent(
             event=MEMBER_STATE,
             actor="self",
@@ -936,6 +1031,12 @@ def step_record(server: "RelayServer", record_id: str, *, now: float | None = No
             target_member["next_ask_at"] = float(_update.get("next_ask_at") or 0.0)
             if "left_busy" in _update:
                 target_member["left_busy"] = list(_update.get("left_busy") or [])
+            # Replaced on key PRESENCE, as ``left_busy`` is (review m4): a later
+            # answer that carries no fact (an older member, a re-probed
+            # ``already_on_target``) must clear an earlier one, not leave a
+            # STALE verdict standing beside a newer receipt.
+            if "serve" in _update:
+                target_member["serve"] = dict(_update.get("serve") or {})
             note_receipt(
                 target_member,
                 state=str(_update["state"]),

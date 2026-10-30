@@ -293,6 +293,15 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "lease path, not a pathname or a translated/copyable session entry",
     ),
     # ---- this install's CONFIG, LOG and STORE surface (outside ``sessions/``) ----
+    "local_operator/memory_maintenance.py": (
+        3,
+        "``LOCK_NAME``/``STAMP_NAME``/``ATTEMPT_NAME`` ('.compact.lock', '.compact.stamp', "
+        "'.compact.attempt'): the memory store's unattended-maintenance lock and cadence "
+        "stamps, inside the DEVICE-LEVEL store directory (<config>/memory/), never an entry "
+        "of a session directory. They describe THIS host's compaction/expiry passes (a "
+        "cross-process fcntl lock and wall-clock stamps), so no session copy may carry "
+        "them: a peer inheriting them would skip or back off passes it never ran",
+    ),
     "local_operator/network/mobility.py": (
         1,
         "``DROPPED_ROLES_DIRNAME`` ('dropped-session-roles'): the DEVICE-LEVEL stash a "
@@ -344,6 +353,17 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "prefix that claims every ``credential_*`` ``what`` key for this module's family "
         "refusal. An in-memory dispatch key, not a filename or directory: nothing on "
         "disk is named by it, so it is not a session-directory entry",
+    ),
+    # THE PAIRING CARD'S OWN FAMILY PREFIX, the ``credential_`` rule one module over.
+    # ``pair_op`` registers ``pair_`` as a FAMILY so an unknown pairing operation
+    # beside the shapes this build can describe is refused instead of signed blind.
+    "local_operator/operator/pair_op.py": (
+        1,
+        "``_PAIR_PREFIX`` ('pair_'): the approval-op registry's record-key prefix for "
+        "the pairing card's family refusal. An in-memory ``what``-key dispatcher, not "
+        "a filename or directory — nothing on disk is named by it, and the card's "
+        "own sidecars live outside the session store, so it is not a "
+        "session-directory entry",
     ),
     # ---- the transcript compression pass's STORE-LEVEL names ----
     "local_operator/session/compression.py": (

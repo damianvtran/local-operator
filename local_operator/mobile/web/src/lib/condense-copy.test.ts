@@ -5,7 +5,7 @@ import { messageRuntime } from "../store";
 
 describe("condensed action counts", () => {
 	it("renders the partial marker instead of silently stating an exact count", () => {
-		messageRuntime.registerBundle("relay.transcript", "en", { ...BUNDLED_OWNED["relay.transcript"] });
+		messageRuntime.registerBundle("relay.transcript", "en", { ...BUNDLED_OWNED["relay.transcript"].en });
 		expect(actionCount(3, true, countLabel(3, true, "en"))).toBe("3+ actions");
 		expect(actionCount(3, false, countLabel(3, false, "en"))).toBe("3 actions");
 	});

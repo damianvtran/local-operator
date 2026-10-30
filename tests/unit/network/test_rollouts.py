@@ -1553,7 +1553,7 @@ def test_a_not_yet_published_target_is_retried_on_the_ladder_then_installs(
     assert live["state"] == "active", live
     assert (member["state"], member["code"]) == ("deferred", "target_not_published"), member
     assert member["waits"] == 1 and member["fails"] == 0, member
-    first_floor = 1000.0 + rollouts.FAIL_BACKOFF_S[0]
+    first_floor = 1000.0 + rollouts.NOT_PUBLISHED_BACKOFF_S[0]
     assert member["next_ask_at"] == first_floor, member
     assert "waiting for 0.99.0 on PyPI" in rollouts.summary(live), rollouts.summary(live)
 
@@ -1563,7 +1563,7 @@ def test_a_not_yet_published_target_is_retried_on_the_ladder_then_installs(
     rollouts.step_record(cast(Any, server), record["id"], now=first_floor + 1.0)
     member = _member(_live(record["id"], root), "d_a")
     assert member["waits"] == 2, member
-    assert member["next_ask_at"] == first_floor + 1.0 + rollouts.FAIL_BACKOFF_S[1], member
+    assert member["next_ask_at"] == first_floor + 1.0 + rollouts.NOT_PUBLISHED_BACKOFF_S[1], member
 
     _scripted(monkeypatch, [_answer("done", version="0.99.0")])
     rollouts.step_record(cast(Any, server), record["id"], now=member["next_ask_at"] + 1.0)
@@ -1584,7 +1584,7 @@ def test_the_wait_rung_survives_an_interleaved_answer(
     """m3 (agent review round 1): a busy ask between two 404s keeps the wait's rung.
 
     The busy answer says nothing about PyPI, so the ladder must not restart at
-    5 min; the next 404 climbs to the third rung, not the first.
+    its first rung; the next 404 climbs to the second rung, not the first.
     """
     root = tmp_path / "cfg"
     server = _Server(root)
@@ -1599,7 +1599,7 @@ def test_the_wait_rung_survives_an_interleaved_answer(
     rollouts.step_record(cast(Any, server), record["id"], now=at)
     member = _member(_live(record["id"], root), "d_a")
     assert member["waits"] == 2, member
-    assert member["next_ask_at"] == at + rollouts.FAIL_BACKOFF_S[1], member
+    assert member["next_ask_at"] == at + rollouts.NOT_PUBLISHED_BACKOFF_S[1], member
 
 
 def test_a_done_member_keeps_the_sessions_it_left_behind_in_record_and_audit(
@@ -1685,6 +1685,110 @@ def test_a_target_that_never_appears_stops_at_the_window_and_says_so(
     assert "0.99.0 is not on PyPI" in rows[-1].detail["counts"], rows[-1].detail
 
 
+#: The publish wait's promised ceiling (seconds), spelled as a literal rather
+#: than read from the module: the cells below must FAIL against a build that
+#: still parks the wait on the failure ladder, not merely error on a name.
+PUBLISH_WAIT_CAP_S = 900.0
+
+
+def _drive(
+    server: _Server,
+    record_id: str,
+    root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    answer: Callable[[], dict[str, Any]],
+    *,
+    asks: int,
+    start: float = 1000.0,
+) -> list[float]:
+    """Ask the one member ``asks`` times, each just past its floor; return the floors' gaps."""
+    gaps: list[float] = []
+    at = start
+    for _ in range(asks):
+        _scripted(monkeypatch, [answer()])
+        rollouts.step_record(cast(Any, server), record_id, now=at)
+        member = _member(_live(record_id, root), "d_a")
+        gaps.append(float(member["next_ask_at"]) - at)
+        at = float(member["next_ask_at"]) + 1.0
+    return gaps
+
+
+def test_a_publish_wait_re_asks_soon_and_never_backs_off_past_its_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """2026-10-28: an hour of PyPI lag put the next ask 2 h out on the failure ladder.
+
+    The node sat 98 min behind an already-published 0.91.1. However long the
+    404s go on, a waiting member is re-asked within the cap, and the ladder
+    opens short (publish lag is minutes, an ask is one small frame).
+    """
+    root = tmp_path / "cfg"
+    server = _Server(root)
+    record = _open(root, devices=["d_a"])
+    gaps = _drive(server, record["id"], root, monkeypatch, _not_published, asks=12)
+    member = _member(_live(record["id"], root), "d_a")
+    assert (member["state"], member["code"]) == ("deferred", "target_not_published"), member
+    assert member["waits"] == 12 and member["fails"] == 0, member
+    assert max(gaps) <= PUBLISH_WAIT_CAP_S, gaps
+    assert gaps[0] < rollouts.FAIL_BACKOFF_S[0], gaps
+    assert gaps == sorted(gaps), f"the wait backs off monotonically: {gaps}"
+    assert gaps[-1] == PUBLISH_WAIT_CAP_S, f"the ladder settles on its cap: {gaps}"
+
+
+def test_a_real_failure_still_climbs_the_failure_ladder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The short ladder is the publish wait's alone: a broken install still backs off to 2 h."""
+    root = tmp_path / "cfg"
+    server = _Server(root)
+    record = _open(root, devices=["d_a"])
+    ladder = rollouts.FAIL_BACKOFF_S
+    gaps = _drive(
+        server,
+        record["id"],
+        root,
+        monkeypatch,
+        lambda: _answer("failed", reason="the install broke"),
+        asks=len(ladder) + 2,
+    )
+    assert gaps == [*ladder, ladder[-1], ladder[-1]], gaps
+    assert ladder == (300.0, 600.0, 1200.0, 2400.0, 7200.0), "the failure ladder is unchanged"
+    member = _member(_live(record["id"], root), "d_a")
+    assert member["fails"] == len(ladder) + 2 and member["waits"] == 0, member
+
+
+def test_the_window_still_ends_a_publish_wait_that_never_resolves(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cap shortens the gaps, never the bound: no ask lands after the window closes."""
+    root = tmp_path / "cfg"
+    server = _Server(root)
+    record = _open(root, devices=["d_a"], now=1000.0)
+    window_end = 1000.0 + rollouts.WINDOW_S
+    asked_at: list[float] = []
+
+    def _fake(server_: Any, device: str, *, rollout: str = "") -> dict[str, Any]:
+        asked_at.append(moment)
+        return _not_published()
+
+    monkeypatch.setattr(meshupdate, "update_peer", _fake)
+    moment = 1000.0
+    steps = 0
+    while _live(record["id"], root)["state"] == "active":
+        steps += 1
+        assert steps <= 1000, "the window never closed"
+        rollouts.step_record(cast(Any, server), record["id"], now=moment)
+        member = _member(_live(record["id"], root), "d_a")
+        moment = max(float(member["next_ask_at"]), moment) + 1.0
+    closed = _live(record["id"], root)
+    assert closed["state"] == "done", closed
+    assert asked_at and max(asked_at) <= window_end, (max(asked_at), window_end)
+    # A day at the cap is ~96 asks — bounded, and the receipts coalesce them.
+    assert len(asked_at) <= rollouts.WINDOW_S / PUBLISH_WAIT_CAP_S + 8, len(asked_at)
+    assert "0.99.0 never appeared on PyPI" in rollouts.summary(closed), rollouts.summary(closed)
+    assert len(_member(closed, "d_a").get("receipts") or []) <= rollouts.RECEIPT_CAP, closed
+
+
 def test_a_newer_rollout_replaces_a_record_still_waiting_for_publish(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1732,3 +1836,112 @@ def test_the_origins_own_unparseable_stamp_is_still_a_terminal_refusal() -> None
     )
     assert (update["state"], update["code"]) == ("refused", "target_not_published"), update
     assert rollouts.member_terminal(update)
+
+
+def test_a_done_member_puts_its_serve_fact_on_the_record_and_audit_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """2026-10-28: a member whose `lop serve` stayed STALE says so on the origin.
+
+    The record carries the bounded fact and the REAL audit log keeps the flat
+    keys (``serve``/``serve_stale``/``serve_remedy`` are allow-listed for
+    ``update_member_state``) — the same filter that once dropped ``left_busy``.
+    """
+    from local_operator.network.audit import AuditLog
+
+    root = tmp_path / "cfg"
+    server = _Server(root)
+    log = AuditLog(root)
+    server.audit = cast(Any, log)
+    record = _open(root, devices=["d_a"])
+    done = _answer("done", version="0.99.0", reason="this device moved from 0.91.1 to 0.99.0")
+    done["serve"] = {
+        "state": "stale",
+        "moved": [],
+        "stale": [{"pid": 537864, "version": "0.91.1"}],
+        "remedy": "lop services restart",
+    }
+    _scripted(monkeypatch, [done])
+    rollouts.step_record(cast(Any, server), record["id"], now=1000.0)
+    log.close()
+    member = _member(_live(record["id"], root), "d_a")
+    assert member["serve"] == {
+        "state": "stale",
+        "stale": [{"pid": 537864, "version": "0.91.1"}],
+        "moved": [],
+        "remedy": "lop services restart",
+    }, member
+    rows = [r for r in AuditLog(root).tail(200) if r.get("event") == rollouts.MEMBER_STATE]
+    detail = rows[-1].get("detail", {})
+    assert detail.get("serve") == "stale", rows[-1]
+    assert detail.get("serve_stale") == ["537864@0.91.1"], rows[-1]
+    assert detail.get("serve_remedy") == "lop services restart", rows[-1]
+
+
+def test_an_answer_without_a_serve_fact_records_none() -> None:
+    """An older member sends no ``serve``; the record must not invent one."""
+    update = rollouts.classify_answer({"ok": True, "state": "done"}, fails=0, now=0.0)
+    assert update["serve"] == {}, update
+    junk = rollouts.classify_answer(
+        {"ok": True, "state": "done", "serve": {"state": "teleported"}}, fails=0, now=0.0
+    )
+    assert junk["serve"] == {}, junk
+
+
+def test_a_later_answer_without_a_serve_fact_clears_the_earlier_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review m4 on #3093: ``serve`` is replaced on key presence, like ``left_busy``.
+
+    A member record carrying an earlier STALE fact, answered by an older
+    member (no ``serve``), must not keep the stale verdict beside the newer
+    receipt.
+    """
+    root = tmp_path / "cfg"
+    server = _Server(root)
+    record = _open(root, devices=["d_a"])
+
+    def _seed(rec: dict[str, Any]) -> bool:
+        member = rollouts.member_of(rec, "d_a")
+        assert member is not None
+        member["serve"] = {"state": "stale", "stale": [{"pid": 1, "version": "0.91.0"}]}
+        return True
+
+    rollouts.mutate_record(record["id"], root, _seed)
+    _scripted(monkeypatch, [_answer("done", version="0.99.0", reason="moved")])
+    rollouts.step_record(cast(Any, server), record["id"], now=1000.0)
+    assert _member(_live(record["id"], root), "d_a")["serve"] == {}
+
+
+def test_a_capped_receipt_keeps_the_serve_remedy_whole() -> None:
+    """QA round 1 on #3093, Q4: the remedy survives the origin's DETAIL_CAP.
+
+    The member's reason used to append the serve clause AFTER named busy
+    sessions, and a plain slice cut it as `... on this d`. The clause now rides
+    first and the cap breaks on a word with an ellipsis.
+    """
+    from local_operator.network import meshupdate
+
+    fact = {
+        "state": "stale",
+        "stale": [{"pid": 1203893, "version": "0.91.92"}],
+        "remedy": "lop services restart",
+    }
+    reason = (
+        "this device moved from 0.91.92 to 0.91.93"
+        + meshupdate.serve_clause(fact)
+        + "; 1 session(s) retired for the new build, 2 kept; 2 busy session(s) stay on "
+        "0.91.92 until they settle: Librarian (approval), Quarterly planning (tool)"
+    )
+    assert len(reason) > rollouts.DETAIL_CAP, len(reason)
+    update = rollouts.classify_answer(
+        {"ok": True, "state": "done", "message": reason}, fails=0, now=0.0
+    )
+    detail = update["detail"]
+    assert len(detail) <= rollouts.DETAIL_CAP, detail
+    assert "run `lop services restart`" in detail, detail
+    assert detail.endswith("…"), detail
+    kept = detail[:-1]
+    assert reason.startswith(kept), detail
+    # Whole words: what follows the kept text is a separator, never a letter.
+    assert reason[len(kept)] in " ,.;:", (detail, reason[len(kept) :][:10])
