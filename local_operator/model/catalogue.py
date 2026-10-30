@@ -985,8 +985,15 @@ def read_listing(
         #
         # Checked BEFORE serving a document (review M3): a STALE document beside
         # a just-failed attempt is the holder's own ``failed=True`` answer, and
-        # ``configure``'s degraded memo (#2992) keys its 60 s-vs-day choice on
-        # that flag — reported as clean, a week-old payload would be day-pinned.
+        # the loser must agree with it. What reads that flag is discovery's
+        # ``_status_of`` (``failed`` -> ``"stale"``, one of the provider
+        # controller's ``FAILED_LISTING_STATUSES``) and ``prices.py``'s cold-miss
+        # retry — reported as clean, a week-old payload would read as a fresh
+        # listing to both. NOT ``configure``'s degraded memo (#2992): that memo
+        # marks DEGRADED only when ``collect_unavailable()`` collected something,
+        # and this stale-payload path collects nothing, so a stale-served
+        # resolution is day-memoised on the holder and loser paths alike (#2992's
+        # stale-beats-absent design; #3025 review R2-M1).
         # A holder that SUCCEEDED replaced the document, whose new stamp no
         # longer matches the recorded failure, so this stays False for it.
         if _failure_backoff_active(path):

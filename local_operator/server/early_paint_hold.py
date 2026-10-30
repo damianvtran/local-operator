@@ -33,6 +33,14 @@ of an unknown id holds for one request lifetime (the route's 404), which is
 also all a known id's open can hold: a key nobody opens is never yielded to
 past #3026's staleness cap either way.
 
+HELD DOES NOT MEAN ADMITTED. As the outermost layer this runs BEFORE
+``host_admission`` and reload admission, so a request carrying a valid bearer
+but a bad ``Host`` (or arriving while reload admission would refuse it) still
+takes the hold for that one request's lifetime, and is refused afterwards by
+the layer that owns that rule. Only a bearer holder can do it, the request's
+own lifetime and the per-batch pause budget bound it, and it is released on
+that request's exit like any other (#3033 review m1).
+
 KEYING. The hold must use the same key the route will (``pool.root``, built by
 ``routes.desktop_sessions.host`` from ``app.state.config_manager.config_dir``),
 or the handoff would leave this one under a key nobody releases until the
@@ -60,6 +68,9 @@ SCOPE_KEY = "local_operator.early_paint_hold"
 
 #: ``/v1/desktop/sessions/<id>/events`` -- the only route that takes a paint
 #: hold. Any id shape: an id the route rejects is held for one request only.
+#: The captured id is used only as a key into the hold tables, never as a path
+#: component; the route resolves it (``pool.session``, whose lookup answers an
+#: unknown id with 404) only after this layer has run.
 _EVENTS = re.compile(r"^/v1/desktop/sessions/([^/]{1,128})/events$")
 
 

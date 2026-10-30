@@ -3585,8 +3585,9 @@ exactly as it answers its own desktop. Two peer read doors still ask only the
 resident index: journal-order **without** `open_frame=1` (`relay.py:9359`,
 `_stored_journal_order`) and the typed source read (`_source_read_detail`, the
 `metadata`/`payload` purposes). With a warm companion and no resident index those
-answer without authority — `building` on the page door, `building` or
-`unavailable` on the typed one — where this page has just answered `ready`
+answer without authority — `building` on both the page door and the typed one
+(the typed door's `unavailable` comes only from its no-journal branch and an
+expected-generation mismatch, neither of which is this case) — where this page has just answered `ready`
 (§"Complete peer-source contract").
 
 **KNOWN LIMITATION, recorded not fixed: the open-frame door still reopens the
