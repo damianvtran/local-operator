@@ -342,21 +342,37 @@ def kernel_exposed_read_subtrees() -> tuple[Path, ...]:
 
 @dataclass(frozen=True)
 class ToolConfinement:
-    """One session's confinement root and the decisions that follow from it."""
+    """One session's confinement root and the decisions that follow from it.
+
+    ``scratchpad`` is the session's OWN ``scratchpad://`` root, granted beside
+    ``root`` -- see :meth:`from_context` for why it is a second grant rather
+    than something the root is assumed to contain.
+    """
 
     root: Path
+    scratchpad: Path | None = None
 
     @classmethod
-    def at(cls, root: str | Path) -> ToolConfinement:
-        """Build a confinement for ``root``, fully resolved.
+    def at(cls, root: str | Path, *, scratchpad: str | Path | None = None) -> ToolConfinement:
+        """Build a confinement for ``root`` (and the session's scratchpad), resolved.
 
         Resolution matters: seatbelt compares vnode paths, and the file-tool
         checks compare against this root, so both must be the REAL path --
         a ``/tmp``-style symlink spelling must not make the jail and the
         check disagree about the same directory.
+
+        A scratchpad the profile cannot carry (:func:`profile_path_refusal`)
+        is DROPPED, not escaped and not a refusal of the whole confinement:
+        failing narrow keeps the session's boundary intact and costs only the
+        pad, which the in-process ``scratchpad://`` tools still serve.
         """
 
-        return cls(root=Path(root).expanduser().resolve())
+        pad: Path | None = None
+        if scratchpad:
+            candidate = Path(scratchpad).expanduser().resolve()
+            if profile_path_refusal(candidate) is None:
+                pad = candidate
+        return cls(root=Path(root).expanduser().resolve(), scratchpad=pad)
 
     @classmethod
     def from_context(cls, context: ToolContext | None) -> ToolConfinement | None:
@@ -372,16 +388,45 @@ class ToolConfinement:
         raw = getattr(context, "confinement_root", None)
         if not raw:
             return None
-        return cls.at(raw)
+        # THE SESSION'S OWN SCRATCHPAD IS GRANTED TOO, read from the SAME
+        # context field (``scratchpad_dir_of``) that ``scratchpad://`` resolves
+        # against and that the bash tool exports as ``LOCAL_OPERATOR_SCRATCHPAD``
+        # -- one source, so the scheme, the env var and the kernel grant cannot
+        # name three different directories. Why a second grant at all: the pad
+        # lives in the session store under the CONFIG dir, while the root is
+        # wherever the host confined the session (an episode's ``world/``), so
+        # the two are siblings, not nested. Measured in a sealed benchmark
+        # record (m23smoke-t001, v0.91.6): ``write scratchpad://job.py``
+        # succeeded while every shell read/write of the same file was EPERM,
+        # because the profile granted only the root. Only the pad itself is
+        # granted -- never the session directory around it (the transcript),
+        # the config dir or HOME.
+        from local_operator.scratchpad import (
+            scratchpad_dir_of,  # local: keep this module's import graph flat
+        )
+
+        return cls.at(raw, scratchpad=scratchpad_dir_of(context))
+
+    def _granted_roots(self) -> tuple[Path, ...]:
+        """Every tree this confinement grants: the root, then the scratchpad."""
+
+        return (self.root,) if self.scratchpad is None else (self.root, self.scratchpad)
 
     def contains(self, path: Path) -> bool:
-        """Whether a RESOLVED path lies at or under the confinement root."""
+        """Whether a RESOLVED path lies at or under the root or the scratchpad.
 
-        try:
-            path.relative_to(self.root)
-        except ValueError:
-            return False
-        return True
+        The scratchpad counts so the path tools agree with the shell: a file the
+        kernel lets ``cat`` read must not be refused to ``read`` by its
+        absolute path (the path ``write scratchpad://`` reports back).
+        """
+
+        for granted in self._granted_roots():
+            try:
+                path.relative_to(granted)
+            except ValueError:
+                continue
+            return True
+        return False
 
     def path_denial(self, path: Path, *, resolvable: bool = True) -> str | None:
         """The refusal for a path outside the root, or ``None`` when inside.
@@ -509,9 +554,10 @@ class ToolConfinement:
         are still allowlisted, which is the line this boundary draws (see the
         module docstring's residuals).
 
-        The third: the write allowlist is the root plus the null devices, and
-        nothing else -- writes are the direction that matters most and they
-        are the strictest list in the file.
+        The third: the write allowlist is the root, the session's own
+        scratchpad (when it has one; see :meth:`from_context`) and the null
+        devices, and nothing else -- writes are the direction that matters
+        most and they are the strictest list in the file.
 
         The fourth: the network line. ``(deny network*)`` REPLACED the
         ``(allow network-outbound)`` this profile used to carry. The deny line
@@ -533,8 +579,9 @@ class ToolConfinement:
         beside it, or the narrow one stops meaning anything.
         """
 
+        granted = " ".join(f'(subpath "{path}")' for path in self._granted_roots())
         read_subpaths = (
-            str(self.root),
+            *(str(path) for path in self._granted_roots()),
             *self._machinery_read_subpaths(),
             *_SYSTEM_READ_SUBPATHS,
         )
@@ -551,7 +598,7 @@ class ToolConfinement:
             "(deny network*)\n"
             '(allow file-read-metadata (subpath "/"))\n'
             f'(allow file-read* (literal "/") {reads})\n'
-            f'(allow file-write* (subpath "{self.root}") {writes})\n'
+            f"(allow file-write* {granted} {writes})\n"
         )
 
 
