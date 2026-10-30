@@ -29,6 +29,10 @@ def test_untranslated_child_uses_english_source_under_supported_locales():
     # is the correct render and a key token would be the bug.
     for locale in ("fr", "ru", "vi", "hi"):
         assert messages.render(policy.label().code, {}, locale=locale) == "account selection policy"
+    # vi moved out of this half when its `relay.account_policy` catalogue shipped
+    # (2026-10-29 audit); the locales below still have no such file, so English is
+    # the correct render and a key token would be the bug.
+    for locale in ("fr", "ru", "hi"):
         assert (
             messages.render("relay.account_policy.loading", {}, locale=locale)
             == "Loading account routing…"

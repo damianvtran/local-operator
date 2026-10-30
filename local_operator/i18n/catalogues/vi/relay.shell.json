@@ -18,7 +18,7 @@
   "relay.shell.usage.family": "Hạn mức theo nhóm mô hình",
   "relay.shell.usage.included": "Hạn mức bao gồm",
   "relay.shell.usage.amount_unknown": "Chưa báo cáo số lượng",
-  "relay.shell.usage.blocked": "Chi phí không khả dụng",
+  "relay.shell.usage.blocked": "Không thể chi tiêu",
   "relay.shell.usage.eligibility_unknown": "Chưa rõ điều kiện chi tiêu",
   "relay.shell.usage.unlimited": "Hạn mức trả phí không giới hạn",
   "relay.shell.usage.window_five": "5 giờ",

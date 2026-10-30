@@ -6,7 +6,7 @@
   "relay.account_policy.saving": "Đang lưu…",
   "relay.account_policy.saved": "Đã lưu trên máy tính này.",
   "relay.account_policy.retry": "Thử lại",
-  "relay.account_policy.unavailable": "Cài đặt định tuyến tài khoản không khả dụng trên chuyển tiếp này. Hãy cập nhật Local Operator trên máy tính này.",
+  "relay.account_policy.unavailable": "Cài đặt định tuyến tài khoản không khả dụng trên máy chủ chuyển tiếp này. Hãy cập nhật Local Operator trên máy tính này.",
   "relay.account_policy.error": "Không thể xác nhận thay đổi. Hãy kiểm tra kết nối và tải lại để đọc chính sách hiện tại.",
   "relay.account_policy.scope": "Thay đổi chỉ áp dụng cho máy tính này.",
   "relay.account_policy.entry": "cài đặt",
