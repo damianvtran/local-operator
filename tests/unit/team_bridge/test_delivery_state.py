@@ -500,3 +500,77 @@ def test_probe_suspected_raises_one_contentless_owner_notification(
     rendered = json.dumps(row)
     for leak in ("SECRET-BODY-CANARY", "harassment", "abusive", "Ada", "acc_human", MID, CID):
         assert leak not in rendered, leak
+
+
+@pytest.mark.parametrize(
+    ("setup", "code"),
+    [
+        (lambda server: setattr(server, "body_route_available", False), "body_unavailable"),
+        (lambda server: setattr(server, "body_override", "tampered bytes"), "body_hash_mismatch"),
+    ],
+)
+def test_a_pre_screen_hold_publishes_held_too(tmp_path, monkeypatch, setup, code) -> None:
+    """PR #3198 review R2: a hold before screening is as invisible to the sender."""
+
+    a, config_dir, server, published, admits = _rig(tmp_path, monkeypatch)
+    screened: list[str] = []
+    _wire_rig(monkeypatch, server, {"a": (a, config_dir)}, screen_calls=screened)
+    setup(server)
+    ref = _ref(server)
+    Store(config_dir).persist_hold(a, ref.encode(), "screening_hold", retry_at=0)
+    out = _retry(a, config_dir)
+
+    assert out["outcomes"][0]["action"] == "hold"
+    hold = Store(config_dir).screening_hold(a, ref.encode())
+    assert hold is not None and hold["hold_code"] == code
+    assert screened == [] and admits == []
+    assert [(p["message_id"], p["hold_class"]) for p in published] == [(MID, "awaiting_review")]
+    assert code not in json.dumps({k: v for k, v in published[0].items() if k != "access"})
+
+
+def test_an_engagement_hold_publishes_but_a_producer_fence_does_not(tmp_path, monkeypatch) -> None:
+    from local_operator.team_bridge.connector import conversation as conversation_mod
+
+    a, config_dir, server, published, _admits = _rig(tmp_path, monkeypatch)
+    _wire_rig(monkeypatch, server, {"a": (a, config_dir)})
+    ref = _ref(server)
+
+    monkeypatch.setattr(conversation_mod, "engagement_hold", lambda d, c: "open_chief_of_staff")
+    Store(config_dir).persist_hold(a, ref.encode(), "screening_hold", retry_at=0)
+    _retry(a, config_dir)
+    assert [p["hold_class"] for p in published] == ["awaiting_review"]
+
+    # A fence (bridge off) means the connector may not act for this owner at
+    # all: no hub write, not even a best-effort one.
+    published.clear()
+    monkeypatch.setattr(conversation_mod, "_producer_fence", lambda *a, **k: "bridge_off")
+    Store(config_dir).persist_hold(a, ref.encode(), "screening_hold", retry_at=0)
+    out = _retry(a, config_dir)
+    assert out["outcomes"][0]["action"] == "hold"
+    assert published == []
+
+
+def test_a_slow_hub_costs_the_drain_at_most_the_short_cap(tmp_path, monkeypatch) -> None:
+    """PR #3198 review R3: the cap is paid per held message, so it stays short."""
+
+    from local_operator.team_bridge.connector import conversation as conversation_mod
+
+    assert conversation_mod._DELIVERY_STATE_TIMEOUT_S == 3.0
+    monkeypatch.setattr(conversation_mod, "_DELIVERY_STATE_TIMEOUT_S", 0.05)
+    a, config_dir, server, published, _admits = _rig(tmp_path, monkeypatch)
+    _wire_rig(monkeypatch, server, {"a": (a, config_dir)}, disposition="hold")
+
+    async def stalled(self: FakeWire, cid: str, mid: str, **kwargs: Any):
+        published.append({"message_id": mid})
+        await asyncio.sleep(30)
+
+    monkeypatch.setattr(FakeWire, "put_delivery_state", stalled, raising=False)
+    ref = _ref(server)
+    Store(config_dir).persist_hold(a, ref.encode(), "screening_hold", retry_at=0)
+    import time as _time
+
+    started = _time.monotonic()
+    out = _retry(a, config_dir)
+    assert _time.monotonic() - started < 5
+    assert out["outcomes"][0]["action"] == "hold"
+    assert len(published) == 1

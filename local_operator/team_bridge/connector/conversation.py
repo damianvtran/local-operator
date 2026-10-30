@@ -661,8 +661,10 @@ def _clear_terminal_hold(owner: Any, ref: ConversationFeedRef, config_dir: Path)
 
 #: Upper bound on the best-effort delivery-state write. The hold it reports is
 #: already durable locally; a slow hub must not stall the drain that re-drives
-#: every other held message.
-_DELIVERY_STATE_TIMEOUT_S = 10.0
+#: every other held message. Paid once PER held message per drain (PR #3198
+#: review R3): during an outage every held ref lands here, so the cap is short —
+#: a write that misses it is simply re-published on the next drain.
+_DELIVERY_STATE_TIMEOUT_S = 3.0
 
 
 async def _publish_held(
@@ -797,6 +799,7 @@ async def handle_conversation_available(
         }
 
     terminal = False
+    client: Any = None
     try:
         fence_code = _producer_fence(store, owner, access, settings)
         if fence_code:
@@ -806,10 +809,27 @@ async def handle_conversation_available(
         # admit; the loop re-drives it on the bounded backoff until the owner
         # sends the session a message (see ``engagement_hold``).
         engage_code = engagement_hold(designation, config_dir)
-        if engage_code:
-            return {"action": "hold", "message_id": message_id, "code": engage_code}
 
         client = wire if wire is not None else await _wire_for(owner, config_dir, auth_store)
+
+        async def held(code: str) -> dict[str, Any]:
+            """Publish "held" (best-effort), then return the hold outcome.
+
+            PR #3198 review R2: a hold BEFORE screening (body unreadable or
+            mismatched, images unbound, the owner's session not yet engaged)
+            is as invisible to the human sender as a screening hold, so every
+            hold from here on publishes too — each maps to ``awaiting_review``
+            or a coarser class, never its code. Deliberately NOT the producer
+            fence above or the ``StoreRefused`` sink below: those say the
+            connector may not act for this owner (bridge off, consent revoked,
+            owner re-enrolled), and a hub write would be acting.
+            """
+
+            await _publish_held(client, owner, ref, code, access)
+            return {"action": "hold", "message_id": message_id, "code": code}
+
+        if engage_code:
+            return await held(engage_code)
         # A durable ref is only a locator. No person-membership read or legacy
         # cached name can supply display provenance. Failed admission must not
         # post even a metadata-only card: that would still wake the recipient.
@@ -819,32 +839,28 @@ async def handle_conversation_available(
         if fetched is None:
             # Missing/old classification route or an unbound response: keep
             # the hold rather than treating a weaker history read as authority.
-            return {"action": "hold", "message_id": message_id, "code": "body_unavailable"}
+            return await held("body_unavailable")
         body_text, body_hash, display = fetched.body, fetched.body_hash, fetched.display
         if fetched.attachments is None:
             # Descriptors the hub sent but this build cannot validate: never
             # screen a guessed subset of the images; keep it retryable.
-            return {"action": "hold", "message_id": message_id, "code": "attachments_malformed"}
+            return await held("attachments_malformed")
         # Display labels are EPHEMERAL: they come from this authorized read and
         # are dropped with it (#2856 keeps them out of the durable ref). Built
         # here, once, because the image block annotates the same object.
         try:
             metadata = _card_metadata(owner, ref, display)
         except ValueError:
-            return {"action": "hold", "message_id": message_id, "code": "sender_malformed"}
+            return await held("sender_malformed")
         try:
             served_digest = hashlib.sha256(body_text.encode("utf-8")).hexdigest()
         except UnicodeEncodeError:
-            return {"action": "hold", "message_id": message_id, "code": "body_invalid"}
+            return await held("body_invalid")
         if served_digest != body_hash:
             # Neither a bad body nor an unscreened metadata notification may
             # spend a recipient turn. Keep the exact locator pending so a later
             # authorized fetch can recover; this is not terminal consumption.
-            return {
-                "action": "hold",
-                "message_id": message_id,
-                "code": "body_hash_mismatch",
-            }
+            return await held("body_hash_mismatch")
 
         # IMAGES. Screened WITH the text only when every image is verified
         # and the screening model can see them; otherwise the text is
@@ -975,25 +991,14 @@ async def handle_conversation_available(
             owner, item, config_dir=config_dir, auth_store=auth_store, settings=settings
         )
         if result is None:
-            await _publish_held(client, owner, ref, "screening_unavailable", access)
-            return {"action": "hold", "message_id": message_id, "code": "screening_unavailable"}
+            return await held("screening_unavailable")
         disposition = getattr(result, "disposition", None)
         if disposition == "hold":
-            hold_code = getattr(result, "hold_code", None) or "screening_hold"
-            await _publish_held(client, owner, ref, hold_code, access)
-            return {
-                "action": "hold",
-                "message_id": message_id,
-                "code": hold_code,
-            }
+            return await held(getattr(result, "hold_code", None) or "screening_hold")
         receipt = getattr(result, "receipt", None)
         if disposition == "bounce":
             if receipt is None:
-                return {
-                    "action": "hold",
-                    "message_id": message_id,
-                    "code": "bounce_receipt_missing",
-                }
+                return await held("bounce_receipt_missing")
             from ..store import refusal_class
 
             # The ONE coarse class may leave this machine with the verdict;
@@ -1024,11 +1029,11 @@ async def handle_conversation_available(
                 "code": "screening_bounce",
             }
         if disposition != "deliver" or receipt is None:
-            return {"action": "hold", "message_id": message_id, "code": "screening_unknown"}
+            return await held("screening_unknown")
         if receipt.body_sha256 != served_digest:
             # S-20's rule, conversation half: never wake from bytes other than
             # the ones the screener saw.
-            return {"action": "hold", "message_id": message_id, "code": "body_hash_mismatch"}
+            return await held("body_hash_mismatch")
         admitted_hash: str | None = None
         if screened_images is not None:
             if getattr(result, "attachments_hash", None) == screened_images.attachments_hash:
@@ -1037,7 +1042,7 @@ async def handle_conversation_available(
             # The verdict does not carry the image set we sent: something
             # between dispatch and here lost the binding. Never admit pixels
             # on it — hold and re-screen.
-            return {"action": "hold", "message_id": message_id, "code": "attachments_unbound"}
+            return await held("attachments_unbound")
         await client.conversation_admit(
             ref.conversation_id,
             message_id,
@@ -1137,6 +1142,9 @@ async def handle_conversation_available(
         # can retain fetched body/provider echoes even when its message is not
         # explicitly interpolated. Emit only a closed structural code here.
         logger.warning("bridge: conversation delivery held code=conversation_failed")
+        if client is not None:
+            # R2: an unexpected failure is a hold the sender should see too.
+            await _publish_held(client, owner, ref, "conversation_failed", access)
         return {"action": "hold", "message_id": message_id, "code": "conversation_failed"}
     finally:
         if terminal:
