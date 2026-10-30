@@ -15,6 +15,7 @@ The two that matter most, and why:
 from __future__ import annotations
 
 import math
+import re
 import sys
 from collections.abc import Mapping
 from pathlib import Path
@@ -3341,3 +3342,74 @@ def test_deleting_a_chain_actually_deletes_it(tmp_path: Path) -> None:
     stored = ConfigManager(tmp_path).get_config_value("retry")["fallbackChains"]
     assert "extra" not in stored, stored
     assert stored["default"] == ["openai/gpt-5"]
+
+
+#: Section name -> the title the page searches. A query for "hotkeys" has to
+#: reach the keymap rows, and the only string carrying that word is the title.
+_SECTION_TITLES = {section.name: section.title for section in settings_io.SECTIONS}
+
+
+def _fold_for_search(text: str) -> str:
+    """Fold a string the way the settings page folds it before matching.
+
+    Case, then every separator run to one space, because ``tui.theme``,
+    ``TUI Theme`` and ``tui theme`` are one string to a query. Comparisons
+    below are on whole tokens, so ``auth`` does not "match" only because it
+    sits inside ``authoring``.
+    """
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", text.casefold()).split())
+
+
+def _row_search_text(setting: settings_io.Setting) -> str:
+    """Everything one row is searched by: its own copy, its section, synonyms."""
+    title = _SECTION_TITLES.get(setting.section, setting.section)
+    return _fold_for_search(
+        f"{setting.label} {setting.help} {setting.key} {title} {' '.join(setting.synonyms)}"
+    )
+
+
+def test_every_synonym_is_clean_and_absent_from_the_row_it_decorates() -> None:
+    """Registry-wide hygiene for ``Setting.synonyms``.
+
+    Why a test rather than a review note: the page reports WHY a row matched,
+    naming the word that hit, so a synonym repeating a word already in the row's
+    own label/help/key can never be that reason - it is dead weight wearing a
+    lie. Stray case or padding is just as costly in the other direction: a
+    synonym that is not lowercase-with-no-padding no longer matches the fold a
+    query goes through, so it silently stops working. Both are cheap to author
+    wrong, so both need a guard.
+    """
+    authored = [setting for setting in settings_io.SETTINGS if setting.synonyms]
+    # An empty list here would make the query test below pass vacuously, which
+    # is how a vocabulary gets deleted while its tests stay green.
+    assert authored, "no registry row carries search synonyms"
+
+    for setting in authored:
+        own = f" {_fold_for_search(f'{setting.label} {setting.help} {setting.key}')} "
+        assert len(set(setting.synonyms)) == len(setting.synonyms), (
+            f"{setting.key} repeats a synonym: {setting.synonyms}"
+        )
+        for synonym in setting.synonyms:
+            assert synonym and synonym == synonym.strip(), (setting.key, synonym)
+            assert synonym == synonym.lower(), (setting.key, synonym)
+            assert f" {_fold_for_search(synonym)} " not in own, (
+                f"{setting.key} repeats its own words: {synonym!r}"
+            )
+
+
+@pytest.mark.parametrize("query", ["theme", "keyboard", "shortcut", "model", "effort"])
+def test_the_queries_this_vocabulary_exists_for_reach_a_row(query: str) -> None:
+    """The gaps the slice was authored against (issue #1492).
+
+    Each of these found ZERO or almost no rows before the vocabulary existed:
+    ``keyboard``/``shortcut``/``color`` matched nothing at all, and the model
+    rows only matched through the literal ``model`` in their labels. This pins
+    the outcome a person actually cares about - typing the word finds the row -
+    without pinning which row, so curation can move.
+    """
+    matches = [
+        setting
+        for setting in settings_io.SETTINGS
+        if f" {query} " in f" {_row_search_text(setting)} "
+    ]
+    assert matches, f"no setting is findable by {query!r}"

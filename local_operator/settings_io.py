@@ -375,6 +375,29 @@ class Setting:
     #: a desktop row with the rules that own it. Never authored twice — an
     #: empty string means "not a hotkey row".
     hotkey_scope: str = ""
+    #: SEARCH VOCABULARY for this row, never rendered: a query may match these
+    #: words, but no surface ever draws them as a sentence — the settings page
+    #: paints the row and, when it explains a match, names the word that hit.
+    #: Same shape and same job as ``PaletteEntry.aliases`` in the command
+    #: palette ("alias words a query may match without them being drawn",
+    #: ``tui/command_palette.py``:97-99), searched through ``match_text``
+    #: (:112-119) and never painted by ``rank_entries`` (:280-299).
+    #:
+    #: They live on the registry ROW because the row that defines a setting is
+    #: the only place a new setting can be made findable from: a second
+    #: catalogue beside this one would drift the first time a row was renamed
+    #: or retired, which is the rule the module docstring states.
+    #:
+    #: English, like the rest of this file's source copy — :func:`_t` renders
+    #: registry copy from the ``en`` catalogue — and deliberately NOT
+    #: ``wire.settings`` catalogue keys. A synonym is MATCHED TEXT, not copy:
+    #: no reader ever sees one, so keying every row's would cost a full
+    #: 8-locale translation wave for words nobody reads. Keep them CURATED:
+    #: author one only where the word a person would actually type differs from
+    #: the row's own words. A synonym repeating a word already in
+    #: ``label``/``help``/``key`` makes the page's "why did this match" reason
+    #: false, and ``tests/unit/test_settings_io.py`` fails on it.
+    synonyms: tuple[str, ...] = ()
 
     @property
     def resolved_choices(self) -> tuple[Choice, ...]:
@@ -1680,6 +1703,15 @@ def _validate_librarian_name(value: Any) -> None:
     _validate_display_name(value, example="Librarian")
 
 
+#: Aliases every hotkey row answers to. One tuple for all of them because the
+#: rows differ only in which command fires: someone hunting "how do I change
+#: that shortcut" wants the whole set, not whichever row I happened to annotate.
+#: "hotkey" is deliberately absent - the section title already reads "Hotkeys",
+#: so every row here matches it, and a synonym that only repeated the header
+#: would make the page's match reason point at the wrong thing.
+_HOTKEY_SYNONYMS: tuple[str, ...] = ("keyboard", "shortcut", "keybinding", "bind", "chord")
+
+
 SETTINGS: tuple[Setting, ...] = (
     Setting(
         key="memory.enabled",
@@ -1773,6 +1805,7 @@ SETTINGS: tuple[Setting, ...] = (
         # 1, D2). Measure any edit to these four before landing it.
         help=_t(_ws.hosting_help()),
         empty_unsets=True,
+        synonyms=("llm", "ai", "engine", "vendor"),
     ),
     Setting(
         key="model_name",
@@ -1784,6 +1817,7 @@ SETTINGS: tuple[Setting, ...] = (
         # 72 cells — see the note on `hosting` above.
         help=_t(_ws.model_name_help()),
         empty_unsets=True,
+        synonyms=("llm", "ai", "engine"),
     ),
     Setting(
         key="model_effort",
@@ -1807,6 +1841,7 @@ SETTINGS: tuple[Setting, ...] = (
         # the `/model default` receipt.
         help=_t(_ws.model_effort_help()),
         choices=_effort_choices(),
+        synonyms=("thinking", "thinking budget", "intelligence"),
     ),
     # -- providers ----------------------------------------------------------
     Setting(
@@ -2072,6 +2107,7 @@ SETTINGS: tuple[Setting, ...] = (
                 _t(_ws.providers_openrouter_data_collection_choice_deny_description()),
             ),
         ),
+        synonyms=("privacy", "tracking", "training"),
     ),
     Setting(
         key="providers.openrouter.zdr",
@@ -2413,6 +2449,7 @@ SETTINGS: tuple[Setting, ...] = (
         # rather than being the one place a theme can only be tried by keeping
         # it (#440 §3).
         preview=True,
+        synonyms=("color", "colors", "palette", "color scheme", "dark mode", "light mode"),
     ),
     # The five display flags below are the FLAT-DOTTED case: each `path` is a
     # single element containing a dot, because `tui/settings.py` reads
@@ -2670,6 +2707,7 @@ SETTINGS: tuple[Setting, ...] = (
         # (RFC §3.1 — unaudited locales are not offered). Widens by
         # regeneration, never by a code change here.
         choices_source=_language_choices,
+        synonyms=("locale", "i18n", "translation"),
     ),
     Setting(
         # The session's INITIAL dock density, not a hard override: `ctrl+g`
@@ -2959,6 +2997,7 @@ SETTINGS: tuple[Setting, ...] = (
             default=action.default,
             help=action.help,
             hotkey_scope=action.scope,
+            synonyms=_HOTKEY_SYNONYMS,
         )
         for action in _keymap.KEY_ACTIONS
     ),
@@ -3127,6 +3166,7 @@ SETTINGS: tuple[Setting, ...] = (
             _t(_ws.session_cleanup_enabled_choice_true_description()),
             _t(_ws.session_cleanup_enabled_choice_false_description()),
         ),
+        synonyms=("retention", "purge", "delete", "prune"),
     ),
     Setting(
         key="session.cleanup.max_sessions",
@@ -3138,6 +3178,7 @@ SETTINGS: tuple[Setting, ...] = (
         help=_t(_ws.session_cleanup_max_sessions_help()),
         minimum=0,
         gated_by="session.cleanup.enabled",
+        synonyms=("retention", "delete", "purge", "prune"),
     ),
     Setting(
         key="session.cleanup.max_inactive_days",
@@ -3149,6 +3190,7 @@ SETTINGS: tuple[Setting, ...] = (
         help=_t(_ws.session_cleanup_max_inactive_days_help()),
         minimum=0,
         gated_by="session.cleanup.enabled",
+        synonyms=("retention", "expiry", "age", "purge"),
     ),
     Setting(
         key="session.cleanup.max_total_bytes",
@@ -3160,6 +3202,7 @@ SETTINGS: tuple[Setting, ...] = (
         help=_t(_ws.session_cleanup_max_total_bytes_help()),
         minimum=0,
         gated_by="session.cleanup.enabled",
+        synonyms=("retention", "disk", "purge"),
     ),
     Setting(
         key="session.cleanup.remove_empty",
@@ -3174,6 +3217,7 @@ SETTINGS: tuple[Setting, ...] = (
             _t(_ws.session_cleanup_remove_empty_choice_false_description()),
         ),
         gated_by="session.cleanup.enabled",
+        synonyms=("delete", "purge", "prune"),
     ),
     # -- transcript compression ----------------------------------------------
     # The consumer is ``session/compression.py``, which reads this path back
@@ -3234,6 +3278,7 @@ SETTINGS: tuple[Setting, ...] = (
             _t(_ws.session_cleanup_delegated_enabled_choice_true_description()),
             _t(_ws.session_cleanup_delegated_enabled_choice_false_description()),
         ),
+        synonyms=("retention", "delete", "purge"),
     ),
     Setting(
         key="session.cleanup.delegated.max_age_hours",
@@ -3250,6 +3295,7 @@ SETTINGS: tuple[Setting, ...] = (
         unit="hours",
         validate_value=_validate_delegated_max_age_hours,
         gated_by="session.cleanup.delegated.enabled",
+        synonyms=("retention", "expiry", "purge"),
     ),
     Setting(
         key="runtime.unattended_gate_timeout",
@@ -3677,6 +3723,7 @@ SETTINGS: tuple[Setting, ...] = (
                 _t(_rsv.mode_choice_opt_in_description()),
             ),
         ),
+        synonyms=("privacy", "cloud", "sharing"),
     ),
     Setting(
         key="classification.timeoutMs",
@@ -5147,6 +5194,7 @@ SETTINGS: tuple[Setting, ...] = (
         minimum=60.0,
         maximum=3600.0,
         help=(_t(_ws.network_credentials_grant_ttl_s_help())),
+        synonyms=("auth", "expiry"),
     ),
     # The github adapter's allow-list (github.py's ``REPOSITORIES_PATH``; the same
     # key is read by the owner — the mint narrows to it and REFUSES when empty —
@@ -5164,6 +5212,7 @@ SETTINGS: tuple[Setting, ...] = (
         placeholder=_t(_ws.network_credentials_github_repositories_placeholder()),
         empty_unsets=True,
         validate_value=_validate_github_repositories,
+        synonyms=("auth", "access", "permissions", "scopes"),
     ),
     # -- hub ---------------------------------------------------------------
     # Defaults are LITERALS here for the same reason the aida ones are: this module
@@ -5586,6 +5635,7 @@ SETTINGS: tuple[Setting, ...] = (
                 _t(_ws.speech_voice_gender_choice_male_description()),
             ),
         ),
+        synonyms=("tts", "audio"),
     ),
     Setting(
         key="speech.voice.tone",
@@ -5622,6 +5672,7 @@ SETTINGS: tuple[Setting, ...] = (
                 _t(_ws.speech_voice_tone_choice_authoritative_description()),
             ),
         ),
+        synonyms=("tts", "audio"),
     ),
     Setting(
         key="speech.voice.expressiveness",
@@ -5670,6 +5721,7 @@ SETTINGS: tuple[Setting, ...] = (
         # Cleared, the key is removed and the consumer's own ``auto`` applies.
         empty_unsets=True,
         help=_t(_ws.speech_voice_language_help()),
+        synonyms=("tts", "audio", "locale"),
     ),
     Setting(
         key="speech.voice.accent",
@@ -5698,6 +5750,7 @@ SETTINGS: tuple[Setting, ...] = (
             'transitions, like "raha hoon" -> "rahoon" or "je m\'appelle" -> "jm\'appelle".'
         ),
         help=_t(_ws.speech_voice_instructions_help()),
+        synonyms=("tts", "audio"),
     ),
     Setting(
         key="speech.transcription.cleanup",
@@ -5732,6 +5785,7 @@ SETTINGS: tuple[Setting, ...] = (
                 _t(_ws.speech_transcription_cleanup_choice_off_description()),
             ),
         ),
+        synonyms=("stt", "speech to text", "voice", "audio"),
     ),
     # -- team bridge (agent messages, RFC §5) ---------------------------------
     # Defaults are LITERALS here, not imports: this module stays off the import
