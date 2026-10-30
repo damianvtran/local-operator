@@ -497,3 +497,105 @@ def test_cli_status_shows_the_after_screening_bucket(tmp_path, capsys, monkeypat
     assert lines[0].startswith(
         "Screening: 1 held (delivery_failed 1, held_after_screening 1; oldest "
     )
+
+
+def test_round2_codes_and_families_are_whitelisted(tmp_path) -> None:
+    """PR #3189 review round 2, m3: real connector codes must not read ``other``."""
+
+    store, owner = _setup(tmp_path)
+    now = time.time()
+    rows = {
+        "bmsg_p1": "verdict_identity_mismatch",
+        "bmsg_p2": "screening_hold",
+        "bmsg_p3": "state_unreadable",
+        "bmsg_p4": "invalid_body_reservation",
+        "bmsg_p5": "ack_recovery:hub_detail",
+        "bmsg_p6": "ack_refused:hub_detail",
+        "bmsg_p7": "ack_not_confirmed:pending",
+        "bmsg_p8": "envelope_refused:stale_proof",
+    }
+    for message_id, code in rows.items():
+        _raw_hold(tmp_path, message_id, code, created_at=now)
+
+    status = store.screening_status_readonly(owner, now=now)
+    assert status is not None
+    assert "other" not in status["held"]["by_code"]
+    assert set(status["held"]["by_code"]) == {
+        "verdict_identity_mismatch",
+        "screening_hold",
+        "state_unreadable",
+        "invalid_body_reservation",
+        "ack_recovery",
+        "ack_refused",
+        "ack_not_confirmed",
+        "envelope_refused",
+    }
+    rendered = json.dumps(status)
+    assert "hub_detail" not in rendered and "stale_proof" not in rendered
+
+
+def _non_finite(root: Path) -> None:
+    """``created_at`` = +inf, -inf and a ``'NaN'`` cell, plus an infinite breaker (m4).
+
+    A Python ``float("nan")`` binds as NULL, which the NOT NULL column refuses,
+    so a stored NaN can only arrive as text; the float path is pinned on the
+    helper itself (``test_status_timestamp_rejects_non_finite``).
+    """
+
+    for message_id, value in (
+        ("bmsg_inf", float("inf")),
+        ("bmsg_ninf", float("-inf")),
+        ("bmsg_nan", "NaN"),
+    ):
+        _raw_hold(root, message_id, "provider_error", created_at=value)
+    _raw_hold(root, "bmsg_ok", "breaker_open", created_at=time.time() - 120)
+    owner = _owner()
+    with sqlite3.connect(state_db_path(root)) as conn:
+        conn.execute(
+            "INSERT INTO screening_breaker (account_scope, failures, open_until, updated_at) "
+            "VALUES (?,?,?,?)",
+            (
+                f"{owner.canonical_base_url}|{owner.account_id}",
+                float("inf"),
+                float("inf"),
+                time.time(),
+            ),
+        )
+
+
+def test_status_timestamp_rejects_non_finite() -> None:
+    from local_operator.team_bridge.store import _status_timestamp
+
+    for value in (float("inf"), float("-inf"), float("nan"), "NaN", True, None):
+        assert _status_timestamp(value) is None
+    assert _status_timestamp(12) == 12.0
+
+
+def test_non_finite_timestamps_read_as_damaged(tmp_path) -> None:
+    store, owner = _setup(tmp_path)
+    _non_finite(tmp_path)
+
+    status = store.screening_status_readonly(owner)
+    assert status is not None
+    assert status["held"]["count"] == 4
+    assert 119 <= status["held"]["oldest_age_s"] <= 125
+    assert status["breaker"] == {"state": "closed", "failures": 0, "open_until": None}
+    # Strict JSON: no Infinity/NaN token can reach a client.
+    json.dumps(status, allow_nan=False)
+
+
+def test_cli_status_survives_non_finite_timestamps(tmp_path, capsys, monkeypatch) -> None:
+    from local_operator.team_bridge.connector import cli as tb_cli
+
+    _setup(tmp_path)
+    _non_finite(tmp_path)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    assert tb_cli.main(_cli(["team-bridge", "receiver", "status"])) == 0
+    human = capsys.readouterr().out
+    line = next(ln for ln in human.splitlines() if ln.startswith("Screening:"))
+    assert "inf" not in line and "nan" not in line
+    assert line.startswith("Screening: 4 held (provider_error 3, breaker_open 1; oldest 2m)")
+    assert tb_cli.main(_cli(["team-bridge", "receiver", "status", "--json"])) == 0
+    raw = capsys.readouterr().out
+    assert "Infinity" not in raw and "NaN" not in raw
+    assert json.loads(raw)["screening"]["held"]["count"] == 4

@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import sqlite3
 import time
@@ -1080,13 +1081,41 @@ _DELIVERY_HOLD_CODES = frozenset(
         # the loop's own defaults (connector/loop.py)
         "hold",
         "retry_failed",
+        # wake.py's recorded-verdict hand-off and conversation.py's screening
+        # outcome default (PR #3189 review round 2, m3)
+        "verdict_identity_mismatch",
+        "screening_hold",
+        # StoreRefused codes the connector saves verbatim as a hold
+        # (``{"action": "hold", "code": failure.code}`` in loop.py and
+        # conversation.py): the codes the store calls on those paths raise,
+        # taken from store.py (_connect/_init/_require_live/claim/
+        # record_body_reservation)
+        "state_unreadable",
+        "invalid_body_reservation",
+        "schema_unsupported",
+        "schema_unversioned",
+        "ref_migration_conflict",
+        "stale_generation",
+        "not_enrolled",
+        "busy",
     }
 )
 
 #: Families written as ``<family>:<detail>`` (``phase_refused:<code>`` in
-#: wake.py, ``policy_stale:<code>`` from the pre-handoff gate): the family is
-#: the code; the detail is a hub string and is never echoed.
-_FAMILY_HOLD_CODES = frozenset({"phase_refused", "policy_stale"})
+#: wake.py, ``policy_stale:<code>`` from the pre-handoff gate, and wake.py's
+#: ACK/envelope outcomes ``ack_recovery:``/``ack_refused:``/
+#: ``ack_not_confirmed:``/``envelope_refused:``): the family is the code; the
+#: detail is a hub string and is never echoed.
+_FAMILY_HOLD_CODES = frozenset(
+    {
+        "phase_refused",
+        "policy_stale",
+        "ack_recovery",
+        "ack_refused",
+        "ack_not_confirmed",
+        "envelope_refused",
+    }
+)
 
 #: The ``screening_holds.failure_class`` vocabulary a sibling change writes
 #: (provider failover classification). Same rule: unlisted reads ``other``.
@@ -1121,11 +1150,19 @@ def _status_failure_class(value: Any) -> str:
 
 
 def _status_timestamp(value: Any) -> float | None:
-    """A stored REAL as a float, or ``None`` for a damaged cell (review m2)."""
+    """A stored REAL as a finite float, or ``None`` for a damaged cell.
+
+    Non-numeric (review m2) and non-finite (round 2, m4) values both read as
+    damaged: SQLite keeps ``inf``/``-inf`` as REALs (Python's driver binds
+    ``NaN`` as NULL, which these NOT NULL columns refuse, but the guard does
+    not rely on that), and an infinite age or breaker deadline would render
+    as ``inf`` on the CLI and break strict JSON on the desktop route.
+    """
 
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    return float(value)
+    number = float(value)
+    return number if math.isfinite(number) else None
 
 
 def read_screening_status(config_dir: Path) -> dict[str, Any] | None:
