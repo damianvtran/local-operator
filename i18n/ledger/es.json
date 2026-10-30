@@ -2047,7 +2047,7 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "137 keys; round-1 audit passed with 2 minor (under-quantified lower-bound note, calque \"bajo profundidad\") and 3 nit; remediated, round 2 re-audited the delta and passed 0/0/0/0. `copy.code_count` keeps a non-plural source on purpose (sidecar forbids a branch; parity refuses simp"
+      "note": "137 keys; round 1: 2 minor, 3 nit (lower-bound note, \"bajo profundidad\" calque); remediated, round 2 passed 0/0/0/0. `copy.code_count` stays non-plural on purpose: sidecar forbids a branch, parity refuses simple→plural."
     },
     {
       "locale": "es",
@@ -2104,7 +2104,7 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "98 keys; round-1 passed with 2 minor (\"pensamiento\" for the reasoning-token class, compact hint tier losing the row noun) and 3 nit; remediated, round 2 passed. `hint.expand.keys_bare` is 14 cells against a cap of 12 that English itself misses at 13 — recorded as a width exceptio"
+      "note": "98 keys; round 1: 2 minor, 3 nit (\"pensamiento\"→\"razonamiento\", compact hint lost its noun); QA then found two Totals labels overrunning the 22-cell column, shortened and re-audited. keys_bare is 14 vs cap 12 (en 13): guide exception."
     },
     {
       "locale": "es",
@@ -2123,7 +2123,7 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "87 keys, no en sidecar: register judged against shipped es TUI copy and the import view source. Round 1 raised 1 major (composed session row 80 cells against the 76-cell pinned row, so esc vanished), 2 minor; remediated to 75 cells and re-audited in round 2, which passed and prov"
+      "note": "87 keys, no en sidecar (register judged vs shipped es TUI). Round 1: 1 major (session row 80 cells vs pinned 76, esc clipped), 2 minor; fixed to 75 and re-audited in round 2, which passed after proving the assembler on the real widget."
     },
     {
       "locale": "es",
@@ -2161,7 +2161,7 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "46 keys; round 1 raised 3 major: toggle receipt agreed masculine against two feminine labels, \"asentados\" read as goals-set not goals-finished, and three /help rows composed 78–80 cells against the pinned 74. Remediated (feminine forms, `finalizados`, rows 68/73/72) and round 2 p"
+      "note": "46 keys; round 1: 3 major (masculine toggle vs two feminine labels, \"asentados\" for finished goals, three /help rows 78–80 vs pinned 74) fixed to feminine, `finalizados`, 68/73/72; round 2 passed."
     },
     {
       "locale": "es",
@@ -2180,7 +2180,7 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "21 keys; round 1 raised 1 major (`cuota incluida agotada` for the sentence relay.shell already ships as `Asignación incluida agotada` — one money object, two names) and 3 minor. Remediated to the relay term and to count-neutral label-first counters; round 2 passed, round 3 confir"
+      "note": "21 keys; round 1: 1 major (`cuota` vs relay `Asignación` for one money object) + 3 minor; aligned, counters made count-neutral; rounds 2–3 passed. Paid annotations kept relay-identical: width exception in the es guide."
     }
   ]
 }
