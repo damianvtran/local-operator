@@ -144,7 +144,9 @@ GROUP_CALLS: list[tuple[str, str, dict[str, object], dict[str, object], str, str
 ]
 
 
-def _settled_summary(name: str, args: dict, details: dict, state: str, start: Any) -> str:
+def _settled_summary(
+    name: str, args: dict[str, object], details: dict[str, object], state: str, start: Any
+) -> str:
     """The SETTLED summary, as the live/replay settle arms paint it.
 
     ``_summarize_args`` is the call-START paint (a running verb for bridge);

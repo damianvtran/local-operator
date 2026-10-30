@@ -131,7 +131,9 @@ def main() -> None:
                     break
             except Exception:  # noqa: BLE001  -- not up yet
                 if fixture.poll() is not None:
-                    raise RuntimeError(f"fixture exited: {fixture.stdout.read()}") from None
+                    raise RuntimeError(
+                        f"fixture exited: {fixture.stdout.read() if fixture.stdout else ''}"
+                    ) from None
                 time.sleep(0.4)
         else:
             raise RuntimeError("fixture never served /login")
