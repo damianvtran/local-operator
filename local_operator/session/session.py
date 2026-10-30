@@ -16555,6 +16555,7 @@ class Session:
         key: str,
         links: list[dict[str, str]],
         anchor_id: str,
+        raise_banner: bool = True,
     ) -> str:
         """Persist unread; presence never proves a newly written callout was seen.
 
@@ -16562,6 +16563,18 @@ class Session:
         covered, or showing a child. Only a later item-specific render receipt
         can acknowledge this revision. L1b owns bounded banner grace; it must
         re-read the item's read watermark before claiming delivery.
+
+        ``raise_banner`` is an ACTION OF THIS DOOR, not a second door: the
+        ``notify`` tool never passes it, so the agent-facing write keeps its own
+        behaviour byte for byte. A PARKED GATE passes ``False``, because that
+        park's OS banner is already owned by ``ServingSessionHandle._announce_pending``
+        — which decides ONCE, at park, against the watching surfaces, the
+        desktop lease, a hidden session and the kill switch, and re-decides when
+        the operator detaches (``reannounce_pending``). Letting this write
+        banner the same park after the grace would put two lock-screen cards on
+        one event, the duplicate ``_announce_pending`` already refuses between
+        its own Electron and detached legs. The row is the durable half of a
+        park and needs no toast of its own to justify its existence.
         """
         from local_operator.notifications.store import NotificationStore
 
@@ -16590,9 +16603,160 @@ class Session:
         # the write's action, revision and priority. Best-effort: a banner is
         # chrome and the item is already durable, so a delivery failure leaves
         # an unread row rather than failing the tool call the model made.
-        if outcome.priority == "high":
+        if raise_banner and outcome.priority == "high":
             await self._route_item_banner(root, store, outcome, title=title, body=body)
         return _notify_sentence(outcome)
+
+    def _notification_owner(self) -> "Session | None":
+        """The session whose inbox an item raised for THIS one belongs in.
+
+        THE GATE ABOVE ANSWERS A DIFFERENT QUESTION (:meth:`_notify_inbox_callable`).
+        It answers "is there an inbox the operator reads for this session", and
+        it is right to refuse a delegated child, a hidden session, a one-shot
+        host, an output-contract session and ``LOP_NOTIFY=0`` — the agent-callable
+        tool speaks for the session the model is running in, and a child has its
+        parent to decide whether the operator needs an item
+        (``docs/design/notifications-inbox.md`` §3.2).
+
+        A PARKED GATE IS NOT THAT KIND OF EVENT. It is a human-blocking
+        condition, and the one that matters most: a subagent held on an approval
+        is the parent conversation unable to advance. Attribution is what the
+        child arm is about, not existence, so this walks the parent links to the
+        session the operator actually reads and answers the question there.
+
+        THE REST OF THE GATE IS NOT RE-STATED HERE (:meth:`_notify_inbox_callable`).
+        A one-shot host, an output-contract session and ``LOP_NOTIFY=0`` still
+        mean there is no inbox to put an item in, and the caller asks exactly
+        that of the OWNER this returns — one definition of the exclusions, so the
+        day the tool's gate grows a condition the gate path inherits it instead
+        of drifting out of step with it. The walk's own termination already
+        leaves the owner a listed, non-child session, which is what makes that
+        reuse a no-op rather than a second opinion. ``None`` therefore means "no
+        conversation this process can reach", never "no caller asked".
+
+        A parent link that is GONE (a weakref to a collected parent, a resumed
+        child whose parent is not in this process) answers ``None``: the item
+        would name a conversation this process cannot reach, and inventing an
+        owner is worse than the drop.
+        """
+        seen: set[int] = set()
+        owner: Session | None = self
+        while owner is not None and (owner._job_id is not None or not owner._session_is_listed()):
+            if id(owner) in seen:
+                return None  # a cycle no real graph has; never loop on it
+            seen.add(id(owner))
+            owner = owner._parent_session
+        if owner is None:
+            return None
+        return owner
+
+    async def raise_gate_item(
+        self, kind: str, gate_title: str, gate_detail: str, wait_id: str
+    ) -> None:
+        """Raise the operator's inbox row for a gate that has just PARKED.
+
+        The inbox had one writer, :meth:`_notify_inbox` (the door behind the
+        ``notify`` tool), and nothing on the gate path called it — so an approval
+        or a question that parked was on every surface except the reel, and an
+        operator away from the screen learned of it only from a banner that is
+        gone once dismissed. This goes through the SAME door, deliberately: the
+        row keeps the attribution, the same-topic fold into an open ask
+        (``asks/dedupe.py``), the priority ladder and the store's read/dismiss
+        marks. A second store or a second row shape is how the two systems drift
+        and the operator ends up with an item they cannot clear.
+
+        ``kind`` is the ``NotificationKind`` of the gate ("approval" or "ask"),
+        and ``gate_title``/``gate_detail`` are exactly the pair the host hands
+        :meth:`_announce_pending`, so the composed sentence is the one every
+        other gate surface shows (``notifications.compose.gate_body``) rather
+        than a second wording. For a SECRET question ``gate_detail`` is empty by
+        the host's own rule, and the shared vocabulary carries the row instead —
+        a lock-screen item must not enumerate the user's missing credentials.
+
+        The priority is ``high`` because the turn cannot advance: the store's own
+        ladder describes an open ask that way, and a wait for the operator is the
+        same fact whichever side of the gate it came from.
+
+        THE KEY NAMES THE WAIT, NOT THE TOOL (QA round 1, Q1/Q2). It is
+        ``gate:{kind}:{wait_id}``, where ``wait_id`` is the id the gate minted
+        for THIS park. One wait that signals twice updates its own row — the
+        dedupe the store's key column exists for — while a SECOND wait is a new
+        row: a card opened in a parallel tool batch beside another for the same
+        tool, or a park arriving after the operator dismissed the previous one.
+        Keying on the tool instead collapsed those into the first row, and the
+        store only revives a dismissed row on a priority ESCALATION
+        (``NotificationStore.notify``'s keyed branch) while every gate row is
+        already ``high`` — so dismissing one card silently muted that tool for
+        the rest of the process, which is the very "the notification dies with
+        its dismissal" gap this change exists to close. Forcing the revival by
+        escalating the priority would trade that bug for a worse one: a rising
+        severity banner instead of a row the operator can read.
+
+        ``wait_id`` also keeps the key free of content: an ask's ``gate_title``
+        is the question's prose, and a key is a durable index into the store,
+        so the identifier the gate already minted is the only safe thing to key
+        on.
+
+        NEVER RAISES, AND THAT COVERS THE WHOLE RAISE. The card is already
+        parked by the time this runs, so a busy or unreadable inbox, an
+        unimportable composer and an unexpected failure in the owner walk must
+        all cost the row and not the gate — a lost item is the bug this fixes,
+        an unparked approval would be a worse one. Everything below the
+        docstring — the walk, the gate question, both lazy imports and the
+        composed text — sits inside ONE ``try``. The imports stay lazy on
+        purpose: ``local_operator.tui.notify`` is imported inside
+        ``_announce_pending`` for the same reason, and only the tools and
+        surfaces that render it should pay for it. Nothing is swallowed
+        silently: everything is logged.
+        """
+        try:
+            owner = self._notification_owner()
+            if owner is None:
+                logger.debug(
+                    "gate item: no inbox the operator reads for %s (%s); not raised",
+                    self.session_id,
+                    kind,
+                )
+                return
+            # THE TOOL'S OWN GATE, ASKED OF THE OWNER, AND ITS OWN DOOR RETURNED:
+            # the exclusions are stated once (``_notify_inbox_callable``) and the
+            # callable it hands back is ``_notify_inbox`` — so the item below is
+            # written by the very method every other writer of the inbox uses.
+            door = owner._notify_inbox_callable()
+            if door is None:
+                logger.debug(
+                    "gate item: %s has no inbox door for the operator (%s); not raised",
+                    owner.session_id,
+                    kind,
+                )
+                return
+            from local_operator.notifications import gate_body
+            from local_operator.tui.notify import CONTEXTS
+
+            await door(
+                title=gate_body(kind, gate_title, gate_detail),
+                # The state CATEGORY, from the same vocabulary the banner beside it
+                # uses (CONTEXTS["approval"] and ``["ask"]`` are the same
+                # category on purpose — both mean the turn is held).
+                body=CONTEXTS.get(kind, ""),
+                priority="high",
+                key=f"gate:{kind}:{wait_id}",
+                links=[],
+                anchor_id="",
+                # THE PARK'S BANNER BELONGS TO ``_announce_pending``, which ran
+                # beside this call and decided it once, on the evidence this door
+                # does not have (watching surfaces, the desktop lease, a hidden
+                # session). One park, one event, one lock-screen card: the row
+                # raised here is the durable half and stays silent.
+                raise_banner=False,
+            )
+        except Exception:  # noqa: BLE001 — the gate settles the card, not the inbox
+            logger.warning(
+                "gate item: could not raise the %s item for %s",
+                kind,
+                self.session_id,
+                exc_info=True,
+            )
 
     def _fold_notify_into_open_ask(self, title: str, body: str, priority: str) -> str | None:
         """The suppression sentence when ``notify`` duplicates an open ask, else ``None``.
