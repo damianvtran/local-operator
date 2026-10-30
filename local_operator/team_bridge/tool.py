@@ -44,6 +44,18 @@ THE CHANNEL OPS work the conversation domain AS THIS SESSION'S AGENT:
   as a REPLY in that message's thread instead of at channel level — how agents
   coordinate without flooding the channel (e.g. one QA-claim thread per item
   in #agents). Threads are one level: the root must be a channel-level message.
+
+  ``to: {"name": …}`` DIRECTS the post at one member, and the name is resolved,
+  never guessed: trimmed, case-insensitive, whole DISPLAY name only (no handle,
+  no email, no substring), against THIS conversation's ACTIVE members — the
+  scope is the room the message lands in, so a colleague who exists in the
+  organization but is not in this conversation cannot be resolved to. Exactly
+  one match becomes that member's mention row on the wire (``kind`` +
+  ``account_id``), so the name itself never leaves the machine; zero matches
+  and several matches both refuse, the latter listing the candidates. The
+  attempt is written to ``recipient_resolutions.jsonl`` (requested name,
+  resolved id or null, matched count, conversation id) BEFORE the post, and on
+  a refusal too, so a misdelivery claim is reconstructable afterwards.
 - **channel_thread** — one thread, oldest-first: the root (with its reply
   count) and a bounded page of replies. Same screening rule as history — an
   unadmitted reply is metadata with ``body`` null.
@@ -62,10 +74,26 @@ carries that session id as origin provenance (the server stores it and never
 returns it); a runtime with no endpoint refuses every channel op rather than
 acting as a human. Neither message bodies nor session ids are ever logged here.
 
+A DISPLAY NAME (``to: {"name": …}``) is resolved, never guessed, and WHICH SET
+it resolves against is the difference between the two lanes:
+``channel_post`` resolves inside that conversation's active members (it carries
+a conversation id), while ``send``/``reply`` resolve inside the owner's own
+``send`` allowlist intersected with the bridge directory (they carry no
+conversation id at all, so the conversation rule cannot apply). Both run the
+same resolver, both demand exactly one match, and both record the attempt in
+``recipient_resolutions.jsonl`` before anything is sent — with the scope word in
+the row, so a later misdelivery claim is answerable for either lane.
+
 REFUSALS, one line each: ``not_permitted`` for ``decide``; ``invalid_request``
-for unknown ops, malformed ``channel_id``, bad history bounds/limits, and
-invalid member shapes; ``no_agent_endpoint`` when a channel op has no owner
-endpoint; ``*_failed`` when the transport does not confirm.
+for unknown ops, malformed ``channel_id``, bad history bounds/limits, invalid
+member shapes, and a display name that resolves to no member, to several, or to
+one whose bridge is not enabled; ``no_agent_endpoint`` when a channel op has no
+owner endpoint; ``members_failed`` when the conversation read that supplies the
+candidates does not answer; ``directory_failed`` when the directory/allowlist
+pair that a ``send``/``reply`` name resolves against does not answer;
+``audit_unavailable`` when the resolution could not be recorded (nothing is sent,
+posted or queued — a directed delivery that cannot be accounted for is refused);
+``*_failed`` when the transport does not confirm.
 
 THE RUNTIME IS BUILD-TIME GATED: a session with no bridge runtime — unsigned,
 disabled, or with no live enrollment generation — never advertises this tool at
@@ -112,12 +140,25 @@ from local_operator.harness.types import (
 
 from .client import TeamBridgeClient
 from .outbox import Outbox, send_from_outbox
+from .recipient_resolution import (
+    ResolutionAuditUnavailable,
+    members_from_allowlist,
+    members_from_conversation,
+    record_resolution,
+    resolve_for_delivery,
+)
 from .types import _CONVERSATION_MESSAGE_ID as _CANONICAL_MESSAGE_ID
 from .types import (
     CONVERSATION_ID_PATTERN,
+    RECIPIENT_NAME_SHAPE,
+    SCOPE_ALLOWLIST,
+    SCOPE_CONVERSATION,
     SEND_RECIPIENT_DESCRIPTION,
     InvalidSendRecipient,
+    NameResolution,
+    RecipientNameRefused,
     is_conversation_message_id,
+    validate_recipient_shape,
     validate_send_recipient,
 )
 
@@ -274,11 +315,20 @@ def _closed_recipient_schema(schema: dict[str, Any]) -> None:
             branch["additionalProperties"] = False
 
 
-#: The recipient OBJECT shape as a type: exactly one of the two keys, each a
+#: The recipient OBJECT shape as a type: exactly one of the three keys, each a
 #: non-empty string. Cardinality and the closed key set live HERE (not on the
 #: field) so they still apply now that the field also accepts a bare id.
+#:
+#: ``name`` is in the closed set because ``channel_post`` accepts it, and the
+#: schema is ONE object for every op. It is not therefore addressable: the
+#: per-op check decides. ``send``/``reply`` refuse it before admission
+#: (``validate_send_recipient`` — they carry no conversation to scope a
+#: resolution to); ``channel_post`` resolves it against that conversation's
+#: active members (``resolve_for_delivery``). Advertising it at the schema and
+#: refusing it per op is deliberate: a model should be able to choose the right
+#: op by reading the tool, and the description says which op resolves a name.
 _SendRecipientObject = Annotated[
-    dict[Literal["endpoint_id", "account_id"], Annotated[str, Field(min_length=1)]],
+    dict[Literal["endpoint_id", "account_id", "name"], Annotated[str, Field(min_length=1)]],
     Field(min_length=1, max_length=1),
 ]
 
@@ -366,8 +416,12 @@ class BridgeToolParams(BaseModel):
         class of silent reinterpretation ``validate_send_recipient`` exists to stop.
         Delegating (rather than re-deriving the mapping here) is what keeps ONE
         rule for the executor, the wire client and every other caller.
+
+        The SHAPE validator, not the send one: a display name is a legal shape for
+        the op that can resolve it, and this model is shared by every op. The
+        op-specific refusal is the executor's, where the op is known.
         """
-        return None if value is None else validate_send_recipient(value)
+        return None if value is None else validate_recipient_shape(value)
 
 
 def _error(message: str, *, code: str = "invalid_request") -> dict[str, Any]:
@@ -452,9 +506,16 @@ def _resolve_reply(
         return args, _error("the received message names no sender", code="unknown_message")
     explicit = args.get("to")
     if explicit is None:
-        # The endpoint is the precise addressee; the account is the fallback
-        # the pair contract also accepts (exactly one key on the wire).
+        # The pair lane resolves the sender; see the note on the name branch below.
         to = {"endpoint_id": sender["endpoint_id"]} if "endpoint_id" in sender else sender
+    elif isinstance(explicit, dict) and "name" in explicit:
+        # A NAME has no destination yet: it is resolved AFTER the admission fence
+        # (the directory and the owner's own allowlist are wire reads, and this
+        # function must not make one before admission). The executor calls this
+        # function again on the resolved pair, so the sender check below is
+        # applied a moment later rather than skipped — the guard is relocated,
+        # never dropped.
+        return args, None
     else:
         try:
             to = validate_send_recipient(explicit)
@@ -473,6 +534,64 @@ def _resolve_reply(
             code="reply_conflict",
         )
     return {**args, "to": to, "thread_id": row["thread_id"]}, None
+
+
+async def _resolve_named_recipient(
+    runtime: "BridgeRuntime", requested: str
+) -> tuple[dict[str, str] | None, dict[str, Any] | None]:
+    """Resolve a display name to ONE addressable pair for ``send``/``reply``.
+
+    Returns ``(pair, None)`` to proceed or ``(None, refusal)``.
+
+    SCOPE, and why it is not the conversation rule: these ops carry no
+    conversation id, so there is no room to scope a name to. The scope is the
+    owner's REACHABLE set — the bridge directory intersected with the owner's own
+    send-allowlist (``members_from_allowlist``, one function, shared) — which is
+    narrower than the organization directory on purpose: a name may only resolve
+    to somebody this owner has explicitly permitted, and an empty allowlist
+    resolves nobody rather than falling back to the directory.
+
+    The audit row is the same row ``channel_post`` writes, under
+    ``scope=allowlist``, with the TENANT as its id: the allowlist is the owner's
+    per organization, and a reconstruction has to know which one it was read
+    from. Both reads happen after the admission gate (they are wire calls), and a
+    read that fails is still recorded — as an ``unavailable`` attempt — so the
+    one path that never resolved anything does not become the one path with no
+    record.
+    """
+
+    scope_id = str(getattr(runtime, "tenant_id", "") or "")
+    try:
+        directory = await runtime.client.directory(runtime.tenant_id)
+        allowlist = await runtime.client.allowlist(tenant_id=runtime.tenant_id)
+    except Exception as failure:
+        try:
+            record_resolution(
+                config_dir=runtime.config_dir,
+                scope=SCOPE_ALLOWLIST,
+                scope_id=scope_id,
+                resolution=NameResolution(requested=requested.strip(), matches=()),
+                outcome="unavailable",
+            )
+        except ResolutionAuditUnavailable as unaudited:
+            return None, _error(str(unaudited), code=unaudited.code)
+        return None, _error(
+            f"could not read the directory and allowlist a name resolves against: {failure}",
+            code="directory_failed",
+        )
+    try:
+        member = resolve_for_delivery(
+            config_dir=runtime.config_dir,
+            scope=SCOPE_ALLOWLIST,
+            scope_id=scope_id,
+            requested_name=requested,
+            candidates=members_from_allowlist(directory, allowlist),
+        )
+    except RecipientNameRefused as failure:
+        return None, _error(str(failure), code=failure.code)
+    except ResolutionAuditUnavailable as failure:
+        return None, _error(str(failure), code=failure.code)
+    return {"account_id": member.account_id}, None
 
 
 # -- directory + direct messages ----------------------------------------------
@@ -935,13 +1054,25 @@ def _posted_message(result: Any) -> tuple[str, int | None]:
 
 
 def _post_receipt(
-    conversation_id: str, result: Any, *, thread_root_id: str = "", lead: str = "posted to"
+    conversation_id: str,
+    result: Any,
+    *,
+    thread_root_id: str = "",
+    lead: str = "posted to",
+    mention_account_id: str = "",
 ) -> dict[str, Any]:
     """The ONE success receipt for a conversation write (channel_post, dm).
 
     Carries ``message_id`` and ``seq`` as fields so the sender can confirm the
     post and pass the id back as ``thread_root_id``. A missing id is reported
     honestly as unconfirmed rather than rendered as ``?``.
+
+    ``mention_account_id`` is set only when the write DIRECTED the message at a
+    member (a name resolved to exactly one): the receipt then carries
+    ``resolved_account_id`` and says which account the post reached. Absent for
+    a plain post and for ``dm``, whose destination is the conversation itself —
+    the key means "this write named a member", so omitting it when nothing was
+    named is the honest shape, not an empty string pretending to be an id.
     """
 
     message_id, seq = _posted_message(result)
@@ -952,7 +1083,9 @@ def _post_receipt(
         content += f" (reply in thread {thread_root_id})"
     if seq is not None:
         content += f" at seq {seq}"
-    return {
+    if mention_account_id:
+        content += f" (mentioning {mention_account_id})"
+    receipt: dict[str, Any] = {
         "ok": True,
         "state": "sent",
         "conversation_id": conversation_id,
@@ -964,6 +1097,9 @@ def _post_receipt(
         "execution_confirmed": False,
         "content": content,
     }
+    if mention_account_id:
+        receipt["resolved_account_id"] = mention_account_id
+    return receipt
 
 
 def _full_body_text(result: Any) -> str | None:
@@ -1078,7 +1214,15 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
     # Refuse unsupported destinations before even scheduling admission I/O.
     # The local authority fence keeps precedence; no invalid destination can
     # create an outbox intent, send a message, or trigger a status request.
+    #
+    # A NAME destination is the one shape the SHAPE check cannot finish here:
+    # turning a display name into an account id needs the bridge directory and
+    # the owner's own allowlist, which are wire reads and therefore sit after the
+    # admission gate. The shape is still checked now (cheaply, before any I/O),
+    # and the pair lane's reading of it is enforced at both ends: a name is
+    # resolved below, an id/endpoint is validated exactly where it always was.
     recipient: dict[str, str] = {}
+    named_recipient = ""
     if op == "reply":
         # Resolution reads only the local store, so it sits between the fence
         # and the recipient check (R9): an unresolvable reply refuses here,
@@ -1088,9 +1232,13 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
             return refused
     if op in ("send", "reply"):
         try:
-            recipient = validate_send_recipient(args.get("to"))
+            shape = validate_recipient_shape(args.get("to"))
         except InvalidSendRecipient as failure:
             return _error(str(failure), code=failure.code)
+        if "name" in shape:
+            named_recipient = shape["name"]
+        else:
+            recipient = shape
     # ADMISSION GATE, second: only a SETTLED "admitted" may act. A non-admitted
     # state refuses THIS op typed and schedules the same single-flight boundary
     # read (fire-and-forget — never waits, never posts). ``take_up`` is a FETCH
@@ -1103,6 +1251,31 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
     if refusal is not None:
         admit_soon(runtime)
         return _error(refusal["error"], code=refusal["code"])
+
+    if named_recipient:
+        # A name becomes an address HERE: after the admission gate (its reads are
+        # wire calls) and before anything is recorded or sent. The args carry the
+        # resolved PAIR from this point on, so every downstream step — the params
+        # model, the reply's own sender check, the durable outbox intent, the
+        # wire body — sees exactly what an explicit account id would have given
+        # it. Nothing downstream has to know a name was ever involved.
+        resolved_to, unresolved = await _resolve_named_recipient(runtime, named_recipient)
+        if unresolved is not None or resolved_to is None:
+            # The helper returns a pair or a refusal. A None PAIR with no refusal
+            # would be a bug in it, and an `assert` here would be stripped under
+            # `-O` into an outbox intent whose `to` is None — so the unreachable
+            # case is a typed refusal, the same way every other unknown is.
+            return unresolved or _error(
+                "that recipient name did not resolve to an address; nothing was sent"
+            )
+        args = {**args, "to": resolved_to}
+        recipient = resolved_to
+        if op == "reply":
+            # The pair exists, so the pair lane's own local check runs now — the
+            # answer must address the sender of the message it answers.
+            args, refused = _resolve_reply(runtime, args)
+            if refused is not None:
+                return refused
 
     try:
         params = BridgeToolParams(**args)
@@ -1325,6 +1498,69 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         thread_root_id = params.thread_root_id.strip()
         if thread_root_id and _CONVERSATION_MESSAGE_ID.fullmatch(thread_root_id) is None:
             return _error("channel_post thread_root_id must be a message id (bcmsg_…)")
+        # WHO this post is directed at, resolved BEFORE anything is posted. The
+        # candidate set is THIS conversation's active members — the least
+        # privilege rule of this slice: a name from elsewhere in the organization
+        # is not a candidate, so it cannot resolve and cannot be delivered to.
+        # A resolved name never reaches the wire as a name; only its ids do.
+        mentions: list[dict[str, str]] = []
+        recipient_account_id = ""
+        if params.to:
+            # The ANNOTATION on ``params.to`` is the published union (object | bare
+            # id), which is what the type checker sees; the field validator has
+            # already canonicalised the value, and re-stating the shape here is
+            # the SAME rule read once more rather than a second one. It also
+            # keeps a bare id from being treated as a name by accident.
+            recipient = validate_recipient_shape(params.to)
+            if "name" not in recipient:
+                # An id is not a name: the directory read that produces ids is
+                # the caller's, and a name is the form a human actually has.
+                return _error(
+                    "channel_post addresses a member by display name "
+                    f"({RECIPIENT_NAME_SHAPE}); endpoint_id/account_id belong to send/reply"
+                )
+            try:
+                conversation = await runtime.client.conversation(
+                    channel_id, tenant_id=runtime.tenant_id
+                )
+            except Exception as failure:
+                # No candidate set exists, so no resolution ran — but the ATTEMPT
+                # did, and every attempt is recorded. The outcome word is
+                # ``unavailable`` rather than a derived ``no_match``, because
+                # nobody was consulted; ``no_match`` would say the members were
+                # read and none matched, which is a different fact.
+                try:
+                    record_resolution(
+                        config_dir=runtime.config_dir,
+                        scope=SCOPE_CONVERSATION,
+                        scope_id=channel_id,
+                        resolution=NameResolution(requested=recipient["name"].strip(), matches=()),
+                        outcome="unavailable",
+                    )
+                except ResolutionAuditUnavailable as unaudited:
+                    return _error(str(unaudited), code=unaudited.code)
+                return _error(
+                    f"could not read this conversation's members: {failure}",
+                    code="members_failed",
+                )
+            try:
+                member = resolve_for_delivery(
+                    config_dir=runtime.config_dir,
+                    scope=SCOPE_CONVERSATION,
+                    scope_id=channel_id,
+                    requested_name=recipient["name"],
+                    candidates=members_from_conversation(conversation),
+                )
+            except RecipientNameRefused as failure:
+                # The attempt is ALREADY recorded (resolve_for_delivery writes the
+                # row before the match is acted on), so a refusal leaves the same
+                # reconstructable record a delivery does — this is where a later
+                # "it went to the wrong colleague" claim gets answered from.
+                return _error(str(failure), code=failure.code)
+            except ResolutionAuditUnavailable as failure:
+                return _error(str(failure), code=failure.code)
+            mentions = [member.mention()]
+            recipient_account_id = member.account_id
         # ONE ref per CALL, minted before dispatch: the client's own 401 refresh
         # retry re-sends this exact body, so that retry is idempotent on the
         # server; a second tool call mints a second ref and is a second message.
@@ -1338,10 +1574,21 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
                 actor_endpoint_id=endpoint_id,
                 origin_session_id=runtime.session_id,
                 thread_root_id=thread_root_id or None,
+                mentions=mentions or None,
             )
         except Exception as failure:
             return _error(f"the post did not confirm: {failure}", code="post_failed")
-        return _post_receipt(channel_id, result, thread_root_id=thread_root_id)
+        # ONE receipt shape for every conversation write (main's `_post_receipt`,
+        # shared with `dm`), EXTENDED with the resolved recipient rather than
+        # rebuilt here: a second construction site is how the two lanes drift.
+        # ``mention_account_id`` is the id the post was actually directed at, so
+        # the confirmation names a fact instead of restating the caller's ask.
+        return _post_receipt(
+            channel_id,
+            result,
+            thread_root_id=thread_root_id,
+            mention_account_id=recipient_account_id,
+        )
 
     if params.op == "react":
         channel_id = params.channel_id.strip()

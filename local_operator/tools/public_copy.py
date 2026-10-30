@@ -646,7 +646,7 @@ def _committed_public_copy(
     renders through :func:`_refusal`.
 
     ``HEAD`` is the committed copy, and this reader serves THAT blob rather than
-    the working-tree file. Five consequences, all measured in review:
+    the working-tree file. Consequences, all measured in review:
 
     * a working-tree secret cannot be read back (the write-a-secret bypass);
     * a clean checkout with ``core.autocrlf=true`` (Git for Windows' default)
@@ -662,7 +662,12 @@ def _committed_public_copy(
     * a consumer checkout's roots need checkout identity, not path shape (review
       S-1); :func:`_publishing_checkouts` says which checkouts may publish the
       root, and that check happens inside this function so all Git probing
-      shares one wrapper.
+      shares one wrapper;
+    * the origin is re-derived immediately before ``show`` so a mid-call
+      checkout/configuration change cannot serve under an identity admitted only
+      earlier. ``commit`` and its audit-facing ``checkout_head`` alias are read
+      BEFORE the blob; a commit landing mid-call can only make the receipt
+      understate the revision, never attribute bytes to a later one.
 
     The helper is synchronous and runs off the event loop
     (:func:`execute_read_public_copy` awaits it in a thread).
@@ -798,6 +803,10 @@ def _committed_public_copy(
             "repository": verified,
             "repository_verified": verified is not None,
             "commit": commit,
+            # Keep the established commit field and the review-required explicit
+            # checkout_head alias identical: both name the one immutable commit
+            # captured before validation and served below, never a later HEAD.
+            "checkout_head": commit,
         }
         tracked = _git("ls-files", "--error-unmatch", "--", relative)
         if tracked.returncode != 0:
@@ -842,6 +851,30 @@ def _committed_public_copy(
             )
         if clean.returncode != 0:
             return b"", {}, f"could not compare {relative} with HEAD"
+        # Re-check identity beside the blob read, not merely during the earlier
+        # admission checks: a checkout/config swap must not serve bytes under a
+        # stale repository name. Only reduced identities reach the refusal; a raw
+        # origin URL can contain credentials.
+        current_origin = _git("remote", "get-url", "origin")
+        current_url = (
+            current_origin.stdout.decode("utf-8", "replace")
+            if current_origin.returncode == 0
+            else ""
+        )
+        current_identity = _origin_identity(current_url)
+        current_selected = (
+            _trusted_origin_identity(current_url) if explicit_root else current_identity
+        )
+        if current_selected != selected:
+            return (
+                b"",
+                {},
+                (
+                    f"the origin of {root} changed during the read: expected "
+                    f"{selected or 'unusable'}, actual {current_selected or 'unusable'}; "
+                    "name the checkout again"
+                ),
+            )
         blob = _git("show", f"{commit}:{relative}")
         if blob.returncode != 0:
             # Reaching here means the path is tracked AND the worktree equals the

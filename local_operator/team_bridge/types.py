@@ -7,7 +7,13 @@ that produce them. Two hard rules, both from the frozen contract (§13.9's
 1. **No content.** Nothing here holds a body, excerpt, summary, sender name or
    email, raw model reason, token or HTTP error detail. Projections WHITELIST
    the metadata fields; everything else on a server item is dropped by
-   construction, not by a redaction pass.
+   construction, not by a redaction pass. The ONE exception is
+   :class:`MemberCandidate`, which carries a member's ``display_label`` —
+   because a name -> member resolution cannot be done without the name it is
+   matching. It is a TRANSIENT in-memory candidate set handed to
+   :func:`resolve_member_by_name`, it is never a durable record of this module,
+   and the delivery-side half that does persist an attempt
+   (``team_bridge.recipient_resolution``) states its own narrower data set there.
 2. **Distinct types for distinct cursors.** ``InboxCursor`` is an OPAQUE
    server string; ``FeedSeq`` is an integer. They are never interchangeable
    (H2 handoff: "never interchange them") — the constructor functions here
@@ -20,6 +26,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any, Literal, Mapping, NewType
 
@@ -35,9 +42,21 @@ __all__ = [
     "InvalidSendRecipient",
     "RECIPIENT_ACCOUNT_SHAPE",
     "RECIPIENT_ENDPOINT_SHAPE",
+    "RECIPIENT_KEYS",
+    "RECIPIENT_NAME_SHAPE",
     "RECIPIENT_TEACHING",
+    "SCOPE_ALLOWLIST",
+    "SCOPE_CONVERSATION",
     "SEND_RECIPIENT_DESCRIPTION",
+    "MemberCandidate",
+    "NAMED_CANDIDATES_MAX",
+    "NameResolution",
+    "RecipientNameRefused",
+    "ResolutionScope",
     "is_account_id",
+    "resolve_member_by_name",
+    "validate_member_mention",
+    "validate_recipient_shape",
     "validate_send_recipient",
     "SCREENING_CATEGORIES",
     "ACK_TARGETS",
@@ -147,20 +166,34 @@ RECIPIENT_ACCOUNT_SHAPE = '{"account_id": "<id>"}'
 #: about the VALUE or KEY it refused (see the validator's docstring): the words
 #: "name"/"label" do not appear, so no caller-controlled key is echoed back.
 RECIPIENT_TEACHING = (
-    f"send/reply take exactly one of {RECIPIENT_ENDPOINT_SHAPE} or "
+    f"a recipient is exactly one of {RECIPIENT_ENDPOINT_SHAPE} or "
     f"{RECIPIENT_ACCOUNT_SHAPE}, or the bare account id string; those ids come "
     f"from the bridge directory, which lists every addressable member"
 )
 
+#: The closed recipient KEY set for one destination. Two are ADDRESSES (an id the
+#: server already knows); ``name`` is a RESOLUTION REQUEST — it is never a wire
+#: value, it is what a caller asks the local resolver to turn into an address.
+#: One tuple, so "exactly one of them" is one rule instead of three.
+RECIPIENT_KEYS = ("endpoint_id", "account_id", "name")
+
+#: The one accepted display-name shape. Spelled once, like its id siblings, so the
+#: refusal a caller reads and the value the schema advertises cannot drift.
+RECIPIENT_NAME_SHAPE = '{"name": "<display name>"}'
+
 #: Model-facing help for the ``to`` parameter, published in the tool schema
 #: (``tool.BridgeToolParams.to``). Built from the same shapes the refusals teach,
 #: so the published advice cannot drift from the contract. It is billed on every
-#: tool call, so it states the two object shapes, the bare form, and where the
-#: ids come from — and nothing else (``scripts/bench_context_budget.py``).
+#: tool call, so it states the two object shapes, the bare form, where the ids
+#: come from, and the ONE per-op difference that decides which op a model should
+#: reach for (``scripts/bench_context_budget.py``).
 SEND_RECIPIENT_DESCRIPTION = (
     f"Who receives it: {RECIPIENT_ACCOUNT_SHAPE} or {RECIPIENT_ENDPOINT_SHAPE}, "
-    f'or the bare account id — e.g. {{"account_id": "acc_123"}}. Ids come from '
-    f"the bridge directory; a name is never resolved."
+    f"the bare account id, or {RECIPIENT_NAME_SHAPE} — trimmed, case-insensitive, "
+    f"WHOLE display name only (never a handle, email or substring). A name resolves "
+    f"in that op's own scope: channel_post inside the conversation's active members, "
+    f"send/reply inside your own send allowlist. One match delivers; none or several "
+    f"refuse. Ids come from the bridge directory."
 )
 
 
@@ -174,20 +207,59 @@ def validate_send_recipient(value: Any) -> dict[str, str]:
     the existing pair-inbox contract, not conversation routing or a human fallback.
     Refusals deliberately do not quote caller-controlled keys or values.
 
+    A DISPLAY NAME never reaches this function from the tool: the tool resolves one
+    (``channel_post`` inside the conversation, ``send``/``reply`` inside the
+    owner's allowlist) and passes on the resolved id, so the pair body it builds
+    here only ever carries an address. A ``{"name": ...}`` that arrives anyway —
+    a direct client caller, a replayed intent, a bug — refuses here, because this
+    layer cannot resolve it and must not forward a string the server would read as
+    an account id.
+
     A BARE STRING is an ACCOUNT id (``"acc_123"`` → ``{"account_id": "acc_123"}``):
     one string is one recipient in one field, so there is nothing to reinterpret
     and no second field that can be lost — the same guarantee the object form
-    gives, for the shape a model reaches for first. Names are still NOT resolved:
-    a name is ambiguous and is the caller's own directory read to make, and a
-    guessed ``{"name": ...}`` refuses with :data:`RECIPIENT_TEACHING`, which
-    names both accepted shapes and the directory. The string checks are the SAME
-    ones the object values get, applied to the only value there is, plus ONE
-    extra: a bare string carrying INTERNAL whitespace refuses with the same
-    teaching text, because a display name is a guess at an id (no id contains a
-    space) and accepting "Ada Lovelace" as an account would forward the mistake
-    to the server instead of correcting it. The OBJECT form is an explicit claim
-    that its value already IS an id, so its pre-existing contract — any non-empty
-    unpadded string — is deliberately unchanged here.
+    gives, for the shape a model reaches for first. Names are still NOT resolved
+    HERE: the pair lane carries no conversation, so it has no least-privilege
+    candidate set to resolve against, and a ``{"name": ...}`` refuses with a
+    sentence naming the op that CAN resolve one. (``channel_post`` resolves it —
+    see :func:`resolve_member_by_name`; the shape rule is shared, the op that may
+    use it is not.) The string checks are the SAME ones the object values get,
+    applied to the only value there is, plus ONE extra: a bare string carrying
+    INTERNAL whitespace refuses with the same teaching text, because a display
+    name is a guess at an id (no id contains a space) and accepting "Ada Lovelace"
+    as an account would forward the mistake to the server instead of correcting
+    it. The OBJECT form is an explicit claim that its value already IS an id, so
+    its pre-existing contract — any non-empty unpadded string — is deliberately
+    unchanged here.
+    """
+    recipient = validate_recipient_shape(value)
+    if "name" in recipient:
+        raise InvalidSendRecipient(
+            # This is the WIRE guard, not the op policy: the tool resolves a
+            # display-label recipient (channel_post inside the room, send/reply
+            # inside the owner's allowlist) and hands this layer an id. A name
+            # reaching HERE means a caller skipped that resolution, and the pair
+            # body has nowhere to put one — so it refuses rather than forwarding a
+            # string the server would read as an account id.
+            "this wire carries an id, not a resolved recipient; "
+            + RECIPIENT_TEACHING
+        )
+    return recipient
+
+
+def validate_recipient_shape(value: Any) -> dict[str, str]:
+    """Return the closed one-of destination AS ASKED, without coercion.
+
+    The SHAPE rule every op shares: exactly one recipient, exactly one of
+    :data:`RECIPIENT_KEYS`, no extra keys. ``name`` passes HERE and is then
+    refused by :func:`validate_send_recipient` (no conversation to scope it to)
+    or resolved by :func:`resolve_member_by_name` (``channel_post``). Splitting
+    the shape from the per-op permission is what keeps ONE answer to "which
+    keys exist": a second copy of this rule at a call site is how a shape that
+    survived one reader quietly became a different shape at the next.
+
+    Refusals quote no caller-controlled key or value, exactly as the send form
+    does — the teaching tail names the accepted shapes and the directory instead.
     """
     if isinstance(value, str):
         if any(character.isspace() for character in value.strip()):
@@ -197,14 +269,312 @@ def validate_send_recipient(value: Any) -> dict[str, str]:
         if not isinstance(value, Mapping) or len(value) != 1:
             raise InvalidSendRecipient(RECIPIENT_TEACHING)
         key = next(iter(value))
-        if key not in ("endpoint_id", "account_id"):
+        if key not in RECIPIENT_KEYS:
             raise InvalidSendRecipient(
-                "send/reply recipient contains an unsupported field; " + RECIPIENT_TEACHING
+                "recipient contains an unsupported field; " + RECIPIENT_TEACHING
             )
         identifier = value[key]
+    if key == "name":
+        # A name is TRIMMED by the resolver, so padding here is not an error:
+        # refusing it would make " Ada Lovelace " unresolvable for the one form
+        # whose whole job is to be human-spelled. Whitespace-only never reaches
+        # the resolver with anything to match.
+        if not isinstance(identifier, str) or not identifier.strip():
+            raise InvalidSendRecipient("a recipient name must be a non-empty display name")
+        return {"name": identifier}
     if not isinstance(identifier, str) or not identifier or identifier != identifier.strip():
         raise InvalidSendRecipient("send/reply recipient must be a non-empty unpadded string")
     return {key: identifier}
+
+
+# ---------------------------------------------------------------------------
+# Name -> member resolution (the ONE resolver; both call sites use it)
+# ---------------------------------------------------------------------------
+#
+# WHY THIS IS A RESOLUTION REQUEST AND NOT A DESTINATION. Measured on this
+# machine: agents addressed colleagues as ``to: "Ada Lovelace"`` and every call
+# was refused, because the tool accepts only opaque ids — five allow cases, seven
+# calls, seven refusals, zero messages on the wire. A name is how a HUMAN is
+# named, so refusing the shape outright made the feature unusable for people.
+# The fix is not to guess: it is to RESOLVE the name against a caller-supplied
+# candidate set and deliver only on an EXACTLY-ONE match. A wrong answer here
+# delivers to the wrong human, which no later receipt repairs.
+
+#: The member kinds the hub addresses. A mention row carries one, so a candidate
+#: whose row has neither is not addressable and never becomes a candidate.
+MEMBER_KINDS = ("human", "agent")
+
+
+@dataclass(frozen=True)
+class MemberCandidate:
+    """One member a display name may resolve to: the address and its display name.
+
+    ``display_label`` is what a human sees in the member list (server-side, from
+    the member row) and is the ONLY field a name is matched against. ``kind`` and
+    ``endpoint_id`` ride along because a directed post's mention row needs them.
+
+    ``bridge_enabled`` is the DIRECTORY's verdict for this account at the moment
+    the candidate set was built — the third guard of the ``send``/``reply``
+    scope, where presence in the allowlist is not the same fact as being able to
+    receive, and a resolution to a switched-off bridge is a message that goes
+    nowhere. It defaults ``True`` because the conversation scope's rule is
+    presence in the room, not this flag.
+    """
+
+    account_id: str
+    display_label: str
+    kind: str = ""
+    endpoint_id: str = ""
+    bridge_enabled: bool = True
+
+    def mention(self) -> dict[str, str]:
+        """The wire ``mentions[]`` row for THIS member — never the asked-for name.
+
+        One method rather than a literal at each call site: a mention rebuilt
+        from a name somewhere else is the silent-loss class this file exists to
+        close (a directed message delivered to nobody looks exactly like an
+        undirected one). A member with no addressable kind refuses HERE rather
+        than building a row the transport would reject: the conversation
+        projection filters those out already, so this is the guard that keeps a
+        future candidate source from silently reintroducing them.
+        """
+
+        if self.kind not in MEMBER_KINDS:
+            raise TeamBridgeTypeError("only a human or agent member can be mentioned")
+        row = {"kind": self.kind, "account_id": self.account_id}
+        if self.endpoint_id:
+            row["endpoint_id"] = self.endpoint_id
+        return row
+
+
+@dataclass(frozen=True)
+class ResolutionScope:
+    """WHERE a name was resolved, as a noun and an audit word.
+
+    The sentence a caller reads and the row the audit keeps both need the scope,
+    and PR2 wires ``send``/``reply`` to :data:`SCOPE_ALLOWLIST` without editing a
+    single refusal: the resolver composes them from HERE, so a second scope cannot
+    arrive with a second spelling of "no member by that name".
+    """
+
+    #: The audit vocabulary — the row's ``scope`` value (NOT ``applies_to``:
+    #: that was this field's working name and it never reached the log).
+    name: str
+    #: The clause a refusal uses, e.g. "in this conversation".
+    where: str
+    #: What a caller should do about an ambiguous match, e.g. "a more specific label".
+    disambiguator: str
+    #: Appended to a ZERO-match refusal, when "nobody by that name" has more than
+    #: one reason and the caller cannot tell which. A model that cannot tell them
+    #: apart retries uselessly instead of telling its human something true, which
+    #: is why the reason is spelled out rather than left to be inferred.
+    miss_hint: str = ""
+
+
+#: ``channel_post``: the conversation's own active members (least privilege — a
+#: name is only resolvable to somebody who is IN the room the message lands in).
+SCOPE_CONVERSATION = ResolutionScope(
+    name="conversation",
+    where="in this conversation",
+    disambiguator="a more specific label, or add the member to this conversation",
+)
+
+#: ``send``/``reply``: the owner's REACHABLE set — the bridge directory
+#: intersected with the owner's own send-allowlist, never directory-wide. A name
+#: that resolves to nobody names the reasons it MIGHT not — "not on this team",
+#: "their bridge may not be enabled", "your allowlist may not name them" — because
+#: those are different facts with different next moves for the human, and a model
+#: that cannot tell them apart retries uselessly instead of saying something true.
+#:
+#: "MAY", deliberately, and the enablement clause stays: this resolver cannot see
+#: the organization directory, so it cannot tell which of the three is true, and
+#: the point of the sentence is that the MODEL cannot either — it must ask. The
+#: one case it CAN be sure of (allowlisted but switched off) resolves and then
+#: gets its own sentence from ``resolve_for_delivery``, so wording these as
+#: certainties would be a claim this call site cannot make.
+SCOPE_ALLOWLIST = ResolutionScope(
+    name="allowlist",
+    where="in your bridge allowlist",
+    disambiguator="a more specific label, or an explicit account id",
+    miss_hint=(
+        " — they may not be on this team, their bridge may not be enabled, or your "
+        "allowlist may not name them; ask the human which, and an explicit account "
+        "id still sends"
+    ),
+)
+
+
+@dataclass(frozen=True)
+class NameResolution:
+    """The record of ONE resolution attempt — resolved, refused or ambiguous.
+
+    Carried by :class:`RecipientNameRefused` so the refusal path can write the
+    same audit row a delivery does: requested name, matched count, candidates and
+    the resolved id (null when nothing resolved).
+    """
+
+    requested: str
+    matches: tuple[MemberCandidate, ...]
+
+    @property
+    def matched_count(self) -> int:
+        return len(self.matches)
+
+    @property
+    def resolved(self) -> MemberCandidate | None:
+        """The one match, or ``None`` — never the first of several."""
+
+        return self.matches[0] if len(self.matches) == 1 else None
+
+    def candidates_named(self) -> tuple[str, ...]:
+        """``label (account_id)`` per NAMED candidate, bounded like the audit row.
+
+        A label is MEMBER-authored text (like a history sender label), so it is
+        flattened and bounded here: a newline in a label must not be able to
+        restructure the sentence a model reads. The LIST is bounded too, and for
+        the same class of reason one step out: the legacy placeholder label
+        ``Member`` is shared by many participants of one conversation, so an
+        unbounded join turned one refusal into a thousand characters of ids a
+        model pays for and cannot use. :meth:`unnamed_count` says how many were
+        left out, so the refusal stays exact about N even when it names few.
+        """
+
+        return tuple(
+            f"{_flatten_label(member.display_label)} ({member.account_id})"
+            for member in self.matches[:NAMED_CANDIDATES_MAX]
+        )
+
+    def unnamed_count(self) -> int:
+        """How many matches the refusal does NOT name (0 when it names them all)."""
+
+        return max(0, self.matched_count - NAMED_CANDIDATES_MAX)
+
+
+#: How many candidates ONE refusal names. The COUNT is always exact; the list is
+#: bounded so a conversation whose members share a placeholder label cannot turn
+#: a disambiguation sentence into a page of ids (the audit row keeps its own
+#: bound for the same reason, and only the log may be wider than the sentence).
+NAMED_CANDIDATES_MAX = 5
+
+
+class RecipientNameRefused(InvalidSendRecipient):
+    """A display name did not resolve to exactly one member; nothing was sent.
+
+    Carries the :class:`NameResolution` so the CALLER can record the attempt
+    before it refuses: the audit row must exist for a refusal exactly as it does
+    for a delivery, or a later misdelivery claim cannot be reconstructed. It is
+    an :class:`InvalidSendRecipient` (``code = "invalid_request"``) because the
+    caller's request is what did not resolve — never the transport.
+    """
+
+    def __init__(self, message: str, resolution: NameResolution) -> None:
+        super().__init__(message)
+        self.resolution = resolution
+
+
+def _flatten_label(label: str) -> str:
+    """One line, bounded: the same treatment a history sender label gets."""
+
+    return " ".join(str(label).split())[:80]
+
+
+def resolve_member_by_name(
+    requested_name: Any,
+    candidates: Iterable[MemberCandidate],
+    *,
+    scope: ResolutionScope = SCOPE_CONVERSATION,
+) -> MemberCandidate:
+    """Resolve a DISPLAY NAME to exactly one candidate member, or refuse.
+
+    THE MATCHING RULE, stated once (the tool schema says the same in fewer
+    words): the requested name is TRIMMED, compared CASE-INSENSITIVELY
+    (``casefold``, so a locale cannot split a name), and matched against the
+    member's DISPLAY NAME ONLY — never a handle, an email, an endpoint label or
+    a PARTIAL/SUBSTRING of a label. ``"Ada"`` never resolves to ``"Ada
+    Lovelace"``: a prefix is a guess about which Ada, and guessing is the one
+    thing this function may not do.
+
+    THREE OUTCOMES, and no fourth:
+
+    * exactly one candidate matches -> that member, and the caller may deliver;
+    * none -> :class:`RecipientNameRefused` saying no active member by that name
+      exists in the scope (a caller with a name from ANOTHER context learns the
+      scope is the limit, not that the person does not exist);
+    * several -> the same refusal with the candidate list (labels and ids) and
+      the name of a disambiguator. The first row is never taken, and no
+      preference exists between a human and an agent: preferring one is a guess
+      dressed as a rule.
+
+    ``candidates`` is ALWAYS an argument, never fetched here: the scope belongs
+    to the CALLER (a conversation's active members for ``channel_post``; the
+    owner's allowlist for ``send``/``reply``), and a resolver that went looking
+    for its own candidate set would be able to resolve outside the scope it was
+    handed.
+    """
+
+    if not isinstance(requested_name, str) or not requested_name.strip():
+        raise RecipientNameRefused(
+            "a recipient name must be a non-empty display name",
+            NameResolution(requested="", matches=()),
+        )
+    requested = requested_name.strip()
+    wanted = requested.casefold()
+    matches = tuple(
+        member
+        for member in candidates
+        if isinstance(member, MemberCandidate) and member.display_label.strip().casefold() == wanted
+    )
+    resolution = NameResolution(requested=requested, matches=matches)
+    if len(matches) == 1:
+        return matches[0]
+    if not matches:
+        raise RecipientNameRefused(
+            f"no active member by that name {scope.where}{scope.miss_hint}", resolution
+        )
+    named = ", ".join(resolution.candidates_named())
+    more = resolution.unnamed_count()
+    if more:
+        named += f", and {more} more"
+    raise RecipientNameRefused(
+        f"that name matches {len(matches)} members {scope.where}: {named} — ask for "
+        f"{scope.disambiguator}",
+        resolution,
+    )
+
+
+def validate_member_mention(value: Any) -> dict[str, str]:
+    """Return one closed ``{kind, account_id[, endpoint_id]}`` mention row.
+
+    Shared by the tool (BEFORE dispatch) and the wire client (when it rebuilds
+    the body) for the same reason :func:`validate_send_recipient` is: a shape
+    that survives tool validation must not vanish at serialization. A mention
+    that is dropped turns a DIRECTED message into an undirected one, and the two
+    look identical in the server's answer — the silent-success class, again.
+
+    The shape is the hub's own Send-policy mention row, already accepted by the
+    scheduled-send body (``desktop_team_bridge.ScheduledMentionIn``), so an
+    immediate send speaks the vocabulary the plan already uses. ``endpoint_id``
+    is optional (an agent member has one; a human member does not).
+    """
+
+    if not isinstance(value, Mapping):
+        raise InvalidSendRecipient("a mention row is an object with kind and account_id")
+    keys = set(value)
+    if keys - {"kind", "account_id", "endpoint_id"}:
+        raise InvalidSendRecipient("a mention row carries only kind, account_id, endpoint_id")
+    kind = value.get("kind")
+    if kind not in MEMBER_KINDS:
+        raise InvalidSendRecipient(f"a mention kind is one of {MEMBER_KINDS!r}")
+    row = {"kind": str(kind), "account_id": _mention_id(value.get("account_id"), "account_id")}
+    if "endpoint_id" in keys:
+        row["endpoint_id"] = _mention_id(value.get("endpoint_id"), "endpoint_id")
+    return row
+
+
+def _mention_id(value: Any, field_name: str) -> str:
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise InvalidSendRecipient(f"a mention {field_name} must be a non-empty unpadded string")
+    return value
 
 
 def is_account_id(value: Any) -> bool:
