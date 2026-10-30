@@ -87,29 +87,29 @@ class ConversationCardMetadata:
     #: The explicit refusal line when those images were NOT admitted (D5),
     #: so an agent is told images exist rather than silently missing them.
     attachments_note: str | None = None
-    #: WAKE-ON-EVERY-MESSAGE (wake contract): the recipient follows the thread
-    #: this reply is in, so the reply is directed at it without a mention.
-    thread_follower: bool = False
-    #: ``dm`` | ``group`` | ``channel`` from the server's row; ``None`` = an
-    #: older hub that does not say.
-    conversation_kind: str | None = None
-    #: Every message one coalesced card names, oldest → newest; empty for a
-    #: single-message card. ``message_id`` is always the NEWEST of them, so
-    #: reply routing keeps binding to one id.
+    #: WAKE-ON-EVERY-MESSAGE (wake contract): every message one coalesced card
+    #: names, oldest → newest; empty for a single-message card. ``message_id`` is
+    #: always the NEWEST of them, so reply routing keeps binding to one id.
     coalesced_message_ids: tuple[str, ...] = ()
 
 
 def card_directed(metadata: ConversationCardMetadata) -> str:
-    """``mention`` | ``thread`` | ``none`` — the card's ``directed:`` value.
+    """``mention`` | ``thread`` | ``none`` — how this wake reached the agent.
 
-    THE ONE predicate the card line, the ``expect:`` line and the reply guard's
-    trigger record share, so "was this addressed to me" cannot drift between
-    what the agent is told and what the guard counts.
+    THE ONE predicate the card's ``directed:`` line and its ``expect:`` line
+    share, so "was this addressed to me" cannot drift inside one card.
+
+    Derived, never carried: the hub wakes a member for a thread reply only when
+    that member follows the thread, so a non-mention row that names a thread
+    root IS a directed wake. Keeping the two runner-up facts (a follower bit, a
+    conversation kind) out of the durable ref is deliberate — the ref is read by
+    the previous release too, and its shape must stay the one that release
+    already parses (review round 1, m3).
     """
 
     if metadata.mention:
         return "mention"
-    if metadata.thread_follower and metadata.thread_root_id:
+    if metadata.thread_root_id:
         return "thread"
     return "none"
 
@@ -135,13 +135,16 @@ def build_conversation_card(metadata: ConversationCardMetadata) -> str:
         BRIDGE_UNTRUSTED_CLAUSE,
         "",
         mention_line,
-        f"directed: {directed}",
+    ]
+    if directed == "thread":
+        # The ONE case the card cannot already say: this endpoint is woken for a
+        # reply it did not get named in (it follows the thread). `mention` and
+        # "none" are already stated by the line above, so repeating them would
+        # be billed on every wake in every conversation for no new fact.
+        lines.append("directed: thread")
+    lines += [
         f"tenant_id: {metadata.tenant_id}",
         f"conversation_id: {metadata.conversation_id}",
-    ]
-    if metadata.conversation_kind:
-        lines.append(f"conversation_kind: {metadata.conversation_kind}")
-    lines += [
         f"message_id: {metadata.message_id}",
         f"conversation_seq: {metadata.conversation_seq}",
     ]
@@ -161,12 +164,18 @@ def build_conversation_card(metadata: ConversationCardMetadata) -> str:
     if directed in ("mention", "thread"):
         lines.append("expect: reply")
     else:
-        lines.append("expect: weigh relevance; if nothing is needed end with no_reply")
+        # Ambient: every message in a conversation the agent belongs to now
+        # wakes it, so the card says how to spend that turn — weigh it, and
+        # end with ``no_reply`` (quiet: a no_reply turn raises no notification)
+        # when it adds nothing. One line, compressed on purpose: this text is
+        # billed on EVERY wake in every conversation.
         if metadata.sender_kind == "agent":
-            # Two agents answering each other's ambient chatter is the loop
-            # this whole contract guards against; the server and the reply
-            # guard cap it, and this line keeps it from starting.
-            lines.append("agent sender: do not reply unless it asks you a direct question")
+            # Two agents answering each other's ambient chatter is the loop this
+            # whole contract guards against; the server and the reply guard cap
+            # it, and this line keeps it from starting.
+            lines.append("expect: weigh relevance; no_reply unless it asks you directly")
+        else:
+            lines.append("expect: weigh relevance; no_reply if nothing is needed")
     if metadata.attachments:
         # A count and how to see them: images reach the agent only through
         # channel_history after an allow that screened them (never this card).
@@ -183,12 +192,10 @@ def build_conversation_card(metadata: ConversationCardMetadata) -> str:
         # Thread context: where the reply lives and how to answer IN it, so an
         # agent coordinating in a thread does not answer at channel level.
         lines += [
-            # The contract's routing name for the same id: the message this
-            # reply hangs under. Stated beside thread_root_id so a reader of
-            # either vocabulary finds it; first, so the route line stays
-            # directly under the thread_root_id it names.
-            f"reply_to_message_id: {metadata.thread_root_id}",
-            f"thread_root_id: {metadata.thread_root_id}",
+            # The route line stays directly under the id it names. ``(reply to)``
+            # carries the contract's second name for the same value
+            # (``reply_to_message_id``) without a second line saying it twice.
+            f"thread_root_id: {metadata.thread_root_id} (reply to)",
             "reply in thread: bridge channel_post with this thread_root_id; "
             "read the thread with channel_thread",
         ]
@@ -441,8 +448,6 @@ def _card_metadata(
         message_id=ref.message_id,
         conversation_seq=ref.conversation_seq,
         thread_root_id=ref.thread_root_id,
-        thread_follower=ref.thread_follower,
-        conversation_kind=ref.conversation_kind,
     )
 
 
@@ -851,6 +856,21 @@ def _notify_probe_suspected(config_dir: Path, session_id: str, endpoint_id: str)
         logger.info("bridge: probe notification unrecorded code=notify_failed")
 
 
+def _badge_only(config_dir: Path, message_id: str) -> dict[str, Any]:
+    """The §5.6 badge-only outcome, made COUNTABLE (review round 1, 7b).
+
+    No card, no wake and no hold: the row is left for a later designation. That
+    used to be invisible — an owner with agent messages on and no designated
+    session saw a receiver that polled and nothing else. It is logged and
+    counted now, so "my agent never answers" has a visible cause.
+    """
+
+    from ..wake_diagnostics import CODE_NO_DESIGNATION, record_woke_nobody
+
+    record_woke_nobody(config_dir, code=CODE_NO_DESIGNATION)
+    return {"action": "badge_only", "message_id": message_id, "code": CODE_NO_DESIGNATION}
+
+
 async def handle_conversation_available(
     owner: Any,
     ref: ConversationFeedRef,
@@ -884,13 +904,13 @@ async def handle_conversation_available(
     fence_code = _producer_fence(store, owner, access, settings)
     if fence_code == "no_designation":
         # Consent without a session is badge-only: arrivals never wake.
-        return {"action": "badge_only", "message_id": message_id}
+        return _badge_only(config_dir, message_id)
     if fence_code:
         return {"action": "hold", "message_id": message_id, "code": fence_code}
 
     designation = store.designated_session_for(owner)
     if designation is None:  # the fence above guarantees this, kept for typing
-        return {"action": "badge_only", "message_id": message_id}
+        return _badge_only(config_dir, message_id)
 
     # The prefix is load-bearing: the loop tells a connector's mid-handoff
     # claim (re-drive after its lease) from a session's own claim by it.
@@ -1068,7 +1088,11 @@ async def handle_conversation_available(
             detail = await _hand_off_card(
                 owner, metadata, ref, session_id=designation, config_dir=config_dir
             )
-            terminal = True
+            # A BUFFERED card is not a delivered one (review M1): the durable
+            # ``wake_coalescing`` hold is the only trace between this ref's
+            # delete and the flush, so the coalescer's ``_settle`` retires it,
+            # never this cleanup.
+            terminal = detail != CARD_COALESCED
             if recovery in ("rejected", "unadmitted"):
                 return {
                     "action": "delivered_unadmitted",
@@ -1225,7 +1249,13 @@ async def handle_conversation_available(
             session_id=designation,
             config_dir=config_dir,
         )
-        terminal = True
+        # A BUFFERED card is not a delivered one: the wake_coalescing hold
+        # written at enqueue is the only durable trace between this ref's delete
+        # and the flush, so the coalescer's ``_settle`` retires it once the card
+        # is actually posted. Clearing it here — the pre-remediation
+        # ``terminal = True`` — deleted that trace while the card was still in
+        # memory, which is exactly the lost wake of review round 1, M1.
+        terminal = detail != CARD_COALESCED
         if detail == CARD_COALESCED:
             # Buffered, not posted: the reservation stays CARD_OWED until the
             # coalescer's flush marks it, so a crash in between replays into

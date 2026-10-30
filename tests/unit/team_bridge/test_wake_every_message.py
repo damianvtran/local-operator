@@ -82,53 +82,84 @@ def _card(**overrides: Any) -> str:
 def test_a_mention_card_expects_a_reply() -> None:
     lines = _card(mention=True).splitlines()
     assert "mention: yes" in lines
-    assert "directed: mention" in lines
+    # `mention` already says `directed: mention`: the same fact is not billed
+    # twice on every wake (review round 1, m4).
+    assert not any(line.startswith("directed:") for line in lines)
     assert "expect: reply" in lines
     assert not any("no_reply" in line for line in lines)
-    assert not any(line.startswith("agent sender:") for line in lines)
 
 
 def test_an_unmentioned_card_says_weigh_it_and_no_reply_is_the_way_out() -> None:
-    lines = _card(mention=False, conversation_kind="channel").splitlines()
+    lines = _card(mention=False).splitlines()
     assert "mention: no" in lines
-    assert "directed: none" in lines
-    assert "conversation_kind: channel" in lines
-    assert "expect: weigh relevance; if nothing is needed end with no_reply" in lines
+    assert not any(line.startswith("directed:") for line in lines)
+    assert "expect: weigh relevance; no_reply if nothing is needed" in lines
     assert "expect: reply" not in lines
-    # A human sender gets no agent caution.
-    assert not any(line.startswith("agent sender:") for line in lines)
+    # The removed conversation-kind line: nothing derives it any more, and the
+    # ref no longer carries it (review round 1, m3/m4).
+    assert not any(line.startswith("conversation_kind:") for line in lines)
 
 
-def test_an_unmentioned_agent_card_cautions_against_answering_it() -> None:
+def test_an_unmentioned_agent_card_asks_for_no_reply_unless_asked_directly() -> None:
+    # Two agents answering each other's ambient chatter is the loop the whole
+    # contract guards against; one line, not two (review m4).
     lines = _card(sender_kind="agent", sender_label="Bea's agent").splitlines()
-    assert "agent sender: do not reply unless it asks you a direct question" in lines
+    assert "expect: weigh relevance; no_reply unless it asks you directly" in lines
 
 
 def test_a_mentioning_agent_card_carries_no_caution() -> None:
     # An agent that @-mentions you asked you something: answer it.
     lines = _card(sender_kind="agent", mention=True).splitlines()
     assert "expect: reply" in lines
-    assert not any(line.startswith("agent sender:") for line in lines)
+    assert not any("no_reply" in line for line in lines)
 
 
-def test_a_followed_thread_reply_is_directed_without_a_mention() -> None:
-    lines = _card(thread_root_id=ROOT, thread_follower=True, sender_kind="agent").splitlines()
+def test_a_thread_reply_is_directed_without_a_mention() -> None:
+    """A non-mentioned thread row IS directed: only followers are woken for it.
+
+    Derived from the thread root (review round 1, m3), never carried as its own
+    ref tag — the deref stays the shape the previous release already reads.
+    """
+
+    lines = _card(thread_root_id=ROOT, sender_kind="agent").splitlines()
     assert "mention: no" in lines
     assert "directed: thread" in lines
     assert "expect: reply" in lines
-    assert f"thread_root_id: {ROOT}" in lines
-    assert f"reply_to_message_id: {ROOT}" in lines
-    # Directed at you, so the agent-sender caution does not apply.
-    assert not any(line.startswith("agent sender:") for line in lines)
+    assert f"thread_root_id: {ROOT} (reply to)" in lines
+    # ONE line names the thread: `reply_to_message_id:` said the same id again
+    # (review m4) and is folded into the `(reply to)` marker.
+    assert not any(line.startswith("reply_to_message_id:") for line in lines)
     # The thread route stays directly under thread_root_id, above the footer.
     assert lines[-3].startswith("thread_root_id: ")
     assert lines[-2].startswith("reply in thread: ")
 
 
-def test_a_thread_reply_the_agent_does_not_follow_is_ambient() -> None:
-    lines = _card(thread_root_id=ROOT, thread_follower=False).splitlines()
-    assert "directed: none" in lines
-    assert "expect: weigh relevance; if nothing is needed end with no_reply" in lines
+def test_a_thread_reply_without_a_mention_is_never_marked_as_one() -> None:
+    assert "mention: no" in _card(thread_root_id=ROOT).splitlines()
+
+
+def test_the_card_carries_no_line_that_repeats_another() -> None:
+    """The card is billed per turn: no line repeats what another already says.
+
+    Measured with the same fields through origin/main's builder and this one:
+    root card 421 → 483 characters (+14.7%), thread reply 424 → 466 (+9.9%);
+    before this compaction the growth was +33% (review round 1, m4). These
+    assertions are the structural half of that budget, so a later line cannot
+    quietly reintroduce the growth.
+    """
+
+    root = _card(sender_kind="agent", sender_label="Bea's agent").splitlines()
+    reply = _card(sender_kind="agent", sender_label="Bea's agent", thread_root_id=ROOT).splitlines()
+    for lines in (root, reply):
+        # `directed:` appears only for `thread`; mention and none are already
+        # stated by the `mention:` line, and `reply_to_message_id:` repeated the
+        # thread root verbatim.
+        assert sum(1 for line in lines if line.startswith("directed:")) <= 1
+        assert not any(line.startswith("reply_to_message_id:") for line in lines)
+        assert not any(line.startswith("conversation_kind:") for line in lines)
+    assert [line for line in reply if line.startswith("thread_root_id:")] == [
+        f"thread_root_id: {ROOT} (reply to)"
+    ]
 
 
 def test_a_coalesced_card_names_every_message_and_binds_the_newest() -> None:
@@ -164,13 +195,22 @@ def test_merging_a_mixed_burst_never_stamps_the_agent_caution_on_a_human() -> No
     assert merged.sender_kind == "mixed"
     assert merged.sender_label == "several members"
     card = build_conversation_card(merged)
-    assert "agent sender:" not in card
+    assert "no_reply unless it asks you directly" not in card
 
 
 # -- durable ref -------------------------------------------------------------
 
 
-def test_the_ref_round_trips_every_wake_tag() -> None:
+def test_the_ref_keeps_the_shape_the_previous_release_already_reads() -> None:
+    """review m3: a rolled-back ``lop`` must still read these durable rows.
+
+    The ref keys the feed queue AND the hold that re-drives it, so a shape the
+    previous release's parser refuses (it accepted 4–7 parts) silently drops the
+    wake after a downgrade. The two runner-up facts a card wanted are therefore
+    derived at render time (a thread root with no mention IS a directed wake)
+    and the conversation kind is simply not carried.
+    """
+
     ref = ConversationFeedRef(
         conversation_id=CONV,
         message_id="bcmsg_m1",
@@ -178,15 +218,10 @@ def test_the_ref_round_trips_every_wake_tag() -> None:
         mention=False,
         sender_kind="agent",
         thread_root_id=ROOT,
-        thread_follower=True,
-        agent_run=3,
-        conversation_kind="channel",
     ).validated()
     encoded = ref.encode()
-    assert encoded == (
-        f"{PREFIX}{CONV}/bcmsg_m1/4/0/agent/thread_root={ROOT}"
-        "/thread_follower=1/agent_run=3/conversation_kind=channel"
-    )
+    assert encoded == f"{PREFIX}{CONV}/bcmsg_m1/4/0/agent/thread_root={ROOT}"
+    assert len(encoded[len(PREFIX) :].split("/")) == 6, "a reply stays within the old bound"
     assert parse_conversation_ref_value(encoded[len(PREFIX) :]) == ref
 
 
@@ -202,28 +237,29 @@ def test_the_ref_round_trips_every_wake_tag() -> None:
 def test_old_refs_parse_unchanged_and_re_encode_byte_identically(value: str) -> None:
     ref = parse_conversation_ref_value(value)
     assert ref is not None
-    assert (ref.thread_follower, ref.agent_run, ref.conversation_kind) == (False, 0, None)
     assert ref.encode() == PREFIX + value
 
 
 @pytest.mark.parametrize(
     "value",
     [
-        f"{CONV}/bcmsg_m1/4/0/agent/agent_run=x",
-        f"{CONV}/bcmsg_m1/4/0/agent/agent_run=01",
-        f"{CONV}/bcmsg_m1/4/0/agent/thread_follower=yes",
-        f"{CONV}/bcmsg_m1/4/0/agent/conversation_kind=room",
-        # A follower bit with no thread to follow.
+        # An UNKNOWN tag is ignored, exactly as the previous release ignores it —
+        # that tolerance is what lets a tag be added at all. The part bound is
+        # the old one, so a shape this release never writes is still refused.
         f"{CONV}/bcmsg_m1/4/0/agent/thread_follower=1",
-        # Wake tags need a stated sender kind, like thread_root.
-        f"{CONV}/bcmsg_m1/4/0/agent_run=2",
+        f"{CONV}/bcmsg_m1/4/0/agent/agent_run=3",
     ],
 )
-def test_a_malformed_wake_tag_is_refused_not_guessed(value: str) -> None:
-    assert parse_conversation_ref_value(value) is None
+def test_an_unknown_tag_still_decodes_to_the_pre_contract_ref(value: str) -> None:
+    ref = parse_conversation_ref_value(value)
+    assert ref is not None and ref.thread_root_id is None
 
 
-def test_the_feed_projection_carries_the_wake_facts_into_the_ref() -> None:
+def test_a_ref_longer_than_the_previous_releases_bound_is_refused() -> None:
+    assert parse_conversation_ref_value(f"{CONV}/bcmsg_m1/4/0/agent/a=1/b=2/c=3") is None
+
+
+def test_the_feed_projection_carries_the_thread_root_and_nothing_else() -> None:
     cursor, refs, _resync = project_events_batch(
         {
             "cursor": "9",
@@ -236,7 +272,9 @@ def test_the_feed_projection_carries_the_wake_facts_into_the_ref() -> None:
                         "conversation_seq": 4,
                         "sender_kind": "agent",
                         "thread_root_id": ROOT,
-                        "reply_to_message_id": ROOT,
+                        # A newer hub's extra wake facts. The ref carries none of
+                        # them (review m3): the card derives `directed:` from the
+                        # thread root, and nothing reads the rest.
                         "thread_follower": True,
                         "agent_run": 2,
                         "conversation_kind": "group",
@@ -246,14 +284,11 @@ def test_the_feed_projection_carries_the_wake_facts_into_the_ref() -> None:
             ],
         }
     )
+    assert cursor == 9
     ref = parse_conversation_ref_value(refs[0][len(PREFIX) :])
     assert ref is not None
-    assert (ref.thread_root_id, ref.thread_follower, ref.agent_run, ref.conversation_kind) == (
-        ROOT,
-        True,
-        2,
-        "group",
-    )
+    assert ref.thread_root_id == ROOT
+    assert refs[0] == f"{PREFIX}{CONV}/bcmsg_m1/4/0/agent/thread_root={ROOT}"
 
 
 def test_an_old_hubs_feed_row_projects_to_the_pre_contract_ref() -> None:
@@ -295,9 +330,8 @@ def _trigger(config_dir: Path, kind: str, now: float, mention: bool = False) -> 
     )
 
 
-def test_the_budget_allows_six_posts_per_ten_minutes(tmp_path: Path) -> None:
+def test_the_budget_allows_six_unprompted_posts_per_ten_minutes(tmp_path: Path) -> None:
     now = 1_000_000.0
-    _trigger(tmp_path, "human", now)
     for index in range(reply_guard.BUDGET_POSTS):
         assert isinstance(_reserve(tmp_path, now + index), reply_guard.Reservation)
     refused = _reserve(tmp_path, now + 10)
@@ -309,6 +343,60 @@ def test_the_budget_allows_six_posts_per_ten_minutes(tmp_path: Path) -> None:
     # The window slides: the first post ages out.
     later = now + reply_guard.BUDGET_WINDOW_S + 1
     assert isinstance(_reserve(tmp_path, later), reply_guard.Reservation)
+
+
+def test_a_person_talking_to_their_agent_is_never_throttled(tmp_path: Path) -> None:
+    """Review round 1, m2: an ordinary 1:1 dialogue must not go silent.
+
+    Every post here answers a HUMAN message, so neither the agent-versus-agent
+    budget nor the cool-down may refuse it — the reviewer reproduced 8 human
+    @-mention → reply turns and got 6 reservations and 2 refusals.
+    """
+
+    now = 1_000_000.0
+    slots = []
+    for index in range(8):
+        when = now + 30 * index
+        _trigger(tmp_path, "human", when, mention=True)
+        slots.append(_reserve(tmp_path, when))
+    assert all(isinstance(slot, reply_guard.Reservation) for slot in slots)
+    assert all(not slot.agent_to_agent for slot in slots)
+
+
+def test_human_prompted_posts_do_not_spend_the_agent_budget(tmp_path: Path) -> None:
+    """The budget counts agent-initiated posts only (review round 1, m2)."""
+
+    now = 1_000_000.0
+    for index in range(reply_guard.BUDGET_POSTS):
+        _trigger(tmp_path, "human", now + index, mention=True)
+        assert isinstance(_reserve(tmp_path, now + index), reply_guard.Reservation)
+    # The six agent turns after them still have their full budget. A trigger
+    # older than the TTL no longer counts as a human prompt, so these posts are
+    # agent-initiated — the case the budget exists for.
+    _trigger(tmp_path, "human", now - 10_000, mention=True)
+    for index in range(reply_guard.BUDGET_POSTS):
+        when = now + 100 + index
+        assert isinstance(_reserve(tmp_path, when), reply_guard.Reservation)
+    refused = _reserve(tmp_path, now + 200)
+    assert isinstance(refused, reply_guard.Refusal) and refused.code == reply_guard.CODE_BUDGET
+
+
+def test_the_absolute_cap_stops_even_human_prompted_posts(tmp_path: Path) -> None:
+    """The floor under both policy limits, with its own refusal code (m2)."""
+
+    now = 1_000_000.0
+    for index in range(reply_guard.ABSOLUTE_POSTS):
+        when = now + index
+        _trigger(tmp_path, "human", when, mention=True)
+        assert isinstance(_reserve(tmp_path, when), reply_guard.Reservation)
+    _trigger(tmp_path, "human", now + 60, mention=True)
+    refused = _reserve(tmp_path, now + 60)
+    assert isinstance(refused, reply_guard.Refusal)
+    # A DISTINCT code: the budget says "let the humans talk", this says "stop".
+    assert refused.code == reply_guard.CODE_ABSOLUTE
+    assert refused.code != reply_guard.CODE_BUDGET
+    assert refused.code != reply_guard.CODE_COOLDOWN
+    assert 0 < refused.retry_after_s <= reply_guard.BUDGET_WINDOW_S
 
 
 def test_the_budget_is_per_conversation(tmp_path: Path) -> None:
@@ -330,9 +418,14 @@ def test_three_agent_to_agent_turns_start_a_cool_down(tmp_path: Path) -> None:
     _trigger(tmp_path, "agent", now + 5)
     refused = _reserve(tmp_path, now + 5)
     assert isinstance(refused, reply_guard.Refusal) and refused.code == reply_guard.CODE_COOLDOWN
-    # A human post WITHOUT a mention does not lift it...
+    # A post answering a PERSON is exempt from the cool-down (review round 1,
+    # m2: the person is talking to their agent, so silence is the wrong answer)...
     _trigger(tmp_path, "human", now + 6, mention=False)
-    assert isinstance(_reserve(tmp_path, now + 6), reply_guard.Refusal)
+    assert isinstance(_reserve(tmp_path, now + 6), reply_guard.Reservation)
+    # ...and it does NOT lift the cool-down for agent-versus-agent traffic: only
+    # the mention reset and expiry do (wake contract).
+    _trigger(tmp_path, "agent", now + 7)
+    assert isinstance(_reserve(tmp_path, now + 7), reply_guard.Refusal)
     # ...it expires on its own...
     assert isinstance(_reserve(tmp_path, now + 5 + reply_guard.COOLDOWN_S), reply_guard.Reservation)
 
@@ -380,6 +473,8 @@ class Msg:
     body: str
     mentions: frozenset[str] = frozenset()
     agent_run: int = 0
+    #: The conversation kind the row carries (``dm`` for the 1:1 lane).
+    kind: str = "channel"
 
     @property
     def sender_kind(self) -> str:
@@ -407,11 +502,16 @@ class Hub:
     screened: list[tuple[str, str]] = field(default_factory=list)
 
     def post(
-        self, sender_endpoint: str | None, body: str, mentions: frozenset[str] = frozenset()
+        self,
+        sender_endpoint: str | None,
+        body: str,
+        mentions: frozenset[str] = frozenset(),
+        *,
+        kind: str = "channel",
     ) -> Msg:
         self.run = 0 if sender_endpoint is None else self.run + 1
         seq = len(self.messages) + 1
-        msg = Msg(f"bcmsg_m{seq:04d}", seq, sender_endpoint, body, mentions, self.run)
+        msg = Msg(f"bcmsg_m{seq:04d}", seq, sender_endpoint, body, mentions, self.run, kind)
         self.messages[msg.id] = msg
         for endpoint in self.members:
             if endpoint == sender_endpoint or not self._wakes(endpoint, msg):
@@ -421,7 +521,7 @@ class Hub:
                 "message_id": msg.id,
                 "conversation_seq": msg.seq,
                 "sender_kind": msg.sender_kind,
-                "conversation_kind": "channel",
+                "conversation_kind": msg.kind,
             }
             if endpoint in mentions:
                 ids["mention"] = True
@@ -578,7 +678,10 @@ def test_three_messages_in_one_window_are_one_wake_and_three_screens(
     card = wakes[0]["card"]
     assert _card_field(card, "message_ids") == ",".join(m.id for m in sent)
     assert _card_field(card, "message_id") == sent[-1].id
-    assert _card_field(card, "conversation_kind") == "channel"
+    # The card names one thread root at most and no conversation kind: the ref
+    # this came from carries neither (review round 1, m3).
+    assert _card_field(card, "conversation_kind") is None
+    assert _card_field(card, "thread_root_id") is None
     assert outcome["coalesced_wakes"][0]["message_ids"] == [m.id for m in sent]
 
 
@@ -802,3 +905,242 @@ def test_two_reply_to_everything_agents_stop_on_the_client_guard_alone(
     assert refusals, "the guard, not luck, ended it"
     assert {r["code"] for r in refusals} <= {reply_guard.CODE_COOLDOWN, reply_guard.CODE_BUDGET}
     print(f"\ncaps off: {per_agent}, {len(wakes)} wakes, refusals={[r['code'] for r in refusals]}")
+
+
+# -- the buffered card survives a stop (review round 1, M1) --------------------
+
+
+def _coalescing_holds(config_dir: Path, owner: Any) -> int:
+    from local_operator.team_bridge.store import Store
+
+    return Store(config_dir).hold_count_readonly(owner, coalesce_mod.HOLD_WAKE_COALESCING)
+
+
+def _one_message_rig(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Any, dict[str, Path], Hub, list[dict[str, Any]]]:
+    clock = Clock()
+    monkeypatch.setattr(time, "time", clock)
+    a = _owner("a", 1)
+    dirs = {"a": tmp_path / "a"}
+    dirs["a"].mkdir()
+    _enroll(dirs["a"], a, "sess_a")
+    hub = Hub(members=("bep_a",))
+    return a, dirs, hub, _rig(monkeypatch, hub, dirs)
+
+
+def test_a_stop_during_the_coalesced_flush_keeps_the_buffered_card(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M1: a BaseException at the hand-off used to lose the wake for good.
+
+    The reviewer reproduced the state after a stop as ``feed_refs=0,
+    screening_holds=0, owed reservations=1`` — nothing re-drove the message, so
+    an hour of iterations delivered 0 wakes instead of 1. The ``wake_coalescing``
+    hold is written when the card is BUFFERED now, which is the only moment
+    before the feed ref (the message's sole durable locator) disappears.
+    """
+
+    a, dirs, hub, wakes = _one_message_rig(tmp_path, monkeypatch)
+
+    async def stopped_at_the_handoff(owner: Any, payload: str, **kwargs: Any) -> str:
+        # A connector stop's cancellation or an interrupt: both are
+        # BaseException, and neither is a delivery failure to retry in place.
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(conversation_mod, "deliver_wake", stopped_at_the_handoff)
+    sent = hub.post(None, "one message")
+    with pytest.raises(KeyboardInterrupt):
+        _iterate(a, dirs["a"])
+    assert wakes == [], "the card never went out"
+    assert _coalescing_holds(dirs["a"], a) == 1, "durable BEFORE the ref could go"
+
+    # RESTART: a fresh process (fresh coalescer) over the same store, an hour on.
+    monkeypatch.undo()
+    clock = Clock()
+    monkeypatch.setattr(time, "time", clock)
+    monkeypatch.setattr(conversation_mod, "engagement_hold", lambda designation, config_dir: "")
+    restarted_wakes = _rig(monkeypatch, hub, dirs)
+    clock.now += 3_600
+    _iterate(a, dirs["a"])
+
+    assert len(restarted_wakes) == 1, "the restart delivered the buffered card"
+    assert _card_field(restarted_wakes[0]["card"], "message_id") == sent.id
+    assert _coalescing_holds(dirs["a"], a) == 0, "delivered, so the hold is cleared"
+
+
+def test_a_kill_between_the_ref_delete_and_the_flush_leaves_a_hold(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other way in: SIGKILL after the refs are deleted, before any flush.
+
+    The iteration's inner half IS that process — it deletes the feed refs as its
+    last act and never reaches ``run_iteration``'s flush.
+    """
+
+    a, dirs, hub, wakes = _one_message_rig(tmp_path, monkeypatch)
+    sent = hub.post(None, "one message")
+    # The buffering scope WITHOUT the flush: the iteration's end (where the flush
+    # runs) is exactly what a kill takes away, after it has already deleted the
+    # message's feed refs.
+    with coalesce_mod.CONNECTOR_COALESCER.scope():
+        asyncio.run(
+            loop_mod._run_iteration_inner(
+                a,
+                config_dir=dirs["a"],
+                access=SimpleNamespace(credential_id=a.credential_id),
+                auth_store=None,
+            )
+        )
+    assert wakes == []
+    assert _coalescing_holds(dirs["a"], a) == 1
+
+    monkeypatch.undo()
+    clock = Clock()
+    monkeypatch.setattr(time, "time", clock)
+    monkeypatch.setattr(conversation_mod, "engagement_hold", lambda designation, config_dir: "")
+    restarted_wakes = _rig(monkeypatch, hub, dirs)
+    clock.now += 3_600
+    _iterate(a, dirs["a"])
+    assert len(restarted_wakes) == 1
+    assert _card_field(restarted_wakes[0]["card"], "message_id") == sent.id
+
+
+# -- the DM lane wakes too (operator-requested coverage) ----------------------
+
+
+def _dm_message_rig(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Any, dict[str, Path], Hub, list[dict[str, Any]]]:
+    """The one-message rig with the REAL wake delivery (the stub is undone).
+
+    The coalescing tests stub ``deliver_wake``; the DM lane is about what that
+    function does, so it is restored to the module's own seam and only the two
+    primitives it calls are doubled.
+    """
+
+    from local_operator.team_bridge.connector import wake as wake_mod
+
+    a, dirs, hub, wakes = _one_message_rig(tmp_path, monkeypatch)
+    monkeypatch.setattr(conversation_mod, "deliver_wake", wake_mod.deliver_wake)
+    return a, dirs, hub, wakes
+
+
+def test_a_dm_card_wakes_a_live_idle_session_through_the_mailbox(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The operator's DM question, against the EXISTING primitives.
+
+    No new transport: the card goes out through ``deliver_wake``, which mails it
+    into the designated session (the same call the Send tool's live delivery
+    uses) with wake on, stamped with the bridge provenance kind so the receiving
+    session renders it as a bridge message rather than a generic peer one.
+    """
+
+    from local_operator.mobile import peer_send as peer_mod
+
+    a, dirs, hub, _wakes = _dm_message_rig(tmp_path, monkeypatch)
+    calls: dict[str, Any] = {}
+
+    async def fake_outcome(
+        record: Any,
+        *,
+        session_id: str,
+        text: str,
+        mode: str,
+        wake: bool,
+        sender: Any,
+        custom_type: str | None = None,
+        bridge_meta: Any = None,
+    ) -> Any:
+        calls["live"] = {
+            "session_id": session_id,
+            "text": text,
+            "mode": mode,
+            "wake": wake,
+            "custom_type": custom_type,
+        }
+        return SimpleNamespace(detail="delivered (live)", state="delivered")
+
+    monkeypatch.setattr(peer_mod, "session_has_durable_history", lambda sid: True)
+    monkeypatch.setattr(peer_mod, "deliver_peer_message_outcome", fake_outcome)
+    sent = hub.post(None, "hello in a dm", kind="dm")
+
+    outcome = _iterate(a, dirs["a"])
+
+    assert outcome["handled"][0]["action"] == "delivered"
+    assert calls["live"]["session_id"] == "sess_a"
+    # A mailbox INJECT with the wake flag — the live-idle path, not a bare badge.
+    assert calls["live"]["mode"] == "mailbox" and calls["live"]["wake"] is True
+    assert calls["live"]["custom_type"] == "team_bridge_message"
+    assert _card_field(calls["live"]["text"], "message_id") == sent.id
+    assert _card_field(calls["live"]["text"], "conversation_id") == CONV
+
+
+def test_a_dm_card_engages_a_cold_session_and_carries_the_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cold with no durable history: the errand CARRIES the card, never a bare wake."""
+
+    from local_operator.mobile import peer_send as peer_mod
+    from local_operator.session.runtime import launch as launch_mod
+
+    a, dirs, hub, _wakes = _dm_message_rig(tmp_path, monkeypatch)
+    monkeypatch.setattr(peer_mod, "session_has_durable_history", lambda sid: False)
+    calls: dict[str, Any] = {}
+
+    async def fake_engage(session_id: str, cwd: str, work: Any, *, config_dir: Path) -> Any:
+        calls["cold"] = {
+            "session_id": session_id,
+            "work": type(work).__name__,
+            "text": work.text,
+            "mode": work.mode,
+            "wake": work.wake,
+        }
+        return SimpleNamespace(state="started")
+
+    monkeypatch.setattr(launch_mod, "engage_runtime", fake_engage)
+    sent = hub.post(None, "hello in a dm", kind="dm")
+
+    _iterate(a, dirs["a"])
+
+    assert calls["cold"]["session_id"] == "sess_a"
+    assert calls["cold"]["work"] == "PeerMessageErrand"
+    assert calls["cold"]["mode"] == "mailbox" and calls["cold"]["wake"] is True
+    assert _card_field(calls["cold"]["text"], "message_id") == sent.id
+
+
+# -- an arrival that wakes nobody must be visible (review round 1, 7b) --------
+
+
+def test_an_arrival_that_wakes_nobody_is_logged_and_counted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Consent with no designated session: nothing wakes, and that used to be silent.
+
+    The outcome stays ``badge_only`` (a real state, not a failure), but the owner
+    can now see it: one WARNING with the typed code, and a counter the receiver
+    status payload exposes.
+    """
+
+    from local_operator.team_bridge.store import Store
+    from local_operator.team_bridge.wake_diagnostics import woke_nobody_counts
+
+    a = _owner("a", 1)
+    dirs = {"a": tmp_path / "a"}
+    dirs["a"].mkdir()
+    _enroll(dirs["a"], a, "sess_a")
+    Store(dirs["a"]).update_designated_session(a, None)
+    hub = Hub(members=("bep_a",))
+    wakes = _rig(monkeypatch, hub, dirs)
+    hub.post(None, "nobody to wake")
+
+    with caplog.at_level("WARNING"):
+        outcome = _iterate(a, dirs["a"])
+
+    first = outcome["handled"][0]
+    assert first["action"] == "badge_only"
+    assert first["code"] == "no_designation"
+    assert wakes == [], "a badge-only arrival wakes nothing"
+    assert "code=no_designation" in caplog.text
+    assert woke_nobody_counts(dirs["a"]) == {"no_designation": 1}

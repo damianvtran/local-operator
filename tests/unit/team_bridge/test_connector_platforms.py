@@ -773,6 +773,35 @@ def test_cli_install_status_remove_round_trip(linux, capsys, monkeypatch) -> Non
     assert not _unit(home).exists()
 
 
+def test_cli_status_exposes_arrivals_that_woke_nobody(linux, capsys, monkeypatch) -> None:
+    """Review round 1, 7b: the badge-only case must be visible to the owner.
+
+    ``no_designation`` (consent accepted, no designated session) wakes nobody by
+    design; before this it was invisible from outside. It is a MACHINE key on
+    purpose — a human sentence would be new user-facing copy, which the i18n
+    ledger gates on a per-locale audit (see the PR's remediation note).
+    """
+
+    from local_operator.team_bridge.connector import cli as tb_cli
+    from local_operator.team_bridge.wake_diagnostics import (
+        CODE_NO_DESIGNATION,
+        record_woke_nobody,
+    )
+
+    _fake, _home, root = linux
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    _commit(root)
+
+    assert tb_cli.main(_cli(["team-bridge", "receiver", "status", "--json"])) == 0
+    assert json.loads(capsys.readouterr().out)["woke_nobody"] == {}, "nothing recorded"
+
+    record_woke_nobody(root, code=CODE_NO_DESIGNATION)
+    record_woke_nobody(root, code=CODE_NO_DESIGNATION)
+
+    assert tb_cli.main(_cli(["team-bridge", "receiver", "status", "--json"])) == 0
+    assert json.loads(capsys.readouterr().out)["woke_nobody"] == {CODE_NO_DESIGNATION: 2}
+
+
 def test_cli_refuses_an_isolated_root_with_the_way_to_run_it(tmp_path, capsys, monkeypatch) -> None:
     from local_operator.team_bridge.connector import cli as tb_cli
 

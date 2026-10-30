@@ -17,15 +17,25 @@ and otherwise waits until ``window_s`` after the previous wake. That gives at
 most one wake per window per (endpoint, conversation, thread) while a burst
 that lands in one feed batch still produces exactly one card.
 
-CRASH SAFETY without touching ``store.py`` (a hotfix lane is mid-change
-there). The card-posted marker on the body reservation is written only at
-FLUSH, never at enqueue, so a reservation whose card is still buffered reads
-``CARD_OWED`` — exactly the state a replay already knows how to finish. A
-group that outlives its iteration gets a durable ``wake_coalescing`` hold row
-keyed by its feed ref (the existing retry schedule): after a crash the
-ordinary hold re-drive finds the owed card and posts it. In the live process
-the in-memory flush runs first and deletes those rows, so the re-drive (which
-would re-fetch the body) never fires in the normal path.
+CRASH SAFETY IS WRITTEN BEFORE THE CARD CAN BE LOST, NEVER AFTER. The feed
+ref is deleted by the loop as soon as its message is handled (once-only
+consumption), so from ``enqueue`` onward the only records that a card is still
+owed are the body reservation (still without its ``card_posted`` marker) and
+the durable ``wake_coalescing`` hold this module writes AT ENQUEUE, keyed by
+the message's own feed ref. A hard kill (SIGKILL, power loss) or a cancellation
+between the ref delete and the flush therefore leaves a hold on the existing
+retry schedule: the ordinary re-drive finds the owed card and posts it. That
+ordering is the whole point — a hold written only at the END of an iteration
+is a hold written after the window in which it was needed. On a successful
+hand-off ``_settle`` marks the reservation posted and deletes the hold, so the
+re-drive never fires in the normal path; and when the flush is itself
+interrupted by a ``BaseException`` (a stop's cancellation, a SIGTERM, an
+interrupt) it re-persists the group's holds and re-raises rather than
+swallowing the stop.
+
+The card-posted marker on the body reservation is still written only at
+FLUSH, never earlier, so a reservation whose card is still buffered reads
+``CARD_OWED`` — exactly the state a replay already knows how to finish.
 
 Threads are their own groups: a reply card must name ONE thread root to route
 an answer into it, so replies in two threads never share a card.
@@ -104,11 +114,12 @@ def merge_metadata(items: list[Any]) -> Any:
 
     The newest message supplies the locator (``message_id``, ``seq``) because
     reply routing binds to one id and the newest is what an answer follows.
-    ``mention``/``thread_follower`` are the OR over the group: a mention
-    anywhere in the burst makes the card directed. The sender is named only
-    when every message shares one; otherwise the card says ``several members``
-    and the kind ``mixed``, so the agent-sender caution (which only applies
-    when every message came from an agent) is never stamped on a human's line.
+    ``mention`` is the OR over the group: a mention anywhere in the burst makes
+    the card directed. Thread direction needs no merge — a flush never mixes
+    threads, one group per thread root. The sender is named only when every
+    message shares one; otherwise the card says ``several members`` and the kind
+    ``mixed``, so the agent-sender caution (which only applies when every
+    message came from an agent) is never stamped on a human's line.
     """
 
     newest = items[-1]
@@ -123,7 +134,6 @@ def merge_metadata(items: list[Any]) -> Any:
     return replace(
         newest,
         mention=any(item.mention for item in items),
-        thread_follower=any(item.thread_follower for item in items),
         sender_kind=sender_kind,
         sender_label=sender_label,
         attachments=attachments,
@@ -162,8 +172,12 @@ class WakeCoalescer:
     ) -> None:
         """Buffer one admitted message's card. Idempotent per message id.
 
-        A replay of a message already buffered (the crash-recovery hold
-        re-driving while the group is still live) adds nothing.
+        The crash-recovery hold is written HERE, before the caller deletes the
+        feed ref: everything after this point may not run (a stop, a kill, a
+        cancel between the ref delete and the flush), and the hold is what a
+        restart's ordinary re-drive looks for. A replay of a message already
+        buffered (the hold re-driving while the group is still live) adds
+        nothing and rewrites nothing.
         """
 
         now = time.time() if now is None else now
@@ -182,6 +196,7 @@ class WakeCoalescer:
         group.items.sort(key=lambda item: item.metadata.conversation_seq)
         if len(group.items) >= MAX_COALESCED_MESSAGES:
             group.due_at = min(group.due_at, now)
+        _persist_hold(owner, ref_key, config_dir, retry_at=group.due_at + _HOLD_GRACE_S)
 
     # -- timing --------------------------------------------------------------
 
@@ -250,6 +265,16 @@ class WakeCoalescer:
                 _persist_holds(group, retry_at=group.due_at + _HOLD_GRACE_S)
                 outcomes.append({"action": "hold", "messages": len(group.items)})
                 continue
+            except BaseException:
+                # A stop or an interrupt is NOT a failed delivery to retry in
+                # place: this process is going away and the buffer with it. The
+                # group's holds (written at enqueue) are refreshed past the
+                # grace period and the exception propagates, so the next start's
+                # ordinary hold retry re-drives every message in the group.
+                # Swallowing it here would strand the group in memory that is
+                # about to be discarded.
+                _persist_holds(group, retry_at=time.time() + _HOLD_GRACE_S)
+                raise
             del self._groups[key]
             self._last_wake[key] = now
             if len(self._last_wake) > _LAST_WAKE_CAP:
@@ -342,15 +367,18 @@ def _still_owed(group: _Group) -> list[_Pending]:
     return kept
 
 
-def _persist_holds(group: _Group, *, retry_at: float) -> None:
+def _persist_hold(owner: Any, ref_key: str, config_dir: Path, *, retry_at: float) -> None:
     from local_operator.team_bridge.store import Store, StoreRefused
 
-    store = Store(group.config_dir)
+    try:
+        Store(config_dir).persist_hold(owner, ref_key, HOLD_WAKE_COALESCING, retry_at=retry_at)
+    except StoreRefused:
+        pass  # fenced owner: the next live generation owns its own rows
+
+
+def _persist_holds(group: _Group, *, retry_at: float) -> None:
     for item in group.items:
-        try:
-            store.persist_hold(group.owner, item.ref_key, HOLD_WAKE_COALESCING, retry_at=retry_at)
-        except StoreRefused:
-            pass  # fenced owner: the next live generation owns its own rows
+        _persist_hold(group.owner, item.ref_key, group.config_dir, retry_at=retry_at)
 
 
 def _settle(group: _Group, *, now: float) -> None:

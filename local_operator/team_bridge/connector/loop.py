@@ -666,11 +666,17 @@ async def run_iteration(
         finally:
             # Flush even when the iteration raised: messages already admitted
             # in it are owed their card regardless of a later ref's failure.
-            summary_wakes = await CONNECTOR_COALESCER.flush_due(
-                deliver=_coalesced_deliver, owner_filter=owner, config_dir=config_dir
-            )
-            # Groups still inside their window survive a crash as holds.
-            CONNECTOR_COALESCER.persist_pending_holds(config_dir=config_dir)
+            # The durable-hold pass runs in its OWN finally, so a stop that
+            # cancels the flush still leaves every buffered message recoverable
+            # (review round 1, M1: the hold used to be written only after the
+            # flush, i.e. never when the flush was the thing that died).
+            try:
+                summary_wakes = await CONNECTOR_COALESCER.flush_due(
+                    deliver=_coalesced_deliver, owner_filter=owner, config_dir=config_dir
+                )
+            finally:
+                # Groups still inside their window survive a crash as holds.
+                CONNECTOR_COALESCER.persist_pending_holds(config_dir=config_dir)
     summary["coalesced_wakes"] = summary_wakes
     return summary
 

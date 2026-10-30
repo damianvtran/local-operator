@@ -478,8 +478,11 @@ def static_feature_flags() -> dict[str, Any]:
         # contract, 2026-10-30): `PUT /v1/desktop/team-bridge/conversations/
         # {id}/agent-notify` with `notify` all|mention|mute plus the required
         # owner/tenant receipt. Agents now default to waking on every
-        # message, so the UI offers "Every message / Only @-mentions / Never";
-        # a renderer that does not see this flag shows no such control.
+        # message, so the UI offers "Every message / @-mentions and its threads /
+        # Never (muted)" — `mention` means direct or channel @-mentions AND
+        # replies in threads the agent follows, not mentions alone (wake
+        # contract, Amendment A1). A renderer that does not see this flag shows
+        # no such control.
         "team_bridge_agent_notify": 1,
         # The OWNER AUDIT ("{chief of staff}'s messages"): the read-only
         # `/v1/desktop/team-bridge/owner-audit/...` family over agent-server

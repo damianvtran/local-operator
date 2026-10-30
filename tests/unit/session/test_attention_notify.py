@@ -1117,7 +1117,7 @@ async def test_a_bridge_card_wake_ending_in_no_reply_publishes_nothing(tmp_path:
     try:
         await session.receive_peer_message(
             "Channel message · #agents · from Ada (human, same tenant)\nmention: no\n"
-            "expect: weigh relevance; if nothing is needed end with no_reply",
+            "expect: weigh relevance; no_reply if nothing is needed",
             mode="mailbox",
             wake=True,
             sender={"account_id": "acc_1", "source": TEAM_BRIDGE_MESSAGE_TYPE},

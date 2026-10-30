@@ -1743,12 +1743,16 @@ class ConversationConsentIn(ConversationOwnerIn):
 class ConversationAgentNotifyIn(_Strict):
     """The owner's choice of what wakes THEIR agent in one conversation.
 
-    ``all`` = every message, ``mention`` = only @-mentions, ``mute`` = never
-    (history only). The captured-owner receipt is REQUIRED, like the reaction
-    write: no shipped renderer calls this route yet, so there is no legacy
-    caller to stay compatible with, and an optional guard would regress the
-    first time a renderer forgot it. The endpoint is NOT a body field: it is
-    always this machine's enrolled agent, never one the caller names.
+    ``all`` = every message, ``mention`` = direct/channel @-mentions AND replies
+    in threads the agent follows, ``mute`` = never (history only). The same three
+    words the UI shows as "Every message / @-mentions and its threads / Never
+    (muted)" (wake contract, Amendment A1: naming ``mention`` as "only
+    @-mentions" was wrong — a followed-thread reply wakes the agent without one).
+    The captured-owner receipt is REQUIRED, like the reaction write: no shipped
+    renderer calls this route yet, so there is no legacy caller to stay
+    compatible with, and an optional guard would regress the first time a
+    renderer forgot it. The endpoint is NOT a body field: it is always this
+    machine's enrolled agent, never one the caller names.
     """
 
     notify: Literal["all", "mention", "mute"]

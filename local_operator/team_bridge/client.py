@@ -4090,8 +4090,10 @@ class TeamBridgeClient:
         hub's endpoint-addressed route (agent-server ``NotifyHandlerEcho``)
         accepts only an ACTIVE agent member owned by the caller's account, and
         answers a non-owner, unknown endpoint and non-member with one coded
-        refusal. ``all`` wakes the agent for every message, ``mention`` only
-        when @-mentioned, ``mute`` never (history only). The answer is the
+        refusal. ``all`` wakes the agent for every message, ``mention`` for
+        direct/channel @-mentions AND replies in threads it follows (wake
+        contract, Amendment A1 — a followed thread is directed at the agent even
+        without a mention), ``mute`` never (history only). The answer is the
         conversation view.
         """
 

@@ -58,7 +58,6 @@ EXPECTED_CARD_A = f"""Channel message · #qa-coordination · from Ada (human, sa
 {BRIDGE_UNTRUSTED_CLAUSE}
 
 mention: yes
-directed: mention
 tenant_id: tnt_1
 conversation_id: bcv_abcdefgh
 message_id: bcmsg_abcdef01
@@ -900,7 +899,7 @@ def test_one_channel_message_wakes_mentioned_a_and_notify_all_b(tmp_path, monkey
     # (g) The triage RULES stay in the served guidance named by version; the
     # card carries only the per-wake expectation (wake contract): a mention
     # expects a reply, an unmentioned message is weighed, no_reply ends it.
-    assert "expect: weigh relevance; if nothing is needed end with no_reply" in card_b
+    assert "expect: weigh relevance; no_reply if nothing is needed" in card_b
     assert "guidance: bridge-guidance-v2" in card_b
     assert "no_reply" not in transcripts["sess_a"][0]["payload"]
     assert "expect: reply" in transcripts["sess_a"][0]["payload"]
@@ -1503,7 +1502,9 @@ def test_a_reply_card_names_its_thread_and_how_to_answer_in_it() -> None:
     lines = card.splitlines()
     assert lines[0].startswith("Thread reply · #agents · from Bea's agent")
     assert lines[1] == BRIDGE_UNTRUSTED_CLAUSE
-    assert f"thread_root_id: {ROOT_ID}" in lines
+    # `(reply to)` carries the contract's `reply_to_message_id` name for the
+    # same id on the same line (review round 1, m4).
+    assert f"thread_root_id: {ROOT_ID} (reply to)" in lines
     assert "channel_post with this thread_root_id" in card
 
 
@@ -1580,7 +1581,7 @@ def test_a_thread_reply_card_keeps_only_its_thread_route() -> None:
     )
     lines = card.splitlines()
     assert lines[-3:-1] == [
-        f"thread_root_id: {ROOT_ID}",
+        f"thread_root_id: {ROOT_ID} (reply to)",
         "reply in thread: bridge channel_post with this thread_root_id; "
         "read the thread with channel_thread",
     ]
