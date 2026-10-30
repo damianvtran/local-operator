@@ -1878,6 +1878,25 @@
       "note": "w3 es backfill: 20 keys; independent audit w3a1 passed (committed evidence i18n/audits/evidence/es/wire.errors.media/w3a1/). Open minor/nit findings are dispositioned in that evidence's report.md."
     },
     {
+      "locale": "es",
+      "namespace": "wire.slash",
+      "source_sha256": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
+      "translator": {
+        "agent": "i18n-translator (session e537e741e8d1)",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session 56bf28217956; instance 56bf28217956-slash2-es)",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PR #3088 width rewrite, re-audited at the committed bytes. 9 of 52 values rewritten by i18n-translator (session e537e741e8d1) (actual model radient/auto; provider-quota fallback); round-1 audit e7a6d684b88a-slash-es rejected the shortened bytes (0B/1M/5m/5n) and round-2 independent audit 56bf28217956-slash2-es on the new bytes passed 0B/0M/2m/4n. target sha256 b577fc64e6ab7369a58f02d4b4653367f9169cf1a015b16168e02dae6bfc5c3b; en source unchanged (b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202). Evidence: i18n/audits/evidence/es/wire.slash/es29s2/record.json (receipt.json + verdicts copied verbatim). Previous rows for this pair described audits of the pre-rewrite values and are superseded."
+    },
+    {
       "locale": "fr",
       "namespace": "tui.status",
       "source_sha256": "2403f9c4f37b40264f575929627b99a0bcabb0baf1bcb6a0b951c6c31ec6843a",
@@ -3564,6 +3583,25 @@
       "note": "Independent audit passed 14/14 keys; the three supervision states stay distinct and placeholders and code spans are byte-identical; U+202F applied at 13 typography sites. 2 MINOR accepted: width (serve_linger_required 102, unsupervised_unknown 92 cells vs 80/78), recorded in style-guides/fr.md. No durability or reboot claim."
     },
     {
+      "locale": "fr",
+      "namespace": "wire.slash",
+      "source_sha256": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
+      "translator": {
+        "agent": "i18n-translator (session 0347acaa76f7, 16 keys; session 53ebb4e7a4a0, wire.slash.approvals)",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session 848874ddfe7a; instance 848874ddfe7a-slash3-fr; prior round b682afa67e4b-slash2-fr)",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PR #3088 width rewrite, re-audited at the committed bytes. 16 of 52 values rewritten by i18n-translator (session 0347acaa76f7, 16 keys; session 53ebb4e7a4a0, wire.slash.approvals) (actual model radient/auto; provider-quota fallback); round-1 audit 9412375334be-slash-fr rejected the shortened bytes (1B/4M/4m/5n) and round-2 audit b682afa67e4b-slash2-fr passed 51 of 52 keys and rejected wire.slash.approvals (0B/1M/4m/1n, changes_requested); a second translator session (53ebb4e7a4a0) rewrote that one value and round-3 audit 848874ddfe7a-slash3-fr confirmed it with 0B/0M/1m/0n and zero drift in the other 51 keys. target sha256 bb580c5bc5a2b2d91b03b97b92be5341db0c731feaf7ea592f08b70d3520983e; en source unchanged (b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202). Evidence: i18n/audits/evidence/fr/wire.slash/fr29s3/record.json (receipt.json + verdicts copied verbatim). Previous rows for this pair described audits of the pre-rewrite values and are superseded."
+    },
+    {
       "locale": "hi",
       "namespace": "tui.status",
       "source_sha256": "2403f9c4f37b40264f575929627b99a0bcabb0baf1bcb6a0b951c6c31ec6843a",
@@ -4600,6 +4638,25 @@
       },
       "status": "passed",
       "note": "Independent audit passed 14/14 keys after one BLOCKER was raised and fixed: an Urdu token in Arabic script stood inside the Devanagari string and was corrected to कोई; the script sweep over all 98 strings is clean. The three states stay distinct: निगरानी में / निगरानी से बाहर (assertive) / निगरानी अज्ञात (modal, no absence claim). Placeholders and code spans byte-identical; width fits rich.cells.cell_len so no exception bullet. No durability or reboot claim."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.slash",
+      "source_sha256": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
+      "translator": {
+        "agent": "i18n-translator (session d5ec953fe384)",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session 80b132698268; instance 80b132698268-slash2-hi)",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PR #3088 width rewrite, re-audited at the committed bytes. 8 of 52 values rewritten by i18n-translator (session d5ec953fe384) (actual model radient/auto; provider-quota fallback); round-1 audit 610f8d957d36-slash-hi rejected the shortened bytes (0B/1M/3m/3n) and round-2 independent audit 80b132698268-slash2-hi on the new bytes passed 0B/0M/1m/1n. target sha256 da022ae8f9e0777ae0d7d7cb53e593a769400ace0a090f282cf79fe646a98b48; en source unchanged (b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202). Evidence: i18n/audits/evidence/hi/wire.slash/hi29s2/record.json (receipt.json + verdicts copied verbatim). Previous rows for this pair described audits of the pre-rewrite values and are superseded."
     },
     {
       "locale": "ru",
@@ -5718,6 +5775,25 @@
       }
     },
     {
+      "locale": "ru",
+      "namespace": "wire.slash",
+      "source_sha256": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
+      "translator": {
+        "agent": "i18n-translator (session aec007cb64fd)",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session 1ad20cd0410c; instance 1ad20cd0410c-slash2-ru)",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PR #3088 width rewrite, re-audited at the committed bytes. 13 of 52 values rewritten by i18n-translator (session aec007cb64fd) (actual model radient/auto; provider-quota fallback); round-1 audit 2c04d4b44ec7-slash-ru rejected the shortened bytes (0B/3M/5m/5n) and round-2 independent audit 1ad20cd0410c-slash2-ru on the new bytes passed 0B/0M/6m/5n. target sha256 09b51528fb14e80fd3db33367624762ef33c47a4668a1a99e6946f451bd5761f; en source unchanged (b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202). Evidence: i18n/audits/evidence/ru/wire.slash/ru29s2/record.json (receipt.json + verdicts copied verbatim). Previous rows for this pair described audits of the pre-rewrite values and are superseded."
+    },
+    {
       "locale": "ur",
       "namespace": "cli.exec_remote_help",
       "source_sha256": "c555648c19dd25af507951dc828f3fffbedc44feb579192c9c3fa7c6952e365e",
@@ -6613,6 +6689,25 @@
       },
       "status": "passed",
       "note": "Independent audit passed: supervision_unknown hedges (معلوم نہیں ہو سکا); unsupervised_unknown stays assertive. 14/14 keys, zero bidi control bytes, the LTR islands byte-identical. 1 MINOR accepted: width (89/81/80 vs 80/78), recorded in style-guides/ur.md. No durability or reboot claim."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.slash",
+      "source_sha256": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
+      "translator": {
+        "agent": "i18n-translator (session e0c37577f3ce)",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session 1ecfefb83d14; instance 1ecfefb83d14-slash2-ur)",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PR #3088 width rewrite, re-audited at the committed bytes. 8 of 52 values rewritten by i18n-translator (session e0c37577f3ce) (actual model radient/auto; provider-quota fallback); round-1 audit 2f076e039aec-slash-ur rejected the shortened bytes (1B/0M/5m/4n) and round-2 independent audit 1ecfefb83d14-slash2-ur on the new bytes passed 0B/0M/3m/3n. target sha256 7c950b38d91902600488c29a5f13fbdaaf52f5fd8af69001fb9803e448a80959; en source unchanged (b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202). Evidence: i18n/audits/evidence/ur/wire.slash/ur29s2/record.json (receipt.json + verdicts copied verbatim). Previous rows for this pair described audits of the pre-rewrite values and are superseded."
     },
     {
       "locale": "vi",
@@ -7729,6 +7824,25 @@
       },
       "status": "passed",
       "note": "Independent audit by a different agent at head 35c7be9989db. Read every value against en, glossary §2 and style-guides/vi.md; ICU argument names/kinds and plural arms verified with the repo parser; NFC, ellipsis and quote typography checked; terminology compared with already-shipped catalogues/vi/**. Single plural key; other-only arm per the vi guide renders correctly (# at 0/1/2/21). «tài nguyên» matches the shipped vi resource wording. 0 blocker/major/minor. 1 keys. Not checked: native-speaker review, rendered layout/width, device run. Target vi catalogue SHA-256 3841bfe2c60bcf0496d5f57ad237dfc71ee92bf396fdd4ed4a296655e1ab7c85."
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.slash",
+      "source_sha256": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
+      "translator": {
+        "agent": "i18n-translator (session 137c362d5bba)",
+        "model": "radienthq/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session f3ea10304234; instance f3ea10304234-slash2-vi)",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PR #3088 width rewrite, re-audited at the committed bytes. 11 of 52 values rewritten by i18n-translator (session 137c362d5bba) (actual model radienthq/auto; provider-quota fallback); round-1 audit 86c035febe3e-slash-vi rejected the shortened bytes (0B/2M/5m/4n) and round-2 independent audit f3ea10304234-slash2-vi on the new bytes passed 0B/0M/1m/4n. target sha256 d228f91dad840c65253a5d46919cb99c0cb0eaa21c99d315e79f55f8490dfc23; en source unchanged (b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202). Evidence: i18n/audits/evidence/vi/wire.slash/vi29s2/record.json (receipt.json + verdicts copied verbatim). Previous rows for this pair described audits of the pre-rewrite values and are superseded."
     },
     {
       "locale": "zh-CN",
@@ -9633,6 +9747,25 @@
       },
       "status": "passed",
       "note": "Independent zh-CN audit, 13 keys, clean: 0 blocker/major/minor/nit. Evidence i18n/audits/evidence/zh-CN/relay.account_policy/zhc1. Auditor read the English source and sidecar at the hashes recorded there; route and marker scan recorded in record.json (worktree reads per docs/security/redaction-policy.md 2.2; 0 markers; assignment tokens verified by ordinals). Translator session 809b6f2773e0, auditor session e139d7f8f30c; both ran on radient/auto after anthropic quota fallbacks. No native-speaker pass claimed."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.slash",
+      "source_sha256": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
+      "translator": {
+        "agent": "i18n-translator (session 1fe5533c9a8f)",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session 7b1ecf2ef33b; instance 7b1ecf2ef33b-slash-zh-cn)",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PR #3088 width rewrite, re-audited at the committed bytes. 5 of 52 values rewritten by i18n-translator (session 1fe5533c9a8f) (actual model radient/auto; provider-quota fallback); round-1 audit a303f65af544-slash-zh-CN rejected the shortened bytes (0B/1M/3m/2n) and round-2 independent audit 7b1ecf2ef33b-slash-zh-cn on the new bytes passed 0B/0M/0m/1n. target sha256 ebc0ae0101022d4ff31ca7e54f0e0d34d000c7e3b46e62b54ac3ed132a88cd55; en source unchanged (b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202). Evidence: i18n/audits/evidence/zh-CN/wire.slash/zh-CN29s2/record.json (receipt.json + verdicts copied verbatim). Previous rows for this pair described audits of the pre-rewrite values and are superseded."
     }
   ]
 }

@@ -898,6 +898,25 @@
       },
       "status": "passed",
       "note": "Independent audit passed: supervision_unknown hedges (معلوم نہیں ہو سکا); unsupervised_unknown stays assertive. 14/14 keys, zero bidi control bytes, the LTR islands byte-identical. 1 MINOR accepted: width (89/81/80 vs 80/78), recorded in style-guides/ur.md. No durability or reboot claim."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.slash",
+      "source_sha256": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
+      "translator": {
+        "agent": "i18n-translator (session e0c37577f3ce)",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session 1ecfefb83d14; instance 1ecfefb83d14-slash2-ur)",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PR #3088 width rewrite, re-audited at the committed bytes. 8 of 52 values rewritten by i18n-translator (session e0c37577f3ce) (actual model radient/auto; provider-quota fallback); round-1 audit 2f076e039aec-slash-ur rejected the shortened bytes (1B/0M/5m/4n) and round-2 independent audit 1ecfefb83d14-slash2-ur on the new bytes passed 0B/0M/3m/3n. target sha256 7c950b38d91902600488c29a5f13fbdaaf52f5fd8af69001fb9803e448a80959; en source unchanged (b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202). Evidence: i18n/audits/evidence/ur/wire.slash/ur29s2/record.json (receipt.json + verdicts copied verbatim). Previous rows for this pair described audits of the pre-rewrite values and are superseded."
     }
   ]
 }

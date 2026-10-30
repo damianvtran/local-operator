@@ -1,0 +1,304 @@
+{
+  "instance": "56bf28217956-slash2-es",
+  "locale": "es",
+  "namespace": "wire.slash",
+  "scope": "local_operator/i18n/catalogues/es/wire.slash.json as it stands in the working tree of /Users/damian/lo-core-fix on branch fix/i18n-slash-descriptions-locale at 7159e2a309 (uncommitted edits). All 52 values audited whole-file for parity, tokens and width; the 9 values this remediation changed judged line by line against local_operator/i18n/catalogues/en/wire.slash.json. Round-2 delta scope: the 9 changed lines; unchanged lines re-checked mechanically only. Read-only: nothing edited.",
+  "tree_head": "7159e2a30927831f5dfb88f84c588eac07770e5d",
+  "tree_state": "branch fix/i18n-slash-descriptions-locale; 7 modified catalogue files, all seven locales (git status --porcelain before and after this audit: identical); neither audited file was touched by this run.",
+  "audit_date": "2026-10-29",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "56bf28217956",
+    "model": "radient/auto",
+    "actual_model_source": "fallback chain this turn: anthropic/claude-sonnet-5-5 (session primary) -> openai/gpt-6-astra -> kimi/k3.1-pro -> radient/auto, each hop a provider quota failure. Stated as it ran, since the concrete model behind radient/auto is not resolvable from inside the session.",
+    "independent_from_translator_session": true,
+    "independent_from_previous_audit": true,
+    "independence_note": "This session authored none of these values (the working-tree edits pre-existed the run) and did not run the previous audit, which was session e7a6d684b88a. Prior receipt 3ef6295a5545/scratchpad/slash-audit/es/receipt.json was read as the CLAIM LIST only, and every claim was re-derived from the bytes."
+  },
+  "input_sha256": {
+    "en": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
+    "es": "b577fc64e6ab7369a58f02d4b4653367f9169cf1a015b16168e02dae6bfc5c3b",
+    "method": "shasum -a 256 on both whole files, taken before and after the audit (identical both times)"
+  },
+  "counts": {
+    "BLOCKER": 0,
+    "MAJOR": 0,
+    "MINOR": 2,
+    "NIT": 4
+  },
+  "verdict": "pass",
+  "verdict_reason": "0 BLOCKER, 0 MAJOR: the round-1 MAJOR (/team) is fixed on the bytes and 8 of its 11 findings are closed; 2 MINOR follow-ups remain, both introduced or left by this round's own fixes (/effort lost the shift+tab token at 42 of 51 cells, /agent lost 'as one').",
+  "namespaces": {
+    "wire.slash": {
+      "status": "passed",
+      "status_note": "role vocabulary is 'passed'; equivalent to the top-level verdict 'pass'",
+      "keys_audited": 52,
+      "sha256": {
+        "en": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
+        "target": "b577fc64e6ab7369a58f02d4b4653367f9169cf1a015b16168e02dae6bfc5c3b"
+      },
+      "findings": [
+        {
+          "id": "ES2-m1",
+          "severity": "MINOR",
+          "key": "wire.slash.effort",
+          "en": "Show or set reasoning effort (shift+tab cycles)",
+          "en_cells": 47,
+          "target": "Muestra o fija el esfuerzo de razonamiento",
+          "target_cells": 42,
+          "problem": "This round's fix for ES-m3 restored 'de razonamiento' and deleted the '(shift+tab alterna)' clause, so the picker row no longer teaches the shortcut. All three elements cannot fit (verb + concept + token is 62 cells), but a form that keeps the concept, the token and a verb does fit: it pays with 'Show or', the half a user can guess from the command name. The deleted token is the half they cannot guess: 'shift+tab' now appears in no es catalogue at all (grep, zero hits), and its only other teacher is the /keys legend, hardcoded English in tui/app.py:56049.",
+          "suggested": "Fija el esfuerzo de razonamiento; shift+tab alterna",
+          "suggested_cells": 51,
+          "note": "No <=51-cell string carries verb + 'de razonamiento' + token; the choice of what to drop is open. Second-best, if the 'Show or' half must stay: 'Muestra o fija el esfuerzo; shift+tab alterna' (45) keeps verb + token and drops 'de razonamiento', i.e. re-opens ES-m3. Recorded as MINOR rather than a hard defect because every surviving form loses something en states."
+        },
+        {
+          "id": "ES2-m2",
+          "severity": "MINOR",
+          "key": "wire.slash.agent",
+          "en": "List agents, switch an agent's class, or speak to this session as one",
+          "en_cells": 69,
+          "target": "Lista agentes, cambia su clase o habla a la sesión",
+          "target_cells": 50,
+          "problem": "The fix for round-1 ES-m1 restored an addressee and removed the manner reading, but deleted 'as one': the third clause now says only 'speak to the session', which every slash command does, and no longer says the session is addressed AS AN AGENT — the payload of /agent (the user-driven way to adopt a role/specialist mid-session, per the registry comment in slash_commands.py). Of the two claims in that clause the fix kept the weaker one.",
+          "suggested": "Lista agentes, cambia su clase o habla como uno",
+          "suggested_cells": 48,
+          "note": "Keeps 'as one' and fits with 3 cells to spare; drops 'to this session', which the row's own context supplies. '…o adopta uno' (43) states the mechanism more plainly if a verb change is acceptable; '…o habla a la sesión como agente' is 62 and cannot fit."
+        },
+        {
+          "id": "ES2-n1",
+          "severity": "NIT",
+          "key": "wire.slash.fork",
+          "en": "Branch this chat; --switch here, --window elsewhere; <message> starts work",
+          "en_cells": 74,
+          "target": "Bifurca el chat; --switch aquí; <message> inicia",
+          "target_cells": 48,
+          "problem": "Round-1 ES-m2 is fixed (<message> is back) and the price is the second flag: '--window' is no longer named in the picker. This is an honest width trade, not a gratuitous drop — all three claims are 65 cells against a 51-cell column. '<message> inicia' is also clipped: the object ('el trabajo') would cost 13 more cells.",
+          "suggested": null,
+          "suggested_cells": null,
+          "note": "Recorded, not demanded, so the owner can decide which flag survives the budget."
+        },
+        {
+          "id": "ES2-n2",
+          "severity": "NIT",
+          "key": "wire.slash.hub",
+          "en": "Open Hub links — per-link subscribe and auto-push policy",
+          "en_cells": 56,
+          "target": "Abre enlaces del hub: suscripción y push por enlace",
+          "target_cells": 51,
+          "problem": "Round-1 ES-m5 is fixed (verb and per-link both restored). The trade is 'auto-push' -> 'push': the automaticity and the word 'policy' are gone. The alternative is the same width, not shorter ('Abre enlaces del hub: suscripción y push automático' = 51), so this is a coin-flip the implementer called in favour of granularity.",
+          "suggested": null,
+          "suggested_cells": null,
+          "note": "Lower-case 'hub' is not a finding: es already says 'el hub' as a common noun in wire.settings.hub.description, while the proper name 'Agent Hub' stays capitalised."
+        },
+        {
+          "id": "ES2-n3",
+          "severity": "NIT",
+          "key": "wire.slash.loop",
+          "en": "Loop toward a goal: /loop <goal>, <n>; --stop cancels",
+          "en_cells": 53,
+          "target": "Itera al objetivo: /loop <goal>, <n>; --stop corta",
+          "target_cells": 50,
+          "problem": "Round-1 ES-n5 is fixed (the target is back and --stop even survived). 'Itera al objetivo' is the one calque left: 'iterar' takes 'hacia', and 'al objetivo' reads as a literal 'to the goal'.",
+          "suggested": "Itera hacia el objetivo: /loop <goal>, <n>",
+          "suggested_cells": 42,
+          "note": "The idiomatic form does not fit beside --stop ('Itera hacia el objetivo: /loop <goal>, <n>; --stop corta' = 56); the flag is the better thing to keep, so this is a preference, not a defect."
+        },
+        {
+          "id": "ES2-n4",
+          "severity": "NIT",
+          "key": "wire.slash.team",
+          "en": "List teams, chart a team's org, or send a request to a team's manager",
+          "en_cells": 69,
+          "target": "Lista equipos, su organigrama o pide al responsable",
+          "target_cells": 51,
+          "problem": "Round-1 ES-M1 is fixed as suggested: verb restored, both objects governed, 'responsable' matching tui.team_authoring.manager / required_manager. Two residues: (a) 'pide al responsable' elides the request noun, so the row no longer says what is sent ('una petición' would cost 12 cells at the 51 ceiling); (b) the locale still splits the concept — tui.welcome.tip.team reads '/team <name> <message> envía trabajo al manager', so es now says 'responsable' in two files and 'manager' in one.",
+          "suggested": null,
+          "suggested_cells": null,
+          "note": "The split is in another namespace, pre-dates this round and is not a reason to reopen this value."
+        }
+      ]
+    }
+  },
+  "previous_findings": [
+    {
+      "id": "ES-M1",
+      "key": "wire.slash.team",
+      "prior_severity": "MAJOR",
+      "status": "fixed",
+      "evidence": "'Lista equipos, su organigrama o pide al responsable' (51 cells) is the round's own suggested wording, applied verbatim: verb restored, 'su' now has 'equipos' as antecedent, and 'responsable' matches tui.team_authoring.manager = 'responsable'. Residual locality split with tui.welcome.tip.team noted as ES2-n4."
+    },
+    {
+      "id": "ES-m1",
+      "key": "wire.slash.agent",
+      "prior_severity": "MINOR",
+      "status": "not_fixed",
+      "evidence": "Addressee restored ('a la sesión') and the manner reading is gone, so the complaint is answered — but the fix deleted 'as one', narrowing the clause to 'speak to the session'. Half fixed, half newly lost; carried as ES2-m2."
+    },
+    {
+      "id": "ES-m2",
+      "key": "wire.slash.fork",
+      "prior_severity": "MINOR",
+      "status": "fixed",
+      "evidence": "'<message> inicia' restored, so the picker again says /fork accepts a starting message. The trade round 1 sanctioned was taken: '--window' is the flag that left (65 cells for all three), recorded as ES2-n1."
+    },
+    {
+      "id": "ES-m3",
+      "key": "wire.slash.effort",
+      "prior_severity": "MINOR",
+      "status": "not_fixed",
+      "evidence": "'de razonamiento' restored as asked, but the fix deleted '(shift+tab alterna)' — the token round 1's own suggestion kept. Not gratuitous (verb + concept + token = 62 cells) but avoidable differently: a 51-cell form keeps the concept, the token and a verb. Carried as ES2-m1."
+    },
+    {
+      "id": "ES-m4",
+      "key": "wire.slash.approvals",
+      "prior_severity": "MINOR",
+      "status": "fixed",
+      "evidence": "'Muestra o fija el modo de aprobación de esta sesión' (51 cells) restores the session scope on the safety-relevant policy. 'de herramientas' (the settings label's own term) does not fit: 52 with it and no scope, 65 with both. Session scope is the fact round 1 asked for and it is present."
+    },
+    {
+      "id": "ES-m5",
+      "key": "wire.slash.hub",
+      "prior_severity": "MINOR",
+      "status": "fixed",
+      "evidence": "Verb restored ('Abre') and 'per-link' restored ('por enlace'); 'auto-push' lost 'auto' at the same width as the alternative, noted as ES2-n2."
+    },
+    {
+      "id": "ES-n1",
+      "key": "wire.slash.delete",
+      "prior_severity": "NIT",
+      "status": "fixed",
+      "evidence": "'pide confirmación' applied as suggested; 'del todo' and the confirmation claim both survive at 51 cells. 'esta' is the price (53 with both), which the prior suggestion itself accepted."
+    },
+    {
+      "id": "ES-n2",
+      "key": "wire.slash.login",
+      "prior_severity": "NIT",
+      "status": "fixed",
+      "evidence": "'Autentica un proveedor' applied verbatim (22 cells); the 'sesión' collision is gone."
+    },
+    {
+      "id": "ES-n3",
+      "key": "wire.slash.session",
+      "prior_severity": "NIT",
+      "status": "no_action",
+      "evidence": "Value unchanged. The prior note made the action conditional on the budget moving off 51; it is still 51, so the condition still holds and no key was touched. Not counted as open."
+    },
+    {
+      "id": "ES-n4",
+      "key": "wire.slash.project",
+      "prior_severity": "NIT",
+      "status": "no_action",
+      "evidence": "Value unchanged, same conditional note (verb + subverb list = 57 cells against 51). Not counted as open."
+    },
+    {
+      "id": "ES-n5",
+      "key": "wire.slash.loop",
+      "prior_severity": "NIT",
+      "status": "fixed",
+      "evidence": "Target restored ('al objetivo') and --stop retained at 50 cells; the collocation is slightly off, noted as ES2-n3."
+    }
+  ],
+  "previous_open_count": 2,
+  "previous_open_ids": [
+    "ES-m1",
+    "ES-m3"
+  ],
+  "mechanical": {
+    "validator": {
+      "command": "python3 scripts/i18n/check.py --catalogues-only",
+      "result": "check.py: catalogue checks: 0 problem(s)",
+      "exit_code": 0
+    },
+    "key_count": {
+      "en": 52,
+      "target": 52
+    },
+    "key_order_identical": true,
+    "missing_or_extra_keys": [],
+    "empty_values": [],
+    "values_identical_to_en": [],
+    "icu_arguments": "none in either file (no braces at all in any value)",
+    "typed_token_deltas": {
+      "wire.slash.effort": {
+        "en": [
+          "shift+tab"
+        ],
+        "es": []
+      },
+      "wire.slash.fork": {
+        "en": [
+          "--switch",
+          "--window",
+          "<message>"
+        ],
+        "es": [
+          "--switch",
+          "<message>"
+        ]
+      }
+    },
+    "typed_tokens_verified_byte_identical": [
+      "--switch",
+      "<message>",
+      "--stop",
+      "--copy",
+      "<goal>",
+      "<n>",
+      "/loop",
+      "/goal --clear",
+      "/model default",
+      "/title --refresh",
+      "/resume",
+      "esc",
+      "'focus'",
+      "add/remove",
+      "status, enable, stop, billing",
+      "list, show, new, delete, link, unlink",
+      "PyPI",
+      "MCP",
+      "OAuth",
+      "Radient",
+      "id"
+    ],
+    "typography": {
+      "double_spaces": [],
+      "space_before_punct": [],
+      "trailing_periods": [],
+      "braces": false,
+      "utf8": true,
+      "nfc": true,
+      "bom": false,
+      "crlf": false,
+      "trailing_newline": true
+    },
+    "register": "51 of 52 values now open with a 3rd-person imperative (the fix moved /team from infinitive 'Ver' to 'Lista', improving within-file consistency); wire.slash.exit alone stays infinitive 'Salir de la aplicación'. Not raised: the guide's infinitive rule targets action labels/buttons, the picker already shipped imperative in wave 1, and re-registering 52 values is out of round-2 scope."
+  },
+  "width": {
+    "budget_cells": 51,
+    "budget_source": "commit 7159e2a309 message: the picker description column holds 51 cells in the offer view at 80 columns (design round 1, D2); local_operator/tui/widgets/command_picker.py truncates with truncate_cells, so an over-budget value is ellipsised, never wrapped",
+    "max_target_cells": 51,
+    "over_budget": [],
+    "at_budget": [
+      "wire.slash.approvals",
+      "wire.slash.delete",
+      "wire.slash.failovers",
+      "wire.slash.hub",
+      "wire.slash.links",
+      "wire.slash.mobile",
+      "wire.slash.provider",
+      "wire.slash.reload",
+      "wire.slash.sidebar",
+      "wire.slash.team"
+    ],
+    "en_over_budget": 16,
+    "judgement": "No es value exceeds 51 cells (max 51, ten values exactly at the ceiling). The changed lines cost 42-51 cells each, all inside budget. Where a full en claim does not fit, this receipt states the arithmetic rather than accepting a truncated string: /fork's three claims are 65, /effort's are 62, /approvals' both qualifiers are 65, /loop's idiomatic form beside --stop is 56."
+  },
+  "method": "Diffed the es and fr/hi/ru/ur/vi/zh-CN working-tree edits with git diff against 7159e2a309 to isolate the 9 changed es values; read the es and en catalogues whole; read i18n/style-guides/es.md (all 73 lines) and i18n/glossary.md; read the en context sidecar local_operator/i18n/catalogues/en/wire.slash.context.json (its only entry is /hub); measured every value's cell width in Python (unicodedata east-asian widths; no wide glyphs in either file); extracted typed tokens with a regex over both files; ran the repo validator in catalogue mode; grepped the TUI for the surfaces behind the changed keys (/effort's shift+tab binding and /keys legend at tui/app.py:56049, /agent's registry comment, /fork's consumes_prompt reasoning, /hub's overlay) and for the locale's own terms (tui.team_authoring 'responsable', wire.settings 'Modo de aprobación de herramientas', tui.welcome.tip.team 'manager', wire.settings 'el hub'). No pytest run. Nothing edited; git status before and after the run is identical.",
+  "caveats": [
+    "The prior receipt's per-value cell counts disagree with mine in places (approvals 46 vs 51 measured, delete 50 vs 51, old fork 47 vs 46). I re-measured everything from the bytes; my numbers are the ones in this receipt.",
+    "'shift+tab' is absent from every es catalogue, so /effort's picker row is not the only missing teacher: the /keys legend in tui/app.py:56049 is hardcoded English for all locales. That is a code/i18n-extraction gap outside this namespace and outside this audit's scope; it is named in ES2-m1 only to establish that the shortcut is not lost to the product outright.",
+    "Round-2 scope: the 9 changed values were judged line by line; the 43 unchanged values were re-checked mechanically (parity, tokens, width, typography) but not re-judged, per the delta rule. The prior round's caveat-listed compression in unchanged values (analytics, context, search, info, model, network, stop, session, mcp, sidebar, rename, highlights) is not re-raised here.",
+    "No ledger row was written and no file in the tree was changed: the instruction for this run was read-only, and the ledger write is the implementer's step. This receipt plus verdict.txt is the artifact of record for this run; it belongs under i18n/audits/evidence/es/wire.slash/<audit-id>/ when the implementer tracks it.",
+    "Auditor served radient/auto after three provider-quota model switches this turn; the concrete model id is not resolvable from inside the session. Independence here is session/agent level: neither these values nor the previous audit were produced by this session."
+  ]
+}

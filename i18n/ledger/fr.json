@@ -1687,6 +1687,25 @@
       },
       "status": "passed",
       "note": "Independent audit passed 14/14 keys; the three supervision states stay distinct and placeholders and code spans are byte-identical; U+202F applied at 13 typography sites. 2 MINOR accepted: width (serve_linger_required 102, unsupervised_unknown 92 cells vs 80/78), recorded in style-guides/fr.md. No durability or reboot claim."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.slash",
+      "source_sha256": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
+      "translator": {
+        "agent": "i18n-translator (session 0347acaa76f7, 16 keys; session 53ebb4e7a4a0, wire.slash.approvals)",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session 848874ddfe7a; instance 848874ddfe7a-slash3-fr; prior round b682afa67e4b-slash2-fr)",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PR #3088 width rewrite, re-audited at the committed bytes. 16 of 52 values rewritten by i18n-translator (session 0347acaa76f7, 16 keys; session 53ebb4e7a4a0, wire.slash.approvals) (actual model radient/auto; provider-quota fallback); round-1 audit 9412375334be-slash-fr rejected the shortened bytes (1B/4M/4m/5n) and round-2 audit b682afa67e4b-slash2-fr passed 51 of 52 keys and rejected wire.slash.approvals (0B/1M/4m/1n, changes_requested); a second translator session (53ebb4e7a4a0) rewrote that one value and round-3 audit 848874ddfe7a-slash3-fr confirmed it with 0B/0M/1m/0n and zero drift in the other 51 keys. target sha256 bb580c5bc5a2b2d91b03b97b92be5341db0c731feaf7ea592f08b70d3520983e; en source unchanged (b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202). Evidence: i18n/audits/evidence/fr/wire.slash/fr29s3/record.json (receipt.json + verdicts copied verbatim). Previous rows for this pair described audits of the pre-rewrite values and are superseded."
     }
   ]
 }

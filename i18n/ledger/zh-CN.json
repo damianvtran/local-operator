@@ -1905,6 +1905,25 @@
       },
       "status": "passed",
       "note": "Independent zh-CN audit, 13 keys, clean: 0 blocker/major/minor/nit. Evidence i18n/audits/evidence/zh-CN/relay.account_policy/zhc1. Auditor read the English source and sidecar at the hashes recorded there; route and marker scan recorded in record.json (worktree reads per docs/security/redaction-policy.md 2.2; 0 markers; assignment tokens verified by ordinals). Translator session 809b6f2773e0, auditor session e139d7f8f30c; both ran on radient/auto after anthropic quota fallbacks. No native-speaker pass claimed."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.slash",
+      "source_sha256": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
+      "translator": {
+        "agent": "i18n-translator (session 1fe5533c9a8f)",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session 7b1ecf2ef33b; instance 7b1ecf2ef33b-slash-zh-cn)",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PR #3088 width rewrite, re-audited at the committed bytes. 5 of 52 values rewritten by i18n-translator (session 1fe5533c9a8f) (actual model radient/auto; provider-quota fallback); round-1 audit a303f65af544-slash-zh-CN rejected the shortened bytes (0B/1M/3m/2n) and round-2 independent audit 7b1ecf2ef33b-slash-zh-cn on the new bytes passed 0B/0M/0m/1n. target sha256 ebc0ae0101022d4ff31ca7e54f0e0d34d000c7e3b46e62b54ac3ed132a88cd55; en source unchanged (b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202). Evidence: i18n/audits/evidence/zh-CN/wire.slash/zh-CN29s2/record.json (receipt.json + verdicts copied verbatim). Previous rows for this pair described audits of the pre-rewrite values and are superseded."
     }
   ]
 }
