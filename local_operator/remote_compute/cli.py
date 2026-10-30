@@ -53,9 +53,10 @@ from typing import Any
 import httpx
 
 from local_operator.exec_mode import ExecArgs, resolve_hosting_model_dry
+from local_operator.i18n.boot import activate_resolved_locale, configured_language
 from local_operator.i18n.keys import wire_remote_compute as _wr
 from local_operator.i18n.resolve import resolve_language
-from local_operator.i18n.text import set_active_locale, tr
+from local_operator.i18n.text import tr
 from local_operator.network.types import MeshRefusal
 from local_operator.remote_compute import RunSpec, is_enabled, resolve_network
 from local_operator.remote_compute.arguments import (
@@ -592,25 +593,29 @@ def _install_locale() -> None:
     ``en``, filtered to the shipped set) so the two surfaces cannot disagree,
     and an unshipped locale already resolves to ``en`` inside the resolver.
 
-    WHY IT IS SWALLOWED: this is copy, not work. A language lookup that fails is
+    WHY IT SWALLOWS: this is copy, not work. A language lookup that fails is
     worth rendering English over, never worth refusing a run somebody asked the
     far end to execute, so a resolver failure leaves the process on ``en``.
 
-    COST: one config read (a watched snapshot when this process has a watcher,
-    a ``ConfigManager`` when it does not — the CLI case), which ``_submit``'s own
-    ``is_enabled`` read already pays for. ``i18n.resolve`` is free to import at
-    module level here: ``i18n.text`` already imports it, so the module graph is
-    unchanged.
+    THE MECHANISM IS SHARED (``i18n.boot.activate_resolved_locale``), not
+    duplicated: the resolve → hand-over → swallow policy has to be identical on
+    both surfaces, and two copies is how they drift. This call site exists
+    because ``cli.main`` returns into ``remote_command`` BEFORE it activates for
+    the headless commands, so the remote path is the only activation this
+    process gets; ``remote_command``'s other callers (tests) rely on it too. Its
+    own module-level ``resolve_language`` binding is passed through because that
+    name is the seam those tests patch.
+
+    COST: one config FILE read (``i18n.boot.configured_language``), which
+    ``_submit``'s own ``is_enabled`` read already pays for. It reads the same
+    ``language`` row the TUI resolves, without constructing a ``ConfigManager``
+    — construction CREATES the config directory, and this process may be on its
+    way to a refusal (``--remote-cancel`` of an unknown run, a flag missing its
+    ``--remote``) that must leave the user's home untouched. ``i18n.resolve`` is
+    free to import at module level here: ``i18n.text`` already imports it, so
+    the module graph is unchanged.
     """
-    locale = "en"
-    try:
-        locale = resolve_language()
-    except Exception:  # noqa: BLE001 — a locale is copy; it never blocks the command
-        locale = "en"
-    try:
-        set_active_locale(locale)
-    except Exception:  # noqa: BLE001 — same reason: the command continues on English
-        pass
+    activate_resolved_locale(lambda: resolve_language(configured_language()))
 
 
 def remote_command(args: argparse.Namespace) -> int:

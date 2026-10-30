@@ -117,9 +117,15 @@ def _help_literals() -> dict[str, str]:
         # rejects nothing that used to be accepted.
         if not isinstance(option, str) or keyword is None:
             continue
-        # The extraction replaced each `help=` value with `_t(_ehw.<key>())`;
-        # the assertion below is that NO such site is still a bare literal.
-        if not isinstance(keyword.value, ast.Call):
+        # The extraction replaced each `help=` value with a render point. TWO
+        # shapes are legitimate: the process-locale resolver `_t(_ehw.<key>())`
+        # and the read-only help render
+        # `<key>().envelope(locale=help_locale)["text"]` — the shape
+        # `cli.build_cli_parser` and `exec_startup` already use, and the one that
+        # lets `--help` follow the config without waiting for a boot activation
+        # (`parse_args` exits before one could run). A bare string constant is
+        # the reverted state under either.
+        if isinstance(keyword.value, ast.Constant):
             raise AssertionError(
                 f"{option}: help= is still a literal — the extraction was reverted"
             )
