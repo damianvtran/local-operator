@@ -61,6 +61,26 @@ DEFAULT_COALESCE_WINDOW_S = 3.0
 #: boundary. Owner-visible like every hold code, and self-describing.
 HOLD_WAKE_COALESCING = "wake_coalescing"
 
+#: What a card hand-off returns when it BUFFERED the card instead of posting it.
+CARD_COALESCED = "coalesced"
+
+
+def card_is_buffered(detail: Any) -> bool:
+    """True when a hand-off buffered its card, i.e. nothing is posted yet.
+
+    THE ONE predicate for "is this delivery finished?". Both the first pass
+    (``handle_conversation_available``'s terminal cleanup) and the hold re-drive
+    (the connector loop's pass) decide it through this function, because the two
+    drifting apart is precisely the lost wake of review round 2, M1′: the spine
+    had been taught that a buffered hand-off is not terminal while the re-drive
+    still deleted the row the enqueue had just written. A buffered card's only
+    durable trace until the flush is that ``wake_coalescing`` row, which
+    ``_settle`` retires once the card is actually posted.
+    """
+
+    return detail == CARD_COALESCED
+
+
 #: Slack after a group's due time before its crash-recovery hold comes due, so
 #: the in-memory flush always wins in a live process.
 _HOLD_GRACE_S = 30.0
@@ -405,11 +425,13 @@ CONNECTOR_COALESCER = WakeCoalescer()
 
 
 __all__ = [
+    "CARD_COALESCED",
     "CONNECTOR_COALESCER",
     "DEFAULT_COALESCE_WINDOW_S",
     "HOLD_WAKE_COALESCING",
     "MAX_COALESCED_MESSAGES",
     "WakeCoalescer",
     "active_coalescer",
+    "card_is_buffered",
     "merge_metadata",
 ]

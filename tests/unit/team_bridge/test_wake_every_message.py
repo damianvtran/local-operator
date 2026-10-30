@@ -1144,3 +1144,92 @@ def test_an_arrival_that_wakes_nobody_is_logged_and_counted(
     assert wakes == [], "a badge-only arrival wakes nothing"
     assert "code=no_designation" in caplog.text
     assert woke_nobody_counts(dirs["a"]) == {"no_designation": 1}
+
+
+def test_a_redrive_killed_before_its_flush_keeps_the_hold_it_just_rewrote(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M1′: the re-drive pass retired the very row it had just rewritten.
+
+    Three steps, exactly as the round-2 review laid them out:
+
+    1. buffer a card, then a hard stop at the hand-off — the durable hold is the
+       only trace left (this is round 1's M1, already fixed);
+    2. RESTART #1 re-drives that hold and is killed before its flush, so the
+       re-driven card is buffered and unposted. The pass used to treat
+       ``{"action": "delivered", "detail": "coalesced"}`` as terminal and delete
+       the ``wake_coalescing`` row ``enqueue`` had just written — from there to
+       the kill nothing durable said the card was owed;
+    3. RESTART #2, an hour later, must deliver the card exactly once.
+
+    The first pass and this pass now decide "finished?" through ONE predicate
+    (``coalesce.card_is_buffered``), which is what stops them drifting again.
+    """
+
+    a, dirs, hub, wakes = _one_message_rig(tmp_path, monkeypatch)
+
+    async def stopped_at_the_handoff(owner: Any, payload: str, **kwargs: Any) -> str:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(conversation_mod, "deliver_wake", stopped_at_the_handoff)
+    sent = hub.post(None, "one message")
+    with pytest.raises(KeyboardInterrupt):
+        _iterate(a, dirs["a"])
+    assert wakes == []
+    assert _coalescing_holds(dirs["a"], a) == 1, "step 1: durable before the ref went"
+
+    # ---- RESTART #1: run the re-drive pass, then die before the flush --------
+    monkeypatch.undo()
+    clock = Clock()
+    monkeypatch.setattr(time, "time", clock)
+    monkeypatch.setattr(conversation_mod, "engagement_hold", lambda designation, config_dir: "")
+    redriven_wakes = _rig(monkeypatch, hub, dirs)
+    loop_mod._RETRY_ATTEMPTS.clear()
+    clock.now += 3_600
+    with coalesce_mod.CONNECTOR_COALESCER.scope():
+        asyncio.run(
+            loop_mod._run_iteration_inner(
+                a,
+                config_dir=dirs["a"],
+                access=SimpleNamespace(credential_id=a.credential_id),
+                auth_store=None,
+            )
+        )
+    assert redriven_wakes == [], "the re-driven card was buffered, not posted"
+    assert _coalescing_holds(dirs["a"], a) == 1, "step 2: the kill must not retire it"
+
+    # ---- RESTART #2: the buffered card is delivered, once --------------------
+    monkeypatch.undo()
+    clock = Clock()
+    monkeypatch.setattr(time, "time", clock)
+    monkeypatch.setattr(conversation_mod, "engagement_hold", lambda designation, config_dir: "")
+    restarted_wakes = _rig(monkeypatch, hub, dirs)
+    loop_mod._RETRY_ATTEMPTS.clear()
+    # An hour apart, like the review's own repro: the killed pass left a live
+    # claim on the body reservation, so the first re-drive after the restart
+    # parks on it and the next one (claim expired) takes it. What must NOT
+    # happen is that no pass ever wakes the session.
+    for _ in range(3):
+        clock.now += 3_600
+        _iterate(a, dirs["a"])
+
+    assert len(restarted_wakes) == 1, "step 3: the card must not be lost"
+    assert _card_field(restarted_wakes[0]["card"], "message_id") == sent.id
+    assert _coalescing_holds(dirs["a"], a) == 0, "delivered, so the hold is retired"
+
+
+def test_a_buffered_handoff_is_never_terminal_for_the_row() -> None:
+    """The predicate both passes share, pinned on its own (review round 2, M1′)."""
+
+    from local_operator.team_bridge.connector.coalesce import (
+        CARD_COALESCED,
+        card_is_buffered,
+    )
+
+    # The predicate reads the ``detail``: the spines say it as a bare string,
+    # the loop's re-drive reads it off the outcome it just got.
+    assert card_is_buffered(CARD_COALESCED) is True
+    assert card_is_buffered({"detail": CARD_COALESCED}.get("detail")) is True
+    assert card_is_buffered(None) is False
+    assert card_is_buffered("delivered and woke the session") is False
+    assert card_is_buffered({"action": "delivered"}.get("detail")) is False

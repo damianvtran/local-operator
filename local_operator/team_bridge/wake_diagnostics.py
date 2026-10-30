@@ -13,6 +13,14 @@ else: no conversation id, no message id, no sender, no body. That an arrival
 woke nobody is operational; the arrival itself is peer content and stays out of
 this file (the same rule the receiver's own log lines follow).
 
+IT COUNTS HANDLED OUTCOMES, NOT UNIQUE MESSAGES (review round 2, n2). A feed row
+that wakes nobody is counted once and then consumed. A *held* row that re-drives
+into the same answer goes onto the doubling backoff and is counted again on each
+pass, so the number can exceed the distinct messages behind it — it answers "how
+often does this happen", which is the question an owner has, not "how many
+messages". A per-message ledger would be durable state about peer traffic, which
+this file deliberately is not.
+
 SHAPE. A small JSON file beside the bridge store, written by atomic replace. The
 connector holds the connector singleton lock, so there is exactly ONE writer;
 the reader (``lop team-bridge receiver status``) is a different process, must
@@ -59,8 +67,9 @@ def record_woke_nobody(config_dir: Path | str, *, code: str) -> None:
     """Log and count one arrival that woke nobody. Never raises."""
 
     # The line a person (or an agent reading the receiver log) actually sees:
-    # one WARNING per arrival, with the typed code. Codes are a closed set from
-    # the fence, never peer content, so this is safe to name literally.
+    # one WARNING per handled outcome, with the typed code (a re-driven hold
+    # logs again — see the module docstring). Codes are a closed set from the
+    # fence, never peer content, so this is safe to name literally.
     logger.warning("bridge: conversation arrival woke nobody code=%s", code)
     path = diagnostics_path(config_dir)
     by_code = _read(path).get("by_code")

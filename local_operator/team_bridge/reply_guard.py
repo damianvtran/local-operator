@@ -19,6 +19,14 @@ writes into a conversation (``bridge channel_post``):
   A human-sent mention resets the consecutive counter and lifts a cool-down,
   and a human-prompted post is exempt from the refusal: a person asking the
   agent directly is exactly the case the guard must not block.
+* **The exemption is deliberately WIDER than the reset** (review round 2, m5).
+  ANY human trigger exempts the next post, not only a mention: a person typing
+  in the conversation — a DM has no mentions by nature — is exactly when an
+  agent must be able to answer, and requiring a mention would silence a 1:1
+  thread. What a human line does NOT do is lift a stored cool-down (only the
+  mention reset in :func:`record_trigger` and expiry do), so a busy channel
+  cannot be used to unlock agent-versus-agent traffic. The absolute cap below
+  is what bounds the wider reading.
 * **Absolute cap** — ``ABSOLUTE_POSTS`` (30) posts per conversation per
   ``BUDGET_WINDOW_S``, counting EVERY post including human-prompted ones. The
   two bounds above are policy; this one is a floor so no bug, no stuck loop and
@@ -229,10 +237,12 @@ def reserve_post(
 
     ORDER IS THE POLICY. The ABSOLUTE cap is decided first: it covers every
     post, human-prompted ones included. Then a post that ANSWERS A PERSON skips
-    the two agent-versus-agent limits entirely; otherwise the cool-down applies
-    and then the per-window budget, which counts only the posts that were not
-    human-prompted. The recorded slot carries both facts (``agent_to_agent``,
-    ``human_prompted``) so the limits stay countable separately.
+    the two agent-versus-agent limits entirely — ANY human trigger counts, which
+    is deliberately wider than the mention-only reset (see the module docstring,
+    review m5); otherwise the cool-down applies and then the per-window budget,
+    which counts only the posts that were not human-prompted. The recorded slot
+    carries both facts (``agent_to_agent``, ``human_prompted``) so the limits
+    stay countable separately.
 
     The slot is recorded BEFORE the post goes out (so a concurrent post sees
     it) and must be given back through :func:`release` when the hub did not

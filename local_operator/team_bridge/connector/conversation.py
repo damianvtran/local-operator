@@ -51,6 +51,7 @@ from ..attachments import (
 )
 from ..client import SCREENING_TEMPLATE_V3_SHA256, BridgeRefusal
 from ..types import ConversationFeedRef
+from .coalesce import CARD_COALESCED, card_is_buffered
 from .wake import (
     CLAIM_TTL_S,
     _producer_fence,
@@ -565,10 +566,11 @@ def _record_body_reservation(
     return RESERVATION_RECORDED if created else RESERVATION_ALREADY_RECORDED
 
 
-#: ``detail`` of a card the connector's coalescer buffered instead of posting.
-#: The caller must then NOT mark the reservation's card posted: the flush does
-#: that once the one grouped card is out (see ``coalesce.py``).
-CARD_COALESCED = "coalesced"
+#: ``detail`` of a card the connector's coalescer buffered instead of posting
+#: (defined by ``coalesce.py``, which owns the buffered state). The caller must
+#: then NOT mark the reservation's card posted: the flush does that once the one
+#: grouped card is out, and ``card_is_buffered`` is the ONE test both this spine
+#: and the loop's hold re-drive use (review round 2, M1′).
 
 
 async def _hand_off_card(
@@ -1092,7 +1094,7 @@ async def handle_conversation_available(
             # ``wake_coalescing`` hold is the only trace between this ref's
             # delete and the flush, so the coalescer's ``_settle`` retires it,
             # never this cleanup.
-            terminal = detail != CARD_COALESCED
+            terminal = not card_is_buffered(detail)
             if recovery in ("rejected", "unadmitted"):
                 return {
                     "action": "delivered_unadmitted",
@@ -1255,8 +1257,8 @@ async def handle_conversation_available(
         # is actually posted. Clearing it here — the pre-remediation
         # ``terminal = True`` — deleted that trace while the card was still in
         # memory, which is exactly the lost wake of review round 1, M1.
-        terminal = detail != CARD_COALESCED
-        if detail == CARD_COALESCED:
+        terminal = not card_is_buffered(detail)
+        if card_is_buffered(detail):
             # Buffered, not posted: the reservation stays CARD_OWED until the
             # coalescer's flush marks it, so a crash in between replays into
             # the existing "owed card" path instead of losing the wake.
