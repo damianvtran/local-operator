@@ -58,10 +58,12 @@ EXPECTED_CARD_A = f"""Channel message · #qa-coordination · from Ada (human, sa
 {BRIDGE_UNTRUSTED_CLAUSE}
 
 mention: yes
+directed: mention
 tenant_id: tnt_1
 conversation_id: bcv_abcdefgh
 message_id: bcmsg_abcdef01
 conversation_seq: 1
+expect: reply
 {ROOT_REPLY_LINE}
 guidance: bridge-guidance-v2"""
 
@@ -895,11 +897,13 @@ def test_one_channel_message_wakes_mentioned_a_and_notify_all_b(tmp_path, monkey
     # (f) No OS notification by default.
     assert notifications == []
 
-    # (g) Triage copy is NOT duplicated in the card; it lives in the served
-    # guidance named by version. Mention state alone distinguishes the cases.
-    assert "no_reply" not in card_b
+    # (g) The triage RULES stay in the served guidance named by version; the
+    # card carries only the per-wake expectation (wake contract): a mention
+    # expects a reply, an unmentioned message is weighed, no_reply ends it.
+    assert "expect: weigh relevance; if nothing is needed end with no_reply" in card_b
     assert "guidance: bridge-guidance-v2" in card_b
     assert "no_reply" not in transcripts["sess_a"][0]["payload"]
+    assert "expect: reply" in transcripts["sess_a"][0]["payload"]
 
     for session in ("sess_a", "sess_b"):
         print(f"\n--- {session} transcript ---")

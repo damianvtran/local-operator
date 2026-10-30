@@ -108,6 +108,20 @@ AckTarget = Literal["read", "blocked"]
 
 _SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
 _CANONICAL_DECIMAL = re.compile(r"^(0|[1-9][0-9]*)$")
+
+#: The closed conversation kinds the server writes on a feed subject
+#: (agent-server ``BridgeConversationKind``).
+CONVERSATION_KINDS = frozenset({"dm", "group", "channel"})
+
+#: Upper bound on a carried ``agent_run``. The server's hard cap is 8, so any
+#: value near this bound is already a stopped run; the bound only keeps a
+#: garbled wire value from becoming an unbounded integer in a durable key.
+_AGENT_RUN_MAX = 10_000
+
+#: Four locator parts + one kind + every known tag (legacy_alias and
+#: thread_root are mutually exclusive, so four tags at most), plus one spare
+#: for a tag a later release adds (an unknown tag is ignored, never refused).
+_MAX_REF_PARTS = 10
 #: The frozen server DTO's closed event-type set (bridge.go BridgeEventItem).
 _EVENT_TYPES = (
     "message_available",
@@ -786,6 +800,19 @@ class ConversationFeedRef:
     #: a ref written before threads parses exactly as it did, and a reader that
     #: does not know the tag ignores it.
     thread_root_id: str | None = None
+    #: WAKE-ON-EVERY-MESSAGE routing facts (wake contract, 2026-10-30). All
+    #: three are server-derived and additive: a ref written before them parses
+    #: with the defaults, and a writer that never sets them encodes the exact
+    #: pre-contract spelling. Persisted as TAGGED slots for the same reason as
+    #: ``thread_root`` — a positional part would collide with the old layouts.
+    #: ``thread_follower``: this recipient follows the thread the reply is in,
+    #: so the reply is DIRECTED at it even without a mention.
+    thread_follower: bool = False
+    #: The consecutive agent-message run length at this message (0 for a
+    #: human sender). Informational: the server owns the authoritative cap.
+    agent_run: int = 0
+    #: ``dm`` | ``group`` | ``channel`` from the server's own row, or ``None``.
+    conversation_kind: str | None = None
 
     def validated(self) -> "ConversationFeedRef":
         """Refuse a ref the parser could not read back (never guess)."""
@@ -815,6 +842,22 @@ class ConversationFeedRef:
             _CONVERSATION_MESSAGE_ID.fullmatch(self.thread_root_id) is None
         ):
             raise TeamBridgeTypeError("thread_root_id is not a bcmsg_ id")
+        if not isinstance(self.thread_follower, bool):
+            raise TeamBridgeTypeError("thread_follower must be a boolean")
+        if (
+            not isinstance(self.agent_run, int)
+            or isinstance(self.agent_run, bool)
+            or not 0 <= self.agent_run <= _AGENT_RUN_MAX
+        ):
+            raise TeamBridgeTypeError("agent_run must be a bounded non-negative integer")
+        if self.conversation_kind is not None and (
+            self.conversation_kind not in CONVERSATION_KINDS
+        ):
+            raise TeamBridgeTypeError("conversation_kind must be dm, group or channel")
+        if self.thread_follower and self.thread_root_id is None:
+            # A follower bit names a thread; without the root there is no
+            # thread to follow, which no server writer produces.
+            raise TeamBridgeTypeError("thread_follower needs a thread_root_id")
         return self
 
     def encode(self) -> str:
@@ -832,6 +875,18 @@ class ConversationFeedRef:
         if self.thread_root_id is not None:
             self.validated()
             encoded += f"/thread_root={self.thread_root_id}"
+        # Wake-contract tags: only NON-DEFAULT values are written, so a ref
+        # without them encodes byte-identically to the pre-contract spelling
+        # (the store's canonical-key comparison depends on that stability).
+        if self.thread_follower:
+            self.validated()
+            encoded += "/thread_follower=1"
+        if self.agent_run:
+            self.validated()
+            encoded += f"/agent_run={self.agent_run}"
+        if self.conversation_kind is not None:
+            self.validated()
+            encoded += f"/conversation_kind={self.conversation_kind}"
         return encoded
 
 
@@ -849,7 +904,11 @@ def parse_conversation_ref_value(value: str) -> ConversationFeedRef | None:
     if not isinstance(value, str):
         return None
     parts = value.split("/")
-    if len(parts) not in (4, 5, 6, 7):
+    # 4..7 were the positional layouts; the wake-contract tags (follower,
+    # agent_run, conversation_kind) can add three more beside kind +
+    # thread_root, so a fully tagged reply is 4 + 1 + 4 = 9 parts. The upper
+    # bound stays FINITE so a garbled key is still refused, never scanned.
+    if not 4 <= len(parts) <= _MAX_REF_PARTS:
         return None
     conversation_id, message_id, seq_text, mention_text = parts[:4]
     if _CANONICAL_DECIMAL.fullmatch(seq_text) is None:
@@ -925,6 +984,29 @@ def parse_conversation_ref_value(value: str) -> ConversationFeedRef | None:
         # reader starts honouring shapes nobody ever meant to persist.
         return None
     thread_root_id = tags.get("thread_root") or None
+    # Wake-contract tags. A KNOWN tag with a value outside its grammar is a
+    # malformed writer (refused, like ``thread_root=``); an absent one is the
+    # pre-contract default. They ride only beside a stated sender kind, like
+    # ``thread_root``, and never beside a migration alias (no released writer
+    # mints both).
+    wake_tags = {"thread_follower", "agent_run", "conversation_kind"} & set(tags)
+    if wake_tags and (len(positional) != 1 or "legacy_alias" in tags):
+        return None
+    thread_follower = False
+    if "thread_follower" in tags:
+        if tags["thread_follower"] != "1":
+            return None
+        thread_follower = True
+    agent_run = 0
+    if "agent_run" in tags:
+        if _CANONICAL_DECIMAL.fullmatch(tags["agent_run"]) is None:
+            return None
+        agent_run = int(tags["agent_run"])
+    conversation_kind: str | None = None
+    if "conversation_kind" in tags:
+        conversation_kind = tags["conversation_kind"]
+        if conversation_kind not in CONVERSATION_KINDS:
+            return None
     try:
         return ConversationFeedRef(
             conversation_id=conversation_id,
@@ -934,6 +1016,9 @@ def parse_conversation_ref_value(value: str) -> ConversationFeedRef | None:
             sender_kind=kind,
             legacy_alias=legacy_alias,
             thread_root_id=thread_root_id,
+            thread_follower=thread_follower,
+            agent_run=agent_run,
+            conversation_kind=conversation_kind,
         ).validated()
     except TeamBridgeTypeError:
         return None
@@ -1190,6 +1275,28 @@ def project_events_batch(result: Mapping[str, Any]) -> tuple[FeedSeq, tuple[str,
             kind = ids.get("sender_kind")
             if kind is not None and kind not in ("human", "agent"):
                 raise TeamBridgeTypeError(f"events[{index}].ids.sender_kind is invalid")
+            # Wake-contract routing facts (all additive, ``omitempty`` on the
+            # server). An older hub omits every one of them and the ref is the
+            # pre-contract shape. ``thread_root_id`` was already on the wire
+            # (agent-server threads) but never carried into the ref, so a
+            # reply's card could not name its thread; it is read here now.
+            thread_root_id = ids.get("thread_root_id") or ids.get("reply_to_message_id") or None
+            if thread_root_id is not None and not isinstance(thread_root_id, str):
+                raise TeamBridgeTypeError(f"events[{index}].ids.thread_root_id must be a string")
+            follower = ids.get("thread_follower", False)
+            if not isinstance(follower, bool):
+                raise TeamBridgeTypeError(f"events[{index}].ids.thread_follower must be a boolean")
+            agent_run = ids.get("agent_run", 0)
+            if isinstance(agent_run, bool) or not isinstance(agent_run, int) or agent_run < 0:
+                raise TeamBridgeTypeError(f"events[{index}].ids.agent_run must be an integer")
+            conversation_kind = ids.get("conversation_kind") or None
+            if conversation_kind is not None and conversation_kind not in CONVERSATION_KINDS:
+                raise TeamBridgeTypeError(f"events[{index}].ids.conversation_kind is invalid")
+            if thread_root_id is not None and kind is None:
+                # The ref grammar ties a thread root to a stated sender kind;
+                # a hub that sends one without the other gets the pre-thread
+                # card rather than an unencodable ref.
+                thread_root_id = None
             at = raw.get("at")
             if not isinstance(at, str) or not at:
                 raise TeamBridgeTypeError(f"events[{index}].at must be a non-empty string")
@@ -1200,6 +1307,10 @@ def project_events_batch(result: Mapping[str, Any]) -> tuple[FeedSeq, tuple[str,
                     conversation_seq=int(seq_text),
                     mention=mention,
                     sender_kind=kind,
+                    thread_root_id=thread_root_id,
+                    thread_follower=follower and thread_root_id is not None,
+                    agent_run=min(agent_run, _AGENT_RUN_MAX),
+                    conversation_kind=conversation_kind if kind is not None else None,
                 )
                 .validated()
                 .encode()

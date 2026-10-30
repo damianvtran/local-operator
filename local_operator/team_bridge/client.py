@@ -4073,6 +4073,41 @@ class TeamBridgeClient:
             expected_account_id=expected_account_id,
         )
 
+    async def conversation_agent_notify(
+        self,
+        conversation_id: str,
+        endpoint_id: str,
+        *,
+        notify: Literal["all", "mention", "mute"],
+        tenant_id: str | None = None,
+        access: OAuthAccess | None = None,
+        expected_account_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Set the notification policy of the caller's OWN AGENT member.
+
+        WHY NOT :meth:`conversation_notify`: that write resolves the caller's
+        HUMAN member row, so it can never change what wakes their agent. The
+        hub's endpoint-addressed route (agent-server ``NotifyHandlerEcho``)
+        accepts only an ACTIVE agent member owned by the caller's account, and
+        answers a non-owner, unknown endpoint and non-member with one coded
+        refusal. ``all`` wakes the agent for every message, ``mention`` only
+        when @-mentioned, ``mute`` never (history only). The answer is the
+        conversation view.
+        """
+
+        if notify not in ("all", "mention", "mute"):
+            raise ValueError("notify must be 'all', 'mention' or 'mute' (§10.1)")
+        body: dict[str, Any] = {"notify": notify}
+        if tenant_id:
+            body["tenant_id"] = tenant_id
+        return await self._send(
+            "POST",
+            f"/messaging/conversations/{conversation_id}/members/{endpoint_id}/notify",
+            body=body,
+            access=access,
+            expected_account_id=expected_account_id,
+        )
+
     async def unread(
         self,
         *,

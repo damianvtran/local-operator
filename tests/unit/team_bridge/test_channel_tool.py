@@ -38,6 +38,15 @@ def _destination_open(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _guard_state_isolated(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The runtimes here use ``config_dir="."``; channel_post's reply guard
+    writes its budget under that dir, so each test gets a fresh cwd — otherwise
+    the 6-post budget would accumulate across tests (and land in the repo)."""
+
+    monkeypatch.chdir(tmp_path)
+
+
+@pytest.fixture(autouse=True)
 def _gates_open(monkeypatch: pytest.MonkeyPatch) -> None:
     """These tests are about channel semantics, not the fences.
 

@@ -1740,6 +1740,30 @@ class ConversationConsentIn(ConversationOwnerIn):
         return self
 
 
+class ConversationAgentNotifyIn(_Strict):
+    """The owner's choice of what wakes THEIR agent in one conversation.
+
+    ``all`` = every message, ``mention`` = only @-mentions, ``mute`` = never
+    (history only). The captured-owner receipt is REQUIRED, like the reaction
+    write: no shipped renderer calls this route yet, so there is no legacy
+    caller to stay compatible with, and an optional guard would regress the
+    first time a renderer forgot it. The endpoint is NOT a body field: it is
+    always this machine's enrolled agent, never one the caller names.
+    """
+
+    notify: Literal["all", "mention", "mute"]
+    expected_account_id: str = Field(min_length=1, max_length=128)
+    tenant_id: str = Field(min_length=1, max_length=128)
+
+    @model_validator(mode="after")
+    def _receipt_grammar(self) -> "ConversationAgentNotifyIn":
+        if not is_account_id(self.expected_account_id):
+            raise ValueError("expected_account_id is outside the accepted grammar")
+        if not self.tenant_id.strip():
+            raise ValueError("a guarded mutation needs an explicit tenant_id")
+        return self
+
+
 class ConversationAdmitIn(ConversationOwnerIn):
     verdict: Literal["allow", "reject"]
     body_hash: str = Field(min_length=1, max_length=128)
@@ -2185,6 +2209,63 @@ async def conversation_consent(
                 decision=body.decision,
                 consent_version=body.consent_version,
                 endpoint_id=body.endpoint_id,
+                tenant_id=body.tenant_id,
+                expected_account_id=body.expected_account_id,
+            )
+        )
+    )
+
+
+@router.put(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}/agent-notify",
+    response_model=CRUDResponse[Any],
+)
+async def conversation_agent_notify(
+    conversation_id: str,
+    request: Request,
+    body: ConversationAgentNotifyIn,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """Set what wakes the owner's OWN agent in this conversation (wake contract).
+
+    WHY A DESKTOP ROUTE: agents now default to ``all`` (woken for every
+    message, deciding relevance themselves), and the owner needs a per-
+    conversation way back to "only @-mentions" or "never". The hub's
+    endpoint-addressed notify write is the only one that reaches an agent
+    member; this route resolves the endpoint from the LOCAL enrolled owner, so
+    a renderer can only ever change this machine's own agent.
+
+    The receipt is checked against that owner before any network: an
+    unenrolled machine is ``not_enrolled``, a receipt for another account is
+    ``owner_mismatch`` and a tenant other than the enrolled one is
+    ``invalid_tenant``. The client then re-checks the bearer against
+    ``expected_account_id``, and the hub owns membership. Hub refusals pass
+    through verbatim; the answer is the hub's conversation view.
+    """
+
+    import sqlite3
+
+    from local_operator.team_bridge.store import Store, StoreRefused
+
+    _require_conversation_id(conversation_id)
+    _refuse_write_scope(request)
+    try:
+        owner = Store(config_manager.config_dir).active_owner_readonly()
+    except (StoreRefused, sqlite3.Error):
+        _raise_read("state_unreadable")
+    if owner is None or not owner.endpoint_id:
+        _raise_read("not_enrolled")
+    if owner.account_id != body.expected_account_id:
+        _raise_read("owner_mismatch")
+    if owner.tenant_id != body.tenant_id:
+        _raise_read("invalid_tenant")
+    client = _conversation_client(config_manager)
+    return reply(
+        await _conversation_reply(
+            client.conversation_agent_notify(
+                conversation_id,
+                owner.endpoint_id,
+                notify=body.notify,
                 tenant_id=body.tenant_id,
                 expected_account_id=body.expected_account_id,
             )

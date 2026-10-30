@@ -87,6 +87,31 @@ class ConversationCardMetadata:
     #: The explicit refusal line when those images were NOT admitted (D5),
     #: so an agent is told images exist rather than silently missing them.
     attachments_note: str | None = None
+    #: WAKE-ON-EVERY-MESSAGE (wake contract): the recipient follows the thread
+    #: this reply is in, so the reply is directed at it without a mention.
+    thread_follower: bool = False
+    #: ``dm`` | ``group`` | ``channel`` from the server's row; ``None`` = an
+    #: older hub that does not say.
+    conversation_kind: str | None = None
+    #: Every message one coalesced card names, oldest → newest; empty for a
+    #: single-message card. ``message_id`` is always the NEWEST of them, so
+    #: reply routing keeps binding to one id.
+    coalesced_message_ids: tuple[str, ...] = ()
+
+
+def card_directed(metadata: ConversationCardMetadata) -> str:
+    """``mention`` | ``thread`` | ``none`` — the card's ``directed:`` value.
+
+    THE ONE predicate the card line, the ``expect:`` line and the reply guard's
+    trigger record share, so "was this addressed to me" cannot drift between
+    what the agent is told and what the guard counts.
+    """
+
+    if metadata.mention:
+        return "mention"
+    if metadata.thread_follower and metadata.thread_root_id:
+        return "thread"
+    return "none"
 
 
 def build_conversation_card(metadata: ConversationCardMetadata) -> str:
@@ -100,6 +125,7 @@ def build_conversation_card(metadata: ConversationCardMetadata) -> str:
     """
 
     mention_line = "mention: yes" if metadata.mention else "mention: no"
+    directed = card_directed(metadata)
     label = _one_line(metadata.conversation_label) or metadata.conversation_id
     sender = _one_line(metadata.sender_label) or "unknown"
     kind = "Thread reply" if metadata.thread_root_id else "Channel message"
@@ -109,11 +135,38 @@ def build_conversation_card(metadata: ConversationCardMetadata) -> str:
         BRIDGE_UNTRUSTED_CLAUSE,
         "",
         mention_line,
+        f"directed: {directed}",
         f"tenant_id: {metadata.tenant_id}",
         f"conversation_id: {metadata.conversation_id}",
+    ]
+    if metadata.conversation_kind:
+        lines.append(f"conversation_kind: {metadata.conversation_kind}")
+    lines += [
         f"message_id: {metadata.message_id}",
         f"conversation_seq: {metadata.conversation_seq}",
     ]
+    if len(metadata.coalesced_message_ids) > 1:
+        # One card for several messages that landed inside the coalescing
+        # window: each was screened and admitted on its own, and the agent
+        # reads them all with one history/thread read. Oldest → newest.
+        lines.append(f"message_ids: {','.join(metadata.coalesced_message_ids)}")
+    # PER-WAKE GUIDANCE, never system prompt (wake contract). Every message in
+    # a conversation the agent is a member of now wakes it, so the card says
+    # whether an answer is EXPECTED: a mention or a thread it follows is
+    # addressed to it; anything else is ambient and the agent weighs it, with
+    # ``no_reply`` as the cheap, quiet way out (a no_reply turn raises no
+    # notification). Kept to one or two lines: this text is billed per wake.
+    # Placed BEFORE the route lines so the route stays directly above the
+    # guidance footer (the shape the route tests pin).
+    if directed in ("mention", "thread"):
+        lines.append("expect: reply")
+    else:
+        lines.append("expect: weigh relevance; if nothing is needed end with no_reply")
+        if metadata.sender_kind == "agent":
+            # Two agents answering each other's ambient chatter is the loop
+            # this whole contract guards against; the server and the reply
+            # guard cap it, and this line keeps it from starting.
+            lines.append("agent sender: do not reply unless it asks you a direct question")
     if metadata.attachments:
         # A count and how to see them: images reach the agent only through
         # channel_history after an allow that screened them (never this card).
@@ -130,6 +183,11 @@ def build_conversation_card(metadata: ConversationCardMetadata) -> str:
         # Thread context: where the reply lives and how to answer IN it, so an
         # agent coordinating in a thread does not answer at channel level.
         lines += [
+            # The contract's routing name for the same id: the message this
+            # reply hangs under. Stated beside thread_root_id so a reader of
+            # either vocabulary finds it; first, so the route line stays
+            # directly under the thread_root_id it names.
+            f"reply_to_message_id: {metadata.thread_root_id}",
             f"thread_root_id: {metadata.thread_root_id}",
             "reply in thread: bridge channel_post with this thread_root_id; "
             "read the thread with channel_thread",
@@ -383,6 +441,8 @@ def _card_metadata(
         message_id=ref.message_id,
         conversation_seq=ref.conversation_seq,
         thread_root_id=ref.thread_root_id,
+        thread_follower=ref.thread_follower,
+        conversation_kind=ref.conversation_kind,
     )
 
 
@@ -498,6 +558,52 @@ def _record_body_reservation(
     # belongs in a log line about it.
     logger.info("bridge: body reservation created=%s", created)
     return RESERVATION_RECORDED if created else RESERVATION_ALREADY_RECORDED
+
+
+#: ``detail`` of a card the connector's coalescer buffered instead of posting.
+#: The caller must then NOT mark the reservation's card posted: the flush does
+#: that once the one grouped card is out (see ``coalesce.py``).
+CARD_COALESCED = "coalesced"
+
+
+async def _hand_off_card(
+    owner: Any,
+    metadata: ConversationCardMetadata,
+    ref: ConversationFeedRef,
+    *,
+    session_id: str,
+    config_dir: Path,
+) -> str:
+    """Buffer the card in the active coalescing scope, else deliver it now.
+
+    Screening, admission and the reservation have ALL happened per message by
+    the time this runs; only the wake is grouped. Outside a connector
+    iteration (direct callers, tests) there is no scope and the card goes out
+    immediately, exactly as before.
+    """
+
+    from ..reply_guard import record_trigger
+    from .coalesce import active_coalescer
+
+    # The reply guard's trigger record: WHAT woke the agent here (closed sender
+    # kind + mention bit, never a body or name). Per message, oldest → newest
+    # as the connector admits them, so the newest wins — which is the message
+    # an answer follows. The tool's channel_post reads it to tell an
+    # agent-to-agent turn from a human-prompted one.
+    record_trigger(
+        config_dir,
+        endpoint_id=str(getattr(owner, "endpoint_id", "") or ""),
+        conversation_id=ref.conversation_id,
+        sender_kind=metadata.sender_kind,
+        mention=metadata.mention,
+    )
+    coalescer = active_coalescer()
+    if coalescer is None:
+        return await _deliver_card(owner, metadata, session_id=session_id, config_dir=config_dir)
+    coalescer.enqueue(
+        owner, metadata, ref_key=ref.encode(), session_id=session_id, config_dir=config_dir
+    )
+    return CARD_COALESCED
 
 
 async def _deliver_card(
@@ -959,8 +1065,8 @@ async def handle_conversation_available(
                 metadata = replace(metadata, attachments_note=attachments_note)
 
         if recovery is not None:
-            detail = await _deliver_card(
-                owner, metadata, session_id=designation, config_dir=config_dir
+            detail = await _hand_off_card(
+                owner, metadata, ref, session_id=designation, config_dir=config_dir
             )
             terminal = True
             if recovery in ("rejected", "unadmitted"):
@@ -1112,13 +1218,29 @@ async def handle_conversation_available(
             logger.warning("bridge: card re-posted code=card_unrecorded")
         if recorded not in (RESERVATION_RECORDED, RESERVATION_ALREADY_RECORDED):
             return {"action": "hold", "message_id": message_id, "code": recorded}
-        detail = await _deliver_card(
+        detail = await _hand_off_card(
             owner,
             metadata,
+            ref,
             session_id=designation,
             config_dir=config_dir,
         )
         terminal = True
+        if detail == CARD_COALESCED:
+            # Buffered, not posted: the reservation stays CARD_OWED until the
+            # coalescer's flush marks it, so a crash in between replays into
+            # the existing "owed card" path instead of losing the wake.
+            return {
+                "action": "delivered",
+                "message_id": message_id,
+                "conversation_id": ref.conversation_id,
+                "conversation_seq": ref.conversation_seq,
+                "mention": ref.mention,
+                "session": designation,
+                "detail": detail,
+                "screened_template": getattr(result, "rendered_version", None),
+                "screened_template_sha256": getattr(result, "rendered_template_sha256", None),
+            }
         # Only after the hand-off returned. A failure to record it is not a
         # failed delivery (the card IS out); it costs one re-posted card PER
         # later replay while the mark keeps failing (review n6) — in
@@ -1163,8 +1285,10 @@ async def handle_conversation_available(
 
 
 __all__ = [
+    "CARD_COALESCED",
     "GUIDANCE_VERSION",
     "ConversationCardMetadata",
     "build_conversation_card",
+    "card_directed",
     "handle_conversation_available",
 ]

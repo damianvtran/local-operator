@@ -142,6 +142,7 @@ from local_operator.harness.types import (
     ToolResult,
 )
 
+from . import reply_guard
 from .client import TeamBridgeClient
 from .outbox import Outbox, send_from_outbox
 from .recipient_resolution import (
@@ -1752,6 +1753,23 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
                 return _error(str(failure), code=failure.code)
             mentions = [member.mention()]
             recipient_account_id = member.account_id
+        # LOOP/COST GUARD (wake contract): every conversation message now wakes
+        # its agent members, so two agents answering every wake would trade
+        # posts for ever. Reserved LAST among the local checks (a malformed or
+        # unresolvable call never spends budget) and BEFORE the wire write (a
+        # concurrent post of the same endpoint sees the slot). Fail closed: a
+        # guard that cannot read its state refuses rather than going silent.
+        try:
+            slot = reply_guard.reserve_post(
+                runtime.config_dir, endpoint_id=endpoint_id, conversation_id=channel_id
+            )
+        except reply_guard.ReplyGuardUnavailable:
+            return _error(
+                "the reply guard could not read its state; not posting",
+                code=reply_guard.CODE_UNAVAILABLE,
+            )
+        if isinstance(slot, reply_guard.Refusal):
+            return slot.as_result()
         # ONE ref per CALL, minted before dispatch: the client's own 401 refresh
         # retry re-sends this exact body, so that retry is idempotent on the
         # server; a second tool call mints a second ref and is a second message.
@@ -1768,6 +1786,11 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
                 mentions=mentions or None,
             )
         except Exception as failure:
+            # The hub did not take it: the budget slot goes back. (The run
+            # counter does not — see ``reply_guard.release``.)
+            reply_guard.release(
+                runtime.config_dir, slot, endpoint_id=endpoint_id, conversation_id=channel_id
+            )
             return _error(f"the post did not confirm: {_failure_text(failure)}", code="post_failed")
         # ONE receipt shape for every conversation write (main's `_post_receipt`,
         # shared with `dm`), EXTENDED with the resolved recipient rather than
