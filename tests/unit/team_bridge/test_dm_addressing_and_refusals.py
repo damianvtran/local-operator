@@ -398,13 +398,15 @@ def test_a_locally_synthesised_refusal_still_names_its_code() -> None:
 async def test_dm_refuses_a_display_name_recipient_and_never_drops_it(
     extra: dict[str, str],
 ) -> None:
-    """A name is a legal SHAPE, and no op but ``channel_post`` may resolve one.
+    """A name is a legal SHAPE; ``dm`` is the op with no scope to resolve one in.
 
-    Main's shared shape validator admits ``{"name": …}`` because a room post can
-    resolve it against that conversation's members; ``dm`` has no room to scope a
-    name to, so the executor must refuse rather than fold the name away. The
-    danger this pins is the SILENT case: a name beside an id would otherwise
-    transcribe the id and quietly discard the name the model asked for.
+    The shared shape validator admits ``{"name": …}`` because the ops that CAN
+    resolve it exist: ``channel_post`` against that conversation's active members,
+    ``send``/``reply`` against the owner's own send allowlist. ``dm``'s recipients
+    are the directory's people and their chiefs of staff, so it resolves against
+    neither and must refuse rather than fold the name away. The danger this pins
+    is the SILENT case: a name beside an id would otherwise transcribe the id and
+    quietly discard the name the model asked for.
     """
 
     client = DmClient([_member()])
