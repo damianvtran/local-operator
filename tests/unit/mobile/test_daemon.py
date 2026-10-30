@@ -312,7 +312,7 @@ def test_http_gate_and_login_flow() -> None:
     # tree; the capability is how the phone knows to offer the destination.
     # NOT an exact key set: capabilities are additive (the Librarian will add
     # its own key), so a new key must not fail this relay's contract test.
-    for key in ("features", "i18n", "stt", "library", "session_tags"):
+    for key in ("features", "i18n", "stt", "library", "session_tags", "skill_invocation"):
         assert key in capabilities
     assert capabilities["library"] == 1
     # The relay capability says these routes exist in THIS build; it is a
@@ -3320,3 +3320,510 @@ def test_a_stopped_screen_the_daemon_watched_end_drops_hidden_asks_on_a_window_c
     assert pushed.get("ended") is True
     assert reopened is not None
     assert reopened.asks == [] and reopened.asks_open == 0 and reopened.ended is True
+
+
+# -- the ``$skill`` relay contract (SKM-D1/D3/D4) -----------------------------
+
+
+def _write_skill(
+    root: Path,
+    name: str,
+    *,
+    body: str = "Read primary sources.",
+    description: str | None = None,
+    hide: bool = False,
+) -> Path:
+    """One authored SKILL.md under a discovery root.
+
+    ``root`` is the ``skills`` directory ITSELF (callers pass
+    ``<cwd>/.local-operator/skills``), because discovery walks up from the
+    session cwd and a test that placed these anywhere else would be asserting
+    against the fixture's own layout rather than the route's lookup.
+    """
+    skill_dir = root / name
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    front = f"---\nname: {name}\ndescription: {description or f'The {name} skill.'}\n"
+    if hide:
+        front += "hide: true\n"
+    front += "---\n\n"
+    (skill_dir / "SKILL.md").write_text(front + body)
+    return skill_dir
+
+
+def _hermetic_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Isolate ``~`` so the real machine's skill libraries cannot join a test.
+
+    ``default_skill_roots`` appends the home native root and the ecosystem
+    roots unconditionally; without this the assertions would pass or fail
+    depending on what the developer has installed. The packaged catalogue is
+    still scanned (it is release content), so every catalogue assertion scopes
+    to the names this test created.
+    """
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+    monkeypatch.setenv("HOME", str(home))
+    return home
+
+
+def _skill_session(
+    daemon: MobileDaemon, work: Path, session_id: str = "skills-live", *, pid: int = 5151
+):
+    """A live session entry whose record says it works in ``work``."""
+    record = SessionRecord(
+        pid=pid,
+        kind="tui",
+        session_id=session_id,
+        conversation_name="skills",
+        cwd=str(work),
+        model_label="fixture/model",
+        control_port=1,
+        control_key="k",
+    )
+    entry = SessionEntry(record)
+    daemon.table.entries[record.pid] = entry
+    return record, entry
+
+
+def _capturing_writer(daemon: MobileDaemon, record: SessionRecord, frames: list[dict[str, Any]]):
+    """A writer that records every control frame and acks it immediately."""
+
+    class Writer:
+        def write(self, payload: bytes) -> None:
+            frame = json.loads(payload.decode())
+            frames.append(frame)
+            daemon._pending_reqs[(record.pid, frame["req"])].set_result(
+                {"op": "ack", "req": frame["req"], "detail": "accepted"}
+            )
+
+        async def drain(self) -> None:
+            return None
+
+    return Writer()
+
+
+def test_the_list_payload_advertises_the_skill_contract() -> None:
+    """The phone gates ``$`` on this key, so it must be present and exact."""
+    client = TestClient(build_app(MobileDaemon(port=0, password="pw123")))
+    client.post("/login", data={"password": "pw123"})
+    capabilities = client.get("/api/sessions").json()["capabilities"]
+    assert capabilities["skill_invocation"] == {"available": True}
+
+
+def test_the_skill_catalogue_needs_auth() -> None:
+    client = TestClient(build_app(MobileDaemon(port=0, password="pw123")))
+    assert client.get("/api/skills?session_id=anything").status_code == 401
+
+
+def test_the_skill_catalogue_names_an_unknown_session() -> None:
+    """404, not an empty list: "no such conversation" is not "no skills"."""
+    client = TestClient(build_app(MobileDaemon(port=0, password="pw123")))
+    client.post("/login", data={"password": "pw123"})
+    answer = client.get("/api/skills?session_id=424242")
+    assert answer.status_code == 404
+    assert answer.json()["code"] == "unknown_session"
+    assert client.get("/api/skills").status_code == 404
+
+
+def test_the_catalogue_lists_hidden_skills_and_cuts_descriptions(tmp_path, monkeypatch) -> None:
+    """Hidden entries are reachable by name, so the picker must offer them."""
+    _hermetic_home(tmp_path, monkeypatch)
+    work = tmp_path / "work"
+    root = work / ".local-operator" / "skills"
+    _write_skill(root, "zz-probe-normal", description="Investigate a question.")
+    _write_skill(root, "zz-probe-hidden", body="Scan for secrets.", hide=True)
+    _write_skill(root, "zz-probe-long", description="L" * 200)
+
+    daemon = MobileDaemon(port=0, password="pw123")
+    _skill_session(daemon, work)
+    client = TestClient(build_app(daemon))
+    client.post("/login", data={"password": "pw123"})
+    rows = client.get("/api/skills?session_id=skills-live").json()["skills"]
+    mine = {row["name"]: row for row in rows if row["name"].startswith("zz-probe")}
+    assert sorted(mine) == ["zz-probe-hidden", "zz-probe-long", "zz-probe-normal"]
+    assert mine["zz-probe-normal"] == {
+        "name": "zz-probe-normal",
+        "description": "Investigate a question.",
+        "hidden": False,
+    }
+    assert mine["zz-probe-hidden"]["hidden"] is True
+    assert len(mine["zz-probe-long"]["description"]) == 160
+    # Every row carries exactly the three wire fields, so a phone never has to
+    # guess what a fourth key means.
+    assert all(sorted(row) == ["description", "hidden", "name"] for row in rows)
+
+
+def test_the_catalogue_reads_the_SESSION_cwd_not_the_relays(tmp_path, monkeypatch) -> None:
+    """Two sessions in two checkouts must not share a vocabulary."""
+    _hermetic_home(tmp_path, monkeypatch)
+    first = tmp_path / "checkout-a"
+    second = tmp_path / "checkout-b"
+    _write_skill(first / ".local-operator" / "skills", "zz-only-in-a")
+    _write_skill(second / ".local-operator" / "skills", "zz-only-in-b")
+
+    daemon = MobileDaemon(port=0, password="pw123")
+    _skill_session(daemon, first, session_id="in-a", pid=5151)
+    _skill_session(daemon, second, session_id="in-b", pid=5252)
+    client = TestClient(build_app(daemon))
+    client.post("/login", data={"password": "pw123"})
+
+    names_a = {row["name"] for row in client.get("/api/skills?session_id=in-a").json()["skills"]}
+    names_b = {row["name"] for row in client.get("/api/skills?session_id=in-b").json()["skills"]}
+    assert "zz-only-in-a" in names_a and "zz-only-in-a" not in names_b
+    assert "zz-only-in-b" in names_b and "zz-only-in-b" not in names_a
+
+
+def test_the_catalogue_is_capped(tmp_path, monkeypatch) -> None:
+    """The row cap is a bound on the ANSWER, not on the tree."""
+    from local_operator.mobile import daemon as daemon_module
+
+    _hermetic_home(tmp_path, monkeypatch)
+    work = tmp_path / "work"
+    root = work / ".local-operator" / "skills"
+    for index in range(3):
+        _write_skill(root, f"zz-probe-{index}")
+    monkeypatch.setattr(daemon_module, "_SKILL_ROWS_MAX", 2)
+
+    daemon = MobileDaemon(port=0, password="pw123")
+    _skill_session(daemon, work)
+    client = TestClient(build_app(daemon))
+    client.post("/login", data={"password": "pw123"})
+    rows = client.get("/api/skills?session_id=skills-live").json()["skills"]
+    assert len(rows) == 2
+
+
+def test_a_flagged_prompt_reaches_the_runtime_expanded(tmp_path, monkeypatch) -> None:
+    """The persisted payload IS the expanded text, and the flag never travels."""
+    _hermetic_home(tmp_path, monkeypatch)
+    work = tmp_path / "work"
+    _write_skill(work / ".local-operator" / "skills", "zz-probe", body="Read primary sources.")
+    daemon = MobileDaemon(port=0, password="pw123")
+    record, entry = _skill_session(daemon, work)
+    frames: list[dict[str, Any]] = []
+    entry.writer = _capturing_writer(daemon, record, frames)  # type: ignore[assignment]
+    client = TestClient(build_app(daemon))
+    client.post("/login", data={"password": "pw123"})
+
+    answer = client.post(
+        "/api/sessions/skills-live/command",
+        json={
+            "op": "prompt",
+            "command_id": "12345678-1234-4678-9234-567812345678",
+            "text": "$zz-probe fix the login bug",
+            "expand_skills": True,
+        },
+    )
+    assert answer.status_code == 200
+    assert answer.json()["skills"] == {"attached": ["zz-probe"], "skipped": []}
+    sent = frames[-1]["text"]
+    assert sent.startswith("$zz-probe fix the login bug\n\n")
+    assert "<operator-skills>" in sent and "Read primary sources." in sent
+    # The relay's own flag is consumed here: a runtime that has never heard of
+    # it must not receive it (and no future runtime may reinterpret it).
+    assert "expand_skills" not in frames[-1]
+
+
+def test_the_flag_absent_sends_the_literal_text(tmp_path, monkeypatch) -> None:
+    """An older phone, or one that decided not to fire: the text goes verbatim."""
+    _hermetic_home(tmp_path, monkeypatch)
+    work = tmp_path / "work"
+    _write_skill(work / ".local-operator" / "skills", "zz-probe")
+    daemon = MobileDaemon(port=0, password="pw123")
+    record, entry = _skill_session(daemon, work)
+    frames: list[dict[str, Any]] = []
+    entry.writer = _capturing_writer(daemon, record, frames)  # type: ignore[assignment]
+    client = TestClient(build_app(daemon))
+    client.post("/login", data={"password": "pw123"})
+
+    answer = client.post(
+        "/api/sessions/skills-live/command",
+        json={
+            "op": "prompt",
+            "command_id": "12345678-1234-4678-9234-567812345678",
+            "text": "$zz-probe fix the login bug",
+        },
+    )
+    assert answer.status_code == 200
+    assert frames[-1]["text"] == "$zz-probe fix the login bug"
+    # No ``skills`` block: the flag never ran, so there is nothing to report.
+    assert "skills" not in answer.json()
+
+
+@pytest.mark.parametrize("flag", ["true", 1])
+def test_only_a_literal_true_expands(tmp_path, monkeypatch, flag: object) -> None:
+    """The additive-input rule: an unrecognised value changes nothing.
+
+    A phone that sends ``"true"`` (the string) or ``1`` is not asking for an
+    expansion, and the text must go out verbatim with no ``skills`` block in
+    the receipt — the same treatment an older relay gives the whole key
+    (agent review round 1, R-MINOR-2).
+    """
+    _hermetic_home(tmp_path, monkeypatch)
+    work = tmp_path / "work"
+    _write_skill(work / ".local-operator" / "skills", "zz-probe", body="Read primary sources.")
+    daemon = MobileDaemon(port=0, password="pw123")
+    record, entry = _skill_session(daemon, work)
+    frames: list[dict[str, Any]] = []
+    entry.writer = _capturing_writer(daemon, record, frames)  # type: ignore[assignment]
+    client = TestClient(build_app(daemon))
+    client.post("/login", data={"password": "pw123"})
+
+    answer = client.post(
+        "/api/sessions/skills-live/command",
+        json={
+            "op": "prompt",
+            "command_id": "12345678-1234-4678-9234-567812345678",
+            "text": "$zz-probe fix the login bug",
+            "expand_skills": flag,
+        },
+    )
+    assert answer.status_code == 200
+    assert "skills" not in answer.json()
+    assert frames[-1]["text"] == "$zz-probe fix the login bug"
+    # The value is popped whatever it was, so the runtime never sees the key.
+    assert "expand_skills" not in frames[-1]
+
+
+def test_the_flag_on_a_non_text_op_is_dropped_and_expands_nothing(tmp_path, monkeypatch) -> None:
+    """Popped on EVERY op, expanded only on the two that carry user text.
+
+    The pop is what keeps the flag the relay's own: a runtime that has never
+    heard of it must not be handed one, and an ``abort`` carrying a ``$name``
+    in its text is a cancellation, not a submit (agent review round 1,
+    R-MINOR-2).
+    """
+    _hermetic_home(tmp_path, monkeypatch)
+    work = tmp_path / "work"
+    _write_skill(work / ".local-operator" / "skills", "zz-probe", body="Read primary sources.")
+    daemon = MobileDaemon(port=0, password="pw123")
+    record, entry = _skill_session(daemon, work)
+    frames: list[dict[str, Any]] = []
+    entry.writer = _capturing_writer(daemon, record, frames)  # type: ignore[assignment]
+    client = TestClient(build_app(daemon))
+    client.post("/login", data={"password": "pw123"})
+
+    answer = client.post(
+        "/api/sessions/skills-live/command",
+        json={"op": "abort", "text": "$zz-probe stop", "expand_skills": True},
+    )
+    assert answer.status_code == 200
+    assert "skills" not in answer.json()
+    assert frames[-1]["text"] == "$zz-probe stop"
+    assert "expand_skills" not in frames[-1]
+
+
+def test_a_flagged_steer_is_expanded_too(tmp_path, monkeypatch) -> None:
+    """Steer is the same contract: a mid-turn instruction can invoke a skill."""
+    _hermetic_home(tmp_path, monkeypatch)
+    work = tmp_path / "work"
+    _write_skill(work / ".local-operator" / "skills", "zz-probe", body="Check the diff.")
+    daemon = MobileDaemon(port=0, password="pw123")
+    record, entry = _skill_session(daemon, work)
+    frames: list[dict[str, Any]] = []
+    entry.writer = _capturing_writer(daemon, record, frames)  # type: ignore[assignment]
+    client = TestClient(build_app(daemon))
+    client.post("/login", data={"password": "pw123"})
+
+    answer = client.post(
+        "/api/sessions/skills-live/command",
+        json={
+            "op": "steer",
+            "command_id": "12345678-1234-4678-9234-567812345678",
+            "text": "$zz-probe look again",
+            "expand_skills": True,
+        },
+    )
+    assert answer.status_code == 200
+    assert answer.json()["skills"]["attached"] == ["zz-probe"]
+    assert "Check the diff." in frames[-1]["text"]
+
+
+def test_a_cold_steer_refuses_before_expanding(tmp_path, monkeypatch) -> None:
+    """A steer with no live entry is a 409, so no skill body may be read for it.
+
+    Expansion is a discovery walk plus one read per body, and none of it can
+    reach a runtime this relay has no entry for (agent review round 1,
+    R-MINOR-4). A cold PROMPT still expands — its wake path delivers the text —
+    which the test above pins.
+    """
+    _hermetic_home(tmp_path, monkeypatch)
+    from local_operator.mobile import daemon as daemon_module
+
+    calls: list[str] = []
+
+    def spy(_daemon, _session_id, text):  # noqa: ANN001, ANN202
+        calls.append(text)
+        raise AssertionError("a cold steer must not expand")
+
+    monkeypatch.setattr(daemon_module, "_expand_session_skills", spy)
+    daemon = MobileDaemon(port=0, password="pw123")
+    client = TestClient(build_app(daemon))
+    client.post("/login", data={"password": "pw123"})
+
+    answer = client.post(
+        "/api/sessions/nobody-home/command",
+        json={
+            "op": "steer",
+            "command_id": "12345678-1234-4678-9234-567812345678",
+            "text": "$zz-probe look again",
+            "expand_skills": True,
+        },
+    )
+    assert answer.status_code == 409
+    assert answer.json()["error"] == "session not connected"
+    assert calls == []
+
+
+def test_an_empty_skill_body_skips_it_and_still_sends(tmp_path, monkeypatch) -> None:
+    """SKM-D4: one unusable body costs that skill, never the message."""
+    _hermetic_home(tmp_path, monkeypatch)
+    work = tmp_path / "work"
+    _write_skill(
+        work / ".local-operator" / "skills",
+        "zz-probe-empty",
+        body="",
+    )
+    daemon = MobileDaemon(port=0, password="pw123")
+    record, entry = _skill_session(daemon, work)
+    frames: list[dict[str, Any]] = []
+    entry.writer = _capturing_writer(daemon, record, frames)  # type: ignore[assignment]
+    client = TestClient(build_app(daemon))
+    client.post("/login", data={"password": "pw123"})
+
+    answer = client.post(
+        "/api/sessions/skills-live/command",
+        json={
+            "op": "prompt",
+            "command_id": "12345678-1234-4678-9234-567812345678",
+            "text": "$zz-probe-empty fix the login bug",
+            "expand_skills": True,
+        },
+    )
+    assert answer.status_code == 200
+    assert answer.json()["skills"] == {"attached": [], "skipped": ["zz-probe-empty"]}
+    assert frames[-1]["text"] == "$zz-probe-empty fix the login bug"
+
+
+def test_an_oversized_payload_is_refused_before_the_runtime_is_touched(
+    tmp_path, monkeypatch
+) -> None:
+    """422 ``skills_too_large``: nothing is sent, so the draft can be edited.
+
+    TWO large bodies, not one: the ``skill://`` resolver already truncates a
+    single file at 200 KiB (``skills.protocol.MAX_READ_BYTES``), so one skill
+    can never reach the 384 KiB budget. The bound exists for a MESSAGE that
+    carries several, which is exactly what this exercises.
+    """
+    from local_operator.skills.invoke import SKILL_BODY_BUDGET_BYTES
+
+    _hermetic_home(tmp_path, monkeypatch)
+    work = tmp_path / "work"
+    root = work / ".local-operator" / "skills"
+    for name in ("zz-probe-huge-a", "zz-probe-huge-b"):
+        _write_skill(root, name, body="x" * (SKILL_BODY_BUDGET_BYTES + 1))
+    daemon = MobileDaemon(port=0, password="pw123")
+    record, entry = _skill_session(daemon, work)
+    frames: list[dict[str, Any]] = []
+    entry.writer = _capturing_writer(daemon, record, frames)  # type: ignore[assignment]
+    client = TestClient(build_app(daemon))
+    client.post("/login", data={"password": "pw123"})
+
+    answer = client.post(
+        "/api/sessions/skills-live/command",
+        json={
+            "op": "prompt",
+            "command_id": "12345678-1234-4678-9234-567812345678",
+            "text": "$zz-probe-huge-a $zz-probe-huge-b do both",
+            "expand_skills": True,
+        },
+    )
+    assert answer.status_code == 422
+    assert answer.json()["code"] == "skills_too_large"
+    assert frames == []
+
+
+def test_the_cap_weighs_the_escaped_bytes_the_frame_carries(tmp_path, monkeypatch) -> None:
+    """A body the resolver truncates can still blow the budget by ITSELF.
+
+    An emoji is four raw bytes and twelve ASCII-escaped ones, so the ~200 KiB
+    the ``skill://`` read returns is ~600 KiB of frame — over 384 KiB with no
+    second skill to help. The raw-byte count saw 204,800 and sent it, and the
+    transport then refused with a bare ``OversizedRequest`` instead of this
+    route's coded 422 (agent review round 1, R-MINOR-1).
+    """
+    _hermetic_home(tmp_path, monkeypatch)
+    work = tmp_path / "work"
+    root = work / ".local-operator" / "skills"
+    _write_skill(root, "zz-probe-emoji", body="\U0001f600" * 60_000)
+    daemon = MobileDaemon(port=0, password="pw123")
+    record, entry = _skill_session(daemon, work)
+    frames: list[dict[str, Any]] = []
+    entry.writer = _capturing_writer(daemon, record, frames)  # type: ignore[assignment]
+    client = TestClient(build_app(daemon))
+    client.post("/login", data={"password": "pw123"})
+
+    answer = client.post(
+        "/api/sessions/skills-live/command",
+        json={
+            "op": "prompt",
+            "command_id": "12345678-1234-4678-9234-567812345678",
+            "text": "$zz-probe-emoji load it",
+            "expand_skills": True,
+        },
+    )
+    assert answer.status_code == 422
+    assert answer.json()["code"] == "skills_too_large"
+    assert frames == []
+
+
+def test_a_cold_prompt_expands_against_the_durable_cwd(tmp_path, monkeypatch) -> None:
+    """The wake path builds its command from the same body, so it expands too.
+
+    The session's runtime is gone, so the cwd comes from the durable record —
+    which is the whole point of the three-source lookup: a phone waking a
+    conversation must resolve ``$name`` in the directory that conversation
+    works in, not where the relay happens to run.
+    """
+    import asyncio as _asyncio
+    from types import SimpleNamespace
+
+    from local_operator.harness.types import Message
+    from local_operator.mobile import attach_client
+    from local_operator.session.transcript import Transcript
+
+    _hermetic_home(tmp_path, monkeypatch)
+    cfg = tmp_path / "config"
+    work = tmp_path / "work"
+    (cfg / "sessions" / "cold-skills").mkdir(parents=True)
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+    _asyncio.run(
+        Transcript(cfg / "sessions" / "cold-skills").append_message(
+            Message.user("existing", id="existing")
+        )
+    )
+    (cfg / "sessions" / "cold-skills" / "desktop.json").write_text(json.dumps({"cwd": str(work)}))
+    _write_skill(work / ".local-operator" / "skills", "zz-probe", body="Read primary sources.")
+
+    async def capture(config_root, command):  # noqa: ANN001, ANN202
+        seen.append(command.text)
+        return SimpleNamespace(close=lambda: None), "woke it"
+
+    seen: list[str] = []
+    monkeypatch.setattr(attach_client, "continue_command", capture)
+    daemon = MobileDaemon(port=0, password="pw123")
+    client = TestClient(build_app(daemon))
+    client.post("/login", data={"password": "pw123"})
+
+    answer = client.post(
+        "/api/sessions/cold-skills/command",
+        json={
+            "op": "prompt",
+            "command_id": "12345678-1234-4678-9234-567812345678",
+            "text": "$zz-probe fix the login bug",
+            "expand_skills": True,
+        },
+    )
+    assert answer.status_code == 200
+    assert answer.json()["skills"] == {"attached": ["zz-probe"], "skipped": []}
+    assert len(seen) == 1
+    assert seen[0].startswith("$zz-probe fix the login bug\n\n")
+    assert "Read primary sources." in seen[0]
