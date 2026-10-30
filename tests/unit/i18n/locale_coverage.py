@@ -22,17 +22,18 @@ file and still lack a specific id; `messages.render_record` then falls back per
 id. Callers that need that finer question should read their own catalogue, as the
 byte-fidelity assertions in these files already do.)
 
-**The vacuity guard is a skip, and that is a decision.** "A locale without this
+**The vacuity guard FAILS, and that is a decision.** "A locale without this
 namespace renders the English source" is only evidence while some shipped locale
 lacks the namespace; once every locale carries it, the loop compares nothing and
-passes for the wrong reason. :func:`require_nonempty` therefore SKIPS that half
-with the derived sets named in the reason. Chosen over a hard failure because a
-fully translated corpus is the goal of the programme, not a regression — reddening
-main on the day it completes repeats exactly the false alarm this module exists to
-remove. The skip is reported on every run (``-rs``), so the gap stays visible, and
-its reason names the way to cover the contract again: pin the fallback against a
-synthetic catalogue root (``test_catalogues.py`` builds fixture trees that way),
-never with a fresh locale list.
+passes for the wrong reason. :func:`require_nonempty` therefore FAILS that half,
+with the derived sets named in the message.
+
+Failing rather than skipping is deliberate: a skip is reported once and then reads
+as green on every subsequent run, which is exactly how the file this helper
+replaces rotted — its locale list stayed green while the corpus moved under it. A
+failure forces the loss of coverage to be dealt with. The fix it should prompt is
+to pin the fallback against a synthetic catalogue root (``test_catalogues.py``
+builds fixture trees that way), never to restore a locale list.
 
 Caches are keyed by the catalogue root, so a test that swaps the tree (as
 `test_catalogues.py` does with ``monkeypatch.setattr(catalogues, "_CATALOGUES")``)
@@ -43,8 +44,6 @@ from __future__ import annotations
 
 import functools
 from collections.abc import Iterable, Sequence
-
-import pytest
 
 from local_operator.i18n import catalogues, resolve
 
@@ -128,15 +127,15 @@ def absent_pairs(locales: Iterable[str] | None = None) -> tuple[tuple[str, str],
 
 
 def require_nonempty(items: Sequence[object], *, subject: str, detail: str) -> None:
-    """Skip the caller's half when the derived corpus has nothing left for it.
+    """Fail the caller's half when the derived corpus has nothing left for it.
 
-    ``detail`` says what the caller would otherwise prove and how to prove it once
-    the real corpus can no longer show the state — see the module docstring for why
-    this skips rather than fails.
+    ``detail`` says what state was found, and the message names the replacement the
+    caller should reach for once the real corpus can no longer show the state — see
+    the module docstring for why this fails rather than skips.
     """
     if items:
         return
-    pytest.skip(
+    raise AssertionError(
         f"{subject}: nothing left to exercise on the current corpus ({detail}); "
         f"pin this contract against a synthetic catalogue root "
         f"(tests/unit/i18n/test_catalogues.py) instead of restoring a locale list"

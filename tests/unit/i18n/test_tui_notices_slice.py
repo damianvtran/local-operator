@@ -14,8 +14,8 @@ What this file pins, and why each pin exists:
    catalogues rather than pinned to one by name. `ur` was that name, and the note
    here called it "inactive, no directory" — it is a shipped locale carrying
    dozens of other namespaces, just not this file. When the last locale without
-   `tui.notices` lands, the derived set empties and the guard skips this half with
-   that reason (see `locale_coverage`) instead of going red on a working wave.
+   `tui.notices` lands, the derived set empties and the guard fails this half with
+   that reason (see `locale_coverage`) rather than passing with nothing compared.
 """
 
 from __future__ import annotations
