@@ -47222,6 +47222,14 @@ class OperatorApp(App[None]):
         view = self._notifications_view
         if view is not None:
             view._paint()
+        # The same debt on the settings page (QA round 1, Q2): an open page keeps
+        # its PAINTED rows and its composed-line caches between repaints, and the
+        # watcher path reaches here with no keypress to follow it. `_rows_key`
+        # and `_paint_token` carry the active locale, so this repaint recomposes
+        # the whole list in the new language rather than reusing the old strips.
+        settings_view = self._settings_view
+        if settings_view is not None:
+            settings_view._repaint()
 
     def _apply_theme(self, name: str, *, preview: bool = False) -> None:
         """Switch every rendering surface to ``name``, live.
