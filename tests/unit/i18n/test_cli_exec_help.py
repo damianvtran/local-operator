@@ -21,6 +21,9 @@ import pytest
 
 from local_operator import config
 from local_operator.i18n import messages, resolve, runtime, text
+from tests.unit.i18n import locale_coverage
+
+NAMESPACE = "cli.exec_help"
 
 
 def _bootstrap():
@@ -232,11 +235,27 @@ def test_twenty_generated_zero_argument_messages_and_english_fallback():
     from local_operator.i18n.keys import cli_exec_help as keys
     from local_operator.i18n.runtime import render_message
 
-    source = catalogues.load_catalogue("en", "cli.exec_help")
-    french = catalogues.load_catalogue("fr", "cli.exec_help")
-    chinese = catalogues.load_catalogue("zh-CN", "cli.exec_help")
-    spanish = catalogues.load_catalogue("es", "cli.exec_help")
-    assert set(french) == set(source) == set(chinese) == set(spanish)
+    source = catalogues.load_catalogue("en", NAMESPACE)
+    # Which shipped locales carry this namespace is DERIVED from the committed
+    # catalogues, never listed: a wave that translates one moves it between these
+    # two sets with no edit here, and the fallback half stays aimed at the REST.
+    translated = locale_coverage.carrying(NAMESPACE)
+    untranslated = locale_coverage.absent(NAMESPACE)
+    locale_coverage.require_nonempty(
+        translated,
+        subject=f"{NAMESPACE} own copy",
+        detail="no shipped locale carries the namespace",
+    )
+    locale_coverage.require_nonempty(
+        untranslated,
+        subject=f"{NAMESPACE} fallback",
+        detail=f"every shipped locale carries it (carries={list(translated)})",
+    )
+    own_copy = {locale: catalogues.load_catalogue(locale, NAMESPACE) for locale in translated}
+    for locale, catalogue in own_copy.items():
+        # Parity, so the per-key assertions below can index a translated
+        # catalogue without a silent per-key fallback hiding a gap.
+        assert set(catalogue) == set(source), locale
     functions = [f for _, f in inspect.getmembers(keys, inspect.isfunction)]
     assert len(source) == len(functions) == 20
     for function in functions:
@@ -244,24 +263,21 @@ def test_twenty_generated_zero_argument_messages_and_english_fallback():
         msg = function()
         assert msg.params == {}
         en = messages.render(msg.code, msg.params, locale="en")
-        fr = messages.render(msg.code, msg.params, locale="fr")
-        # fr carries this namespace: its rendered bytes are the catalogue value,
-        # not the English source.
-        assert fr == render_message(french[msg.code], msg.params, "fr")
-        assert fr != en
-        zh = messages.render(msg.code, msg.params, locale="zh-CN")
-        # zh-CN carries this namespace after its disposition: the rendered
-        # bytes are its catalogue value, not the English source.
-        assert zh == render_message(chinese[msg.code], msg.params, "zh-CN")
-        assert zh != en
-        # Spanish carries this namespace after the es W2 wave: its rendered
-        # bytes are its catalogue value, not the English source.
-        es = messages.render(msg.code, msg.params, locale="es")
-        assert es == render_message(spanish[msg.code], msg.params, "es")
-        assert es != en
-        # A locale that does not carry the namespace still falls back to English.
-        for locale in ("ru", "vi", "hi", "unknown"):
-            assert messages.render(msg.code, msg.params, locale=locale) == en
+        for locale in translated:
+            rendered = messages.render(msg.code, msg.params, locale=locale)
+            # The locale carries this namespace: its rendered bytes are its own
+            # catalogue value, not the English source.
+            assert rendered == render_message(
+                own_copy[locale][msg.code], msg.params, locale
+            ), locale
+            assert rendered != en, locale
+        for locale in untranslated:
+            # A locale without the file still renders the English source — never
+            # blank, never the message code.
+            assert messages.render(msg.code, msg.params, locale=locale) == en, locale
+        # A tag outside the shipped set is not a locale: it takes the same English
+        # path, which is a different guarantee from "shipped but untranslated".
+        assert messages.render(msg.code, msg.params, locale="unknown") == en
     assert "{'required_sections': [...]}" in keys.output_schema().envelope(locale="en")["text"]
 
 
