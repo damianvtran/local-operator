@@ -2619,3 +2619,37 @@ def test_a_laddered_notice_keeps_the_row_it_is_pinned_to() -> None:
     narrow = picker.render_text(40).plain.splitlines()[-1].strip()
     assert wide == "ordered by how you pay — bare /login lists the groups", wide
     assert narrow == "ordered by how you pay", narrow
+
+
+def test_a_language_move_reaches_the_picker_only_when_the_rows_are_re_handed() -> None:
+    """The picker stores a COPY, which is why ``/language`` re-pushes the rows.
+
+    ``CommandPicker.set_commands`` does ``list(commands)``, so the registry's own
+    in-place refresher cannot reach a mounted picker: it would paint the boot
+    language for the rest of the session. ``OperatorApp._apply_language`` calls
+    ``_refresh_offered_commands()`` for exactly that reason. Both halves are
+    pinned here — the staleness that motivates the re-push, and the French row
+    that arrives when it happens — because either alone can pass while the user
+    still sees English.
+    """
+    from local_operator.i18n.text import set_active_locale
+
+    picker = _picker(SLASH_COMMANDS)
+    picker.sync("/")
+    assert "List all commands" in "\n".join(row.plain for row in picker.render_rows(200))
+
+    set_active_locale("fr")
+    try:
+        stale = "\n".join(row.plain for row in picker.render_rows(200))
+        assert "Lister toutes les commandes" not in stale
+        picker.set_commands(SLASH_COMMANDS)
+        picker.sync("/")
+        fresh = "\n".join(row.plain for row in picker.render_rows(200))
+        assert "Lister toutes les commandes" in fresh
+    finally:
+        set_active_locale("en")
+    # Moving back is the same contract in reverse: the copy takes what it is
+    # handed, so the round trip only completes with another re-push.
+    picker.set_commands(SLASH_COMMANDS)
+    picker.sync("/")
+    assert "List all commands" in "\n".join(row.plain for row in picker.render_rows(200))

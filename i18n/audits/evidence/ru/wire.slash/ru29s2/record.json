@@ -1,0 +1,140 @@
+{
+  "schema": 1,
+  "audit_id": "ru29s2",
+  "audit_kind": "independent_full_namespace_audit_of_rewritten_slash_descriptions",
+  "locale": "ru",
+  "namespace": "wire.slash",
+  "round": 2,
+  "audit_date": "2026-10-29",
+  "key_count": 52,
+  "keys_read": 52,
+  "keys_changed_in_this_commit": 13,
+  "changed_keys": [
+    "wire.slash.approvals",
+    "wire.slash.effort",
+    "wire.slash.failovers",
+    "wire.slash.fork",
+    "wire.slash.goal",
+    "wire.slash.hub",
+    "wire.slash.mcp",
+    "wire.slash.model",
+    "wire.slash.notifications",
+    "wire.slash.search",
+    "wire.slash.session",
+    "wire.slash.sidebar",
+    "wire.slash.stop"
+  ],
+  "changed_keys_method": "git show HEAD:<catalogue> compared key-by-key with the working tree at record time",
+  "tree_head_above_the_rewrite": "7159e2a30927831f5dfb88f84c588eac07770e5d",
+  "current_byte_round_for_ledger": true,
+  "sha256": {
+    "en": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
+    "context": "32b3475a5808048a6eeaae462fee0feb55405fca77026e41b9609a516d74a215",
+    "target": "09b51528fb14e80fd3db33367624762ef33c47a4668a1a99e6946f451bd5761f"
+  },
+  "translator": {
+    "agent": "i18n-translator (session aec007cb64fd)",
+    "session": "aec007cb64fd",
+    "model": "radient/auto",
+    "date": "2026-10-29",
+    "model_note": "provider-quota fallback chain anthropic/claude-sonnet-5-5 -> openai/gpt-6-astra -> kimi/k3.1-pro -> radient/auto; recorded as served, per the translator's own note"
+  },
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "1ad20cd0410c",
+    "instance": "1ad20cd0410c-slash2-ru",
+    "model": "radient/auto",
+    "date": "2026-10-29",
+    "result": "passed",
+    "findings": 0,
+    "unresolved_blocker_major": 0,
+    "counts": {
+      "BLOCKER": 0,
+      "MAJOR": 0,
+      "MINOR": 6,
+      "NIT": 5
+    },
+    "independence": "distinct session and instance from the translator and from the round-1 auditor; the receipt states this in its own independence block"
+  },
+  "prior_rounds": [
+    {
+      "round": 1,
+      "instance": "2c04d4b44ec7-slash-ru",
+      "verdict": "changes_requested",
+      "counts": {
+        "BLOCKER": 0,
+        "MAJOR": 3,
+        "MINOR": 5,
+        "NIT": 5
+      },
+      "subject": "the shortened bytes introduced by head commit 7159e2a309",
+      "evidence": "session scratch slash-audit/ru/receipt.json (not copied; verdict + counts preserved here and in verdict-round1.txt)"
+    }
+  ],
+  "evidence": {
+    "receipt": "receipt.json",
+    "verdict": "verdict.txt",
+    "scope": "scope.json",
+    "report": "report.md",
+    "manifest": "evidence-manifest.json",
+    "round_1_verdict": "verdict-round1.txt"
+  },
+  "findings_summary": [
+    {
+      "id": "r2m1",
+      "severity": "MINOR",
+      "key": "wire.slash.sidebar"
+    },
+    {
+      "id": "r2m2",
+      "severity": "MINOR",
+      "key": "wire.slash.agent"
+    },
+    {
+      "id": "r2m3",
+      "severity": "MINOR",
+      "key": "wire.slash.model"
+    },
+    {
+      "id": "r2m4",
+      "severity": "MINOR",
+      "key": "wire.slash.fork"
+    },
+    {
+      "id": "r2m5",
+      "severity": "MINOR",
+      "key": "wire.slash.stop"
+    },
+    {
+      "id": "r2m6",
+      "severity": "MINOR",
+      "key": "wire.slash.approvals / effort / hub / mcp"
+    },
+    {
+      "id": "r2n1",
+      "severity": "NIT",
+      "key": "wire.slash.notifications"
+    },
+    {
+      "id": "r2n2",
+      "severity": "NIT",
+      "key": "wire.slash.highlights"
+    },
+    {
+      "id": "r2n3",
+      "severity": "NIT",
+      "key": "wire.slash.project"
+    },
+    {
+      "id": "r2n4",
+      "severity": "NIT",
+      "key": "wire.slash.loop"
+    },
+    {
+      "id": "r2n5",
+      "severity": "NIT",
+      "key": "wire.slash.search"
+    }
+  ],
+  "verdict": "passed"
+}
