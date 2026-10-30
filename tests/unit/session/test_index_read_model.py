@@ -13,6 +13,7 @@ import dataclasses
 import json
 import os
 import threading
+import time
 from pathlib import Path
 from typing import cast
 
@@ -750,6 +751,88 @@ async def test_a_burst_publishes_nothing_and_coalesces(tmp_path, monkeypatch):
     await asyncio.sleep(rm._MATERIALIZE_IDLE_S + 1.5)
     assert built == [SID], built
     assert rm.header(tmp_path, SID).state == "ready"
+
+
+@pytest.mark.asyncio
+async def test_an_append_between_arming_and_firing_still_publishes(tmp_path, monkeypatch):
+    """R6-2: the drop is safe only because a NEWER derivation re-arms and publishes.
+
+    The timer is armed for D1, the journal grows, D2 is derived and offered. If the
+    drop swallowed the newer derivation the guard would be losing a write; it must
+    publish D2 and leave the head ready for D2's own companion.
+    """
+    _journal(tmp_path)
+    first = ti.refresh_index(tmp_path, SID)
+    assert first is not None
+    rm.reset_for_tests()
+    built: list[str] = []
+    real_publish = rm.publish
+
+    def spy(root, sid, idx):
+        built.append(rm.token_for(idx)[:8])
+        return real_publish(root, sid, idx)
+
+    monkeypatch.setattr(rm, "publish", spy)
+    rm.schedule_materialize(tmp_path, SID, first)  # armed for D1
+    assert rm._PENDING and rm._TIMERS
+    path = tmp_path / "sessions" / SID / "transcript.jsonl"
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(
+            json.dumps(
+                {
+                    "id": "u99",
+                    "ts": 99.0,
+                    "type": "message",
+                    "payload": {"kind": "message", "role": "user", "content": [{"text": "late"}]},
+                }
+            )
+            + "\n"
+        )
+    second = ti.refresh_index(tmp_path, SID)
+    assert second is not None
+    assert rm.token_for(second) != rm.token_for(first), "fixture did not move the derivation"
+    rm.schedule_materialize(tmp_path, SID, second)  # replaces the pending derivation
+    assert len(rm._PENDING) == 1, "the newer derivation was queued instead of replacing"
+    await asyncio.sleep(rm._MATERIALIZE_IDLE_S + 1.2)
+    assert built == [rm.token_for(second)[:8]], built
+    assert rm.header(tmp_path, SID).state == "ready"
+
+
+@pytest.mark.asyncio
+async def test_a_stale_companion_is_replaced_not_shadowed(publication):
+    """R6-2: `_companion_exists` is DERIVATION-specific, and this pins that.
+
+    A helper optimised to "any companion exists for this session" would make every
+    later derivation unschedulable, and the suite above would not notice. D1's
+    companion on disk must not stop D2 from arming or publishing.
+    """
+    root, first = publication
+    assert rm._companion_exists(root, SID, first)
+    path = root / "sessions" / SID / "transcript.jsonl"
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(
+            json.dumps(
+                {
+                    "id": "u98",
+                    "ts": 99.0,
+                    "type": "message",
+                    "payload": {"kind": "message", "role": "user", "content": [{"text": "late"}]},
+                }
+            )
+            + "\n"
+        )
+    second = ti.refresh_index(root, SID)
+    assert second is not None
+    assert rm.token_for(second) != rm.token_for(first)
+    assert rm._companion_exists(root, SID, first), "D1's companion must still be there"
+    rm.schedule_materialize(root, SID, second)
+    assert rm._PENDING, "a stale companion for D1 shadowed the D2 derivation"
+    rm._publish_when_idle(ti._key(root, SID), SID)
+    # The build runs on its own thread; wait for it rather than assert on a race.
+    deadline = time.monotonic() + 10
+    while not rm._companion_exists(root, SID, second) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert rm._companion_exists(root, SID, second), "D2 was never published"
 
 
 @pytest.mark.asyncio
