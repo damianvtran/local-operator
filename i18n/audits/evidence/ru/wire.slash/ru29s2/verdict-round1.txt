@@ -1,0 +1,2 @@
+CHANGES_REQUESTED
+Meaning is sound in 47/52 values and the width goal is met (no ru value over 51 cells), but three MAJORs block: /hub translates the kept-English auto-push term and drops per-link; /approvals drops the mode; /fork drops the <message> argument clause.

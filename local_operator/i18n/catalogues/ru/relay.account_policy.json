@@ -1,0 +1,15 @@
+{
+  "relay.account_policy.title": "Настройки компьютера",
+  "relay.account_policy.back": "Назад",
+  "relay.account_policy.loading": "Загрузка маршрутизации аккаунтов…",
+  "relay.account_policy.save": "Сохранить политику",
+  "relay.account_policy.saving": "Сохранение…",
+  "relay.account_policy.saved": "Сохранено на этом компьютере.",
+  "relay.account_policy.retry": "Повторить",
+  "relay.account_policy.unavailable": "Настройки маршрутизации аккаунтов недоступны на этом ретрансляторе. Обновите Local Operator на этом компьютере.",
+  "relay.account_policy.error": "Не удалось подтвердить изменение. Проверьте подключение и перезагрузите страницу, чтобы прочитать текущую политику.",
+  "relay.account_policy.scope": "Изменения применяются только к этому компьютеру.",
+  "relay.account_policy.entry": "настройки",
+  "relay.account_policy.rejected": "Изменение не сохранено. Проверьте значение или настройки этого компьютера и повторите попытку.",
+  "relay.account_policy.load_error": "Не удалось загрузить маршрутизацию аккаунтов. Проверьте подключение и повторите попытку."
+}

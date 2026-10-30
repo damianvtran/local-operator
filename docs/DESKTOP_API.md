@@ -507,10 +507,21 @@ acceptance is a separate slice, not established merely by advertising this key.
 
 - `GET /v1/settings`: `result.sections` has `name`, `title`, `scope`, `description`;
   `result.settings` has every registered key, label, help, kind, choices/members,
-  bounds, current/default values, `is_default`, `empty_unsets`, `redacted`, and the
-  three registry-authored annotations `warning`, `placeholder` and `gated_by`.
-  Search this complete projection by label/help/key. Scope comes from its section.
-  Desktop theme and terminal `tui.theme` are different scopes, not synonyms.
+  bounds, current/default values, `is_default`, `empty_unsets`, `redacted`, the
+  registry-authored search vocabulary `synonyms`, and the three annotations
+  `warning`, `placeholder` and `gated_by`. Search this complete projection by
+  label, help, key, the section's `title`, each choice's label and description,
+  and `synonyms` - the extra words the registry authored where the row's own copy
+  names the thing differently from the way a person types it (`tui.theme` answers
+  to "dark mode", the hotkey rows to "keyboard" and "hotkey"). `synonyms` is
+  additive and optional - `[]` for a key that carries none - and it is matched,
+  never drawn: it is not copy, so it has no translation and no row paints it.
+  A registry row never repeats a word it already shows (its own copy, its
+  section's title, or a choice's label/description) in `synonyms`: the search
+  result names the word that hit, so a duplicate would make that reason false.
+  `tests/unit/test_settings_io.py` enforces it. Scope comes from the row's
+  section. Desktop theme and terminal `tui.theme` are different scopes, not two
+  spellings of one setting.
   The annotations are registry copy and a registry fact, not renderer inference:
   `warning` is a consequence stated for one key (the desktop draws it in danger ink,
   always visible, never behind a reveal), `placeholder` is an example for a field

@@ -22,7 +22,7 @@ exceptions. The string ratchet records file-level categories in
 of supported languages, including languages added later. A feature is not done
 until it is localized; "English first, translate later" is a missing feature,
 not a follow-up. Adding a language means adding it to the manifest, its
-`i18n/style-guides/<locale>.md`, and its audited `i18n/ledger.json` rows.
+`i18n/style-guides/<locale>.md`, and its audited `i18n/ledger/<locale>.json` rows.
 Removing one is a product decision, never a code cleanup.
 
 **Translations are idiomatic, never literal.** An LLM translator produces them
@@ -50,7 +50,11 @@ not tied to a real plan.
 
 HOWTO: [`docs/I18N.md`](docs/I18N.md). Contract:
 [`docs/design/i18n.md`](docs/design/i18n.md). `local_operator/i18n/data/shipped.json`
-is GENERATED from ledger completeness — **never hand-edit it**.
+is GENERATED from ledger completeness — **never hand-edit it**. The audit
+ledger is sharded per locale: append audit rows to `i18n/ledger/<locale>.json`
+(authoritative, append-only, last row per `(locale, namespace)` wins), never to
+`i18n/ledger.json` — that aggregate is a generated mirror re-rendered by
+`scripts/i18n/generate.py`, and `--check` fails if the two disagree.
 
 ## Environment
 

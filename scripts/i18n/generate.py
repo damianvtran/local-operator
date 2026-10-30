@@ -11,9 +11,15 @@ WHAT THIS OWNS (all of it generated, all of it committed):
 * ``local_operator/mobile/web/src/i18n/keys.gen.ts`` — type-only wire/relay
   key map and two-overload translator contract from the same ICU parser;
 * ``local_operator/i18n/data/shipped.json`` — the shipped-locale set computed
-  from ``i18n/ledger.json`` (§6: a locale ships iff every namespace has a
+  from the audit ledger (§6: a locale ships iff every namespace has a
   ledger entry that passed against the CURRENT en source hash). ``en`` is
   always shipped.
+* ``i18n/ledger.json`` — the legacy aggregate ledger, mirrored from the
+  per-locale shards under ``i18n/ledger/<locale>.json`` (the authoritative
+  source since 2026-10-29: one shared array made every locale PR conflict
+  with every other). Append audit rows to your locale's shard, then
+  regenerate; ``--check`` fails if the aggregate and shards disagree, so a
+  stale aggregate cannot silently win.
 
 WHY A DRIFT CHECK. These are generated-but-committed, so a hand edit or a
 catalogue change without regeneration would ship tables that disagree with the
@@ -36,6 +42,7 @@ import keyword
 import subprocess
 import sys
 import tempfile
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -53,6 +60,88 @@ EMITTER = REPO / "scripts" / "i18n" / "emit.mjs"
 DATA_DIR = REPO / "local_operator" / "i18n" / "data"
 KEYS_DIR = REPO / "local_operator" / "i18n" / "keys"
 LEDGER = REPO / "i18n" / "ledger.json"
+LEDGER_SHARDS = REPO / "i18n" / "ledger"
+
+
+def _ledger_entries() -> list[dict[str, Any]]:
+    """The authoritative audit rows: per-locale shards, aggregate fallback.
+
+    Shards win whenever ``i18n/ledger/`` holds any ``*.json``; the aggregate
+    is read only for trees that predate sharding (fixture roots, old
+    checkouts). Within each shard, file order is preserved and per-locale
+    last-wins is applied downstream exactly as the aggregate's array order
+    did — the migration is order-preserving per locale, so eligibility
+    semantics cannot move. Cross-locale order never mattered: the shipped
+    computation keys on ``(locale, namespace)`` and iterates SUPPORTED_LOCALES.
+    """
+    shard_paths = sorted(LEDGER_SHARDS.glob("*.json")) if LEDGER_SHARDS.is_dir() else []
+    if shard_paths:
+        entries: list[dict[str, Any]] = []
+        for path in shard_paths:
+            shard = _read_json(path)
+            rows = shard.get("entries", []) if isinstance(shard, dict) else []
+            entries.extend(row for row in rows if isinstance(row, dict))
+        return entries
+    if not LEDGER.is_file():
+        return []
+    ledger = _read_json(LEDGER)
+    if not isinstance(ledger, dict):
+        return []
+    return [row for row in ledger.get("entries", []) if isinstance(row, dict)]
+
+
+def _render_aggregate() -> str:
+    """The legacy aggregate, re-rendered from shards for compatibility.
+
+    Sorted by locale (then each shard's own row order): a deterministic,
+    reviewable mirror. No consumer reads it for eligibility anymore —
+    ``_ledger_entries`` prefers the shards — so its ordering is free to be
+    canonical rather than historical. ``schema`` is carried over from the
+    pre-migration aggregate so existing readers keep working.
+    """
+    payload: dict[str, Any] = {"schema": 1, "entries": _ledger_entries()}
+    if LEDGER.is_file():
+        legacy = _read_json(LEDGER)
+        if isinstance(legacy, dict) and "schema" in legacy:
+            payload["schema"] = legacy["schema"]
+    return json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+
+
+def _aggregate_rows_missing_from_shards() -> list[str]:
+    """Rows a contributor appended to the AGGREGATE instead of its shard.
+
+    The aggregate is a generated mirror, so re-rendering it would DROP a row
+    written there directly — silently reversing somebody's audit. ``--check``
+    fails on the drift, but a plain ``generate.py`` run must refuse rather than
+    overwrite: the contributor's row belongs in ``i18n/ledger/<locale>.json``,
+    and moving it is their decision (the aggregate carries no ordering by which
+    we could reconstruct intent). Compared as a multiset of serialized rows, so
+    a pure reordering is not mistaken for a lost row, and summarised per
+    ``(locale, namespace)`` because a wave usually appends one namespace many
+    times.
+    """
+    if not (LEDGER_SHARDS.is_dir() and any(LEDGER_SHARDS.glob("*.json"))):
+        return []
+    if not LEDGER.is_file():
+        return []
+    legacy_rows = _read_json(LEDGER)
+    if not isinstance(legacy_rows, dict):
+        return []
+    shard_counts = Counter(json.dumps(row, sort_keys=True) for row in _ledger_entries())
+    stranded: Counter[tuple[str, str]] = Counter()
+    for row in legacy_rows.get("entries", []):
+        if not isinstance(row, dict):
+            continue
+        key = json.dumps(row, sort_keys=True)
+        if shard_counts[key] > 0:
+            shard_counts[key] -= 1
+            continue
+        stranded[(str(row.get("locale")), str(row.get("namespace")))] += 1
+    return [
+        f"{locale}/{namespace}" + (f" ({count} rows)" if count > 1 else "")
+        for (locale, namespace), count in sorted(stranded.items())
+    ]
+
 
 #: Security disposition is independent of per-carried-namespace audit passes.
 #: A held locale cannot be made eligible by omitting its file or ledger row and
@@ -333,10 +422,9 @@ def _shipped_locales() -> list[str]:
     generated set es/fr → en only).
     """
     shipped: set[str] = {"en"}
-    if not LEDGER.is_file():
+    entries = _ledger_entries()
+    if not entries:
         return [loc for loc in SUPPORTED_LOCALES if loc in shipped]
-    ledger = _read_json(LEDGER)
-    entries = ledger.get("entries", []) if isinstance(ledger, dict) else []
     by_locale: dict[str, dict[str, dict[str, Any]]] = {}
     for entry in entries:
         if not isinstance(entry, dict):
@@ -470,6 +558,12 @@ def _planned_files(emitted: Path) -> dict[Path, str]:
         DATA_DIR / "formats.json": (emitted / "formats.json").read_text(encoding="utf-8"),
         DATA_DIR / "shipped.json": _render_shipped(),
     }
+    # The aggregate is a generated mirror of the shards whenever shards exist;
+    # planning it here makes `--check` fail when a contributor edits only one
+    # of the two, so a stale aggregate cannot silently disagree with the
+    # authoritative shards.
+    if LEDGER_SHARDS.is_dir() and any(LEDGER_SHARDS.glob("*.json")):
+        planned[LEDGER] = _render_aggregate()
     en_dir = catalogues.catalogue_root() / "en"
     modules: list[str] = []
     relay_types: dict[str, dict[str, str]] = {}
@@ -568,7 +662,44 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="regenerate into a temp dir and fail on any byte difference (CI mode)",
     )
+    parser.add_argument(
+        "--accept-stranded",
+        action="store_true",
+        help=(
+            # i18n: ignore operator tooling diagnostic (English-only)
+            "re-render the mirror even though it holds rows no shard carries, "
+            "DISCARDING them (reviewed exception only: the ledger is append-only, "
+            "so this is for an authorised row removal, never for a rebase)"
+        ),
+    )
     args = parser.parse_args(argv)
+
+    stranded = _aggregate_rows_missing_from_shards()
+    if stranded and args.accept_stranded:
+        print(
+            # i18n: ignore operator tooling diagnostic (English-only)
+            "generate.py: --accept-stranded given — these aggregate rows are NOT in any "
+            "shard and will be dropped from the mirror:"
+        )
+        for row in stranded:
+            print(f"  dropped aggregate row: {row}")  # i18n: ignore operator diagnostic
+        stranded = []
+    if stranded:
+        print(
+            # i18n: ignore operator tooling diagnostic (English-only)
+            "generate.py: refusing to overwrite i18n/ledger.json — it holds audit row(s)\n"
+            "that no shard carries. The aggregate is a GENERATED mirror of\n"
+            "i18n/ledger/<locale>.json; appending to it would lose the row on the next run."
+        )
+        for row in stranded:
+            print(f"  stranded aggregate row: {row}")  # i18n: ignore operator diagnostic
+        print(
+            # i18n: ignore operator tooling diagnostic (English-only)
+            "Move each row into its locale's shard (keeping order), then re-run:\n"
+            "  python3 scripts/i18n/shard_ledger.py --fold-stranded   # rebased branch\n"
+            "  python3 scripts/i18n/generate.py                       # re-render the mirror"
+        )
+        return 2
 
     with tempfile.TemporaryDirectory(prefix="i18n-emit-") as td:
         emitted = Path(td)

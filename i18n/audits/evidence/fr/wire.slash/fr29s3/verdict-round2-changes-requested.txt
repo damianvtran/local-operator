@@ -1,0 +1,2 @@
+CHANGES_REQUESTED
+14/14 round-1 findings addressed, but the approvals fix introduced a MAJOR: 'Régler …' drops the report half en states ('Show or set'), verified — bare /approvals reports the mode.

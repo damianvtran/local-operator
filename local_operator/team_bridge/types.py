@@ -193,7 +193,7 @@ SEND_RECIPIENT_DESCRIPTION = (
     f"WHOLE display name only (never a handle, email or substring). A name resolves "
     f"in that op's own scope: channel_post inside the conversation's active members, "
     f"send/reply inside your own send allowlist. One match delivers; none or several "
-    f"refuse. Ids come from the bridge directory."
+    f"refuse. Ids come from the bridge directory; dm takes ids only."
 )
 
 
