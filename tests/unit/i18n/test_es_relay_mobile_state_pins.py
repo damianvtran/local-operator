@@ -71,7 +71,22 @@ def test_usage_row_agrees_at_every_count_the_sheet_renders(shell):
             "Quedan 21 solicitudes restantes",
         ),
     )
-    for count, unit_key, used_expected, left_expected in cases:
+    # requests at the same boundaries as credits, so the docstring's claim and
+    # the code agree (review R2-03)
+    for count, unit_key, used_expected, left_expected in cases + (
+        (
+            10**6,
+            "relay.shell.usage.unit_requests",
+            "Se usaron 1.000.000 de solicitudes",
+            "Quedan 1.000.000 de solicitudes restantes",
+        ),
+        (
+            1500000,
+            "relay.shell.usage.unit_requests",
+            "Se usaron 1.500.000 solicitudes",
+            "Quedan 1.500.000 solicitudes restantes",
+        ),
+    ):
         used, left = _compose(shell, count, unit_key)
         assert used == used_expected, (count, used)
         assert left == left_expected, (count, left)
