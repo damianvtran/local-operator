@@ -831,16 +831,19 @@ def _dm_recipient(
     and not-a-member refusals) unchanged, whichever spelling arrived.
 
     WHAT REFUSES HERE. Only what the pair itself cannot settle, in the
-    resolver's own words: an id standing beside a ``to`` that names the OTHER
-    key ("exactly one of account_id or endpoint_id"), or the same key naming two
-    different ids. Neither is guessed at. A third branch refuses a ``to`` that is
-    not the canonical one-key dict at all, which ``BridgeToolParams`` cannot
-    produce — its validator returns that dict or raises — so the branch exists to
-    keep the type checker and the runtime on the same value and to refuse rather
-    than guess if that ever changes; it reuses the same sentence. ``target`` is
-    untouched, so ``to={"endpoint_id": …}`` beside ``target="human"`` hits the
-    resolver's existing "endpoint_id addresses an agent" refusal rather than a
-    new one.
+    resolver's own words: a ``to`` that names a DISPLAY NAME (main's shared shape
+    validator admits ``{"name": …}`` because ``channel_post`` can resolve one;
+    ``dm`` has no conversation to scope a name to, so it refuses and points at
+    ``op=directory`` rather than letting the name be silently dropped beside an
+    id), an id standing beside a ``to`` that names the OTHER key ("exactly one of
+    account_id or endpoint_id"), or the same key naming two different ids. None
+    is guessed at. A fourth branch refuses a ``to`` that is not the canonical
+    one-key dict at all, which ``BridgeToolParams`` cannot produce — its validator
+    returns that dict or raises — so the branch exists to keep the type checker
+    and the runtime on the same value and to refuse rather than guess if that ever
+    changes; it reuses the same sentence. ``target`` is untouched, so
+    ``to={"endpoint_id": …}`` beside ``target="human"`` hits the resolver's
+    existing "endpoint_id addresses an agent" refusal rather than a new one.
     """
 
     # THE DECLARED TYPE IS ``dict | str | None`` because the field also accepts a
@@ -853,7 +856,13 @@ def _dm_recipient(
         return params, None
     if not isinstance(recipient, dict):
         return params, _error("dm needs exactly one of account_id or endpoint_id")
-    key, value = next(iter(recipient.items()))
+    key = next(iter(recipient))
+    if key not in ("endpoint_id", "account_id"):
+        return params, _error(
+            "dm takes an account_id or endpoint_id, not a display name: read "
+            "op=directory for the person's account id or their agent's endpoint_id"
+        )
+    value = recipient[key]
     other = "account_id" if key == "endpoint_id" else "endpoint_id"
     if getattr(params, other).strip():
         return params, _error("dm needs exactly one of account_id or endpoint_id")

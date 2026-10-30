@@ -381,6 +381,32 @@ def test_a_locally_synthesised_refusal_still_names_its_code() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("extra", [{}, {"account_id": PEER}, {"endpoint_id": PEER_ENDPOINT}])
+async def test_dm_refuses_a_display_name_recipient_and_never_drops_it(
+    extra: dict[str, str],
+) -> None:
+    """A name is a legal SHAPE, and no op but ``channel_post`` may resolve one.
+
+    Main's shared shape validator admits ``{"name": …}`` because a room post can
+    resolve it against that conversation's members; ``dm`` has no room to scope a
+    name to, so the executor must refuse rather than fold the name away. The
+    danger this pins is the SILENT case: a name beside an id would otherwise
+    transcribe the id and quietly discard the name the model asked for.
+    """
+
+    client = DmClient([_member()])
+    outcome = await execute_bridge(_runtime(client), _dm(to={"name": "Ada Lovelace"}, **extra))
+
+    assert outcome["ok"] is False, outcome
+    assert outcome["code"] == "invalid_request"
+    assert outcome["error"] == (
+        "dm takes an account_id or endpoint_id, not a display name: read op=directory "
+        "for the person's account id or their agent's endpoint_id"
+    )
+    assert client.calls == [], "a name-only dm reads no directory and opens nothing"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "args",
     [
