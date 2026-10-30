@@ -656,7 +656,9 @@ def test_committed_bundle_emits_every_shipped_locale_that_is_complete(i18n_gener
     # The eager module is English-only: a second locale there is the pre-split
     # shape, which ships every language's bytes to every visitor.
     eager = _bundle_locale_maps(bundle)
-    assert set(eager) <= set(owned)
+    # Equality, not subset: a namespace dropped from the eager module is a relay
+    # surface that paints raw keys, and nothing else would notice.
+    assert set(eager) == set(owned)
     for namespace in eager:
         assert eager[namespace] == {"en"}, namespace
 
@@ -674,7 +676,7 @@ def test_committed_bundle_emits_every_shipped_locale_that_is_complete(i18n_gener
         )
         # Every owned namespace, and only this locale in each: the whole-surface
         # rule means the chunk is all of a language or nothing of it.
-        assert {ns: langs for ns, langs in chunk.items()} == {ns: {locale} for ns in eager}, locale
+        assert chunk == {ns: {locale} for ns in owned}, locale
 
 
 def test_bundled_spa_module_drops_a_locale_complete_for_only_some_owned_namespaces(
