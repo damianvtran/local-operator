@@ -109,6 +109,56 @@ def test_runner_refuses_tools_and_unevidenced_identity(tmp_path) -> None:
         ScreenModelRunner(FakeStreamFn(text_only), selection)("p", default_model="qa/default")
 
 
+@pytest.mark.parametrize(
+    ("stop_reason", "answered"),
+    [
+        ("refusal", "model_refused"),
+        ("length", "reply_truncated"),
+        ("error", None),
+        ("aborted", None),
+    ],
+)
+def test_runner_types_answered_terminals_apart_from_route_failures(
+    stop_reason: str, answered: str | None
+) -> None:
+    """#3195: the pipeline keys the breaker on this distinction, so it is pinned
+    at the boundary that raises it: a refusal or a truncated reply is a provider
+    ANSWER; an error/aborted terminal is a route failure."""
+    selection = DefaultSelection(
+        provider="openai",
+        model_id="qa-default",
+        spec=build_model_spec("openai", "qa-default"),
+        approved_identities=frozenset({"qa-default"}),
+    )
+    events = [StreamTextDelta(delta="VERDICT: "), StreamEndEvent(stop_reason=stop_reason)]
+    with pytest.raises(_ScreeningStreamRefused) as raised:
+        ScreenModelRunner(FakeStreamFn(events), selection)("p", default_model="qa-default")
+    assert raised.value.answered_hold_code == answered
+    # Stream-shape refusals with no terminal stay route failures.
+    text_only = [StreamTextDelta(delta="VERDICT: deliver\nREASON: ok.")]
+    with pytest.raises(_ScreeningStreamRefused) as missing:
+        ScreenModelRunner(FakeStreamFn(text_only), selection)("p", default_model="qa-default")
+    assert missing.value.answered_hold_code is None
+
+
+def test_screening_output_ceiling_leaves_room_for_reasoning() -> None:
+    """#3195: Anthropic counts adaptive thinking against ``max_tokens``. At 256 an
+    ordinary screen on the seeded ``medium`` effort ran out before the verdict
+    line (measured live: 220-350 tokens typical, 715 at xhigh), which is what
+    opened the breaker. The request must carry a ceiling above that."""
+    selection = DefaultSelection(
+        provider="openai",
+        model_id="qa-default",
+        spec=build_model_spec("openai", "qa-default"),
+        approved_identities=frozenset({"qa-default"}),
+    )
+    fn = FakeStreamFn(
+        [StreamTextDelta(delta="VERDICT: deliver\nREASON: ok."), StreamEndEvent(stop_reason="stop")]
+    )
+    ScreenModelRunner(fn, selection)("p", default_model="qa-default")
+    assert fn.requests[0].max_tokens >= 1024
+
+
 def test_wire_guard_requires_job_and_charges_bound_dispatch(tmp_path) -> None:
     store, owner = _setup(tmp_path)
 

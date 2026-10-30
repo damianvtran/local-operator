@@ -99,6 +99,11 @@ HOLD_CODES = (
     "breaker_open",
     "runner_unavailable",
     "provider_error",
+    # The provider ANSWERED but the reply cannot admit: the screening model's
+    # own safety refusal, or a reply cut off at the output ceiling. Neither is
+    # a route failure, so neither advances the account breaker (#3195).
+    "model_refused",
+    "reply_truncated",
     "model_identity_unknown",
     "model_identity_mismatch",
     "parse_failed",
@@ -1292,6 +1297,35 @@ async def _screen_core(
             return ScreenResult("hold", hold_code=code)
         raise
     except Exception as failure:  # noqa: BLE001 - sanitized hold; never prose
+        # The breaker measures the ROUTE, not the message (#3195). A stream
+        # that the provider COMPLETED but that cannot admit -- the model's own
+        # safety refusal, a reply truncated at the token ceiling -- proves the
+        # route works. Counting those let a sender whose messages provoke a
+        # refusal open the account breaker and park every other inbound
+        # message, the owner's teammates included, and the parked retries
+        # re-tripped it. Typed by the runner's closed reason (duck-typed so
+        # this module keeps its lazy model_boundary import); prose-free.
+        answered = getattr(failure, "answered_hold_code", None)
+        if isinstance(answered, str) and answered in HOLD_CODES:
+            try:
+                store.record_screening_success(owner)
+            except StoreRefused:
+                pass
+            # The receiver status keeps the same closed class #3194 gives it
+            # (``stream_refused``); only the breaker accounting differs.
+            from local_operator.team_bridge.model_boundary import screening_failure_class
+
+            _commit_hold(
+                store,
+                owner,
+                message_id,
+                attempt_id,
+                fingerprint,
+                epoch,
+                answered,
+                failure_class=screening_failure_class(failure),
+            )
+            return ScreenResult("hold", hold_code=answered)
         retry_at = _record_failure(store, owner)
         # A CLOSED class from the exception's type/typed fields (never its
         # text), so the receiver status can say what kind of failure parked
@@ -1312,7 +1346,9 @@ async def _screen_core(
 
     # 11b. A provider RESPONSE — even a valid model HOLD — is a provider
     #      SUCCESS: it resets consecutive failures (A5). Only the exception
-    #      path above counts toward the breaker; cached proofs never do.
+    #      path above counts toward the breaker, and only for a route failure
+    #      (an answered refusal/truncation is a success there too); cached
+    #      proofs never do.
     try:
         store.record_screening_success(owner)
     except StoreRefused:
