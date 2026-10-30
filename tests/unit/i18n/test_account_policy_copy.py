@@ -10,8 +10,8 @@ and one that does not must not render a key token.
 
 from local_operator import settings_io
 from local_operator.i18n import catalogues, messages
-from local_operator.i18n.runtime import render_message
 from local_operator.i18n.keys import wire_settings_account_policy as policy
+from local_operator.i18n.runtime import render_message
 
 
 def test_registry_uses_new_child_source_and_stable_machine_enum_ids():
