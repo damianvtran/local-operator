@@ -838,9 +838,17 @@ def _dm_recipient(
     existing "endpoint_id addresses an agent" refusal rather than a new one.
     """
 
-    if params.to is None:
+    # THE DECLARED TYPE IS ``dict | str | None`` because the field also accepts a
+    # bare id; the validator above has already canonicalised every accepted value
+    # to the one-key dict. Narrowing the LOCAL (rather than casting, or blanking
+    # the checker) is what keeps the type checker and the runtime reading the
+    # SAME value: a str reaching here is refused, never guessed at.
+    recipient = params.to
+    if recipient is None:
         return params, None
-    key, value = next(iter(params.to.items()))
+    if not isinstance(recipient, dict):
+        return params, _error("dm to must name exactly one of endpoint_id or account_id")
+    key, value = next(iter(recipient.items()))
     other = "account_id" if key == "endpoint_id" else "endpoint_id"
     if getattr(params, other).strip():
         return params, _error("dm needs exactly one of account_id or endpoint_id")
