@@ -316,3 +316,12 @@ async def _reap(process: asyncio.subprocess.Process) -> None:
         await asyncio.shield(asyncio.wait_for(drain_and_wait(), timeout=2.0))
     except Exception:  # noqa: BLE001 — best effort; the kill already landed
         logger.debug("status command: reaped child did not report exit", exc_info=True)
+    # Close the transport on THIS loop even when the bounded wait ran out on a
+    # loaded machine (review round 3, M1): left to the garbage collector it can
+    # be finalised after the loop closes and log "Event loop is closed".
+    transport = getattr(process, "_transport", None)
+    if transport is not None:
+        try:
+            transport.close()
+        except Exception:  # noqa: BLE001 — already closed, or the loop is going
+            pass

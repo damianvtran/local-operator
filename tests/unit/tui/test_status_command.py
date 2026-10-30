@@ -167,10 +167,12 @@ def test_escapes_and_controls_never_reach_the_band() -> None:
 
 def test_a_large_payload_does_not_deadlock_a_script_that_prints_first() -> None:
     """stdin is fed concurrently with the stdout read (review round 2, N3)."""
-    big = dict(_PAYLOAD, cwd="x" * 200_000)
+    # ~2 MB both ways: well past the pipe buffers, which is where the old
+    # write-then-read order deadlocked; 200 KB passed with or without the fix.
+    big = dict(_PAYLOAD, cwd="x" * 2_000_000)
     started = time.monotonic()
     outcome = asyncio.run(
-        sc.run("head -c 200000 /dev/zero | tr '\\0' y; echo; cat >/dev/null", big, timeout=5)
+        sc.run("head -c 2000000 /dev/zero | tr '\\0' y; echo; cat >/dev/null", big, timeout=5)
     )
     assert time.monotonic() - started < 3
     assert outcome.error == "" and outcome.line.startswith("yyyy")
