@@ -42,6 +42,7 @@ one renderer is a decision the other will not make.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any, Literal
 
@@ -1948,6 +1949,297 @@ def sessions_row_summary(args: Mapping[str, object]) -> str:
             parts.append(query)
         return " · ".join(parts)
     return op
+
+
+# ---------------------------------------------------------------------------
+# Team Bridge tool rows: the TOKENS both hosts paint from
+# ---------------------------------------------------------------------------
+#
+# WHY. The ``bridge`` tool fell through to the generic first-scalars scan on
+# every surface, so a channel post painted ``Called bridge bcv_b0044d… 3`` — an
+# opaque conversation id and a stray ``limit`` — and a refused post, a post that
+# landed, and a pair-lane ``send`` that never reached any conversation all read
+# the same. The operator could not tell from the row what was said, where, or
+# whether it was seen.
+#
+# THE SPLIT. :func:`bridge_row` decides WHAT the row is about (the op, the
+# target, a body preview, a count, the outcome) as plain JSON tokens; the hosts
+# turn those tokens into keyed copy (``tool_rows/bridge.py`` for the terminal
+# and the phone projection; the desktop renders the same tokens itself). It
+# stays here, i18n-free, for the reason ``sessions_row_summary`` does: one
+# decision, several renderers, and this module must stay host-free.
+#
+# TRUST. Labels and previews are member- or model-written text (a channel name,
+# a DM label from the directory, a post body), so they are flattened to one
+# line and stripped of control characters before any host sees them. An opaque
+# id (``bcv_``/``bcmsg_``/``acc_``/``ep_``) is never offered as a label: the
+# reader cannot use one, and painting it is exactly the defect this replaces.
+
+#: Opaque Team Bridge identifiers. A token matching one is an address, never a
+#: name, so the label sources skip it and the host falls back to a kind noun.
+_BRIDGE_ID_PREFIXES = ("bcv_", "bcmsg_", "acc_", "ep_")
+
+#: Ops whose row is a write INTO a conversation or a peer's inbox: these carry a
+#: body preview. Kept beside the token contract so the desktop's
+#: ``kind:bridge:post`` split and the hosts' preview rule read one list.
+BRIDGE_POST_OPS = frozenset({"channel_post", "dm", "send", "reply"})
+
+#: Codes that end ``_failed`` but mean the WRITE MAY HAVE LANDED: the hub took
+#: the post and the confirmation was lost. "Failed" would invite a duplicate
+#: re-post, so these read as ``unconfirmed`` with ``send_unconfirmed``.
+_BRIDGE_UNCONFIRMED_CODES = frozenset({"send_unconfirmed", "post_failed"})
+
+#: The DM receipt's ``content`` lead, written by ``team_bridge/tool.py``'s
+#: ``_post_receipt(lead=f"direct message to {label} in")``. Parsed, not
+#: imported, so this module keeps its no-imports contract; a drift in that
+#: wording degrades to the next label source, never to a wrong label.
+_DM_CONTENT_LEAD = "direct message to "
+_DM_CONTENT_TAIL = " in bcv_"
+
+#: Bound on a label/preview token. The rows shed from the right anyway; this
+#: only keeps a pasted essay from riding every frame as one token.
+_BRIDGE_TEXT_MAX = 200
+
+#: A whole terminal escape sequence (CSI ``ESC [ … final``, OSC ``ESC ] … BEL|ST``,
+#: or a two-byte ``ESC x``). Removed WHOLE before the per-character strip: dropping
+#: only the ESC byte would leave ``[31m`` painted as text inside a label.
+_BRIDGE_ESCAPE_RE = re.compile(
+    r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-_]|\x9b[0-?]*[ -/]*[@-~]"
+)
+
+
+def _bridge_clean(value: object) -> str:
+    """Member-written text as one safe line ("" when unusable).
+
+    Control characters (C0, DEL, C1 — the bytes that drive a terminal) are
+    dropped, then whitespace collapses, so a label can neither break a row nor
+    repaint the screen it lands on.
+    """
+    if not isinstance(value, str):
+        return ""
+    value = _BRIDGE_ESCAPE_RE.sub("", value)
+    kept = "".join(
+        " " if ch in "\t\n\r\v\f" else ch
+        for ch in value
+        if ch in "\t\n\r\v\f" or not (ord(ch) < 32 or 127 <= ord(ch) < 160)
+    )
+    return " ".join(kept.split())[:_BRIDGE_TEXT_MAX]
+
+
+def _bridge_label(value: object) -> str | None:
+    """A cleaned label, or None when it is empty or an opaque id."""
+    text = _bridge_clean(value)
+    if not text or text.lower().startswith(_BRIDGE_ID_PREFIXES):
+        return None
+    return text
+
+
+def _bridge_preview(args: Mapping[str, object], details: Mapping[str, Any]) -> str | None:
+    """The first non-empty line of what was said: body, then text.
+
+    ``take_up`` carries the received message's text in its RESULT, so the
+    details are read after the arguments.
+    """
+    for source in (args.get("body"), args.get("text"), details.get("text")):
+        if isinstance(source, str):
+            for line in source.splitlines():
+                cleaned = _bridge_clean(line)
+                if cleaned:
+                    return cleaned
+    return None
+
+
+def _bridge_json_tail(content: object) -> Any:
+    """The JSON payload of a bridge ``content`` string, or None.
+
+    Read results put the untrusted clause first, then a blank line, then the
+    JSON; ``channels``/``channel_create`` are bare JSON. Both are tried.
+    """
+    if not isinstance(content, str) or not content.strip():
+        return None
+    import json  # stdlib, deferred: only reads with a payload pay for it
+
+    candidates = [content]
+    head, sep, tail = content.partition("\n\n")
+    if sep:
+        candidates.insert(0, tail)
+    for candidate in candidates:
+        try:
+            return json.loads(candidate)
+        except ValueError:
+            continue
+    return None
+
+
+def _bridge_count(op: str, details: Mapping[str, Any]) -> int | None:
+    """How many rows a read returned, when the result says so."""
+    payload = _bridge_json_tail(details.get("content"))
+    if op in ("channel_history", "shared_history"):
+        messages = payload.get("messages") if isinstance(payload, Mapping) else None
+        return len(messages) if isinstance(messages, list) else None
+    if op == "channel_thread":
+        if not isinstance(payload, Mapping):
+            return None
+        replies = payload.get("replies")
+        root = 1 if isinstance(payload.get("root"), Mapping) else 0
+        if not isinstance(replies, list) and not root:
+            return None
+        return root + (len(replies) if isinstance(replies, list) else 0)
+    if op == "directory":
+        if isinstance(payload, Mapping):
+            count = payload.get("count")
+            if isinstance(count, int) and not isinstance(count, bool):
+                return count
+        members = details.get("members")
+        return len(members) if isinstance(members, list) else None
+    if op in ("channels", "shared_conversations"):
+        if isinstance(payload, list):
+            return len(payload)
+        if isinstance(payload, Mapping):
+            for key in ("conversations", "items", "data"):
+                rows = payload.get(key)
+                if isinstance(rows, list):
+                    return len(rows)
+        return None
+    return None
+
+
+def _bridge_dm_label(content: object) -> str | None:
+    """The label out of a DM receipt's ``direct message to <label> in bcv_…``."""
+    if not isinstance(content, str) or not content.startswith(_DM_CONTENT_LEAD):
+        return None
+    rest = content[len(_DM_CONTENT_LEAD) :]
+    cut = rest.find(_DM_CONTENT_TAIL)
+    return _bridge_label(rest[:cut]) if cut > 0 else None
+
+
+def _bridge_target(
+    op: str, args: Mapping[str, object], details: Mapping[str, Any]
+) -> dict[str, str | None]:
+    """``{kind, label}``: what the row is ABOUT, in the contract's label order."""
+    if op in (
+        "channel_post",
+        "channel_create",
+        "channel_history",
+        "channel_thread",
+        "react",
+        "shared_history",
+    ):
+        kind = "channel"
+    elif op == "dm":
+        kind = "dm"
+    elif op in ("send", "reply"):
+        kind = "person"
+    elif op in ("take_up", "ack"):
+        kind = "message"
+    elif op == "directory":
+        kind = "directory"
+    else:
+        return {"kind": "none", "label": None}
+    label = _bridge_label(details.get("conversation_label"))
+    if label is None and op == "dm":
+        label = _bridge_dm_label(details.get("content"))
+    if label is None and op == "channel_create":
+        payload = _bridge_json_tail(details.get("content"))
+        if isinstance(payload, Mapping):
+            label = _bridge_label(payload.get("name"))
+    if label is None and kind in ("channel", "dm", "person"):
+        label = _bridge_label(args.get("name"))
+        to = args.get("to")
+        if label is None and isinstance(to, Mapping):
+            label = _bridge_label(to.get("name"))
+    if kind in ("message", "directory"):
+        # These rows name no conversation: the message is opaque by design and
+        # the directory is the team's, so a stray arg must not dress one up.
+        label = None
+    return {"kind": kind, "label": label}
+
+
+def _bridge_outcome(op: str, details: Mapping[str, Any]) -> tuple[str | None, str | None]:
+    """``(outcome, code)`` from the result details; ``(None, None)`` while running."""
+    if not details:
+        return None, None
+    code = details.get("code")
+    code = _bridge_clean(code) or None if isinstance(code, str) else None
+    if details.get("ok") is True:
+        if details.get("destination_type") == "peer_inbox":
+            return "inbox_only", None
+        state = details.get("recipient_state")
+        if op == "dm" and isinstance(state, str) and state and state != "active":
+            return "awaiting_acceptance", None
+        return None, None
+    if details.get("ok") is False:
+        if code in _BRIDGE_UNCONFIRMED_CODES:
+            return "unconfirmed", code
+        if code and code.endswith("_failed"):
+            return "failed", code
+        return "refused", code
+    return None, code
+
+
+def bridge_row(
+    args: Mapping[str, object], details: Mapping[str, Any] | None = None
+) -> dict[str, Any]:
+    """One ``bridge`` call as display TOKENS, for every host to render.
+
+    ``args`` are the call's arguments; ``details`` is the result's details (the
+    whole ``execute_bridge`` dict) once it settles, ``None`` while it runs.
+    Pure and JSON-serialisable: the same call always yields the same dict, and
+    the desktop reads these keys verbatim, so a key here is a wire contract —
+    add, never rename.
+
+    ``action`` is ``op`` except for the composites whose copy differs from
+    their op's: a reaction removal and the two ack states. An unknown op keeps
+    its own word with no target and no outcome — never a guess.
+    """
+    details = details if isinstance(details, Mapping) else {}
+    op = _bridge_clean(args.get("op"))
+    action = op
+    if op == "react" and args.get("remove") is True:
+        action = "react-remove"
+    elif op == "ack":
+        state = args.get("state") or details.get("state")
+        if state == "working":
+            action = "ack-working"
+        elif state == "done":
+            action = "ack-done"
+    known = op in BRIDGE_KNOWN_OPS
+    target = _bridge_target(op, args, details) if known else {"kind": "none", "label": None}
+    preview = _bridge_preview(args, details) if op in BRIDGE_POST_OPS or op == "take_up" else None
+    emoji = _bridge_clean(args.get("emoji")) or None if op == "react" else None
+    outcome, code = _bridge_outcome(op, details) if known else (None, None)
+    return {
+        "op": op,
+        "action": action,
+        "target": target,
+        "preview": preview,
+        "count": _bridge_count(op, details) if known and details.get("ok") is True else None,
+        "emoji": emoji,
+        "outcome": outcome,
+        "code": code,
+    }
+
+
+#: Every op the bridge tool publishes (``BridgeToolParams.op``), spelled here
+#: so this module keeps its no-imports contract; a test pins it to the schema.
+BRIDGE_KNOWN_OPS = frozenset(
+    {
+        "take_up",
+        "ack",
+        "send",
+        "reply",
+        "channels",
+        "channel_create",
+        "channel_post",
+        "channel_history",
+        "react",
+        "channel_thread",
+        "directory",
+        "dm",
+        "shared_conversations",
+        "shared_history",
+    }
+)
 
 
 # ---------------------------------------------------------------------------
