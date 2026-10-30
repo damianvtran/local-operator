@@ -133,6 +133,8 @@ export type MessageParams = {
   "relay.chrome.composer.folder_label": { "name": string };
   "relay.chrome.composer.label": undefined;
   "relay.chrome.composer.model_label": { "label": string };
+  "relay.chrome.composer.placeholder.idle": undefined;
+  "relay.chrome.composer.placeholder.steer": undefined;
   "relay.chrome.composer.spend_label": { "label": string };
   "relay.chrome.drawer.appearance": undefined;
   "relay.chrome.drawer.close": undefined;
@@ -210,7 +212,6 @@ export type MessageParams = {
   "relay.chrome.spend.title": undefined;
   "relay.health.dropped_detail": undefined;
   "relay.health.ended_detail": undefined;
-  "relay.health.ended_placeholder": undefined;
   "relay.health.ended_send_failed": undefined;
   "relay.health.live": undefined;
   "relay.health.live_detail": undefined;
@@ -660,6 +661,21 @@ export type MessageParams = {
   "wire.memory.sync.help": undefined;
   "wire.memory.sync.label": undefined;
   "wire.memory.title": undefined;
+  "wire.radient_saver.mode.choice.off.description": undefined;
+  "wire.radient_saver.mode.choice.off.label": undefined;
+  "wire.radient_saver.mode.choice.opt_in.description": undefined;
+  "wire.radient_saver.mode.choice.opt_in.label": undefined;
+  "wire.radient_saver.mode.help": undefined;
+  "wire.radient_saver.mode.label": undefined;
+  "wire.radient_saver.notice.disabled": undefined;
+  "wire.radient_saver.notice.no_credit": undefined;
+  "wire.radient_saver.notice.oversize": undefined;
+  "wire.radient_saver.notice.rate_limited": undefined;
+  "wire.radient_saver.notice.rejected": undefined;
+  "wire.radient_saver.notice.signed_out": undefined;
+  "wire.radient_saver.notice.unavailable": undefined;
+  "wire.radient_saver.section.description": undefined;
+  "wire.radient_saver.section.title": undefined;
   "wire.remote_compute.alone": undefined;
   "wire.remote_compute.api_override": { "host": string };
   "wire.remote_compute.api_override_invalid": undefined;

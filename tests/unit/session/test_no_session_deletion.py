@@ -393,6 +393,21 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "Drops <config>/operator/revoked.json when its last entry is lifted",
     ),
     (
+        "local_operator/operator/handlers.py::_admission_install",
+        "<path>.unlink",
+        # The staged statement after a refused privileged step (agent review round
+        # 2, m4): a prompt the operator cancelled and a splint that exited non-zero
+        # both have to leave no bytes behind, because the next plain
+        # `lop operator install` would otherwise apply what this run did not.
+        # The path is `trust.staging_path(config_root)` =
+        # `operator_root(config_root)/"anchor.json"` — a LITERAL basename joined
+        # onto the literal segment "operator" under the CONFIG root, so it is a
+        # fixed sibling of `sessions/` and no input reaches it: no session id, no
+        # caller path, and the call can only ever name that one regular file.
+        "Drops <config>/operator/anchor.json, the staged statement this run wrote",
+        2,
+    ),
+    (
         "local_operator/tui/app.py::OperatorApp._release_sidebar_preparation",
         "<path>.remove",
         "Textual TranscriptView.remove unmounts a widget; no filesystem path",
@@ -1074,6 +1089,24 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<store>/<session>/scratchpad/, store marker, config dir), the removal "
         "shape is an lstat-confirmed non-directory, and the caller only plans "
         "files whose shape+size+age passed",
+    ),
+    #
+    # Two FILE unlinks, both named by the function that owns the sidecars' paths:
+    # the per-session scan cache and the spool write lock. Neither path can be a
+    # session directory — the first comes from `session_files.ledger.cache_path`
+    # (`<config>/cache/session_files/<id>.json`) and the second from
+    # `spooled.lock_name` (`<config>/wakes/spooled/.<id>.lock`) — and both are
+    # written OUTSIDE the session directory by the modules that own them. The
+    # call runs only after `_bounded_rmtree` has already removed THIS session's
+    # directory, and it is keyed by that session's id: a sidecar whose session
+    # directory still exists is never touched.
+    (
+        "local_operator/session/cleanup.py::_drop_session_sidecars",
+        "<path>.unlink",
+        "Unlinks the removed session's own file-scan cache entry and spool lock — "
+        "regular files named by the owning modules' path helpers, never a directory, "
+        "and only for a session whose directory this removal just deleted",
+        2,
     ),
     # -- transcript compression ----------------------------------------------
     # The compression pass RENAMES nothing and REMOVES nothing but the two files
@@ -3737,7 +3770,53 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "Only the sibling .sidebar-tags-*.tmp leftover; never a session path",
     ),
+    (
+        "local_operator/session/transcript_index.py::write_index",
+        "<path>.unlink",
+        "Removes only the index's own sibling .tmp leftover when the commit did not land",
+    ),
+    # -- the immutable read model: cache FILES beside the index --------------
+    # `cache/transcript_index/read-models/<sid>/` holds SQLite companions and
+    # their naming sidecars. Every path below is built by `_path()` from the
+    # CONFIG ROOT plus a 32-hex token (`_token_for`), never from a caller string
+    # and never below `sessions/`: publishing writes a sibling temp FILE and
+    # renames it onto the companion, the sidecar does the same, the collector
+    # unlinks unreferenced cache FILES, and the orphan sweep deletes FILES in a
+    # directory whose own session has no index left. None of these can name a
+    # session directory, a transcript, or an entry inside `sessions/`.
+    (
+        "local_operator/session/index_read_model.py::publish",
+        "<path>.replace",
+        "tmp FILE -> the companion's 32-hex cache path under cache/, never a session path",
+    ),
+    (
+        "local_operator/session/index_read_model.py::publish",
+        "<path>.unlink",
+        "Removes only the sweep's own .tmp sibling when the publish did not commit",
+    ),
+    (
+        "local_operator/session/index_read_model.py::write_naming",
+        "<path>.replace",
+        "tmp FILE -> the naming sidecar's 32-hex cache path under cache/, never a session path",
+    ),
+    (
+        "local_operator/session/index_read_model.py::write_naming",
+        "<path>.unlink",
+        "Removes only the sidecar's own .tmp sibling; the token names a cache file",
+    ),
+    (
+        "local_operator/session/index_read_model.py::collect",
+        "<path>.unlink",
+        "Unlinks an unreferenced companion/sidecar cache FILE by its 32-hex stem",
+    ),
+    (
+        "local_operator/session/index_read_model.py::_sweep_orphans",
+        "<path>.unlink",
+        "Unlinks cache FILEs inside a read-models/<sid> directory whose session has no index; "
+        "the directory itself is left in place",
+    ),
 )
+
 
 _ALLOWED: dict[str, str] = {f"{row[0]}::{row[1]}": str(row[2]) for row in _ALLOWED_ROWS}
 _ALLOWED_COUNTS: dict[str, int] = {
@@ -3929,6 +4008,11 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         # allow-list rows above for the full argument).
         "local_operator/session/compression.py::_publish",
         "local_operator/session/cleanup.py::_write_record",  # tmp -> last-cleanup.json
+        # tmp FILE -> read-models/<32-hex>.sqlite / .naming.json under cache/: the
+        # receiver is a companion token path built from the config root, never a
+        # session directory (see the allow-list rows below for the full argument).
+        "local_operator/session/index_read_model.py::publish",
+        "local_operator/session/index_read_model.py::write_naming",
         # tmp FILE -> sessions/<id>/inbox.jsonl inside the session it was handed;
         # the commit swaps one spool file, never a directory.
         "local_operator/session/runtime/inbox.py::commit_inbox_batch",

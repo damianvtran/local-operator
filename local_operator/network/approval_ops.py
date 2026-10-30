@@ -43,9 +43,10 @@ CONSTRAINTS.
   decides which path may sign. It imports nothing heavy at module load so the stdlib-only
   approvals store can consult it.
 
-HOW TO ADD AN OP (S4a-pair-op is the first user): implement :class:`ApprovalOp` in the
-op's own module, call :func:`register` at import, add that module to :data:`_PROVIDERS`,
-and decide ``file_only_signing`` as an explicit operator decision -- never by default.
+HOW TO ADD AN OP (S4a-pair-op was the first user, and is the worked example): implement
+:class:`ApprovalOp` in the op's own module, call :func:`register` at import, add that module
+to :data:`_PROVIDERS`, and decide ``file_only_signing`` as an explicit operator decision --
+never by default.
 """
 
 from __future__ import annotations
@@ -69,7 +70,12 @@ SURFACE_DESKTOP = "desktop"
 SURFACE_CLI = "cli"
 
 #: Modules that register ops at import. CLOSED: the only way an op enters the registry.
-_PROVIDERS: tuple[str, ...] = ("local_operator.network.credentials.desktop_approval",)
+#: ``operator.pair_op`` is the phone pairing approval (S4a-pair-op) -- the first op that
+#: does not ride ``device_onboard`` storage, and the first registered outside this package.
+_PROVIDERS: tuple[str, ...] = (
+    "local_operator.network.credentials.desktop_approval",
+    "local_operator.operator.pair_op",
+)
 
 
 @runtime_checkable

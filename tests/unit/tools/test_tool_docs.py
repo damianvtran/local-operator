@@ -286,7 +286,16 @@ MEASURED_TOKENS: dict[str, int] = {
     # context budget had 2 billed tokens of headroom. The ``team`` entry moves by
     # the same -1 for its twin field; the same printed table measured both.
     "agent": 1364,
-    "ask": 1079,
+    # RE-MEASURED (ask/notify dedupe, asks/dedupe.py): 1079 -> 1078. The
+    # restraint now says "decide, never for FYI" and "asking notifies: never
+    # also `notify` it"; trims elsewhere in the same paragraph pay for it so
+    # the tail is net negative. Same reading on both ask arms (the doc renders
+    # the shared restraint plus each arm's tail; only the restraint moved).
+    # 1078 -> 1083 (CI remediation, #3094): the rewrite had dropped "decide
+    # yourself", "subagent" and "approved that action", which test_ask_tool.py
+    # pins as the last-resort and irreversible-trigger contract; restoring them
+    # costs +5, measured by this test's print on both LOP_ASK_NONBLOCKING arms.
+    "ask": 1083,
     "ask_withdraw": 452,
     "bash": 295,
     # NEW (H5d, Team Bridge): the ``bridge`` doc — take-up's hash rule, the
@@ -318,7 +327,42 @@ MEASURED_TOKENS: dict[str, int] = {
     # repeated op roster left the description and the thread-reply clause moved
     # to thread_root_id's own field note. Every op is still discoverable.
     # Neither the document soft cap nor the start-context budget changes.
-    "bridge": 777,
+    # 777 -> 1674: the doc now covers the OP SET THE TOOL ACTUALLY HAS. Before this
+    # branch it documented four ops (take_up/ack/send/reply) while main's tool shipped
+    # ten and this branch adds four more; `directory`, `dm`,
+    # `shared_conversations`/`shared_history` and the six
+    # room ops (`channels`, `channel_create`, `channel_post`, `channel_history`,
+    # `channel_thread`, `react`) had no entry at all, so a model reading the reference
+    # had to guess, and the new `dm` blurb forward-references `channel_history` for
+    # reading the reply. Measured by this test's own ledger print ON THIS HEAD (1674),
+    # never carried across. The pair-lane caveat on `send` earns its tokens: without it
+    # an agent answers a DM with `send`, which no Team Bridge UI shows.
+    # Independently, main's #3133 adds the recipient description below; the
+    # converged ledger must include BOTH changes and was measured by this test.
+    # 777 -> 839 (tb-send-recipient-ergonomics): the ``to`` parameter publishes
+    # its own DESCRIPTION now — both accepted object shapes, the bare account id
+    # and where the ids come from — because the schema is the model's first
+    # teacher, and the bare form was refused at validation while teaching
+    # nothing. +62 on this opt-in reference; the paired start-context raise is
+    # stated in scripts/bench_context_budget.py. Measured by this test's printed
+    # table, no other tool's bytes moved.
+    # Converged directory/dm + recipient-description ledger: 1,736 tokens,
+    # measured by this test's canonical renderer on the merged tree; 1,781 with
+    # the name-resolution clause (tb-name-resolution, +45); and 1,792 on this
+    # stacked branch (+11), where the SAME description names both scopes a
+    # display name can resolve in — the channel_post room, the sender's own send
+    # allowlist — because that difference is what decides which op a model should
+    # reach for. Measured by this test's own printed table; no other tool's bytes
+    # moved.
+    # RE-MEASURED (dm `to`): 1,792 -> 1,797 is this change's whole footprint on
+    # this tool (+5), and it is deliberate: `dm` now accepts `to` but resolves no
+    # display name, so the SAME description ends "; dm takes ids only." — the only
+    # clause added, because a model told nothing would read the name clause as
+    # covering every op that takes the field. The accepts-or-refuses detail for a
+    # name lives in dm's refusal, not in per-request schema prose. Measured by
+    # this test's own printed table on the rebased head; the paired start-context
+    # figure is in scripts/bench_context_budget.py.
+    "bridge": 1797,
     # Re-measured with this test's canonical isolated renderer: the read-only
     # inspect_ownership operation adds 19 opt-in tokens, not wire prompt cost.
     # 1327 -> 1424 (2026-10-16): the browser `type` secret_ref convention adds
@@ -465,7 +509,9 @@ MEASURED_TOKENS: dict[str, int] = {
     # ``notify`` doc — its description plus the five-field schema rendered by
     # this file's own renderer. Re-measured via this test's print; it is the
     # ONLY entry that moved, every other count is byte-identical.
-    "notify": 242,
+    # RE-MEASURED (ask/notify dedupe): 242 -> 241 — "FYI ... never a question
+    # (`ask` notifies)", worded to cost less than the text it replaced.
+    "notify": 241,
     "patience": 330,
     # RE-MEASURED 2026-10-20 (evidence-attachment discoverability): ``project``
     # 1098 -> 1143 is the ONLY entry that moved — the ``attach`` description now
@@ -477,7 +523,17 @@ MEASURED_TOKENS: dict[str, int] = {
     # NEW (redaction policy, PR #2796): the sanctioned public-copy reader.
     # 237 tokens measured through this test's own table; deliberately small —
     # it exists to avoid a bypass, not to be a second file browser.
-    "read_public_copy": 121,
+    # RE-MEASURED: 121 -> 162 (#3106, repo_root added) -> 135 (#3106 trim) ->
+    # 133 (merge of #3122, whose `_CONSUMER_CHECKOUTS` registry makes the
+    # `repo_root` description name three checkouts; the same cut still fits the
+    # `--kind child` budget arm, 30,380, which is the tighter ratchet).
+    # Measured through this test's own assertion table after each change, never
+    # carried from CI or guessed:
+    #   .venv/bin/python scripts/run_bounded.py --timeout 300 -- \
+    #     .venv/bin/python -m pytest
+    #     tests/unit/tools/test_tool_docs.py::test_docs_stay_within_the_soft_cap_and_the_token_ledger_is_current
+    # No other entry moved.
+    "read_public_copy": 133,
     "read_variable": 67,
     "secret": 186,
     # Advertised surface re-measured: explicit repeat + confirmed-reuse detail

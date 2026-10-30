@@ -14,9 +14,11 @@ The two that matter most, and why:
 
 from __future__ import annotations
 
+import json
 import math
+import re
 import sys
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 
 import pytest
@@ -25,6 +27,10 @@ from rich.cells import cell_len
 
 from local_operator import keymap, settings_io
 from local_operator.config import DEFAULT_CONFIG, ConfigManager
+from local_operator.i18n import catalogues, text
+from local_operator.i18n.keys import wire_settings as ws
+from local_operator.i18n.keys import wire_settings_account_policy as ap
+from local_operator.i18n.messages import Msg
 from local_operator.memory import DEFAULT_EXCLUDED_DEVICES, SCOPES
 from local_operator.memory_capture import (
     LOCATORS_DEFAULT_ENABLED,
@@ -123,6 +129,7 @@ def _consumer_defaults() -> dict[str, object]:
         RetrySettings,
     )
     from local_operator.remote_compute import DEFAULT_REMOTE_COMPUTE_ENABLED
+    from local_operator.saver.gate import DEFAULT_MODE as SAVER_DEFAULT_MODE
     from local_operator.scratchpad import SCRATCHPAD_TOTAL_BUDGET_BYTES
     from local_operator.session.cleanup import (
         DEFAULT_DELEGATED_ENABLED,
@@ -375,6 +382,10 @@ def _consumer_defaults() -> dict[str, object]:
         # constant here, and DEFAULT_CONFIG against it in
         # ``test_the_retire_below_tps_default_config_matches_the_consumer``.
         "providers.openrouter.retire_below_tps": OPENROUTER_RETIRE_BELOW_TPS,
+        # Radient Saver's gate reads ``saver.gate.DEFAULT_MODE`` when nothing is
+        # configured; the registry row and DEFAULT_CONFIG restate it, and the
+        # contract's "later flip" must move all three together.
+        "radient.saver.mode": SAVER_DEFAULT_MODE,
         # The fork keys have REAL single-value consumers — the constants
         # ``/fork`` itself reads — so they are mapped here rather than
         # allow-listed. An allow-list entry would buy a green test while leaving
@@ -2662,6 +2673,156 @@ class TestConfigEditQualifiesALoosening:
         assert "Running sessions are unchanged" not in out, out
 
 
+class TestRegistryLocaleResolution:
+    """Carried settings follow the live locale; English-only children do not."""
+
+    @pytest.fixture(autouse=True)
+    def _restore_english(self, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+        # Some cases pin the active locale directly to exercise missing-catalogue
+        # fallback; a no-op public move would otherwise leave the next test in es.
+        monkeypatch.setattr(text, "_active_locale", "en")
+        yield
+        monkeypatch.undo()
+        # Direct locale pins bypass set_active_locale's refresh, and a public
+        # switch in a test can make the restored value a no-op. Restore both.
+        settings_io._refresh_registry_copy()
+
+    def test_a_locale_move_rematerialises_frozen_rows_in_place(self) -> None:
+        section = next(section for section in settings_io.SECTIONS if section.name == "model")
+        setting = settings_io.BY_KEY["hosting"]
+        by_key = settings_io.BY_KEY
+        assert section.title == "Model"
+        text.set_active_locale("es")
+        assert section.title == "Modelo"
+        assert setting.label == "Proveedor predeterminado"
+        assert settings_io.BY_KEY is by_key
+        assert settings_io.BY_KEY["hosting"] is setting
+        text.set_active_locale("en")
+        assert section.title == "Model"
+        assert setting.label == "Default provider"
+
+    def test_missing_locale_and_key_fall_back_to_english_then_code(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        root = tmp_path / "catalogues"
+        (root / "es").mkdir(parents=True)
+        (root / "en").mkdir()
+        (root / "en" / "wire.settings.json").write_text(
+            json.dumps({ws.model_title().code: "Model"}), encoding="utf-8"
+        )
+        monkeypatch.setattr(catalogues, "_CATALOGUES", root)
+        monkeypatch.setattr(text, "_active_locale", "es")
+        assert settings_io._t(ws.model_title()) == "Model"
+        (root / "en" / "wire.settings.json").unlink()
+        # Both layers: the file cache outlives the merged map by design.
+        settings_io._namespace_sources.cache_clear()
+        settings_io._sources.cache_clear()
+        assert settings_io._t(ws.model_title()) == ws.model_title().code
+
+    def test_child_namespaces_resolve_in_the_active_locale(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The seven children are separate for hashing, not for language.
+
+        QA round 1, Q1: pinning them to English left seven English islands on a
+        Spanish page even though each child ships a Spanish catalogue. The
+        namespace SPLIT is what preserves the audited `wire.settings` source
+        hash, so the children follow the active locale like any other copy.
+        """
+        message = ap.label()
+        spanish = json.loads(
+            Path("local_operator/i18n/catalogues/es/wire.settings.account_policy.json").read_text(
+                encoding="utf-8"
+            )
+        )[message.code]
+        monkeypatch.setattr(text, "_active_locale", "es")
+        assert settings_io._t(message) == spanish
+        english = settings_io._namespace_sources(
+            str(catalogues.catalogue_root()), "wire.settings.account_policy", "en"
+        )[message.code]
+        assert spanish != english
+
+    def test_a_child_missing_from_the_locale_falls_back_to_english(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        message = ap.label()
+        english = settings_io._catalogues.load_catalogue("en", "wire.settings.account_policy")[
+            message.code
+        ]
+        root = tmp_path / "catalogues"
+        (root / "es").mkdir(parents=True)
+        (root / "en").mkdir()
+        (root / "en" / "wire.settings.account_policy.json").write_text(
+            json.dumps({message.code: english}), encoding="utf-8"
+        )
+        # Present in es for the CARRIED namespace, absent for the child: the
+        # child's own key must come from English, not from its code.
+        (root / "es" / "wire.settings.json").write_text(
+            json.dumps({ws.model_title().code: "Modelo"}), encoding="utf-8"
+        )
+        monkeypatch.setattr(catalogues, "_CATALOGUES", root)
+        settings_io._namespace_sources.cache_clear()
+        settings_io._sources.cache_clear()
+        monkeypatch.setattr(text, "_active_locale", "es")
+        assert settings_io._t(message) == english
+        assert settings_io._t(ws.model_title()) == "Modelo"
+
+    def test_registry_copy_costs_one_read_per_namespace_per_locale(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        settings_io._namespace_sources.cache_clear()
+        settings_io._sources.cache_clear()
+        reads: list[tuple[str, str]] = []
+        real_load = settings_io._catalogues.load_catalogue
+
+        def counted(locale: str, namespace: str) -> dict[str, str]:
+            reads.append((locale, namespace))
+            return real_load(locale, namespace)
+
+        monkeypatch.setattr(settings_io._catalogues, "load_catalogue", counted)
+        monkeypatch.setattr(text, "_active_locale", "es")
+        settings_io._refresh_registry_copy()
+        # ~800 messages, and each (locale, namespace) FILE read at most once: a
+        # read-per-message would put hundreds of parses on this path.
+        assert len(reads) == len(set(reads)), f"a catalogue was read twice: {reads}"
+        assert len(reads) <= 2 * (1 + len(settings_io._CHILD_SETTINGS_NAMESPACES))
+        assert ("es", "wire.settings") in reads
+        # A repeat refresh is served entirely from the cache.
+        reads.clear()
+        settings_io._refresh_registry_copy()
+        assert reads == [], f"a repeat refresh re-read {reads}"
+        # A move to another locale reads THAT locale's files, and returning to
+        # es costs nothing: children are keyed by file, so they are shared
+        # rather than re-read per move (QA round 1, Q3).
+        reads.clear()
+        monkeypatch.setattr(text, "_active_locale", "fr")
+        settings_io._refresh_registry_copy()
+        assert any(locale == "fr" for locale, _ in reads)
+        assert len(reads) == len(set(reads))
+        reads.clear()
+        monkeypatch.setattr(text, "_active_locale", "es")
+        settings_io._refresh_registry_copy()
+        assert reads == [], f"returning to a cached locale re-read {reads}"
+
+    def test_a_render_failure_degrades_to_the_message_code(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        message = Msg("wire.settings.model.title", {})
+        monkeypatch.setattr(
+            settings_io,
+            "_sources",
+            lambda root, namespace, locale: {message.code: "{bad" if locale == "es" else "Model"},
+        )
+        monkeypatch.setattr(text, "_active_locale", "es")
+        assert settings_io._t(message) == "Model"
+
+        def no_english(root: str, namespace: str, locale: str) -> dict[str, str]:
+            return {message.code: "{bad"} if locale == "es" else {}
+
+        monkeypatch.setattr(settings_io, "_sources", no_english)
+        assert settings_io._t(message) == message.code
+
+
 def test_the_exclusion_row_round_trips_and_treats_empty_as_none(manager: ConfigManager) -> None:
     """`web_search.excluded_providers` is the opt-out list, and [] is its DEFAULT.
 
@@ -3336,3 +3497,121 @@ def test_deleting_a_chain_actually_deletes_it(tmp_path: Path) -> None:
     stored = ConfigManager(tmp_path).get_config_value("retry")["fallbackChains"]
     assert "extra" not in stored, stored
     assert stored["default"] == ["openai/gpt-5"]
+
+
+#: Section name -> the title the page searches. A query for "hotkeys" has to
+#: reach the keymap rows, and the only string carrying that word is the title.
+_SECTION_TITLES = {section.name: section.title for section in settings_io.SECTIONS}
+
+
+def _fold_for_search(text: str) -> str:
+    """Fold a string the way the settings page folds it before matching.
+
+    Case, then every separator run to one space, because ``tui.theme``,
+    ``TUI Theme`` and ``tui theme`` are one string to a query. Comparisons
+    below are on whole tokens, so ``auth`` does not "match" only because it
+    sits inside ``authoring``.
+    """
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", text.casefold()).split())
+
+
+def _row_copy_text(setting: settings_io.Setting) -> str:
+    """Every string that already reaches a query WITHOUT the synonyms.
+
+    Three surfaces, because the page searches the PAYLOAD rather than this
+    module: the row's own copy (label/help/key), its section's title (a keymap
+    row is findable by "hotkeys" today) and every choice it ships - the
+    projection puts each choice's label and description on the wire and the row
+    detail paints them (``tui.theme`` ships "dark" and "light"). A synonym
+    repeating any of these can never be the reason the row matched, which is
+    the rule the hygiene test below enforces (review round 1, R2: guarding only
+    label/help/key left the other two surfaces silently unenforced).
+    """
+    title = _SECTION_TITLES.get(setting.section, setting.section)
+    choices = " ".join(
+        f"{choice.label} {choice.description}" for choice in setting.resolved_choices
+    )
+    return _fold_for_search(f"{setting.label} {setting.help} {setting.key} {title} {choices}")
+
+
+def _row_search_text(setting: settings_io.Setting) -> str:
+    """Everything one row is searched by: its own copy, its section, synonyms."""
+    return _fold_for_search(f"{_row_copy_text(setting)} {' '.join(setting.synonyms)}")
+
+
+def test_every_synonym_is_clean_and_absent_from_the_row_it_decorates() -> None:
+    """Registry-wide hygiene for ``Setting.synonyms``.
+
+    Why a test rather than a review note: the page reports WHY a row matched,
+    naming the word that hit, so a synonym repeating a word the row already
+    carries can never be that reason - it is dead weight wearing a lie. That
+    judgment is made over ``_row_copy_text``: label, help, key, its section's
+    title AND its choice labels/descriptions, because the payload ships all of
+    them and the page renders them beside the row.
+
+    Stray case or padding is just as costly in the other direction: a synonym
+    that is not lowercase-with-no-padding no longer matches the fold a query
+    goes through, so it silently stops working. Both are cheap to author wrong,
+    so both need a guard.
+    """
+    authored = [setting for setting in settings_io.SETTINGS if setting.synonyms]
+    # An empty list here would make the query test below pass vacuously, which
+    # is how a vocabulary gets deleted while its tests stay green.
+    assert authored, "no registry row carries search synonyms"
+
+    for setting in authored:
+        own = f" {_row_copy_text(setting)} "
+        assert len(set(setting.synonyms)) == len(
+            setting.synonyms
+        ), f"{setting.key} repeats a synonym: {setting.synonyms}"
+        for synonym in setting.synonyms:
+            assert synonym and synonym == synonym.strip(), (setting.key, synonym)
+            assert synonym == synonym.lower(), (setting.key, synonym)
+            assert (
+                f" {_fold_for_search(synonym)} " not in own
+            ), f"{setting.key} repeats its own words: {synonym!r}"
+
+
+@pytest.mark.parametrize(
+    ("query", "row_key"),
+    [
+        # The theme row's guard: "color"/"colors"/"palette" are NOT usable as
+        # synonyms here, because its own choice descriptions already say them
+        # ("classic 16 color discipline"), so the widened hygiene rule below
+        # rejects them. These phrases appear nowhere in the row, its section or
+        # any choice, so this case can only pass because of the vocabulary.
+        ("color scheme", "tui.theme"),
+        ("keyboard", "keymap.new_session"),
+        ("shortcut", "keymap.push_to_talk"),
+        # The singular of the section's title: `hotkeys` reaches these rows
+        # through the title, `hotkey` does not under a whole-token fold, which
+        # is why _HOTKEY_SYNONYMS spells it out.
+        ("hotkey", "keymap.resume"),
+        ("llm", "hosting"),
+        ("retention", "session.cleanup.max_sessions"),
+        ("tts", "speech.voice.gender"),
+        ("locale", "language"),
+        ("privacy", "providers.openrouter.data_collection"),
+    ],
+)
+def test_each_authored_query_reaches_the_row_it_is_about(query: str, row_key: str) -> None:
+    """The gaps the slice was authored against (issue #1492).
+
+    Every pair here is a word that found this row in NO other way: delete the
+    row's synonyms and the assertion fails, which is what makes it a guard
+    rather than a description (review round 1, R1). Pinning the ROW rather than
+    "some row" is the whole point - `retention` used to match only through a
+    key, and the row a person typing it wants is a cleanup row.
+
+    `theme`, `model` and `effort` were dropped in the same round: they matched
+    their rows before the vocabulary existed, so they were cases that could not
+    fail. `color` was dropped for a different reason - the theme row's own
+    choice descriptions already carry it (see the case comment above) - so it
+    documents the projection rather than the vocabulary.
+    """
+    reachable = {
+        setting.key
+        for setting in settings_io.SETTINGS
+        if f" {query} " in f" {_row_search_text(setting)} "
+    }
+    assert row_key in reachable, f"{query!r} no longer reaches {row_key}"

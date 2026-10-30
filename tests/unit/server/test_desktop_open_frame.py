@@ -404,6 +404,7 @@ async def test_the_first_frame_spends_only_what_is_left_of_its_budget(
 
         # A scan that cannot land inside the budget is not waited on.
         ti._reset_for_tests()
+        ti.index_path(harness.root, harness.session_id).unlink()
 
         def slow_refresh(*_: Any, **__: Any) -> Any:
             time.sleep(2.0)
@@ -474,6 +475,197 @@ async def test_a_warm_reopen_does_not_wait_on_its_own_paused_scan(tmp_path: Path
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("cache_state", ["large_disk", "small_disk", "large_resident"])
+async def test_frame_index_fallback_preserves_ready_facts_without_projection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cache_state: str
+) -> None:
+    """No idle budget wager on large disk HITs; resident/small HITs keep facts.
+
+    Observe the actual wait seam rather than asserting milliseconds: host load
+    may delay any task, but cannot make waiting on a held refresh useful.
+    """
+    async with _Harness(tmp_path) as harness:
+        harness.seed(turns=4)
+        previous = ti.refresh_index(harness.root, harness.session_id)
+        assert previous is not None
+        cache = ti.index_path(harness.root, harness.session_id)
+        # Exercise _frame_index itself, not the earlier summary fast path, and with
+        # NO companion published for this publication (nothing calls publish here),
+        # so the fallback is the only source — which is the case under test.
+        if cache_state != "small_disk":
+            with cache.open("a", encoding="utf-8") as handle:
+                handle.write(" " * (6 << 20))
+        if cache_state == "large_resident":
+            ti._remember(ti._key(harness.root, harness.session_id), previous, cache.stat().st_mtime)
+        waits = []
+        real_wait = asyncio.wait
+
+        async def record_wait(*args: Any, **kwargs: Any) -> Any:
+            waits.append(kwargs.get("timeout"))
+            return await real_wait(*args, **kwargs)
+
+        release = ti.hold_paint(harness.root, harness.session_id)
+        task = None
+        try:
+            async with harness.pool.session(harness.session_id, read=True) as bridge:
+                with monkeypatch.context() as patch:
+                    patch.setattr(asyncio, "wait", record_wait)
+                    # A GENEROUS budget, because this test observes the wait SEAM
+                    # (recorded by the spy above), not milliseconds: on a loaded
+                    # host a 0.12 s deadline turned the assertion below into a coin
+                    # flip (round-3 M1).
+                    index = await bridge._frame_index(time.monotonic() + 5.0)
+                entry = ti._IN_FLIGHT.get(ti._key(harness.root, harness.session_id))
+                task = entry[1] if entry is not None else None
+                if cache_state == "large_disk":
+                    assert index is not None, "fallback must not strand its own ready answer"
+                else:
+                    assert index is not None
+                    assert index.runs == previous.runs
+                    assert index.checkpoints == previous.checkpoints
+                    assert index.journal_rows == previous.journal_rows
+                    assert index.source_projection_facts == previous.source_projection_facts
+                    assert bool(waits) is (cache_state == "small_disk")
+        finally:
+            release()
+            if task is None:
+                entry = ti._IN_FLIGHT.get(ti._key(harness.root, harness.session_id))
+                task = entry[1] if entry is not None else None
+            if task is not None:
+                assert await asyncio.wait_for(task, 30) is not None
+
+
+@pytest.mark.asyncio
+async def test_held_disk_hit_preserves_first_frame_grouping_without_full_hydration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Acceptance companion to the scheduling test: fast but incomplete fails.
+
+    These are semantic inputs to collapse/group rendering, not rendered proof.
+    A bounded witnessed fact slice must retain them if full hydration is held.
+    """
+    async with _Harness(tmp_path) as harness:
+        harness.seed(turns=4)
+        previous = ti.refresh_index(harness.root, harness.session_id)
+        assert previous is not None
+        _publish(harness.root, harness.session_id, previous)
+        cache = ti.index_path(harness.root, harness.session_id)
+        with cache.open("a", encoding="utf-8") as handle:
+            handle.write(" " * (6 << 20))
+        ti._remember(ti._key(harness.root, harness.session_id), previous, cache.stat().st_mtime)
+        assert harness.client is not None
+        url = f"/v1/desktop/sessions/{harness.session_id}/history"
+        params = {"limit": 50, "open_frame": 1}
+        control_response = await harness.client.get(url, params=params)
+        assert control_response.status_code == 200
+        control = control_response.json()["result"]
+        assert control["runs_state"] == "ready" and control["runs"]
+        ti._reset_for_tests()
+        reads = []
+        real_read = ti._read_raw
+
+        def read_spy(*args: Any, **kwargs: Any) -> Any:
+            reads.append(True)
+            return real_read(*args, **kwargs)
+
+        monkeypatch.setattr(ti, "_read_raw", read_spy)
+        release = ti.hold_paint(harness.root, harness.session_id)
+        try:
+            response = await harness.client.get(url, params=params)
+            assert response.status_code == 200
+            first = response.json()["result"]
+            for field in ("entries", "runs", "runs_state", "head_cut"):
+                assert (
+                    first[field] == control[field]
+                ), f"first-frame {field} regressed under paint hold"
+            assert reads == [], "grouping still depended on whole-index hydration during paint"
+        finally:
+            release()
+            entry = ti._IN_FLIGHT.get(ti._key(harness.root, harness.session_id))
+            if entry is not None:
+                await asyncio.wait_for(entry[1], 30)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shape", ["tool", "compacted", "duplicate", "live", "around"])
+async def test_projection_preserves_grouped_frames_and_freshness_controls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, shape: str
+) -> None:
+    """Non-empty folded spans/compaction stay final, not merely rows present."""
+    async with _Harness(tmp_path) as harness:
+        if shape in {"tool", "live", "duplicate", "around"}:
+            rows: list[Any] = []
+            for turn in range(1, 4):
+                rows.extend(_long_turn(turn, 6))
+            if shape == "live":
+                rows.extend(_long_turn(9, 8)[:-1])
+            directory = harness.root / "sessions" / harness.session_id
+            _write(directory, rows)
+        else:
+            harness.seed(turns=8)
+            directory = harness.root / "sessions" / harness.session_id
+            # The real compaction path replaces the journal inode.
+            await Transcript(directory).compact_file(min_reclaim_bytes=0)
+        index = ti.refresh_index(harness.root, harness.session_id)
+        assert index is not None
+        _publish(harness.root, harness.session_id, index)
+        if shape == "duplicate":
+            from dataclasses import replace
+
+            ti.write_index(
+                harness.root,
+                harness.session_id,
+                replace(index, checkpoints=index.checkpoints + [index.checkpoints[0]]),
+                # A synthetic derivation cannot be published under the same
+                # token; the duplicate-id rule is exercised on the canonical
+                # document, which the projection must keep agreeing with.
+            )
+        assert harness.client is not None
+        url = f"/v1/desktop/sessions/{harness.session_id}/history"
+        params: dict[str, Any] = {
+            "limit": 20 if shape == "live" else 50,
+            "open_frame": 1,
+            "journal_order": 1,
+        }
+        if shape == "around":
+            params = {
+                "around_id": "u0003",
+                "before": 5,
+                "after": 5,
+                "open_frame": 1,
+                "journal_order": 1,
+            }
+        control = (await harness.client.get(url, params=params)).json()["result"]
+        assert control["runs_state"] == "ready", control
+        assert control["journal_order_state"] == "ready", control
+        assert any(
+            row["payload"].get("tool_calls") or row["payload"].get("role") == "tool"
+            for row in control["entries"]
+        ) or shape in {"compacted", "around"}
+        ti._reset_for_tests()
+        reads = []
+        original = ti._read_raw
+
+        def spy(*args: Any, **kwargs: Any) -> Any:
+            reads.append(True)
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(ti, "_read_raw", spy)
+        monkeypatch.setattr(
+            DesktopSessionBridge,
+            "_frame_index",
+            lambda *args, **kwargs: pytest.fail("hydrating fallback ran"),
+        )
+        release = ti.hold_paint(harness.root, harness.session_id)
+        try:
+            first = (await harness.client.get(url, params=params)).json()["result"]
+            assert first == control
+            assert reads == []
+        finally:
+            release()
+
+
+@pytest.mark.asyncio
 async def test_the_event_stream_states_attaching_only_to_a_negotiating_client(
     tmp_path: Path,
 ) -> None:
@@ -534,6 +726,19 @@ async def test_a_snapshot_carries_the_same_page_as_history(tmp_path: Path) -> No
         assert snapshot["runs"] == page["runs"]
         assert snapshot["runs_state"] == page["runs_state"]
         assert snapshot["head_cut"] == page["head_cut"]
+
+
+def _publish(root: Path, sid: str, index) -> None:
+    """Write the companion the way the background pass does, synchronously.
+
+    Production publishes it on the event loop after the refresh returns; these
+    tests call the derivation directly, so they publish explicitly.
+    """
+    from local_operator.session import index_read_model as rm
+
+    token = rm.publish(root, sid, index)
+    assert token is not None
+    rm.write_naming(root, sid, token, index.naming)
 
 
 def _long_turn(turn: int, calls: int, *, spend_rows: bool = True) -> list[Any]:
@@ -935,11 +1140,37 @@ async def test_a_frame_whose_index_lands_during_the_hunt_is_the_steady_frame(
         params = {"limit": limit, "open_frame": 1}
 
         original = DesktopSessionBridge._frame_index
+        # The RESIDENT entry must stay: it is what makes the retry cheap enough
+        # to land inside the hunt, and the case under test is a retry that
+        # SUCCEEDS. Establishing it HERE rather than inheriting whatever
+        # ``warm()`` happened to leave makes the precondition explicit — a
+        # competition-era read can serve the manifest without remembering the
+        # resident, and this test then failed for a reason it does not measure
+        # (round-3 M1). Only the on-disk document (and so the companion) goes, so
+        # the first attempt has nothing and must answer None.
+        index = ti.refresh_index(harness.root, harness.session_id)
+        assert index is not None
+        key = ti._key(harness.root, harness.session_id)
+        ti._remember(key, index, ti.index_path(harness.root, harness.session_id).stat().st_mtime)
+        ti.index_path(harness.root, harness.session_id).unlink()
         calls: list[int] = []
 
         async def _lands_during_the_hunt(self: Any, deadline: float) -> Any:
             calls.append(1)
-            return None if len(calls) == 1 else await original(self, deadline)
+            if len(calls) == 1:
+                return None
+            # LAND the index inside this call instead of betting on a background
+            # refresh fitting the open budget: the case under test is "the index
+            # arrives during the hunt", and the arrival must be deterministic
+            # (round-3 M1: the old shape failed or passed on scheduling luck).
+            arrival = await asyncio.to_thread(ti.refresh_index, harness.root, harness.session_id)
+            if arrival is not None:
+                ti._remember(
+                    key,
+                    arrival,
+                    ti.index_path(harness.root, harness.session_id).stat().st_mtime,
+                )
+            return await original(self, deadline)
 
         monkeypatch.setattr(DesktopSessionBridge, "_frame_index", _lands_during_the_hunt)
         first = (await harness.client.get(url, params=params)).json()["result"]
@@ -958,3 +1189,108 @@ async def test_a_frame_whose_index_lands_during_the_hunt_is_the_steady_frame(
             steady["head_cut"],
         )
         assert canonical(first) == canonical(steady)
+
+
+@pytest.mark.asyncio
+async def test_projection_journal_ordinals_match_the_resident_join(tmp_path: Path) -> None:
+    """R2/Q1: coordinates describe what the page SERVES, never a dropped row.
+
+    Same code, same fixture, same request: the resident join is the control, and
+    the projection must produce its payload exactly. The pre-fix projection added
+    the opener of a row the cap had dropped (``limit=5`` answered ``{u0005}``
+    where the head served ``{u0001..u0005}``).
+    """
+    async with _Harness(tmp_path) as harness:
+        harness.seed(turns=6)
+        index = ti.refresh_index(harness.root, harness.session_id)
+        assert index is not None
+        _publish(harness.root, harness.session_id, index)
+        key = ti._key(harness.root, harness.session_id)
+        ti._remember(key, index, ti.index_path(harness.root, harness.session_id).stat().st_mtime)
+        assert harness.client is not None
+        url = f"/v1/desktop/sessions/{harness.session_id}/history"
+        params = {"limit": 5, "open_frame": 1, "journal_order": 1}
+        control = (await harness.client.get(url, params=params)).json()["result"]
+        assert control["journal_order_state"] == "ready"
+        # The resident join emits an opener axis, not one entry per served row:
+        # each row carries its own ``journal_seq``.
+        assert control["journal_ordinals"], control
+        assert all(row.get("journal_seq") is not None for row in control["entries"])
+
+        ti._reset_for_tests()  # no resident index: the companion is the only source
+        projected = (await harness.client.get(url, params=params)).json()["result"]
+        assert projected == control
+
+
+@pytest.mark.asyncio
+async def test_a_warm_checkpoint_manifest_reflects_a_later_append(tmp_path: Path) -> None:
+    """Round-3 N1: the rail must not answer the PRE-append list forever.
+
+    Warmed first on purpose: the cached manifest is keyed on the canonical
+    document and the naming sidecar, and an append moves neither file, so a
+    cache that consults only those two keeps answering `ready N` while the
+    journal has grown (QA's "append loses facts", base answers `ready N+2`).
+    """
+    async with _Harness(tmp_path) as harness:
+        harness.seed(turns=3)
+        index = ti.refresh_index(harness.root, harness.session_id)
+        assert index is not None
+        _publish(harness.root, harness.session_id, index)
+        assert harness.client is not None
+        url = f"/v1/desktop/sessions/{harness.session_id}/checkpoints"
+        warm = (await harness.client.get(url)).json()["result"]
+        assert warm["index"]["state"] == "ready"
+        before = len(warm["checkpoints"])
+        directory = harness.root / "sessions" / harness.session_id
+        await Transcript(directory).append_message(
+            Message(role="user", content=[TextContent(text="after the warm cache")])
+        )
+        await Transcript(directory).append_message(
+            Message(role="assistant", content=[TextContent(text="answered")])
+        )
+        after = (await harness.client.get(url)).json()["result"]
+        polled = [after]
+        for _ in range(2):
+            polled.append((await harness.client.get(url)).json()["result"])
+        assert all(poll["index"]["state"] == "ready" for poll in polled)
+        assert all(len(poll["checkpoints"]) == before + 2 for poll in polled), [
+            len(poll["checkpoints"]) for poll in polled
+        ]
+        assert len({len(poll["checkpoints"]) for poll in polled}) == 1
+
+
+@pytest.mark.asyncio
+async def test_an_append_warm_reopen_still_reaches_final_runs(tmp_path: Path) -> None:
+    """Q5: the companion must not cost the append path its ready first frame.
+
+    A companion published for the PREVIOUS journal is stale for the suffix, so the
+    read falls back to the refresh the ORIGINAL path waits on; that wait is what
+    used to land inside the frame budget (5/6 quiet opens) and what a lock-held
+    companion build pushed outside it (0/6). Deterministic here: after an append
+    the first frame must carry the settled runs the steady frame carries, not a
+    ``building`` placeholder.
+    """
+    async with _Harness(tmp_path) as harness:
+        harness.seed(turns=3)
+        ti.refresh_index(harness.root, harness.session_id)
+        directory = harness.root / "sessions" / harness.session_id
+        await Transcript(directory).append_message(
+            Message(role="tool", content=[TextContent(text="appended")], tool_call_id="x1")
+        )
+        ti._reset_for_tests()
+        assert harness.client is not None
+        url = f"/v1/desktop/sessions/{harness.session_id}/history"
+        params = {"limit": 50, "open_frame": 1}
+        first = (await harness.client.get(url, params=params)).json()["result"]
+        steady = (await harness.client.get(url, params=params)).json()["result"]
+        assert steady["runs_state"] == "ready"
+        if first["runs_state"] == "ready":
+            # The discriminator: a READY first frame must carry the appended runs,
+            # never the pre-append set a stale companion would have served.
+            assert first["runs"] == steady["runs"], "a ready frame carried stale runs"
+        else:
+            # An honest building answer is allowed under host load, but ONLY with
+            # no facts — an incomplete ready frame is the forbidden case, and this
+            # branch used to compare itself against steady unconditionally, which
+            # made the test fail for the very answer it permits (round-3 M1).
+            assert first["runs"] == [], "a building frame carried facts"

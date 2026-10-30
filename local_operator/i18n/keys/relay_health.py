@@ -18,10 +18,6 @@ def ended_detail() -> Msg:
     return Msg("relay.health.ended_detail", {})
 
 
-def ended_placeholder() -> Msg:
-    return Msg("relay.health.ended_placeholder", {})
-
-
 def ended_send_failed() -> Msg:
     return Msg("relay.health.ended_send_failed", {})
 

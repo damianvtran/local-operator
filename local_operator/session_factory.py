@@ -5193,10 +5193,16 @@ async def _prepare(
         # see local_operator.tools.confinement for the mechanism and limits.
         session_kwargs["confinement_root"] = str(world_root)
     # H5 (Team Bridge): the runtime resolved above is the same object the tool
-    # table was built against. It is still attached ONLY to the persisted,
-    # account-bound designated session — and subagent children are built
-    # elsewhere and never receive it (see the parameter's comment on
-    # ``Session``).
+    # table was built against. It is attached to EVERY writer session of the
+    # enrolled owner: the collaboration surface (directory/dm/channel_post and
+    # the endpoint-addressed room reads) belongs to any of them, while the
+    # inbound mailbox and the owner-shared reads are gated per call by the
+    # strict authority fence (``not_designated``). The designation is therefore
+    # no longer what decides whether a session has the tool, so an enrolled
+    # machine pays the bridge schema in each session — that is the cost of the
+    # capability, stated here rather than left to be inferred from the diff
+    # (review round 1 MAJOR 1/2). Subagent children are built elsewhere and
+    # never receive it (see the parameter's comment on ``Session``).
     if bridge_runtime is not None:
         session_kwargs["bridge_runtime"] = bridge_runtime
     return _SessionPlan(
@@ -6023,6 +6029,21 @@ def attach_credential_binding(
         from local_operator.session.credential_binding import mesh_copy_account
 
         install_account(lambda credential_id: mesh_copy_account(get_credential(credential_id)))
+    install_label = getattr(recorder, "set_label_resolver", None)
+    if callable(get_credential) and callable(install_label):
+        # The account-change NOTICE names the account by its sign-in label (the
+        # one ``credential_identity`` derivation the borrow listing and the
+        # login receipt use), so two logins on one device no longer render the
+        # same sentence. Read only when a notice is about to be journaled.
+        from local_operator.providers.auth_store import credential_identity
+
+        def _label(credential_id: int) -> str:
+            # ``get_credential`` is duck-typed here (``getattr``); the identity
+            # derivation is too — it accepts any row with a ``.data`` mapping.
+            row: Any = get_credential(credential_id)
+            return (credential_identity(row) or "") if row is not None else ""
+
+        install_label(_label)
     reader = getattr(auth_store, "set_binding_reader", None)
     if callable(reader):
         reader(recorder.recall_for)

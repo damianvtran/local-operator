@@ -1,0 +1,44 @@
+COMMAND: cd /Users/damian/lo-i18n-es && git rev-parse HEAD && git branch --show-current && git status --short -- local_operator/i18n/catalogues/en/wire.errors.auth.json local_operator/i18n/catalogues/es/wire.errors.auth.json
+66da866475f3e74553196a3167c18c6125141844
+feat/i18n-es-wire-errors
+?? local_operator/i18n/catalogues/es/wire.errors.auth.json
+
+COMMAND: python3 /Users/damian/.local-operator/sessions/600fd4a56564/scratchpad/audit_es_w3a2.py
+NAMESPACE wire.errors.auth
+en_sha256=9d48edaa61269239e132201224c1c7d6cf89ef198598f0ec6c99c1f3ade542f6
+target_sha256=5e23604abad61cc486b8d7764f09cfd882f9afd2a32248ea1efbf5d28d9f7ad3
+en_blob_revision=d6781d2567c65a7cc51e797883eaeea3fde1be68
+context_sidecar_exists=False
+keys en=12 es=12
+missing_keys=[]; extra_keys=[]
+wire.errors.auth.credentials_missing: placeholders=PASS; en_chars=51; es_chars=61
+wire.errors.auth.input_invalid: placeholders=PASS; en_chars=52; es_chars=78
+wire.errors.auth.key_not_accepted: placeholders=PASS; en_chars=41; es_chars=42
+wire.errors.auth.sign_in_not_waiting: placeholders=PASS; en_chars=38; es_chars=52
+wire.errors.auth.account_not_found: placeholders=PASS; en_chars=26; es_chars=38
+wire.errors.auth.sign_in_missing: placeholders=PASS; en_chars=49; es_chars=62
+wire.errors.auth.key_rejected: placeholders=PASS; en_chars=35; es_chars=39
+wire.errors.auth.provider_refusal: placeholders=PASS; en_chars=7; es_chars=7
+wire.errors.auth.local_server_only: placeholders=PASS; en_chars=45; es_chars=55
+wire.errors.auth.server_address_missing: placeholders=PASS; en_chars=44; es_chars=65
+wire.errors.auth.store_unreadable: placeholders=PASS; en_chars=70; es_chars=80
+wire.errors.auth.auth_refusal: placeholders=PASS; en_chars=7; es_chars=7
+icu_plural_nodes=0; disallowed_categories=[]
+negative_control_dropped_placeholder_detected=PASS
+FAILURES=[]
+PROCESS EXIT: 0
+
+READER ROUTE (actual invocations):
+cd /Users/damian/lo-i18n-es && lop exec --run-in "$PWD" "Use read_public_copy with path='local_operator/i18n/catalogues/en/wire.errors.auth.json' and key='wire.errors.auth.account_not_found'"
+READER OUTPUT: `wire.errors.auth.account_not_found` = “Provider account not found”
+COMMAND EXIT: timeout after 90 seconds (process killed) after reader result
+
+Same prescribed route, key wire.errors.auth.auth_refusal
+READER OUTPUT: `wire.errors.auth.auth_refusal`: `{error}`
+COMMAND EXIT: timeout after 90 seconds (process killed) after reader result
+
+Same prescribed route, key wire.errors.auth.key_not_accepted
+READER OUTPUT: `wire.errors.auth.key_not_accepted`: **“This provider does not accept an API key.”**
+COMMAND EXIT: timeout after 90 seconds (process killed) after reader result
+
+Additional individual-key invocations for credentials_missing, input_invalid and key_rejected timed out without a returned reader value. Exact source/target bytes were read directly and hashed; semantic conclusions are not based on display-side redactions. The reader cannot read untracked Spanish targets or nonexistent sidecars.

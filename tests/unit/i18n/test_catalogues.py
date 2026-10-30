@@ -77,6 +77,9 @@ def test_shipped_wire_namespaces_exist() -> None:
         # The OpenRouter host-speed settings row (English-only, own namespace so
         # the audited wire.settings hash is untouched).
         "wire.host_speed",
+        # Radient Saver's settings row and fail-open notices (own namespace so the
+        # audited wire.settings hash is untouched).
+        "wire.radient_saver",
         # Populated by the console-capacity slice (this PR), the same way the
         # extraction slices added wire.settings/wire.errors.*/wire.exec.
         "wire.console",
@@ -217,6 +220,10 @@ def test_wave3_hindi_carries_its_namespace_snapshot_with_parity(i18n_check) -> N
     locale = "hi"
     namespaces = (
         "cli.exec_remote_help",
+        # The serve-supervision slice's 14-key namespace, carried in every locale
+        # only with its independently audited ledger row at the current en bytes;
+        # it sorts after cli.exec_remote_help.
+        "cli.services_status",
         "relay.approvals",
         "relay.ask",
         "relay.asks",
@@ -254,6 +261,10 @@ def test_wave3_hindi_carries_its_namespace_snapshot_with_parity(i18n_check) -> N
         "wire.incidents",
         "wire.memory",
         "wire.notices",
+        # Radient Saver LO1 (PR #3078): the 17-key settings and fail-open notice
+        # copy, carried with its independently audited ledger row at the
+        # current en bytes; it sorts before wire.remote_compute.
+        "wire.radient_saver",
         "wire.remote_compute",
         "wire.settings",
         "wire.slash",

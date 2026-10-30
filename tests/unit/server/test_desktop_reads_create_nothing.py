@@ -16,6 +16,7 @@ because the answer ``has_any_network`` gives is the thing the desktop acts on.
 from __future__ import annotations
 
 import asyncio
+import time
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -28,6 +29,44 @@ from local_operator.server.utils.desktop_mesh import has_any_network
 #: installs, never a real one (see ``test_desktop_command_catalogue.py``).
 TOKEN = "[redacted]"
 HEADERS = {"Authorization": f"Bearer {TOKEN}"}
+
+
+def _tree(root: Path) -> list[str]:
+    return sorted(str(path.relative_to(root)) for path in root.rglob("*"))
+
+
+def _settle_filesystem(root: Path, *, quiet_s: float = 0.25, limit_s: float = 15.0) -> None:
+    """Wait until this tree STOPS CHANGING, then the caller snapshots it.
+
+    WHY. The library indexer writes under this same root on its own daemon
+    threads (`library-indexer`, `library-thumbs`): it opens `library/library.sqlite3`
+    (creating `-shm`/`-wal`) and, through `library/index.py`, asks
+    `session_files.ledger.refresh` for a session's files ledger
+    (`cache/session_files/<sid>.json`). Those writes have nothing to do with the
+    route under test, but a snapshot taken mid-pass attributes them to whichever
+    route ran next — measured in CI as `/v1/desktop/runtimes created
+    ['cache/session_files', …]` while the same test passed 4/4 locally.
+
+    WHAT IT CANNOT MASK. Quiescence is measured BEFORE the before-snapshot, so a
+    write the ROUTE performs still happens strictly between the two snapshots and
+    is still reported. `test_the_quiescence_barrier_does_not_hide_a_route_write`
+    is the control: it creates exactly the shapes this barrier waits for, INSIDE
+    the window, and requires the comparison to fail.
+    """
+    deadline = time.monotonic() + limit_s
+    previous = _tree(root)
+    stable_since = time.monotonic()
+    while time.monotonic() < deadline:
+        time.sleep(quiet_s)
+        current = _tree(root)
+        now = time.monotonic()
+        if current == previous:
+            if now - stable_since >= quiet_s:
+                return
+        else:
+            previous = current
+            stable_since = now
+
 
 NETWORK = "n_0123456789abcdef01234567"
 SELF_DEVICE = "d_" + "a" * 32
@@ -165,13 +204,47 @@ def test_the_other_read_routes_do_not_create_the_run_plane_either(tmp_path, monk
             assert portal is not None
             portal.call(_settle_boot_task, task)
         for route in routes:
-            before = sorted(str(path.relative_to(root)) for path in root.rglob("*"))
+            # Taken PER ROUTE (review round 4, MINOR-2). Once, a second indexer
+            # pass could still land inside a later route's window and read as that
+            # route's write; per route bounds the settle to the window it protects.
+            # It still cannot mask a route write: quiescence is measured before
+            # `before`, and the route's own work happens after it.
+            _settle_filesystem(root)
+            before = _tree(root)
             client.get(route, headers=HEADERS)
-            after = sorted(str(path.relative_to(root)) for path in root.rglob("*"))
+            after = _tree(root)
             assert after == before, f"{route} created {sorted(set(after) - set(before))}"
 
     assert (root / "network").exists() is False
     assert (root / "run").exists() is False
+
+
+def test_the_quiescence_barrier_does_not_hide_a_route_write(tmp_path, monkeypatch) -> None:
+    """The barrier's own negative control.
+
+    The barrier waits for the tree to stop moving BEFORE the snapshot. If it were
+    instead a blanket "ignore anything that appears late", a route that writes
+    would pass. Here a write of exactly the shapes the barrier waits for
+    (`cache/session_files/<sid>.json`, a library WAL sidecar) is performed inside
+    the window, and the same comparison must report it.
+    """
+    root = _isolate(tmp_path, monkeypatch)
+    with TestClient(app, headers={"Host": "127.0.0.1:1111"}) as client:
+        for task_name in ("aida_boot_task", "librarian_boot_task"):
+            task = getattr(app.state, task_name, None)
+            if task is None:
+                continue
+            portal = client.portal
+            assert portal is not None
+            portal.call(_settle_boot_task, task)
+        _settle_filesystem(root)
+        before = _tree(root)
+        (root / "cache" / "session_files").mkdir(parents=True, exist_ok=True)
+        (root / "cache" / "session_files" / "aaaaaaaaaaaa.json").write_text("{}")
+        (root / "library").mkdir(parents=True, exist_ok=True)
+        (root / "library" / "library.sqlite3-wal").write_bytes(b"")
+        after = _tree(root)
+        assert after != before, "a write inside the window went unreported"
 
 
 def test_the_probe_and_the_vocabulary_still_read_a_real_network(tmp_path, monkeypatch) -> None:

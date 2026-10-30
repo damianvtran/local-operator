@@ -197,6 +197,13 @@ _AMBIENT_VARS = (
     # plausibly carries it. Cells that want it on set it through ``monkeypatch``
     # explicitly.
     "RADIENT_ORG_ALLOW_NONCANONICAL_BASE",
+    # Radient Saver's process override (``saver/gate.py`` ``ENV_OVERRIDE``) beats
+    # ``radient.saver.mode``: ``auto`` would turn the gate ON and route
+    # conversation history to Radient's prepare route from any test that builds
+    # a stream, and ``off`` would make every gate-on cell pass the gate-off
+    # path. Either way an inherited value decides what a cell measures, the
+    # escape-hatch class above. Cells set it through ``monkeypatch`` explicitly.
+    "LOP_RADIENT_SAVER",
     "LOCAL_OPERATOR_HOME",
     "LOCAL_OPERATOR_DEBUG",
     # Names the session a `lop secret` retrieval is attributed to in the audit
@@ -296,6 +303,18 @@ _AMBIENT_VARS = (
     # the suite observes. Tests that need it set it through
     # `tests/notification_opt_in.notification_path_opt_in`.
     "LOCAL_OPERATOR_NOTIFY_TEST_HOSTING",
+    # The escape hatch over the session store's LIVE-STORE guard
+    # (``session/cleanup.py::ALLOW_TEST_STORE_DELETIONS_ENV``): a test process may
+    # not delete a session directory, a pad's content or the handoff quarantine
+    # from the operator's own ``~/.local-operator``, and this variable waives
+    # that. An inherited value is the ALLOW_NESTED_SESSION failure exactly —
+    # every refusal cell in ``test_cleanup_live_store_guard.py`` (and every
+    # future one) would take the allow path while looking like it tested the
+    # refusal, and the guard that exists because a lane's pytest run deleted a
+    # real session would be proven by nothing. Scrubbed for the whole run; a
+    # cell that means to exercise the opt-in sets it through ``monkeypatch``,
+    # which is also where the reason is written down.
+    "LOCAL_OPERATOR_ALLOW_TEST_STORE_DELETIONS",
     # Tests launched from a detached operator inherit these runtime-only flags.
     # They turn strict --resume validation into adoption of a brand-new id.
     "LOP_RUNTIME_ADOPT_SESSION",

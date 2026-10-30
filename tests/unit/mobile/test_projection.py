@@ -1425,6 +1425,190 @@ def test_the_derived_roster_graph_is_what_fits_a_cliff_width_roster() -> None:
     assert all(row["label"] for row in rows)
 
 
+def test_a_wide_roster_never_costs_the_transcript() -> None:
+    """A 256-wide flat roster: shed the DERIVED graph, never the reader's messages.
+
+    ``peer_ids`` is every sibling's job id, so a flat group of width n costs
+    O(n^2) — measured on this fixture: 1,044,992 B of a 1,396,444 B frame
+    (74.8%). While that graph was shed AFTER the transcript tiers, the cap spent
+    the transcript first (text floored to 200 chars, tail cut to 16 rows) and
+    dropped the graph anyway, so a frame that would have fitted with every row
+    and character intact reached the phone cut short. Every field in it is a
+    pure derivation of ``parent_job_id`` (kept on every row), which is what
+    makes it the right thing to give up when that alone buys the frame.
+
+    256 is ``SubagentComms.MAX_RECORDS``: a wider request is clamped by the
+    fold, so a larger number here would only rename the same fixture.
+    """
+    from local_operator.mobile.projection import cap_projection_frame
+    from local_operator.mobile.types import TranscriptEntry
+    from local_operator.session.runtime.server import _MAX_LINE_BYTES
+
+    fold = _flat_roster_fold(256)
+    fold.projection.transcript = [
+        TranscriptEntry(id="opener", kind="user", text="open the conversation"),
+        *[
+            TranscriptEntry(id=f"answer-{index}", kind="assistant", text="evidence " * 160)
+            for index in range(PROJECTION_TRANSCRIPT_LIMIT - 1)
+        ],
+    ]
+
+    data, degraded = cap_projection_frame(fold.projection)
+
+    assert degraded is True
+    assert all(
+        row.get("peer_ids") == [] for row in data["subagents"]
+    ), "the derivable graph has to be shed to fit a 256-wide roster"
+    assert all("parent_job_id" in row for row in data["subagents"])
+    assert (
+        len(data["transcript"]) == PROJECTION_TRANSCRIPT_LIMIT
+    ), "the cap cut the reader's rows to make room for a field it then dropped"
+    assert not any(
+        str(row.get("text") or "").endswith("…") for row in data["transcript"]
+    ), "a message was truncated to fit a field it then dropped"
+    assert all(row.get("text_complete") is True for row in data["transcript"])
+    assert len(data["transcript"][0]["text"]) == len(
+        "open the conversation"
+    ), "the opening row is the one row the phone must always read in full"
+    assert (
+        len(json.dumps({"op": "projection", "data": data}).encode()) <= 700_000
+    ), "the transcript survived by spending a different field, not by breaking the cap"
+    assert len(json.dumps({"op": "projection", "data": data}).encode()) < _MAX_LINE_BYTES
+
+
+def test_a_small_rosters_graph_is_not_spent_to_save_a_transcript() -> None:
+    """A graph worth a few hundred bytes must not be shed before the cheap tiers.
+
+    Shed FIRST and unconditionally, the graph left the Agents sheet for nothing
+    whenever the frame was over the cap for a different reason: the sheet reads
+    ``peer_ids``/``ancestor_ids`` and nothing on the client rebuilds them. The
+    tier is now gated on ``total - derived <= cap`` — it fires only when the
+    graph alone is the whole fix. Here the transcript's expand payloads are the
+    weight, so tier 3 fits the frame and the roster keeps its edges.
+    """
+    from local_operator.mobile.projection import cap_projection_frame
+    from local_operator.mobile.types import TranscriptEntry
+
+    fold = _flat_roster_fold(5)
+    fold.projection.transcript = [
+        TranscriptEntry(id="opener", kind="user", text="open the conversation"),
+        *[
+            TranscriptEntry(
+                id=f"answer-{index}",
+                kind="assistant",
+                text="short answer",
+                details={"expanded": "x" * 12_000},
+            )
+            for index in range(PROJECTION_TRANSCRIPT_LIMIT - 1)
+        ],
+    ]
+
+    data, degraded = cap_projection_frame(fold.projection)
+
+    assert degraded is True
+    assert any(
+        row.get("peer_ids") for row in data["subagents"]
+    ), "a five-child graph cannot buy this frame; shedding it only costs the sheet"
+    assert all(
+        row.get("details") == {} for row in data["transcript"]
+    ), "the expand payload is the cheaper thing to spend"
+    assert len(data["transcript"]) == PROJECTION_TRANSCRIPT_LIMIT
+    assert len(json.dumps({"op": "projection", "data": data}).encode()) <= 700_000
+
+
+def test_the_pinned_head_is_stated_on_the_wire() -> None:
+    """The pin is a FACT the daemon publishes, not something the client infers.
+
+    The client's first history cursor must be the oldest row of the tail, and a
+    pinned opener is not it. Length cannot say so: the frame cap can publish a
+    pinned tail of ``FRAME_CAP_TRANSCRIPT_FLOOR`` rows, and an older owner's
+    pinned 80-row frame is indistinguishable from an uncapped one. SPARSE: an
+    unpinned projection omits the key entirely, which is also what an older
+    daemon means.
+    """
+    from local_operator.mobile.types import TranscriptEntry
+
+    fold = make_fold()
+    fold._append(TranscriptEntry(id="opener", kind="user", text="the brief"))
+    for index in range(PROJECTION_TRANSCRIPT_LIMIT):
+        fold._append(TranscriptEntry(id=f"row-{index}", kind="assistant", text="body"))
+
+    assert fold.projection.transcript_head_pinned is True
+    assert fold.projection.to_json()["transcript_head_pinned"] is True
+    assert len(fold.projection.transcript) == PROJECTION_TRANSCRIPT_LIMIT
+    assert fold.projection.transcript[0].id == "opener"
+
+    small = make_fold()
+    small._append(TranscriptEntry(id="opener", kind="user", text="the brief"))
+    for index in range(4):
+        small._append(TranscriptEntry(id=f"row-{index}", kind="assistant", text="body"))
+
+    assert small.projection.transcript_head_pinned is False
+    assert "transcript_head_pinned" not in small.projection.to_json()
+
+
+def test_the_graph_is_offered_again_after_details() -> None:
+    """A graph that did not buy the frame alone may buy it once details are gone.
+
+    Tier 2 asks "is shedding the graph enough by itself". The answer can only
+    improve after a spend, so the same measured question is asked again after
+    tier 3. Without it, a roster whose graph plus expand payloads is the whole
+    weight sends the tail and the text to the floor and drops the graph anyway
+    (measured in round 2: 435 siblings with 8 KB details per row ended at 16
+    rows and 199 KB, where details then graph keeps 80 rows at 218 KB).
+
+    The cap is derived from the fixture's own sizes rather than hard-coded, so
+    the test lands inside the band it is about: ``total - derived > cap`` (tier
+    2 declines) and ``total - derived - details <= cap`` (tier 3 + graph fits).
+    """
+    from local_operator.mobile.projection import (
+        FRAME_CAP_DERIVED_ROSTER_FIELDS,
+        cap_projection_frame,
+    )
+    from local_operator.mobile.types import TranscriptEntry
+
+    fold = _flat_roster_fold(160)
+    fold.projection.transcript = [
+        TranscriptEntry(id="opener", kind="user", text="open the conversation"),
+        *[
+            TranscriptEntry(
+                id=f"answer-{index}",
+                kind="assistant",
+                text="short",
+                details={"expanded": "x" * 6_000},
+            )
+            for index in range(PROJECTION_TRANSCRIPT_LIMIT - 1)
+        ],
+    ]
+
+    def measure(value: object) -> int:
+        return len(json.dumps(value, ensure_ascii=False, sort_keys=True).encode())
+
+    whole = fold.projection.to_json()
+    total = measure(whole)
+    derived = sum(
+        measure(row.get(field) or [])
+        for row in whole["subagents"]
+        for field in FRAME_CAP_DERIVED_ROSTER_FIELDS
+    )
+    details = sum(measure(row.get("details") or {}) for row in whole["transcript"])
+    cap = total - derived - details // 2
+
+    assert 0 < cap
+    assert total - derived > cap, "tier 2 must decline, or the case is not the one tested"
+    assert total - derived - details <= cap, "tier 3 plus the graph must fit"
+
+    frame, degraded = cap_projection_frame(fold.projection, cap_bytes=cap)
+
+    assert degraded is True
+    assert all(row.get("peer_ids") == [] for row in frame["subagents"])
+    assert (
+        len(frame["transcript"]) == PROJECTION_TRANSCRIPT_LIMIT
+    ), "the tail was halved to make room for a graph it then dropped"
+    assert all(row.get("details") == {} for row in frame["transcript"])
+    assert measure(frame) <= cap
+
+
 def test_the_roster_falls_back_to_identity_rows_when_shedding_is_not_enough() -> None:
     """The last tier before the honest warning: identity rows only.
 

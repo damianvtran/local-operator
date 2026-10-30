@@ -1,0 +1,8 @@
+{
+  "cli.monitor_help.monitor": "Inspeccionar los monitores activos y cancelar uno en una sesión cerrada",
+  "cli.monitor_help.status": "todos los monitores de esta máquina, el más próximo primero",
+  "cli.monitor_help.json": "salida legible por máquina",
+  "cli.monitor_help.cancel": "cancelar un monitor de una sesión sin runtime abierto (una sesión activa cambia sus propios monitores desde dentro)",
+  "cli.monitor_help.session": "ID de sesión a la que pertenece el monitor",
+  "cli.monitor_help.monitor_id": "ID del monitor (m1, m2, …)"
+}

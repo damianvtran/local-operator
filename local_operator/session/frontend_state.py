@@ -2603,6 +2603,66 @@ def _released_row(job: Any) -> "JobState":
     return _freeze_job(JobState.model_validate(values))
 
 
+class _LiveRows:
+    """Immutable base rows keyed by an owner's explicit source revision.
+
+    Lineage and derived pricing are deliberately outside this memo: comms,
+    todos and paint-safe pricing have independent writers/clocks. Sources
+    without a revision remain on the rebuilding path.
+    A source mutation invalidates before its observers run; elapsed time never
+    participates, so there is no interval in which stale accounting is allowed.
+    """
+
+    def __init__(self, epoch: str) -> None:
+        self._epoch = epoch
+        self._rows: dict[str, tuple[Any, int, Any, JobState]] = {}
+
+    def rebind(self, epoch: str) -> None:
+        if epoch != self._epoch:
+            self._epoch = epoch
+            self.clear()
+
+    def clear(self) -> None:
+        self._rows.clear()
+
+    def retain(self, ids: set[str]) -> None:
+        for key in self._rows.keys() - ids:
+            del self._rows[key]
+
+    def row(self, job: Any, window: _FrozenSequence | None) -> "JobState":
+        revision = getattr(job, "projection_revision", None)
+        job_id = str(getattr(job, "id", "") or "")
+        previous = self._rows.get(job_id)
+        if (
+            type(revision) is int
+            and previous is not None
+            and previous[0] is job
+            and previous[1] == revision
+            and previous[2] is window
+        ):
+            frozen = previous[3]
+            # Pricing has an independent clock: a cold paint memo can warm, or
+            # an unstamped aggregate can cross a pricing window without a job
+            # mutation. Cache immutable structure, never that derived money.
+            cost, unknown = job_subtree_cost(
+                job, default_model_label=str(getattr(job, "model_label", None) or "")
+            )
+            knowledge = _cost_knowledge(cost, unknown)
+            if cost != frozen.direct_cost or knowledge != frozen.direct_cost_knowledge:
+                frozen = frozen.model_copy(
+                    update={"direct_cost": cost, "direct_cost_knowledge": knowledge}
+                )
+                _mark_frozen_job(frozen)
+                self._rows[job_id] = (job, revision, window, frozen)
+            return frozen
+        frozen = _freeze_job(JobState.from_job(job, window=window))
+        if type(revision) is int:
+            self._rows[job_id] = (job, revision, window, frozen)
+        else:
+            self._rows.pop(job_id, None)
+        return frozen
+
+
 class _ReleasedRows:
     """Per-job memo of a RELEASED child's row, so a tick stops rebuilding it.
 
@@ -3446,6 +3506,8 @@ def _thaw_model(value: BaseModel) -> BaseModel:
 
 
 def _freeze_usage(value: Usage) -> _FrozenUsage:
+    if isinstance(value, _FrozenUsage):
+        return value
     frozen = _FrozenUsage.model_validate(value.model_dump(mode="python"))
     updates = {name: _freeze_value(item) for name, item in frozen.__dict__.items()}
     for name, item in (frozen.model_extra or {}).items():
@@ -3454,6 +3516,8 @@ def _freeze_usage(value: Usage) -> _FrozenUsage:
 
 
 def _freeze_frontend_usage(value: FrontendUsage) -> _FrozenFrontendUsage:
+    if isinstance(value, _FrozenFrontendUsage):
+        return value
     frozen = _FrozenFrontendUsage.model_validate(value.model_dump(mode="python"))
     updates = {name: _freeze_value(item) for name, item in frozen.__dict__.items()}
     for name, item in (frozen.model_extra or {}).items():
@@ -6513,6 +6577,7 @@ class FrontendStateStore:
         #: because it answers the other half of one question: what a roster tick
         #: must rebuild.
         self._released_rows = _ReleasedRows(self._state.epoch)
+        self._live_rows = _LiveRows(self._state.epoch)
         #: The FOLLOWER's last wire body per job, as received (before the reducer
         #: rewrites ``trajectory``/``todos`` on it), so a ``jobs`` delta can keep
         #: the canonical row of every child whose body did not move -- see
@@ -6903,6 +6968,7 @@ class FrontendStateStore:
         # here rather than in two conditioned branches.
         self._trajectory_windows.clear()
         self._released_rows.clear()
+        self._live_rows.clear()
         self._follower_windows.reset(state.epoch)
         # Same lineage argument as the window memo: a re-seated state's rows are
         # freshly parsed objects, so no body recorded against the old ones may
@@ -7760,6 +7826,7 @@ class FrontendStateStore:
             # or the payload it installs could be built from a reused window.
             self._trajectory_windows.clear()
             self._released_rows.clear()
+            self._live_rows.clear()
         selected = getattr(session, "model", None)
         effective = getattr(session, "effective_model", None) or selected
         last_usage = None
@@ -7769,7 +7836,9 @@ class FrontendStateStore:
                 last_usage = restore()
             except Exception:
                 last_usage = None
-        jobs = self._jobs(session, self._retained_windows(), self._released_memo())
+        jobs = self._jobs(
+            session, self._retained_windows(), self._released_memo(), self._live_memo()
+        )
         child_costs: dict[str, float] = dict(current.child_costs)
         for job in jobs:
             _carry_child_cost(child_costs, job, default_model_label=_label(selected))
@@ -8366,7 +8435,9 @@ class FrontendStateStore:
         cadence the page that needs it already refreshes on, at a fraction of
         the cost.
         """
-        jobs = self._jobs(session, self._retained_windows(), self._released_memo())
+        jobs = self._jobs(
+            session, self._retained_windows(), self._released_memo(), self._live_memo()
+        )
         child_costs = dict(self._state.child_costs)
         selected = getattr(session, "model", None)
         for job in jobs:
@@ -9115,11 +9186,16 @@ class FrontendStateStore:
         self._released_rows.rebind(self._state.epoch)
         return self._released_rows
 
+    def _live_memo(self) -> _LiveRows:
+        self._live_rows.rebind(self._state.epoch)
+        return self._live_rows
+
     @staticmethod
     def _jobs(
         session: Any,
         windows: _TrajectoryWindows | None = None,
         released: "_ReleasedRows | None" = None,
+        live: "_LiveRows | None" = None,
     ) -> list[JobState]:
         """One roster row per job, reusing frozen retained windows when given a memo.
 
@@ -9217,13 +9293,15 @@ class FrontendStateStore:
                         )
                     )
                     continue
-                value = JobState.from_job(
-                    job,
-                    window=(
-                        None
-                        if windows is None
-                        else windows.window(job_id, getattr(job, "trajectory", None))
-                    ),
+                window = (
+                    None
+                    if windows is None
+                    else windows.window(job_id, getattr(job, "trajectory", None))
+                )
+                value = (
+                    live.row(job, window)
+                    if live is not None
+                    else JobState.from_job(job, window=window)
                 )
                 # Marked SEEN only once the row is built: a job whose row raises is
                 # skipped from ``values``, so keeping it in ``seen`` would keep its
@@ -9236,6 +9314,8 @@ class FrontendStateStore:
                 continue
         if windows is not None:
             windows.retain(seen)
+        if live is not None:
+            live.retain(seen - released_seen)
         if released is not None:
             # Only the RELEASED ids: a row that went back to being rebuilt in
             # full (or left the roster) must not keep a memo entry pinning it.

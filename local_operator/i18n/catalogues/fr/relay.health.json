@@ -6,6 +6,5 @@
   "relay.health.dropped_detail": "Votre ordinateur n’arrive pas à joindre cette session pour l’instant et continue d’essayer. Tant qu’il n’y parvient pas, un envoi échoue aussitôt et votre texte reste dans la zone de saisie.",
   "relay.health.quiet_detail": "Sur votre ordinateur, cette session ne répond plus — elle est peut-être occupée ou bloquée. Un message peut être signalé en échec et arriver malgré tout quand elle aura rattrapé son retard. Réessayer ne l’enverra pas en double.",
   "relay.health.ended_detail": "L’historique est conservé. Envoyez un message ou touchez « Reprendre » pour rouvrir la session dans votre dossier personnel.",
-  "relay.health.ended_send_failed": "Cette session est terminée et n’a pas pu être rouverte pour le moment. Réessayez ou touchez « Terminée » en haut, puis choisissez « Reprendre ».",
-  "relay.health.ended_placeholder": "Envoyer la rouvre (dossier perso)…"
+  "relay.health.ended_send_failed": "Cette session est terminée et n’a pas pu être rouverte pour le moment. Réessayez ou touchez « Terminée » en haut, puis choisissez « Reprendre »."
 }
