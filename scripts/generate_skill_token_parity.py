@@ -4,7 +4,7 @@
 WHY THIS FILE EXISTS
 --------------------
 `web/src/lib/skill-token.ts` re-implements the TUI's ``$name`` parser
-(``local_operator/tui/widgets/command_pipeline.py``'s `skill_token`,
+(``local_operator/tui/widgets/command_picker.py``'s `skill_token`,
 `skill_token_is_leading`, and the SKILL branch of `completion_for`). A port
 that agrees by inspection is a port that drifts in silence: nothing in the web
 bundle can read Python, and nothing in the Python suite can read the bundle.

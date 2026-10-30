@@ -759,6 +759,13 @@ export function Composer({
 	   mic, which takes 46 px from the line. Missing one let a cold load commit a
 	   stale level until the row's observer happened to fire. The count is passed
 	   on its own because the hook must know it even when it is not in the row. */
+	const queuedLabel = projection.queued_count > 0
+		? messageRuntime.t("relay.transcript.composer.queued", { count: projection.queued_count })
+		: "";
+	const readingKey = [projection.model_label, projection.effort, meterFacts(projection).label, micAvailable ? "mic" : ""].join("|");
+	const foot = useFootFit(short, readingKey, queuedLabel);
+	useEffect(() => { onFitLevel?.(foot.level); }, [foot.level, onFitLevel]);
+
 	/* The skill catalogue, once per session, only when the relay advertises the
 	   capability. A FETCH ERROR OR AN EMPTY CATALOGUE = THE TRAY NEVER OPENS
 	   (SKM-D5): the draft keeps working as plain prose, and nothing shouts about
@@ -782,12 +789,6 @@ export function Composer({
 		};
 	}, [pid, skillCapability]);
 
-	const queuedLabel = projection.queued_count > 0
-		? messageRuntime.t("relay.transcript.composer.queued", { count: projection.queued_count })
-		: "";
-	const readingKey = [projection.model_label, projection.effort, meterFacts(projection).label, micAvailable ? "mic" : ""].join("|");
-	const foot = useFootFit(short, readingKey, queuedLabel);
-	useEffect(() => { onFitLevel?.(foot.level); }, [foot.level, onFitLevel]);
 	const [dictation, setDictation] = useState<DictationState>("idle");
 	/* The transient outcome line (added / empty / discarded); lives in the same
 	   status row as the live states so nothing moves between them (D3). */

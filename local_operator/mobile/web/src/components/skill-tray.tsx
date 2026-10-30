@@ -9,9 +9,10 @@
  * rest of the draft to a filter that rewrites the buffer when accepted. So this
  * tray never takes focus: each row answers `onPointerDown` with
  * `preventDefault` (the caret stays in the field, the keyboard stays up, and
- * the compatibility click never reaches the row), and the component installs no
- * key handler at all — hardware Enter still sends the message, exactly as it
- * does with the tray closed.
+ * the compatibility click never reaches the row), and the pick itself fires on
+ * the pointer RELEASE so a drag that scrolls the list cannot insert a name. The
+ * component installs no key handler at all — hardware Enter still sends the
+ * message, exactly as it does with the tray closed.
  *
  * PLACEMENT AND RHYTHM. `docs/design/mobile-relay-guidelines.md` puts
  * everything stacked between the transcript and the composer inside the one
@@ -43,7 +44,8 @@ export function SkillTray({
 	/** The matched rows, already filtered and ordered by the caller. */
 	rows: SkillEntry[];
 	/** Accept one row: the composer replaces the token's span and restores the
-	    caret. Called from `onPointerDown`, so it runs before focus could move. */
+	    caret. Called from a tap's pointer release (or a keyboard activation), so
+	    focus never left the field on the way here. */
 	onPick: (name: string) => void;
 }) {
 	/* A tap picks; a DRAG does not. The tray is a scroller on a short column
