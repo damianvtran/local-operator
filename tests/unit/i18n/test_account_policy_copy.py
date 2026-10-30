@@ -15,6 +15,7 @@ from pathlib import Path
 from local_operator import settings_io
 from local_operator.i18n import catalogues, messages
 from local_operator.i18n.keys import wire_settings_account_policy as policy
+from tests.unit.i18n import locale_coverage
 
 REPO = Path(__file__).resolve().parents[3]
 MANIFEST = REPO / "i18n" / "languages.json"
@@ -59,6 +60,28 @@ def test_registry_uses_new_child_source_and_stable_machine_enum_ids():
 
 
 def test_account_policy_copy_follows_the_catalogue_tree():
+    # Anti-vacuity, from the SHIPPED ledger (`render` coerces an unshipped locale to
+    # `en`, so only shipped locales can show either half) and derived, so a wave
+    # moves the answer here instead of editing a list. FAIL, never skip: an empty
+    # half means the contract is no longer exercised by real data, and a skip reads
+    # as green on every later run — which is how this test rotted three times.
+    for namespace, _code, _english in TARGET_MESSAGES:
+        locale_coverage.require_nonempty(
+            locale_coverage.carrying(namespace),
+            subject=f"{namespace} own copy",
+            detail=(
+                "no shipped locale carries it "
+                f"(absent={list(locale_coverage.absent(namespace))})"
+            ),
+        )
+        locale_coverage.require_nonempty(
+            locale_coverage.absent(namespace),
+            subject=f"{namespace} fallback",
+            detail=(
+                "every shipped locale carries it "
+                f"(carries={list(locale_coverage.carrying(namespace))})"
+            ),
+        )
     for locale in _supported_non_source_locales():
         for namespace, code, english in TARGET_MESSAGES:
             rendered = messages.render(code, {}, locale=locale)
