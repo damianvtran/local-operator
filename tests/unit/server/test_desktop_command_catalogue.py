@@ -225,3 +225,53 @@ def test_the_commands_capability_reports_the_narrowed_policy():
         result = client.get("/v1/capabilities").json()["result"]
 
     assert result["features"]["commands"] == 2
+
+
+def test_the_catalogue_speaks_the_language_each_request_resolved(monkeypatch):
+    """A French user's palette is French: resolution is per REQUEST, not per boot.
+
+    The daemon never calls ``set_active_locale``, so ``spec.description`` — the
+    registry's import-time sentence — is English in this process by design. The
+    route therefore renders through ``describe(spec, resolve_language())``; this
+    test drives the whole response rather than the helper, because the defect
+    lived in WHICH render point the route chose, not in whether one existed.
+
+    ``LOP_LANG`` is flipped between two requests inside one client, which is the
+    assertion the per-request contract needs: a catalogue cached on the boot
+    language, or one rendered once at import, passes either half alone.
+    """
+    from local_operator.i18n import catalogues
+    from local_operator.slash_commands import SLASH_COMMANDS
+
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "[redacted]")
+    monkeypatch.delenv("LOCAL_OPERATOR_DESKTOP_ORIGINS", raising=False)
+    french = catalogues.load_catalogue("fr", "wire.slash")
+
+    with TestClient(app, headers={"Host": "127.0.0.1:1111"}) as client:
+
+        def described() -> dict[str, str]:
+            response = client.get(
+                "/v1/desktop/commands", headers={"Authorization": "Bearer [redacted]"}
+            )
+            assert response.status_code == 200
+            body = response.json()["result"]["commands"]
+            return {row["name"]: row["description"] for row in body}
+
+        monkeypatch.setenv("LOP_LANG", "fr")
+        french_rows = described()
+        monkeypatch.setenv("LOP_LANG", "en")
+        english_rows = described()
+        # An unsupported tag is not a language: `resolve_language` filters to the
+        # shipped set, so the client sees English rather than a raw key or a mix.
+        monkeypatch.setenv("LOP_LANG", "zz")
+        unsupported_rows = described()
+
+    assert french_rows["help"] == french["wire.slash.help"] == "Lister toutes les commandes"
+    assert french_rows["exit"] == french["wire.slash.exit"] != english_rows["exit"]
+    assert english_rows["help"] == "List all commands"
+    assert unsupported_rows["help"] == "List all commands"
+    # The registry itself did not move: this is a per-request render, not a
+    # process-wide locale activation (which would repaint every backend string).
+    assert next(s for s in SLASH_COMMANDS if s.name == "help").description == "List all commands"
+    # Names and machine fields stay verbatim in every language (RFC §2.7).
+    assert set(french_rows) == set(english_rows)

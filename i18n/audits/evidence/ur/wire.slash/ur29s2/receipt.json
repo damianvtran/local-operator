@@ -1,0 +1,217 @@
+{
+  "schema": 1,
+  "instance": "1ecfefb83d14-slash2-ur",
+  "locale": "ur",
+  "scope": "local_operator/i18n/catalogues/ur/wire.slash.json — all 52 keys audited; round-2 focus on the 8 values changed by the uncommitted remediation on top of 7159e2a309 (archive, fork, hub, keys, notifications, stop, team, usage). Read-only audit: nothing in the tree was edited.",
+  "checkout": "/Users/damian/lo-core-fix",
+  "tree_head": "7159e2a30927831f5dfb88f84c588eac07770e5d",
+  "tree_state": "HEAD 7159e2a309 + uncommitted edits; git status shows exactly 8 changed values in this file (8 insertions / 8 deletions, no other byte moved)",
+  "audit_date": "2026-10-29",
+  "audit_kind": "round-2 cold independent translation audit — verification of the round-1 CHANGES_REQUESTED remediation",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "1ecfefb83d14",
+    "model": "radient/auto",
+    "actual_model_source": "served on radient/auto after provider quota failures in this same session forced a fallback chain: anthropic/claude-sonnet-5-5 → openai/gpt-6-astra → kimi/k3.1-pro → radient/auto. Recorded as served, not as the session's nominal model.",
+    "independent_from_translator_session": true,
+    "independent_from_previous_auditor": true,
+    "independence_evidence": "previous audit of this file ran in session 2f076e039aec against target sha256 0e7c8f9a0ae48accb9d28623acb899950a63864f6af023ca439ead6f17bbb7b4; this audit runs in 1ecfefb83d14 against 7c950b38d91902600488c29a5f13fbdaaf52f5fd8af69001fb9803e448a80959. Different bytes, different session; no value in this file was written by this session."
+  },
+  "input_sha256": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.slash.json",
+      "sha256": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/ur/wire.slash.json",
+      "sha256": "7c950b38d91902600488c29a5f13fbdaaf52f5fd8af69001fb9803e448a80959"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/wire.slash.context.json",
+      "sha256": "32b3475a5808048a6eeaae462fee0feb55405fca77026e41b9609a516d74a215"
+    },
+    "policy": [
+      {
+        "path": "i18n/glossary.md",
+        "sha256": "ef07b446668778822d0ff4dcd7b380543456ddf7b08e060dce5818cb8fd6fdcd"
+      },
+      {
+        "path": "i18n/style-guides/ur.md",
+        "sha256": "3f8d600cd51d585278405f6bfcf93c0ddd1718d2490423849e8dab3f4f1d6545"
+      }
+    ]
+  },
+  "counts": {
+    "BLOCKER": 0,
+    "MAJOR": 0,
+    "MINOR": 3,
+    "NIT": 3
+  },
+  "verdict": "pass",
+  "namespaces": {
+    "wire.slash": {
+      "status": "passed",
+      "keys_audited": 52,
+      "sha256": {
+        "en": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
+        "target": "7c950b38d91902600488c29a5f13fbdaaf52f5fd8af69001fb9803e448a80959"
+      },
+      "findings": [
+        {
+          "id": "UR2-M1",
+          "severity": "MINOR",
+          "key": "wire.slash.hub",
+          "en": "Open Hub links — per-link subscribe and auto-push policy",
+          "current": "Hub روابط: فی ربط سبسکرپشن اور خودکار push پالیسی",
+          "problem": "Round-1 M1 is met — the policy noun پالیسی is back and the line no longer reads as 'the command auto-pushes'. The price was the imperative: کھولیں is gone, so the value is now a noun-phrase label, not the 'terse imperative opening/verb' the en sidecar declares for this key. I grade MINOR not MAJOR because a fit WITH the verb exists at 50 cells (below), so the drop is a choice rather than a budget wall, though either choice loses a word: the current 49-cell form also fits a column the English itself (56 cells) overruns, which is a real gain.",
+          "suggestion": "Hub کھولیں: فی ربط سبسکرپشن اور خودکار push پالیسی — 50 cells, keeps the verb and the policy noun, trades روابط (Hub already names the surface). If the reviewed decision is label-not-verb, keep the current text and record the trade in the ledger note."
+        },
+        {
+          "id": "UR2-W1",
+          "severity": "MINOR",
+          "key": "wire.slash.fork",
+          "current": "گفتگو کی شاخ بنائیں؛ <message> سے کام شروع؛ --switch یہیں، --window وہاں",
+          "en": "Branch this chat; --switch here, --window elsewhere; <message> starts work",
+          "problem": "72 cells against the 51-cell picker column (pre-commit 49; en 74). The 51-cell cut lands after '--switc', so the --switch/--window half is truncated in the picker while the <message> clause — the half UR-SLASH-B1 exists to protect — stays fully visible, because this value front-loads it and the English does not. Honest statement of the fit: no idiomatic form carries all three clauses inside 51 cells (en needs 74), so complete-and-truncated is the right trade here; this tail is a branching-flag list, which the commit message itself exempts from the budget.",
+          "suggestion": "Keep as-is and record the overrun; do not shorten to 51 — every 51-cell variant I tried drops either the <message> clause or a flag. If the budget is genuinely hard, raise the column, not the copy."
+        },
+        {
+          "id": "UR2-W2",
+          "severity": "MINOR",
+          "key": "wire.slash.stop",
+          "current": "سیشن بند کریں: یہ، دوسرا (نام/pid) یا سب؛ /resume کھولے",
+          "en": "End this session, another by name/pid, or all — /resume reopens it",
+          "problem": "55 cells (pre-commit exactly 51, at budget; en 66). Restoring نام/pid (round-1 M2) cost 4 cells, so the tail '؛ /resume کھولے' now clips in the picker. The truncation eats only that secondary clause; the selector clause (this / another by name-pid / all) stays visible. This is the one value in the remediation whose overrun is not a flag list, so it is a real regression against the commit's own criterion.",
+          "suggestion": "سیشن بند: یہ، دوسرا (نام/pid) یا سب؛ /resume کھولے — 50 cells, fits, at the cost of the finite imperative (بند کریں → بند). Prefer this only if the 51-cell column is enforced; otherwise keep the fuller imperative and accept a clipped /resume clause, as English does at 66."
+        },
+        {
+          "id": "UR2-N1",
+          "severity": "NIT",
+          "key": "wire.slash.keys",
+          "current": "کی بورڈ رہنمائی دکھائیں",
+          "en": "Show the keyboard legend",
+          "problem": "Round-1 N1 implemented verbatim. 'legend' (a key→action reference table) is generalised to رہنمائی (guidance); the picker row still tells a user where the key reference lives, so it lands.",
+          "suggestion": "Leave as-is; کی بورڈ کلیدی رہنمائی دکھائیں (28 cells) if the key→action sense is wanted back."
+        },
+        {
+          "id": "UR2-N2",
+          "severity": "NIT",
+          "key": "wire.slash.model",
+          "current": "ماڈل بدلیں؛ /model default نئے سیشنز کے لیے محفوظ",
+          "en": "Switch model; /model default saves it for new sessions",
+          "problem": "Unchanged by the remediation (round-1 N3 open). The tail is verbless — محفوظ is a state, so 'saves it' reads as a condition. Understandable in a clipped line.",
+          "suggestion": "ماڈل بدلیں؛ /model default نئے سیشنز کے لیے محفوظ کرے (53 cells)."
+        },
+        {
+          "id": "UR2-N3",
+          "severity": "NIT",
+          "key": "wire.slash.highlights",
+          "current": "جواب کے نمایاں حصے: منسوخ، دوبارہ کوشش، رخ بدلیں",
+          "en": "Cancel, retry or steer the highlights under an answer",
+          "problem": "Unchanged (round-1 N2 open). The colon list mixes an adjective (منسوخ), a noun (کوشش) and an imperative (بدلیں); all three options are present, so no meaning is lost.",
+          "suggestion": "جواب کے نمایاں حصے: منسوخ کریں، دوبارہ کوشش، رخ بدلیں — or leave as-is for the 51-cell fit."
+        }
+      ]
+    }
+  },
+  "previous_findings": [
+    {
+      "id": "UR-SLASH-B1",
+      "severity": "BLOCKER",
+      "key": "wire.slash.fork",
+      "status": "fixed",
+      "evidence": "Both the third clause and the <message> token are on the bytes and byte-identical to en; the clause is front-loaded so it survives the 51-cell cut (verified: truncated string ends '...--switc', with the <message> clause fully inside). New width cost recorded as UR2-W1; no new defect in the clause itself."
+    },
+    {
+      "id": "UR-SLASH-M1",
+      "severity": "MINOR",
+      "key": "wire.slash.hub",
+      "status": "fixed",
+      "evidence": "پالیسی restored, matching the round-1 suggested text byte for byte; the setting-vs-action misread is gone. A new loss was introduced at the same time (imperative کھولیں dropped) — see UR2-M1."
+    },
+    {
+      "id": "UR-SLASH-M2",
+      "severity": "MINOR",
+      "key": "wire.slash.stop",
+      "status": "fixed",
+      "evidence": "نام/pid restored exactly as suggested; the name selector is back. Width 51→55 recorded as UR2-W2."
+    },
+    {
+      "id": "UR-SLASH-M3",
+      "severity": "MINOR",
+      "key": "wire.slash.team",
+      "status": "fixed",
+      "evidence": "تنظیمی restored (as ٹیمیں/تنظیمی خاکہ, 4 cells shorter than the suggestion by using / for اور); org-chart sense is identifiable again."
+    },
+    {
+      "id": "UR-SLASH-M4",
+      "severity": "MINOR",
+      "key": "wire.slash.usage",
+      "status": "fixed",
+      "evidence": "استعمالی replaced by the genitive استعمال کا, exactly the suggestion, and consistent with the glossary's ur cell for usage (استعمال)."
+    },
+    {
+      "id": "UR-SLASH-M5",
+      "severity": "MINOR",
+      "key": "wire.slash.notifications",
+      "status": "fixed",
+      "evidence": "Predicate completed: پڑھی ہو جاتی ہیں agrees with اطلاعات and reads as 'become read'; the fragment is gone."
+    },
+    {
+      "id": "UR-SLASH-N1",
+      "severity": "NIT",
+      "key": "wire.slash.keys",
+      "status": "fixed",
+      "evidence": "Suggestion adopted verbatim; residual generalisation of 'legend' recorded as UR2-N1 (NIT, not blocking)."
+    },
+    {
+      "id": "UR-SLASH-N2",
+      "severity": "NIT",
+      "key": "wire.slash.highlights",
+      "status": "not_fixed",
+      "evidence": "Value untouched; round 1 offered 'leave as-is if the 51-cell fit is preferred'. Still open as UR2-N3 (NIT)."
+    },
+    {
+      "id": "UR-SLASH-N3",
+      "severity": "NIT",
+      "key": "wire.slash.model",
+      "status": "not_fixed",
+      "evidence": "Value untouched; optional in round 1. Still open as UR2-N2 (NIT)."
+    },
+    {
+      "id": "UR-SLASH-N4",
+      "severity": "NIT",
+      "key": "wire.slash.archive",
+      "status": "fixed",
+      "evidence": "جاری رکھا جا سکتا ہے adopted, matching /resume's continue verb in the same file."
+    }
+  ],
+  "previous_findings_summary": {
+    "total": 10,
+    "fixed": 8,
+    "not_fixed": 2,
+    "open_ids": [
+      "UR-SLASH-N2",
+      "UR-SLASH-N3"
+    ],
+    "blocker_or_major_open": 0,
+    "note": "Every BLOCKER/MINOR/MINOR/NIT that carried meaning (B1, M1-M5, N1, N4) is fixed on the bytes. The two open items are the two round-1 NITs that round 1 itself marked optional."
+  },
+  "verification_method": {
+    "mechanical": "python3 scripts/i18n/check.py --catalogues-only (isolated env, temp HOME) → 'catalogue checks: 0 problem(s)', exit 0. Independent checks: 52/52 key sets identical and in the same order; 0 real token mismatches (flags --switch/--window/--stop/--clear/--copy/--refresh, commands /loop /goal /model /resume /title, angle args <goal> <n> <message>, all byte-identical); the two regex hits '/remove' and '/usage' are prose slashes inside 'add/remove' and 'login/usage', not command tokens; 0 values byte-identical to en; 0 bidi control chars; 0 native digits; 0 Devanagari danda; 0 double or trailing spaces; NFC clean; 0 تم/تو (آپ register held).",
+    "width": "terminal cells, Arabic script ≈1 cell/char and combining marks 0 per i18n/style-guides/ur.md; budget 51 cells from the 7159e2a309 message (picker description column at 80 columns; design review round 1, D2). ur as it stands: 2 values over 51 (fork 72, stop 55), 7 at exactly 51, max 72. en for the same file: 16 values over 51, max 74. Pre-remediation ur, measured from the committed blob: fork 49, stop 51, hub 49. en for the three changed keys: hub 56, stop 66, fork 74 — so en's own hub row overruns the column that ur's now fits (49).",
+    "claim_list": "round-1 receipts read as claims only; every status above re-derived from the bytes in this tree."
+  },
+  "not_claimed": [
+    "No rendered-frame, screenshot or runtime terminal evidence — no bidi/shaping verification of the RTL line order.",
+    "No pytest run: this worktree has no .venv, and per AGENTS.md no venv is borrowed or symlinked across worktrees.",
+    "No ledger row edit — the instruction for this audit was read-only; the wire.slash ledger row is the ledger step, not this record.",
+    "No locale other than ur; no claim about fr/es/hi/ru/vi/zh-CN."
+  ],
+  "notes": [
+    "The remediation is materially better than the revision round 1 rejected: the same 14-value rewrite now carries every clause round 1 named, the two token losses are back, and the two safety-adjacent selector clauses (نام/pid, اس سیشن کے لیے) are intact.",
+    "One inherited inconsistency worth naming: round 1's own suggested hub text dropped the imperative it had just complained about elsewhere; the implementer adopted that suggestion verbatim. UR2-M1 records the result honestly rather than blaming the implementer for following the review.",
+    "Front-loading in /fork is better than the source: en trails <message> past the 51-cell cut, ur leads with it. That is the intent recorded in the /fork registry comment.",
+    "RTL observation, not a copy defect: 5 ur values open with a strong-LTR island (Hub, MCP, Radient, UI, PyPI). Per the ur style guide the render layer applies FSI/PDI isolation, and translations must not carry manual controls — none do."
+  ]
+}

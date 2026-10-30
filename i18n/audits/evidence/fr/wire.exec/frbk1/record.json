@@ -1,0 +1,45 @@
+{
+  "locale": "fr",
+  "namespace": "wire.exec",
+  "audit_date": "2026-10-29",
+  "key_count": 17,
+  "translator": {
+    "agent": "translator (lopdev team)",
+    "model": "radient/auto",
+    "date": "2026-10-29",
+    "note": "translator's model recorded as the session-reported route; not independently verifiable by the auditor"
+  },
+  "auditor": {
+    "agent": "translation-auditor (lopdev team)",
+    "session": "500e883ce1b1",
+    "model": "radient/auto",
+    "fallback": "anthropic/claude-sonnet-5-5 (primary) -> openai/gpt-6-astra -> kimi/k3.1-pro -> radient/auto, each move caused by a provider quota failure; radient/auto served every command in this audit",
+    "independence": "not the translator; edited nothing in the repository",
+    "date": "2026-10-29"
+  },
+  "input_hashes": {
+    "en": "041ca802dd4e1329cf1f1b2984311c628f314223f5941b35a7007f5b3d198c94",
+    "context": null,
+    "target_locale": "79ad993d06a239c2ae9fffc4e11e8465d66fc7dc87e29d40ba91a55a242a51ad"
+  },
+  "remediation": {
+    "note": "Findings were remediated after the audit. input_hashes.target_locale binds the FINAL shipped bytes; input_hashes.context is the sidecar hash the auditor worked from where it changed afterwards. target_sha_at_audit keeps the bytes the auditor actually read.",
+    "target_sha_at_audit": "d097a33c1b83a499c732a012c6256de412fa13136b4c57fee09049fc1e9c9fa4",
+    "target_sha_after_remediation": "79ad993d06a239c2ae9fffc4e11e8465d66fc7dc87e29d40ba91a55a242a51ad",
+    "context_sha_at_audit": null,
+    "context_sha_after_remediation": null
+  },
+  "artifacts": [
+    "report.md",
+    "record.json",
+    "audit.log"
+  ],
+  "current_report_verdict": "findings-remediated",
+  "findings": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 1,
+    "nit": 0
+  },
+  "masking_note": "Verified by ordinal comparison, not by eye: the display filter's marker sequence (ordinals 91,114,101,100,97,99,116,101,100,93, assembled at runtime rather than typed) occurs in 0 of the 17 French values in this namespace. No marker shown anywhere in the transcript was treated as file content, and no French value contains one. Bracket scan: 1 value(s) carry '[' or ']' — the literal CLI metavar '[,NAME]' in `wire.exec.approval_advisory`, ordinals [91, 44, 78, 65, 77, 69, 93], carried byte-identically from the English. Also dumped by ordinal: prose colons are U+003A (58) preceded by U+202F (8239); apostrophes are U+2019 (8217) outside quoted literals; U+003D '=' (61) appears 0 times in this namespace, so no name=value run exists for a filter to rewrite."
+}

@@ -1182,13 +1182,19 @@ def test_a_join_from_the_tool_parks_and_never_supplies_the_code() -> None:
     assert joined.is_error
     text = _text(joined)
     # WHICH FIRST CLAUSE APPEARS IS AN ENVIRONMENT FACT, not this test's subject: a
-    # token minted where nothing is advertised is refused locally with "no endpoint",
-    # while a token naming a detected address gets the dial's own refusal instead
-    # ("nothing was listening at …"). Asserting only the first made this test pass on
-    # the author's machine and fail on CI, where `init` advertised the runner's own
-    # address — so both the local refusal and the dial refusal are accepted here, and
-    # the teeth are the sentences below, which are the same either way.
-    assert "no endpoint" in text or "nothing was listening at" in text, text
+    # token minted where nothing is advertised is refused locally with "no endpoint";
+    # a token naming a detected address where nothing accepts the dial gets the dial's
+    # own refusal instead ("nothing was listening at …"); and a token naming an address
+    # where a peer DOES accept the socket and then closes without sending a frame
+    # surfaces as "the handshake at <host> stopped (<exc>)" — the same refusal in its
+    # stopped-handshake wording. Asserting only the first made this test pass on the
+    # author's machine and fail on CI, where `init` advertised the runner's own address
+    # when only the second was accepted; this machine and CI now produce the third. So
+    # all three dial outcomes are accepted here, and the teeth are the sentences below,
+    # which are the same whichever one a given environment produces.
+    assert (
+        "no endpoint" in text or "nothing was listening at" in text or "the handshake at" in text
+    ), text
     assert "Pairing needs a person" in text
     assert "This tool has no way to answer a pairing" in text
 

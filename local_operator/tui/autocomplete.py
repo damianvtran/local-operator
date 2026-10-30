@@ -23,9 +23,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Protocol, Sequence, TypeVar, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, Sequence, TypeVar, runtime_checkable
 
 from local_operator.sigils import SlashContext, at_token
+
+if TYPE_CHECKING:
+    # Type-only: this module stays free of widget and I/O imports (it is loaded
+    # for the slash catalogue alone), and the field annotation below is a
+    # string because of the ``from __future__ import annotations`` above.
+    from local_operator.i18n.messages import Msg
 
 
 def file_completion_token(text: str, cursor: int | None = None) -> SlashContext | None:
@@ -223,6 +229,34 @@ class SlashCommand:
     desktop_destination: str = field(default="", kw_only=True)
     name: str
     description: str = ""
+    #: The catalogue message ``description`` was rendered from, when the row's
+    #: copy lives in one — the whole reason ``SLASH_COMMANDS`` reads from
+    #: ``wire.*`` is that translators own the sentence, not the registry.
+    #:
+    #: ``None`` for a literal description: a page whose copy is not catalogued
+    #: yet keeps its own words and renders them in every language.
+    #:
+    #: It exists because the rendered string cannot answer "what would this say
+    #: in another language". A consumer that resolves a locale per REQUEST (the
+    #: desktop catalogue and the phone listing, neither of which activates a
+    #: locale process-wide) needs the id and the untouched params back to render
+    #: its own; ``slash_commands.describe`` is that render. The message itself
+    #: rather than a bare key, so ICU arguments survive if a description grows
+    #: one.
+    #:
+    #: Keyword-only with a default so the literal-string rows and the fixtures
+    #: that pass a description positionally keep working unchanged; a locale
+    #: move re-materialises the row with ``dataclasses.replace``, so this field
+    #: is never mutated in place.
+    #:
+    #: ``compare=False`` because this is PROVENANCE, not identity: the class is
+    #: frozen, so the generated ``__hash__`` hashes every compared field, and
+    #: ``Msg.params`` is a dict — including this one made ``hash(row)`` raise
+    #: ``TypeError: unhashable type: 'dict'`` for every catalogued row (all 62,
+    #: latent only because nothing hashes a row today). It is also the honest
+    #: equality: two rows for the same command are the same row whether or not
+    #: one of them still carries the id it was rendered from.
+    description_message: Msg | None = field(default=None, kw_only=True, compare=False)
     aliases: tuple[str, ...] = field(default_factory=tuple)
     #: Whether running the command may write what was typed into the visible
     #: ledger as a user row.
