@@ -104,12 +104,15 @@ UPLOAD_MAX_FILES = 10
 #: Not a session quota: recordings have no per-session ceiling in v1 (D6 says so
 #: rather than leaving the gap implicit).
 RECORD_MAX_BYTES = 64 * 1024 * 1024
-#: Recording length. `timeout_s` on `record_start` is the span in seconds, and
-#: the host's own timer auto-stops and finalises at the same value, so a caller
-#: that forgets to stop still gets a file rather than an encoder left running.
-RECORD_DEFAULT_DURATION_S = 120.0
-RECORD_MIN_DURATION_S = 1.0
-RECORD_MAX_DURATION_S = 600.0
+#: Recording length in WHOLE seconds, because the host's `durationOf` requires
+#: `Number.isInteger` (ui `recording.ts`): a fractional value is refused there
+#: with `record_failed`, after the approval prompt, so this end refuses it first
+#: with a reason the model can act on (review round 1, R1-2). The host's own
+#: timer auto-stops and finalises at this value, so a caller that forgets to
+#: stop still gets a file rather than an encoder left running.
+RECORD_DEFAULT_DURATION_S = 120
+RECORD_MIN_DURATION_S = 1
+RECORD_MAX_DURATION_S = 600
 
 #: Fallback basename when a page-supplied name sanitises to nothing usable.
 _FALLBACK_STEM = "download"
@@ -1630,7 +1633,7 @@ def recordings_dir(session_id: str, *, root: Path | None = None) -> Path:
     screen content, and every later ``ls`` of a private directory is what keeps
     it from being world-readable.
     """
-    session8 = "".join(ch for ch in (session_id or ""))[:8]
+    session8 = (session_id or "")[:8]
     # The fallback is spelled WHOLE rather than truncated to eight characters
     # with the rest: a host with no session id (a unit call, an eval harness)
     # would otherwise land every clip in `nosessio`.

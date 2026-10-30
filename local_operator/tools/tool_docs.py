@@ -415,8 +415,7 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             "- 'record_start'/'record_stop' make an MP4 of this tab (AV1: plays "
             "in QuickTime, not Chrome's <video>); path= is approved before "
             "capture and never overwritten, timeout_s= caps the length. Desktop "
-            "host only."
-            "\n"
+            "host only.\n"
             "- Hosts, setup, approvals, error meanings: ``guide://browser``."
         ),
     ),

@@ -20832,6 +20832,17 @@ _NETWORK_ACTIONS = frozenset({"network_start", "network_stop", "network_read", "
 #: `_browser_record` together, and the two approvals differ only in the tier.
 _RECORD_ACTIONS = frozenset({"record_start", "record_stop"})
 
+#: The destination each surface's in-flight recording was approved to write
+#: (D4/D5). Present so `record_stop` can prove the file it is handed is the one
+#: the user approved, instead of trusting the host's word (review round 1,
+#: R1-3). Process-global: the tool executes in the session process and the
+#: surface handle is nonce-unique per tab, so two sessions cannot collide. It is
+#: deliberately NOT a member of `BrowserSurface`: that class declares `__slots__`
+#: and its protocol is `@runtime_checkable`, so a new member would break every
+#: other host implementor for a harness-only bookkeeping value (the same reason
+#: `extension_update_notified` stays off the protocol).
+_APPROVED_RECORDINGS: dict[str, str] = {}
+
 #: Style property names ``styles`` accepts as caller-requested extras. The
 #: charset is the CSS ident set that matters here: letters, digits, dashes and
 #: underscores — ``_`` is an ident character (``--brand_color`` is a legal
@@ -21895,14 +21906,26 @@ def _validate_record_fields(action: str, params: BrowserParams) -> str:
             "MP4 container whatever the name says, and a wrong extension is a file the "
             "next reader cannot play"
         )
-    if params.timeout_s is not None and not (
-        _files.RECORD_MIN_DURATION_S <= params.timeout_s <= _files.RECORD_MAX_DURATION_S
-    ):
-        return (
-            "'timeout_s' for 'record_start' is the recording length in seconds "
-            f"({_files.RECORD_MIN_DURATION_S:g} to {_files.RECORD_MAX_DURATION_S:g}; "
-            f"default {_files.RECORD_DEFAULT_DURATION_S:g}); got {params.timeout_s:g}"
-        )
+    if params.timeout_s is not None:
+        if float(params.timeout_s) != int(params.timeout_s):
+            # The HOST takes whole seconds (`Number.isInteger` in its
+            # `durationOf`), and refuses a fraction only AFTER the approval
+            # prompt, as `record_failed` with no capture. Refusing here is
+            # cheaper and names the fix (review round 1, R1-2).
+            return (
+                "'timeout_s' for 'record_start' must be a whole number of seconds "
+                f"(1 to {_files.RECORD_MAX_DURATION_S}, default "
+                f"{_files.RECORD_DEFAULT_DURATION_S}); got {params.timeout_s:g}. Round it "
+                "to an integer and retry"
+            )
+        if not (
+            _files.RECORD_MIN_DURATION_S <= int(params.timeout_s) <= _files.RECORD_MAX_DURATION_S
+        ):
+            return (
+                "'timeout_s' for 'record_start' is the recording length in seconds "
+                f"({_files.RECORD_MIN_DURATION_S:g} to {_files.RECORD_MAX_DURATION_S:g}; "
+                f"default {_files.RECORD_DEFAULT_DURATION_S:g}); got {params.timeout_s:g}"
+            )
     return ""
 
 
@@ -24919,7 +24942,9 @@ def _recording_cap_bytes(target: Path, context: ToolContext | None) -> int:
     return files.RECORD_MAX_BYTES
 
 
-def _recording_landed(tool_call_id: str, result: dict[str, Any]) -> ToolResult:
+def _recording_landed(
+    tool_call_id: str, result: dict[str, Any], *, approved: str | None = None
+) -> ToolResult:
     """Judge the clip the host says it published, from THIS machine's disk (D5).
 
     The host's exit code is not evidence. A path it names that is absent, empty,
@@ -24927,6 +24952,13 @@ def _recording_landed(tool_call_id: str, result: dict[str, Any]) -> ToolResult:
     this call, and the model is told so while it can still retry — rather than
     being handed a path to nothing and discovering it several turns from the
     cause (the download precedent, `_browser_download`).
+
+    ``approved`` is the destination the user approved at ``record_start``. A path
+    that differs is refused, because the alternative is Python certifying a file
+    the approval never covered (review round 1, R1-3). ``None`` happens only when
+    no start was seen in THIS process — a resumed session whose recording was
+    started before the restart — and the structural checks below are then the
+    whole verification, which the receipt should not overstate.
     """
     from local_operator import browser_files as files
 
@@ -24945,6 +24977,15 @@ def _recording_landed(tool_call_id: str, result: dict[str, Any]) -> ToolResult:
             "browser",
             f"the host reported {raw_path!r} as the recording, which is not an absolute "
             ".mp4 path; nothing is reported as saved.",
+        )
+    if approved is not None and str(target) != approved:
+        return _error(
+            tool_call_id,
+            "browser",
+            f"the host saved the recording to {target}, but this session approved "
+            f"{approved} at 'record_start'. Nothing is reported as saved; the approved "
+            "file is the only one this call may vouch for. Start a new recording to the "
+            "intended path if the clip is still needed.",
         )
     try:
         size = target.stat().st_size
@@ -25061,9 +25102,12 @@ async def _browser_record(
         # Fixed capture parameters (D14): 1280x720 at 10 fps with audio off, the
         # same viewport the agent's hidden tab already paints. Not tunable in v1
         # and not sent as fields the host might read as requests to change.
+        # WHOLE seconds: the validator refuses a fraction, and the host's
+        # `durationOf` would too (R1-2). `int()` here is a lossless narrow of a
+        # value already proven integral, not a round.
         timeout = params.timeout_s
         duration = (
-            float(timeout)
+            int(timeout)
             if isinstance(timeout, (int, float)) and not isinstance(timeout, bool)
             else files.RECORD_DEFAULT_DURATION_S
         )
@@ -25074,18 +25118,27 @@ async def _browser_record(
             tool_call_id, action, wire, surface=state.surface_id, client=client
         )
         if problem is not None:
+            # No capture exists, so any target remembered for this surface is
+            # not this call's and must not survive to a later stop.
+            _APPROVED_RECORDINGS.pop(state.surface_id, None)
             return _drop_closed_surface(problem, state)
         assert result is not None
         if not bool(result.get("recording", True)):
             # A host that says `recording: false` started nothing; reporting a
             # started capture would have the agent wait for a clip that cannot
             # exist.
+            _APPROVED_RECORDINGS.pop(state.surface_id, None)
             return _error(
                 tool_call_id,
                 "browser",
                 f"the browser host did not start a recording to {target}; nothing was "
                 "captured and nothing was written.",
             )
+        # Remembered so the STOP can prove the file it is handed is the one the
+        # user approved (R1-3). Overwrites any earlier target on this surface,
+        # which is correct: the host replaces a different owner's recording, and
+        # a same-owner second start is refused before this line.
+        _APPROVED_RECORDINGS[state.surface_id] = str(target)
         return _text(
             tool_call_id,
             "browser",
@@ -25104,9 +25157,13 @@ async def _browser_record(
         tool_call_id, action, wire, surface=state.surface_id, client=client
     )
     if problem is not None:
+        # A refusal means the host has no recording to finalise, so the memory is
+        # stale whatever the reason was.
+        _APPROVED_RECORDINGS.pop(state.surface_id, None)
         return _drop_closed_surface(problem, state)
     assert result is not None
-    return _recording_landed(tool_call_id, result)
+    approved = _APPROVED_RECORDINGS.pop(state.surface_id, None)
+    return _recording_landed(tool_call_id, result, approved=approved)
 
 
 async def _browser_download(

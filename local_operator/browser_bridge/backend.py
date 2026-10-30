@@ -939,13 +939,15 @@ def _record_reason_message(error: BridgeError, reason: str) -> str:
         )
     if reason == "record_active":
         where = str(error.data.get("path") or "").strip()
-        age = error.data.get("age_s")
+        # `age_ms`, the host's unit (ui `recording.ts` sends integer
+        # milliseconds). Reading `age_s` here dropped the age from the copy on
+        # every real refusal, which is what review round 1 (R1-1) caught.
+        age = error.data.get("age_ms")
         if isinstance(age, bool) or not isinstance(age, int | float):
-            age = None
-        if where:
-            running = f" ({where}{f', started {age} s ago' if age is not None else ''})"
+            ago = ""
         else:
-            running = ""
+            ago = f", started {float(age) / 1000:.1f} s ago"
+        running = f" ({where}{ago})" if where else ""
         return (
             f"a recording is already running for this session{running}; stop it with "
             "'record_stop' before starting another. Nothing was changed."

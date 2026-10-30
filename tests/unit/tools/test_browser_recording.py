@@ -63,6 +63,16 @@ def _surface(surface: str = "ui:7:nonce") -> BrowserSurface:
     return holder
 
 
+# The approved-target memory is process-global (see `_APPROVED_RECORDINGS`), so
+# every test starts and ends with it empty rather than inheriting a previous
+# test's approval.
+@pytest.fixture(autouse=True)
+def _clear_approved_recordings():
+    builtin._APPROVED_RECORDINGS.clear()
+    yield
+    builtin._APPROVED_RECORDINGS.clear()
+
+
 class _AdvertisedHost:
     """A desktop host whose record advertises the recording methods.
 
@@ -109,6 +119,56 @@ def _call(
         )
     )
     return result, seen
+
+
+def _run_pair(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    start_path: str = "",
+    stop_reply: dict[str, Any] | None = None,
+    host_writes: Path | None = None,
+) -> tuple[Any, Any, BrowserSurface, list[tuple[str, dict[str, Any]]]]:
+    """A `record_start` then a `record_stop` on ONE surface, over a fake wire.
+
+    `record_stop` can only prove it is saving the approved file if the approval
+    survived the intervening tool call, so the interesting cases need both halves
+    in one process — which is exactly the shape a real session has.
+
+    ``host_writes`` is the file the fake HOST publishes at stop: the start must
+    be given an ABSENT target (a recording never overwrites), and the bytes only
+    appear when the host stops, which is the real order.
+    """
+    seen: list[tuple[str, dict[str, Any]]] = []
+    state = _surface()
+
+    async def fake_bridge(tool_call_id, action_name, wire, *, surface="", client=None):
+        seen.append((action_name, dict(wire)))
+        if action_name == "record_start":
+            return {"recording": True, "path": wire["path"]}, None
+        if host_writes is not None:
+            host_writes.write_bytes(MP4_HEAD)
+        return stop_reply, None
+
+    monkeypatch.setattr(builtin, "_bridge_call", fake_bridge)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "cfg"))
+    ctx = _ctx(tmp_path)
+    start = asyncio.run(
+        builtin._browser_record(
+            "call",
+            state,
+            "record_start",
+            _params("record_start", path=start_path),
+            ctx,
+            client=_AdvertisedHost(),
+        )
+    )
+    stop = asyncio.run(
+        builtin._browser_record(
+            "call", state, "record_stop", _params("record_stop"), ctx, client=_AdvertisedHost()
+        )
+    )
+    return start, stop, state, seen
 
 
 # ---------------------------------------------------------------------------
@@ -214,11 +274,29 @@ def test_validation_refuses_a_duration_on_record_stop() -> None:
     assert "record_start" in problem
 
 
-@pytest.mark.parametrize("value", [0, -1, 0.5, 601, 5000])
+@pytest.mark.parametrize("value", [0, -1, 601, 5000])
 def test_validation_bounds_the_recording_length(value: float) -> None:
     problem = builtin._validate_browser_args("record_start", _params(timeout_s=value))
     assert problem
     assert "600" in problem
+
+
+@pytest.mark.parametrize("value", [1.5, 90.5, 599.5])
+def test_validation_refuses_a_fractional_length(value: float) -> None:
+    """The host takes WHOLE seconds (`Number.isInteger`); refuse before capture.
+
+    A fraction used to reach the wire, and the host refused it AFTER the
+    approval prompt with `record_failed` and no capture (review round 1, R1-2).
+    """
+    problem = builtin._validate_browser_args("record_start", _params(timeout_s=value))
+    assert "whole number" in problem
+    assert f"{value:g}" in problem
+
+
+def test_validation_accepts_an_integral_float_length() -> None:
+    # `timeout_s=30.0` is a JSON number a caller can reasonably send; it is not a
+    # fraction, so it must not be refused (the wire carries 30, an integer).
+    assert builtin._validate_browser_args("record_start", _params(timeout_s=30.0)) == ""
 
 
 @pytest.mark.parametrize("name", ["clip.mkv", "clip", "clip.mp4.part", "clip.MPEG4"])
@@ -404,6 +482,80 @@ def test_start_refuses_a_host_that_says_it_did_not_start(
     assert "nothing was captured" in result.text.lower()
 
 
+def test_start_refuses_a_traversal_path_outside_the_confinement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`..` is resolved BEFORE the confinement answer, so it cannot escape (R1-4)."""
+    jail = tmp_path / "jail"
+    jail.mkdir()
+    seen: list[tuple[str, dict[str, Any]]] = []
+    result, _ = _call(
+        "record_start",
+        tmp_path,
+        monkeypatch,
+        context=_ctx(tmp_path, confinement_root=str(jail)),
+        path=str(jail / ".." / "escape.mp4"),
+        calls=seen,
+    )
+    assert result.is_error
+    assert seen == []
+    assert "confined" in result.text
+
+
+def test_start_refuses_a_symlink_leaf(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A leaf that is a link is refused even when it points at a real file."""
+    real = tmp_path / "real.mp4"
+    real.write_bytes(MP4_HEAD)
+    link = tmp_path / "link.mp4"
+    link.symlink_to(real)
+    seen: list[tuple[str, dict[str, Any]]] = []
+    result, _ = _call("record_start", tmp_path, monkeypatch, path=str(link), calls=seen)
+    assert result.is_error
+    assert seen == []
+    assert "symlink" in result.text
+
+
+def test_start_refuses_a_symlink_parent_that_leaves_the_confinement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A link DIRECTORY that leaves the jail is caught by resolution (R1-4)."""
+    jail = tmp_path / "jail"
+    outside = tmp_path / "outside"
+    jail.mkdir()
+    outside.mkdir()
+    (jail / "alias").symlink_to(outside)
+    seen: list[tuple[str, dict[str, Any]]] = []
+    result, _ = _call(
+        "record_start",
+        tmp_path,
+        monkeypatch,
+        context=_ctx(tmp_path, confinement_root=str(jail)),
+        path=str(jail / "alias" / "clip.mp4"),
+        calls=seen,
+    )
+    assert result.is_error
+    assert seen == []
+    assert "confined" in result.text
+
+
+def test_start_resolves_a_symlink_parent_that_stays_inside(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An in-workspace link directory is normalised: the wire carries the real path.
+
+    The approval prompt and the host must both be promised the same file, so the
+    resolved spelling is what travels — never the alias the model typed.
+    """
+    real = tmp_path / "real"
+    real.mkdir()
+    (tmp_path / "alias").symlink_to(real)
+    result, seen = _call(
+        "record_start", tmp_path, monkeypatch, path=str(tmp_path / "alias" / "clip.mp4")
+    )
+    assert not result.is_error
+    assert seen[0][1]["path"] == str(real / "clip.mp4")
+
+
 # ---------------------------------------------------------------------------
 # The stop is judged from disk (D5), never from the host's account alone
 # ---------------------------------------------------------------------------
@@ -554,6 +706,75 @@ def test_a_closed_tab_drops_the_pinned_surface(
 # ---------------------------------------------------------------------------
 
 
+def test_stop_must_report_the_path_that_was_approved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A different file is refused, naming BOTH paths (review round 1, R1-3).
+
+    Without the comparison Python certified whatever absolute `.mp4` the host
+    named — the approval covered one file and the receipt vouched for another.
+    """
+    approved = tmp_path / "approved.mp4"
+    other = tmp_path / "other.mp4"
+    start, stop, _state, _seen = _run_pair(
+        tmp_path,
+        monkeypatch,
+        start_path=str(approved),
+        stop_reply={"path": str(other), "bytes": len(MP4_HEAD), "duration_ms": 1},
+        host_writes=other,
+    )
+    assert not start.is_error
+    assert stop.is_error
+    assert str(other) in stop.text
+    assert str(approved) in stop.text
+    assert "nothing is reported as saved" in stop.text.lower()
+
+
+def test_stop_accepts_the_approved_path_and_forgets_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "clip.mp4"
+    start, stop, state, _seen = _run_pair(
+        tmp_path,
+        monkeypatch,
+        start_path=str(target),
+        stop_reply={
+            "path": str(target),
+            "bytes": len(MP4_HEAD),
+            "duration_ms": 1000,
+            "auto_stopped": False,
+        },
+        host_writes=target,
+    )
+    assert not start.is_error
+    assert not stop.is_error
+    assert stop.details == {"path": str(target), "bytes": len(MP4_HEAD)}
+    # The approval is consumed by the stop that used it: a second stop must not
+    # compare against a recording that no longer exists.
+    assert state.surface_id not in builtin._APPROVED_RECORDINGS
+
+
+def test_stop_without_a_remembered_approval_still_checks_the_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A resumed process has no approval memory; the structural checks remain.
+
+    The receipt is honest about what was verified: the file is there, its size
+    matches the host's report and it is an MP4 — not that it is the approved one.
+    """
+    target = tmp_path / "clip.mp4"
+    junk = b"not-an-mp4-at-all"
+    target.write_bytes(junk)
+    result, _ = _call(
+        "record_stop",
+        tmp_path,
+        monkeypatch,
+        reply={"path": str(target), "bytes": len(junk), "duration_ms": 1},
+    )
+    assert result.is_error
+    assert "mp4" in result.text.lower()
+
+
 def _wire_error(code: ErrorCode, reason: str, **data: Any) -> BridgeError:
     return BridgeError(code, "host text", {"reason": reason, **data})
 
@@ -561,10 +782,14 @@ def _wire_error(code: ErrorCode, reason: str, **data: Any) -> BridgeError:
 @pytest.mark.parametrize(
     "reason, needle, extra",
     [
-        ("record_unsupported", "Chromium 153", {}),
+        # The payloads are the HOST's shapes (`recording.ts`): `chromium` is a
+        # NUMBER major version, `age_ms` is integer milliseconds, `limit` and
+        # `max_bytes` are numbers. A test with invented string fields cannot
+        # catch a unit mismatch — which is how R1-1 shipped.
+        ("record_unsupported", "Chromium 152", {"chromium": 152}),
         ("record_av1_unavailable", "AV1", {}),
         ("record_path", "path", {}),
-        ("record_active", "already", {}),
+        ("record_active", "already", {"path": "/tmp/clip.mp4", "age_ms": 12000}),
         ("record_not_active", "nothing to stop", {}),
         ("record_limit", "2", {"limit": 2}),
         ("record_too_large", "shorter", {"max_bytes": browser_files.RECORD_MAX_BYTES}),
@@ -582,9 +807,28 @@ def test_every_record_reason_renders_its_own_copy(
     assert needle.lower() in message.lower()
 
 
+def test_record_active_renders_the_host_age_in_seconds() -> None:
+    """`age_ms` from the host becomes seconds in the copy (review round 1, R1-1)."""
+    message = format_error(
+        _wire_error(ErrorCode.BUSY, "record_active", path="/tmp/clip.mp4", age_ms=12500),
+        action="record_start",
+        host=HOST_UI,
+    )
+    assert "12.5 s ago" in message
+    assert "/tmp/clip.mp4" in message
+
+
+def test_record_active_without_an_age_says_so_without_inventing_one() -> None:
+    message = format_error(
+        _wire_error(ErrorCode.BUSY, "record_active"), action="record_start", host=HOST_UI
+    )
+    assert "started" not in message
+    assert "already running" in message
+
+
 def test_unsupported_names_the_chromium_version_the_host_reported() -> None:
     message = format_error(
-        _wire_error(ErrorCode.INTERNAL, "record_unsupported", chromium="152.0.7977.78"),
+        _wire_error(ErrorCode.INTERNAL, "record_unsupported", chromium=152),
         action="record_start",
         host=HOST_UI,
     )

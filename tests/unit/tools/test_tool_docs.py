@@ -359,12 +359,14 @@ MEASURED_TOKENS: dict[str, int] = {
     # the field's own description to the doc — the deliberate cost of the value
     # never appearing in the transcript (a literal password in `type` reached a
     # subagent's transcript, where no shape pass could see it).
-    # 1424 -> 1801 (browser recording, D8): two ops (`record_start`,
-    # `record_stop`) and one note replacing the prose the guide carries in full
-    # (the AV1 caveat, the approval-before-capture rule, the desktop-only host).
-    # The schema must advertise the pair or the feature is undiscoverable, and
-    # the fixed caps/limits live in `guide://browser` instead of here. Measured
-    # by this test's own print; no other tool's entry moved.
+    # 1655 -> 1801 (browser recording, D8, +146): two ops (`record_start`,
+    # `record_stop`) and one note. The note replaces the prose the guide carries
+    # in full (the AV1 caveat, the approval-before-capture rule, the desktop-only
+    # host), and the fixed caps/limits live in `guide://browser` instead of here.
+    # The schema must advertise the pair or the feature is undiscoverable.
+    # Measured by this test's own print; no other tool's entry moved. (The step
+    # is 1655 -> 1801, not 1424 -> 1801: 1424 was two ledger baselines ago,
+    # review round 1 R1-6.)
     "browser": 1801,
     # NEW (code-requests PR1b): the ``code_requests`` doc — relation and lane
     # vocabulary, the freshness rule and the data-not-instructions framing.
