@@ -154,6 +154,27 @@ def test_the_budget_is_measured_over_the_bodies_and_refuses_the_message(skills) 
     assert raised.value.budget == 127
 
 
+def test_the_budget_is_the_escaped_size_the_frame_carries(skills) -> None:
+    """A body at the budget in RAW bytes is 3x the budget in an ASCII-only frame.
+
+    ``fit_request_frame`` sizes ``json.dumps(frame)`` with ``ensure_ascii=True``,
+    where an emoji is a surrogate pair (twelve bytes) and a CJK character six,
+    so counting UTF-8 bytes let a body of exactly 384 KiB build a 1.125 MiB
+    frame that the transport refused with a bare ``OversizedRequest`` — a 422
+    with no ``skills_too_large`` for the phone to key a notice on (agent review
+    round 1, R-MINOR-1).
+    """
+    emoji = "\U0001f600" * (SKILL_BODY_BUDGET_BYTES // 4)
+    assert len(emoji.encode("utf-8")) == SKILL_BODY_BUDGET_BYTES
+    with pytest.raises(SkillPayloadTooLarge) as raised:
+        expand_invocation("$research", skills, reader({"research": emoji}))
+    # The refusal names the size the FRAME sees: twelve escaped bytes per emoji
+    # against four raw ones, so a body equal to the budget in raw bytes is
+    # three times the budget on the wire.
+    assert raised.value.size == 3 * SKILL_BODY_BUDGET_BYTES
+    assert raised.value.budget == SKILL_BODY_BUDGET_BYTES
+
+
 def test_the_default_budget_is_the_documented_bound() -> None:
     """384 KiB: a bound the relay's frame can carry, not a measurement."""
     assert SKILL_BODY_BUDGET_BYTES == 384 * 1024

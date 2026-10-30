@@ -1960,7 +1960,7 @@ def _skill_rows(daemon: "MobileDaemon", session_id: str) -> list[dict[str, Any]]
 
     Sorted by name so two reads of an unchanged tree produce the same bytes (a
     picker that reorders under the operator's finger is a different bug class
-    from a wrong list), and capped at ``_SKILL_ROW_MAX`` so a pathological tree
+    from a wrong list), and capped at ``_SKILL_ROWS_MAX`` so a pathological tree
     cannot make this answer unbounded.
     """
     skills = _session_skills(daemon, session_id)
@@ -7991,7 +7991,15 @@ def build_app(daemon: MobileDaemon):
             # path forwards ``**body`` and the cold path builds its
             # ``ContinuationCommand`` from the same dict, so one assignment
             # covers both and neither can send the unexpanded text.
-            if expand_skills and op in ("prompt", "steer"):
+            #
+            # A COLD STEER IS EXCLUDED because its destination does not exist:
+            # with no entry the route below raises the 409, so expanding first
+            # spent a discovery walk plus one read per body on a request that
+            # was already a refusal (agent review round 1, R-MINOR-4). A cold
+            # PROMPT is the opposite — the wake path builds its command from
+            # this same dict — so it must still expand.
+            cold_steer = op == "steer" and entry is None
+            if expand_skills and op in ("prompt", "steer") and not cold_steer:
                 text = body.get("text")
                 if isinstance(text, str):
                     from local_operator.skills.invoke import SkillPayloadTooLarge

@@ -62,6 +62,7 @@ operator merely quoted is not a block and is never hidden. The older
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Callable, Mapping, Sequence
 from typing import NamedTuple, TypeGuard
@@ -94,7 +95,7 @@ __all__ = [
     "typed_line_of",
 ]
 
-#: The most a single message may attach as skill bodies, in UTF-8 bytes.
+#: The most a single message may attach as skill bodies, in WIRE bytes.
 #:
 #: A BOUND, not a measurement: a relay control frame is one JSON line with a
 #: 1 MiB ceiling (``session.runtime.server._MAX_LINE_BYTES``), and the user's
@@ -102,12 +103,36 @@ __all__ = [
 #: the frame room while still carrying a SKILL.md far larger than any
 #: hand-written one. The design doc's 8-skill / 48k-token cap is NOT
 #: implemented on main, so this does not pretend to be it (SKM-D4).
+#:
+#: WIRE bytes, meaning what ``_wire_bytes`` counts, because that is what the
+#: frame limit itself measures: ``fit_request_frame`` weighs
+#: ``json.dumps(frame)`` with its default ``ensure_ascii=True``. Counting raw
+#: UTF-8 let this 384 KiB budget build a 1.125 MiB emoji frame that the
+#: transport refused as a bare ``OversizedRequest`` — a 422 the phone could not
+#: key ``skills_too_large`` on (agent review round 1, R-MINOR-1).
 SKILL_BODY_BUDGET_BYTES = 384 * 1024
 
 #: The opening tag of a rendered payload, capturing the typed line stored in
 #: its ``invocation`` attribute. Anchored to the tag rather than searched
 #: loosely so ordinary prose quoting the words cannot be mistaken for one.
 _INVOCATION_TAG_RE = re.compile(r'<skill name="[^"]*" invocation="([^"]*)">')
+
+
+def _wire_bytes(body: str) -> int:
+    """How many bytes this body adds to the relay's JSON control frame.
+
+    MEASURED THE WAY THE FRAME IS: ``fit_request_frame`` takes
+    ``len(json.dumps(frame).encode())`` with the default ``ensure_ascii=True``,
+    so a body is weighed in ESCAPED characters — one per ASCII letter, six per
+    Latin-1/Greek/Cyrillic or CJK character, twelve per emoji (a surrogate
+    pair). Raw UTF-8 bytes undercount every one of those, by up to 3x for a
+    two-byte character.
+
+    The two quote characters ``json.dumps`` wraps the string in are subtracted:
+    they belong to the frame, not to this body, so summing several bodies sums
+    exactly the text each one contributes.
+    """
+    return len(json.dumps(body)) - 2
 
 
 class SkillAttachment(NamedTuple):
@@ -216,7 +241,9 @@ class SkillPayloadTooLarge(ValueError):
     """
 
     def __init__(self, size: int, budget: int) -> None:
-        super().__init__(f"skill bodies total {size} bytes, over the {budget} byte budget")
+        super().__init__(
+            f"skill bodies total {size} bytes on the wire, over the {budget} byte budget"
+        )
         self.size = size
         self.budget = budget
 
@@ -294,7 +321,7 @@ def expand_invocation(
         if not skill_body_has_content(body):
             skipped.append(SkippedBody(name, "empty"))
             continue
-        total += len(body.encode("utf-8"))
+        total += _wire_bytes(body)
         if total > body_budget:
             raise SkillPayloadTooLarge(total, body_budget)
         entries.append((name, body))
