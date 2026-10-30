@@ -21,6 +21,7 @@ the phone joins all three into one compacted line.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Mapping
 from typing import Any
 
@@ -83,6 +84,11 @@ _VERBS: dict[str, tuple[Callable[[], Msg], Callable[[], Msg], Callable[[], Msg]]
     ),
     "ack-done": (_k.verb_settled_ack_done, _k.verb_running_ack_done, _k.verb_failed_ack_done),
 }
+#: ``ack`` with no state is refused by the executor (``ack needs message_id and
+#: state``) — but it is still a documented op, so its refusal must not borrow the
+#: unknown-op copy (``Used Team Bridge ack``; review round 1, R3). It reads as the
+#: claim it most often is ("Couldn't claim a message"), with no new copy to audit.
+_VERBS["ack"] = _VERBS["ack-working"]
 _UNKNOWN_VERBS = (_k.verb_settled_unknown, _k.verb_running_unknown, _k.verb_failed_unknown)
 
 #: Actions whose verb is a complete phrase: no target follows, only a count.
@@ -96,7 +102,13 @@ _FAILED_OUTCOMES = frozenset({"refused", "failed"})
 
 
 def _target_text(row: Mapping[str, Any], *, in_thread: bool) -> str:
-    """The rendered target: ``#name``, a bare person/DM label, or a kind noun."""
+    """The rendered target: ``#name``, a bare person/DM label, or a kind noun.
+
+    ``in_thread`` appends the ``{label} thread`` suffix. Callers pass it only
+    for a ``channel_post`` reply: ``channel_thread`` also carries a
+    ``thread_root_id``, but its verb already says ``Read thread in``, and the
+    suffix painted ``Read thread in #general thread``.
+    """
     raw = row.get("target")
     target: Mapping[str, Any] = raw if isinstance(raw, Mapping) else {}
     kind = target.get("kind")
@@ -131,14 +143,27 @@ def _count_text(action: str, count: object) -> str:
     return ""
 
 
-def outcome_word(row: Mapping[str, Any]) -> str | None:
+def outcome_word(row: Mapping[str, Any], *, short: bool = False) -> str | None:
     """The status-cap word for a non-plain outcome, or None for a plain one.
 
     ``refused``/``failed`` carry the machine code after `` · `` (never
     translated: it is what an operator searches for).
+
+    ``short`` is the narrow-row form (``not posted``, ``awaiting``,
+    ``unconfirmed``): the TUI caps its status column at a third of the row, and
+    below the width where the full word fits that third the short word keeps
+    the distinction instead of eating the summary. ``refused``/``failed`` are
+    already one word, so they have no short form; the full sentence always
+    stays in the expanded card.
     """
     outcome = row.get("outcome")
     code = row.get("code") if isinstance(row.get("code"), str) else None
+    if short and outcome == "inbox_only":
+        return _t(_k.outcome_short_inbox_only())
+    if short and outcome == "awaiting_acceptance":
+        return _t(_k.outcome_short_awaiting_acceptance())
+    if short and outcome == "unconfirmed":
+        return _t(_k.outcome_short_unconfirmed())
     if outcome == "inbox_only":
         return _t(_k.outcome_inbox_only())
     if outcome == "refused":
@@ -175,6 +200,7 @@ def render_bridge_row(
     """
     action = str(row.get("action") or "")
     outcome = row.get("outcome")
+    in_thread = in_thread and action == "channel_post"
     keys = _VERBS.get(action)
     known = keys is not None
     settled, live, failed_verb = keys if keys is not None else _UNKNOWN_VERBS
@@ -221,7 +247,7 @@ def bridge_row_line(
     return f"{line} · {outcome}" if outcome else line
 
 
-#: Internal fields the expanded card shows LAST, under a "details" label. Order
+#: Internal fields the expanded card shows LAST, under a "Details" heading. Order
 #: is the order a debugging reader needs: where, which message, then the
 #: delivery-stage receipts, then the raw text the model saw.
 _INTERNAL_FIELDS = (
@@ -243,6 +269,56 @@ _INTERNAL_FIELDS = (
 )
 
 
+#: An opaque Team Bridge id inside free error text (``conversation bcv_… is
+#: archived``). Same prefixes as ``rows._BRIDGE_ID_PREFIXES``, matched
+#: case-insensitively as the label filter there is.
+_ID_TOKEN_RE = re.compile(r"\b(bcv|bcmsg|acc|ep)_[A-Za-z0-9_-]+", re.IGNORECASE)
+
+
+def _scrub_ids(error: str, row: Mapping[str, Any]) -> str:
+    """``error`` with its raw ids replaced by words a reader can use.
+
+    The expanded sentence is the readable account; the ids belong under
+    ``Details``, where the raw ``error`` is NOT shown either but the ``code``
+    and the conversation/message ids are. A conversation id becomes the row's
+    own target (``#ops`` or "a conversation"); any other id becomes ``…``.
+    The desktop's twin makes the same substitution (UI PR #1529).
+    """
+    if not error:
+        return error
+    target = _target_text(row, in_thread=False) or _t(_k.target_conversation())
+
+    def swap(match: re.Match[str]) -> str:
+        return target if match.group(1).lower() == "bcv" else "…"
+
+    return _ID_TOKEN_RE.sub(swap, error)
+
+
+def _refusal_sentence(error: str, code: str, *, failed: bool) -> str:
+    """The refused/failed sentence without empty slots (never ``Refused:  ()``).
+
+    A refusal can arrive with no message, no code, or neither (an executor
+    exception path, a hub that answers with a bare status), so each shape has
+    its own key rather than an ICU select a translator would have to keep
+    whole across four arms.
+    """
+    if failed:
+        if error and code:
+            return _t(_k.expanded_failed(error=error, code=code))
+        if error:
+            return _t(_k.expanded_failed_error(error=error))
+        if code:
+            return _t(_k.expanded_failed_code(code=code))
+        return _t(_k.expanded_failed_bare())
+    if error and code:
+        return _t(_k.expanded_refused(error=error, code=code))
+    if error:
+        return _t(_k.expanded_refused_error(error=error))
+    if code:
+        return _t(_k.expanded_refused_code(code=code))
+    return _t(_k.expanded_refused_bare())
+
+
 def bridge_expanded(
     row: Mapping[str, Any],
     args: Mapping[str, Any],
@@ -254,7 +330,7 @@ def bridge_expanded(
 
     ``body`` is the raw (markdown) text the call wrote, for the host to render;
     ``outcome`` the keyed sentence; ``internals`` ``[(field, value)]`` pairs,
-    shown last behind a disclosure (desktop) or a dim label (TUI). Identifiers
+    shown last behind a disclosure (desktop) or a section heading (TUI). Identifiers
     live ONLY in ``internals``: the readable parts never show one.
     """
     details = details if isinstance(details, Mapping) else {}
@@ -263,7 +339,12 @@ def bridge_expanded(
     # Always the SETTLED form: an expansion is drawn only for a settled card.
     verb, summary, _word = render_bridge_row(row, running=False, in_thread=in_thread, failed=failed)
     if action == "dm":
-        target = _target_text(row, in_thread=False)
+        # A DM's headline names the PERSON: the bare kind fallback painted
+        # "Direct message to a DM" (relay round 1), so an unlabelled one reads
+        # "Direct message to a teammate".
+        raw = row.get("target")
+        label = raw.get("label") if isinstance(raw, Mapping) else None
+        target = label if isinstance(label, str) and label else _t(_k.target_person())
         headline = _t(_k.expanded_dm_headline(label=target))
     else:
         head = summary.split(" · ", 1)[0] if summary else ""
@@ -277,21 +358,32 @@ def bridge_expanded(
     if not body and isinstance(details.get("text"), str):
         body = details["text"]
     outcome = row.get("outcome")
-    error = str(details.get("error") or "")
+    error = _scrub_ids(str(details.get("error") or ""), row)
     code = str(details.get("code") or "")
     sentence = ""
     if outcome == "inbox_only":
         sentence = _t(_k.expanded_inbox_only())
     elif outcome == "refused":
-        sentence = _t(_k.expanded_refused(error=error, code=code))
+        sentence = _refusal_sentence(error, code, failed=False)
     elif outcome == "failed":
-        sentence = _t(_k.expanded_failed(error=error, code=code))
+        sentence = _refusal_sentence(error, code, failed=True)
     elif outcome == "unconfirmed":
-        sentence = _t(_k.expanded_unconfirmed(error=error))
+        sentence = (
+            _t(_k.expanded_unconfirmed(error=error))
+            if error
+            else _t(_k.expanded_unconfirmed_bare())
+        )
     elif outcome == "awaiting_acceptance":
         sentence = _t(
             _k.expanded_awaiting_acceptance(state=str(details.get("recipient_state") or ""))
         )
+    elif details.get("ok") is True and details.get("state") == "reacted":
+        # `react` answers `state: reacted|removed` and no seq, so the plain-post
+        # arm below never fired and the card said nothing about whether the
+        # reaction landed (review round 1, NIT-2).
+        sentence = _t(_k.expanded_reacted())
+    elif details.get("ok") is True and details.get("state") == "removed":
+        sentence = _t(_k.expanded_reaction_removed())
     elif details.get("ok") is True and details.get("state") == "sent":
         seq = details.get("seq")
         if isinstance(seq, int) and not isinstance(seq, bool):
@@ -299,14 +391,33 @@ def bridge_expanded(
         else:
             sentence = _t(_k.expanded_posted())
     internals: list[tuple[str, str]] = []
+    values: dict[str, Any] = {}
     for field in _INTERNAL_FIELDS:
         value = details.get(field, args.get(field) if field not in ("code", "content") else None)
         if value is None or value == "":
             continue
-        internals.append((field, str(value)))
+        values[field] = value
+    # One destination, one name (design round 1, D2): the call addresses a
+    # `channel_id` and the receipt answers `conversation_id`; when they are the
+    # same id, two key names told a reader diagnosing a misroute that the post
+    # went to a conversation AND a channel, a distinction that does not exist.
+    if values.get("channel_id") == values.get("conversation_id"):
+        values.pop("channel_id", None)
+    # A write receipt's `content` (`posted to bcv_…: message bcmsg_… at seq 42`)
+    # restates the id, message id and seq already listed above it. A receipt
+    # with no message id ("accepted, but the hub returned no message id"), a
+    # pair-lane inbox note and a read's payload all say something the fields do
+    # not, so they stay.
+    if details.get("state") == "sent" and values.get("message_id"):
+        values.pop("content", None)
+    for field, value in values.items():
+        # JSON spelling, not the Python repr: the desktop paints `false` for the
+        # same field, and `False` read as a stray code token (design D5).
+        text = ("true" if value else "false") if isinstance(value, bool) else str(value)
+        internals.append((field, text))
     return {"headline": headline, "body": body, "outcome": sentence, "internals": internals}
 
 
 def details_label() -> str:
-    """The dim label above :func:`bridge_expanded`'s internals."""
+    """The section heading above :func:`bridge_expanded`'s internals."""
     return _t(_k.expanded_details())

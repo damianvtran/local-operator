@@ -22,7 +22,7 @@
   "wire.tool_rows.bridge.expanded.details": {
     "role": "Team Bridge tool row (TUI tool card and phone transcript row)",
     "tone": "plain",
-    "note": "Dim section label above the internal fields (conversation id, message id, seq, raw content) at the end of the expanded card. Lowercase in English, like the card's other dim labels. English source only until the independent translation/audit wave carries this namespace; missing locales fall back to English."
+    "note": "Section heading (bold, after a blank line) above the internal fields (conversation id, message id, seq, raw content) at the end of the expanded card. Capitalised as a heading, matching the desktop's 'Details' disclosure row; changed from the earlier lowercase dim label in design review round 1 (D6). English source only until the independent translation/audit wave carries this namespace; missing locales fall back to English."
   },
   "wire.tool_rows.bridge.expanded.dm_headline": {
     "role": "Team Bridge tool row (TUI tool card and phone transcript row)",
@@ -33,6 +33,21 @@
     "role": "Team Bridge tool row (TUI tool card and phone transcript row)",
     "tone": "plain",
     "note": "Outcome sentence for a failed call. {error} is the tool's own English diagnostic and {code} a machine code; neither is translated. English source only until the independent translation/audit wave carries this namespace; missing locales fall back to English."
+  },
+  "wire.tool_rows.bridge.expanded.failed_bare": {
+    "role": "Team Bridge tool row (TUI tool card and phone transcript row)",
+    "tone": "plain",
+    "note": "Expanded-card sentence when a Team Bridge call failed with neither a reason nor a code. English source only until the independent translation/audit wave carries this namespace; missing locales fall back to English."
+  },
+  "wire.tool_rows.bridge.expanded.failed_code": {
+    "role": "Team Bridge tool row (TUI tool card and phone transcript row)",
+    "tone": "plain",
+    "note": "Expanded-card sentence when a Team Bridge call failed with a code but no reason text. {code} is a machine code such as not_permitted; never translate it. English source only until the independent translation/audit wave carries this namespace; missing locales fall back to English."
+  },
+  "wire.tool_rows.bridge.expanded.failed_error": {
+    "role": "Team Bridge tool row (TUI tool card and phone transcript row)",
+    "tone": "plain",
+    "note": "Expanded-card sentence when a Team Bridge call failed and the result carried a reason but no code. {error} is the server's reason text (data, not copy; ids already replaced by the target name or '…'). English source only until the independent translation/audit wave carries this namespace; missing locales fall back to English."
   },
   "wire.tool_rows.bridge.expanded.inbox_only": {
     "role": "Team Bridge tool row (TUI tool card and phone transcript row)",
@@ -49,15 +64,45 @@
     "tone": "plain",
     "note": "Outcome sentence in the expanded card after a conversation write. {seq} is the message's sequence number in the conversation (a plain integer; 'seq' is a technical term the operator sees elsewhere). English source only until the independent translation/audit wave carries this namespace; missing locales fall back to English."
   },
+  "wire.tool_rows.bridge.expanded.reacted": {
+    "role": "Team Bridge tool row (TUI tool card and phone transcript row)",
+    "tone": "plain",
+    "note": "Outcome sentence in the expanded card after a reaction was added to a message. English source only until the independent translation/audit wave carries this namespace; missing locales fall back to English."
+  },
+  "wire.tool_rows.bridge.expanded.reaction_removed": {
+    "role": "Team Bridge tool row (TUI tool card and phone transcript row)",
+    "tone": "plain",
+    "note": "Outcome sentence in the expanded card after the agent removed its own reaction from a message. English source only until the independent translation/audit wave carries this namespace; missing locales fall back to English."
+  },
   "wire.tool_rows.bridge.expanded.refused": {
     "role": "Team Bridge tool row (TUI tool card and phone transcript row)",
     "tone": "plain",
     "note": "Outcome sentence for a refused call. {error} is the tool's own English diagnostic and {code} a machine code; neither is translated. English source only until the independent translation/audit wave carries this namespace; missing locales fall back to English."
   },
+  "wire.tool_rows.bridge.expanded.refused_bare": {
+    "role": "Team Bridge tool row (TUI tool card and phone transcript row)",
+    "tone": "plain",
+    "note": "Expanded-card sentence when a Team Bridge call was refused with neither a reason nor a code. English source only until the independent translation/audit wave carries this namespace; missing locales fall back to English."
+  },
+  "wire.tool_rows.bridge.expanded.refused_code": {
+    "role": "Team Bridge tool row (TUI tool card and phone transcript row)",
+    "tone": "plain",
+    "note": "Expanded-card sentence when a Team Bridge call was refused with a code but no reason text. {code} is a machine code such as not_permitted; never translate it. English source only until the independent translation/audit wave carries this namespace; missing locales fall back to English."
+  },
+  "wire.tool_rows.bridge.expanded.refused_error": {
+    "role": "Team Bridge tool row (TUI tool card and phone transcript row)",
+    "tone": "plain",
+    "note": "Expanded-card sentence when a Team Bridge call was refused and the result carried a reason but no code. {error} is the server's reason text (data, not copy; ids already replaced by the target name or '…'). English source only until the independent translation/audit wave carries this namespace; missing locales fall back to English."
+  },
   "wire.tool_rows.bridge.expanded.unconfirmed": {
     "role": "Team Bridge tool row (TUI tool card and phone transcript row)",
     "tone": "plain",
     "note": "Outcome sentence when the hub did not confirm a post/send. {error} is the tool's own English diagnostic. It may have landed — do not say it failed. English source only until the independent translation/audit wave carries this namespace; missing locales fall back to English."
+  },
+  "wire.tool_rows.bridge.expanded.unconfirmed_bare": {
+    "role": "Team Bridge tool row (TUI tool card and phone transcript row)",
+    "tone": "plain",
+    "note": "Expanded-card sentence when the hub may have taken a post but did not confirm it, and no reason text came back. Must not say 'failed': the post may have landed. English source only until the independent translation/audit wave carries this namespace; missing locales fall back to English."
   },
   "wire.tool_rows.bridge.outcome.awaiting_acceptance": {
     "role": "Team Bridge tool row (TUI tool card and phone transcript row)",
@@ -88,6 +133,24 @@
     "tone": "plain",
     "note": "Status word for a post/send the hub may have accepted but did not confirm — it might have landed, so this must not say 'failed'. English source only until the independent translation/audit wave carries this namespace; missing locales fall back to English.",
     "maxCells": 32
+  },
+  "wire.tool_rows.bridge.outcome_short.awaiting_acceptance": {
+    "role": "Team Bridge tool row (TUI tool card and phone transcript row)",
+    "tone": "plain",
+    "note": "Narrow-row form of outcome.awaiting_acceptance ('awaiting acceptance'), used when the status column is too narrow for the full word: a DM posted to an agent whose owner has not yet accepted it. Warning ink. Must stay very short. English source only until the independent translation/audit wave carries this namespace; missing locales fall back to English.",
+    "maxCells": 14
+  },
+  "wire.tool_rows.bridge.outcome_short.inbox_only": {
+    "role": "Team Bridge tool row (TUI tool card and phone transcript row)",
+    "tone": "plain",
+    "note": "Narrow-row form of outcome.inbox_only ('not posted to a conversation'), used when the status column is too narrow for the full word: a pair-lane send/reply accepted only into the peer's private inbox, NOT visible in any conversation. Warning (amber) ink beside a success mark. Must stay very short and must not read as a success. English source only until the independent translation/audit wave carries this namespace; missing locales fall back to English.",
+    "maxCells": 14
+  },
+  "wire.tool_rows.bridge.outcome_short.unconfirmed": {
+    "role": "Team Bridge tool row (TUI tool card and phone transcript row)",
+    "tone": "plain",
+    "note": "Narrow-row form of outcome.unconfirmed ('delivery unconfirmed'), used when the status column is too narrow for the full word: the hub may have accepted the post but did not confirm it, so it must not say 'failed'. Warning ink. Must stay very short. English source only until the independent translation/audit wave carries this namespace; missing locales fall back to English.",
+    "maxCells": 14
   },
   "wire.tool_rows.bridge.target.conversation": {
     "role": "Team Bridge tool row (TUI tool card and phone transcript row)",
@@ -187,7 +250,7 @@
   "wire.tool_rows.bridge.verb_failed.shared_history": {
     "role": "Team Bridge tool row verb (TUI tool card and phone transcript row)",
     "tone": "plain, negative past",
-    "note": "Leading verb phrase of the collapsed row for the bridge 'shared_history' operation, when the call was refused or failed. It is followed on the same row by the target (a #channel name, a person's or DM's display name, or a fallback noun such as 'a conversation'), so it must read as the start of a phrase whose object comes next. No ICU arguments; the row truncates from the right, so keep it short. English source only until the independent translation/audit wave carries this namespace; missing locales fall back to English."
+    "note": "Leading verb phrase of the collapsed row for the bridge 'shared_history' operation, when the call was refused or failed. It is followed on the same row by the target (a #channel name, a person's or DM's display name, or a fallback noun such as 'a conversation'), so it must read as the start of a phrase whose object comes next. Changed in review round 1: the earlier 'Read shared' did not compose with the target ('Read shared a conversation'); 'shared conversation' names what was read, and the target that follows is that conversation's name. With no name the row reads 'Read shared conversation (4 messages)'. No ICU arguments; the row truncates from the right, so keep it short. English source only until the independent translation/audit wave carries this namespace; missing locales fall back to English."
   },
   "wire.tool_rows.bridge.verb_failed.take_up": {
     "role": "Team Bridge tool row verb (TUI tool card and phone transcript row)",
@@ -272,7 +335,7 @@
   "wire.tool_rows.bridge.verb_running.shared_history": {
     "role": "Team Bridge tool row verb (TUI tool card and phone transcript row)",
     "tone": "plain, progressive",
-    "note": "Leading verb phrase of the collapsed row for the bridge 'shared_history' operation, while the call is still running. It is followed on the same row by the target (a #channel name, a person's or DM's display name, or a fallback noun such as 'a conversation'), so it must read as the start of a phrase whose object comes next. No ICU arguments; the row truncates from the right, so keep it short. English source only until the independent translation/audit wave carries this namespace; missing locales fall back to English."
+    "note": "Leading verb phrase of the collapsed row for the bridge 'shared_history' operation, while the call is still running. It is followed on the same row by the target (a #channel name, a person's or DM's display name, or a fallback noun such as 'a conversation'), so it must read as the start of a phrase whose object comes next. Changed in review round 1: the earlier 'Read shared' did not compose with the target ('Read shared a conversation'); 'shared conversation' names what was read, and the target that follows is that conversation's name. With no name the row reads 'Read shared conversation (4 messages)'. No ICU arguments; the row truncates from the right, so keep it short. English source only until the independent translation/audit wave carries this namespace; missing locales fall back to English."
   },
   "wire.tool_rows.bridge.verb_running.take_up": {
     "role": "Team Bridge tool row verb (TUI tool card and phone transcript row)",
@@ -357,7 +420,7 @@
   "wire.tool_rows.bridge.verb_settled.shared_history": {
     "role": "Team Bridge tool row verb (TUI tool card and phone transcript row)",
     "tone": "plain, past tense",
-    "note": "Leading verb phrase of the collapsed row for the bridge 'shared_history' operation, after the call returned successfully. It is followed on the same row by the target (a #channel name, a person's or DM's display name, or a fallback noun such as 'a conversation'), so it must read as the start of a phrase whose object comes next. No ICU arguments; the row truncates from the right, so keep it short. English source only until the independent translation/audit wave carries this namespace; missing locales fall back to English."
+    "note": "Leading verb phrase of the collapsed row for the bridge 'shared_history' operation, after the call returned successfully. It is followed on the same row by the target (a #channel name, a person's or DM's display name, or a fallback noun such as 'a conversation'), so it must read as the start of a phrase whose object comes next. Changed in review round 1: the earlier 'Read shared' did not compose with the target ('Read shared a conversation'); 'shared conversation' names what was read, and the target that follows is that conversation's name. With no name the row reads 'Read shared conversation (4 messages)'. No ICU arguments; the row truncates from the right, so keep it short. English source only until the independent translation/audit wave carries this namespace; missing locales fall back to English."
   },
   "wire.tool_rows.bridge.verb_settled.take_up": {
     "role": "Team Bridge tool row verb (TUI tool card and phone transcript row)",

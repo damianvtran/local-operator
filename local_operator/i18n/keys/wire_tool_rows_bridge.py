@@ -38,6 +38,18 @@ def expanded_failed(*, error: str, code: str) -> Msg:
     return Msg("wire.tool_rows.bridge.expanded.failed", {"error": error, "code": code})
 
 
+def expanded_failed_bare() -> Msg:
+    return Msg("wire.tool_rows.bridge.expanded.failed_bare", {})
+
+
+def expanded_failed_code(*, code: str) -> Msg:
+    return Msg("wire.tool_rows.bridge.expanded.failed_code", {"code": code})
+
+
+def expanded_failed_error(*, error: str) -> Msg:
+    return Msg("wire.tool_rows.bridge.expanded.failed_error", {"error": error})
+
+
 def expanded_inbox_only() -> Msg:
     return Msg("wire.tool_rows.bridge.expanded.inbox_only", {})
 
@@ -50,12 +62,36 @@ def expanded_posted_at(*, seq: str) -> Msg:
     return Msg("wire.tool_rows.bridge.expanded.posted_at", {"seq": seq})
 
 
+def expanded_reacted() -> Msg:
+    return Msg("wire.tool_rows.bridge.expanded.reacted", {})
+
+
+def expanded_reaction_removed() -> Msg:
+    return Msg("wire.tool_rows.bridge.expanded.reaction_removed", {})
+
+
 def expanded_refused(*, error: str, code: str) -> Msg:
     return Msg("wire.tool_rows.bridge.expanded.refused", {"error": error, "code": code})
 
 
+def expanded_refused_bare() -> Msg:
+    return Msg("wire.tool_rows.bridge.expanded.refused_bare", {})
+
+
+def expanded_refused_code(*, code: str) -> Msg:
+    return Msg("wire.tool_rows.bridge.expanded.refused_code", {"code": code})
+
+
+def expanded_refused_error(*, error: str) -> Msg:
+    return Msg("wire.tool_rows.bridge.expanded.refused_error", {"error": error})
+
+
 def expanded_unconfirmed(*, error: str) -> Msg:
     return Msg("wire.tool_rows.bridge.expanded.unconfirmed", {"error": error})
+
+
+def expanded_unconfirmed_bare() -> Msg:
+    return Msg("wire.tool_rows.bridge.expanded.unconfirmed_bare", {})
 
 
 def outcome_awaiting_acceptance() -> Msg:
@@ -76,6 +112,18 @@ def outcome_refused() -> Msg:
 
 def outcome_unconfirmed() -> Msg:
     return Msg("wire.tool_rows.bridge.outcome.unconfirmed", {})
+
+
+def outcome_short_awaiting_acceptance() -> Msg:
+    return Msg("wire.tool_rows.bridge.outcome_short.awaiting_acceptance", {})
+
+
+def outcome_short_inbox_only() -> Msg:
+    return Msg("wire.tool_rows.bridge.outcome_short.inbox_only", {})
+
+
+def outcome_short_unconfirmed() -> Msg:
+    return Msg("wire.tool_rows.bridge.outcome_short.unconfirmed", {})
 
 
 def target_conversation() -> Msg:

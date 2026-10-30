@@ -4695,52 +4695,101 @@ def test_an_inbox_only_send_wears_the_warning_word_not_plain_success() -> None:
     assert texts[1] == f"{ICON_SUCCESS} "
     warn = bindings.style("tool.status.partial_glyph")
     assert runs[0][1] == warn and runs[1][1] == warn
-    # The word survives whole at an ordinary width (the cap grows to fit it).
-    assert "not posted to a conversation" in card._build_row(100).plain
+    # The cap never grows past a third of the row, so the summary keeps
+    # priority: the full word where it fits that third, the short word below.
+    assert "not posted to a conversation ✓" in card._build_row(120).plain
+    narrow = card._build_row(100).plain
+    assert "not posted ✓" in narrow and "to a conversation" not in narrow
+    assert "Sent to a teammate · ping" in card._build_row(80).plain
+    assert "not posted ✓" in card._build_row(80).plain
+
+
+def test_an_unconfirmed_bridge_post_wears_warn_ink_not_danger() -> None:
+    card = ToolCard(
+        "b3u", "bridge", {"op": "channel_post", "channel_id": _BRIDGE_CHANNEL, "body": "x"}
+    )
+    lost = {"ok": False, "code": "post_failed", "error": "confirmation lost"}
+    card.mark_failed("confirmation lost", "confirmation lost", lost)
+    runs = card._status_runs(cap=60)
+    warn = bindings.style("tool.status.partial_glyph")
+    assert runs[0] == ("delivery unconfirmed ", warn)
+    assert runs[1] == (f"{ICON_ERROR} ", warn)
 
 
 def test_a_refused_bridge_call_names_the_code_in_the_error_cap() -> None:
-    card = ToolCard("b4", "bridge", {"op": "channel_post", "name": "general", "body": "hi"})
+    card = ToolCard("b4", "bridge", {"op": "channel_create", "name": "general"})
     refusal = {"ok": False, "code": "not_permitted", "error": "writes are off"}
     card.mark_failed("writes are off", "writes are off", refusal)
     row = card._build_row(100).plain
-    assert "Couldn't post in #general · hi" in row
+    assert "Couldn't create #general" in row
     assert "refused · not_permitted" in row and ICON_ERROR in row
 
 
 def test_a_bridge_error_without_details_does_not_claim_the_post() -> None:
-    card = ToolCard("b5", "bridge", {"op": "channel_post", "name": "general", "body": "hi"})
+    card = ToolCard(
+        "b5", "bridge", {"op": "channel_post", "channel_id": _BRIDGE_CHANNEL, "body": "hi"}
+    )
     card.mark_failed("boom", "boom", None)
     row = card._build_row(100).plain
-    assert "Couldn't post in #general" in row and "Posted in" not in row
+    assert "Couldn't post in a conversation" in row and "Posted in" not in row
 
 
 def test_bridge_expansion_order_headline_body_outcome_then_details() -> None:
     args: dict[str, object] = {
         "op": "channel_post",
         "channel_id": _BRIDGE_CHANNEL,
-        "name": "general",
         "body": "**v2**",
     }
     card = ToolCard("b6", "bridge", args)
-    card.mark_done("posted", _bridge_post_receipt())
+    card.mark_done("posted", {**_bridge_post_receipt(), "conversation_label": "general"})
     card._expanded = True
-    lines = [line.strip() for line in card._build_content(100).plain.splitlines()[1:]]
+    content = card._build_content(100)
+    lines = [line.strip() for line in content.plain.splitlines()[1:]]
     assert lines[0] == "Posted in #general"
     assert lines[1] == "v2", "the body is rendered markdown, not raw asterisks"
     assert lines[2] == "Posted at seq 42"
-    assert lines[3] == "details"
-    assert lines[4] == f"conversation_id: {_BRIDGE_CHANNEL}"
-    # Ids appear only below the details label.
-    assert all("bcv_" not in line for line in lines[:4])
+    assert lines[3] == "", "a blank row sets the Details heading apart"
+    assert lines[4] == "Details"
+    assert lines[5] == f"conversation_id: {_BRIDGE_CHANNEL}"
+    # Ids appear only below the details heading.
+    assert all("bcv_" not in line for line in lines[:5])
+    # D2: one name for the one destination, and no receipt restating the ids.
+    assert not any(line.startswith(("channel_id:", "content:")) for line in lines)
+    # D3/D6: the outcome is primary ink; the heading is bold.
+    value_ink = bindings.style("tool.args.value")
+    styles = {content.plain[span.start : span.end]: span.style for span in content.spans}
+    assert styles["Posted at seq 42"] == value_ink
+    assert styles["Details"].bold
+
+
+def test_bridge_details_elide_a_read_payload_and_spell_booleans_as_json() -> None:
+    from local_operator.harness.message_types import BRIDGE_UNTRUSTED_CLAUSE
+
+    payload = '{"messages": [' + ", ".join(['{"body": "x"}'] * 40) + "]}"
+    content = f"{BRIDGE_UNTRUSTED_CLAUSE}\n\n{payload}"
+    card = ToolCard("b6r", "bridge", {"op": "channel_history", "channel_id": _BRIDGE_CHANNEL})
+    card.mark_done(
+        content,
+        {"ok": True, "state": "ok", "content": content, "execution_confirmed": False},
+    )
+    card._expanded = True
+    lines = [line.strip() for line in card._build_content(100).plain.splitlines()[1:]]
+    (content_line,) = [line for line in lines if line.startswith("content:")]
+    assert content_line.endswith("…")
+    assert "execution_confirmed: false" in lines
 
 
 def test_a_bridge_history_read_counts_its_messages() -> None:
     from local_operator.harness.message_types import BRIDGE_UNTRUSTED_CLAUSE
 
-    card = ToolCard("b7", "bridge", {"op": "channel_history", "name": "general", "limit": 3})
+    card = ToolCard(
+        "b7", "bridge", {"op": "channel_history", "channel_id": _BRIDGE_CHANNEL, "limit": 3}
+    )
     content = f'{BRIDGE_UNTRUSTED_CLAUSE}\n\n{{"messages": [{{}}, {{}}, {{}}]}}'
-    card.mark_done(content, {"ok": True, "state": "ok", "content": content})
+    card.mark_done(
+        content,
+        {"ok": True, "state": "ok", "content": content, "conversation_label": "general"},
+    )
     assert "Read #general (3 messages)" in card._build_row(100).plain
 
 
@@ -4761,7 +4810,9 @@ def test_bridge_and_send_rows_condense_into_one_quiet_group() -> None:
 
     sender = {"pid": 7, "conversation_name": "peer-a"}
 
-    bridge = ToolCard("q1", "bridge", {"op": "channel_post", "name": "general", "body": "a"})
+    bridge = ToolCard(
+        "q1", "bridge", {"op": "channel_post", "channel_id": _BRIDGE_CHANNEL, "body": "a"}
+    )
     send = ToolCard("q2", "send", {"target": "peer", "message": "b"})
     bridge2 = ToolCard("q3", "bridge", {"op": "dm", "body": "c"})
     for card in (bridge, send, bridge2):

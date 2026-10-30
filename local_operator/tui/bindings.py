@@ -482,6 +482,19 @@ _TOOL_ROW_BINDINGS: tuple[Binding, ...] = (
     Binding("tool.args.dim", "dim", "surface", Role.NEUTRAL, Surface.TOOL_ROW),
     Binding("tool.args.label", "label", "surface", Role.REFERENCE, Surface.TOOL_ROW),
     Binding("tool.args.value", "fg", "surface", Role.NEUTRAL, Surface.TOOL_ROW),
+    Binding(
+        "tool.bridge.detail_value",
+        "muted",
+        "surface",
+        Role.NEUTRAL,
+        Surface.TOOL_ROW,
+        note=(
+            "Values under the Team Bridge card's `Details` heading (ids, seq, "
+            "receipt stage). Secondary, but read when diagnosing a misroute, so "
+            "`muted` rather than `dim`: design round 1 (D3) measured `dim` at "
+            "3.08-3.77:1 on the light card ground, under the 4.5:1 text floor."
+        ),
+    ),
     # -- _append_output_body: plain result expansion -----------------------
     Binding("tool.output.dim", "dim", "surface", Role.NEUTRAL, Surface.TOOL_ROW),
     Binding("tool.output.error", "danger", "tint-danger", Role.OUTCOME, Surface.TOOL_ROW),

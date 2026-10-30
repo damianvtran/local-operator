@@ -302,6 +302,11 @@ def test_wave3_hindi_carries_its_namespace_snapshot_with_parity(i18n_check) -> N
         "wire.settings",
         "wire.slash",
         "wire.slash.notifications_page",
+        # The Team Bridge tool row (TUI card + phone projection). Carried with
+        # the seven-locale translation wave; key/placeholder parity is pinned
+        # here like every namespace above, and shipping still waits on its
+        # independent audit row. It sorts after wire.slash.notifications_page.
+        "wire.tool_rows.bridge",
     )
     assert catalogues.namespaces(locale) == namespaces
     for namespace in namespaces:

@@ -42,7 +42,9 @@ one renderer is a decision the other will not make.
 
 from __future__ import annotations
 
+import json
 import re
+import unicodedata
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any, Literal
 
@@ -2008,12 +2010,32 @@ _BRIDGE_ESCAPE_RE = re.compile(
 )
 
 
+#: Format (``Cf``) characters a member-written label may still keep. ZWJ builds
+#: emoji sequences (a family emoji is three glyphs joined by U+200D, and a
+#: reaction row paints one) and ZWNJ/ZWJ are required shaping marks in
+#: Devanagari, Urdu and Persian script — deleting them misspells a real name.
+#: Neither reorders text, which is the hazard the strip exists for.
+_BRIDGE_CF_KEEP = frozenset({"\u200c", "\u200d"})
+
+
 def _bridge_clean(value: object) -> str:
     """Member-written text as one safe line ("" when unusable).
 
     Control characters (C0, DEL, C1 — the bytes that drive a terminal) are
     dropped, then whitespace collapses, so a label can neither break a row nor
     repaint the screen it lands on.
+
+    Unicode FORMAT characters (``Cf``: the bidi embeddings/overrides/isolates
+    U+202A–202E and U+2066–2069, the marks U+200E/200F/061C, zero-width space,
+    word joiner, BOM…) are dropped too, except :data:`_BRIDGE_CF_KEEP`. The
+    labels are cross-organization text, and an unterminated RLO reverses
+    everything painted after it: ``Created #\u202egnp.exe`` reads as
+    ``Created #exe.png`` on a bidi-aware renderer (the desktop pane), and drags
+    the status word with it. This is the class ``ansi.sanitize_prompt_line``
+    and ``session_picker.PASTE_BIDI_CONTROLS`` already neutralise for their
+    surfaces; here the characters are DROPPED rather than escaped, because a
+    row label is read as a name, not audited as a literal — the desktop's
+    ``bridgeText`` makes the same cut so the ported tokens stay byte-identical.
     """
     if not isinstance(value, str):
         return ""
@@ -2021,7 +2043,12 @@ def _bridge_clean(value: object) -> str:
     kept = "".join(
         " " if ch in "\t\n\r\v\f" else ch
         for ch in value
-        if ch in "\t\n\r\v\f" or not (ord(ch) < 32 or 127 <= ord(ch) < 160)
+        if ch in "\t\n\r\v\f"
+        or not (
+            ord(ch) < 32
+            or 127 <= ord(ch) < 160
+            or (unicodedata.category(ch) == "Cf" and ch not in _BRIDGE_CF_KEEP)
+        )
     )
     return " ".join(kept.split())[:_BRIDGE_TEXT_MAX]
 
@@ -2034,17 +2061,42 @@ def _bridge_label(value: object) -> str | None:
     return text
 
 
+#: Markdown a collapsed preview must not paint literally (design round 1, D1:
+#: ``Release **v0.62.0** is cut`` in the headline while the expansion rendered
+#: the same body as prose). Line-leading block markers (heading, quote, list
+#: bullet or number), an image or link reduced to its text, and the inline
+#: emphasis/code markers. A single ``*``/``_`` is removed only at a word EDGE,
+#: so ``snake_case`` and ``2 * 3`` survive; ``**``/``__``/``~~``/backticks are
+#: always markers in a one-line preview.
+_BRIDGE_MD_BLOCK_RE = re.compile(r"^\s{0,3}(?:#{1,6}\s+|>\s?|[-*+]\s+|\d{1,9}[.)]\s+)+")
+_BRIDGE_MD_LINK_RE = re.compile(r"!?\[([^\]]*)\]\([^)]*\)")
+_BRIDGE_MD_PAIRED_RE = re.compile(r"\*\*|__|~~|`+")
+_BRIDGE_MD_EDGE_RE = re.compile(r"(?<![\w*])[*_](?=[^\s*_])|(?<=[^\s*_])[*_](?![\w*])")
+
+
+def _bridge_plain(line: str) -> str:
+    """One markdown line as the plain words a collapsed preview shows."""
+    line = _BRIDGE_MD_BLOCK_RE.sub("", line)
+    line = _BRIDGE_MD_LINK_RE.sub(r"\1", line)
+    line = _BRIDGE_MD_PAIRED_RE.sub("", line)
+    return _BRIDGE_MD_EDGE_RE.sub("", line)
+
+
 def _bridge_preview(args: Mapping[str, object], details: Mapping[str, Any]) -> str | None:
-    """The first non-empty line of what was said: body, then text.
+    """The first non-empty line of what was said, as plain text: body, then text.
 
     ``take_up`` carries the received message's text in its RESULT, so the
-    details are read after the arguments.
+    details are read after the arguments. Markdown markers are stripped HERE,
+    for the preview only (:func:`_bridge_plain`); the expanded card reads the
+    raw body from the args and renders it as markdown. A line that is nothing
+    but markup (a ``---`` rule, a code fence) yields nothing and the next line
+    is tried.
     """
     for source in (args.get("body"), args.get("text"), details.get("text")):
         if isinstance(source, str):
             for line in source.splitlines():
-                cleaned = _bridge_clean(line)
-                if cleaned:
+                cleaned = _bridge_clean(_bridge_plain(line))
+                if cleaned and cleaned.strip("-=*_~`#> "):
                     return cleaned
     return None
 
@@ -2057,8 +2109,6 @@ def _bridge_json_tail(content: object) -> Any:
     """
     if not isinstance(content, str) or not content.strip():
         return None
-    import json  # stdlib, deferred: only reads with a payload pay for it
-
     candidates = [content]
     head, sep, tail = content.partition("\n\n")
     if sep:
@@ -2143,10 +2193,20 @@ def _bridge_target(
         payload = _bridge_json_tail(details.get("content"))
         if isinstance(payload, Mapping):
             label = _bridge_label(payload.get("name"))
-    if label is None and kind in ("channel", "dm", "person"):
+    if label is None and op == "channel_create":
+        # The only op whose `name` arg the executor reads (`tool.py`'s
+        # channel_create body). Every other channel op addresses an opaque
+        # `channel_id`, so a `name` arg there is ignored by the tool and must
+        # not label the row either: the receipt carries only the id, and the
+        # honest fallback is the kind noun ("a conversation").
         label = _bridge_label(args.get("name"))
+    if label is None and kind in ("dm", "person"):
+        # `to` is the RECIPIENT only for dm/send/reply. On channel_post it is a
+        # MENTION — the member the post is directed at — so reading it there
+        # painted "Posted in #Alice" for a post that mentioned Alice (review
+        # round 1, R1).
         to = args.get("to")
-        if label is None and isinstance(to, Mapping):
+        if isinstance(to, Mapping):
             label = _bridge_label(to.get("name"))
     if kind in ("message", "directory"):
         # These rows name no conversation: the message is opaque by design and
