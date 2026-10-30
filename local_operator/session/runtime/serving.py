@@ -7079,9 +7079,17 @@ class ServingSessionHandle(SessionHandle):
         gate must never depend on one. The raise itself never raises — the card
         is parked by now, and the row is the thing that may be lost, never the
         wait.
+
+        The seam is TYPED rather than left ``Any``: ``getattr``'s three-argument
+        form widens to ``object`` for the analyzer, which then cannot await the
+        result (pyright: `"object" is not awaitable` — caught by CI, not by the
+        local gate). Naming the contract also says what a reduced host would
+        have to implement to carry an inbox.
         """
-        raiser = getattr(self._session, "raise_gate_item", None)
-        if not callable(raiser):
+        raiser: Callable[[str, str, str], Awaitable[None]] | None = getattr(
+            self._session, "raise_gate_item", None
+        )
+        if raiser is None:
             return
         await raiser(kind, gate_title, gate_detail)
 
