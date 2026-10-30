@@ -173,8 +173,12 @@ describe("relay.shell extraction", () => {
 		   the same `registerBundle` channel. Pre-loading the module only settles
 		   WHEN the store's own import resolves; nothing is registered by hand. */
 		const shipped = Object.keys(BUNDLED_CHUNKS);
-		if (shipped.length === 0) return; // no complete locale to load yet
-		const locale = shipped.includes("ur") ? "ur" : shipped[0];
+		// Loud on purpose: `ur` is complete today, so an empty or ur-less manifest
+		// means the copy regressed (or the emitter stopped intersecting) and this
+		// is the only test that drives the real chunk through the config frame.
+		// Skipping quietly here is how the lazy path would stop being covered.
+		expect(shipped).toContain("ur");
+		const locale = "ur";
 		await BUNDLED_CHUNKS[locale]();
 		vi.useFakeTimers();
 		Stream.instances = [];

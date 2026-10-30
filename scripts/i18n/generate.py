@@ -465,9 +465,7 @@ def _render_bundled_module(
     return "\n".join(lines)
 
 
-def _render_locale_module(
-    namespaces: dict[str, dict[str, dict[str, str]]], locale: str
-) -> str:
+def _render_locale_module(namespaces: dict[str, dict[str, dict[str, str]]], locale: str) -> str:
     """One complete shipped locale's owned copy, as its own lazily loaded chunk.
 
     Same namespace->locale->messages shape as the eager map, so the store
