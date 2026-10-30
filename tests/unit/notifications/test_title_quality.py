@@ -137,10 +137,14 @@ def test_only_a_letter_earns_the_dense_floor() -> None:
     script that packs a word into a character, never for a numeral in that
     script. ``１２`` is the same case one fold away: NFKC turns it into ``12``.
     """
-    assert title_defect("١٢") is not None
-    assert "at least 3 are needed" in title_defect("١٢")
-    assert title_defect("٣٤") is not None
-    assert "at least 3 are needed" in title_defect("٣٤")
+    # A named local, not the call inline: ``title_defect`` returns ``str | None``,
+    # and pyright refuses ``in`` against an Optional (the CI type-check caught it).
+    arabic_two = title_defect("١٢")
+    assert arabic_two is not None
+    assert "at least 3 are needed" in arabic_two
+    arabic_two_other = title_defect("٣٤")
+    assert arabic_two_other is not None
+    assert "at least 3 are needed" in arabic_two_other
     assert title_defect("１２") is not None
     # Three digits are admitted in either spelling: the floor is a count, not a
     # script ban, and the ASCII arm was never in question.
