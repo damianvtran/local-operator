@@ -62,7 +62,10 @@ THE CHANNEL OPS work the conversation domain AS THIS SESSION'S AGENT:
 - **channel_history** — a bounded page of messages. The server admits bodies
   per (message, endpoint) screening; an agent sees the METADATA (sender, seq,
   hash) of messages it has not admitted, with ``body`` null, and only the
-  admitted bodies. There is intentionally no local body cache here.
+  admitted bodies. There is intentionally no local body cache here. The one
+  exception to ``body: null`` is a message THIS account authored: the hub never
+  delivers it back for admission, so history and thread fetch its text per read
+  (hash-verified, never stored) so a sender can read what it wrote.
 
 - **react** — set an emoji on an admitted conversation message (or remove it
   with ``remove=true``). This is a screened agent WRITE, never an ack; the hub
@@ -1841,6 +1844,8 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         # Bodies are external content even when the sender is a teammate's
         # agent: the same untrusted wrap as take_up. Unadmitted messages carry
         # ``body: null`` — metadata only — and stay that way (no local cache).
+        if isinstance(result, dict) and isinstance(result.get("messages"), list):
+            await _restore_own_bodies(runtime, channel_id, result["messages"], endpoint_id)
         images = await _history_images(runtime, channel_id, result, endpoint_id)
         return {
             "ok": True,
@@ -1886,6 +1891,7 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
             replies = result.get("replies")
             if isinstance(replies, list):
                 thread_rows.extend(replies)
+        await _restore_own_bodies(runtime, channel_id, thread_rows, endpoint_id)
         images = await _history_images(runtime, channel_id, {"messages": thread_rows}, endpoint_id)
         return {
             "ok": True,
@@ -1933,6 +1939,77 @@ def _image_provenance(channel_id: str, message: dict[str, Any], lines: list[str]
         f"(seq {message.get('seq')}) from {label} ({kind}):"
     )
     return "\n".join([head, *lines])
+
+
+#: Most own-message bodies one history/thread read will fetch. The page itself
+#: is bounded by ``CONVERSATION_PAGE_MAX``; this keeps a page of the agent's own
+#: posts from becoming a hundred sequential reads.
+OWN_BODY_FETCH_MAX = 25
+
+
+async def _restore_own_bodies(
+    runtime: BridgeRuntime, channel_id: str, rows: list[Any], endpoint_id: str
+) -> None:
+    """Fill ``body`` on the rows THIS account authored, in place.
+
+    WHY (the sender could not read its own write): the hub serves a history body
+    only for a message THIS endpoint admitted, and an endpoint admits a message
+    by screening it as an INBOUND delivery (``connector/conversation.py``, the
+    only caller of ``conversation_admit``). A message this account posted is
+    never delivered back to it, so it is never admitted and reads back
+    ``body: null`` with only its hash, forever.
+
+    WHAT THIS DOES NOT DO: it does not weaken screening. The ``/body`` route the
+    connector uses for classification is asked ONLY for rows whose
+    ``sender.account_id`` is the runtime's own account: text this account wrote
+    cannot be an injection against itself, and everyone else's stays ``null``
+    until the connector screens it. No local copy is made: the text is fetched
+    per read, handed to the model and dropped.
+
+    A row is filled only when the served body hashes to the row's own
+    ``body_hash`` (sha256 over the UTF-8 text, as the connector verifies); any
+    failure — transport, refusal, mismatch — leaves the row exactly as the hub
+    sent it.
+    """
+
+    import asyncio
+
+    own = getattr(runtime.owner, "account_id", "")
+    if not own:
+        return
+    wanted = [
+        row
+        for row in rows
+        if isinstance(row, dict)
+        and row.get("body") is None
+        and isinstance(row.get("body_hash"), str)
+        and isinstance(row.get("id"), str)
+        and _CONVERSATION_MESSAGE_ID.fullmatch(row["id"]) is not None
+        and isinstance(row.get("sender"), dict)
+        and row["sender"].get("account_id") == own
+    ][:OWN_BODY_FETCH_MAX]
+    if not wanted:
+        return
+    gate = asyncio.Semaphore(5)
+
+    async def fill(row: dict[str, Any]) -> None:
+        async with gate:
+            try:
+                served = await runtime.client.conversation_body(
+                    channel_id,
+                    row["id"],
+                    tenant_id=runtime.tenant_id,
+                    endpoint_id=endpoint_id,
+                )
+            except Exception:  # noqa: BLE001 — the hub's null stands; never a crash
+                return
+        if not isinstance(served, dict) or served.get("message_id") != row["id"]:
+            return
+        text = served.get("body")
+        if isinstance(text, str) and body_digest(text) == row["body_hash"]:
+            row["body"] = text
+
+    await asyncio.gather(*(fill(row) for row in wanted))
 
 
 async def _history_images(
