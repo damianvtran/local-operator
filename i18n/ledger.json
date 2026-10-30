@@ -9388,6 +9388,25 @@
       "note": "w2 es backfill: 17 keys; independent audit w2a1 passed (committed evidence i18n/audits/evidence/es/cli.wake_help/w2a1/). Open minor/nit findings are dispositioned in that evidence's report.md."
     },
     {
+      "locale": "zh-CN",
+      "namespace": "relay.account_policy",
+      "source_sha256": "0019b08106e6f7762194b164b9b9b37054a8cfade759aa2f6490787a73dea890",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "model": "radient/auto",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "radient/auto",
+        "date": "2026-10-28",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent zh-CN audit, 13 keys, clean: 0 blocker/major/minor/nit. Evidence i18n/audits/evidence/zh-CN/relay.account_policy/zhc1. Auditor read the English source and sidecar at the hashes recorded there; route and marker scan recorded in record.json (worktree reads per docs/security/redaction-policy.md 2.2; 0 markers; assignment tokens verified by ordinals). Translator session 809b6f2773e0, auditor session e139d7f8f30c; both ran on radient/auto after anthropic quota fallbacks. No native-speaker pass claimed."
+    },
+    {
       "locale": "ru",
       "namespace": "relay.shell",
       "source_sha256": "f53b23560b88b531ef8fc3274bc396676f26e755ad4ff9ad87ce368cebdee560",

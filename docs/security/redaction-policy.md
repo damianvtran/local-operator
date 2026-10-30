@@ -149,6 +149,14 @@ is **not** a redaction toggle:
   process cwd. The selector chooses where to read and grants no access — it is
   not a permission, and it widens neither the root list above nor any path
   family.
+
+   **Origin identity is not an authenticity proof.** It guards against accidental
+   cross-repo reads, but it comes from the checkout's own configuration: three
+   commands — `git init`, `git remote add origin <allowlisted>`, and a commit —
+   produce an admitted checkout. The `read_public_copy` result is redaction-exempt
+   by tool name, so no downstream redaction catches a fabricated checkout. The
+   allowlist, pinned committed blob, read-time identity re-check and audit receipt
+   constrain and record the read; they do not establish who authored the bytes.
 * The consumer roots are keyed to **checkout identity, not path shape**: a
   `src/i18n/...` path is served only when the workspace root is the checkout
   root and the **last two path components** of `git remote get-url origin`,
@@ -226,7 +234,11 @@ is **not** a redaction toggle:
   `<config dir>/audit/public-copy-reads.jsonl` **before** the content is
   returned: timestamp, session, path, key, character count, selected-content
   SHA-256, canonical repository root, repository identity, whether that
-  identity was verified, pinned commit SHA and this document. The identity is
+  identity was verified, pinned commit SHA (also recorded as `checkout_head`)
+  and this document. `checkout_head` is captured before the content is served,
+  so a commit landing mid-call can only understate the revision. The identity
+  is re-checked immediately before the blob is served and a change refuses the
+  read, naming the expected and actual reduced identities. The identity is
   recorded only from the host-pinned GitHub-origin check (the same parser), as `null` with
   `repository_verified: false` otherwise; the default root keeps its historical
   looser gate for admission but never claims a verified identity from it. The

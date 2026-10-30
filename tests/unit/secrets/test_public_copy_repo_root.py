@@ -823,6 +823,78 @@ async def test_verified_explicit_root_records_the_identity(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_checkout_head_distinguishes_two_commits_of_the_same_path(tmp_path):
+    """The receipt names each served revision, not just repository and path."""
+    root = _ui_repo(tmp_path)
+    context = _context(tmp_path, tmp_path)
+    request = {"path": UI_CATALOGUE, "key": "wire.slash.credential", "repo_root": str(root)}
+    first = await execute_read_public_copy("first", request, context=context)
+    assert not first.is_error, first.text
+    first_details = _details(first)
+    first_head = first_details["checkout_head"]
+
+    (root / UI_CATALOGUE).write_text(
+        json.dumps({"wire.slash.credential": "second synthetic revision"}), encoding="utf-8"
+    )
+    _git(root, "add", UI_CATALOGUE)
+    _git(root, "commit", "-qm", "second revision")
+    second = await execute_read_public_copy("second", request, context=context)
+    assert not second.is_error, second.text
+    second_details = _details(second)
+    second_head = second_details["checkout_head"]
+
+    assert first_head != second_head
+    assert first_details["commit"] == first_head
+    assert second_details["commit"] == second_head
+    assert first_details["repository_root"] == second_details["repository_root"]
+    assert "second synthetic revision" in second.text
+    records = [
+        json.loads(line)
+        for line in Path(first_details["audit_log"]).read_text(encoding="utf-8").splitlines()
+    ]
+    assert [record["checkout_head"] for record in records] == [first_head, second_head]
+    assert [record["commit"] for record in records] == [first_head, second_head]
+
+
+@pytest.mark.asyncio
+async def test_origin_change_immediately_before_blob_read_is_refused(tmp_path, monkeypatch):
+    """A stale admission cannot serve bytes under the previously read identity."""
+    from local_operator.tools import public_copy
+
+    root = _ui_repo(tmp_path)
+    real_run = public_copy.subprocess.run
+    changed = False
+
+    def change_origin_after_clean_check(*args, **kwargs):
+        nonlocal changed
+        result = real_run(*args, **kwargs)
+        argv = args[0]
+        if not changed and "diff" in argv:
+            _git(
+                root,
+                "remote",
+                "set-url",
+                "origin",
+                "https://github.com/damianvtran/local-operator.git",
+            )
+            changed = True
+        return result
+
+    monkeypatch.setattr(public_copy.subprocess, "run", change_origin_after_clean_check)
+    result = await execute_read_public_copy(
+        "changed",
+        {"path": UI_CATALOGUE, "repo_root": str(root)},
+        context=_context(tmp_path, tmp_path),
+    )
+    assert changed, "negative control: the test must change origin inside the Git call path"
+    assert result.is_error
+    assert "expected damianvtran/local-operator-ui" in result.text
+    assert "actual damianvtran/local-operator" in result.text
+    assert "https://" not in result.text
+    assert not public_copy._audit_path().exists()
+
+
+@pytest.mark.asyncio
 async def test_missing_promisor_blob_is_not_called_uncommitted(tmp_path):
     """Q1: the file IS committed; only its object is unavailable."""
     root = _ui_repo(tmp_path)
