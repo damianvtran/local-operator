@@ -93,6 +93,38 @@ projects come from the session's project links at read time.
 only). `approval_tier="read"` (the operator's own inbox, the `no_reply`
 reasoning), shared concurrency.
 
+**Title quality — the contract.** The list shows the title ALONE, so a title
+that identifies no event is a row the operator must read and dismiss to learn
+nothing. `NotifyParams` therefore refuses a degenerate title as
+`invalid arguments` (`local_operator/notifications/title_quality.py`):
+
+- **Information floor** — fewer than three alphanumerics after dropping
+everything else. Three admits what people really write (`PR #7`, `CI green`),
+rejects `x`/`--`/`ok`, and is script-independent: `修复完成` counts four,
+`🚀` counts zero.
+- **Placeholder vocabulary** — the WHOLE title, casefolded and stripped of
+non-alphanumerics, against a fixed set (`x`, `noop`/`no-op`, `n/a`, `test`,
+`todo`, `tbd`, `update`, `unused`, `placeholder`, `wip`, `done`, `ok`, …).
+Whole-equality only: `Update: 3 PRs merged` and `Tests failing on shard 3`
+pass, because they are statements that happen to open with a placeholder word.
+- **Nothing at all** — a whitespace/punctuation-only title is refused HERE. It
+used to reach the store, whose bare `ValueError` surfaced as "the inbox could
+not be written": a dead end naming neither the cause nor a way out.
+
+The boundary is deliberately one-sided: **refuse provably content-free titles,
+never judge a short-but-real one.** Over-refusing a legitimate notification is
+the worse failure, because the model's cheapest way to obey a guard is to post
+nothing. The body is never consulted — it is not on the list row, so a
+substantial body behind `x` still renders as an opaque row.
+
+The refusal names the silent alternative in its own words: a turn that produced
+nothing the operator needs ends with `no_reply` and posts no notification.
+`no_reply` itself is untouched, so a quiet turn stays zero-friction. The guard
+lives on the tool params, NOT in `NotificationStore.notify`: server-side writers
+(an approval gate titled with the tool name, tests) use short titles on purpose
+and must keep working. The 25 legacy placeholder rows were retired by hand;
+this guard is what stops new ones.
+
 ### 3.2 Who gets it (createIf rung 3)
 
 Only a top-level conversation the operator's own listings show. The session
