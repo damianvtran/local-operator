@@ -2740,7 +2740,14 @@ class StatusLine:
             # STALE reading (the last good line kept through a failure) takes
             # `dim`, the band's last-known ink, so a held value never reads as
             # a fresh one.
-            ink = dim if self._custom_stale else Style(color=theme_mod.semantic_color("muted"))
+            # Stale is ALSO italic (design round 2, T-11): hue alone measured
+            # 1.21:1 against the fresh ink on some themes and is byte-identical
+            # under NO_COLOR, and weight/slant survive both.
+            ink = (
+                dim + Style(italic=True)
+                if self._custom_stale
+                else Style(color=theme_mod.semantic_color("muted"))
+            )
             text = truncate_cells(self._custom, custom_cap) if custom_cap else self._custom
             parts.append(("", text, ink))
         if "context" not in dropped:

@@ -77,6 +77,7 @@ MAX_CELLS = 40
 # cleans our own CLI's output, this one cleans arbitrary third-party output.
 _ESCAPE_RE = re.compile(
     r"\x1b\[[0-?]*[ -/]*[@-~]"  # CSI
+    r"|\x9b[0-?]*[ -/]*[@-~]"  # 8-bit C1 CSI: the introducer alone is Cc-stripped
     # OSC, DCS, SOS, PM and APC are all STRINGS terminated by BEL or ST; strip
     # the payload with the introducer, or a DCS leaves its parameters behind as
     # junk text on the band (review round 1, m3).
@@ -253,21 +254,34 @@ async def _collect(process: asyncio.subprocess.Process, data: bytes) -> bytes:
     line is in the kept prefix.
     """
     assert process.stdin is not None and process.stdout is not None
-    try:
-        process.stdin.write(data)
-        await process.stdin.drain()
-    except (BrokenPipeError, ConnectionResetError):
-        pass  # the script ignores stdin and already exited: allowed
-    finally:
+    stdin = process.stdin
+
+    async def feed() -> None:
+        # CONCURRENT with the read below (review round 2, N3): a script that
+        # prints before it reads stdin would otherwise block on a full stdout
+        # pipe while we block writing a payload larger than the stdin pipe.
         try:
-            process.stdin.close()
-        except Exception:  # noqa: BLE001 — closing a dead pipe is not an error
-            pass
-    kept = bytearray()
-    while chunk := await process.stdout.read(_CHUNK_BYTES):
-        if len(kept) < MAX_READ_BYTES:
-            kept += chunk[: MAX_READ_BYTES - len(kept)]
-    await process.wait()
+            stdin.write(data)
+            await stdin.drain()
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # the script ignores stdin and already exited: allowed
+        finally:
+            try:
+                stdin.close()
+            except Exception:  # noqa: BLE001 — closing a dead pipe is not an error
+                pass
+
+    feeder = asyncio.ensure_future(feed())
+    try:
+        kept = bytearray()
+        while chunk := await process.stdout.read(_CHUNK_BYTES):
+            if len(kept) < MAX_READ_BYTES:
+                kept += chunk[: MAX_READ_BYTES - len(kept)]
+        await process.wait()
+    finally:
+        if not feeder.done():
+            feeder.cancel()
+        await asyncio.gather(feeder, return_exceptions=True)
     return bytes(kept)
 
 

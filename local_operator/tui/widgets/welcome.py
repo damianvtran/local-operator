@@ -935,6 +935,20 @@ class WelcomeInfo:
     aida_name: str | None = None
 
 
+def _cwd_or_empty() -> str:
+    """The working directory, or "" once it has been deleted.
+
+    ``os.getcwd()`` raises after the directory the TUI started in is removed (a
+    deleted git worktree is the common case), and this runs on the welcome
+    poll, so an unguarded call ended the whole app. An empty cwd renders as no
+    cwd row, which is the truth.
+    """
+    try:
+        return os.getcwd()
+    except OSError:
+        return ""
+
+
 def app_version() -> str:
     """Installed distribution version, or ``""`` when it cannot be read.
 
@@ -1014,7 +1028,7 @@ def session_welcome_info(
         version=app_version(),
         model_label=label,
         model_name=name,
-        cwd=os.getcwd(),
+        cwd=_cwd_or_empty(),
         missing_credential=missing,
         quota_notice=quota,
         notice=notice or None,

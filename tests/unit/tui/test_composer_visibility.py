@@ -332,8 +332,15 @@ async def test_a_failing_command_holds_its_last_line_and_warns_once(monkeypatch,
         assert len(notices) == 1
         assert "exit 127" in notices[0][0] and notices[0][1] == "warning"
 
-        # A success ends the episode; the next failure is announced again.
-        app._apply_status_command_outcome("cmd", sc.Outcome(line="back"))
+        # A FLAKY script (alternating) stays one episode: no notice per blip.
+        for _ in range(10):
+            app._apply_status_command_outcome("cmd", sc.Outcome(line="back"))
+            app._apply_status_command_outcome("cmd", sc.Outcome(error="exit 1"))
+        assert len(notices) == 1
+
+        # Only a streak of successes ends the episode; then it is announced again.
+        for _ in range(sc.STALE_AFTER_FAILURES):
+            app._apply_status_command_outcome("cmd", sc.Outcome(line="back"))
         app._apply_status_command_outcome("cmd", sc.Outcome(error="timed out after 10s"))
         assert len(notices) == 2
         await pilot.pause()

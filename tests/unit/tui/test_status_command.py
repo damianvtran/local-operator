@@ -165,6 +165,17 @@ def test_escapes_and_controls_never_reach_the_band() -> None:
     assert sc.sanitize(raw) == "red link tabbell"  # BEL is removed, not spaced
 
 
+def test_a_large_payload_does_not_deadlock_a_script_that_prints_first() -> None:
+    """stdin is fed concurrently with the stdout read (review round 2, N3)."""
+    big = dict(_PAYLOAD, cwd="x" * 200_000)
+    started = time.monotonic()
+    outcome = asyncio.run(
+        sc.run("head -c 200000 /dev/zero | tr '\\0' y; echo; cat >/dev/null", big, timeout=5)
+    )
+    assert time.monotonic() - started < 3
+    assert outcome.error == "" and outcome.line.startswith("yyyy")
+
+
 def test_bidi_overrides_and_invisible_characters_are_stripped() -> None:
     """A right-to-left override would visually reorder every segment after it
     (alarms included) in a bidi-aware terminal; zero-width characters make the
@@ -173,6 +184,8 @@ def test_bidi_overrides_and_invisible_characters_are_stripped() -> None:
     assert sc.sanitize(raw) == "abcdefghixyz"
     # A DCS string is removed with its payload, not left behind as text.
     assert sc.sanitize("\x1bP1;2q payload\x1b\\ ok") == "ok"
+    # An 8-bit C1 CSI takes its parameters with it (review round 2, N4).
+    assert sc.sanitize("\x9b31mred") == "red"
 
 
 def test_long_output_is_capped_to_the_bounded_rung() -> None:

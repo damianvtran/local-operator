@@ -2,6 +2,6 @@
   "tui.status_command.failed": {
     "role": "warning notice",
     "tone": "plain, precise",
-    "note": "Shown once when the operator's status-band shell command fails. {error} is a short English machine reason such as 'exit 127' or 'timed out after 10s' and is not translated. 'display.composer.command' is a config key: keep it verbatim. 'band' is the status band under the input."
+    "note": "Shown once when the operator's status-band shell command starts failing (it may never have succeeded, e.g. a mistyped path). {error} is a short English machine reason such as 'exit 127' or 'timed out after 10s' and is not translated. 'display.composer.command' is a config key: keep it verbatim."
   }
 }

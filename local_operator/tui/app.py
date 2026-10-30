@@ -5232,6 +5232,7 @@ class OperatorApp(App[None]):
         #: Consecutive failed runs, and whether this armed command's failure
         #: episode has been announced (`_apply_status_command_outcome`).
         self._status_command_failures = 0
+        self._status_command_successes = 0
         self._status_command_notified = False
         #: The park reason this app has already announced, so a 5-second poll
         #: raises one card per episode rather than holding the toast slot
@@ -47620,6 +47621,7 @@ class OperatorApp(App[None]):
             return
         self._status_command_armed = armed
         self._status_command_failures = 0
+        self._status_command_successes = 0
         self._status_command_notified = False
         if self._status_command_timer is not None:
             self._status_command_timer.stop()
@@ -47648,7 +47650,7 @@ class OperatorApp(App[None]):
         """
         if self._status_command_armed is None:
             return
-        if self._status_command_running is not None and self._status_command_running.is_running:
+        if self._status_command_running is not None and not self._status_command_running.is_finished:
             return
         self._start_status_command_run()
 
@@ -47718,19 +47720,27 @@ class OperatorApp(App[None]):
           and clears it only after ``STALE_AFTER_FAILURES`` in a row;
         - the FIRST failure for an armed command raises one warning notice
           naming why (``exit 127``, ``timed out after 10s``), so a mistyped
-          path is distinguishable from "not configured". Once per armed
-          command, the ``_poll_tunnel_park`` once-per-episode rule: a script
-          that keeps failing does not re-announce itself every 30 s, and a
-          success re-arms the notice for the next episode.
+          path is distinguishable from "not configured". Once per episode,
+          the ``_poll_tunnel_park`` rule: a script that keeps failing does not
+          re-announce itself every 30 s, and only ``STALE_AFTER_FAILURES``
+          successes in a row end the episode, so a flaky one does not either.
         """
         status = self._status
         if status is None:
             return
         if not outcome.error:
             self._status_command_failures = 0
-            self._status_command_notified = False
+            # The episode ends only after a STREAK of successes (design round
+            # 2, T-9): resetting on every success let a script alternating
+            # success and failure write a warning per minute into the
+            # transcript. The same threshold that clears a stale reading
+            # re-arms the notice, so one number governs "this is flaky".
+            self._status_command_successes += 1
+            if self._status_command_successes >= status_command_mod.STALE_AFTER_FAILURES:
+                self._status_command_notified = False
             status.update(custom=outcome.line, custom_stale=False)
             return
+        self._status_command_successes = 0
         self._status_command_failures += 1
         if self._status_command_failures >= status_command_mod.STALE_AFTER_FAILURES:
             status.update(custom="", custom_stale=False)

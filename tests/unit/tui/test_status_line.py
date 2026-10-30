@@ -2631,7 +2631,10 @@ def test_a_long_custom_reading_shortens_before_it_drops(monkeypatch) -> None:
     from local_operator.tui.widgets.status_line import CUSTOM_CELLS_FLOOR
 
     monkeypatch.setenv("HOME", "/Users/tester")
-    reading = "acct 5h 42% · 7d 18% · resets in 3h 12m"  # 40 cells, the runner's cap
+    from local_operator.tui.status_command import MAX_CELLS
+
+    reading = "acct 5h 42% · 7d 18% · resets in 13h 12m"
+    assert cell_len(reading) == MAX_CELLS
     status, _clock = _full_band()
     status.update(custom=reading)
     assert reading in status.render_text(140).plain
@@ -2669,7 +2672,7 @@ def test_a_stale_reading_takes_the_last_known_ink() -> None:
     status.update(custom_stale=True)
     stale = style_of("acct 42%")
     assert fresh != stale
-    assert stale == Style(color=theme_mod.semantic_color("dim"))
+    assert stale == Style(color=theme_mod.semantic_color("dim"), italic=True)
 
 
 def test_the_custom_rung_is_in_every_ladder_and_bounded() -> None:
