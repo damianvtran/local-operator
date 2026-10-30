@@ -52,7 +52,7 @@ def test_english_login_and_auth_contract() -> None:
     assert client.get("/api/sessions").status_code == 401
 
 
-@pytest.mark.parametrize("locale", ["en", "fr", "es", "ru", "vi"])
+@pytest.mark.parametrize("locale", ["en", "fr", "ru", "vi"])
 def test_actual_shipped_missing_namespace_uses_english_metadata(
     monkeypatch, tmp_path, locale: str
 ) -> None:
@@ -74,6 +74,28 @@ def test_actual_shipped_missing_namespace_uses_english_metadata(
     refused = client.post("/login", data={"password": "wrong"})
     assert refused.status_code == 401
     assert '<p class="error" role="alert">Wrong password.</p>' in refused.text
+
+
+def test_spanish_login_page_renders_its_own_copy(monkeypatch, tmp_path) -> None:
+    # es now CARRIES relay.login, so the page must paint Spanish and declare
+    # lang="es" — the missing-namespace control above still proves the English
+    # fallback for the locales that do not carry it.
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "config.yml").write_text("values:\n  language: es\n")
+    assert daemon.resolve_language() == "es"
+    client = TestClient(
+        daemon.build_app(daemon.MobileDaemon(port=0, password="fixture-password")),
+        follow_redirects=False,
+    )
+    page = client.get("/login")
+    assert '<html lang="es" dir="ltr">' in page.text
+    assert "local operator — iniciar sesión" in page.text
+    assert "contraseña" in page.text
+    assert "iniciar sesión" in page.text
+    assert "sign in" not in page.text.split("<body", 1)[1]
+    refused = client.post("/login", data={"password": "wrong"})
+    assert refused.status_code == 401
+    assert "incorrecta." in refused.text
 
 
 def test_single_backend_locale_live_resolution_and_escaping(monkeypatch, tmp_path) -> None:

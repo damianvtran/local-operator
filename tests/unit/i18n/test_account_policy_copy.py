@@ -39,9 +39,18 @@ def test_spanish_carries_the_policy_label_and_still_falls_back_elsewhere():
     # The key identity is immutable; only the value is localised.
     assert policy.label().code == "wire.settings.account_policy.label"
     assert messages.render(policy.label().code, {}, locale="es") == "Política de cuentas"
-    # A namespace es does not carry yet must still fall back to the English
-    # source rather than to a key token, in the same locale.
+    # Spanish now CARRIES the relay account-policy chrome, so it must render its
+    # own copy rather than the English source.
     assert (
         messages.render("relay.account_policy.loading", {}, locale="es")
-        == "Loading account routing…"
+        == "Cargando el enrutamiento de cuentas…"
+    )
+    # …and a namespace es still does NOT carry must fall back to the English
+    # source rather than to a key token, in the same locale. `wire.errors.sdk_spec`
+    # is English-pinned by caller contract, so it is a real missing namespace
+    # rather than a synthetic one.
+    assert messages.render(
+        "wire.errors.sdk_spec.attach_fields_unsupported", {"fields": "x"}, locale="es"
+    ) == messages.render(
+        "wire.errors.sdk_spec.attach_fields_unsupported", {"fields": "x"}, locale="en"
     )
