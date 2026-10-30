@@ -15,7 +15,12 @@ export interface RenderedEnvelope {
 	locale: string | null;
 	direction: "ltr" | "rtl" | null;
 }
-const RESOLVED = new Set(["en", "fr", "es", "zh-CN", "ru", "vi", "ur", "hi"]);
+/** Every locale the product supports, English first. The tuple is exported so a
+ * test can ask which of them has no owned relay catalogue without restating
+ * the list: a second copy of it in a test would drift the day a locale lands,
+ * and the SPA's fallback tests are exactly the ones that must not drift. */
+export const RESOLVED_LOCALES = ["en", "fr", "es", "zh-CN", "ru", "vi", "ur", "hi"] as const;
+const RESOLVED = new Set<string>(RESOLVED_LOCALES);
 export const isResolvedLocale = (value: unknown): value is string =>
 	typeof value === "string" && RESOLVED.has(value);
 export const directionFor = (locale: string): "ltr" | "rtl" => locale === "ur" ? "rtl" : "ltr";

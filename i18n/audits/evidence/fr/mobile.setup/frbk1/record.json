@@ -1,0 +1,43 @@
+{
+  "locale": "fr",
+  "namespace": "mobile.setup",
+  "audit_date": "2026-10-29",
+  "key_count": 76,
+  "translator": {
+    "agent": "translator (lopdev team)",
+    "model": "radient/auto",
+    "date": "2026-10-29"
+  },
+  "auditor": {
+    "agent": "translation-auditor (lopdev team)",
+    "session": "ab2610514b4d",
+    "model": "radient/auto",
+    "independence": "not the translator; edited nothing",
+    "date": "2026-10-29"
+  },
+  "input_hashes": {
+    "en": "6249b10379beb9b2433746416fa7baff061265a1b9315d47465140cd5fcf61e9",
+    "context": "be33c74a329196fdbe78f11f015848ff4f9593add57eba414163d4042807c811",
+    "target_locale": "4d9454e44e389dae5bb75f205e8feb6be9f9938e85e79d6181424a07f6426e81"
+  },
+  "remediation": {
+    "note": "Findings were remediated after the audit. input_hashes.target_locale binds the FINAL shipped bytes; input_hashes.context is the sidecar hash the auditor worked from where it changed afterwards. target_sha_at_audit keeps the bytes the auditor actually read.",
+    "target_sha_at_audit": "4c0bd0d04f4946e04e4eff23fab925f674df6568b9d3adfbd092dcb3df86894b",
+    "target_sha_after_remediation": "4d9454e44e389dae5bb75f205e8feb6be9f9938e85e79d6181424a07f6426e81",
+    "context_sha_at_audit": "be33c74a329196fdbe78f11f015848ff4f9593add57eba414163d4042807c811",
+    "context_sha_after_remediation": "be33c74a329196fdbe78f11f015848ff4f9593add57eba414163d4042807c811"
+  },
+  "artifacts": [
+    "report.md",
+    "record.json",
+    "audit.log"
+  ],
+  "current_report_verdict": "findings-remediated",
+  "findings": {
+    "blocker": 0,
+    "major": 1,
+    "minor": 1,
+    "nit": 2
+  },
+  "masking_note": "Verified by ordinal enumeration over the namespace bytes, not by reading the rendered transcript: no value contains U+003D, so no name=value run exists that the harness could mask, and no U+FFFD appears. The non-ASCII inventory is exactly the French letters present plus U+2019, U+2026, U+202F and U+2014 where the source calls for them (enumerated in audit.log). A masking marker inside a French value would be a blocker; none exists, and the codepoint enumeration rules out one having been hidden from this audit."
+}

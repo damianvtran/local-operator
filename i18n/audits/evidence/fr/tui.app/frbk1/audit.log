@@ -1,0 +1,54 @@
+# audit.log — fr / tui.app / frbk1
+# commands are recorded verbatim; the text under each is the command's real output.
+
+$ git -C /Users/damian/lo-i18n-base status --porcelain | grep 'catalogues/fr/'
+?? local_operator/i18n/catalogues/fr/tui.app.json
+
+$ git -C /Users/damian/lo-i18n-base rev-parse HEAD
+9495f8a6c3bf2b5438ef5c33d7274cf519435dda
+
+$ ls /Users/damian/lo-i18n-base/local_operator/i18n/catalogues/en/tui.app.context.json
+/Users/damian/lo-i18n-base/local_operator/i18n/catalogues/en/tui.app.context.json
+
+$ PYTHONPATH=/Users/damian/lo-i18n-base /Users/damian/local-operator/.venv/bin/python /Users/damian/.local-operator/sessions/d5db18882cb9/scratchpad/frbk1_audit_ns.py tui.app
+namespace=tui.app keys_en=46 keys_fr=46 context=present
+sidecar_keys=46 sidecar_missing=[] sidecar_extra=[]
+sha256 en=7e5f39df72438663a66afca0e5338e90b7b984bdca6b562195ce976945bd7875
+sha256 context=a840ac61e3c1e1178825257c1b9ebaa6ebfef500df4f3a29e8c463b50eef42fa
+sha256 fr=ecd4a3b5b436429c04a034aacd8dc8e281853fa891ac7936a00299a478a865b3
+key_order_matches_en= True
+missing_in_fr= []
+extra_in_fr= []
+argument_tuple_diffs= NONE
+fr_plural_categories= ['many', 'one', 'other']
+plural_selectors_added_vs_en= 6
+  tui.app.skills.led_by: en=(('one', 'other'),) fr=(('one', 'many', 'other'),)
+  tui.app.config.effect_new: en=(('one', 'other'),) fr=(('one', 'many', 'other'),)
+  tui.app.config.needs_relaunch: en=(('one', 'other'),) fr=(('one', 'many', 'other'),)
+  tui.app.parked.wakes: en=(('one', 'other'),) fr=(('one', 'many', 'other'),)
+  tui.app.parked.monitors: en=(('one', 'other'),) fr=(('one', 'many', 'other'),)
+  tui.app.stop_all.will_be_stopped: en=(('one', 'other'),) fr=(('one', 'many', 'other'),)
+invalid_fr_selectors= NONE
+typography_strays= [('ascii_space_before_punct(in_code)', 'tui.app.help.title_note_more')]
+u202f_total=19 u00a0_total=2
+whitespace_signature_diffs= NONE
+maxCells_rows= []
+over_budget= NONE
+largest_fr_minus_en  (plural=ICU template length, not rendered width):
+  + 99  tui.app.stop_all.will_be_stopped               en=152 fr=251 [plural-template]
+  + 42  tui.app.parked.monitors                        en= 63 fr=105 [plural-template]
+  + 34  tui.app.config.needs_relaunch                  en= 60 fr= 94 [plural-template]
+  + 31  tui.app.skills.led_by                          en= 80 fr=111 [plural-template]
+  + 30  tui.app.parked.wakes                           en= 57 fr= 87 [plural-template]
+  + 20  tui.app.config.effect_new                      en= 64 fr= 84 [plural-template]
+  + 20  tui.app.help.notify_note_more                  en=125 fr=145
+  + 19  tui.app.aida.extras_used                       en= 47 fr= 66
+  + 19  tui.app.help.copy_note_more                    en= 51 fr= 70
+  + 18  tui.app.help.title_note_more                   en=109 fr=127
+  + 18  tui.app.help.notify_note                       en=131 fr=149
+  + 17  tui.app.signin.opening                         en= 43 fr= 60
+
+$ PYTHONPATH=/Users/damian/lo-i18n-base /Users/damian/local-operator/.venv/bin/python scripts/i18n/check.py --catalogues-only; echo "exit=$?"
+check.py: catalogue checks: 0 problem(s)
+exit=0
+

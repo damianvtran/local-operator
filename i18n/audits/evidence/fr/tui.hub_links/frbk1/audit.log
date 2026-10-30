@@ -1,0 +1,48 @@
+# audit.log — fr / tui.hub_links / frbk1
+# commands are recorded verbatim; the text under each is the command's real output.
+
+$ git -C /Users/damian/lo-i18n-base status --porcelain | grep 'catalogues/fr/'
+?? local_operator/i18n/catalogues/fr/tui.hub_links.json
+
+$ git -C /Users/damian/lo-i18n-base rev-parse HEAD
+9495f8a6c3bf2b5438ef5c33d7274cf519435dda
+
+$ ls /Users/damian/lo-i18n-base/local_operator/i18n/catalogues/en/tui.hub_links.context.json
+/Users/damian/lo-i18n-base/local_operator/i18n/catalogues/en/tui.hub_links.context.json
+
+$ PYTHONPATH=/Users/damian/lo-i18n-base /Users/damian/local-operator/.venv/bin/python /Users/damian/.local-operator/sessions/d5db18882cb9/scratchpad/frbk1_audit_ns.py tui.hub_links
+namespace=tui.hub_links keys_en=56 keys_fr=56 context=present
+sidecar_keys=55 sidecar_missing=['tui.hub_links.hint.engage'] sidecar_extra=[]
+sha256 en=7fbe6713f8ac8f312884476c498c3b74e76c5f0853bdd027f25fc47d489311bb
+sha256 context=9b81676163337d8a93e38138909dbd4801f8edd8416075c6efb994f9870c682e
+sha256 fr=d69bd8926e7b50d9902dcb89de3d59082582737612153d1b4cd059b0833d6767
+key_order_matches_en= True
+missing_in_fr= []
+extra_in_fr= []
+argument_tuple_diffs= NONE
+fr_plural_categories= ['many', 'one', 'other']
+plural_selectors_added_vs_en= 0
+invalid_fr_selectors= NONE
+typography_strays= NONE
+u202f_total=8 u00a0_total=0
+whitespace_signature_diffs= NONE
+maxCells_rows= [('tui.hub_links.hint.failed', 22, 35, 48)]
+over_budget= NONE
+largest_fr_minus_en  (plural=ICU template length, not rendered width):
+  + 52  tui.hub_links.confirm.public                   en=128 fr=180
+  + 41  tui.hub_links.confirm.private                  en=151 fr=192
+  + 41  tui.hub_links.reason.no_receipt                en=102 fr=143
+  + 39  tui.hub_links.reason.baseline_unknown          en= 94 fr=133
+  + 29  tui.hub_links.reason.mixed_lineage             en= 98 fr=127
+  + 29  tui.hub_links.state.unsubscribed               en= 77 fr=106
+  + 28  tui.hub_links.reason.unsupported_precondition  en= 76 fr=104
+  + 28  tui.hub_links.state.unavailable                en= 65 fr= 93
+  + 24  tui.hub_links.confirm.concurrent               en= 83 fr=107
+  + 24  tui.hub_links.policy.auto_push.help            en= 58 fr= 82
+  + 16  tui.hub_links.state.preview_changed            en= 94 fr=110
+  + 15  tui.hub_links.confirm.keys                     en= 46 fr= 61
+
+$ PYTHONPATH=/Users/damian/lo-i18n-base /Users/damian/local-operator/.venv/bin/python scripts/i18n/check.py --catalogues-only; echo "exit=$?"
+check.py: catalogue checks: 0 problem(s)
+exit=0
+

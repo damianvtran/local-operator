@@ -1,0 +1,2 @@
+CHANGES_REQUESTED
+wire.slash/agent says the command talks to agents (it attaches one to the session); fork, stop, delete and effort also drop a documented argument, target, object or read path; typography and placeholders are otherwise clean.
