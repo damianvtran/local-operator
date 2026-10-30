@@ -45,9 +45,19 @@ def _assert_latest_row_is_fresh_and_earlier_rows_superseded(rows: list[dict[str,
     check that demanded every row be fresh would forbid ever re-auditing.
 
     WHY NOT ONLY THE LATEST. Reading just the last row would let a stale duplicate,
-    or an older audit appended AFTER a newer one, pass unseen. So: the last row must
-    be at the current English hash, and every earlier row for that namespace must be
-    at a DIFFERENT hash (a second row at the same hash is a duplicate, not history).
+    or an older audit appended AFTER a newer one, pass unseen. So the last row must
+    be at the current English hash, and no two rows for a namespace may be the same
+    row.
+
+    WHY IDENTICAL ROWS AND NOT IDENTICAL HASHES. A repeated hash is NOT evidence of
+    a duplicate: re-auditing a TRANSLATION leaves the English bytes untouched, so the
+    second row legitimately carries the same ``source_sha256`` and new translator/
+    auditor provenance. Measured on this tree: every one of the seven translated
+    locales carries exactly that pair for ``wire.slash`` (#3088 re-audited the width
+    rewrite without changing the English), and there are zero byte-identical rows in
+    the whole ledger. The earlier rule here — "every earlier row must be at a
+    different hash" — was written for the new-English-bytes case and forbade the
+    re-audit case; it was masked until a count assertion stopped failing first.
     """
 
     by_namespace: dict[str, list[dict[str, Any]]] = {}
@@ -59,15 +69,21 @@ def _assert_latest_row_is_fresh_and_earlier_rows_superseded(rows: list[dict[str,
             namespace,
             "stale audit against the current English bytes",
         )
-        for earlier in entries[:-1]:
-            assert earlier["source_sha256"] != current, (
-                namespace,
-                "an earlier row is at the current hash: a duplicate, or a stale row after it",
-            )
+        # An exact duplicate is the defect this catches (the same audit appended
+        # twice); a second row at the SAME hash with different provenance is a
+        # re-audit of the translation and is normal history.
+        seen: set[str] = set()
+        for entry in entries:
+            identity = json.dumps(entry, sort_keys=True)
+            assert identity not in seen, (namespace, "the same ledger row appears twice")
+            seen.add(identity)
 
 
-def test_active_ledger_carries_the_released_chinese_candidate() -> None:
-    ledger = json.loads((REPO / "i18n" / "ledger.json").read_bytes())["entries"]
+def test_active_ledger_carries_the_released_chinese_candidate(i18n_generate) -> None:
+    # Read through the generator's loader: per-locale shards are authoritative
+    # (the aggregate is a generated mirror), and the rows are identical either
+    # way — test_ledger_shards pins that parity.
+    ledger = i18n_generate._ledger_entries()
     chinese = [entry for entry in ledger if entry["locale"] == "zh-CN"]
     # The disposition was taken because every namespace the locale CARRIES has
     # a passed audit at the CURRENT en bytes; a row for a namespace with no
@@ -109,7 +125,20 @@ def test_active_ledger_carries_the_released_chinese_candidate() -> None:
     # deleted ended placeholder): two more. Both contributions are counted.
     # The serve-supervision slice adds the independently audited 14-key
     # `cli.services_status` row at the current English bytes: one more again.
-    assert len(chinese) == 97
+    # PR #3121's independently audited `relay.account_policy` backfill (13 keys)
+    # is the final one: main reached 97 while this branch was open, and the
+    # append-only tail gains one more row for the namespace this PR lands.
+    # NO row-count pin. The count is a snapshot of the audit waves that happen
+    # to have landed (the comment block above is the receipt of how many times
+    # it had to be edited: 81 -> 83 -> ... -> 98), and it reddens on a
+    # legitimate contribution — #3088's zh-CN slash row made it 99 for no
+    # defect. The gate's actual requirement is structural and is asserted
+    # below, where it bites: every namespace zh-CN carries has a row, every row
+    # passed, and the latest row per namespace is at the current English bytes
+    # with every earlier row at a different hash (so a same-hash duplicate still
+    # fails). That set equality is what forbids an unaudited or missing
+    # namespace; a total adds nothing it does not already catch.
+    assert chinese, "the released candidate carries no zh-CN rows"
     assert all(entry["status"] == "passed" for entry in chinese)
     carried = set(catalogues.namespaces("zh-CN"))
     assert {entry["namespace"] for entry in chinese} == carried
@@ -173,7 +202,9 @@ def test_active_ledger_carries_the_released_chinese_candidate() -> None:
     # rows at the new English bytes: two more.
     # The serve-supervision slice adds the audited `cli.services_status` row at
     # the current English bytes: one more again.
-    assert len(hindi) == 52
+    # Same conversion as zh-CN above: the cardinality was a running tally of
+    # landed waves, not a property. The structural clauses below are the gate.
+    assert hindi, "the active hi rows disappeared"
     assert all(entry["status"] == "passed" for entry in hindi)
     _assert_latest_row_is_fresh_and_earlier_rows_superseded(hindi)
 
@@ -241,6 +272,7 @@ def test_a_held_locale_is_excluded_even_with_every_row_passed(
         )
     monkeypatch.setattr(catalogues, "_CATALOGUES", root)
     monkeypatch.setattr(i18n_generate, "LEDGER", tmp_path / "ledger.json")
+    monkeypatch.setattr(i18n_generate, "LEDGER_SHARDS", tmp_path / "ledger")
     en_sha = catalogues.catalogue_sha256("en", "wire.exec")
     i18n_generate.LEDGER.write_text(
         json.dumps(

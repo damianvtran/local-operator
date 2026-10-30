@@ -2875,6 +2875,38 @@ def test_the_phone_catalogue_drops_terminal_only_vocabulary() -> None:
         assert description == expected, name
 
 
+def test_the_phone_sheet_follows_the_language_the_request_resolved(monkeypatch) -> None:
+    """A French phone sheet is French, and the two overrides stay theirs.
+
+    Same contract as the desktop catalogue: this daemon never activates a
+    locale, so the rows render through ``describe(cmd, resolve_language())`` at
+    the boundary. Two assertions beyond that, both cheap and both load-bearing:
+    the two terminal-shaped overrides keep their own English copy (localising
+    them is a separate translated-copy change), and the per-locale cache answers
+    the SECOND language from the SAME daemon — a single-language cache would
+    serve whichever request arrived first for the life of the process.
+    """
+    from local_operator.i18n import catalogues
+    from local_operator.slash_commands import SLASH_COMMANDS
+
+    monkeypatch.setenv("LOP_LANG", "fr")
+    daemon = MobileDaemon(port=0, password="pw123")
+    described = {row["name"]: row["description"] for row in daemon.slash_commands()}
+
+    french = catalogues.load_catalogue("fr", "wire.slash")
+    assert described["model"] == french["wire.slash.model"]
+    assert described["model"].startswith("Changer de modèle")
+    # The registry is untouched in this process — the render is the boundary's.
+    registry = {cmd.name: cmd.description for cmd in SLASH_COMMANDS}
+    assert registry["model"] == "Switch model; /model default saves it for new sessions"
+    assert described["effort"] == "Show or set this session's reasoning effort"
+    assert described["rename"] == "Name this conversation"
+
+    monkeypatch.setenv("LOP_LANG", "en")
+    english = {row["name"]: row["description"] for row in daemon.slash_commands()}
+    assert english["model"] == "Switch model; /model default saves it for new sessions"
+
+
 def test_the_two_viewport_meta_copies_agree_and_match_the_runtime_constant() -> None:
     """Issue #1870: the viewport meta lives in TWO places that must move together.
 

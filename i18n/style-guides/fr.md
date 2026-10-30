@@ -70,6 +70,16 @@ for `fr`; when this file and a habit disagree, this file wins.
 - Budgets: `maxCells` from the en sidecar; pinned: PERSIST_HINT 42/43 cells,
   tip pool 59, `/help` ≈ 55. French typographic spaces (U+202F) count one
   cell each — account for them.
+- Recorded width exception: `relay.chrome`, five keys over their declared
+  `maxCells`, all accepted because the French is the correct rendering and no
+  shorter correct synonym exists: `list.search_close` 19/16 (an accessible
+  name — announced, never laid out, so it cannot truncate; accessibility-only),
+  `list.mark_all` 21/20, `row.unpin` 11/10, `row.saving` 15/12 and
+  `session.loading` 30/28 cells with `rich.cells.cell_len`. The four visible
+  overruns are 1–3 cells; shortening any of them (`Tout marquer lu`,
+  `Sauvegarde…`, `Chargement…`) drops either the standard French form or the
+  noun that names what is loading. Recorded rather than rewritten, per the
+  shorter-synonym rule above.
 - Recorded width exception: `cli.services_status` in this wave:
   `serve_linger_required` measures 102 and `unsupervised_unknown` 92 cells with
   `rich.cells.cell_len` against the 80/78 status budget. The durability clause

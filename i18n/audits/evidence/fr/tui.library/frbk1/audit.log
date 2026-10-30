@@ -1,0 +1,49 @@
+# audit.log — fr / tui.library / frbk1
+# commands are recorded verbatim; the text under each is the command's real output.
+
+$ git -C /Users/damian/lo-i18n-base status --porcelain | grep 'catalogues/fr/'
+?? local_operator/i18n/catalogues/fr/tui.library.json
+
+$ git -C /Users/damian/lo-i18n-base rev-parse HEAD
+9495f8a6c3bf2b5438ef5c33d7274cf519435dda
+
+$ ls /Users/damian/lo-i18n-base/local_operator/i18n/catalogues/en/tui.library.context.json
+ls: /Users/damian/lo-i18n-base/local_operator/i18n/catalogues/en/tui.library.context.json: No such file or directory
+
+$ PYTHONPATH=/Users/damian/lo-i18n-base /Users/damian/local-operator/.venv/bin/python /Users/damian/.local-operator/sessions/d5db18882cb9/scratchpad/frbk1_audit_ns.py tui.library
+namespace=tui.library keys_en=108 keys_fr=108 context=ABSENT (null)
+sha256 en=5a389b6a7d8de06621462f2685eff6dc95cd4cd6584d35dd6c26a0a19ad50b11
+sha256 context=None
+sha256 fr=764cf78d82e995f5e17eb6e7e161eeece56d3f9f36abd4375325fe69d9a02d3a
+key_order_matches_en= True
+missing_in_fr= []
+extra_in_fr= []
+argument_tuple_diffs= NONE
+fr_plural_categories= ['many', 'one', 'other']
+plural_selectors_added_vs_en= 2
+  tui.library.asset_count: en=(('one', 'other'),) fr=(('one', 'many', 'other'),)
+  tui.library.detail_sources: en=(('one', 'other'),) fr=(('one', 'many', 'other'),)
+invalid_fr_selectors= NONE
+typography_strays= NONE
+u202f_total=14 u00a0_total=0
+whitespace_signature_diffs= NONE
+maxCells_rows= []
+over_budget= NONE
+largest_fr_minus_en  (plural=ICU template length, not rendered width):
+  + 27  tui.library.notice_open_failed                 en= 51 fr= 78
+  + 26  tui.library.detail_sources                     en= 61 fr= 87 [plural-template]
+  + 24  tui.library.ask_prompt                         en=103 fr=127
+  + 24  tui.library.asset_count                        en= 47 fr= 71 [plural-template]
+  + 23  tui.library.ask_prompt_digest                  en= 91 fr=114
+  + 19  tui.library.empty_body                         en= 65 fr= 84
+  + 19  tui.library.librarian_no_launcher              en= 69 fr= 88
+  + 18  tui.library.form_asset_gone                    en= 60 fr= 78
+  + 17  tui.library.rail_hidden                        en= 66 fr= 83
+  + 16  tui.library.form_tags_hint                     en= 35 fr= 51
+  + 15  tui.library.empty_title                        en= 13 fr= 28
+  + 13  tui.library.librarian_unavailable              en= 45 fr= 58
+
+$ PYTHONPATH=/Users/damian/lo-i18n-base /Users/damian/local-operator/.venv/bin/python scripts/i18n/check.py --catalogues-only; echo "exit=$?"
+check.py: catalogue checks: 0 problem(s)
+exit=0
+

@@ -372,6 +372,8 @@
  "wire.settings.keymap_quick_send.label": "Quick send",
  "wire.settings.keymap_resume.help": "Opens the picker of recent conversations, the same as /resume.",
  "wire.settings.keymap_resume.label": "Resume a session",
+ "wire.settings.keymap_start_recording.help": "Starts speech-to-text recording in the desktop window.",
+ "wire.settings.keymap_start_recording.label": "Start recording",
  "wire.settings.language.help": "Interface language. auto follows your operating system, falling back to English.",
  "wire.settings.language.label": "Language",
  "wire.settings.librarian.description": "The Librarian keeps the global Library organised: her display name, the daily pass, and the pause switch. The Library is long-term and shared by every conversation.",

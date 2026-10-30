@@ -1793,7 +1793,26 @@ CHARS_PER_BILLED_TOKEN = 2.78
 # CONVERGED directory/dm ceiling: the two ledgers above are inputs, not a sum.
 # Re-measured on this merged tree with an isolated HOME and this script:
 #   top 95,937 chars / 34,510 billed / 37 schemas; ceiling = 34,510 + 55.
-BUDGET_BILLED_TOKENS = 34_565
+#
+# RAISED 34,565 -> 34,860 folding origin/main 66da866475f into the name-resolution
+# branch (tb-name-resolution). Measured with THIS script, both trees, one host,
+# one after the other:
+#   main-now (origin/main 66da866475f)  96,519 chars = ~34,719 billed
+#   merged (this branch)                96,757 chars = ~34,805 billed / 37 schemas
+#   delta                                   +238 chars = ~+86
+# The +86 is EXACTLY the delta this branch measured on its own base before the
+# fold (+238 chars, the ``name`` property plus the one clause that states the
+# matching rule and the per-op scope), which is the check that the fold itself
+# added no context.
+#
+# SAID PLAINLY: main-now already measures 34,719 against its own committed
+# 34,565 — 154 tokens over, i.e. the directory/dm ledger was set before the last
+# merges landed on main and main's tree has since grown. That drift is not this
+# branch's and is not absorbed silently: the ceiling below is this tree's own
+# measurement plus the 55-token band, and main's overshoot is reported here so
+# the owner of that ledger can tighten it separately.
+# Ceiling = measured head + the 55-token band (34,805 + 55).
+BUDGET_BILLED_TOKENS = 34_860
 
 #: The SUBAGENT ceiling (``--kind child``), in billed tokens. Same ratchet rules
 #: as ``BUDGET_BILLED_TOKENS`` above. It is a separate number because a child's
@@ -1970,7 +1989,18 @@ BUDGET_BILLED_TOKENS = 34_565
 # because the child inventory carries the same bridge operations and recipient
 # schema. Both ceilings preserve the 55-token headroom band. Measured on the
 # merged tree: 85,106 chars / 30,614 billed; ceiling = 30,614 + 55.
-BUDGET_CHILD_BILLED_TOKENS = 30_669
+#
+# RAISED 30,669 -> 30,964 with the top arm above, folding origin/main 66da866475f
+# into the name-resolution branch. Same trees, same script, child arm:
+#   main-now (origin/main 66da866475f)  85,688 chars = ~30,823 billed
+#   merged (this branch)                85,926 chars = ~30,909 billed / 32 schemas
+#   delta                                   +238 chars = ~+86
+# The child pays the SAME +238 as the top arm — one published ``to`` property and
+# one clause, on a surface that already carries the bridge tool — which is the
+# check that nothing child-only moved. main-now's own overshoot (30,823 against
+# its committed 30,669) is main's drift, stated in the top arm's entry.
+# Ceiling = measured head + the 55-token band (30,909 + 55).
+BUDGET_CHILD_BILLED_TOKENS = 30_964
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:

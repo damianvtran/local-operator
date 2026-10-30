@@ -973,9 +973,21 @@ async def test_a_stale_cache_with_one_appended_row_still_waits(tmp_path, monkeyp
     monkeypatch.setattr(asyncio, "wait", spying_wait)
     view = await ti.checkpoints_view(tmp_path, SID)  # the route's own default
     assert timeouts == [ti._FIRST_PAINT_WAIT_S], "a usable previous index lost the wait"
+    # THE PROPERTY IS THE WAGER, NOT THE SCHEDULER (review round 5, MAJOR). The
+    # first-paint budget is 120 ms; a loaded host can leave the refresh running
+    # when it expires, and `building` is then the honest answer rather than a
+    # defect. Assert the wait was offered, then wait for the build this call
+    # started and read the facts from the answer that follows — the freshness
+    # assertions below are about the derivation, and racing them against a timer
+    # is what made this test fail one run in ten.
+    if view["index"]["state"] != "ready":
+        entry = ti._IN_FLIGHT.get(ti._key(tmp_path, SID))
+        if entry is not None:
+            await asyncio.wait_for(entry[1], 60)
+        view = await ti.checkpoints_view(tmp_path, SID)
     assert view["index"]["state"] == "ready"
-    # Freshness, not just state: the appended row is in the manifest this ask
-    # answered with, checked against a full scan of the same journal.
+    # Freshness, not just state: the appended row is in the manifest, checked
+    # against a full scan of the same journal.
     expected = [checkpoint.id for checkpoint in refreshed(tmp_path).checkpoints]
     assert [entry["id"] for entry in view["checkpoints"]] == expected
     assert "late" in expected
@@ -2214,6 +2226,251 @@ def test_the_payable_rule_is_the_manifest_rule() -> None:
     )
 
 
+def _padded_disk_hit(root: Path) -> ti.TranscriptIndex:
+    """A small witnessed journal with an expensive, still-valid cache document.
+
+    The companion is published explicitly: production does it from the caller on
+    the event loop after the refresh, which a plain helper call does not run.
+    """
+    write_rows(root, [user("u1", 1.0), assistant("a1", 1.1)])
+    previous = refreshed(root)
+    _materialize(root, previous)
+    with ti.index_path(root, SID).open("a", encoding="utf-8") as handle:
+        handle.write(" " * (6 << 20))
+    return previous
+
+
+def _materialize(root: Path, index: ti.TranscriptIndex) -> None:
+    """Publish the companion for an already-derived index, synchronously."""
+    from local_operator.session import index_read_model as rm
+
+    token = rm.publish(root, SID, index)
+    assert token is not None
+    rm.write_naming(root, SID, token, index.naming)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["hit", "append", "truncate", "rewrite"])
+async def test_disk_fallback_keeps_original_admission_and_derives_all_facts(tmp_path, change):
+    """An exact journal signature removes rederivation, not disk decoding.
+
+    Padding a valid document isolates its hydration charge from journal size
+    and run geometry; real many-row indexes exercise both in the HTTP matrix.
+    Hydration is expensive, but a projection-less fallback cannot be deferred:
+    doing so would strand a correct ready answer behind its own paint hold.
+    """
+    previous = _padded_disk_hit(tmp_path)
+    path = journal_path(tmp_path)
+    if change == "append":
+        write_rows(tmp_path, [user("u2", 2.0)])
+    elif change == "truncate":
+        path.write_bytes(path.read_bytes().splitlines(keepends=True)[0])
+    elif change == "rewrite":
+        before = path.stat()
+        original = path.read_bytes()
+        rewritten = original.replace(b"u1", b"u9")
+        assert rewritten != original
+        path.write_bytes(rewritten)
+        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000_000))
+        assert path.stat().st_size == before.st_size
+    assert ti.fresh_resident(tmp_path, SID) is None
+    assert ti._read_resume_head(tmp_path, SID) is not None
+    release = ti.hold_paint(tmp_path, SID)
+    task = None
+    built = None
+    try:
+        task, started = ti.start_refresh(tmp_path, SID)
+        assert started and not ti.refresh_deferred(tmp_path, SID)
+        assert not ti.refresh_paused_for_paint(tmp_path, SID)
+    finally:
+        release()
+        if task is not None:
+            built = await asyncio.wait_for(task, 30)
+    assert built is not None
+    if change == "hit":
+        assert _derived(built) == _derived(previous)
+    else:
+        # A clean rebuild is the oracle for append/compaction: charging cache
+        # hydration must never weaken the source signature or tail witnesses.
+        assert _derived(built) == _derived(ti._scan_full(path, None))
+    assert not ti.refresh_deferred(tmp_path, SID)
+
+
+@pytest.mark.asyncio
+async def test_hydration_and_rederivation_cost_sum_without_stranding_fallback(tmp_path):
+    write_rows(tmp_path, [user("u1", 1.0), assistant("a1", 1.1)])
+    refreshed(tmp_path)
+    with ti.index_path(tmp_path, SID).open("a", encoding="utf-8") as handle:
+        handle.write(" " * (3 << 20))
+    write_rows(tmp_path, [assistant("a2", 1.2, "x" * (3 << 20))])
+    journal = journal_path(tmp_path).stat()
+    head = ti._read_resume_head(tmp_path, SID)
+    assert head is not None
+    rederive = ti._rederive_bytes(journal, *head[:3])
+    hydration = ti.index_path(tmp_path, SID).stat().st_size
+    budget = ti._FIRST_PAINT_SCAN_BYTES_PER_S * ti._FIRST_PAINT_WAIT_S
+    assert rederive < budget and hydration < budget < rederive + hydration
+    release = ti.hold_paint(tmp_path, SID)
+    try:
+        assert not ti.scan_payable_in_budget(
+            journal.st_size,
+            has_previous=True,
+            wait_s=ti._FIRST_PAINT_WAIT_S,
+            rederive_bytes=rederive,
+            hydration_bytes=hydration,
+        )
+        assert ti._defer_for_paint(tmp_path, SID) is None
+    finally:
+        release()
+
+
+@pytest.mark.asyncio
+async def test_a_large_resident_hit_keeps_ready_facts_without_hydrating(tmp_path, monkeypatch):
+    previous = _padded_disk_hit(tmp_path)
+    ti._remember(ti._key(tmp_path, SID), previous, ti.index_path(tmp_path, SID).stat().st_mtime)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("a witnessed resident HIT must not hydrate or schedule a refresh")
+
+    monkeypatch.setattr(ti, "_read_raw", forbidden)
+    monkeypatch.setattr(ti, "start_refresh", forbidden)
+    release = ti.hold_paint(tmp_path, SID)
+    try:
+        assert ti.fresh_resident(tmp_path, SID) is previous
+        answer = await ti.checkpoints_view(tmp_path, SID)
+        assert answer["index"]["state"] == "ready"
+        assert [row["id"] for row in answer["checkpoints"]] == [c.id for c in previous.checkpoints]
+    finally:
+        release()
+
+
+@pytest.mark.asyncio
+async def test_large_disk_checkpoint_manifest_preserves_ready_facts_before_paint(
+    tmp_path, monkeypatch
+):
+    """Acceptance: deferring hydration must not downgrade an already-ready rail.
+
+    The probe currently hydrates before checking any paint rule. This control
+    deliberately preserves its ready answer while forbidding that whole read;
+    if the cost-only patch cannot satisfy both, it depends on the bounded
+    witnessed fact publication, not on hiding the regression as 'building'.
+    """
+    previous = _padded_disk_hit(tmp_path)
+    expected = ti._manifest_state(
+        SID, "ready", previous, ti.index_path(tmp_path, SID).stat().st_mtime
+    )
+    reads = []
+    real_read = ti._read_raw
+
+    def read_spy(*args, **kwargs):
+        reads.append(True)
+        return real_read(*args, **kwargs)
+
+    monkeypatch.setattr(ti, "_read_raw", read_spy)
+    release = ti.hold_paint(tmp_path, SID)
+    try:
+        answer = await ti.checkpoints_view(tmp_path, SID)
+        assert answer == expected, "a hydration hold discarded previously-ready checkpoint facts"
+        assert reads == [], "the ready manifest still hydrated the whole disk index under paint"
+    finally:
+        release()
+        entry = ti._IN_FLIGHT.get(ti._key(tmp_path, SID))
+        if entry is not None:
+            await asyncio.wait_for(entry[1], 30)
+
+
+@pytest.mark.asyncio
+async def test_a_small_exact_disk_hit_remains_payable_and_complete(tmp_path):
+    write_rows(tmp_path, [user("u1", 1.0), assistant("a1", 1.1)])
+    previous = refreshed(tmp_path)
+    assert ti.fresh_resident(tmp_path, SID) is None
+    release = ti.hold_paint(tmp_path, SID)
+    try:
+        task, started = ti.start_refresh(tmp_path, SID)
+        assert started and not ti.refresh_paused_for_paint(tmp_path, SID)
+        built = await asyncio.wait_for(task, 30)
+        assert built is not None and _derived(built) == _derived(previous)
+        assert built.journal_rows == previous.journal_rows
+        assert built.source_projection_facts == previous.source_projection_facts
+        assert ti.fresh_resident(tmp_path, SID) is built
+    finally:
+        release()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("large", [False, True])
+async def test_projection_less_running_fallback_uses_original_pause_rule(
+    tmp_path, monkeypatch, large
+):
+    if large:
+        _padded_disk_hit(tmp_path)
+    else:
+        write_rows(tmp_path, [user("u1", 1.0), assistant("a1", 1.1)])
+        refreshed(tmp_path)
+    release = ti.hold_paint(tmp_path, SID)
+    key = ti._key(tmp_path, SID)
+    pending = asyncio.create_task(asyncio.Event().wait())
+    ti._IN_FLIGHT[key] = (asyncio.get_running_loop(), pending)
+    sleeps = []
+
+    def release_on_pause(seconds):
+        sleeps.append(seconds)
+        release()
+
+    monkeypatch.setattr(ti.time, "sleep", release_on_pause)
+    try:
+        assert not ti.refresh_paused_for_paint(tmp_path, SID)
+        ti._yield_to_other_opens(key, tmp_path, SID)()
+        assert not sleeps
+    finally:
+        release()
+        pending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+        ti._IN_FLIGHT.pop(key, None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entered", [False, True])
+async def test_cancelled_cold_unpayable_refresh_drops_the_deferred_marker(tmp_path, entered):
+    _big_journal(tmp_path)
+    release = ti.hold_paint(tmp_path, SID)
+    task, _ = ti.start_refresh(tmp_path, SID)
+    try:
+        assert ti.refresh_deferred(tmp_path, SID)
+        if entered:
+            await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        # The task completion callback is queued separately from its finally.
+        await asyncio.sleep(0)
+        assert not ti.refresh_deferred(tmp_path, SID)
+        assert ti._key(tmp_path, SID) not in ti._IN_FLIGHT
+    finally:
+        release()
+        if not task.done():
+            await asyncio.wait_for(task, 30)
+
+
+@pytest.mark.asyncio
+async def test_cold_unpayable_hold_expiry_still_reaches_ready(tmp_path, monkeypatch):
+    _big_journal(tmp_path)
+    # Expire, rather than sleep: this tests the ceiling's escape path without
+    # depending on machine speed or spending a real first-paint budget.
+    monkeypatch.setattr(ti, "_PAINT_HOLD_CEILING_S", 0)
+    monkeypatch.setattr(ti, "_YIELD_HOLD_STALE_S", 0)
+    release = ti.hold_paint(tmp_path, SID)
+    try:
+        task, _ = ti.start_refresh(tmp_path, SID)
+        assert ti.refresh_deferred(tmp_path, SID)
+        built = await asyncio.wait_for(task, 30)
+        assert built is not None
+        assert not ti.refresh_paused_for_paint(tmp_path, SID)
+    finally:
+        release()
+
+
 @pytest.mark.asyncio
 async def test_a_held_cold_unpayable_scan_waits_for_the_release(tmp_path, monkeypatch):
     """The scan does not start while the hold is live, and starts on release."""
@@ -2346,9 +2603,12 @@ def test_the_cache_head_states_the_resume_point_without_a_full_parse(tmp_path):
     index = refreshed(tmp_path)
     head = ti._read_resume_head(tmp_path, SID)
     assert head is not None
-    sig, scan, generation = head
+    sig, scan, generation, size = head
     assert scan == index.scan and generation == index.journal_generation
     assert (sig["size"], sig["inode"]) == (index.sig["size"], index.sig["inode"])
+    # document_bytes rides the same descriptor, so no extra stat is needed on
+    # the event loop to price hydration.
+    assert size == ti.index_path(tmp_path, SID).stat().st_size
     raw = ti.index_path(tmp_path, SID).read_bytes()
     assert raw.index(b'"scan":') < ti._RESUME_HEAD_BYTES, "scan must ride in the head"
 

@@ -1,0 +1,40 @@
+{
+  "schema": 1,
+  "record_kind": "portable_evidence_manifest",
+  "audit_id": "ru29s2",
+  "receipt": "receipt.json",
+  "report": "report.md",
+  "file_count": 6,
+  "files": [
+    {
+      "path": "receipt.json",
+      "bytes": 22644,
+      "sha256": "c8450624ad1c47d92ec66f4afcfa6881d73dc4c152149d0650eb0081d6c4586f"
+    },
+    {
+      "path": "record.json",
+      "bytes": 3756,
+      "sha256": "023eeb77e152e88cd21e555dabf68877d04baf0934329bfb25ae7da1810e23b3"
+    },
+    {
+      "path": "report.md",
+      "bytes": 2533,
+      "sha256": "61c0cb4a4ead842668fdb641c3611359261360ed4bfd7e69212c79b76e55553f"
+    },
+    {
+      "path": "scope.json",
+      "bytes": 1364,
+      "sha256": "45d4bba3ad56861ffe9ff01fa268c923d9bc02f65950f18546bcd6a613913267"
+    },
+    {
+      "path": "verdict-round1.txt",
+      "bytes": 268,
+      "sha256": "d497ae9b079592b2d570b67cdb6ecc519320939e2aced64a315cbd154ef987eb"
+    },
+    {
+      "path": "verdict.txt",
+      "bytes": 202,
+      "sha256": "9168ccb58385b1738b0c1ba35c82d5a30aafc47e64cadb628f7eed8d2cf49c4f"
+    }
+  ]
+}

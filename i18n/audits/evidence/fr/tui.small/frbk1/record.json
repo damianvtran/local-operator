@@ -1,0 +1,44 @@
+{
+  "locale": "fr",
+  "namespace": "tui.small",
+  "audit_date": "2026-10-29",
+  "key_count": 137,
+  "translator": {
+    "agent": "translator (lopdev team)",
+    "model": "radient/auto",
+    "date": "2026-10-29"
+  },
+  "auditor": {
+    "agent": "translation-auditor (lopdev team)",
+    "session": "d5db18882cb9",
+    "model": "radient/auto",
+    "actual_model_source": "Actual served model is the harness's auto route (radient/auto). This session received two provider-failure fallbacks during the audit: anthropic/claude-sonnet-5-5 -> openai/gpt-6-astra -> kimi/k3.1-pro -> radient/auto (reason: quota). No pinned model is claimed.",
+    "independence": "not the translator; edited nothing",
+    "date": "2026-10-29"
+  },
+  "input_hashes": {
+    "en": "16d49c4ba2a514bbde7da494443abade26a3b28c0389e6bca124d00aa7d0ed75",
+    "context": "1e3d6785f78126b8389b2acbcc081d5bf782fbaf744114e47611fbff3c45dde1",
+    "target_locale": "23992848274d7a94da1953564faca27579d4d1b4e238be1a2c877fb313345ea3"
+  },
+  "remediation": {
+    "note": "Findings were remediated after the audit. input_hashes.target_locale binds the FINAL shipped bytes; input_hashes.context is the sidecar hash the auditor worked from where it changed afterwards. target_sha_at_audit keeps the bytes the auditor actually read.",
+    "target_sha_at_audit": "5a1a26ac03a707b7878d4eeb9511d90f398ee48862ed1ff237b5bdb886c6d321",
+    "target_sha_after_remediation": "23992848274d7a94da1953564faca27579d4d1b4e238be1a2c877fb313345ea3",
+    "context_sha_at_audit": "1e3d6785f78126b8389b2acbcc081d5bf782fbaf744114e47611fbff3c45dde1",
+    "context_sha_after_remediation": "1e3d6785f78126b8389b2acbcc081d5bf782fbaf744114e47611fbff3c45dde1"
+  },
+  "artifacts": [
+    "report.md",
+    "record.json",
+    "audit.log"
+  ],
+  "current_report_verdict": "findings-remediated",
+  "findings": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 1,
+    "nit": 2
+  },
+  "masking_note": "No masking marker exists in the audited bytes. Verified by codepoint rather than by eye across all eight audited French catalogues: no bracketed redaction marker, no U+FFFD and no control characters in any value. The only 'redact' substring anywhere in the set is the placeholder NAME {redactions} in tui.import.result_memory, whose rendered French text is the word 'masquages' — a placeholder name, not a masked value."
+}

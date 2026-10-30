@@ -1,0 +1,107 @@
+{
+  "schema": 1,
+  "audit_id": "fr29s3",
+  "audit_kind": "independent_full_namespace_audit_of_rewritten_slash_descriptions",
+  "locale": "fr",
+  "namespace": "wire.slash",
+  "round": 3,
+  "audit_date": "2026-10-29",
+  "key_count": 52,
+  "keys_read": 52,
+  "keys_changed_in_this_commit": 16,
+  "changed_keys": [
+    "wire.slash.agent",
+    "wire.slash.approvals",
+    "wire.slash.clear",
+    "wire.slash.delete",
+    "wire.slash.effort",
+    "wire.slash.failovers",
+    "wire.slash.fork",
+    "wire.slash.language",
+    "wire.slash.links",
+    "wire.slash.mcp",
+    "wire.slash.model",
+    "wire.slash.reload",
+    "wire.slash.sidebar",
+    "wire.slash.stop",
+    "wire.slash.team",
+    "wire.slash.theme"
+  ],
+  "changed_keys_method": "git show HEAD:<catalogue> compared key-by-key with the working tree at record time",
+  "tree_head_above_the_rewrite": "7159e2a30927831f5dfb88f84c588eac07770e5d",
+  "current_byte_round_for_ledger": true,
+  "sha256": {
+    "en": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
+    "context": "32b3475a5808048a6eeaae462fee0feb55405fca77026e41b9609a516d74a215",
+    "target": "bb580c5bc5a2b2d91b03b97b92be5341db0c731feaf7ea592f08b70d3520983e"
+  },
+  "translator": {
+    "agent": "i18n-translator (session 0347acaa76f7, 16 keys; session 53ebb4e7a4a0, wire.slash.approvals)",
+    "session": "0347acaa76f7 + 53ebb4e7a4a0",
+    "model": "radient/auto",
+    "date": "2026-10-29",
+    "model_note": "provider-quota fallback chain anthropic/claude-sonnet-5-5 -> openai/gpt-6-astra -> kimi/k3.1-pro -> radient/auto; recorded as served, per the translator's own note"
+  },
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "848874ddfe7a",
+    "instance": "848874ddfe7a-slash3-fr",
+    "model": "radient/auto",
+    "date": "2026-10-29",
+    "result": "passed",
+    "findings": 0,
+    "unresolved_blocker_major": 0,
+    "counts": {
+      "BLOCKER": 0,
+      "MAJOR": 0,
+      "MINOR": 1,
+      "NIT": 0
+    },
+    "independence": "distinct session and instance from the translator and from the round-1 auditor; the receipt states this in its own independence block"
+  },
+  "prior_rounds": [
+    {
+      "round": 1,
+      "instance": "9412375334be-slash-fr",
+      "verdict": "changes_requested",
+      "counts": {
+        "BLOCKER": 1,
+        "MAJOR": 4,
+        "MINOR": 4,
+        "NIT": 5
+      },
+      "subject": "the shortened bytes introduced by head commit 7159e2a309",
+      "evidence": "session scratch slash-audit/fr/receipt.json (not copied; verdict + counts preserved here and in verdict-round1.txt)"
+    },
+    {
+      "round": 2,
+      "instance": "b682afa67e4b-slash2-fr",
+      "verdict": "changes_requested",
+      "counts": {
+        "BLOCKER": 0,
+        "MAJOR": 1,
+        "MINOR": 4,
+        "NIT": 1
+      },
+      "subject": "the 16 rewritten keys; one MAJOR on wire.slash.approvals ('Regler' dropped the report half of 'Show or set')",
+      "evidence": "receipt-round2-changes-requested.json + verdict-round2-changes-requested.txt in this directory"
+    }
+  ],
+  "evidence": {
+    "receipt": "receipt.json",
+    "verdict": "verdict.txt",
+    "scope": "scope.json",
+    "report": "report.md",
+    "manifest": "evidence-manifest.json",
+    "round_1_verdict": "verdict-round1.txt"
+  },
+  "findings_summary": [
+    {
+      "id": "R3-1",
+      "severity": "MINOR",
+      "key": "wire.slash.approvals"
+    }
+  ],
+  "verdict": "passed",
+  "round_3_scope_note": "Round 3 confirmed only wire.slash.approvals after the single-key rewrite, and proved the other 51 keys unchanged by byte reconstruction: restoring only that value re-hashes to the round-2 audited target exactly."
+}
