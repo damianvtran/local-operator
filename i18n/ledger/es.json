@@ -2029,6 +2029,158 @@
       },
       "status": "passed",
       "note": "Round 4 scope reduction: `lop team-bridge setup` no longer grants consent (it is granted in the Local Operator app only, #3022's bearer boundary). Copy change audited at source_sha256 f029ae6953f2fce31d126e7315beaf120bc63da0fc7398fbc6b31413b962222f: 5 keys deleted (setup.credential/account/tenant/consent/session), 7 added (setup.consent_ui_required/consent_ui_next/enable_in_app_required/designation_missing/ready/not_ready/failed), 2 updated (help.setup, outcome.not_wanted_hint). Independent audit (reviewer role, distinct agent and context from both the implementer and the translator): verdict clean, 0 blocker, 0 major, 1 minor + 4 nit, all applied (hi verbal predicate 'सेटअप हो चुके हैं'; ru agreement 'готовы' and 'предоставляется' for consent; zh-CN '就位' for the receiver and an explicit machine object in enable_in_app_required). The load-bearing sentence keeps all four elements in every locale: consent is granted in the app, NOT from a terminal, open the app once, enable agent messages."
+    },
+    {
+      "locale": "es",
+      "namespace": "tui.small",
+      "source_sha256": "16d49c4ba2a514bbde7da494443abade26a3b28c0389e6bca124d00aa7d0ed75",
+      "translator": {
+        "agent": "i18n-translator (es-tui-a)",
+        "model": "radient/auto",
+        "date": "2026-10-30"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (independent)",
+        "model": "radient/auto",
+        "date": "2026-10-30",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "137 keys; round-1 audit passed with 2 minor (under-quantified lower-bound note, calque \"bajo profundidad\") and 3 nit; remediated, round 2 re-audited the delta and passed 0/0/0/0. `copy.code_count` keeps a non-plural source on purpose (sidecar forbids a branch; parity refuses simp"
+    },
+    {
+      "locale": "es",
+      "namespace": "tui.library",
+      "source_sha256": "5a389b6a7d8de06621462f2685eff6dc95cd4cd6584d35dd6c26a0a19ad50b11",
+      "translator": {
+        "agent": "i18n-translator (es-tui-a)",
+        "model": "radient/auto",
+        "date": "2026-10-30"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (independent)",
+        "model": "radient/auto",
+        "date": "2026-10-30",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "108 keys, no en sidecar: register judged against shipped es TUI copy; round-1 passed with 1 minor (rail_hidden 76 cells, clipped on the one-row status line) and 1 nit; remediated to 45 cells, round 2 passed 0/0/0/0."
+    },
+    {
+      "locale": "es",
+      "namespace": "tui.projects",
+      "source_sha256": "aeb473eb7de44143822962b44b6be239d63f930710e754ce5205781ca4b4ae91",
+      "translator": {
+        "agent": "i18n-translator (es-tui-a)",
+        "model": "radient/auto",
+        "date": "2026-10-30"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (independent)",
+        "model": "radient/auto",
+        "date": "2026-10-30",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "97 keys; round-1 passed with 1 minor (\"Tiempo más grueso\" calque for coarser time) and 1 nit (imperative among infinitive hint labels); remediated, round 2 passed 0/0/0/0."
+    },
+    {
+      "locale": "es",
+      "namespace": "tui.analytics",
+      "source_sha256": "aa5221066aa84eedf0f924628d51bc8f08ccf5f26b5075638b9d40062f7b617e",
+      "translator": {
+        "agent": "i18n-translator (es-tui-b)",
+        "model": "radient/auto",
+        "date": "2026-10-30"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (independent)",
+        "model": "radient/auto",
+        "date": "2026-10-30",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "98 keys; round-1 passed with 2 minor (\"pensamiento\" for the reasoning-token class, compact hint tier losing the row noun) and 3 nit; remediated, round 2 passed. `hint.expand.keys_bare` is 14 cells against a cap of 12 that English itself misses at 13 — recorded as a width exceptio"
+    },
+    {
+      "locale": "es",
+      "namespace": "tui.import",
+      "source_sha256": "932e0f87210ff80950346c684afb000907610c9ff35388125977182120b136c2",
+      "translator": {
+        "agent": "i18n-translator (es-tui-b)",
+        "model": "radient/auto",
+        "date": "2026-10-30"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (independent)",
+        "model": "radient/auto",
+        "date": "2026-10-30",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "87 keys, no en sidecar: register judged against shipped es TUI copy and the import view source. Round 1 raised 1 major (composed session row 80 cells against the 76-cell pinned row, so esc vanished), 2 minor; remediated to 75 cells and re-audited in round 2, which passed and prov"
+    },
+    {
+      "locale": "es",
+      "namespace": "tui.hub_links",
+      "source_sha256": "7fbe6713f8ac8f312884476c498c3b74e76c5f0853bdd027f25fc47d489311bb",
+      "translator": {
+        "agent": "i18n-translator (es-tui-c)",
+        "model": "radient/auto",
+        "date": "2026-10-30"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (independent)",
+        "model": "radient/auto",
+        "date": "2026-10-30",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "56 keys; round 1 raised 1 major (refusal naming `aviso`, the notice line the message is painted on), 1 minor, 2 nit. Two remediation rounds: `diálogo` was also wrong (no such modal here), then `prompt` — the glossary term and the surface to re-arm. Round 3 passed 0/0/0/0."
+    },
+    {
+      "locale": "es",
+      "namespace": "tui.app",
+      "source_sha256": "7e5f39df72438663a66afca0e5338e90b7b984bdca6b562195ce976945bd7875",
+      "translator": {
+        "agent": "i18n-translator (es-tui-c)",
+        "model": "radient/auto",
+        "date": "2026-10-30"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (independent)",
+        "model": "radient/auto",
+        "date": "2026-10-30",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "46 keys; round 1 raised 3 major: toggle receipt agreed masculine against two feminine labels, \"asentados\" read as goals-set not goals-finished, and three /help rows composed 78–80 cells against the pinned 74. Remediated (feminine forms, `finalizados`, rows 68/73/72) and round 2 p"
+    },
+    {
+      "locale": "es",
+      "namespace": "tui.usage",
+      "source_sha256": "5aeaec254352896101bf2825ac03d06f74c95e3598cda23536c5fe28507a2f8b",
+      "translator": {
+        "agent": "i18n-translator (es-tui-c)",
+        "model": "radient/auto",
+        "date": "2026-10-30"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (independent)",
+        "model": "radient/auto",
+        "date": "2026-10-30",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "21 keys; round 1 raised 1 major (`cuota incluida agotada` for the sentence relay.shell already ships as `Asignación incluida agotada` — one money object, two names) and 3 minor. Remediated to the relay term and to count-neutral label-first counters; round 2 passed, round 3 confir"
     }
   ]
 }

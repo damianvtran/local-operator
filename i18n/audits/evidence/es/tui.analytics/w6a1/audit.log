@@ -1,0 +1,208 @@
+audit.log — tui.analytics (es) — audit id w6a1 — 2026-10-30
+This file is the EXECUTION log: each block is a command and its real output.
+The judgements are in report.md and record.json; those are notes, not evidence.
+Run everything below from the repository root.
+
+### 0. environment
+$ /Users/damian/local-operator/.venv/bin/python --version
+Python 3.12.13
+[exit 0]
+
+$ /Users/damian/local-operator/.venv/bin/python -c from importlib.metadata import version; print("rich", version("rich"))
+rich 15.0.0
+[exit 0]
+
+
+### 1. audited revision and the on-disk target (untracked) binding
+$ git rev-parse HEAD
+b925c2e11be36653dfe88ac78f627bc2531427df
+[exit 0]
+
+$ git status --porcelain -- local_operator/i18n/catalogues/es/tui.analytics.json
+?? local_operator/i18n/catalogues/es/tui.analytics.json
+[exit 0]
+
+$ shasum -a 256 local_operator/i18n/catalogues/en/tui.analytics.json local_operator/i18n/catalogues/es/tui.analytics.json
+aa5221066aa84eedf0f924628d51bc8f08ccf5f26b5075638b9d40062f7b617e  local_operator/i18n/catalogues/en/tui.analytics.json
+6d6e6274c0d97a1bb5c2a723b9a2da526bbf6244d1646bdb76abded282f8e627  local_operator/i18n/catalogues/es/tui.analytics.json
+[exit 0]
+
+$ shasum -a 256 local_operator/i18n/catalogues/en/tui.analytics.context.json
+04356facdf1802a34a4be9ab6d3255cc9e92826d2b4e9ae917c43f687a9325eb  local_operator/i18n/catalogues/en/tui.analytics.context.json
+[exit 0]
+
+### 2. the repository's own catalogue validator (read-only)
+$ python3 scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+[exit 0]
+
+### 3. this bundle's checks (mechanical + semantic + negative controls)
+$ env PYTHONPATH=/Users/damian/lo-i18n-es /Users/damian/local-operator/.venv/bin/python i18n/audits/evidence/es/tui.analytics/w6a1/checks.py
+namespace : tui.analytics
+locale    : es
+repo root : /Users/damian/lo-i18n-es
+en        : tui.analytics.json exists=True
+target    : es/tui.analytics.json exists=True
+context   : tui.analytics.context.json exists=True
+cell_len  : rich.cells.cell_len (the function the TUI measures with)
+
+key counts: en=98 target=98 context=98
+
+== blocking checks ==
+  0 failure(s) so far
+
+== measurements ==
+  plural messages checked: 14
+  render tui.analytics.search.counted_read: 1->1 lectura | 0->0 lecturas | 2->2 lecturas | 1000000->1.000.000 de lecturas | 2000000->2.000.000 de lecturas | 1500000->1.500.000 lecturas
+  render tui.analytics.search.counted_search: 1->1 búsqueda | 0->0 búsquedas | 2->2 búsquedas | 1000000->1.000.000 de búsquedas | 2000000->2.000.000 de búsquedas | 1500000->1.500.000 búsquedas
+  render tui.analytics.search.incl_free_read: 1->incl. 1 lectura gratis | 0->incl. 0 lecturas gratis | 2->incl. 2 lecturas gratis | 1000000->incl. 1.000.000 de lecturas gratis | 2000000->incl. 2.000.000 de lecturas gratis | 1500000->incl. 1.500.000 lecturas gratis
+  render tui.analytics.search.incl_free_search: 1->incl. 1 búsqueda gratis | 0->incl. 0 búsquedas gratis | 2->incl. 2 búsquedas gratis | 1000000->incl. 1.000.000 de búsquedas gratis | 2000000->incl. 2.000.000 de búsquedas gratis | 1500000->incl. 1.500.000 búsquedas gratis
+  render tui.analytics.search.incl_unpriced_read: 1->incl. 1 lectura sin precio | 0->incl. 0 lecturas sin precio | 2->incl. 2 lecturas sin precio | 1000000->incl. 1.000.000 de lecturas sin precio | 2000000->incl. 2.000.000 de lecturas sin precio | 1500000->incl. 1.500.000 lecturas sin precio
+  render tui.analytics.search.incl_unpriced_search: 1->incl. 1 búsqueda sin precio | 0->incl. 0 búsquedas sin precio | 2->incl. 2 búsquedas sin precio | 1000000->incl. 1.000.000 de búsquedas sin precio | 2000000->incl. 2.000.000 de búsquedas sin precio | 1500000->incl. 1.500.000 búsquedas sin precio
+  render tui.analytics.search.note_read_full: 1->1 lectura · sin precio publicado | 0->0 lecturas · sin precio publicado | 2->2 lecturas · sin precio publicado | 1000000->1.000.000 de lecturas · sin precio publicado | 2000000->2.000.000 de lecturas · sin precio publicado | 1500000->1.500.000 lecturas · sin precio publicado
+  render tui.analytics.search.note_read_partial: 1->1 lectura · 1 sin precio | 0->0 lecturas · 0 sin precio | 2->2 lecturas · 2 sin precio | 1000000->1.000.000 de lecturas · 1.000.000 sin precio | 2000000->2.000.000 de lecturas · 2.000.000 sin precio | 1500000->1.500.000 lecturas · 1.500.000 sin precio
+  render tui.analytics.search.note_read_unpriced: 1->1 lectura · sin precio | 0->0 lecturas · sin precio | 2->2 lecturas · sin precio | 1000000->1.000.000 de lecturas · sin precio | 2000000->2.000.000 de lecturas · sin precio | 1500000->1.500.000 lecturas · sin precio
+  render tui.analytics.search.note_search_full: 1->1 búsqueda · sin precio publicado | 0->0 búsquedas · sin precio publicado | 2->2 búsquedas · sin precio publicado | 1000000->1.000.000 de búsquedas · sin precio publicado | 2000000->2.000.000 de búsquedas · sin precio publicado | 1500000->1.500.000 búsquedas · sin precio publicado
+  render tui.analytics.search.note_search_partial: 1->1 búsqueda · 1 sin precio | 0->0 búsquedas · 0 sin precio | 2->2 búsquedas · 2 sin precio | 1000000->1.000.000 de búsquedas · 1.000.000 sin precio | 2000000->2.000.000 de búsquedas · 2.000.000 sin precio | 1500000->1.500.000 búsquedas · 1.500.000 sin precio
+  render tui.analytics.search.note_search_unpriced: 1->1 búsqueda · sin precio | 0->0 búsquedas · sin precio | 2->2 búsquedas · sin precio | 1000000->1.000.000 de búsquedas · sin precio | 2000000->2.000.000 de búsquedas · sin precio | 1500000->1.500.000 búsquedas · sin precio
+  render tui.analytics.table.subagent_suffix: 1->+1 subagente | 0->+0 subagentes | 2->+2 subagentes | 1000000->+1.000.000 de subagentes | 2000000->+2.000.000 de subagentes | 1500000->+1.500.000 subagentes
+  render tui.analytics.totals.days_with_usage: 1->1 día con uso | 0->0 días con uso | 2->2 días con uso | 1000000->1.000.000 de días con uso | 2000000->2.000.000 de días con uso | 1500000->1.500.000 días con uso
+  protected-token comparison on 98 shared keys
+  budget tui.analytics.hint.expand.compact: es=28 en=29 cap=31 (es - cap = -3) -> within cap
+  budget tui.analytics.hint.expand.full: es=39 en=40 cap=42 (es - cap = -3) -> within cap
+  budget tui.analytics.hint.expand.full_metric: es=56 en=56 cap=57 (es - cap = -1) -> within cap
+  budget tui.analytics.hint.expand.keys: es=24 en=22 cap=25 (es - cap = -1) -> within cap
+  budget tui.analytics.hint.expand.keys_bare: es=14 en=13 cap=12 (es - cap = +2) -> OVER cap and OVER en
+      -> cap unattainable in source (en 13 > cap 12); es delta vs en = +1 cells
+  polarity: 0 lost negation(s); 9 key(s) where es adds a negative marker (reviewed by hand, not auto-failed): ['tui.analytics.model.failed', 'tui.analytics.search.incl_unpriced_read', 'tui.analytics.search.incl_unpriced_search', 'tui.analytics.search.note_read_partial', 'tui.analytics.search.note_read_unpriced', 'tui.analytics.search.note_search_partial', 'tui.analytics.search.note_search_unpriced', 'tui.analytics.search.unpriced_clause', 'tui.analytics.totals.fresh']
+  byte-identical prose values: 0
+  semantic assertions evaluated: 38
+
+== negative controls (each MUST trip its check) ==
+  negative control [keys] dropped one key: CAUGHT
+      -> [keys] 1 key(s) missing from target: ['tui.analytics.chart.daily_empty']
+  negative control [icu] renamed a placeholder argument: CAUGHT
+      -> [icu] tui.analytics.chart.metric_clause: argument tuple differs — en=(('active', 'simple'), ('other', 'simple')) target=(('renombrado', 'simple'), ('other', 'simple'))
+  negative control [plural] deleted a 'many' branch: CAUGHT
+      -> [plural] tui.analytics.search.counted_read: argument count has ['one', 'other']; es requires at least ['many', 'one', 'other']
+  negative control [plural] emptied a branch: CAUGHT
+      -> [plural] tui.analytics.search.counted_read: empty branch/branches ['other']
+  negative control [plural] added a 'few' category: CAUGHT
+      -> [plural] tui.analytics.search.counted_read: ['few'] is not a Spanish CLDR category (argument count)
+  negative control [tokens] rewrote the $— money mark: CAUGHT
+      -> [tokens] tui.analytics.legend.cost: protected tokens differ — en=['$— money mark:$—'] target=[]
+  negative control [budget] padded a declared-budget hint past maxCells: CAUGHT
+      -> [budget] tui.analytics.hint.expand.compact: 40 cells exceeds maxCells 31 (en 29 fits)
+  negative control [polarity] dropped the negation from the empty state: CAUGHT
+      -> [polarity] tui.analytics.empty.title: EN negates, target carries no negative marker
+  negative control [semantics] rendered 'free' as 'unpriced': CAUGHT
+      -> [semantics] tui.analytics.search.summary_free: hit forbidden 'sin precio' ('free' rendered as UNPRICED); got '{count} sin precio'
+  negative control [terms] used 'demonio' for daemon: CAUGHT
+      -> [terms] tui.analytics.chart.daily_empty: 'demonio' — daemon stays English (§2 amendment)
+  negative control [untranslated] left a prose value in English: CAUGHT
+      -> [untranslated] tui.analytics.chart.daily_empty: target is byte-identical to EN prose — 'no daily usage recorded yet'
+
+== result ==
+  PASS — all checks clean, every negative control tripped
+[exit 0]
+
+### 4. width measurements used in report.md
+$ rich.cells.cell_len over the exact strings (the function _row_overhead measures with)
+ 28  tui.analytics.hint.expand.compact (es)               ↑↓ · enter expandir · e todo
+ 30  tui.analytics.hint.expand.compact (fix: fila+abrir)  ↑↓ fila · enter abrir · e todo
+ 24  tui.analytics.hint.expand.keys (es)                  ↑↓ fila · enter · e todo
+ 39  tui.analytics.hint.expand.full (es)                  esc · ↑↓ fila · enter expandir · e todo
+ 56  tui.analytics.hint.expand.full_metric (es)           esc · t coste/tokens · ↑↓ fila · enter expandir · e todo
+ 14  tui.analytics.hint.expand.keys_bare (es)             enter · e todo
+ 13  tui.analytics.hint.expand.keys_bare (en)             enter · e all
+ 62  import hint row (en)                                 ↑↓ move · space select · a all/none · enter preview · esc back
+ 80  import hint row (es)                                 ↑↓ mover · space seleccionar · a todas/ninguna · enter vista previa · esc volver
+ 75  import hint row (fix: elegir)                        ↑↓ mover · space elegir · a todas/ninguna · enter vista previa · esc volver
+ 76  import hint row (fix: todo/nada)                     ↑↓ mover · space seleccionar · a todo/nada · enter vista previa · esc volver
+  8  tui.import.all_none (en)                             all/none
+ 13  tui.import.all_none (es)                             todas/ninguna
+[exit 0]
+
+### 5. the code that consumes these keys (for the register and width findings)
+$ grep -n 'show_move\|_narrow =' local_operator/tui/widgets/harness_import_view.py
+139:        self._narrow = False
+171:        self._narrow = self.size.width < 90
+508:        # The hint row still fits at 80x24 (76 cells); only the 60x20 row needs
+510:        show_move = state in ("sources", "sessions") and (not self._narrow or self.size.width >= 74)
+511:        if show_move:
+[exit 0]
+
+$ sed -n '506,530p' local_operator/tui/widgets/harness_import_view.py
+        state = self._state
+        labels: dict[HintButton, str] = {}
+        # The hint row still fits at 80x24 (76 cells); only the 60x20 row needs
+        # to shed it. Gate on the measured page width, not the pane breakpoint.
+        show_move = state in ("sources", "sessions") and (not self._narrow or self.size.width >= 74)
+        if show_move:
+            labels[self._hint_move] = _t(_kt.hint_move())
+        if state == "sources":
+            labels[self._hint_enter] = _t(_kt.hint_open())
+            labels[self._hint_reload] = _t(_kt.hint_reload())
+        elif state == "sessions":
+            labels[self._hint_space] = _t(_kt.hint_select())
+            labels[self._hint_all] = _t(_kt.all_none())
+            labels[self._hint_enter] = _t(_kt.hint_preview())
+        elif state == "preview":
+            labels[self._hint_enter] = (
+                _t(_kt.hint_confirm()) if self._only_metadata_only() else _t(_kt.hint_import())
+            )
+        elif state == "progress":
+            labels[self._hint_cancel] = _t(_kt.hint_cancel())
+        elif state == "result":
+            labels[self._hint_enter] = _t(_kt.hint_list())
+        labels[self._hint_esc] = _t(_kt.hint_back())
+        return labels
+
+
+$ grep -n 'def truncate_cells' -A12 local_operator/tui/widgets/tool_card.py
+728:def truncate_cells(text: str, width: int, ellipsis: str = "…") -> str:
+729-    """Truncate ``text`` to at most ``width`` cells (one width model).
+730-
+731-    Measurement and slicing both go through ``rich.cells.cell_len``; mixing
+732-    ``len()`` with cell width is a crash class the history documents.
+733-    """
+734-    if width <= 0:
+735-        return ""
+736-    if cell_len(text) <= width:
+737-        return text
+738-    if width <= cell_len(ellipsis):
+739-        return ellipsis[:width]
+740-    out: list[str] = []
+
+$ grep -n 'def _build' -A16 local_operator/tui/widgets/subagent_view.py | sed -n '18,40p'  (hint key+label join)
+    def _build(self, label: str, *, lead: bool, hovered: bool) -> Text:
+        key_token, label_token = self._ink
+        # Hover lifts each tone one step, so the whole hint answers the pointer
+        # rather than only its key — a half-lit hint reads as a rendering
+        # glitch. The lifted pair is the SAME two tokens one rung brighter, so
+        # no colour is introduced and the accent is not spent.
+        if hovered and self._actionable:
+            key_token, label_token = self._lifted_ink
+        dim = Style(color=theme_mod.semantic_color(key_token))
+        faint = Style(color=theme_mod.semantic_color(label_token))
+        row = Text(no_wrap=True, overflow="ellipsis")
+        if lead:
+            # The seam belongs to the ROW, not to the hint that follows it, so
+            # it keeps its resting tone even while that hint is hovered — a
+            # punctuation mark must not read as part of a control.
+            row.append(" · ", style=Style(color=theme_mod.semantic_color("faint")))
+        if self._key:
+            row.append(self._key, style=dim)
+        if label:
+            row.append(f" {label}" if self._key else label, style=faint)
+        return row
+
+
+### 6. what the negative controls caught
+$ grep -A2 'negative control' the checks output above
+Every control printed CAUGHT with the failing check line, e.g.:
+  [plural] tui.analytics.search.counted_read: argument count has ['one','other']; es requires at least ['many','one','other']
+  [icu]    ...: argument tuple differs — en=... target=...
+  [tokens] ...: protected tokens differ — en=['$— money mark:$—'] target=[]
+  [budget] ...: N cells exceeds maxCells M
+  [control] would appear here if any control had NOT tripped; none did.

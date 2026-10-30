@@ -75,6 +75,22 @@ translators and the auditor. Wave 1 locale.
     `tui.authoring.seed_not_installed`); the plural is `plantillas incluidas`.
     W2 briefly used `perfiles iniciales`, which the audit flagged as a second
     rendering of one product term.
+- **Amendment (es TUI wave, 2026-10-30): `cuota` is not `asignación`.** Two
+  different money objects share this panel and must keep two names. `cuota` is
+  the *quota* — a ceiling on usage (`wire.settings`, `wire.slash.usage`).
+  `asignación` is the *allowance* — the paid allocation (`Asignación de pago
+  ilimitada`, `Asignación incluida agotada`, shipped in `relay.shell.usage`).
+  `tui.usage.paid.continue` had said `cuota incluida agotada` for the sentence
+  `relay.shell` already ships as `Asignación incluida agotada`; the audit called
+  it drift between two surfaces naming one object, and the shard moved to the
+  shipped term. Where a new string needs "quota" in the ceiling sense, it is
+  `cuota`; where it means the paid allocation, it is `asignación`.
+- **Amendment (es TUI wave, 2026-10-30): `pull` / `push` stay English, and the
+  action label is the infinitive form `Hacer pull ahora`** (en: `Pull now`). The
+  shipped catalogues already settled this: `Hacer pull de un equipo del hub por
+  ID`, `hacer pull` in the auto-push refusal, `El push automático aún no está
+  disponible`. Do not render `pull` as `extraer` or `traer` — the user pairs the
+  label with the subcommand they already type.
 
 ## Plurals
 
@@ -104,6 +120,26 @@ translators and the auditor. Wave 1 locale.
   `rich.cells.cell_len` against the 80/78 status budget. Recorded rather than
   tightened to a shorter remedy, because the alternatives lose the logout-only
   qualification or the scope name.
+- Recorded width exception: `tui.usage` paid annotations (es TUI wave,
+  2026-10-30). `paid.family_caps` measures 53 cells against en's 29 and
+  `paid.eligibility_unknown` 35 against en's 25; both are one-line annotations drawn
+  as `TIER_INDENT + note` and truncated with an ellipsis, so at the supported
+  40×24 floor (31-cell body) they clip where English does not. Kept long on
+  purpose: both follow the shipped `relay.shell.usage` family, where the same
+  allowance is described on the relay surface (wording adapted to this
+  catalogue's sentence case and final-period rules), and shortening them here
+  would name one money object two ways — the exact deviation this round fixed
+  in `paid.continue`. `paid.continue` itself grew from 44 to 54 composed cells
+  for the same reason, so it needs a **63-column** terminal to show whole (it
+  fitted from 58 before). `family_caps` needs **64** and `eligibility_unknown`
+  fits from 51, measured with `rich.cells.cell_len` against `body = columns−9`:
+  in the 60–63 band `family_caps` and `paid.continue` still clip, and all three
+  fit only from 64 columns up.
+- Recorded width exception: `tui.analytics.hint.expand.keys_bare` (es TUI wave,
+  2026-10-30). es measures 14 cells against the declared `maxCells` of 12 — but
+  **English measures 13 against the same 12**, so the cap is unattainable in the
+  source itself. 14 is the floor once both keys stay named (`e` may not lose its
+  action word); the footer crops with `overflow="crop"` rather than wrapping.
 
 ## Punctuation & typography
 
