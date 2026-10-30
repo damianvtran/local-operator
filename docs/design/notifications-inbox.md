@@ -113,7 +113,11 @@ miscount of letters — and the five entries that are also shorter than the floo
 (`x`, `y`, `z`, `ok`, `n/a`) stay reachable instead of becoming dead vocabulary
 that reappears if the floor ever moves. Whole-equality only: `Update: 3 PRs
 merged` and `Tests failing on shard 3` pass, because they are statements that
-happen to open with a placeholder word.
+happen to open with a placeholder word. The set is English by design — it
+encodes the reported population and the vocabulary the model is told to avoid —
+so a two-character equivalent in another script (`完了`, `완료`, `تم`) is
+judged by the information floor alone, which cannot tell a two-character word
+from a two-character non-word; that is an accepted residual, not coverage.
 - **Information floor** — measured in information, not characters: fewer than
 three alphanumerics for a title of Latin letters and digits, fewer than two
 when its letters are non-ASCII (CJK ideographs, kana, Hangul, Arabic, Cyrillic).
@@ -123,9 +127,11 @@ says more than one Latin letter, and holding them to three refused exactly the
 short-but-real titles this section says never to judge. A floor that only
 counts characters is not script-independent; this one is stated in the unit
 that actually matters. Three still admits what people really write (`PR #7`,
-`CI green`) and refuses Latin noise (`ab`, `ok`); one character of any script
-is refused, because a word names something but a title has to say what
-happened; `修复完成` counts four, `🚀` counts zero.
+`CI green`) and refuses Latin noise (`ab`); `ok` never reaches this floor —
+the vocabulary above refuses it as a placeholder word, which is the precise
+diagnosis. One character of any script is refused, because a word names
+something but a title has to say what happened; `修复完成` counts four, `🚀`
+counts zero.
 - **Nothing at all** — a whitespace/punctuation-only title is refused HERE. It
 used to reach the store, whose bare `ValueError` surfaced as "the inbox could
 not be written": a dead end naming neither the cause nor a way out.

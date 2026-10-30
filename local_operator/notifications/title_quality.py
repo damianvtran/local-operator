@@ -11,7 +11,7 @@ notification to catch noise is the worse failure, because the model's cheapest
 way to obey is then to post nothing at all, and the operator loses the item
 that mattered. So each rule below refuses only what carries no information at
 all: a null word, or too few characters to identify an event by — three of
-Latin letters or digits, two when a character already carries a word.
+Latin letters or digits, two when a letter already carries a word.
 
 The body is deliberately NOT consulted. It is not on the list row, so a
 substantial body behind a ``x`` title still renders as a row the operator has
@@ -35,6 +35,15 @@ import unicodedata
 #: shard 3"`` both contain a word from this set and both carry real information;
 #: a substring or startswith test would refuse them and teach the model to
 #: avoid the useful openings rather than the empty ones.
+#:
+#: English by design, not by omission: the set encodes the reported population
+#: and the vocabulary the model is told to avoid, so growing it is a translation
+#: project with no natural boundary — every language has its own short words for
+#: "done". A two-character equivalent in another script (``完了``, ``완료``,
+#: ``تم``) is therefore judged by the information floor alone, which cannot tell
+#: a two-character word from a two-character non-word. That is an accepted
+#: residual of counting information instead of judging it, not coverage of
+#: languages other than English.
 _PLACEHOLDER_TITLES = frozenset(
     {
         "x",
@@ -60,13 +69,15 @@ _PLACEHOLDER_TITLES = frozenset(
     }
 )
 
-#: The information floor for a title of ASCII alphanumerics, in characters.
-#: Three is the smallest count that still admits titles people really write
-#: (``"PR #9"`` → ``PR9``, ``"CI green"`` → ``CIgreen``) while refusing the
-#: reported one- and two-character placeholders.
+#: The information floor for a title with no non-ASCII LETTER, in characters:
+#: Latin letters and digits, and digits of any other script, which carry one
+#: digit's worth of information wherever they are written. Three is the smallest
+#: count that still admits titles people really write (``"PR #9"`` → ``PR9``,
+#: ``"CI green"`` → ``CIgreen``) while refusing the reported one- and
+#: two-character placeholders.
 _MIN_INFORMATIVE = 3
 
-#: The floor for a title whose letters are non-ASCII: CJK ideographs, kana,
+#: The floor for a title carrying a non-ASCII LETTER: CJK ideographs, kana,
 #: Hangul, Arabic, Cyrillic and the like. In those scripts a single character is
 #: already a word or a bound morpheme — ``部署`` is "deploy", ``完了`` is "done" —
 #: so two characters say as much as eight Latin ones. Counting every character
@@ -74,6 +85,12 @@ _MIN_INFORMATIVE = 3
 #: script-independent, and refused precisely the short-but-real titles §3.1 says
 #: never to judge. Two is a floor, not an exemption: one character is still
 #: refused, because a word names something but a title has to say what happened.
+#:
+#: A non-ASCII DIGIT does not qualify, which is why the discriminator below asks
+#: for a letter rather than for "anything non-ASCII": ``١٢`` says exactly what
+#: ``12`` says — one digit, one digit's worth, in every script — and ``12`` is
+#: refused. Admit the numeral and the floor is script-biased in the other
+#: direction, treating a number as an event that its ASCII spelling is not.
 _MIN_INFORMATIVE_DENSE = 2
 
 
@@ -101,12 +118,17 @@ def _normalise(title: str) -> str:
 def _floor(said: str) -> int:
     """How many alphanumerics ``said`` needs before it can identify an event.
 
-    ``str.isascii()`` on the normalised form is the question the floor is really
-    about: is every character one Latin letter or digit, or does a character
-    carry a whole word? Only alphanumerics survive :func:`_normalise`, so a
-    non-ASCII character here is always a letter or digit of a denser script.
+    The question is whether a LETTER here already carries a whole word — an
+    ideograph, a kana, a Hangul syllable, an Arabic or Cyrillic letter — and a
+    non-ASCII letter is the only evidence of that. Asking ``str.isascii()`` of
+    the whole title answered a different question: it granted the dense floor to
+    every non-ASCII alphanumeric, so ``١٢`` ("12") was admitted while ``12`` was
+    refused. ``isalpha`` is a letter here, never punctuation or a symbol, because
+    only alphanumerics survive :func:`_normalise`.
     """
-    return _MIN_INFORMATIVE if said.isascii() else _MIN_INFORMATIVE_DENSE
+    if any(char.isalpha() and not char.isascii() for char in said):
+        return _MIN_INFORMATIVE_DENSE
+    return _MIN_INFORMATIVE
 
 
 #: The vocabulary in the only form the comparison uses (``no-op`` → ``noop``).

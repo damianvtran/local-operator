@@ -129,6 +129,30 @@ def test_the_floor_is_measured_in_information_not_characters() -> None:
     assert title_defect("完") is not None
 
 
+def test_only_a_letter_earns_the_dense_floor() -> None:
+    """A non-ASCII letter carries a word; a non-ASCII digit carries a digit.
+
+    ``١٢`` is "12" in Arabic-Indic digits and says exactly what ``12`` says, so
+    it must be refused at the same floor — the dense floor is granted for a
+    script that packs a word into a character, never for a numeral in that
+    script. ``１２`` is the same case one fold away: NFKC turns it into ``12``.
+    """
+    assert title_defect("١٢") is not None
+    assert "at least 3 are needed" in title_defect("١٢")
+    assert title_defect("٣٤") is not None
+    assert "at least 3 are needed" in title_defect("٣٤")
+    assert title_defect("１２") is not None
+    # Three digits are admitted in either spelling: the floor is a count, not a
+    # script ban, and the ASCII arm was never in question.
+    assert title_defect("123") is None
+    assert title_defect("١٢٣") is None
+    # The letters the dense floor exists for are untouched by that change.
+    assert title_defect("部署") is None
+    assert title_defect("完了") is None
+    assert title_defect("تم") is None
+    assert title_defect("修") is not None
+
+
 def test_a_compatibility_form_is_the_same_word() -> None:
     """NFKC before the vocabulary, or the guard is an IME keystroke from bypassed."""
     assert title_defect("ＮＯＯＰ") is not None
