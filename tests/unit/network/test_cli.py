@@ -814,7 +814,7 @@ def test_the_status_command_asks_the_relay_for_a_fresh_read(
     assert seen and seen[0].get("refresh") is True, seen
 
 
-def _show_payload_with_a_removed_member() -> dict:
+def _show_payload_with_a_removed_member() -> dict[str, Any]:
     return {
         "name": "devmesh",
         "network_id": "n_" + "a" * 22,
