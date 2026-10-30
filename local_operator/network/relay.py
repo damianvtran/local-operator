@@ -14698,12 +14698,18 @@ def _unit_config_root() -> Path | None:
     # escaped inside one pair of quotes), so it is decoded by inverting exactly
     # that, never by a looser guess that would misread a path with a quote or a
     # percent sign in it.
-    found = re.search(
+    # THE LAST ASSIGNMENT WINS (deferred m5 from the #3075 review): systemd
+    # resolves a variable assigned more than once to its LAST value, so reading
+    # the FIRST would put a deliberate-stop marker in a root the running relay no
+    # longer reads -- the marker would exist, nothing would act on it, and a stop
+    # the operator asked for would be reported as a crash. findall over the same
+    # anchored pattern, then take [-1].
+    found = re.findall(
         rf'^Environment="{re.escape(CONFIG_DIR_ENV)}=((?:[^"\\]|\\.)*)"\s*$', text, re.M
     )
     if not found:
         return None
-    value = re.sub(r"\\(.)", r"\1", found.group(1)).replace("%%", "%")
+    value = re.sub(r"\\(.)", r"\1", found[-1]).replace("%%", "%")
     return Path(value) if value else None
 
 

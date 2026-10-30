@@ -1916,6 +1916,39 @@ def _write_unit_pinning(home: Path, config: Path) -> Path:
     return unit
 
 
+def test_a_unit_that_pins_the_config_twice_resolves_to_the_last_line(
+    linux_host: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The LAST ``Environment=`` assignment wins, exactly as systemd resolves it (m5, #3075).
+
+    Reading the first line would put a deliberate-stop marker in a root the running
+    relay no longer reads: the marker would exist, nothing would act on it, and the
+    stop the operator asked for would be reported as a crash.
+    """
+    first = tmp_path / "first"
+    last = tmp_path / "last"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "override"))
+    unit = _write_unit_pinning(linux_host, first)
+    unit.write_text(
+        unit.read_text(encoding="utf-8")
+        + f"Environment={supervisors.quoted(f'{relay.CONFIG_DIR_ENV}={last}')}\n",
+        encoding="utf-8",
+    )
+
+    assert relay._unit_config_root() == last  # noqa: SLF001
+
+
+def test_one_pin_still_resolves_to_that_pin(
+    linux_host: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The single-line case is unchanged by taking the last match."""
+    config = tmp_path / "only"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "override"))
+    _write_unit_pinning(linux_host, config)
+
+    assert relay._unit_config_root() == config  # noqa: SLF001
+
+
 def test_the_stop_verb_marks_the_stop_before_the_arm_signals(
     linux_host: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
