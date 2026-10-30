@@ -114,8 +114,12 @@ def test_runner_refuses_tools_and_unevidenced_identity(tmp_path) -> None:
     [
         ("refusal", "model_refused"),
         ("length", "reply_truncated"),
+        # The end event's own camelCase spelling, passed through verbatim.
+        ("toolUse", "parse_failed"),
         ("error", None),
         ("aborted", None),
+        # A blank stop reason is ``missing_stop``: not an answer.
+        ("", None),
     ],
 )
 def test_runner_types_answered_terminals_apart_from_route_failures(
@@ -134,10 +138,20 @@ def test_runner_types_answered_terminals_apart_from_route_failures(
     with pytest.raises(_ScreeningStreamRefused) as raised:
         ScreenModelRunner(FakeStreamFn(events), selection)("p", default_model="qa-default")
     assert raised.value.answered_hold_code == answered
-    # Stream-shape refusals with no terminal stay route failures.
+
+
+def test_runner_stream_without_end_event_is_a_route_failure() -> None:
+    """A stream that never sent its end event is not an answer (``missing_end``)."""
+    selection = DefaultSelection(
+        provider="openai",
+        model_id="qa-default",
+        spec=build_model_spec("openai", "qa-default"),
+        approved_identities=frozenset({"qa-default"}),
+    )
     text_only = [StreamTextDelta(delta="VERDICT: deliver\nREASON: ok.")]
     with pytest.raises(_ScreeningStreamRefused) as missing:
         ScreenModelRunner(FakeStreamFn(text_only), selection)("p", default_model="qa-default")
+    assert missing.value.reason == "missing_end"
     assert missing.value.answered_hold_code is None
 
 

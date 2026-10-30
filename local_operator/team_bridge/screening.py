@@ -1304,7 +1304,10 @@ async def _screen_core(
         # refusal open the account breaker and park every other inbound
         # message, the owner's teammates included, and the parked retries
         # re-tripped it. Typed by the runner's closed reason (duck-typed so
-        # this module keeps its lazy model_boundary import); prose-free.
+        # this module keeps its lazy model_boundary import); prose-free. Only
+        # ``_ScreeningStreamRefused`` defines the attribute, and ProviderError
+        # has no ``__getattr__``, so no other failure can claim to be answered;
+        # the HOLD_CODES membership check below closes the vocabulary anyway.
         answered = getattr(failure, "answered_hold_code", None)
         if isinstance(answered, str) and answered in HOLD_CODES:
             try:

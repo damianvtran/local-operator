@@ -92,7 +92,11 @@ _ANSWERED_REFUSAL_HOLDS: dict[str, str] = {
     # The reply hit ``max_tokens`` before the verdict was complete.
     "length": "reply_truncated",
     # Replies that break the strict grammar in a way the parser never sees.
+    # ``tool_use`` is the runner's own reason (a tool-call delta, or tool
+    # content in a clean end's payload); ``toolUse`` is a ``StreamEndEvent``'s
+    # stop reason passed through verbatim (``harness.types.StreamEndEvent``).
     "tool_use": "parse_failed",
+    "toolUse": "parse_failed",
     "over_cap": "parse_failed",
 }
 
