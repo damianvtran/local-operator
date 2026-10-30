@@ -37,6 +37,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Mapping, Sequence
 
+from local_operator.team_bridge.store import (
+    SCREENING_FAILURE_CLASSES as _STORE_FAILURE_CLASSES,
+)
 from local_operator.team_bridge.store import Store, StoreRefused
 from local_operator.team_bridge.types import OwnerSnapshot
 
@@ -320,20 +323,96 @@ def resolve_screening_chain(config_dir: Path, settings: Any = None) -> list[Defa
     return hops
 
 
-#: The CLOSED vocabulary written to ``screening_holds.failure_class`` on a
-#: ``provider_error`` hold (read by the receiver status line). Derived from the
-#: exception TYPE and ProviderError's typed fields only — never message prose,
-#: which is vendor-controlled and scrubbed anyway.
-SCREENING_FAILURE_CLASSES = (
-    "auth_unusable",
-    "quota",
-    "timeout",
-    "provider_5xx",
-    "stream_refused",
-    "identity_refused",
-    "chain_exhausted",
-    "other",
-)
+#: The CLOSED vocabulary of ``screening_holds.failure_class`` — owned by the
+#: store, which clamps every write to it (anything else becomes ``other``).
+SCREENING_FAILURE_CLASSES = _STORE_FAILURE_CLASSES
+
+
+#: HTTP statuses that mean "this route is unavailable right now", which no
+#: submission can produce: gateway/overload responses. 500 is deliberately
+#: absent — providers report an output-side content filter as a 5xx, and a
+#: body crafted to trip it must not buy a different screener (S-1).
+_ADVANCE_STATUSES = frozenset({502, 503, 504, 529})
+#: Rate limit / out of quota. Floodable in principle, but bounded by the
+#: per-account HTTP budget and accepted by the operator (PR #3194 decisions).
+_QUOTA_STATUSES = frozenset({429})
+#: The provider rejected OUR credential, never the content.
+_AUTH_STATUSES = frozenset({401, 403})
+
+#: Typed flag the guard sets on a scrubbed wire failure. ``True`` only when
+#: the RAW failure was on the allow-list below; the walk reads nothing else.
+_ADVANCE_ATTR = "tb_screen_advance"
+
+
+def _sender_cannot_cause(failure: BaseException) -> bool:
+    """Whether the next hop may screen after THIS raw failure (S-1/S-2).
+
+    WHY AN ALLOW-LIST: the threat is a sender who controls the body and
+    attachments. Any failure their bytes can provoke — a content-filter 400,
+    a 413 / bad-image 400, an output-filter 5xx, a length or refusal stop —
+    must HOLD, because falling over would let crafted content buy a weaker
+    screener, and the first provider refusing the input is itself evidence.
+    Only failures of the ROUTE advance: our credential rejected (401/403, an
+    OAuth refresh that failed), quota (429 / ``kind == "quota"``), a timeout,
+    a gateway/overload status (502/503/504/529), or a transport error our own
+    client raised before the body was sent.
+
+    MUST be evaluated on the RAW exception, before ``_scrub_wire_failure``
+    erases everything but typed fields; it reads only types, ``status`` and
+    typed flags, never message prose. The guard's own fail-closed refusals
+    (owner moved, policy stale, budget exhausted, route changed) are built
+    AFTER this point and never carry the flag, so they stop the walk.
+    """
+
+    if isinstance(failure, (asyncio.TimeoutError, TimeoutError)):
+        return True
+    try:
+        import httpx
+
+        if isinstance(failure, httpx.TimeoutException):
+            return True
+        if isinstance(failure, (httpx.ConnectError, httpx.ConnectTimeout)):
+            return True  # raised before any request byte reached the provider
+    except ImportError:  # pragma: no cover - httpx is a hard dependency
+        pass
+    try:
+        from local_operator.providers.auth_store import AuthStoreError
+
+        if isinstance(failure, AuthStoreError):
+            return True  # credential resolution / OAuth refresh failed
+    except ImportError:  # pragma: no cover
+        pass
+    from local_operator.providers.failover import ProviderError
+
+    if not isinstance(failure, ProviderError):
+        return False
+    if getattr(failure, "fail_closed", False) and not getattr(failure, "request_sent", True):
+        return False  # a local refusal before any send: never provider weather
+    status = getattr(failure, "status", None)
+    kind = getattr(failure, "kind", None)
+    if isinstance(status, int) and status:
+        return (
+            status in _ADVANCE_STATUSES
+            or status in _QUOTA_STATUSES
+            or (status in _AUTH_STATUSES and kind in ("auth", "quota"))
+        )
+    # No status: a status-less ``kind`` is classified from PROVIDER TEXT (an
+    # in-band error chunk on a 200 stream), which a crafted body can steer — so
+    # it never advances on its own. Only typed provenance does: the bearer
+    # flagged unusable, or a failure OUR client observed (``transport``, set
+    # solely by ``wrap_transport_error``) that is a timeout or a connect error.
+    if getattr(failure, "auth_error", False):
+        return True
+    if not getattr(failure, "transport", False):
+        return False
+    if kind == "timeout":
+        return True
+    try:
+        import httpx
+
+        return isinstance(failure.__cause__, httpx.ConnectError)
+    except ImportError:  # pragma: no cover
+        return False
 
 
 def screening_failure_class(failure: BaseException) -> str:
@@ -443,6 +522,9 @@ def _scrub_wire_failure(failure: BaseException) -> BaseException:
         )
     scrub.__cause__ = None
     scrub.__context__ = None
+    # The ONE fact the chain walk needs, decided on the raw failure before its
+    # evidence is erased (S-1): a typed boolean, never prose.
+    setattr(scrub, _ADVANCE_ATTR, _sender_cannot_cause(failure))
     return scrub
 
 
@@ -982,14 +1064,17 @@ class ScreenChainRunner:
       passes ``make_screening_runner(..., selection=hop)`` — so every hop gets
       a FRESH wire guard and dedicated client: per-send charging, the route
       check and the hop's own (provider, model) tuple check all still apply.
-    * Advance ONLY when a hop raised a provider/transport exception or
-      returned the unevidenced ``("", None)`` signal. A return carrying a
-      model identity STOPS the walk whatever its text: a model HOLD is a
-      verdict, not a failure, and must never be re-asked elsewhere. A
-      :class:`_ScreeningStreamRefused` (the hop's OWN reply ended in a
-      refusal, length cut, tool use or over-cap text) also stops the walk and
-      propagates as-is: it is that model's answer to these bytes, and asking
-      the next model would let a second screener overrule the first.
+    * Advance ONLY on a failure a sender cannot cause (:func:`_sender_cannot_cause`:
+      credential unusable, quota, timeout, 502/503/504/529, a pre-send
+      transport error), or on the unevidenced ``("", None)`` signal (serving
+      identity is request-local provenance, not something a body controls).
+      EVERYTHING ELSE STOPS AND HOLDS (S-1/S-2): any other 4xx (content-filter
+      400, 413), any other 5xx, every :class:`_ScreeningStreamRefused`
+      (refusal, length, tool use, over-cap, missing end/stop, error, aborted,
+      images_unsupported), the guard's own fail-closed refusals, and local
+      defects. A sender-triggerable failure must never buy a weaker screener.
+      A return carrying a model identity STOPS the walk whatever its text: a
+      model HOLD is a verdict, not a failure.
     * Every hop failing re-raises the LAST exception, tagged
       ``tb_chain_exhausted`` when more than one hop ran, so the pipeline
       records exactly ONE breaker failure and ONE ``provider_error`` hold.
@@ -1092,7 +1177,15 @@ class ScreenChainRunner:
                 )
             except _ScreeningStreamRefused:
                 raise
-            except Exception as failure:  # noqa: BLE001 — next hop; control flow propagates
+            except Exception as failure:  # noqa: BLE001 — classified below; control flow propagates
+                # A wire failure was classified on its RAW form by the guard
+                # before scrubbing; a failure raised outside the guard (the
+                # credential cascade, a local defect) is still raw here.
+                advance = getattr(failure, _ADVANCE_ATTR, None)
+                if advance is None:
+                    advance = _sender_cannot_cause(failure)
+                if not advance:
+                    raise
                 last_failure = failure
                 continue
             if actual is not None:

@@ -978,12 +978,26 @@ async def run_screening_cycle(
     # provider, model and approved map — so a same-version different-SHA
     # status, or a same-model provider/map change, advances the authority
     # and can never reuse an old proof (R7/Q3).
+    # THE CHAIN IS PART OF THE AUTHORITY (S-4): every hop's (provider, model)
+    # tuple is published with the policy and bound into the revision, so
+    # editing ``retry.fallbackChains`` advances revision + epoch and a receipt
+    # is always tied to the chain in force when it was minted. A single-hop
+    # chain hashes the pre-chain form byte-for-byte, so an operator with no
+    # fallback configured sees no revision change (and no epoch churn) from
+    # the upgrade.
+    serving = sorted({(hop.provider, hop.model_id) for hop in chain})
+    chain_part = (
+        "|chain=" + ",".join(f"{provider}/{model}" for provider, model in serving)
+        if len(chain) > 1
+        else ""
+    )
     revision = (
         "accepted:"
         + hashlib.sha256(
             (
                 f"{version}|{template_hash}|{selection.provider}|{selection.model_id}|"
                 + ",".join(sorted(selection.approved_identities))
+                + chain_part
             ).encode("utf-8")
         ).hexdigest()[:32]
     )
@@ -1014,6 +1028,9 @@ async def run_screening_cycle(
                 revision=revision,
                 expected_epoch=None if current is None else int(current["epoch"]),
                 create_only=current is None,
+                # The receipt fences accept a model in THIS set (B1/S-3); a
+                # single hop stores NULL, which reads as {default_model}.
+                approved_serving=serving if len(chain) > 1 else None,
             )
         except StoreRefused:
             # A competing publisher moved authority; screen nothing rather
