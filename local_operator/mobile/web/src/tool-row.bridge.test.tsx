@@ -238,7 +238,8 @@ describe("the phone's bridge tool row", () => {
 		const [inbox, refused] = [...container.querySelectorAll("button")];
 		expect(inbox.className).toContain("@container");
 		const name = [...inbox.querySelectorAll("span")].find((n) => n.textContent === "bridge")!;
-		expect(name.className).toContain("@max-[18rem]:hidden");
+		/* D10: the name sheds below 22rem (360/390 rows), before the chip. */
+		expect(name.className).toContain("@max-[22rem]:hidden");
 		const inboxChip = inbox.querySelector("[data-bridge-outcome]")!;
 		const word = [...inboxChip.querySelectorAll("span")].find((n) => n.textContent === "not posted to a conversation")!;
 		expect(word.className).toContain("@max-[18rem]:sr-only");
@@ -264,6 +265,27 @@ describe("the phone's bridge tool row", () => {
 		expect(screen.getByText("Messaged Priya Shah · Heads up - the 0.93 cut lands tonight.")).toBeTruthy();
 		const name = screen.getByRole("button").textContent ?? "";
 		expect(name.match(/awaiting/g)?.length).toBe(1);
+	});
+
+	it.each([
+		/* The daemon's real refused line (`_settle_bridge(channel_post,
+		   {ok:false, code:"not_member"})`), a coded rate limit, and caps that
+		   cut inside the code, inside the word, and to nothing (review round 2,
+		   R7 / D9 / Q5; QA O2). */
+		["Couldn't post in a conversation · rolling back · refused · not_member", "not_member", "Couldn't post in a conversation · rolling back"],
+		["Couldn't post in a conversation · hi · refused · rate_limited", "rate_limited", "Couldn't post in a conversation · hi"],
+		["Couldn't post in a conversation · rolling back · refused · not_m…", "not_member", "Couldn't post in a conversation · rolling back"],
+		["Couldn't post in a conversation · rolling back · ref…", "not_member", "Couldn't post in a conversation · rolling back"],
+		["Couldn't post in a conversation · rolling back · …", "not_member", "Couldn't post in a conversation · rolling back"],
+	])("strips a refusal's two-segment outcome once: %s", (summary, code, kept) => {
+		const { container } = render(
+			<ToolRow entry={entry({ tool_state: "failed", summary }, { ...POST, outcome: "refused", code })} />,
+		);
+		expect(screen.getByText(kept)).toBeTruthy();
+		/* The accessible name says the outcome once - the chip's. */
+		const name = container.querySelector("button")!.textContent ?? "";
+		expect(name.match(/refused/g)?.length).toBe(1);
+		expect(name).not.toMatch(/· …/);
 	});
 
 	it("keeps a summary whose last segment is not the outcome", () => {

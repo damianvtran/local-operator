@@ -5028,7 +5028,11 @@ def test_bridge_copy_scrubs_ids_from_every_field_including_the_error() -> None:
         error=True,
     )
     copy = row.details["bridge_copy"]
-    assert copy["outcome_sentence"].startswith("Refused: you are not in …")
+    # The core names the conversation in words where it can (#3203 R4); the
+    # remaining ids are scrubbed here. Either way the sentence keeps its
+    # refusal and code and carries no id.
+    assert copy["outcome_sentence"].startswith("Refused: you are not in ")
+    assert copy["outcome_sentence"].endswith("(not_member)")
     for value in copy.values():
         assert "remote_9" not in value and "-ABC" not in value
     _no_bridge_ids(copy)

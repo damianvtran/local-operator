@@ -225,21 +225,30 @@ function bridgeOutcome(
 function bridgeSummary(summary: string, outcome: { text: string; word: string } | null): string {
 	const text = scrubBridgeIds(summary);
 	if (!outcome) return text;
-	/* The daemon caps the line BEFORE the phone sees it, so the tail may arrive
-	   cut (`· awaiting…`) and an exact-suffix match misses it - the caveat then
-	   read twice, and a screen reader heard it twice (design D5 / QA Q3). Strip
-	   the last ` · ` segment when it is the outcome, whole or as a capped
-	   prefix of it. */
-	const sep = text.lastIndexOf(" · ");
-	if (sep < 0) return text;
-	const tail = text.slice(sep + 3);
-	const stem = tail.endsWith("…") ? tail.slice(0, -1) : tail;
-	const full = outcome.text;
-	const matches =
-		tail === full ||
-		tail === outcome.word ||
-		(tail.endsWith("…") && stem.length > 0 && (full.startsWith(stem) || outcome.word.startsWith(stem)));
-	return matches ? text.slice(0, sep) : text;
+	/* The daemon's line ends ` · <outcome>` for capless cells, and its cap may
+	   cut that tail anywhere. With the chip beside it the caveat must be said
+	   once (design D5 / QA Q3), so strip it in this order:
+	   1. the FULL outcome, found by TEXT not by the last separator: a refusal's
+	      outcome is itself two segments (`refused · not_member`), and splitting
+	      on the last ` · ` compared `not_member` against it and missed (review
+	      round 2, R7 / D9 / Q5);
+	   2. a capped tail: the last ` · ` segment(s) ending `…` that are a prefix
+	      of the outcome (`· awaiting…`, `· refused · not_m…`), including a bare
+	      `· …` where the cap left nothing of it (QA O2). */
+	const full = ` · ${outcome.text}`;
+	if (text.endsWith(full)) return text.slice(0, -full.length);
+	if (!text.endsWith("…")) return text;
+	const capped = text.slice(0, -1);
+	/* A cap that left nothing of the tail: `… · …` (QA O2). */
+	if (capped.endsWith(" · ")) return text.slice(0, -" · …".length);
+	for (let sep = capped.lastIndexOf(" · "); sep >= 0; sep = capped.lastIndexOf(" · ", sep - 1)) {
+		const tail = capped.slice(sep + 3);
+		if (tail === "" || outcome.text.startsWith(tail)) return text.slice(0, sep);
+		/* Only the trailing segments can be the outcome; stop once the tail is
+		   longer than the outcome itself. */
+		if (tail.length > outcome.text.length) break;
+	}
+	return text;
 }
 
 const OUTCOME_INK: Record<OutcomeTone, string> = {
@@ -422,10 +431,11 @@ export function ToolRow({
 					</span>
 				) : null}
 				{/* NARROW-ROW PRIORITY for a bridge row (design round 1, D3; the
-				    desktop's container shed in #1529). Below an 18rem row (a 320px
-				    phone measures 262px) the row could hold neither what happened
-				    nor to whom. Shed in order: (1) the `bridge` name - the
-				    messages-square mark already says which tool; (2) the
+				    desktop's container shed in #1529). Shed in order: (1) the
+				    `bridge` name below a 22rem row - 360/390 phones measure 302/332px
+				    and the name still took ~45px the summary needed (design round 2,
+				    D10), while the messages-square mark already says which tool;
+				    then below 18rem (a 320px phone measures 262px): (2) the
 				    inbox/awaiting chip's words - its mark and ink stay, the word
 				    stays for screen readers; (3) a refusal's `· code` - the word
 				    stays, the code is in the expansion's sentence. */}
@@ -433,7 +443,7 @@ export function ToolRow({
 					dir="ltr"
 					className={cn(
 						"min-w-0 shrink truncate text-body-sm text-ink-muted",
-						bridge && "@max-[18rem]:hidden",
+						bridge && "@max-[22rem]:hidden",
 					)}
 				>
 					{entry.tool_name}
