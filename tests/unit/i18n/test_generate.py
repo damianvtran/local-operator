@@ -589,10 +589,12 @@ def test_security_hold_cannot_be_bypassed_by_partial_or_forged_passes(
 
 
 def _bundle_locale_maps(bundle: str) -> dict[str, set[str]]:
-    """`namespace -> locales` from the generated namespace/locale map.
+    """`namespace -> locales` from a generated namespace/locale map module.
 
     Parsed by indentation rather than imported: the artifact is TypeScript and
-    this test judges the COMMITTED bytes, not a re-import of them.
+    this test judges the COMMITTED bytes, not a re-import of them. Works on the
+    eager `bundled.gen.ts` (English only) and on every `bundled.<locale>.gen.ts`
+    chunk, which share one namespace -> locale -> messages shape.
     """
     namespaces = re.findall(r'^  "([^"]+)": \{$', bundle, re.MULTILINE)
     blocks = re.split(r'^  "[^"]+": \{$', bundle, flags=re.MULTILINE)[1:]
@@ -602,8 +604,17 @@ def _bundle_locale_maps(bundle: str) -> dict[str, set[str]]:
     return found
 
 
+def _chunk_locales(bundle: str) -> set[str]:
+    """Locales `BUNDLED_CHUNKS` lists, i.e. the ones the SPA can lazily load."""
+    return set(
+        re.findall(
+            r'^  "([^"]+)": \(\) => import\("\./bundled\.[^"]+\.gen"\),$', bundle, re.MULTILINE
+        )
+    )
+
+
 def test_committed_bundle_emits_every_shipped_locale_that_is_complete(i18n_generate) -> None:
-    """A locale complete in EVERY owned namespace must be IN the bundle.
+    """A locale complete in EVERY owned namespace must be a lazy chunk.
 
     Completeness is the only door to a non-English SPA: `generate.py` emits a
     locale only when it cleared every owned namespace (the `covering`
@@ -612,20 +623,23 @@ def test_committed_bundle_emits_every_shipped_locale_that_is_complete(i18n_gener
     locale that the emitter skipped — every catalogue audited, every gate
     satisfied, and the surface silently English anyway.
 
+    Since the per-locale chunk split the eager `bundled.gen.ts` carries English
+    only; every other locale lives in its own `bundled.<locale>.gen.ts` reached
+    through `BUNDLED_CHUNKS`. The invariant is therefore read from three
+    outputs that must agree: the `BUNDLED_CHUNKS` registry, the chunk files on
+    disk, and the content of each chunk.
+
     The expectation is derived from the committed catalogues and shipped
-    manifest, never from today's artifact: fr (#3131) and zh-CN (#3121) enter
-    the bundle by landing their translations, with no edit here.
+    manifest, never from today's artifact: a new language enters the bundle by
+    landing its translations, with no edit here.
     """
-    bundle = (REPO / "local_operator/mobile/web/src/i18n/bundled.gen.ts").read_text(
-        encoding="utf-8"
-    )
-    emitted = _bundle_locale_maps(bundle)
+    bundled_dir = REPO / "local_operator/mobile/web/src/i18n"
+    bundle = (bundled_dir / "bundled.gen.ts").read_text(encoding="utf-8")
     shipped = json.loads((REPO / "local_operator/i18n/data/shipped.json").read_text())["locales"]
     # The owned list and the shipped manifest are the two inputs the emitter
     # reads; re-declaring either here would make the test agree with its own
     # copy of the rule instead of with the rule.
     owned = i18n_generate.OWNED_SPA_NAMESPACES
-    assert set(emitted) <= set(owned)
     catalogues_dir = REPO / "local_operator/i18n/catalogues"
     complete: set[str] = set(shipped)
     for namespace in owned:
@@ -636,11 +650,31 @@ def test_committed_bundle_emits_every_shipped_locale_that_is_complete(i18n_gener
             if locale == "en" or set(english) <= carried:
                 continue
             complete.discard(locale)
-    for namespace in owned:
-        # Every emitted locale is complete: a partial one would be dropped by
-        # `uiLocaleFor` anyway, so shipping its bytes buys nothing but weight.
-        assert emitted[namespace] == complete, (namespace, sorted(complete))
     assert "en" in complete
+    expected_chunks = complete - {"en"}
+
+    # The eager module is English-only: a second locale there is the pre-split
+    # shape, which ships every language's bytes to every visitor.
+    eager = _bundle_locale_maps(bundle)
+    assert set(eager) <= set(owned)
+    for namespace in eager:
+        assert eager[namespace] == {"en"}, namespace
+
+    assert _chunk_locales(bundle) == expected_chunks
+    # A chunk file with no registry entry is unreachable weight; a registry
+    # entry with no file is a build break. Both are compared to the same set.
+    on_disk = {
+        path.name.removeprefix("bundled.").removesuffix(".gen.ts")
+        for path in bundled_dir.glob("bundled.*.gen.ts")
+    }
+    assert on_disk == expected_chunks
+    for locale in expected_chunks:
+        chunk = _bundle_locale_maps(
+            (bundled_dir / f"bundled.{locale}.gen.ts").read_text(encoding="utf-8")
+        )
+        # Every owned namespace, and only this locale in each: the whole-surface
+        # rule means the chunk is all of a language or nothing of it.
+        assert {ns: langs for ns, langs in chunk.items()} == {ns: {locale} for ns in eager}, locale
 
 
 def test_bundled_spa_module_drops_a_locale_complete_for_only_some_owned_namespaces(
@@ -654,6 +688,9 @@ def test_bundled_spa_module_drops_a_locale_complete_for_only_some_owned_namespac
     trusting the runtime to refuse it — ships a client that grows with every
     partial translation wave and one that flips language mid-namespace the day
     someone "fixes" the gate.
+
+    Judged on the planned outputs: no `BUNDLED_CHUNKS` entry and no
+    `bundled.fr.gen.ts` chunk while fr misses a namespace, both once it is whole.
     """
     root, emitted = generated
     monkeypatch.setattr(i18n_generate, "_shipped_locales", lambda: ("en", "fr"))
@@ -661,14 +698,17 @@ def test_bundled_spa_module_drops_a_locale_complete_for_only_some_owned_namespac
         (root / "en" / f"{namespace}.json").write_text(json.dumps({f"{namespace}.label": "Label"}))
     (root / "fr").mkdir(exist_ok=True)
     (root / "fr" / "relay.shell.json").write_text(json.dumps({"relay.shell.label": "Étiquette"}))
-    partial = i18n_generate._planned_files(emitted)[
-        i18n_generate.REPO / "local_operator/mobile/web/src/i18n/bundled.gen.ts"
-    ]
-    assert '"fr"' not in partial
+    bundled = i18n_generate._bundled_dir()
+    partial_plan = i18n_generate._planned_files(emitted)
+    assert _chunk_locales(partial_plan[bundled / "bundled.gen.ts"]) == set()
+    assert bundled / "bundled.fr.gen.ts" not in partial_plan
+    # Dropped entirely: not even the namespace it does carry leaks into the
+    # eager module (English only) or into any chunk.
+    assert '"fr"' not in partial_plan[bundled / "bundled.gen.ts"]
     (root / "fr" / "relay.session.json").write_text(
         json.dumps({"relay.session.label": "Étiquette"})
     )
-    whole = i18n_generate._planned_files(emitted)[
-        i18n_generate.REPO / "local_operator/mobile/web/src/i18n/bundled.gen.ts"
-    ]
-    assert whole.count('"fr": {') == 2
+    whole_plan = i18n_generate._planned_files(emitted)
+    assert _chunk_locales(whole_plan[bundled / "bundled.gen.ts"]) == {"fr"}
+    chunk = _bundle_locale_maps(whole_plan[bundled / "bundled.fr.gen.ts"])
+    assert chunk == {"relay.session": {"fr"}, "relay.shell": {"fr"}}
