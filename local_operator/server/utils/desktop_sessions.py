@@ -4503,6 +4503,17 @@ class DesktopSessionBridge:
         indexed answered ``building`` and reconciled a moment later — the
         after-paint change the capability exists to remove. Serving it from the
         companion is what makes the answer final on the first frame.
+
+        A COMPANION ANSWER ALSO ARMS THE RESIDENT SCAN, and that is not bookkeeping.
+        Source (3) started one as a side effect: a page that answered ``building``
+        began the correction, so from the NEXT read on the resident join answered
+        and the companion was never opened again. A page answered from (2) never
+        enters that branch, so without this the poll loop pays a companion open on
+        every request forever — measured on a 36.5 MB journal, 25 identical reads:
+        median 67.8 ms with the companion alone against 18.6 ms on base once its
+        resident index existed. Same singleflight, not awaited, and only when
+        nothing is resident: no scan is added to this request's latency and none is
+        started twice.
         """
         ids = list(dict.fromkeys(ids))
         source = index_read_model.page_source(pages)
@@ -4516,20 +4527,42 @@ class DesktopSessionBridge:
             order_ids=ids,
             source=source,
         )
+        if projected.state == "ready" and index_read_model.apply_order(answer, projected.value):
+            self._warm_resident_index()
+            return answer
         # A missing, stale, corrupt or unsupported projection is NOT an error: the
         # policy below is exactly what an absent companion answered before this
         # existed, so an older store degrades to today's behaviour.
-        return self._journal_page(
-            answer, pages, ids, facts=projected.value if projected.state == "ready" else None
-        )
+        return self._journal_page(answer, pages, ids)
+
+    def _warm_resident_index(self) -> None:
+        """Offer this session to the existing background scan, and do not wait.
+
+        THE SAME CALL the ``building`` branch makes from inside
+        :meth:`_journal_page` (``_order_correction``), through the same
+        ``start_refresh`` singleflight — so a refresh already running is joined,
+        not started again, and a resident index is left alone (two stats, no
+        scan). It is never awaited: this request's page is already complete, and
+        the point of arming it is the NEXT request, which then answers from the
+        resident join instead of reopening the companion.
+
+        A failure here is not a page failure — the facts were served — so it is
+        logged at debug and swallowed exactly as ``_frame_index`` treats it.
+        """
+        from local_operator.session import transcript_index
+
+        try:
+            if transcript_index.fresh_resident(self.root, self.session_id) is not None:
+                return
+            transcript_index.start_refresh(self.root, self.session_id)
+        except Exception:  # noqa: BLE001 — an optimisation, never the answer
+            logger.debug("journal order: resident warm failed", exc_info=True)
 
     def _journal_page(
         self,
         answer: dict[str, Any],
         pages: list[Any],
         ids: list[str],
-        *,
-        facts: index_read_model.FrameFacts | None = None,
     ) -> dict[str, Any]:
         """Opt-in source facts, from a single verified page/index view only.
 
@@ -4539,19 +4572,14 @@ class DesktopSessionBridge:
         service; their count/string bounds cap the response and source remains
         THIS session. Missing ids are explicitly unknown.
 
-        ``facts`` is the caller's already-materialized companion projection
-        (:func:`index_read_model.order_facts`), supplied by
-        :meth:`_journal_order_page` when no resident index holds this journal's
-        witness. It answers first because it is the same derivation the resident
-        join would read, already materialized in the caller's worker hop; the
-        resident attempt below still runs so this method keeps ONE policy for
-        what happens when neither can prove the rows.
+        THE COMPANION IS NOT TRIED HERE. It is
+        :meth:`_journal_order_page`'s own door, because that method must also arm
+        the resident scan once a projection has served the page. This one keeps
+        its own policy for what a page with no provable source answers.
         """
         from local_operator.session import transcript_index
 
         ids = list(dict.fromkeys(ids))
-        if facts is not None and index_read_model.apply_order(answer, facts):
-            return answer
         sources = [page.source_signature for page in pages]
         source = sources[0] if sources and all(s == sources[0] for s in sources) else None
         if self._apply_journal_order(answer, source, ids):
