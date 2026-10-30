@@ -23,7 +23,7 @@
   "cli.team_bridge.status.screening_held": "{count, plural, other {# tin bị giữ}} ({codes}; cũ nhất {age})",
   "cli.team_bridge.status.screening_held_class": "{count, plural, other {# tin bị giữ}} ({codes}; cũ nhất {age}; chủ yếu là {failure_class})",
   "cli.team_bridge.status.screening_held_none": "không có tin bị giữ",
-  "cli.team_bridge.status.screening_breaker": "cầu dao {state, select, open{mở thêm {remaining} ({failures, plural, other {# lần lỗi}})} failing{đóng ({failures, plural, other {# lần lỗi gần đây}})} other{đóng}}",
+  "cli.team_bridge.status.screening_breaker": "cầu dao {state, select, open{còn mở {remaining} nữa ({failures, plural, other {# lần lỗi}})} failing{đóng ({failures, plural, other {# lần lỗi gần đây}})} other{đóng}}",
   "cli.team_bridge.status.screening_rejected": "{count, plural, other {# tin bị từ chối trong 24 giờ}} ({categories})",
   "cli.team_bridge.status.screening_rejected_none": "không có tin bị từ chối trong 24 giờ",
   "cli.team_bridge.outcome.installed": "Bộ nhận đã được cài đặt và đang chạy.",
