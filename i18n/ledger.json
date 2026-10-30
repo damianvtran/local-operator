@@ -3602,6 +3602,405 @@
       "note": "PR #3088 width rewrite, re-audited at the committed bytes. 16 of 52 values rewritten by i18n-translator (session 0347acaa76f7, 16 keys; session 53ebb4e7a4a0, wire.slash.approvals) (actual model radient/auto; provider-quota fallback); round-1 audit 9412375334be-slash-fr rejected the shortened bytes (1B/4M/4m/5n) and round-2 audit b682afa67e4b-slash2-fr passed 51 of 52 keys and rejected wire.slash.approvals (0B/1M/4m/1n, changes_requested); a second translator session (53ebb4e7a4a0) rewrote that one value and round-3 audit 848874ddfe7a-slash3-fr confirmed it with 0B/0M/1m/0n and zero drift in the other 51 keys. target sha256 bb580c5bc5a2b2d91b03b97b92be5341db0c731feaf7ea592f08b70d3520983e; en source unchanged (b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202). Evidence: i18n/audits/evidence/fr/wire.slash/fr29s3/record.json (receipt.json + verdicts copied verbatim). Previous rows for this pair described audits of the pre-rewrite values and are superseded."
     },
     {
+      "locale": "fr",
+      "namespace": "mobile.setup",
+      "source_sha256": "6249b10379beb9b2433746416fa7baff061265a1b9315d47465140cd5fcf61e9",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent fr audit (frbk1), 76 keys, auditor session ab2610514b4d. Findings at audit: 0 blocker / 1 major / 1 minor / 2 nit. Every blocker/major has been remediated in the commit that adds this row; the remediated bytes are bound by input_hashes.target_locale in the bundle, and the pre-remediation hash is kept as remediation.target_sha_at_audit. Nits are answered in the audit report and the PR. Route: direct worktree reads (docs/security/redaction-policy.md 2.2); marker verified by ordinals, 0 markers in the French bytes. Auditor served on radient/auto after provider-quota fallbacks (disclosed); no native-speaker pass claimed."
+    },
+    {
+      "locale": "fr",
+      "namespace": "relay.account_policy",
+      "source_sha256": "0019b08106e6f7762194b164b9b9b37054a8cfade759aa2f6490787a73dea890",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent fr audit (frbk1), 13 keys, auditor session ab2610514b4d. Findings at audit: 0 blocker / 0 major / 1 minor / 1 nit. Every blocker/major has been remediated in the commit that adds this row; the remediated bytes are bound by input_hashes.target_locale in the bundle, and the pre-remediation hash is kept as remediation.target_sha_at_audit. Nits are answered in the audit report and the PR. Route: direct worktree reads (docs/security/redaction-policy.md 2.2); marker verified by ordinals, 0 markers in the French bytes. Auditor served on radient/auto after provider-quota fallbacks (disclosed); no native-speaker pass claimed."
+    },
+    {
+      "locale": "fr",
+      "namespace": "relay.library",
+      "source_sha256": "ad478c433a4db3e725994766c724a2e8e92176f015f8283e71dc13b87185466a",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent fr audit (frbk1), 1 keys, auditor session ab2610514b4d. Findings at audit: 0 blocker / 0 major / 0 minor / 0 nit. Every blocker/major has been remediated in the commit that adds this row; the remediated bytes are bound by input_hashes.target_locale in the bundle, and the pre-remediation hash is kept as remediation.target_sha_at_audit. Nits are answered in the audit report and the PR. Route: direct worktree reads (docs/security/redaction-policy.md 2.2); marker verified by ordinals, 0 markers in the French bytes. Auditor served on radient/auto after provider-quota fallbacks (disclosed); no native-speaker pass claimed."
+    },
+    {
+      "locale": "fr",
+      "namespace": "relay.login",
+      "source_sha256": "9a59686bcd0e3641a5a807ea2b778cb385e591060c26c7fb994bea95e4de5bc5",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent fr audit (frbk1), 4 keys, auditor session ab2610514b4d. Findings at audit: 0 blocker / 0 major / 0 minor / 0 nit. Every blocker/major has been remediated in the commit that adds this row; the remediated bytes are bound by input_hashes.target_locale in the bundle, and the pre-remediation hash is kept as remediation.target_sha_at_audit. Nits are answered in the audit report and the PR. Route: direct worktree reads (docs/security/redaction-policy.md 2.2); marker verified by ordinals, 0 markers in the French bytes. Auditor served on radient/auto after provider-quota fallbacks (disclosed); no native-speaker pass claimed."
+    },
+    {
+      "locale": "fr",
+      "namespace": "relay.session",
+      "source_sha256": "a4ae148de969d4a2e8541aca5b4b99ad311d9ef112a0d056fc21fcf90e7e0129",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent fr audit (frbk1), 17 keys, auditor session ab2610514b4d. Findings at audit: 0 blocker / 0 major / 0 minor / 0 nit. Every blocker/major has been remediated in the commit that adds this row; the remediated bytes are bound by input_hashes.target_locale in the bundle, and the pre-remediation hash is kept as remediation.target_sha_at_audit. Nits are answered in the audit report and the PR. Route: direct worktree reads (docs/security/redaction-policy.md 2.2); marker verified by ordinals, 0 markers in the French bytes. Auditor served on radient/auto after provider-quota fallbacks (disclosed); no native-speaker pass claimed."
+    },
+    {
+      "locale": "fr",
+      "namespace": "relay.shell",
+      "source_sha256": "f53b23560b88b531ef8fc3274bc396676f26e755ad4ff9ad87ce368cebdee560",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent fr audit (frbk1), 44 keys, auditor session ab2610514b4d. Findings at audit: 0 blocker / 1 major / 1 minor / 1 nit. Every blocker/major has been remediated in the commit that adds this row; the remediated bytes are bound by input_hashes.target_locale in the bundle, and the pre-remediation hash is kept as remediation.target_sha_at_audit. Nits are answered in the audit report and the PR. Route: direct worktree reads (docs/security/redaction-policy.md 2.2); marker verified by ordinals, 0 markers in the French bytes. Auditor served on radient/auto after provider-quota fallbacks (disclosed); no native-speaker pass claimed."
+    },
+    {
+      "locale": "fr",
+      "namespace": "tui.analytics",
+      "source_sha256": "aa5221066aa84eedf0f924628d51bc8f08ccf5f26b5075638b9d40062f7b617e",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent fr audit (frbk1), 98 keys, auditor session d5db18882cb9. Findings at audit: 0 blocker / 1 major / 1 minor / 1 nit. Every blocker/major has been remediated in the commit that adds this row; the remediated bytes are bound by input_hashes.target_locale in the bundle, and the pre-remediation hash is kept as remediation.target_sha_at_audit. Nits are answered in the audit report and the PR. Route: direct worktree reads (docs/security/redaction-policy.md 2.2); marker verified by ordinals, 0 markers in the French bytes. Auditor served on radient/auto after provider-quota fallbacks (disclosed); no native-speaker pass claimed."
+    },
+    {
+      "locale": "fr",
+      "namespace": "tui.app",
+      "source_sha256": "7e5f39df72438663a66afca0e5338e90b7b984bdca6b562195ce976945bd7875",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent fr audit (frbk1), 46 keys, auditor session d5db18882cb9. Findings at audit: 0 blocker / 0 major / 0 minor / 2 nit. Every blocker/major has been remediated in the commit that adds this row; the remediated bytes are bound by input_hashes.target_locale in the bundle, and the pre-remediation hash is kept as remediation.target_sha_at_audit. Nits are answered in the audit report and the PR. Route: direct worktree reads (docs/security/redaction-policy.md 2.2); marker verified by ordinals, 0 markers in the French bytes. Auditor served on radient/auto after provider-quota fallbacks (disclosed); no native-speaker pass claimed."
+    },
+    {
+      "locale": "fr",
+      "namespace": "tui.hub_links",
+      "source_sha256": "7fbe6713f8ac8f312884476c498c3b74e76c5f0853bdd027f25fc47d489311bb",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent fr audit (frbk1), 56 keys, auditor session d5db18882cb9. Findings at audit: 0 blocker / 0 major / 1 minor / 1 nit. Every blocker/major has been remediated in the commit that adds this row; the remediated bytes are bound by input_hashes.target_locale in the bundle, and the pre-remediation hash is kept as remediation.target_sha_at_audit. Nits are answered in the audit report and the PR. Route: direct worktree reads (docs/security/redaction-policy.md 2.2); marker verified by ordinals, 0 markers in the French bytes. Auditor served on radient/auto after provider-quota fallbacks (disclosed); no native-speaker pass claimed."
+    },
+    {
+      "locale": "fr",
+      "namespace": "tui.import",
+      "source_sha256": "932e0f87210ff80950346c684afb000907610c9ff35388125977182120b136c2",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent fr audit (frbk1), 87 keys, auditor session d5db18882cb9. Findings at audit: 0 blocker / 0 major / 0 minor / 2 nit. Every blocker/major has been remediated in the commit that adds this row; the remediated bytes are bound by input_hashes.target_locale in the bundle, and the pre-remediation hash is kept as remediation.target_sha_at_audit. Nits are answered in the audit report and the PR. Route: direct worktree reads (docs/security/redaction-policy.md 2.2); marker verified by ordinals, 0 markers in the French bytes. Auditor served on radient/auto after provider-quota fallbacks (disclosed); no native-speaker pass claimed."
+    },
+    {
+      "locale": "fr",
+      "namespace": "tui.library",
+      "source_sha256": "5a389b6a7d8de06621462f2685eff6dc95cd4cd6584d35dd6c26a0a19ad50b11",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent fr audit (frbk1), 108 keys, auditor session d5db18882cb9. Findings at audit: 0 blocker / 0 major / 1 minor / 0 nit. Every blocker/major has been remediated in the commit that adds this row; the remediated bytes are bound by input_hashes.target_locale in the bundle, and the pre-remediation hash is kept as remediation.target_sha_at_audit. Nits are answered in the audit report and the PR. Route: direct worktree reads (docs/security/redaction-policy.md 2.2); marker verified by ordinals, 0 markers in the French bytes. Auditor served on radient/auto after provider-quota fallbacks (disclosed); no native-speaker pass claimed."
+    },
+    {
+      "locale": "fr",
+      "namespace": "tui.projects",
+      "source_sha256": "aeb473eb7de44143822962b44b6be239d63f930710e754ce5205781ca4b4ae91",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent fr audit (frbk1), 97 keys, auditor session d5db18882cb9. Findings at audit: 0 blocker / 2 major / 3 minor / 1 nit. Every blocker/major has been remediated in the commit that adds this row; the remediated bytes are bound by input_hashes.target_locale in the bundle, and the pre-remediation hash is kept as remediation.target_sha_at_audit. Nits are answered in the audit report and the PR. Route: direct worktree reads (docs/security/redaction-policy.md 2.2); marker verified by ordinals, 0 markers in the French bytes. Auditor served on radient/auto after provider-quota fallbacks (disclosed); no native-speaker pass claimed."
+    },
+    {
+      "locale": "fr",
+      "namespace": "tui.small",
+      "source_sha256": "16d49c4ba2a514bbde7da494443abade26a3b28c0389e6bca124d00aa7d0ed75",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent fr audit (frbk1), 137 keys, auditor session d5db18882cb9. Findings at audit: 0 blocker / 0 major / 1 minor / 2 nit. Every blocker/major has been remediated in the commit that adds this row; the remediated bytes are bound by input_hashes.target_locale in the bundle, and the pre-remediation hash is kept as remediation.target_sha_at_audit. Nits are answered in the audit report and the PR. Route: direct worktree reads (docs/security/redaction-policy.md 2.2); marker verified by ordinals, 0 markers in the French bytes. Auditor served on radient/auto after provider-quota fallbacks (disclosed); no native-speaker pass claimed."
+    },
+    {
+      "locale": "fr",
+      "namespace": "tui.usage",
+      "source_sha256": "5aeaec254352896101bf2825ac03d06f74c95e3598cda23536c5fe28507a2f8b",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent fr audit (frbk1), 21 keys, auditor session d5db18882cb9. Findings at audit: 0 blocker / 0 major / 0 minor / 1 nit. Every blocker/major has been remediated in the commit that adds this row; the remediated bytes are bound by input_hashes.target_locale in the bundle, and the pre-remediation hash is kept as remediation.target_sha_at_audit. Nits are answered in the audit report and the PR. Route: direct worktree reads (docs/security/redaction-policy.md 2.2); marker verified by ordinals, 0 markers in the French bytes. Auditor served on radient/auto after provider-quota fallbacks (disclosed); no native-speaker pass claimed."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.errors.agents",
+      "source_sha256": "7800f04d031a9a97222f383dea74878acadb12d9d9382b16ba638990b77627c7",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent fr audit (frbk1), 44 keys, auditor session 500e883ce1b1. Findings at audit: 0 blocker / 0 major / 0 minor / 0 nit. Every blocker/major has been remediated in the commit that adds this row; the remediated bytes are bound by input_hashes.target_locale in the bundle, and the pre-remediation hash is kept as remediation.target_sha_at_audit. Nits are answered in the audit report and the PR. Route: direct worktree reads (docs/security/redaction-policy.md 2.2); marker verified by ordinals, 0 markers in the French bytes. Auditor served on radient/auto after provider-quota fallbacks (disclosed); no native-speaker pass claimed."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.errors.auth",
+      "source_sha256": "9d48edaa61269239e132201224c1c7d6cf89ef198598f0ec6c99c1f3ade542f6",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent fr audit (frbk1), 12 keys, auditor session 500e883ce1b1. Findings at audit: 0 blocker / 0 major / 0 minor / 0 nit. Every blocker/major has been remediated in the commit that adds this row; the remediated bytes are bound by input_hashes.target_locale in the bundle, and the pre-remediation hash is kept as remediation.target_sha_at_audit. Nits are answered in the audit report and the PR. Route: direct worktree reads (docs/security/redaction-policy.md 2.2); marker verified by ordinals, 0 markers in the French bytes. Auditor served on radient/auto after provider-quota fallbacks (disclosed); no native-speaker pass claimed."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.errors.media",
+      "source_sha256": "1c109f63b8d3ce00657a47836199ce8ff924bb8e4bd999fda9f1d64f760a823b",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent fr audit (frbk1), 20 keys, auditor session 500e883ce1b1. Findings at audit: 0 blocker / 0 major / 0 minor / 1 nit. Every blocker/major has been remediated in the commit that adds this row; the remediated bytes are bound by input_hashes.target_locale in the bundle, and the pre-remediation hash is kept as remediation.target_sha_at_audit. Nits are answered in the audit report and the PR. Route: direct worktree reads (docs/security/redaction-policy.md 2.2); marker verified by ordinals, 0 markers in the French bytes. Auditor served on radient/auto after provider-quota fallbacks (disclosed); no native-speaker pass claimed."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.exec",
+      "source_sha256": "041ca802dd4e1329cf1f1b2984311c628f314223f5941b35a7007f5b3d198c94",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent fr audit (frbk1), 17 keys, auditor session 500e883ce1b1. Findings at audit: 0 blocker / 0 major / 1 minor / 0 nit. Every blocker/major has been remediated in the commit that adds this row; the remediated bytes are bound by input_hashes.target_locale in the bundle, and the pre-remediation hash is kept as remediation.target_sha_at_audit. Nits are answered in the audit report and the PR. Route: direct worktree reads (docs/security/redaction-policy.md 2.2); marker verified by ordinals, 0 markers in the French bytes. Auditor served on radient/auto after provider-quota fallbacks (disclosed); no native-speaker pass claimed."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.host_speed",
+      "source_sha256": "e193473d58c0de1779bcefab06d0e9b1734ee493aea30ea827e4499510282b8c",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent fr audit (frbk1), 2 keys, auditor session 500e883ce1b1. Findings at audit: 0 blocker / 0 major / 0 minor / 1 nit. Every blocker/major has been remediated in the commit that adds this row; the remediated bytes are bound by input_hashes.target_locale in the bundle, and the pre-remediation hash is kept as remediation.target_sha_at_audit. Nits are answered in the audit report and the PR. Route: direct worktree reads (docs/security/redaction-policy.md 2.2); marker verified by ordinals, 0 markers in the French bytes. Auditor served on radient/auto after provider-quota fallbacks (disclosed); no native-speaker pass claimed."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.slash.library",
+      "source_sha256": "0f8615f2ed9ffaf3aeb0288a4ff4b8fc8becd46017a931db9d4b3d9ec32fce46",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent fr audit (frbk1), 2 keys, auditor session 500e883ce1b1. Findings at audit: 0 blocker / 0 major / 0 minor / 1 nit. Every blocker/major has been remediated in the commit that adds this row; the remediated bytes are bound by input_hashes.target_locale in the bundle, and the pre-remediation hash is kept as remediation.target_sha_at_audit. Nits are answered in the audit report and the PR. Route: direct worktree reads (docs/security/redaction-policy.md 2.2); marker verified by ordinals, 0 markers in the French bytes. Auditor served on radient/auto after provider-quota fallbacks (disclosed); no native-speaker pass claimed."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.tunnel_setup",
+      "source_sha256": "3854be7dce54dd3aeb9564921ed6a50f0560b32c7ac40955d81be93acd7e2ac1",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent fr audit (frbk1), 5 keys, auditor session 500e883ce1b1. Findings at audit: 0 blocker / 0 major / 0 minor / 1 nit. Every blocker/major has been remediated in the commit that adds this row; the remediated bytes are bound by input_hashes.target_locale in the bundle, and the pre-remediation hash is kept as remediation.target_sha_at_audit. Nits are answered in the audit report and the PR. Route: direct worktree reads (docs/security/redaction-policy.md 2.2); marker verified by ordinals, 0 markers in the French bytes. Auditor served on radient/auto after provider-quota fallbacks (disclosed); no native-speaker pass claimed."
+    },
+    {
       "locale": "hi",
       "namespace": "tui.status",
       "source_sha256": "2403f9c4f37b40264f575929627b99a0bcabb0baf1bcb6a0b951c6c31ec6843a",
