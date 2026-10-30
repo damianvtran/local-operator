@@ -422,6 +422,14 @@ export const BUNDLED_LOCALE: Readonly<Record<string, Readonly<Record<string,
       "relay.shell.usage.window_week": "7 jours",
     },
   },
+  "relay.skills": {
+    "fr": {
+      "relay.skills.skipped": "Envoy\u00e9 sans {names} \u2014 {count, plural, one {cette comp\u00e9tence n\u2019a pas de contenu \u00e0 joindre} many {ces comp\u00e9tences n\u2019ont pas de contenu \u00e0 joindre} other {ces comp\u00e9tences n\u2019ont pas de contenu \u00e0 joindre}}.",
+      "relay.skills.too_large": "Ces comp\u00e9tences sont trop volumineuses pour \u00eatre envoy\u00e9es ensemble. Retirez-en une et renvoyez le message.",
+      "relay.skills.tray.hidden": "masqu\u00e9e",
+      "relay.skills.tray.label": "Comp\u00e9tences",
+    },
+  },
   "relay.transcript": {
     "fr": {
       "relay.transcript.composer.queued": "{count, plural, one {# en attente} many {# en attente} other {# en attente}}",

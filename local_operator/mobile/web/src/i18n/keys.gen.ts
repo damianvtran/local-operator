@@ -380,6 +380,10 @@ export type MessageParams = {
   "relay.shell.usage.window_month": undefined;
   "relay.shell.usage.window_unknown": undefined;
   "relay.shell.usage.window_week": undefined;
+  "relay.skills.skipped": { "names": string; "count": number };
+  "relay.skills.too_large": undefined;
+  "relay.skills.tray.hidden": undefined;
+  "relay.skills.tray.label": undefined;
   "relay.transcript.composer.queued": { "count": number };
   "relay.transcript.fold.failed_label": undefined;
   "relay.transcript.fold.more": { "count": number };

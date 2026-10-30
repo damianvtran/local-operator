@@ -237,6 +237,10 @@ OWNED_SPA_NAMESPACES = (
     # `relay.chrome` reason: adding keys there would stale every locale's passed
     # ledger row for a redesign another lane owns.
     "relay.notifications",
+    # The composer's `$skill` picker and the one notice naming a skill the relay
+    # could not attach (SKM-D6). Its own namespace for the same frozen-bytes
+    # reason: relay.chrome carries the composer chrome and must not stale.
+    "relay.skills",
 )
 
 GENERATED_HEADER = (

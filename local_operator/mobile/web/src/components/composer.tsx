@@ -8,9 +8,10 @@
  * the send button switches to the `steer` op (same action, different
  * command) and a stop button appears beside it.
  */
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import { useFootFit } from "../lib/use-foot-fit";
-import { getCommands, HttpError, sendCommand, transcribeAudio } from "../api";
+import { getCommands, getSkills, HttpError, sendCommand, transcribeAudio } from "../api";
 import {
 	getPendingContinuation,
 	submitContinuation,
@@ -37,10 +38,18 @@ import { Sheet } from "./ui/sheet";
 import { UsageSheet } from "./usage-sheet";
 import { SessionStatus, meterFacts } from "./session-status";
 import { WorkingDirectoryChip } from "./directory-sheet";
+import { SkillTray } from "./skill-tray";
 import { cn } from "../lib/cn";
-import { textDirection } from "../lib/bidi";
+import { isolate, textDirection } from "../lib/bidi";
+import { aboveComposerOccupied } from "../lib/asks";
+import {
+	isLeadingSkillToken,
+	skillMatches,
+	skillSpanReplacement,
+	skillToken,
+} from "../lib/skill-token";
 import { messageRuntime, useCapabilities, useDraft } from "../store";
-import type { PromptImage, SessionProjection, SlashCommand } from "../types";
+import type { PromptImage, SessionProjection, SkillEntry, SlashCommand } from "../types";
 
 /** One attached image, kept as the wire form plus a local object URL for the
     thumbnail strip. */
@@ -124,6 +133,25 @@ function slashQuery(text: string): string | null {
     this predicate stays the single rule. */
 function slashTokenOnly(text: string): boolean {
 	return slashQuery(text) !== null && !text.includes(" ");
+}
+
+/** Whether the draft is a SLASH DRAFT — the ONE predicate send() and the skill
+    picker share.
+
+    The send path has always classified its input this way: a leading `/`, on a
+    single line, with no attachment is a command; anything else is a message. The
+    `$` picker must ask the same question because the two surfaces compete for
+    one composer, and a second copy of this rule is how `/team x $skill` would
+    open a skill list inside a command's argument. `/team x $skill` is out of
+    scope (SKM-D5), so a slash draft simply closes the tray: the slash surface
+    owns that draft.
+
+    The attachment clause is load-bearing rather than incidental: a "/…" caption
+    with an image is a prompt, not a command, and the send path already treats it
+    that way. */
+export function isSlashDraft(text: string, imageCount: number): boolean {
+	const trimmed = text.trim();
+	return trimmed.startsWith("/") && !trimmed.includes("\n") && imageCount === 0;
 }
 
 /** The voice state machine's four resting points (error surfaces as `idle` + copy). */
@@ -628,6 +656,50 @@ export function Composer({
 	onFitLevel?: (level: number) => void;
 }) {
 	const [text, setText] = useDraft(pid);
+	/* Whether the draft counts as a gesture for the picker at all. `null` means
+	   "the field has not reported a caret since this draft was restored", and
+	   the parse treats it as CLOSED rather than as end-of-text: a restored `$ux`
+	   draft used to open the tray before the user had touched anything (UX
+	   review U2). Typing or moving the caret sets a number; there is no route
+	   back to `null` except a restore. */
+	const [caret, setCaret] = useState<number | null>(null);
+	/* Whether the user closed the tray for this draft (UX review U1). Reset by
+	   the next EDIT or caret move, so dismissing is per-gesture, never sticky. */
+	const [skillDismissed, setSkillDismissed] = useState(false);
+	/* The parse the user CLOSED the tray at: caret and token, captured by the
+	   gesture that dismissed it.
+
+	   WHY A SNAPSHOT AND NOT JUST `setSkillDismissed(false)`. An Escape press is
+	   not one event. The key reaches `onKeyDown`, and the same key press also
+	   makes React report the selection (`onSelect`) with the caret unchanged —
+	   which re-armed the dismissal in the same gesture. One Escape then appeared
+	   to do nothing and a second worked, because only the first press carries
+	   that report (UX review U1, QA round 2 Q-R2-1; measured with trusted key
+	   events and with React's own props wrapped). Re-arming only when the parse's
+	   inputs changed makes the GESTURE the trigger rather than the event: the
+	   pair the dismissal recorded arriving again is that gesture's own tail,
+	   while a moved caret or a different token at it is a fresh decision. */
+	const closedAtRef = useRef<{ caret: number | null; token: string | null } | null>(null);
+	/* The parse as of THIS render, readable from a handler that may run after a
+	   re-render (the document-level dismiss listener). */
+	const parseRef = useRef<{ text: string; caret: number | null }>({ text, caret });
+	parseRef.current = { text, caret };
+	/* Whether the notice currently painted is the skipped-skill receipt, which
+	   describes the message just SENT and must not outlive it into the next
+	   draft (UX review U5). A ref: it gates a clear, and never renders. */
+	const skipNoticeRef = useRef(false);
+	/* The `$name` catalogue. Empty while the capability is absent or the fetch
+	   failed — both mean "no picker", never a banner (SKM-D5). */
+	const [skills, setSkills] = useState<SkillEntry[]>([]);
+	/* Set by a tray pick, consumed by the [text] layout effect to put the caret
+	   where the insertion left it. A ref because it is an instruction to an
+	   effect, not rendered state. */
+	const pendingCaretRef = useRef<number | null>(null);
+	/* A pick can produce the SAME buffer (tapping the name already typed with a
+	   space after it). `setText` then bails out and the [text] layout effect
+	   never runs, so the caret would stay inside the token and the tray would
+	   stay open. This tick makes the effect run on every pick regardless. */
+	const [caretTick, setCaretTick] = useState(0);
 	/* U5/U8 (mobile UX batch 1): the sheet follows the draft only while the draft
 	   is still the command TOKEN (see `slashTokenOnly`), and once the user has
 	   closed it for this draft it stays closed until the draft is no longer a
@@ -657,6 +729,9 @@ export function Composer({
 	const [dragOver, setDragOver] = useState(false);
 	const textareaRef = useRef<HTMLTextAreaElement>(null);
 	const fileInputRef = useRef<HTMLInputElement>(null);
+	/* The composer's own wrapper, which holds the tray AND the card: the arrow
+	   keys are routed here so the tray stays a pure list (see `trayRows`). */
+	const trayRootRef = useRef<HTMLDivElement>(null);
 
 	/* THE MOVE'S LOCAL BRIDGE (see ``directory-sheet.tsx``). The directory route
 	   answers only once the successor runtime is ready, and the successor's
@@ -721,6 +796,34 @@ export function Composer({
 	const readingKey = [projection.model_label, projection.effort, meterFacts(projection).label, micAvailable ? "mic" : ""].join("|");
 	const foot = useFootFit(short, readingKey, queuedLabel);
 	useEffect(() => { onFitLevel?.(foot.level); }, [foot.level, onFitLevel]);
+
+	/* The skill catalogue, once per session, only when the relay advertises the
+	   capability. A FETCH ERROR OR AN EMPTY CATALOGUE = THE TRAY NEVER OPENS
+	   (SKM-D5): the draft keeps working as plain prose, and nothing shouts about
+	   a picker the user never asked for. */
+	const skillCapability = capabilities?.skill_invocation?.available === true;
+	useEffect(() => {
+		/* Cleared BEFORE the fetch, not after it lands: a reused Composer instance
+		   (the same screen repointed at another session) otherwise keeps showing
+		   the previous session's list, with rows the new relay may not have
+		   (agent review m4). A skill created mid-session still needs a reload;
+		   that is the fetch-once contract SKM-D5 chose, and the relay drops
+		   unknown names anyway. */
+		setSkills([]);
+		if (!skillCapability) return;
+		let cancelled = false;
+		getSkills(pid)
+			.then((answer) => {
+				if (!cancelled) setSkills(answer.skills);
+			})
+			.catch(() => {
+				if (!cancelled) setSkills([]);
+			});
+		return () => {
+			cancelled = true;
+		};
+	}, [pid, skillCapability]);
+
 	const [dictation, setDictation] = useState<DictationState>("idle");
 	/* The transient outcome line (added / empty / discarded); lives in the same
 	   status row as the live states so nothing moves between them (D3). */
@@ -809,7 +912,123 @@ export function Composer({
 		}
 	}, [text]);
 
+	/* A tray pick must leave the caret where `_skill_span_replacement`'s
+	   arithmetic put it — one cell past the separator — not wherever React's
+	   value write happens to leave it. A LAYOUT effect, so the caret moves in the
+	   same paint the text lands and the next keystroke cannot read a stale
+	   position. Focus returns to the field here rather than in the pointer
+	   handler because a pick may race the field's own blur. */
+	useLayoutEffect(() => {
+		const at = pendingCaretRef.current;
+		if (at === null) return;
+		pendingCaretRef.current = null;
+		const el = textareaRef.current;
+		if (!el) return;
+		el.focus();
+		el.setSelectionRange(at, at);
+		setCaret(at);
+	}, [text, caretTick]);
+
 	const disabled = false;
+
+	/* The skill tray's own parse. Slash drafts win (SKM-D5): while the draft is
+	   a slash command the slash surface owns the composer, so `/team x $skill`
+	   never opens this list. `isSlashDraft` is the same predicate send() uses.
+
+	   NO IME GUARD (agent review M1, superseding SKM-D5's composition clause).
+	   Android soft keyboards compose every LATIN word, not just CJK input, so
+	   suppressing the parse while `composing` held the tray shut for the whole
+	   time a user typed `$res` on the platform this feature exists for. What the
+	   guard was protecting against — a token parsed from a half-composed string
+	   flickering the list open — is decided by `selectionStart` instead: it is
+	   the settled caret both mid- and post-composition, and a partially
+	   composed word is a partially typed word, which is exactly when a prefix
+	   list SHOULD narrow. `compositionend` re-reads it once more so a browser
+	   that only reports the final position still lands here. */
+	const skillDraft = skillCapability && !isSlashDraft(text, images.length);
+	const activeSkillToken =
+		skillDraft && caret !== null && !skillDismissed ? skillToken(text, caret) : null;
+	const skillLeading =
+		activeSkillToken !== null && isLeadingSkillToken(text, activeSkillToken);
+	const skillRows = activeSkillToken
+		? skillMatches(activeSkillToken.query, skills, skillLeading)
+		: [];
+	const skillTrayOpen = !disabled && skillRows.length > 0;
+
+	/** The tray's row buttons, in DOM order — the destination of the arrow
+	    keys. A query rather than row state: the tray owns which rows exist, and
+	    a pick unmounts the list, so there is no stable index to hold. */
+	const trayRows = () =>
+		Array.from(
+			trayRootRef.current?.querySelectorAll<HTMLButtonElement>("[data-skill-tray] button") ?? [],
+		);
+
+	/** Close the tray, recording the parse it was closed at, so the selection
+	    report the SAME gesture also produces is not mistaken for a new one. */
+	const dismissSkillTray = () => {
+		const { text: drafted, caret: at } = parseRef.current;
+		const token = at === null ? null : skillToken(drafted, at);
+		closedAtRef.current = {
+			caret: at,
+			token: token ? `${token.start}:${token.end}:${token.query}` : null,
+		};
+		setSkillDismissed(true);
+	};
+
+	/* A tap ANYWHERE outside the list and the field closes it (UX review U1):
+	   before this, the only exits were editing the token away or sending, and on
+	   a phone the list covers up to 45 % of the column while the user reads.
+	   Ignored for a target inside the tray — a row's own tap must reach its
+	   pointer handlers — and for the field, where a tap is a caret move and
+	   `onSelect` re-decides. Capture phase so a handler that stops propagation
+	   (a chip opening its sheet) still dismisses. */
+	useEffect(() => {
+		if (!skillTrayOpen) return;
+		const onPointerDown = (event: PointerEvent) => {
+			const target = event.target;
+			if (!(target instanceof Element)) return;
+			if (target.closest("[data-skill-tray]")) return;
+			if (target === textareaRef.current) return;
+			dismissSkillTray();
+		};
+		/* The same rule for the KEYBOARD (UX round 2 U7): the tray follows the
+		   field, so focus landing anywhere else closes it. Without this, moving
+		   focus from a row to the transcript would strand an open list behind a
+		   field nobody is typing in — the blur that used to close it belongs to
+		   the textarea, which is not the element being left. */
+		const onFocusIn = (event: FocusEvent) => {
+			const target = event.target;
+			if (!(target instanceof Element)) return;
+			if (target === textareaRef.current) return;
+			if (target.closest("[data-skill-tray]")) return;
+			dismissSkillTray();
+		};
+		/* An Escape pressed while a ROW has focus closes the list too, and puts
+		   the caret back where it came from: the field's own handler cannot see
+		   the key, and a list that the keyboard can enter but not leave would be
+		   a trap (U7). The listener is scoped to the tray's own rows (agent
+		   review m9): an Escape aimed at anything else belongs to that thing,
+		   not to a list the user is not in. `preventDefault` keeps the browser's
+		   own Escape (stop the page load, close a native popup) from racing a
+		   gesture the app is already handling. */
+		const onKeyDown = (event: KeyboardEvent) => {
+			if (event.key !== "Escape") return;
+			const target = event.target;
+			if (!(target instanceof Element)) return;
+			if (!target.closest("[data-skill-tray]")) return;
+			event.preventDefault();
+			dismissSkillTray();
+			textareaRef.current?.focus();
+		};
+		document.addEventListener("pointerdown", onPointerDown, true);
+		document.addEventListener("focusin", onFocusIn, true);
+		document.addEventListener("keydown", onKeyDown, true);
+		return () => {
+			document.removeEventListener("pointerdown", onPointerDown, true);
+			document.removeEventListener("focusin", onFocusIn, true);
+			document.removeEventListener("keydown", onKeyDown, true);
+		};
+	}, [skillTrayOpen]);
 
 	useEffect(() => {
 		/* Envelopes are scoped per session and survive navigation (U1): moving to
@@ -1016,6 +1235,7 @@ export function Composer({
 			   commits it — scroll, never focus. */
 			revealAppendRef.current = true;
 			setText(joined);
+			setCaret(null);
 			/* U3: a polite completion line, the announcement a screen reader was
 			   missing; see the DICTATION_ADDED comment for the focus tradeoff. */
 			setDictationNotice(DICTATION_ADDED);
@@ -1032,6 +1252,7 @@ export function Composer({
 	const clearDraft = () => {
 		provenanceRef.current = emptyProvenance();
 		setText("");
+		setCaret(null);
 	};
 
 	/** Classify one USER-driven draft change (typing, a slash fill): sticky
@@ -1068,6 +1289,7 @@ export function Composer({
 		setSending(true);
 		setError("");
 		setNotice("");
+		skipNoticeRef.current = false;
 		/* The echo the prompt branch paints, held so the failure branch can take it
 		   back down and hand the text over again. A HOLDER rather than a plain
 		   local because the callback that fills it runs in a closure TS's
@@ -1077,8 +1299,7 @@ export function Composer({
 		const submitted: { echo: { commandId: string; text: string } | null } = { echo: null };
 		/* A refused COMMAND and a failed CONTINUATION need different words: the first
 		   carries the runtime's own refusal sentence, the second is the retry copy. */
-		const isSlash =
-			trimmed.startsWith("/") && !trimmed.includes("\n") && images.length === 0;
+		const isSlash = isSlashDraft(raw, images.length);
 		try {
 			/* Slash input routes to the slash op rather than prompt — and only
 			   when there is no attachment, since a "/…" caption with an image
@@ -1091,6 +1312,7 @@ export function Composer({
 				if (command === "usage" && !args) {
 					setUsageOpen(true);
 					setText("");
+					setCaret(null);
 					return;
 				}
 				/* THE ROUTED OP, not `slash`. `slash` is the owner's off-terminal subset
@@ -1174,6 +1396,11 @@ export function Composer({
 							clearDraft();
 						}
 					},
+					/* The expansion request rides the FRESH envelope only (a retry
+					   replays the stored body's own flag). Gated on the capability
+					   AND on a `$`: a message without one asks the relay for nothing,
+					   and an older relay never sees a flag it would drop. */
+					skillCapability && trimmed.includes("$"),
 				);
 				setRetryEnvelope(null);
 				/* The session admitted this command — the receipt IS that fact, and it is
@@ -1206,6 +1433,25 @@ export function Composer({
 					   success notice, not the danger alert (D11). The pending row stays up
 					   either way — it is a row the session genuinely owes. */
 					setNotice(RETRY_ACK_NOTICE);
+				}
+				/* A skill the relay could not attach is SAID (SKM-D4): the message
+				   did send, and a silent skip would read as an invocation that ran
+				   when nothing was attached. One keyed line, neutral rather than
+				   success — it reports what did not happen. Last write wins on
+				   purpose: this fact changes what the message the user just sent
+				   CONTAINS, where the retry acknowledgement is about their next
+				   draft. */
+				const skippedSkills = receipt.skills?.skipped ?? [];
+				if (skippedSkills.length > 0) {
+					setNoticeTone("neutral");
+					/* Marked so the next draft's first keystroke clears it (U5). */
+					skipNoticeRef.current = true;
+					setNotice(
+						messageRuntime.t("relay.skills.skipped", {
+							names: skippedSkills.map((name) => isolate(`$${name}`)).join(", "),
+							count: skippedSkills.length,
+						}),
+					);
 				}
 				return;
 			}
@@ -1248,24 +1494,32 @@ export function Composer({
 				   annotation, which is what a retry replays. */
 				provenanceRef.current = emptyProvenance();
 				setText(submitted.echo.text);
+				setCaret(null);
 			}
 			setRetryEnvelope(getPendingContinuation(pid));
 			setError(
-				ended
-					/* U15's other half (UX round 1, U20; issue #1875): on an ENDED
-					   session `Try again.` is not the whole story. A send to an ended
-					   session is itself resume-then-send (the daemon wakes a host for
-					   a prompt with no live entry), so a send that FAILED here means
-					   that wake failed, and the honest remedies are the two that
-					   exist: send again under the same envelope, or Resume. #3008
-					   review U5: Resume now lives behind the header's "Ended" control
-					   (and the ⋮ menu) — the sessions list never offered it. Keyed,
-					   unlike its neighbours, because it is new copy. (The composer is
-					   NOT disabled for an ended session: sending is a real way back.) */
-					? messageRuntime.t("relay.health.ended_send_failed")
-					: projection.streaming
-						? STEER_ERROR
-						: CONTINUATION_ERROR,
+				/* A skill set over the relay's body budget is a REFUSAL WITH A REMEDY,
+				   not a transient failure: retrying the same draft is refused again,
+				   so the one retry sentence pointed at an action that cannot work and
+				   hid the cause (UX review U6). Keyed on the wire's typed code, so the
+				   sentence survives the relay rewording its own prose. */
+				failure instanceof HttpError && failure.code === "skills_too_large"
+					? messageRuntime.t("relay.skills.too_large")
+					: ended
+						/* U15's other half (UX round 1, U20; issue #1875): on an ENDED
+						   session `Try again.` is not the whole story. A send to an ended
+						   session is itself resume-then-send (the daemon wakes a host for
+						   a prompt with no live entry), so a send that FAILED here means
+						   that wake failed, and the honest remedies are the two that
+						   exist: send again under the same envelope, or Resume. #3008
+						   review U5: Resume now lives behind the header's "Ended" control
+						   (and the ⋮ menu) — the sessions list never offered it. Keyed,
+						   unlike its neighbours, because it is new copy. (The composer is
+						   NOT disabled for an ended session: sending is a real way back.) */
+						? messageRuntime.t("relay.health.ended_send_failed")
+						: projection.streaming
+							? STEER_ERROR
+							: CONTINUATION_ERROR,
 			);
 		} finally {
 			setSending(false);
@@ -1280,9 +1534,25 @@ export function Composer({
 		}
 	};
 
-	const onChange = (value: string) => {
+	const onChange = (value: string, caretAt: number | null) => {
 		applyUserEdit(value);
 		setText(value);
+		/* Every keystroke re-decides the tray, composing or not: `selectionStart`
+		   is the caret the user sees, which is the caret the parse needs (M1). */
+		setCaret(caretAt);
+		/* An edit is a fresh gesture: a tray the user dismissed, or that a restored
+		   draft never opened, is allowed back the moment they type (U1/U2) — and
+		   the edit invalidates the parse the dismissal recorded, because the
+		   text it was taken from no longer exists. */
+		closedAtRef.current = null;
+		setSkillDismissed(false);
+		/* The skipped-skill receipt described the message that was SENT. The moment
+		   the user starts another one it reads as a statement about the new draft,
+		   so it goes (U5). */
+		if (skipNoticeRef.current) {
+			skipNoticeRef.current = false;
+			setNotice("");
+		}
 		/* Typing is the next action: a lingering dictation outcome line is done
 		   being useful. */
 		setDictationNotice("");
@@ -1312,6 +1582,7 @@ export function Composer({
 	const onSlashPick = (fill: string, submit: boolean) => {
 		applyUserEdit(fill);
 		setText(fill);
+		setCaret(null);
 		/* The pick CLOSES the sheet for this draft: an argument-taking command
 		   lands mid-edit ("/rename ") and the sheet must not come back while the
 		   arguments are typed (U5). */
@@ -1333,12 +1604,77 @@ export function Composer({
 		const composed = `/${value}`;
 		applyUserEdit(composed);
 		setText(composed);
+		setCaret(null);
 		setSlashDismissed(true);
 		textareaRef.current?.focus();
 	};
 
+	/** Accept one skill row: replace ONLY the token's span (SKM-D5, the TUI's
+	    `_skill_span_replacement` arithmetic), then let the [text] layout effect
+	    put the caret one cell past the separator. */
+	const onSkillPick = (name: string) => {
+		if (!activeSkillToken) return;
+		const next = skillSpanReplacement(text, activeSkillToken, name);
+		applyUserEdit(next.text);
+		setText(next.text);
+		pendingCaretRef.current = next.caret;
+		setCaretTick((tick) => tick + 1);
+	};
+
+	/* Arrow keys BETWEEN the rows (UX round 3 U7, agent review M3), handled at
+	   the composer so `SkillTray` stays a pure list. A row is a real button:
+	   Enter and Space are its NATIVE activation and arrive in `onClick` with
+	   `detail === 0`, so no key is duplicated here. ArrowUp at the first row
+	   goes back to the field — the list must not be a keyboard dead end. */
+	const onTrayKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+		if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+		if (event.nativeEvent.isComposing) return;
+		/* Only a BARE arrow: with Shift it extends a selection, and with
+		   Alt/Ctrl/Meta it moves by word or paragraph — gestures the field (or
+		   the row) still owns. */
+		if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+		const target = event.target;
+		if (!(target instanceof Element)) return;
+		const row = target.closest("[data-skill-tray] button");
+		if (!row) return;
+		const rows = trayRows();
+		const at = rows.indexOf(row as HTMLButtonElement);
+		if (at < 0) return;
+		event.preventDefault();
+		const next = event.key === "ArrowDown" ? rows[at + 1] : rows[at - 1];
+		if (next) next.focus();
+		else if (event.key === "ArrowUp") textareaRef.current?.focus();
+	};
+
+	/* `display: contents` is load-bearing, not decoration: the tray has to be a
+	   SIBLING of the composer card (a picker above the field) while this
+	   component stays one element in its parent's flex column, and re-indenting
+	   the whole card behind a fragment would bury every future diff. The wrapper
+	   itself paints nothing and has no layout box. */
 	return (
-		<div className={COMPOSER_SHELL}>
+		<div className="contents" ref={trayRootRef} onKeyDown={onTrayKeyDown}>
+			{/* The `$skill` list, in the above-composer region with the slot's own
+			    numbers (see skill-tray.tsx for why it is not inside the slot's
+			    scroller). Rendered by the composer because the draft, the caret and
+			    the insert all live here; the tray is a pure list. */}
+			{skillTrayOpen ? (
+				<SkillTray
+					rows={skillRows}
+					onPick={onSkillPick}
+					/* TWO ROWS WHEN ANYTHING ABOVE THE COMPOSER DRAWS (design D5,
+					   QA round 4 Q-R4-1). `blockingPending` alone answered "no card"
+					   for a queued ask the runtime also mirrors into `pending` —
+					   correct as far as it goes, except that same state draws the
+					   32 px dock in the slot. The cap therefore reads the ONE
+					   predicate for "the slot has something in it": the blocking
+					   card OR the dock (`aboveComposerOccupied`, whose dock half is
+					   the `outstandingAsks` gate `AskDock` draws behind). An EMPTY
+					   mirror still keeps the 45 % cap, so a slot with nothing in it
+					   costs the list no height (m8/U8). */
+					questionPending={aboveComposerOccupied(projection.pending, projection.asks)}
+				/>
+			) : null}
+			<div className={COMPOSER_SHELL}>
 			{showResume && !projection.streaming && !disabled ? (
 				<button
 					type="button"
@@ -1554,7 +1890,54 @@ export function Composer({
 					<textarea
 						ref={textareaRef}
 						value={text}
-						onChange={(e) => onChange(e.target.value)}
+						onChange={(e) => onChange(e.target.value, e.target.selectionStart)}
+						/* The caret the `$` parse reads. `onSelect` also covers a tap
+						   that moves it without a change; `onChange` alone would leave a
+						   stale position after any selection move. */
+						onSelect={(e) => {
+							/* Also covers a tap that moves the caret without a change, and
+							   re-opens a tray the user dismissed (U1) — but only for a
+							   parse that differs from the one the dismissal recorded. The
+							   `select` the same Escape press produces is the tail of a
+							   gesture already taken (Q-R2-1). */
+							const at = e.currentTarget.selectionStart;
+							setCaret(at);
+							const token = skillToken(text, at);
+							const mark = token ? `${token.start}:${token.end}:${token.query}` : null;
+							const closed = closedAtRef.current;
+							if (closed && closed.caret === at && closed.token === mark) return;
+							closedAtRef.current = null;
+							setSkillDismissed(false);
+						}}
+						onCompositionEnd={(e) => {
+							/* The settled caret after an IME composition — the one report a
+							   browser is guaranteed to make (M1). */
+							setCaret(e.currentTarget.selectionStart);
+						}}
+						onBlur={(e) => {
+							/* Focus moving INTO the list is not a dismissal (U7). The
+							   keyboard's route there is the arrow keys just above, which
+							   call `row.focus()`: that focus move blurs this field with the
+							   row as `relatedTarget`, and closing here would unmount the
+							   target before the browser could focus it. Sequential focus
+							   cannot enter the list at all — the tray precedes the card's
+							   attach/mic in DOM order — which is why the arrow route exists
+							   (agent review M3). React's `onBlur` is the bubbling
+							   `focusout`, so `relatedTarget` is the control about to
+							   receive focus. Anything else — the keyboard going away,
+							   another control, the page — still closes it (U1). */
+							const next = e.relatedTarget;
+							if (next instanceof Element && next.closest("[data-skill-tray]")) return;
+							dismissSkillTray();
+						}}
+						onPointerDown={() => {
+							/* A tap in the field is an explicit gesture, even when it lands on
+							   the caret already there: a restored draft's first tap reports a
+							   new caret anyway, but a return from another app taps where it
+							   left off and `select` alone stays quiet (review round 2 m7). */
+							closedAtRef.current = null;
+							setSkillDismissed(false);
+						}}
 						onPaste={(e) => {
 							const files = Array.from(e.clipboardData.files);
 							if (files.length > 0) {
@@ -1570,7 +1953,37 @@ export function Composer({
 						enterKeyHint="send"
 						onKeyDown={(e) => {
 							/* Hardware keyboards: Enter sends, Shift+Enter
-							   newline. Touch keyboards use the button. */
+							   newline. Touch keyboards use the button. Escape closes the
+							   `$skill` tray without touching the draft (U1); with the tray
+							   closed it is not this field's key. */
+							if (e.key === "Escape" && skillTrayOpen) {
+								dismissSkillTray();
+								return;
+							}
+							/* THE KEYBOARD'S ROUTE INTO THE LIST (U7/M3). DOM order puts
+							   the tray before the card's attach/mic controls, so neither
+							   Tab nor Shift+Tab can reach a row — the field's blur closes
+							   the tray on the way out. ArrowDown enters at the first row
+							   and ArrowUp at the last, as a combobox does; the wrapper's
+							   handler then walks the rows. `preventDefault` keeps the
+							   caret where it is, and composition owns every key while an
+							   IME is composing (the arrows pick candidates there). */
+							if (
+								(e.key === "ArrowDown" || e.key === "ArrowUp") &&
+								skillTrayOpen &&
+								!e.nativeEvent.isComposing &&
+								!e.altKey &&
+								!e.ctrlKey &&
+								!e.metaKey &&
+								!e.shiftKey
+							) {
+								const rows = trayRows();
+								if (rows.length > 0) {
+									e.preventDefault();
+									(e.key === "ArrowDown" ? rows[0] : rows[rows.length - 1]).focus();
+									return;
+								}
+							}
 							if (e.key === "Enter" && !e.shiftKey) {
 								e.preventDefault();
 								void send(text);
@@ -1650,6 +2063,7 @@ export function Composer({
 				pid={pid}
 				projection={projection}
 			/>
+			</div>
 		</div>
 	);
 }

@@ -44,6 +44,8 @@ describe("retainConfigStream", () => {
 		// relay.approvals is the approvals-policy slice's own en-only copy (the
 		// policy state line, the global scope and the mode-change links).
 		// relay.notifications is the phone inbox's own (#/notifications).
+		// relay.skills is the composer's `$skill` picker (SKM-D6): its tray
+		// labels and the one skipped-skill notice.
 		const ownedNamespaces = Object.keys(BUNDLED_OWNED).sort();
 		expect(ownedNamespaces).toEqual([
 			"relay.account_policy",
@@ -57,6 +59,7 @@ describe("retainConfigStream", () => {
 			"relay.session",
 			"relay.session.tags",
 			"relay.shell",
+			"relay.skills",
 			"relay.transcript",
 		]);
 		const registrations = Object.values(BUNDLED_OWNED).reduce(

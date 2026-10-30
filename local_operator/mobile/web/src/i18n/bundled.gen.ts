@@ -422,6 +422,14 @@ export const BUNDLED_OWNED: Readonly<Record<string, Readonly<Record<string,
       "relay.shell.usage.window_week": "7-day",
     },
   },
+  "relay.skills": {
+    "en": {
+      "relay.skills.skipped": "Sent without {names} \u2014 {count, plural, one {that skill has} other {those skills have}} no content to attach.",
+      "relay.skills.too_large": "These skills are too large to send together. Remove one skill and send again.",
+      "relay.skills.tray.hidden": "hidden",
+      "relay.skills.tray.label": "Skills",
+    },
+  },
   "relay.transcript": {
     "en": {
       "relay.transcript.composer.queued": "{count, plural, one {# queued} other {# queued}}",

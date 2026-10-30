@@ -422,6 +422,14 @@ export const BUNDLED_LOCALE: Readonly<Record<string, Readonly<Record<string,
       "relay.shell.usage.window_week": "7\u5929",
     },
   },
+  "relay.skills": {
+    "zh-CN": {
+      "relay.skills.skipped": "\u5df2\u53d1\u9001\uff0c\u4f46\u672a\u9644\u5e26{names}\u2014\u2014{count, plural, other {\u6240\u5217\u6280\u80fd\u6ca1\u6709\u53ef\u9644\u52a0\u7684\u5185\u5bb9}}\u3002",
+      "relay.skills.too_large": "\u8fd9\u4e9b\u6280\u80fd\u592a\u5927\uff0c\u65e0\u6cd5\u4e00\u8d77\u53d1\u9001\u3002\u79fb\u9664\u4e00\u4e2a\u6280\u80fd\u540e\u91cd\u65b0\u53d1\u9001\u3002",
+      "relay.skills.tray.hidden": "\u9690\u85cf",
+      "relay.skills.tray.label": "\u6280\u80fd",
+    },
+  },
   "relay.transcript": {
     "zh-CN": {
       "relay.transcript.composer.queued": "{count, plural, other {# \u6761\u5df2\u6392\u961f}}",

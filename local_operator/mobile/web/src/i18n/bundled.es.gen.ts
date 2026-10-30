@@ -422,6 +422,14 @@ export const BUNDLED_LOCALE: Readonly<Record<string, Readonly<Record<string,
       "relay.shell.usage.window_week": "7 d\u00edas",
     },
   },
+  "relay.skills": {
+    "es": {
+      "relay.skills.skipped": "Enviado sin {names} \u2014 {count, plural, one {esa habilidad no tiene contenido que adjuntar} many {esas habilidades no tienen contenido que adjuntar} other {esas habilidades no tienen contenido que adjuntar}}.",
+      "relay.skills.too_large": "Estas habilidades son demasiado grandes para enviarlas juntas. Quita una habilidad y env\u00eda de nuevo.",
+      "relay.skills.tray.hidden": "oculta",
+      "relay.skills.tray.label": "Habilidades",
+    },
+  },
   "relay.transcript": {
     "es": {
       "relay.transcript.composer.queued": "{count, plural, one {# en cola} many {# en cola} other {# en cola}}",

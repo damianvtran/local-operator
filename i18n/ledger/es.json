@@ -2032,6 +2032,44 @@
     },
     {
       "locale": "es",
+      "namespace": "relay.skills",
+      "source_sha256": "604fa70ae72093282d048c4ca98d92ff825472c63b52bda9761dd7709cbd8e24",
+      "translator": {
+        "agent": "coder (lopdev mobile-web-skill-picker session 2f4ba11bb797)",
+        "model": "radient/auto",
+        "date": "2026-10-30"
+      },
+      "auditor": {
+        "agent": "codex (independent i18n audit via codex MCP; separate agent/model and context from the translator)",
+        "model": "codex default",
+        "date": "2026-10-30",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Skill picker copy (SKM-D6): three keys — relay.skills.tray.label, relay.skills.tray.hidden, relay.skills.skipped. Independent audit via the codex MCP (a separate agent and model from the translator, read-only on the checkout; thread 01a18d8c-4112-7e23-b40b-42272a8059e3): round 1 returned FAIL with 5 findings, all applied verbatim — fr typographic apostrophes; zh-CN spacing around {names}, dash and the count-1 plural; hi and ur attachment direction; vi's `other`-only plural. Round 2 on the corrected bytes: PASS for all seven locales, 0 findings. Terms follow the glossary's skill row (compétence, habilidad, 技能, навык, कौशल, مہارت, kỹ năng); placeholders and plural categories preserved per locale."
+    },
+    {
+      "locale": "es",
+      "namespace": "relay.skills",
+      "source_sha256": "3d4b4e8746f8379501cc3542dfc1fa3b48494467054f5f5ee8789bde4abcb89e",
+      "translator": {
+        "agent": "coder (lopdev mobile-web-skill-picker session a3b59b458d0d)",
+        "model": "radient/auto",
+        "date": "2026-10-30"
+      },
+      "auditor": {
+        "agent": "codex (independent i18n audit via the codex CLI; separate agent/model and context from the translator)",
+        "model": "gpt-5.6-sol",
+        "date": "2026-10-30",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Skill picker copy (SKM-D6 + round-1 remediation U6): the namespace now carries four keys — relay.skills.tray.label, relay.skills.tray.hidden, relay.skills.skipped and the new relay.skills.too_large. The three existing keys are byte-identical to the bytes audited in the earlier round; the new key is the 422 `skills_too_large` refusal, which replaces a generic retry line with the cause (the skills together exceed the relay's body budget) and the remedy (remove one, send again). Independent audit this round via the codex CLI/MCP (separate agent and model from the translator, read-only on the checkout, gpt-5.6-sol, session 01a18ddc-d8ec-75a2-916d-049305cbbc6c): PASS for all seven locales, 0 findings, with a byte check (no BOM, no trailing space, no ICU braces, NFC). Terms follow the glossary's skill row (compétence, habilidad, 技能, навык, कौशल, مہارت, kỹ năng); register follows each style guide (tú / vous / 你 / вы / आप / آپ / bạn)."
+    },
+    {
+      "locale": "es",
       "namespace": "cli.team_bridge",
       "source_sha256": "97aa224ed22d209a8eb84860bea6694f5c47fc531887d80270cbb1eee71e74fe",
       "translator": {

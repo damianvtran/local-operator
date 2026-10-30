@@ -57,6 +57,7 @@ vi.mock("./api", async (importOriginal) => {
 		getSubagentDetail: vi.fn(async () => null),
 		imageUrl: vi.fn(() => ""),
 		getCommands: vi.fn(async () => ({ commands: [] })),
+		getSkills: vi.fn(async () => ({ skills: [] })),
 		getModels: vi.fn(async () => ({ models: [] })),
 		markSessionSeen: vi.fn(async () => ({ ok: true })),
 		sendCommandWithProof: mocks.sendCommandWithProof,

@@ -764,6 +764,35 @@ export interface SlashCommand {
 	arguments: "none" | "optional" | "required";
 }
 
+/** One row of the relay's `$name` catalogue (`GET /api/skills?session_id=`).
+
+    `description` is the skill's one-line routing sentence, cut to 160 chars by
+    the relay (`_SKILL_DESCRIPTION_CHARS`); `hidden` marks a skill whose `hide`
+    frontmatter suppresses automatic selection. The picker still offers hidden
+    skills: being typed is exactly the case `hide` leaves open. */
+export interface SkillEntry {
+	name: string;
+	description: string;
+	hidden: boolean;
+}
+
+/** What `GET /api/skills` answers. Sorted by name by the relay, so a picker
+    that reorders under the finger is a client bug, not a server answer. */
+export interface SkillsResponse {
+	skills: SkillEntry[];
+}
+
+/** The additive `skills` block a prompt/steer receipt carries when the relay
+    honoured `expand_skills` (SKM-D4): what attached to the message that was
+    sent, and what did not (an empty or unreadable SKILL.md skips that skill
+    and lets the message through). Both lists are names WITHOUT the `$`; the
+    phone joins the skipped ones into its one keyed notice. Absent on a reply
+    from a relay that does not expand — which is the capability's answer too. */
+export interface SkillExpansionReceipt {
+	attached: string[];
+	skipped: string[];
+}
+
 /** One offerable model, as `GET /api/models` ranks it.
  *
  * The array order IS the ranking — direct-connected providers first, newest
@@ -899,6 +928,13 @@ export type CommandOp =
 			/** The reserved annotation (input-mode-v1), omitted when absent. */
 			input_mode?: InputMode;
 			input_path?: string;
+			/** Ask the relay to expand `$name` mentions before delivery (SKM-D1).
+			    Set only when this client saw `capabilities.skill_invocation` and
+			    the text carries `$`; an older relay drops it silently, which is
+			    why the capability — never this field — tells a phone the feature
+			    exists. Part of the retry envelope's bytes: a replay asks for the
+			    same expansion the first attempt asked for. */
+			expand_skills?: boolean;
 		}
 	| { op: "abort" }
 	| { op: "set_model"; provider: string; model_id: string }
