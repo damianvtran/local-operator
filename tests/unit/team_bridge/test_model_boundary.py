@@ -79,6 +79,8 @@ def test_runner_builds_one_fresh_isolated_user_request(tmp_path) -> None:
     assert actual == "qa-default"  # the spec's own model id is the serving evidence
     request = fn.requests[0]
     assert request.isolated is True
+    # Deterministic verdicts: identical bytes must not flip on sampling noise.
+    assert request.temperature == 0.0 and request.top_p is None
     assert request.tools == [] and request.tool_choice == "none"
     assert len(request.messages) == 1 and request.messages[0].role == "user"
     assert request.system_blocks == []

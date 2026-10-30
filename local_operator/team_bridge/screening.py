@@ -740,12 +740,18 @@ _HOLD_FOR_COMMIT = {
 
 
 def _persist_hold(
-    store: Store, owner: OwnerSnapshot, message_id: str, code: str, retry_at: float | None = None
+    store: Store,
+    owner: OwnerSnapshot,
+    message_id: str,
+    code: str,
+    retry_at: float | None = None,
+    *,
+    failure_class: str | None = None,
 ) -> None:
     """Best-effort durable hold for a VALID live owner; never raises."""
 
     try:
-        store.persist_hold(owner, message_id, code, retry_at=retry_at)
+        store.persist_hold(owner, message_id, code, retry_at=retry_at, failure_class=failure_class)
     except StoreRefused:
         # An owner that went stale between validation and the hold write
         # simply gets no row: durable state must never hold another
@@ -1285,9 +1291,23 @@ async def _screen_core(
             _commit_hold(store, owner, message_id, attempt_id, fingerprint, epoch, code)
             return ScreenResult("hold", hold_code=code)
         raise
-    except Exception:  # noqa: BLE001 - sanitized hold; never prose
+    except Exception as failure:  # noqa: BLE001 - sanitized hold; never prose
         retry_at = _record_failure(store, owner)
-        _commit_hold(store, owner, message_id, attempt_id, fingerprint, epoch, "provider_error")
+        # A CLOSED class from the exception's type/typed fields (never its
+        # text), so the receiver status can say what kind of failure parked
+        # the message — ``chain_exhausted`` when every configured hop failed.
+        from local_operator.team_bridge.model_boundary import screening_failure_class
+
+        _commit_hold(
+            store,
+            owner,
+            message_id,
+            attempt_id,
+            fingerprint,
+            epoch,
+            "provider_error",
+            failure_class=screening_failure_class(failure),
+        )
         return ScreenResult("hold", hold_code="provider_error", retry_at=retry_at)
 
     # 11b. A provider RESPONSE — even a valid model HOLD — is a provider
@@ -1430,6 +1450,8 @@ def _commit_hold(
     fingerprint: str,
     epoch: int,
     hold_code: str,
+    *,
+    failure_class: str | None = None,
 ) -> None:
     """Record ONE hold against the reserved attempt; never raise."""
 
@@ -1441,9 +1463,10 @@ def _commit_hold(
             fingerprint=fingerprint,
             expected_epoch=epoch,
             hold_code=hold_code,
+            failure_class=failure_class,
         )
     except StoreRefused:
-        _persist_hold(store, owner, message_id, hold_code)
+        _persist_hold(store, owner, message_id, hold_code, failure_class=failure_class)
 
 
 async def _keep_turn_alive(

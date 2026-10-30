@@ -331,6 +331,7 @@ CREATE TABLE IF NOT EXISTS screening_holds (
     hold_code TEXT NOT NULL,
     retry_at REAL,
     created_at REAL NOT NULL,
+    failure_class TEXT,
     PRIMARY KEY (owner_key, message_id)
 );
 CREATE TABLE IF NOT EXISTS screening_schedule (
@@ -1114,6 +1115,12 @@ _HOLD_UPSERT = (
     "ON CONFLICT(owner_key, message_id) DO UPDATE SET "
     "hold_code = excluded.hold_code, retry_at = excluded.retry_at"
 )
+
+#: The SCREENING-OUTCOME hold upsert: as :data:`_HOLD_UPSERT`, plus the
+#: ``failure_class`` column, so a re-hold for a new reason never keeps the
+#: previous outcome's class (a later ``model_hold`` clears a stale
+#: ``chain_exhausted``). Only the writers that own the column use it.
+_HOLD_UPSERT_CLASSED = _HOLD_UPSERT + ", failure_class = excluded.failure_class"
 
 #: What a replay owes for an admission's card (PR #3063 reviews M5/m11/m15).
 #: ``owed``: the reservation is still ``pending`` and no card was recorded —
@@ -2210,6 +2217,28 @@ class Store:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(body_reservations)")}
         if "card_posted_at" not in columns:
             conn.execute("ALTER TABLE body_reservations ADD COLUMN card_posted_at REAL")
+
+    @staticmethod
+    def _ensure_hold_failure_class_column(conn: sqlite3.Connection) -> None:
+        """Add ``failure_class`` to a ``screening_holds`` that predates it.
+
+        WHY: a ``provider_error`` hold said nothing about WHICH failure parked
+        the message (auth, quota, 5xx, an exhausted fallback chain), so the
+        receiver status could not tell the operator what to fix. The column
+        holds a closed class from ``model_boundary.SCREENING_FAILURE_CLASSES``
+        — never provider prose. The receiver status (PR #3189) reads it by
+        this exact name, only when present.
+
+        ADDITIVE AND NULLABLE, so no schema stamp moves (the same rule as
+        :meth:`_ensure_card_posted_column`): an older binary sharing this
+        state file never names the column and keeps opening it, and every
+        pre-upgrade row reads NULL — "class unknown". It is NOT in
+        ``_V3_COLUMNS``: a table without it is not damaged.
+        """
+
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(screening_holds)")}
+        if "failure_class" not in columns:
+            conn.execute("ALTER TABLE screening_holds ADD COLUMN failure_class TEXT")
 
     def body_card_status(
         self, owner: OwnerSnapshot, conversation_id: str, message_id: str
@@ -4462,8 +4491,12 @@ class Store:
         verify: Any = None,
         admission_revision: str | None = None,
         turn: str | None = None,
+        failure_class: str | None = None,
     ) -> None:
         """Commit ONE logical outcome, fenced on every binding that matters.
+
+        ``failure_class`` rides a HOLD only (the pipeline sets it on the
+        ``provider_error`` path); every other hold writes NULL into it.
 
         Inside ONE write transaction: live-owner/generation (native fence,
         H2 discipline), the attempt belongs to THIS owner AND message AND
@@ -4726,10 +4759,12 @@ class Store:
                 # Upsert, never REPLACE (PR #3063 review m10): a re-drive held
                 # again for a NEW reason must keep the row's ``created_at``,
                 # or the owner-visible hold age resets on every pass.
+                self._ensure_hold_failure_class_column(conn)
                 conn.execute(
-                    "INSERT INTO screening_holds (owner_key, message_id, "
-                    "hold_code, retry_at, created_at) VALUES (?,?,?,?,?) " + _HOLD_UPSERT,
-                    (key, message_id, hold_code, retry_at, time.time()),
+                    "INSERT INTO screening_holds (owner_key, message_id, hold_code, "
+                    "retry_at, created_at, failure_class) VALUES (?,?,?,?,?,?) "
+                    + _HOLD_UPSERT_CLASSED,
+                    (key, message_id, hold_code, retry_at, time.time(), failure_class),
                 )
 
     def screen_schedule(self, owner: OwnerSnapshot) -> dict[str, Any] | None:
@@ -4899,8 +4934,12 @@ class Store:
         *,
         retry_at: float | None = None,
         keep_existing: bool = False,
+        failure_class: str | None = None,
     ) -> None:
         """Durably quarantine a VALID-LIVE-OWNER early refusal (H3-Q8).
+
+        ``failure_class`` is set only by the screening pipeline's
+        ``provider_error`` fallback write; any other caller writes NULL.
 
         Early holds (no usable default, template floor mismatch, budget
         exhaustion) happen before any attempt row exists; their per-item
@@ -4920,21 +4959,25 @@ class Store:
         # code and schedule move IN PLACE. INSERT OR REPLACE deleted and
         # re-inserted the row, so every re-hold reset the visible hold age.
         on_conflict = (
-            "ON CONFLICT(owner_key, message_id) DO NOTHING" if keep_existing else _HOLD_UPSERT
+            "ON CONFLICT(owner_key, message_id) DO NOTHING"
+            if keep_existing
+            else _HOLD_UPSERT_CLASSED
         )
         with self._connect() as conn:
             self._init(conn)
             self._begin_write(conn)
             self._require_live(conn, owner)
+            self._ensure_hold_failure_class_column(conn)
             conn.execute(
                 "INSERT INTO screening_holds (owner_key, message_id, hold_code, "
-                "retry_at, created_at) VALUES (?,?,?,?,?) " + on_conflict,
+                "retry_at, created_at, failure_class) VALUES (?,?,?,?,?,?) " + on_conflict,
                 (
                     _owner_key(owner),
                     _contentless_delivery_key(message_id),
                     hold_code,
                     retry_at,
                     time.time(),
+                    failure_class,
                 ),
             )
 
@@ -5065,10 +5108,15 @@ class Store:
             self._begin_write(conn)
             self._require_live(conn, owner)
             if hold_code:
+                # A re-code to a DIFFERENT reason drops the old failure class:
+                # the class describes the provider failure that parked the
+                # row, and must never be reported against another reason.
+                self._ensure_hold_failure_class_column(conn)
                 updated = conn.execute(
-                    "UPDATE screening_holds SET retry_at = ?, hold_code = ? "
+                    "UPDATE screening_holds SET retry_at = ?, hold_code = ?, "
+                    "failure_class = CASE WHEN hold_code = ? THEN failure_class ELSE NULL END "
                     "WHERE owner_key = ? AND message_id = ?",
-                    (float(retry_at), str(hold_code), *key),
+                    (float(retry_at), str(hold_code), str(hold_code), *key),
                 )
             else:
                 updated = conn.execute(

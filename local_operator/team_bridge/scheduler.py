@@ -860,15 +860,21 @@ async def run_screening_cycle(
     """
 
     from local_operator.team_bridge.model_boundary import (
+        ScreenChainRunner,
         make_screening_runner,
-        resolve_default_selection,
+        resolve_screening_chain,
     )
     from local_operator.team_bridge.screening import screen_message_async
     from local_operator.team_bridge.store import Store, StoreRefused
 
-    selection = resolve_default_selection(config_dir)
-    if selection is None:
+    # ONE capture of the whole hop list: hop 0 is the configured default (the
+    # published policy's model), the rest are the operator's configured
+    # fallbacks, walked by ScreenChainRunner because failover disables its
+    # own chain for isolated requests (see resolve_screening_chain).
+    chain = resolve_screening_chain(config_dir, settings)
+    if not chain:
         return None
+    selection = chain[0]
     # ACCEPTED STATUS (R8/Q3): the owner-pinned SDK status is received
     # through the normal accepted-status seam — an injected fetcher (the
     # production one calls the H1 client's own ``status`` with the PINNED
@@ -1019,7 +1025,15 @@ async def run_screening_cycle(
         template_sha256=template_hash,
         default_model=selection.model_id,
         admission_revision=revision,
-        approved_serving_identities=tuple(sorted(selection.approved_identities)),
+        # The UNION of every hop's own identity, so step 13 accepts whichever
+        # hop served. Tuple exactness still holds per hop inside each hop's
+        # runner (a foreign provider serving an approved id is refused there).
+        # ``default_model`` and the revision stay hop 0's, so the published
+        # row does not churn with the chain; cached receipts are consumed by
+        # ``model = default_model`` and so only ever reuse a hop-0 verdict.
+        approved_serving_identities=tuple(
+            sorted({identity for hop in chain for identity in hop.approved_identities})
+        ),
         provider=selection.provider,
     )
     cycle = AccountScreeningCycle(store=store, owner=owner, holder=holder, ttl=ttl)
@@ -1027,19 +1041,22 @@ async def run_screening_cycle(
     async def _screen(item: "Mapping[str, Any]") -> Any:
         message_block = item.get("message")
         message_id = str(message_block.get("id")) if isinstance(message_block, Mapping) else ""
-        runner = make_screening_runner(
-            config_dir=config_dir,
-            store=store,
-            owner=owner,
-            message_id=message_id,
-            auth_store=auth_store,
-            settings=settings,
-            # The SAME capture this composition resolved — never a second
-            # resolve that could certify a different config (R8/Q3).
-            selection=selection,
-        )
-        if runner is None:
-            return None
+
+        def _hop_runner(hop: Any) -> Any:
+            # A FRESH guarded runner per hop: its own wire guard (per-send
+            # charging, route check) and dedicated client, bound to the SAME
+            # captured hop — never a second resolve (R8/Q3).
+            return make_screening_runner(
+                config_dir=config_dir,
+                store=store,
+                owner=owner,
+                message_id=message_id,
+                auth_store=auth_store,
+                settings=settings,
+                selection=hop,
+            )
+
+        runner = ScreenChainRunner(chain, _hop_runner)
         return await screen_message_async(
             owner,
             item,
