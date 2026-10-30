@@ -94,6 +94,46 @@
     "tone": "terse, plain English, operator-facing",
     "note": "Agent messages is the product name of Team Bridge; 'receiver' is the background process that delivers messages. Commands, flags, file paths and config keys stay verbatim."
   },
+  "cli.team_bridge.status.screening": {
+    "role": "lop team-bridge CLI output",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Agent messages is the product name of Team Bridge; 'receiver' is the background process that delivers messages. Commands, flags, file paths and config keys stay verbatim. One status line about message screening. {held}, {breaker} and {rejected} are the three already-translated fragments below; keep the ' · ' separators and their order."
+  },
+  "cli.team_bridge.status.screening_healthy": {
+    "role": "lop team-bridge CLI output",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Agent messages is the product name of Team Bridge; 'receiver' is the background process that delivers messages. Commands, flags, file paths and config keys stay verbatim. The status line when no screened message is held and none was rejected in the last 24 hours. 'Screening' is the safety check every incoming agent message passes; 'breaker' is the circuit breaker that pauses screening after repeated provider failures."
+  },
+  "cli.team_bridge.status.screening_held": {
+    "role": "lop team-bridge CLI output",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Agent messages is the product name of Team Bridge; 'receiver' is the background process that delivers messages. Commands, flags, file paths and config keys stay verbatim. Messages parked by screening, waiting to be retried. {codes} is a verbatim list of technical hold codes with counts (e.g. 'breaker_open 9, provider_error 3'); {age} is a compact duration like '41m'. Never translate the codes."
+  },
+  "cli.team_bridge.status.screening_held_class": {
+    "role": "lop team-bridge CLI output",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Agent messages is the product name of Team Bridge; 'receiver' is the background process that delivers messages. Commands, flags, file paths and config keys stay verbatim. As screening_held, plus {failure_class}: the verbatim technical code of the most common provider failure among held messages. Never translate it."
+  },
+  "cli.team_bridge.status.screening_held_none": {
+    "role": "lop team-bridge CLI output",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Agent messages is the product name of Team Bridge; 'receiver' is the background process that delivers messages. Commands, flags, file paths and config keys stay verbatim. Fragment: no message is parked by screening."
+  },
+  "cli.team_bridge.status.screening_breaker": {
+    "role": "lop team-bridge CLI output",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Agent messages is the product name of Team Bridge; 'receiver' is the background process that delivers messages. Commands, flags, file paths and config keys stay verbatim. Fragment: the screening circuit breaker. open = screening paused for {remaining} (compact duration like '4m'); failing = closed but with recent provider failures; other = closed and healthy."
+  },
+  "cli.team_bridge.status.screening_rejected": {
+    "role": "lop team-bridge CLI output",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Agent messages is the product name of Team Bridge; 'receiver' is the background process that delivers messages. Commands, flags, file paths and config keys stay verbatim. Fragment: messages screening rejected in the last 24 hours. {categories} is a verbatim list of technical category codes with counts (e.g. 'personal_info_request 1'). Never translate the codes."
+  },
+  "cli.team_bridge.status.screening_rejected_none": {
+    "role": "lop team-bridge CLI output",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Agent messages is the product name of Team Bridge; 'receiver' is the background process that delivers messages. Commands, flags, file paths and config keys stay verbatim. Fragment: no message was rejected by screening in the last 24 hours."
+  },
   "cli.team_bridge.outcome.installed": {
     "role": "lop team-bridge CLI output",
     "tone": "terse, plain English, operator-facing",

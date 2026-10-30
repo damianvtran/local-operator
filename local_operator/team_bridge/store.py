@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import sqlite3
 import time
@@ -1000,6 +1001,189 @@ class OwnerReceipt:
 
     consent_version: str
     consent_ref: str
+
+
+def screening_hold_message_id(value: str) -> str:
+    """The bare message id a ``screening_holds.message_id`` row names.
+
+    WHY THIS EXISTS. ``screening_holds.message_id`` carries TWO shapes: the bare
+    id (``bcmsg_…`` / ``bmsg_…``, written by the screener and by pair holds)
+    and the composite conversation feed ref
+    ``message_available:conversation_id=<bcv>/<bcmsg>/<seq>/<n>/<kind>…``
+    (canonicalised by :func:`_contentless_delivery_key` on every hold write and
+    on :meth:`Store.delete_hold`). Receipts and attempts are keyed by the BARE
+    id. A reader that looks a held message up by bare id alone misses every
+    composite row — which is how held messages were once reported as having
+    "vanished" — and a reader that counts rows counts one message twice when
+    both shapes exist for it. Every status reader goes through this ONE parser
+    so a held message is counted once whatever shape its row has, and can be
+    joined to its receipt.
+
+    READ-ONLY by contract: this maps a stored key to a join key; it never
+    rewrites the stored key (the loop and ``delete_hold`` depend on the
+    composite spelling). A malformed composite answers the raw value unchanged
+    — it still counts as one held message under its own key, and nothing about
+    it is echoed — rather than raising inside a status read.
+    """
+
+    from local_operator.team_bridge.types import (
+        CONVERSATION_FEED_KIND,
+        CONVERSATION_FEED_TYPE,
+        parse_conversation_ref_value,
+    )
+
+    prefix = f"{CONVERSATION_FEED_TYPE}:{CONVERSATION_FEED_KIND}="
+    if not value.startswith(prefix):
+        return value
+    ref = parse_conversation_ref_value(value[len(prefix) :])
+    return ref.message_id if ref is not None else value
+
+
+#: Hold codes a status read may emit verbatim, beyond screening's own
+#: ``screening.HOLD_CODES`` (imported lazily: ``screening`` imports this
+#: module). WHY a closed list (PR #3189 review m1): ``hold_code`` is a TEXT
+#: column and not every writer passes a constant — the connector persists the
+#: hub's ``BridgeRefusal.code`` and spine outcome codes — so a shape filter
+#: would let any lowercase string through to the CLI and the desktop. These are
+#: the connector's DELIVERY-side codes, written after screening admitted the
+#: message (``connector/loop.py``, ``conversation.py``, ``wake.py``): spine
+#: outcomes, producer fences, reservation failures and the loop's own
+#: defaults. Anything not listed renders as ``other``. Extend this list when a
+#: writer gains a code.
+_DELIVERY_HOLD_CODES = frozenset(
+    {
+        # spine outcomes (wake.py / conversation.py ``{"action": "hold"}``)
+        "ack_binding_mismatch",
+        "ack_tuple_mismatch",
+        "attachments_malformed",
+        "attachments_unbound",
+        "body_invalid",
+        "body_unavailable",
+        "bounce_receipt_missing",
+        "bridge_meta_invalid",
+        "conversation_failed",
+        "delivery_failed",
+        "display_context_invalid",
+        "envelope_missing",
+        "mismatched_id",
+        "screening_bounce",
+        "screening_unavailable",
+        "screening_unknown",
+        "sender_malformed",
+        # producer fences (wake._producer_fence)
+        "bridge_off",
+        "credential_changed",
+        "consent_revoked",
+        "no_designation",
+        # body reservation failures (conversation._record_body_reservation)
+        "receipt_unavailable",
+        "reservation_refused",
+        # the loop's own defaults (connector/loop.py)
+        "hold",
+        "retry_failed",
+        # wake.py's recorded-verdict hand-off and conversation.py's screening
+        # outcome default (PR #3189 review round 2, m3)
+        "verdict_identity_mismatch",
+        "screening_hold",
+        # StoreRefused codes the connector saves verbatim as a hold
+        # (``{"action": "hold", "code": failure.code}`` in loop.py and
+        # conversation.py): the codes the store calls on those paths raise,
+        # taken from store.py (_connect/_init/_require_live/claim/
+        # record_body_reservation)
+        "state_unreadable",
+        "invalid_body_reservation",
+        "schema_unsupported",
+        "schema_unversioned",
+        "ref_migration_conflict",
+        "stale_generation",
+        "not_enrolled",
+        "busy",
+    }
+)
+
+#: Families written as ``<family>:<detail>`` (``phase_refused:<code>`` in
+#: wake.py, ``policy_stale:<code>`` from the pre-handoff gate, and wake.py's
+#: ACK/envelope outcomes ``ack_recovery:``/``ack_refused:``/
+#: ``ack_not_confirmed:``/``envelope_refused:``): the family is the code; the
+#: detail is a hub string and is never echoed.
+_FAMILY_HOLD_CODES = frozenset(
+    {
+        "phase_refused",
+        "policy_stale",
+        "ack_recovery",
+        "ack_refused",
+        "ack_not_confirmed",
+        "envelope_refused",
+    }
+)
+
+#: The ``screening_holds.failure_class`` vocabulary a sibling change writes
+#: (provider failover classification). Same rule: unlisted reads ``other``.
+SCREENING_FAILURE_CLASSES = frozenset(
+    {
+        "auth_unusable",
+        "quota",
+        "timeout",
+        "provider_5xx",
+        "stream_refused",
+        "identity_refused",
+        "chain_exhausted",
+        "other",
+    }
+)
+
+#: The window the rejected count looks back over.
+SCREENING_REJECT_WINDOW_S = 24 * 3600.0
+
+
+def _status_hold_code(value: Any, known: frozenset[str]) -> str:
+    if not isinstance(value, str):
+        return "other"
+    if value in known:
+        return value
+    family = value.partition(":")[0]
+    return family if family in _FAMILY_HOLD_CODES else "other"
+
+
+def _status_failure_class(value: Any) -> str:
+    return value if isinstance(value, str) and value in SCREENING_FAILURE_CLASSES else "other"
+
+
+def _status_timestamp(value: Any) -> float | None:
+    """A stored REAL as a finite float, or ``None`` for a damaged cell.
+
+    Non-numeric (review m2) and non-finite (round 2, m4) values both read as
+    damaged: SQLite keeps ``inf``/``-inf`` as REALs (Python's driver binds
+    ``NaN`` as NULL, which these NOT NULL columns refuse, but the guard does
+    not rely on that), and an infinite age or breaker deadline would render
+    as ``inf`` on the CLI and break strict JSON on the desktop route.
+    """
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
+
+
+def read_screening_status(config_dir: Path) -> dict[str, Any] | None:
+    """The screening status for the live owner of ``config_dir``, or ``None``.
+
+    The ONE wrapper both surfaces call (``lop team-bridge receiver status`` and
+    the desktop status route; PR #3189 review N1), so its error contract lives
+    in one place: a status read never fails its caller (CLI exit 0, route 200).
+    Any failure — absent store, not enrolled, fenced, unreadable, or a damaged
+    row this reader did not anticipate — is ``None``, and the exception's own
+    text is not echoed (it can name a path or a stored value).
+    """
+
+    try:
+        store = Store(config_dir)
+        owner = store.active_owner_readonly()
+        if owner is None:
+            return None
+        return store.screening_status_readonly(owner)
+    except Exception:  # noqa: BLE001 — a status read never fails its caller
+        return None
 
 
 def _contentless_delivery_key(value: str) -> str:
@@ -2029,6 +2213,161 @@ class Store:
                 (_owner_key(owner), hold_code),
             ).fetchone()
             return int(row["n"]) if row is not None else 0
+
+    def screening_status_readonly(
+        self, owner: OwnerSnapshot, *, now: float | None = None
+    ) -> dict[str, Any] | None:
+        """Held / breaker / rejected screening counts for this live owner (read-only).
+
+        WHY THIS EXISTS. When screening parks a message (a hold) or moderates
+        it ``reject``, the owner previously saw only silence: 46 messages sat in
+        ``screening_holds`` for up to 90 minutes and four rejections left no
+        signal anywhere. ``lop team-bridge receiver status`` and the desktop
+        status read both render this one answer.
+
+        CONTENT LAW. Counts, closed codes, categories, ages and timestamps
+        only — never a body, a model reply, a reason or a sender label. The
+        query selects no other column; hold codes and failure classes pass
+        only through closed whitelists (``other`` otherwise) and categories
+        only through the closed screening vocabulary (``unknown``). Read-only
+        over an EXISTING store; never creates, migrates or writes.
+
+        COUNTING. Every ``screening_holds`` row is a live durable retry, so
+        every row counts (PR #3189 review M1). Rows are normalised by
+        :func:`screening_hold_message_id` and counted once per bare message
+        id; when one message has rows in both shapes the composite (canonical)
+        row's code wins. A held message that ALREADY has a receipt was
+        screened and admitted but not delivered (``delivery_failed``,
+        ``bridge_off``, ``phase_refused``, a reservation failure, ...): it is
+        reported in its own ``after_screening`` bucket rather than hidden.
+        The ``deliveries`` table does not prove delivery for a conversation
+        message (it carries pair deliveries only), so a hold is never
+        discounted against it; a hold whose message was in fact delivered is
+        retired by the loop's next re-drive. ``failure_class`` is read only
+        when that column exists (a sibling change adds it); absent, the
+        dominant class is ``None``.
+
+        DAMAGED ROWS (review m2) are read defensively: a non-numeric
+        ``created_at`` still counts the message but gives it no age, and a
+        category that is not a string is ignored. Nothing here raises past
+        :func:`read_screening_status`.
+
+        ``None`` for an absent store or a fenced owner. Unreadable raises
+        :class:`StoreRefused` like every ``_connect_readonly`` caller.
+        """
+
+        from local_operator.team_bridge.screening import HOLD_CODES
+
+        known_codes = frozenset(HOLD_CODES) | _DELIVERY_HOLD_CODES
+        at = time.time() if now is None else float(now)
+        with self._connect_readonly() as conn:
+            if conn is None:
+                return None
+            if self._live_generation(conn, owner) != owner.enrollment_generation:
+                return None
+            key = _owner_key(owner)
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(screening_holds)")}
+            failure_column = ", failure_class" if "failure_class" in columns else ""
+            holds = conn.execute(
+                f"SELECT message_id, hold_code, created_at{failure_column} "
+                "FROM screening_holds WHERE owner_key = ?",
+                (key,),
+            ).fetchall()
+            receipted = {
+                str(row["message_id"])
+                for row in conn.execute(
+                    "SELECT message_id FROM screening_receipts WHERE owner_key = ?", (key,)
+                )
+            }
+            rejects = conn.execute(
+                "SELECT categories FROM screening_receipts "
+                "WHERE owner_key = ? AND verdict = 'reject' AND created_at >= ?",
+                (key, at - SCREENING_REJECT_WINDOW_S),
+            ).fetchall()
+            breaker = conn.execute(
+                "SELECT failures, open_until FROM screening_breaker WHERE account_scope = ?",
+                (self._account_scope(owner),),
+            ).fetchone()
+
+        # One entry per bare message id: (canonical?, code, oldest created_at, class).
+        held: dict[str, tuple[bool, str, float | None, str | None]] = {}
+        for row in holds:
+            stored = str(row["message_id"])
+            bare = screening_hold_message_id(stored)
+            canonical = bare != stored
+            code = _status_hold_code(row["hold_code"], known_codes)
+            created = _status_timestamp(row["created_at"])
+            raw_class = row["failure_class"] if failure_column else None
+            failure = _status_failure_class(raw_class) if raw_class is not None else None
+            prior = held.get(bare)
+            if prior is not None:
+                ages = [value for value in (created, prior[2]) if value is not None]
+                created = min(ages) if ages else None
+                if prior[0] and not canonical:
+                    code, canonical = prior[1], True
+                failure = failure if failure is not None else prior[3]
+            held[bare] = (canonical, code, created, failure)
+
+        by_code: dict[str, int] = {}
+        after_by_code: dict[str, int] = {}
+        classes: dict[str, int] = {}
+        for bare, (_canonical, code, _created, failure) in held.items():
+            by_code[code] = by_code.get(code, 0) + 1
+            if bare in receipted:
+                after_by_code[code] = after_by_code.get(code, 0) + 1
+            if failure is not None:
+                classes[failure] = classes.get(failure, 0) + 1
+        oldest = min((entry[2] for entry in held.values() if entry[2] is not None), default=None)
+        # Highest count wins; a tie resolves alphabetically so the answer is stable.
+        dominant = min(classes, key=lambda name: (-classes[name], name)) if classes else None
+
+        by_category: dict[str, int] = {}
+        for row in rejects:
+            try:
+                decoded = json.loads(row["categories"])
+            except (TypeError, ValueError):
+                decoded = None
+            names = (
+                [name for name in decoded if isinstance(name, str)]
+                if isinstance(decoded, list)
+                else []
+            )
+            for name in names or ["unknown"]:
+                category = name if name in _CLOSED_CATEGORIES else "unknown"
+                by_category[category] = by_category.get(category, 0) + 1
+
+        failures = 0
+        open_until = 0.0
+        if breaker is not None:
+            failures = int(_status_timestamp(breaker["failures"]) or 0)
+            open_until = _status_timestamp(breaker["open_until"]) or 0.0
+
+        def _ranked(counts: dict[str, int]) -> dict[str, int]:
+            return dict(sorted(counts.items(), key=lambda item: (-item[1], item[0])))
+
+        return {
+            "held": {
+                "count": len(held),
+                "by_code": _ranked(by_code),
+                "oldest_age_s": max(0.0, at - oldest) if oldest is not None else None,
+                "dominant_failure_class": dominant,
+                # Held AFTER an admitting receipt: screened, not yet delivered.
+                # A subset of ``count``/``by_code``, never in addition to them.
+                "after_screening": {
+                    "count": sum(after_by_code.values()),
+                    "by_code": _ranked(after_by_code),
+                },
+            },
+            "breaker": {
+                "state": "open" if open_until > at else "closed",
+                "failures": failures,
+                "open_until": open_until if open_until > 0 else None,
+            },
+            "rejected_24h": {
+                "count": len(rejects),
+                "by_category": _ranked(by_category),
+            },
+        }
 
     def designated_session_for_readonly(self, owner: OwnerSnapshot) -> str | None:
         """The designated CoS session id, read-only, under the same live fence.
