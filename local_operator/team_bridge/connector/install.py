@@ -1353,6 +1353,13 @@ def refresh_plist_if_stale() -> launchd.PlistRefresh:
             # (`launchd.shared_label_refusal`): a plist pointing at any other root
             # is not ours to rewrite, even where launchd would accept the path.
             return launchd.PlistRefresh(name=name, kind="not-addressable")
+        # The StandardErrorPath parent must exist before the job is booted back
+        # in: launchd does not create it, and a rewritten plist pointing at a
+        # missing directory is a spawn failure on the job this repair just
+        # replaced. `_install_launchd` creates the same directory for the same
+        # reason; inside the never-raises try, so an unwritable tree is a
+        # ``failed`` outcome rather than an exception out of an upgrade.
+        stderr_path(config_dir).parent.mkdir(parents=True, exist_ok=True)
         outcome = launchd.rewrite_if_stale(name=name, path=path, rendered=render_plist(config_dir))
         if outcome.kind == "current":
             # A CURRENT PLIST IS NOT A CURRENT BUILD (see the docstring): this unit

@@ -73,10 +73,13 @@ class _World:
         self.signals: list[tuple[int, int]] = []
         self.waiter_current = True
         self.holder_stale = True
+        self.lock_free = False
+        self.lock_probes = 0
         self.now = 0.0
         self.pauses = 0
         monkeypatch.setattr(reap, "_is_posix", lambda: True)
         monkeypatch.setattr(reap, "_lock_holder_pids", lambda path: self.holders)
+        monkeypatch.setattr(reap, "_lock_free", self.probe_lock)
         monkeypatch.setattr(reap, "_read_process", self.read)
         monkeypatch.setattr(reap, "_waiter_is_current", lambda: self.waiter_current)
         monkeypatch.setattr(reap, "_holder_is_stale", lambda pid: self.holder_stale)
@@ -84,6 +87,10 @@ class _World:
         monkeypatch.setattr(reap, "_signal", self.signal)
         monkeypatch.setattr(reap, "_clock", lambda: self.now)
         monkeypatch.setattr(reap, "_pause", self.pause)
+
+    def probe_lock(self, config: Path) -> bool:
+        self.lock_probes += 1
+        return self.lock_free
 
     def read(self, pid: int) -> reap._Process | None:
         queue = self.reads.get(pid)
@@ -246,6 +253,44 @@ def test_a_holder_discovery_that_cannot_answer_is_a_refusal(
     assert world.signals == []
 
 
+def test_a_lock_proved_free_is_never_signalled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE OPENERS GAP: a lock a non-blocking acquire can take needs no signal.
+
+    On macOS the holder probe names OPENERS, and the process selected above may
+    merely have the file open. The last proof asks the lock itself; when it is
+    free the outcome is ``lock_free`` and nothing is signalled — signalling an
+    opener because ``lsof`` could not tell it apart from the holder is the wrong
+    reap this direction exists to prevent.
+    """
+
+    world = _World(monkeypatch)
+    world.lock_free = True
+    outcome = _reap(world)
+    assert outcome.kind == "reaped", outcome
+    assert outcome.reason == "lock_free"
+    assert world.lock_probes == 1
+    assert world.signals == []
+
+
+def test_a_lock_probe_that_cannot_answer_refuses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Doubt is not freedom: an unreadable lock file refuses before any signal."""
+
+    world = _World(monkeypatch)
+
+    def boom(config: Path) -> bool:
+        raise OSError("unreadable")
+
+    monkeypatch.setattr(reap, "_lock_free", boom)
+    outcome = _reap(world)
+    assert outcome.kind == "refused"
+    assert outcome.reason == "lock_probe_failed"
+    assert world.signals == []
+
+
 def test_a_pid_reused_between_the_proofs_and_the_signal_is_not_signalled(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -315,6 +360,77 @@ def test_a_holder_that_ignores_sigterm_but_burns_cpu_is_not_killed(
     assert world.signals == [(HOLDER, signal.SIGTERM)], world.signals
 
 
+def test_a_failed_sigkill_is_not_reported_as_reaped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A kill the kernel refuses stopped nobody, so it is a refusal, not a reap.
+
+    ``_signal`` answers False for a refusal and for a process that vanished
+    between the identity check and the call; either way this call delivered
+    nothing, and claiming ``reaped/sigkill`` would report a stop that did not
+    happen.
+    """
+
+    world = _World(monkeypatch)
+    monkeypatch.setattr(
+        reap,
+        "_signal",
+        lambda pid, number: world.signals.append((pid, number)) or number != signal.SIGKILL,
+    )
+    world.signals = []
+
+    outcome = _reap(world)
+
+    assert outcome.kind == "refused", outcome
+    assert outcome.reason == "sigkill_refused"
+    assert world.signals == [(HOLDER, signal.SIGTERM), (HOLDER, signal.SIGKILL)]
+
+
+def test_a_graceful_reap_writes_one_reaped_line_with_sigterm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """``stopping`` says SIGTERM was sent; one ``reaped`` line says how it ended."""
+
+    world = _World(monkeypatch)
+    with caplog.at_level("WARNING", logger="local_operator.team_bridge.connector"):
+        outcome = _reap(world)
+
+    assert outcome.reason == "sigterm"
+    messages = [record.getMessage() for record in caplog.records]
+    stopping = [m for m in messages if "stopping stale holder" in m]
+    reaped = [m for m in messages if "reaped stale holder" in m]
+    assert len(stopping) == 1, messages
+    assert len(reaped) == 1, messages
+    assert reaped[0].endswith("evidence=same_uid,same_config,older_generation,sigterm"), reaped
+
+
+def test_a_wedged_reap_writes_one_reaped_line_with_sigkill(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """ONE grep-able claim per attempt, written after the outcome is known.
+
+    The old code wrote a ``reaped`` line right after SIGTERM and a second after
+    SIGKILL, so one attempt produced two claims about one process — and the
+    first was written before the holder had necessarily died.
+    """
+
+    world = _World(monkeypatch)
+    monkeypatch.setattr(
+        reap, "_signal", lambda pid, number: world.signals.append((pid, number)) or True
+    )
+    world.signals = []
+    with caplog.at_level("WARNING", logger="local_operator.team_bridge.connector"):
+        outcome = _reap(world)
+
+    assert outcome.reason == "sigkill"
+    messages = [record.getMessage() for record in caplog.records]
+    stopping = [m for m in messages if "stopping stale holder" in m]
+    reaped = [m for m in messages if "reaped stale holder" in m]
+    assert len(stopping) == 1, messages
+    assert len(reaped) == 1, messages
+    assert reaped[0].endswith("evidence=same_uid,same_config,older_generation,sigkill"), reaped
+
+
 def test_windows_never_reaps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """No flock, no generations: the probe there is the installer's own."""
 
@@ -341,6 +457,183 @@ def test_a_refusal_logs_one_content_free_reason(
     expected = f"bridge connector reap refused: proof=holder_generation_unproven pid={HOLDER}"
     assert messages == [expected], messages
     assert str(CONFIG) not in "\n".join(messages)
+
+
+# -- the parsers, from fixture strings ----------------------------------------
+#
+# These run on EVERY host, including a macOS one with no /proc and no live
+# holder: the /proc/locks table and the ps/lsof answers are fed as strings, so the
+# parsers are exercised here rather than first on CI's Linux shard.
+
+
+class _FakeRun:
+    """What ``reap._run`` answers: the two fields the parsers read."""
+
+    def __init__(self, returncode: int, stdout: str = "") -> None:
+        self.returncode = returncode
+        self.stdout = stdout
+
+
+_PS_LINE = (
+    "501 Fri Oct 23 14:28:51 2026 1:02.34 "
+    "/img -m local_operator.team_bridge.connector --config-dir /store"
+)
+
+
+def _lock_identity(path: Path) -> str:
+    """The ``major:minor:inode`` a ``/proc/locks`` row carries, in hex."""
+
+    sample = path.stat()
+    return f"{os.major(sample.st_dev):x}:{os.minor(sample.st_dev):x}:{sample.st_ino}"
+
+
+def _table_row(pid: int, identity: str, kind: str = "FLOCK") -> str:
+    return f"1: {kind}  ADVISORY  WRITE {pid} {identity} 0 EOF"
+
+
+def test_the_proc_locks_parser_reads_a_fixture_table(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only FLOCK rows for THIS inode count, once per pid."""
+
+    path = tmp_path / "connector.lock"
+    path.write_bytes(b"")
+    identity = _lock_identity(path)
+    table = "\n".join(
+        [
+            _table_row(HOLDER, identity),
+            _table_row(OTHER, identity),
+            _table_row(777, identity, kind="POSIX"),  # a different lock kind
+            _table_row(888, "00:1b:999999"),  # another inode
+            _table_row(HOLDER, identity),  # the same holder, listed twice
+            "garbage",
+        ]
+    )
+    monkeypatch.setattr(reap, "_proc_locks_text", lambda: table)
+    assert reap._proc_locks_holder_pids(path) == [HOLDER, OTHER]
+
+
+def test_the_proc_locks_parser_answers_none_when_the_table_is_unreadable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "connector.lock"
+    path.write_bytes(b"")
+    monkeypatch.setattr(reap, "_proc_locks_text", lambda: None)
+    assert reap._proc_locks_holder_pids(path) is None
+
+
+def test_the_proc_locks_parser_answers_none_when_the_file_is_gone(tmp_path: Path) -> None:
+    assert reap._proc_locks_holder_pids(tmp_path / "absent.lock") is None
+
+
+def test_the_lsof_parser_reads_a_fixture_listing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(reap, "_run", lambda argv: _FakeRun(0, "p123\np456\np123\n"))
+    assert reap._lsof_holder_pids(tmp_path / "lock") == [123, 456]
+
+
+@pytest.mark.parametrize(
+    ("result", "expected"),
+    [
+        (_FakeRun(1, ""), []),  # lsof's "no matches": the one non-zero kept
+        (_FakeRun(1, "p123\n"), None),  # non-zero AND output: unanswered
+        (_FakeRun(0, ""), []),
+        (_FakeRun(0, "pabc\n"), None),  # unparseable
+        (None, None),  # no lsof / timeout
+    ],
+)
+def test_the_lsof_parser_refuses_what_it_cannot_read(
+    result: _FakeRun | None,
+    expected: list[int] | None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(reap, "_run", lambda argv: result)
+    assert reap._lsof_holder_pids(tmp_path / "lock") == expected
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        ("/img -m local_operator.team_bridge.connector --config-dir /store", "/store"),
+        ("/img --config-dir=/store", "/store"),
+        ("/img --config-dir", None),
+        ("/img --config-dir --base-url http://x", None),  # next token is a flag
+        ("/img --config-dir=", None),
+        ("/img -m mod", None),
+    ],
+)
+def test_the_option_parser_reads_both_spellings(argv: str, expected: str | None) -> None:
+    assert reap._option(argv, "--config-dir") == expected
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        (f"/img --config-dir {CONFIG}", True),
+        (f"/img --config-dir {OTHER_CONFIG}", False),
+        # n2: a relative path resolves against the HOLDER's cwd, not ours.
+        ("/img --config-dir store-a", False),
+        ("/img -m mod", False),
+    ],
+)
+def test_the_config_probe_refuses_what_it_cannot_compare(argv: str, expected: bool) -> None:
+    assert reap._same_config(argv, CONFIG) is expected
+
+
+@pytest.mark.parametrize(
+    ("token", "expected"),
+    [
+        ("0:01.23", 1.23),
+        ("1:02:03", 3723.0),
+        # m3: both ps flavours switch to ``dd-`` past 24 h of cumulative CPU.
+        ("1-02:03:04", 93784.0),
+        ("0-00:00.50", 0.5),
+        ("12", None),
+        ("1:2:3:4", None),
+        ("junk", None),
+        ("-1:00", None),
+    ],
+)
+def test_the_cpu_parser_reads_every_ps_time_shape(token: str, expected: float | None) -> None:
+    assert reap._cpu_seconds(token) == expected
+
+
+def test_the_process_reader_parses_one_ps_answer(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[list[str]] = []
+
+    def fake_run(argv: list[str]) -> _FakeRun:
+        seen.append(argv)
+        return _FakeRun(0, _PS_LINE + "\n")
+
+    monkeypatch.setattr(reap, "_run", fake_run)
+    proc = reap._read_process(HOLDER)
+
+    assert proc is not None
+    assert (proc.pid, proc.uid, proc.start) == (HOLDER, 501, "Fri Oct 23 14:28:51 2026")
+    assert proc.cpu_s == 62.34
+    assert proc.argv.endswith("--config-dir /store")
+    # ``-ww`` is load-bearing: a piped ps truncates argv on Linux.
+    assert "-ww" in seen[0]
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        None,
+        _FakeRun(1),
+        _FakeRun(0, ""),
+        _FakeRun(0, "501 Fri Oct 23 14:28:51 2026 1:02.34"),  # argv missing
+        _FakeRun(0, "notauid Fri Oct 23 14:28:51 2026 1:02.34 /img -m mod"),
+        _FakeRun(0, "501 Fri Oct 23 14:28:51 2026 nonsense /img -m mod"),
+    ],
+)
+def test_the_process_reader_refuses_an_unreadable_answer(
+    result: _FakeRun | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(reap, "_run", lambda argv: result)
+    assert reap._read_process(HOLDER) is None
 
 
 # -- the caller's contract -----------------------------------------------------

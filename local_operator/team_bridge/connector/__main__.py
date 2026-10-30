@@ -42,6 +42,7 @@ import copy
 import logging
 import os
 import signal
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -109,10 +110,15 @@ SELF_CHECK_MIN_UPTIME_S = 300.0
 #: patching this, not by sleeping.
 _PROCESS_STARTED_S = time.monotonic()
 
-#: The value ``XPC_SERVICE_NAME`` carries in a process launchd did NOT start:
-#: macOS puts this in every interactive shell's environment, so "the variable is
-#: set" alone would read a terminal-started connector as supervised.
-_INTERACTIVE_SHELL_XPC = "0"
+#: The marker the plist and the systemd unit set in their OWN environment
+#: (``install.render_plist`` / ``render_systemd``), and nothing else on the host
+#: does. Required in addition to the supervisor's marker because BOTH supervisor
+#: markers are inherited: measured 2026-10-30, a ``bash`` under Local Operator.app
+#: carried ``application.com.local-operator.<n>.<n>``, and a wakes-daemon child
+#: carried ``com.local-operator.wakes``. "A supervisor marker is present" is
+#: therefore not the question; "is it OUR supervisor's, and did our unit set its
+#: own environment" is.
+_CONNECTOR_ENV = "LOCAL_OPERATOR_CONNECTOR"
 
 
 def _is_supervised() -> bool:
@@ -123,13 +129,19 @@ def _is_supervised() -> bool:
     (``Restart=always``) that is a restart onto the current generation, which is
     the whole point. In a terminal it is a connector that silently vanished.
 
-    Each marker is the supervisor's OWN, not an inference:
+    BOTH MARKS, AND THE SUPERVISOR'S OWN. A marker alone is inherited by every
+    descendant of a launchd job or systemd unit (measured 2026-10-30: about ten
+    processes under Local Operator.app carry
+    ``application.com.local-operator.<n>``, and the wakes daemon's children carry
+    ``com.local-operator.wakes``), so an agent session or a terminal opened there
+    would otherwise pass this gate and then exit instead of being restarted.
 
-    * macOS: launchd stamps ``XPC_SERVICE_NAME`` with the job's label on every
-      process it spawns. The interactive-shell value (``0``) means no job, so a
-      foreground run is excluded rather than trusted.
-    * Linux: systemd sets ``INVOCATION_ID`` per unit invocation; nothing else on
-      the host sets it.
+    * macOS: ``XPC_SERVICE_NAME`` must equal the job's label EXACTLY — a prefix,
+      another job's label or the interactive shell's ``0`` all refuse — and the
+      plist's own ``LOCAL_OPERATOR_CONNECTOR=1`` must be present.
+    * Linux: ``INVOCATION_ID`` alone is per invocation, not per unit, and is
+      inherited like any other variable; the unit's own
+      ``LOCAL_OPERATOR_CONNECTOR=1`` (``install.render_systemd``) is required too.
     * Windows: never. There are no generations there (the layout is POSIX-only),
       so the question cannot arise; answering ``False`` keeps the check inert.
     """
@@ -138,10 +150,17 @@ def _is_supervised() -> bool:
 
     if is_windows():
         return False
-    if os.environ.get("INVOCATION_ID"):
-        return True
-    name = os.environ.get("XPC_SERVICE_NAME", "")
-    return bool(name) and name != _INTERACTIVE_SHELL_XPC
+    if os.environ.get(_CONNECTOR_ENV) != "1":
+        return False
+    if sys.platform == "darwin":
+        # Lazy: ``install`` pulls launchd and the renderers, and this module is
+        # the connector's own import-light start path.
+        from local_operator.team_bridge.connector.install import LABEL
+
+        return os.environ.get("XPC_SERVICE_NAME") == LABEL
+    if sys.platform.startswith("linux"):
+        return bool(os.environ.get("INVOCATION_ID"))
+    return False
 
 
 def _own_generation_is_stale() -> bool | None:
@@ -189,7 +208,17 @@ async def _watch_own_generation(stop: asyncio.Event) -> None:
             pass
         if time.monotonic() - _PROCESS_STARTED_S < SELF_CHECK_MIN_UPTIME_S:
             continue
-        if await loop.run_in_executor(None, _own_generation_is_stale) is not True:
+        try:
+            stale = await loop.run_in_executor(None, _own_generation_is_stale)
+        except Exception as exc:  # noqa: BLE001 — a self-check must never die
+            # ONE content-free line per failure, then the next tick: an
+            # unreadable pointer or a probe that raised once must not take the
+            # check out of a process that may run for weeks.
+            logger.warning(
+                "bridge connector self-check failed: stage=run code=%s", type(exc).__name__
+            )
+            continue
+        if stale is not True:
             continue
         if supervised:
             # One content-free line, in this file's vocabulary: the stage that
@@ -487,11 +516,17 @@ async def _supervise(args: argparse.Namespace) -> int:
     finally:
         stopped.cancel()
         watch.cancel()
+        # AWAIT the cancelled tasks before reading their outcome: ``cancel()``
+        # does not make a task done, so reading ``watch.exception()`` right here
+        # was dead code (it only ran when the watcher had already finished) and
+        # a self-check failure was left to asyncio's unhandled-task report.
+        await asyncio.wait({stopped, watch}, timeout=STOP_CANCEL_S)
         if watch.done() and not watch.cancelled():
-            # Retrieved rather than propagated: a self-check must never turn a
-            # clean stop into a failure. Without this, asyncio would print the
-            # task's exception as an unhandled task error instead.
-            watch.exception()
+            failure = watch.exception()
+            if failure is not None:
+                # Retrieved rather than propagated: a self-check must never
+                # turn a clean stop into a failure.
+                logger.warning("bridge connector stop: stage=stop code=%s", type(failure).__name__)
         for sig in installed:
             loop.remove_signal_handler(sig)
 

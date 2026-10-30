@@ -23,7 +23,13 @@ WHAT IS PINNED, each cell because the opposite is a real failure:
   "older";
 * the uptime gate is checked BEFORE the probe forks, which is why there is no
   check before the lock: a connector started during a flip must not read that
-  flip's own pointer move as staleness and restart-loop.
+  flip's own pointer move as staleness and restart-loop;
+* the SUPERVISOR GATE needs the supervisor's OWN marker plus the unit's own
+  environment (``LOCAL_OPERATOR_CONNECTOR=1``): both supervisor markers are
+  inherited by every descendant of a job, so "a marker is set" would let a
+  terminal under the app's launchd job pass the gate and then exit;
+* a probe that RAISES logs one content-free line and the check continues: the
+  process may run for weeks, and one unreadable read is a tick, not an end.
 
 Time is shrunk through the module's constants, never by sleeping: the interval
 becomes a few ``asyncio.sleep`` ticks and ``_PROCESS_STARTED_S`` is moved, so a
@@ -35,13 +41,16 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import sys
 import time
 
 import pytest
 
 from local_operator.team_bridge.connector import __main__ as main_mod
+from local_operator.team_bridge.connector import install as connector_install
 
 LOG = "local_operator.team_bridge.connector"
+LABEL = connector_install.LABEL
 
 
 def _fast(
@@ -169,31 +178,99 @@ def test_a_connector_younger_than_the_uptime_gate_never_probes(
     assert not stop.is_set()
 
 
+def test_an_unexpected_probe_error_warns_and_keeps_checking(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A probe that raises must not end the check for the process's lifetime.
+
+    The watcher can run for weeks; one unreadable read is a tick, not a reason to
+    stop looking. The line is content-free like every other connector line — the
+    exception's CLASS name only — because the log is persisted.
+    """
+
+    _fast(monkeypatch)
+    reads: list[str] = []
+
+    def boom() -> bool | None:
+        reads.append("probe")
+        raise RuntimeError("a detail that must not reach the log")
+
+    monkeypatch.setattr(main_mod, "_own_generation_is_stale", boom)
+    monkeypatch.setattr(main_mod, "_is_supervised", lambda: True)
+    with caplog.at_level(logging.WARNING, logger=LOG):
+        stop = _run_watch(ticks=5)
+
+    assert len(reads) >= 2, reads
+    assert not stop.is_set()
+    warnings = [
+        record.getMessage() for record in caplog.records if record.levelno == logging.WARNING
+    ]
+    assert warnings, "the failure was never logged"
+    assert set(warnings) == {
+        "bridge connector self-check failed: stage=run code=RuntimeError"
+    }, warnings
+    assert "a detail that must not reach the log" not in "\n".join(warnings)
+
+
 @pytest.mark.parametrize(
-    ("environ", "windows", "expected"),
+    ("environ", "platform", "expected"),
     [
-        ({"XPC_SERVICE_NAME": "com.local-operator.bridge-connector"}, False, True),
-        ({"XPC_SERVICE_NAME": "0"}, False, False),
-        ({}, False, False),
-        ({"INVOCATION_ID": "9d1c"}, False, True),
-        ({"XPC_SERVICE_NAME": "com.local-operator.bridge-connector"}, True, False),
+        # The plist's OWN pair: the label launchd stamped, and the variable the
+        # plist sets in its own EnvironmentVariables.
+        ({"XPC_SERVICE_NAME": LABEL, "LOCAL_OPERATOR_CONNECTOR": "1"}, "darwin", True),
+        # INHERITED markers, measured on this host 2026-10-30: they belong to
+        # another launchd job or app, not to the connector's job.
+        (
+            {
+                "XPC_SERVICE_NAME": "application.com.local-operator.1.2",
+                "LOCAL_OPERATOR_CONNECTOR": "1",
+            },
+            "darwin",
+            False,
+        ),
+        (
+            {"XPC_SERVICE_NAME": "com.local-operator.wakes", "LOCAL_OPERATOR_CONNECTOR": "1"},
+            "darwin",
+            False,
+        ),
+        # An interactive shell's value (the one macOS puts in every shell) and an
+        # empty one.
+        ({"XPC_SERVICE_NAME": "0", "LOCAL_OPERATOR_CONNECTOR": "1"}, "darwin", False),
+        ({"XPC_SERVICE_NAME": "", "LOCAL_OPERATOR_CONNECTOR": "1"}, "darwin", False),
+        # The exact label WITHOUT the plist's own environment: some other launchd
+        # job's descendant, or a plist predating the marker.
+        ({"XPC_SERVICE_NAME": LABEL}, "darwin", False),
+        # Linux: INVOCATION_ID is inherited like any variable; the unit sets the
+        # second mark (install.render_systemd).
+        ({"INVOCATION_ID": "9d1c", "LOCAL_OPERATOR_CONNECTOR": "1"}, "linux", True),
+        ({"INVOCATION_ID": "9d1c"}, "linux", False),
+        # The OTHER platform's marker is not this platform's marker.
+        ({"INVOCATION_ID": "9d1c", "LOCAL_OPERATOR_CONNECTOR": "1"}, "darwin", False),
+        ({"XPC_SERVICE_NAME": LABEL, "LOCAL_OPERATOR_CONNECTOR": "1"}, "win32", False),
     ],
 )
 def test_the_supervisor_marker_is_the_supervisors_own(
-    environ: dict[str, str], windows: bool, expected: bool, monkeypatch: pytest.MonkeyPatch
+    environ: dict[str, str], platform: str, expected: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """``XPC_SERVICE_NAME=0`` is what macOS puts in an interactive shell, so "the
-    variable is set" is not the question; and Windows has no generation layout at
-    all, so it must never answer yes.
+    """Only OUR job's exact marker plus OUR unit's own environment may say yes.
+
+    ``XPC_SERVICE_NAME=0`` is what macOS puts in an interactive shell, and BOTH
+    supervisor markers are inherited by descendants of unrelated jobs — measured
+    2026-10-30: ``application.com.local-operator.<n>`` under the app and
+    ``com.local-operator.wakes`` under the wakes daemon. So neither "the
+    variable is set" nor "the label appears" is the question. Windows has no
+    generation layout at all, so it must never answer yes.
 
     ``os.name`` is NOT patched here (``pathlib`` builds ``WindowsPath`` from it
     and that cannot be instantiated off Windows); the platform answer comes
-    through the one seam the package already has for it.
+    through the one seam the package already has for it, and ``sys.platform``
+    picks the marker the way the shipped branches do.
     """
 
-    for name in ("XPC_SERVICE_NAME", "INVOCATION_ID"):
+    for name in ("XPC_SERVICE_NAME", "INVOCATION_ID", "LOCAL_OPERATOR_CONNECTOR"):
         monkeypatch.delenv(name, raising=False)
     for name, value in environ.items():
         monkeypatch.setenv(name, value)
-    monkeypatch.setattr("local_operator.procstate.is_windows", lambda: windows)
+    monkeypatch.setattr("local_operator.procstate.is_windows", lambda: platform == "win32")
+    monkeypatch.setattr(sys, "platform", platform)
     assert main_mod._is_supervised() is expected

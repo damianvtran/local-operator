@@ -171,6 +171,28 @@ def test_a_stale_plist_is_rewritten_and_the_connector_reloaded(
     assert calls[2] == ("bootstrap", f"gui/{os.getuid()}", str(path)), calls
 
 
+def test_a_repair_creates_the_log_parent_launchd_will_write_to(
+    calls: list[tuple[str, ...]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The rewritten plist's ``StandardErrorPath`` directory must exist.
+
+    launchd does not create it, and the repair boots the job back in; a plist
+    pointing at a missing ``logs/`` is a spawn failure on the job this repair
+    just replaced. ``_install_launchd`` creates the same directory for the same
+    reason.
+    """
+
+    store = tmp_path / "config"
+    path = tmp_path / "connector.plist"
+    _write(path, store, current=False)
+    assert not connector_install.stderr_path(store).parent.exists()
+
+    outcome = connector_install.refresh_plist_if_stale()
+
+    assert outcome.kind == "repaired", outcome
+    assert connector_install.stderr_path(store).parent.is_dir()
+
+
 def test_a_current_plist_on_a_moved_build_is_restarted_exactly_once(
     calls: list[tuple[str, ...]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

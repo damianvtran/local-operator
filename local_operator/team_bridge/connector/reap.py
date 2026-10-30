@@ -19,9 +19,14 @@ one costs a live process.
    ourselves superseded, ``None`` means we could not read our own argv or the
    pointer; neither case may judge another process.
 2. **Exactly one holder, and it is not us.** Linux parses ``/proc/locks`` for the
-   inode's ``FLOCK`` rows; macOS asks ``lsof -F p`` (measured 0.55 s on this
-   host). No ``lsof``, a timeout, a non-zero exit that still printed something,
-   unparseable output, zero holders or more than one all refuse.
+   inode's ``FLOCK`` rows. macOS asks ``lsof -F p`` (measured 0.55 s on this
+   host), which names every process that has the file OPEN — OPENERS, not lock
+   holders, and a process that merely opened the file is not the one to stop.
+   No ``lsof``, a timeout, a non-zero exit that still printed something,
+   unparseable output, zero openers or more than one all refuse. The last
+   proof before the signal answers the opener/holder gap directly: a
+   non-blocking ``flock`` (``_lock_free``) that SUCCEEDS means the lock is
+   free, whatever the opener list said, and then nothing is signalled.
 3. **Same account, same store, and it is a connector.** Same uid as the waiter,
    ``-m local_operator.team_bridge.connector`` in its argv, and its
    ``--config-dir`` resolving to the SAME directory as ours. Another user's lock
@@ -48,7 +53,13 @@ on a bootout and what the connector's own graceful handler expects
 still alive after ``STOP_WAIT_S``, the pid and start time still match, AND its
 cumulative CPU time grew by less than ``CPU_FLAT_S`` since the SIGTERM sample —
 i.e. it is wedged, which is the state the incident's holder was in. A holder that
-is busy burning CPU is not wedged and is given its graceful window instead.
+is busy burning CPU is not wedged and is given its graceful window instead. A
+failed SIGKILL is NOT a reap: the outcome is a refusal, because a process that
+``kill`` refused is one this attempt did not stop.
+
+THE LOG SAYS "reaped" ONCE, and only after the outcome is known ("stopping" is
+the separate SIGTERM-sent line): a single greppable claim about what happened,
+which is what an operator or a test reads.
 
 AT MOST ONE ATTEMPT PER PROCESS START: the only caller is the ``ConnectorLockBusy``
 arm of ``__main__._main_async``, immediately before it exits 75.
@@ -56,8 +67,9 @@ arm of ``__main__._main_async``, immediately before it exits 75.
 Every probe forks (``ps``, ``lsof``), so every probe runs in the default executor
 and never on the event loop: the waiter's own SIGTERM must stay responsive while
 it waits. The seams at the bottom (``_read_process``, ``_lock_holder_pids``,
-``_signal``, ``_pause``, ``_clock``) are module functions so a unit test can
-replace them and needs no real signalling and no real holder.
+``_proc_locks_text``, ``_lock_free``, ``_signal``, ``_pause``, ``_clock``) are
+module functions so a unit test can replace them and needs no real signalling,
+no real holder and, for the ``/proc/locks`` parser, no Linux host.
 """
 
 from __future__ import annotations
@@ -73,7 +85,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Literal
 
-from local_operator.team_bridge.connector.lock import CONNECTOR_LOCK_NAME
+from local_operator.team_bridge.connector.lock import (
+    CONNECTOR_LOCK_NAME,
+    ConnectorLock,
+    ConnectorLockBusy,
+)
 
 logger = logging.getLogger("local_operator.team_bridge.connector")
 
@@ -113,7 +129,9 @@ Refusal = Literal[
     "different_config",
     "holder_generation_unproven",
     "holder_identity_moved",
+    "lock_probe_failed",
     "signal_refused",
+    "sigkill_refused",
 ]
 
 
@@ -211,9 +229,23 @@ def _read_process(pid: int) -> _Process | None:
 
 
 def _cpu_seconds(token: str) -> float | None:
-    """``ps -o time=`` (``MM:SS.ss`` or ``HH:MM:SS``) as seconds."""
+    """``ps -o time=`` as seconds: ``MM:SS.ss``, ``HH:MM:SS`` or ``dd-hh:mm:ss``."""
 
-    parts = token.split(":")
+    days = 0.0
+    text = token
+    if "-" in token:
+        # Both GNU and BSD ``ps`` switch to ``dd-`` past 24 h of cumulative CPU.
+        # Leaving it unparsed refused every such holder as ``holder_unreadable``
+        # — a silent exclusion of exactly the long-lived processes this reap
+        # exists for (measured: a Linux ``1-02:03:04`` answered ``None``).
+        day_text, _, text = token.partition("-")
+        try:
+            days = float(day_text)
+        except ValueError:
+            return None
+        if not text:
+            return None
+    parts = text.split(":")
     try:
         numbers = [float(part) for part in parts]
     except ValueError:
@@ -223,7 +255,21 @@ def _cpu_seconds(token: str) -> float | None:
     total = 0.0
     for number in numbers:
         total = total * 60.0 + number
-    return total
+    return days * 86_400.0 + total
+
+
+def _proc_locks_text() -> str | None:
+    """Linux's ``/proc/locks`` text, or ``None`` where it cannot be read.
+
+    A seam of its own so the parser below is exercised from a fixture string on
+    a macOS host: the read is the only Linux-specific step, and leaving it
+    inline meant the parser was first run on CI.
+    """
+
+    try:
+        return Path("/proc/locks").read_text()
+    except OSError:
+        return None
 
 
 def _proc_locks_holder_pids(path: Path) -> list[int] | None:
@@ -237,9 +283,8 @@ def _proc_locks_holder_pids(path: Path) -> list[int] | None:
         sample = path.stat()
     except OSError:
         return None
-    try:
-        table = Path("/proc/locks").read_text()
-    except OSError:
+    table = _proc_locks_text()
+    if table is None:
         return None
     wanted = (os.major(sample.st_dev), os.minor(sample.st_dev), sample.st_ino)
     pids: list[int] = []
@@ -260,11 +305,14 @@ def _proc_locks_holder_pids(path: Path) -> list[int] | None:
 
 
 def _lsof_holder_pids(path: Path) -> list[int] | None:
-    """The pids ``lsof`` reports holding ``path`` open, or ``None``.
+    """The pids ``lsof`` reports having ``path`` OPEN — openers, not holders.
 
-    ANY output with a non-zero exit is refused rather than parsed: ``lsof``
-    answers 1 for "no matches" but also for several real errors, and this probe
-    cannot tell those apart (the installer's own reader takes the same view).
+    ``lsof -F p`` lists every process with the file open, which includes a
+    process that merely opened it; the caller answers that gap with
+    ``_lock_free`` immediately before any signal. ANY output with a non-zero
+    exit is refused rather than parsed: ``lsof`` answers 1 for "no matches" but
+    also for several real errors, and this probe cannot tell those apart (the
+    installer's own reader takes the same view).
     """
 
     binary = "/usr/sbin/lsof" if Path("/usr/sbin/lsof").exists() else "lsof"
@@ -298,6 +346,25 @@ def _lock_holder_pids(path: Path) -> list[int] | None:
         if pids is not None:
             return pids
     return _lsof_holder_pids(path)
+
+
+def _lock_free(config_dir: Path) -> bool:
+    """Whether a zero-deadline acquire can take the lock RIGHT NOW.
+
+    THE OPENERS GAP, answered directly: on macOS the holder probe names openers,
+    and one of them need not be the holder (measured; see
+    ``_lsof_holder_pids``). A lock that can be taken needs no signal at all,
+    whatever that list said, so this is asked last — after the identity proofs
+    and before SIGTERM — and a free answer short-circuits the reap.
+    """
+
+    lock = ConnectorLock(config_dir, deadline_s=0)
+    try:
+        lock.acquire()
+    except ConnectorLockBusy:
+        return False
+    lock.release()
+    return True
 
 
 def _is_posix() -> bool:
@@ -388,8 +455,14 @@ def _same_config(argv: str, config_dir: Path) -> bool:
     named = _option(argv, "--config-dir")
     if not named:
         return False
+    named_path = Path(named)
+    if not named_path.is_absolute():
+        # A relative ``--config-dir`` resolves against the HOLDER's cwd, which
+        # this process cannot read; comparing it against ours would be a guess.
+        # The installer always writes absolute paths, so a relative one refuses.
+        return False
     try:
-        return Path(named).resolve() == Path(config_dir).resolve()
+        return named_path.resolve() == Path(config_dir).resolve()
     except (OSError, ValueError):
         return False
 
@@ -411,6 +484,25 @@ def _refuse(reason: str, *, pid: int = 0) -> ReapOutcome:
     else:
         logger.warning("bridge connector reap refused: proof=%s", reason)
     return ReapOutcome(kind="refused", reason=reason, pid=pid)
+
+
+def _reaped(reason: str, pid: int, generation: str) -> ReapOutcome:
+    """The ONE "reaped" line: written only when the outcome is already known.
+
+    A reap used to log "reaped" right after SIGTERM and again after SIGKILL, so
+    one attempt produced two greppable claims, the first of them before the
+    holder had necessarily died. ``reason`` is ``sigterm`` or ``sigkill`` and is
+    also the evidence field, so a reader can tell a graceful stop from a kill.
+    """
+
+    logger.warning(
+        "bridge connector reaped stale holder: pid=%d generation=%s "
+        "evidence=same_uid,same_config,older_generation,%s",
+        pid,
+        generation,
+        reason,
+    )
+    return ReapOutcome(kind="reaped", reason=reason, pid=pid)
 
 
 # -- the attempt ---------------------------------------------------------------
@@ -484,11 +576,35 @@ async def reap_stale_holder(config_dir: Path) -> ReapOutcome:
     if not await _in_executor(_holder_is_stale, pid):
         return _refuse("holder_generation_unproven", pid=pid)
 
-    generation = await _in_executor(_holder_generation, pid)
+    generation_result = await _in_executor(_holder_generation, pid)
+    # ``_in_executor`` is typed ``object`` for the probes that answer unions;
+    # this probe's contract is a string ("" when unread), asserted the same way
+    # the process reads above are.
+    assert isinstance(generation_result, str)
+    generation = generation_result
     # Proof 5, first application: the identity recorded above must still be the
     # live one — `ps` answered twice and a reuse can land between the two.
     if not await _in_executor(_still_ours, pid, recorded):
         return _refuse("holder_identity_moved", pid=pid)
+
+    # THE LAST PROOF BEFORE THE SIGNAL: can the lock be taken now? On macOS the
+    # holder probe names OPENERS, so the process above may merely have the file
+    # open while the holder (or an unreadable one) is someone else. A successful
+    # non-blocking flock is direct evidence that nothing holds it, and then no
+    # signal can improve on that: the caller's retry takes the lock.
+    try:
+        already_free = await _in_executor(_lock_free, config_dir)
+    except OSError:
+        # The probe could not answer (the file vanished or is unreadable), which
+        # is not proof that the lock is free. Doubt refuses.
+        return _refuse("lock_probe_failed", pid=pid)
+    if already_free:
+        logger.warning(
+            "bridge connector reap found a free lock: pid=%d generation=%s evidence=free_lock",
+            pid,
+            generation,
+        )
+        return ReapOutcome(kind="reaped", reason="lock_free", pid=pid)
 
     if not _signal(pid, signal.SIGTERM):
         # Either it died between the check and the call — nothing was signalled,
@@ -498,21 +614,23 @@ async def reap_stale_holder(config_dir: Path) -> ReapOutcome:
         if await _in_executor(_read_process, pid) is None:
             return ReapOutcome(kind="reaped", reason="already_gone", pid=pid)
         return _refuse("signal_refused", pid=pid)
+    # The SIGTERM SENT is its own fact, ahead of the outcome and deliberately not
+    # "reaped": the holder may still be alive.
     logger.warning(
-        "bridge connector reaped stale holder: pid=%d generation=%s "
+        "bridge connector stopping stale holder: pid=%d generation=%s "
         "evidence=same_uid,same_config,older_generation,sigterm",
         pid,
         generation,
     )
 
     if await _await_gone(pid, recorded, STOP_WAIT_S):
-        return ReapOutcome(kind="reaped", reason="sigterm", pid=pid)
+        return _reaped("sigterm", pid, generation)
 
     # THE WEDGED CASE. Alive after the graceful window, and it must still BE the
     # process that was proved about, twice over: identity, then CPU.
     now = await _in_executor(_read_process, pid)
     if not isinstance(now, _Process) or now.start != recorded.start:
-        return ReapOutcome(kind="reaped", reason="sigterm", pid=pid)
+        return _reaped("sigterm", pid, generation)
     if now.cpu_s - recorded.cpu_s >= CPU_FLAT_S:
         # Busy, not wedged: it consumed real CPU inside the window, so it is
         # making progress and gets the same benefit of the doubt a fresh
@@ -524,13 +642,10 @@ async def reap_stale_holder(config_dir: Path) -> ReapOutcome:
         )
         return ReapOutcome(kind="reaped", reason="sigterm_busy", pid=pid)
     if not await _in_executor(_still_ours, pid, recorded):
-        return ReapOutcome(kind="reaped", reason="sigterm", pid=pid)
+        return _reaped("sigterm", pid, generation)
 
-    _signal(pid, signal.SIGKILL)
-    logger.warning(
-        "bridge connector reaped stale holder: pid=%d generation=%s "
-        "evidence=same_uid,same_config,older_generation,sigkill",
-        pid,
-        generation,
-    )
-    return ReapOutcome(kind="reaped", reason="sigkill", pid=pid)
+    if not _signal(pid, signal.SIGKILL):
+        # A failed kill delivered nothing: it is not ``reaped/sigkill``, and
+        # saying it was would report a stop that did not happen.
+        return _refuse("sigkill_refused", pid=pid)
+    return _reaped("sigkill", pid, generation)
