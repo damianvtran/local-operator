@@ -9210,6 +9210,12 @@ def _scratchpad_target(
         target = parse_scratchpad_url(url, root)
     except ScratchpadPathError as exc:
         return _invalid_arguments(tool_call_id, tool_name, str(exc))
+    # The confinement check ``_read_scratchpad`` makes, for ``write``/``edit``:
+    # a scheme target resolved through a pad swapped for a symlink must be
+    # refused like the absolute path it resolves to (review round 1, R1).
+    denial = _confinement_denial(target.path, context)
+    if denial is not None:
+        return _error(tool_call_id, tool_name, denial)
     if target.directory:
         # ``scratchpad://`` rstrips to ``scratchpad:`` — the scheme separator IS
         # the trailing slash — so the root example is spelled out rather than
@@ -9259,6 +9265,14 @@ async def _read_scratchpad(
         target = parse_scratchpad_url(url, root)
     except ScratchpadPathError as exc:
         return _invalid_arguments(tool_call_id, "read", str(exc))
+    # A CONFINED session's scheme answers to the same grant as its absolute
+    # paths (review round 1, R1): ``parse_scratchpad_url`` resolves THROUGH a
+    # symlink planted at the pad, so without this check ``scratchpad://x`` read
+    # whatever the link named. ``ToolConfinement`` drops a swapped pad from its
+    # grant, so the resolved target then lies outside every granted tree.
+    denial = _confinement_denial(target.path, context)
+    if denial is not None:
+        return _error(tool_call_id, "read", denial)
     # A URL that named a directory, and one that names a directory on disk
     # without saying so (``scratchpad://logs``), both list. One level, like the
     # file listing; ``read scratchpad://logs/`` descends explicitly.
