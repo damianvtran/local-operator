@@ -109,7 +109,7 @@ describe("the relay's first frame reserves the settled layout", () => {
 
 	it("carries the settled empty composer's glyphs and placeholder in the reserve", () => {
 		/* Design review round 1 (D1). The reserve was a ring, a bordered empty box
-		   and a sunken disc: no paperclip, no `Message…`, no arrow — so the reveal
+		   and a sunken disc: no paperclip, no placeholder, no arrow — so the reveal
 		   popped three glyphs and a placeholder into place, all four of which are
 		   static and knowable before any data arrives. In dark the disc sits at
 		   1.05:1 against the canvas, so the row read as "ring + outline" with the
@@ -117,7 +117,7 @@ describe("the relay's first frame reserves the settled layout", () => {
 		const { container } = render(<SessionScreen sessionId="s1" />);
 		const frame = container.querySelector("[aria-hidden='true'] textarea") as HTMLTextAreaElement;
 		expect(frame).not.toBeNull();
-		expect(frame.placeholder).toBe("Message…");
+		expect(frame.placeholder).toBe("Ask anything…");
 		// One paperclip definition, drawn in the attach disc's disabled styling.
 		expect(container.querySelectorAll("[aria-hidden='true'] svg").length).toBe(1);
 		const discs = Array.from(
@@ -126,6 +126,26 @@ describe("the relay's first frame reserves the settled layout", () => {
 		const send = discs.find((el) => el.className.includes("bg-sunken"));
 		expect(send).toBeTruthy();
 		expect(send?.textContent).toBe("↑");
+	});
+
+	it("reserves the SAME placeholder the settled idle composer shows", () => {
+		/* No pop at reveal: the frame is drawn before the projection, so it
+		   carries the idle copy (relay.chrome.composer.placeholder.idle), which
+		   is what the live field shows for an idle AND an ended session. Read
+		   both from the DOM so a change to either side fails here, not only a
+		   change to the literal. */
+		const reserved = render(<SessionScreen sessionId="s1" />);
+		const frame = reserved.container.querySelector("[aria-hidden='true'] textarea") as HTMLTextAreaElement;
+		const before = frame.placeholder;
+		const beforeDir = frame.getAttribute("dir");
+		reserved.unmount();
+
+		slot = { projection: projection(), connected: true };
+		render(<SessionScreen sessionId="s1" />);
+		const live = screen.getByRole("textbox", { name: /message/i }) as HTMLTextAreaElement;
+		expect(before).toBe("Ask anything…");
+		expect(live.placeholder).toBe(before);
+		expect(live.getAttribute("dir")).toBe(beforeDir);
 	});
 
 	it("reports a dropped link in its own sentence, with no ladder rung stacked on it", () => {

@@ -77,6 +77,8 @@
   "relay.chrome.session.resuming": "Reanudando…",
   "relay.chrome.session.degraded": "No responde — los mensajes esperarán",
   "relay.chrome.composer.label": "Mensaje",
+  "relay.chrome.composer.placeholder.idle": "Pregunta lo que sea…",
+  "relay.chrome.composer.placeholder.steer": "Guía al agente…",
   "relay.chrome.composer.folder_label": "Carpeta de trabajo: {name}",
   "relay.chrome.composer.model_label": "Modelo: {label}",
   "relay.chrome.composer.spend_label": "Gasto y contexto: {label}",

@@ -213,7 +213,7 @@ def test_v2_receipt_is_bound_to_the_v2_bytes(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Exposure: one reachable endpoint by default
+# Exposure: outbound writer runtimes share one designated inbound endpoint
 # ---------------------------------------------------------------------------
 
 
@@ -243,19 +243,20 @@ def _enrolled(tmp_path: Path) -> Store:
     return store
 
 
-def test_a_fresh_account_exposes_exactly_one_endpoint(tmp_path: Path) -> None:
-    _enrolled(tmp_path)
+def test_a_fresh_account_exposes_outbound_to_all_writer_sessions(tmp_path: Path) -> None:
+    store = _enrolled(tmp_path)
     cfg = _Config(tmp_path)
     reachable = [
         session
         for session in ("sess_cos", "sess_other", "sess_manager", "team-alpha")
         if bridge_runtime_for_session(config_manager=cfg, session_id=session) is not None
     ]
-    assert reachable == ["sess_cos"], "only the designated CoS session is reachable"
+    assert reachable == ["sess_cos", "sess_other", "sess_manager", "team-alpha"]
+    assert store.designated_session_for(OWNER) == "sess_cos"
 
 
-def test_a_surface_preference_alone_does_not_expose_a_second_session(tmp_path: Path) -> None:
-    _enrolled(tmp_path)
+def test_outbound_exposure_does_not_change_native_designation(tmp_path: Path) -> None:
+    store = _enrolled(tmp_path)
     # The settings row now names another session, but the NATIVE enrollment
     # designation (the recorded consent commit) still names the CoS.
     cfg = _Config(tmp_path, session="sess_other")
@@ -264,10 +265,11 @@ def test_a_surface_preference_alone_does_not_expose_a_second_session(tmp_path: P
         for session in ("sess_cos", "sess_other")
         if bridge_runtime_for_session(config_manager=cfg, session_id=session) is not None
     ]
-    assert reachable == ["sess_cos"], "a config edit is not the recorded designation"
+    assert reachable == ["sess_cos", "sess_other"]
+    assert store.designated_session_for(OWNER) == "sess_cos"
 
 
-def test_a_second_endpoint_requires_the_recorded_designation(tmp_path: Path) -> None:
+def test_inbound_redesignation_does_not_narrow_outbound_exposure(tmp_path: Path) -> None:
     store = _enrolled(tmp_path)
     from local_operator.team_bridge.connector import enrollment as enroll_mod
 
@@ -280,8 +282,8 @@ def test_a_second_endpoint_requires_the_recorded_designation(tmp_path: Path) -> 
             config_dir=tmp_path,
         )
 
-    # A new enrollment generation CAN move it, and it REPLACES the designation:
-    # exactly one endpoint is reachable before and after.
+    # A new enrollment generation CAN move the sole inbound designation;
+    # writer runtimes remain available without becoming additional recipients.
     bumped = replace(OWNER, enrollment_generation=2)
     enroll_mod.commit_consent_and_designation(
         bumped,
@@ -296,7 +298,7 @@ def test_a_second_endpoint_requires_the_recorded_designation(tmp_path: Path) -> 
         for session in ("sess_cos", "sess_other", "sess_manager")
         if bridge_runtime_for_session(config_manager=cfg, session_id=session) is not None
     ]
-    assert reachable == ["sess_other"], "the new recorded designation replaces; it never adds"
+    assert reachable == ["sess_cos", "sess_other", "sess_manager"]
 
 
 # ---------------------------------------------------------------------------

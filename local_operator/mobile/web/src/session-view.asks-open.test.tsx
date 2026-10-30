@@ -427,7 +427,7 @@ describe("state 4 — the user closed it while asks were pending: it stays close
 describe("clause 5 — never steal the keyboard, never trap", () => {
 	it("does not open over a composer the user is typing into", async () => {
 		const view = mount(frame([]));
-		const field = screen.getByPlaceholderText("Message…") as HTMLTextAreaElement;
+		const field = screen.getByPlaceholderText("Ask anything…") as HTMLTextAreaElement;
 		field.focus();
 		expect(document.activeElement).toBe(field);
 		publish(view, frame([ask()]));
@@ -439,7 +439,7 @@ describe("clause 5 — never steal the keyboard, never trap", () => {
 	it("does not open over a focused composer, and does not come back when it blurs", async () => {
 		// Cold open with the composer holding focus (the one-shot a new conversation uses).
 		const view = mount(frame(null));
-		const field = screen.getByPlaceholderText("Message…") as HTMLTextAreaElement;
+		const field = screen.getByPlaceholderText("Ask anything…") as HTMLTextAreaElement;
 		field.focus();
 		publish(view, frame([ask()]));
 		expect(sheetOpen()).toBe(false);
@@ -458,7 +458,7 @@ describe("clause 5 — never steal the keyboard, never trap", () => {
 		   seen it and the cell passed over a policy that DID veto on drafts (found by deleting
 		   the cell's subject in the mutation run). The composer showing the text proves the
 		   key is the one it reads. */
-		const field = screen.getByPlaceholderText("Message…") as HTMLTextAreaElement;
+		const field = screen.getByPlaceholderText("Ask anything…") as HTMLTextAreaElement;
 		expect(field.value).toBe("half a sentence");
 		expect(document.activeElement).not.toBe(field);
 		await waitFor(() => expect(sheetOpen()).toBe(true));

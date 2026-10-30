@@ -1,0 +1,47 @@
+COMMAND: cd /Users/damian/lo-i18n-es && git rev-parse HEAD && git branch --show-current && git status --short -- local_operator/i18n/catalogues/en/wire.errors.files.json local_operator/i18n/catalogues/es/wire.errors.files.json
+66da866475f3e74553196a3167c18c6125141844
+feat/i18n-es-wire-errors
+?? local_operator/i18n/catalogues/es/wire.errors.files.json
+
+COMMAND: python3 /Users/damian/.local-operator/sessions/600fd4a56564/scratchpad/audit_es_w3a2.py
+NAMESPACE wire.errors.files
+en_sha256=ccfeb1ea55e0fed62213846cb669f28075b20e91e361f380456772d433983f64
+target_sha256=99d5fc6b856cc3501640e67de115915a7f7c75545e08eb7db34d367d9facb8bd
+en_blob_revision=479e05332cbde315e887645fceeebf81bf4e73c7
+context_sidecar_exists=False
+keys en=11 es=11
+missing_keys=[]; extra_keys=[]
+wire.errors.files.image_type: placeholders=PASS; en_chars=46; es_chars=60
+wire.errors.files.video_type: placeholders=PASS; en_chars=46; es_chars=59
+wire.errors.files.sign_route: placeholders=PASS; en_chars=30; es_chars=31
+wire.errors.files.sign_ttl: placeholders=PASS; en_chars=38; es_chars=37
+wire.errors.files.heic_conversion: placeholders=PASS; en_chars=41; es_chars=50
+wire.errors.files.internal_error: placeholders=PASS; en_chars=30; es_chars=35
+wire.errors.files.html_utf8: placeholders=PASS; en_chars=34; es_chars=41
+wire.errors.files.sign_auth: placeholders=PASS; en_chars=51; es_chars=63
+wire.errors.files.html_type: placeholders=PASS; en_chars=45; es_chars=58
+wire.errors.files.sign_path: placeholders=PASS; en_chars=23; es_chars=25
+wire.errors.files.audio_type: placeholders=PASS; en_chars=46; es_chars=59
+icu_plural_nodes=0; disallowed_categories=[]
+negative_control_dropped_placeholder_detected=PASS
+FAILURES=[]
+PROCESS EXIT: 0
+
+READER ROUTE (actual invocation):
+cd /Users/damian/lo-i18n-es && lop exec --run-in "$PWD" "Use read_public_copy with path='local_operator/i18n/catalogues/en/wire.errors.files.json' and key='all'"
+READER RESULT: aggregate key `all` refused, then the worktree-local exec agent read and returned the full 11-key English catalogue.
+COMMAND EXIT: 0
+RETURNED ENGLISH COPY:
+wire.errors.files.audio_type = File is not an allowed audio type: {mime_type}
+wire.errors.files.heic_conversion = Failed to convert HEIC/HEIF file: {error}
+wire.errors.files.html_type = File is not an allowed HTML type: {mime_type}
+wire.errors.files.html_utf8 = HTML file is not valid UTF-8 text.
+wire.errors.files.image_type = File is not an allowed image type: {mime_type}
+wire.errors.files.internal_error = Internal Server Error: {error}
+wire.errors.files.sign_auth = A local access token or desktop bearer is required.
+wire.errors.files.sign_path = path must not be empty.
+wire.errors.files.sign_route = route must be one of: {routes}
+wire.errors.files.sign_ttl = ttl_s must be between 1 and {maximum}.
+wire.errors.files.video_type = File is not an allowed video type: {mime_type}
+
+Exact source/target bytes were read directly and hashed; semantic conclusions are not based on display-side redactions. The reader cannot read untracked Spanish targets or nonexistent sidecars.

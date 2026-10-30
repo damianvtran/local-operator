@@ -1,0 +1,23 @@
+{
+  "cli.agents_help.agents": "Gestionar agentes",
+  "cli.agents_help.list": "Listar todos los agentes",
+  "cli.agents_help.list_page": "Número de página que mostrar (predeterminado: 1)",
+  "cli.agents_help.list_perpage": "Número de agentes por página (predeterminado: 10)",
+  "cli.agents_help.create": "Crear un agente nuevo",
+  "cli.agents_help.create_name": "Nombre del agente que crear",
+  "cli.agents_help.delete": "Eliminar un agente (local por nombre o de Radient por ID)",
+  "cli.agents_help.delete_name": "Nombre del agente local que eliminar",
+  "cli.agents_help.delete_id": "ID del agente de Radient que eliminar",
+  "cli.agents_help.delete_org": "Eliminar un agente del espacio de trabajo de esta organización en lugar del hub público (uso compartido de Agent Hub en la organización; requiere `lop login radient`)",
+  "cli.agents_help.push": "Hacer push (subir) de un agente a Radient; `--org` y `--hub-id` usan el flujo de vista previa y confirmación (códigos de salida: 0 publicado, 1 error, 2 solo vista previa con cambios pendientes, 3 rechazado, 130 cancelado)",
+  "cli.agents_help.push_name": "Nombre del agente del que hacer push a Radient",
+  "cli.agents_help.push_id": "ID del agente de Radient al que hacer push (sobrescritura explícita)",
+  "cli.agents_help.push_org": "Publicar en el espacio de trabajo de esta organización en lugar del hub público (uso compartido de Agent Hub en la organización; requiere `lop login radient`)",
+  "cli.agents_help.push_hub_id": "Volver a publicar (sobrescribir) esta ficha del hub desde el agente local (antes comprueba referencias personales); requiere --name (--id es un ID local)",
+  "cli.agents_help.pull": "Hacer pull (descargar) de un agente desde Radient",
+  "cli.agents_help.pull_id": "ID del agente de Radient del que hacer pull",
+  "cli.agents_help.pull_org": "Hacer pull desde el espacio de trabajo de esta organización en lugar del hub público (uso compartido de Agent Hub en la organización; requiere `lop login radient`)",
+  "cli.agents_help.sync": "Actualizar las plantillas incluidas instaladas y los agentes descargados del hub a su texto más reciente",
+  "cli.agents_help.sync_name": "Sincronizar solo el perfil instalado con este nombre",
+  "cli.agents_help.sync_all": "Sincronizar todas las plantillas incluidas instaladas y los agentes descargados del hub (predeterminado si no se indica --name)"
+}

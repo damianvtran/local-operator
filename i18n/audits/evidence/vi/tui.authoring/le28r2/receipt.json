@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "audit_id": "le28r2",
+  "locale": "vi",
+  "namespace": "tui.authoring",
+  "source_sha256": "7431acf3288cc3766cf37135badb29511737120ab52fc518bf514311ee488d13",
+  "target_sha256": "6d54279fffe0436451f5dc1cce88bc19dd559f1dc145ec30b34aa5e2e144a3a2",
+  "hashes": {
+    "audit.log": "162e5ab31c8e2079c420d3dbe0779e820f8121f89178ed5fbc2a8ee3d0a9e043",
+    "coverage.json": "9f42655e09ec88b2f9e84bbd4a5e52a848d504c8860ddc4b64833e16230bb646",
+    "extra_checks.py.txt": "021b80e6a99f447fe6973af5c655c123750f7c042f1c5e8cb38c410e5e226d39",
+    "findings.json": "05bb91faae9dbc0751d4a09d00772abfd36fa8f6b3938c45793d9bf13560bc05",
+    "mech_sweep.py.txt": "3905b1630aea590646fccb31b2628de7519a93fb4a443a62d9a0e161ba400348",
+    "mechanical.json": "2297d032252106a82a1d75b41c0f3f5f113bb98bbc68bd89e25a6a19048e1036",
+    "prior-ledger.json": "88b799272f60ba61cf7a92c96bfa1e3d0130deb6ecfb533fc5ff5f1d4256f916",
+    "probe.py.txt": "a431d62529197feec3f74988f1a19cefb5acfbf90e836f7fc382beb574517f31",
+    "record.json": "3fb6a987109d3734d85f136af95ddf4e72d63215ac1e978f70c67c8e03b4ea27",
+    "rendered-text.json": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+    "renders.py.txt": "7cd2c376d3c59183f6fc60155dce9f6c2d514b10e58ce4da1f4dec49d657bf33",
+    "report.md": "2d550bc1962dc9b877f4347c0d23ea1ed4cfe96871f4c23be05e2a0d20c4fcf3",
+    "route-receipts.json": "f4911e14df7cdc7a71813718466cf998b59342135e62aa07a0900432525b33f8",
+    "widths-and-rederivations.json": "b9cf5fdf6a7481ffc8e6182df1d46176680185d56fbb0d4f35f383eb5c925b0b"
+  }
+}

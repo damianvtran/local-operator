@@ -1,0 +1,64 @@
+#!/usr/bin/env python3
+"""Mechanical parity checks for one i18n namespace (read-only).
+
+Usage:  python3 i18n/audits/evidence/es/<ns>/w1a1/parity.py.txt <namespace>
+
+Compares the en source, the es candidate and the en context sidecar:
+key sets, {placeholder} multisets in order, `code spans`, newline counts,
+ICU select/plural selectors, illegal es plural categories (few/zero/two),
+and width against the sidecar's maxCells.
+
+This script reads catalogues and prints; it writes nothing.
+"""
+import json
+import re
+import sys
+
+NS = sys.argv[1]
+BASE = "local_operator/i18n/catalogues"
+en = json.load(open(f"{BASE}/en/{NS}.json", encoding="utf-8"))
+es = json.load(open(f"{BASE}/es/{NS}.json", encoding="utf-8"))
+try:
+    ctx = json.load(open(f"{BASE}/en/{NS}.context.json", encoding="utf-8"))
+except FileNotFoundError:
+    ctx = {}
+
+PH = re.compile(r"\{[^{}]*\}")
+CODE = re.compile(r"`[^`]*`")
+ICU = re.compile(r"\{\s*(\w+)\s*,\s*(plural|select|selectordinal)\b")
+
+print(f"== {NS} ==")
+print(f"keys: en={len(en)} es={len(es)} context={len(ctx)}")
+print(f"missing_in_es: {sorted(set(en) - set(es))}")
+print(f"extra_in_es:   {sorted(set(es) - set(en))}")
+print(f"en_keys_without_context_sidecar_entry: {len(sorted(set(en) - set(ctx)))}")
+
+fail = 0
+ph_total = 0
+for k in sorted(set(en) & set(es)):
+    a, b = en[k], es[k]
+    pa, pb = PH.findall(a), PH.findall(b)
+    ph_total += len(pa)
+    if pa != pb:
+        print(f"PLACEHOLDER {k}: en={pa} es={pb}")
+        fail += 1
+    if CODE.findall(a) != CODE.findall(b):
+        print(f"CODESPAN {k}: en={CODE.findall(a)} es={CODE.findall(b)}")
+        fail += 1
+    if a.count("\n") != b.count("\n"):
+        print(f"NEWLINE_COUNT {k}: en={a.count(chr(10))} es={b.count(chr(10))}")
+    if ICU.findall(a) != ICU.findall(b):
+        print(f"ICU_SELECTOR {k}: en={ICU.findall(a)} es={ICU.findall(b)}")
+        fail += 1
+    for bad in ("few", "zero", "two"):
+        if re.search(r"\b%s\s*\{" % bad, b):
+            print(f"PLURAL_CATEGORY {k}: illegal es category '{bad}'")
+            fail += 1
+    cells = (ctx.get(k) or {}).get("maxCells")
+    if cells is not None:
+        m = max(len(line) for line in b.split("\n"))
+        state = "OVER" if m > cells else "ok"
+        print(f"WIDTH {k}: maxCells={cells} es_max_line={m} en_max_line={max(len(l) for l in a.split(chr(10)))} -> {state}")
+
+print(f"placeholders_compared={ph_total}")
+print(f"mechanical_failures={fail}")

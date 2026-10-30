@@ -284,19 +284,21 @@ async def test_local_off_before_the_read_makes_zero_reads(
 ) -> None:
     reads, row = await _drive(tmp_path, monkeypatch, fence_results=["bridge_off"])
     assert reads == []
-    # ZERO access calls: the fence runs BEFORE the lazy pin, because
-    # ``current_access`` itself can make a remote refresh call.
+    # The session-wide entry fence precedes the ledger read. A refusal must not
+    # mutate the row: in particular, a non-designated task session may never
+    # overwrite a genuine hold reason owned by the designated session.
     assert _ACCESS_CALLS == []
-    assert row["state"] == "held" and row["reason"] == "standing_fence"
+    assert row["state"] == "pending"
 
 
 async def test_off_after_access_is_still_resolved_blocks_the_read(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Fence order per row: (1) pre-fence, (2) pre-access fence, (3) the
-    # post-access fence, (4) the post-GET fence. An off switch landing after
-    # the access await but before the GET settles must produce ZERO reads.
-    reads, row = await _drive(tmp_path, monkeypatch, fence_results=["", "", "bridge_off"])
+    # The session-wide entry fence runs first, followed by the per-row fence,
+    # pre-access fence, post-access fence, and post-GET fence. An off switch
+    # landing after the access await but before the GET settles must make no
+    # read; this later per-row refusal owns the row and marks it held.
+    reads, row = await _drive(tmp_path, monkeypatch, fence_results=["", "", "", "bridge_off"])
     assert len(_ACCESS_CALLS) == 1
     assert reads == []
     assert row["state"] == "held" and row["reason"] == "standing_fence"

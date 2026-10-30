@@ -41,6 +41,7 @@ from local_operator.network.credentials import (
     inheritance,
 )
 from local_operator.network.types import MeshRefusal
+from local_operator.operator import pair_op
 from local_operator.server import desktop
 from local_operator.server.routes import desktop_approvals as approval_routes
 from local_operator.server.routes import desktop_credentials as operation_routes
@@ -215,14 +216,18 @@ def test_golden_credential_digests(
     assert desktop_approval.disclosure_digest(module.disclosure(frozen)) == disclosure_hex
 
 
-def test_file_only_signing_is_derived_from_the_registry_unchanged() -> None:
-    assert desktop_approval.FILE_ONLY_SIGNING == {finite_share.OP: True, inheritance.OP: False}
+def test_file_only_signing_is_derived_from_the_registry_with_the_pair_op() -> None:
+    assert desktop_approval.FILE_ONLY_SIGNING == {
+        finite_share.OP: True,
+        inheritance.OP: False,
+        pair_op.OP: True,
+    }
     assert dict(desktop_approval.FILE_ONLY_SIGNING) == approval_ops.file_only_signing()
     # Every registered op carries an explicit decision, and only registered ops are listed.
     assert {op.op for op in approval_ops.registered()} == set(desktop_approval.FILE_ONLY_SIGNING)
     for op in approval_ops.registered():
         assert isinstance(op, approval_ops.ApprovalOp)
-        assert op.kind == A.KIND_DEVICE_ONBOARD
+        assert op.kind in {A.KIND_DEVICE_ONBOARD, A.KIND_OPERATOR_DEVICE_PAIR}
 
 
 def test_registering_a_second_op_under_the_same_name_is_refused() -> None:

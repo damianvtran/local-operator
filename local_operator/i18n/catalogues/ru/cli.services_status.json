@@ -1,0 +1,16 @@
+{
+  "cli.services_status.install_service": "установите его командой `{command}`",
+  "cli.services_status.install_service_help": "Только Linux: установить и включить пользовательский юнит systemd для serve",
+  "cli.services_status.restart_supervision_limit": "`lop services restart` может перезагрузить его, но не может взять его под управление",
+  "cli.services_status.serve_install_isolated_home": "файл юнита записан, но этот HOME не является домашним каталогом пользовательского менеджера systemd; ничего не включено",
+  "cli.services_status.serve_install_linux_only": "для установки службы serve в Linux требуется systemd --user; поведение serve в macOS не изменилось",
+  "cli.services_status.serve_install_not_serving": "юнит serve включён, но не обслуживает собственный процесс: {error}",
+  "cli.services_status.serve_install_wrong_cgroup": "юнит serve ответил, но cgroup его PID не подтверждает local-operator-serve.service",
+  "cli.services_status.serve_linger_required": "linger отключён: выполните `loginctl enable-linger`, чтобы юнит сохранялся после выхода из сеанса",
+  "cli.services_status.serve_unit_enabled": "пользовательская служба systemd включена: {unit}",
+  "cli.services_status.serve_unit_written": "файл юнита записан: {unit}",
+  "cli.services_status.supervised_by": "под управлением: {unit}",
+  "cli.services_status.supervision_unknown": "управление неизвестно: не удалось определить юнит systemd",
+  "cli.services_status.unsupervised_scope": "без управления: {scope}; systemd не может его перезапустить",
+  "cli.services_status.unsupervised_unknown": "без управления: юнит systemd не найден; systemd не может его перезапустить"
+}

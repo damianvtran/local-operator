@@ -77,6 +77,8 @@
   "relay.chrome.session.resuming": "Reprise…",
   "relay.chrome.session.degraded": "Ne répond pas — les envois attendent",
   "relay.chrome.composer.label": "Message",
+  "relay.chrome.composer.placeholder.idle": "Posez votre question…",
+  "relay.chrome.composer.placeholder.steer": "Orientez l’agent…",
   "relay.chrome.composer.folder_label": "Dossier de travail : {name}",
   "relay.chrome.composer.model_label": "Modèle : {label}",
   "relay.chrome.composer.spend_label": "Dépenses et contexte : {label}",

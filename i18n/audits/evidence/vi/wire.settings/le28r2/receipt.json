@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "audit_id": "le28r2",
+  "locale": "vi",
+  "namespace": "wire.settings",
+  "hashes": {
+    "audit.log": "dd9c239191b8d46a7b6e93432f7d347f7d741bf7a03e15ba3d0ce53a3f4e3ba9",
+    "coverage.json": "9aeccc8880e1a9a0ab660de696b28306e9c2183e80e62e8918b3da73d133019a",
+    "extra_checks.py.txt": "021b80e6a99f447fe6973af5c655c123750f7c042f1c5e8cb38c410e5e226d39",
+    "findings.json": "fb93a10437dd57e0b8beea7a422feaae7c9678c5f7c0b51c668e097b26f796fd",
+    "mech_sweep.py.txt": "3905b1630aea590646fccb31b2628de7519a93fb4a443a62d9a0e161ba400348",
+    "mechanical.json": "ff2e2958b56ded14ac58634a9f2579a2f7aa62bd5fe51d7f2edce4710d282913",
+    "prior-ledger.json": "bf5ee67109fefaf25ddd8e3b9094973a7db05b2caaf41dced41999744c6fdd21",
+    "probe.py.txt": "a431d62529197feec3f74988f1a19cefb5acfbf90e836f7fc382beb574517f31",
+    "record.json": "8d4c5a7ba738dfbe0d55012bda89469b203cb0a5b0cadd65c1b7af69be91aacd",
+    "rendered-text.json": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+    "renders.py.txt": "7cd2c376d3c59183f6fc60155dce9f6c2d514b10e58ce4da1f4dec49d657bf33",
+    "report.md": "59262f512f9daab54b27caf9dafe21c9557157da990e58c95789fcfb7df66a4b",
+    "route-receipts.json": "c1865d5fe2a28e2f8901b1bddb2c35ba40ce1787440c761a7936befe36d0549d",
+    "subaudit-original.json": "3d9d4fd0aeef12b3375f12fecd2188d631cfeb0f98d3e71b8d93915bde21eb87",
+    "subaudit-original.md": "9461ee9bd44bad1c4fa0c0d49bbd77a87661682827149d0a3c2a78a1624569bc",
+    "widths-and-rederivations.json": "929aea179a791a5a47df981eaa3e155158800e30079fc29e9384afe60c24e34d"
+  }
+}

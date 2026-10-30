@@ -64,18 +64,77 @@ async def _boot(pilot, app: OperatorApp) -> None:
             return
 
 
+# Idle ticks a prompt wait may spend before it gives up. A deadlock guard, not a
+# timing assumption: every measured caller settles in a handful of ticks.
+_WAIT_PROMPT_TICKS = 200
+
+
 async def _wait_prompt(pilot, app: OperatorApp) -> None:
-    """Settle until the in-flight gate's question is mounted.
+    """Settle until the in-flight gate's question is mounted AND its focus is decided.
 
     Replaces a fixed `pilot.pause(0.3)` that bet on how long the gate takes to
-    arm and raise its card; the observable the next assertion needs is the
-    ``ApprovalPrompt`` on screen, so wait for exactly that. The ceiling is a
-    deadlock guard, not a timing assumption.
+    arm and raise its card. The ceilings are deadlock guards, not timing
+    assumptions.
+
+    "In the widget tree" is NOT enough, which is the race this guards
+    (CI failure triage on PR #3104, 2026-10-28): a card is queryable before its
+    Mount is dispatched, and its ``on_mount`` decides focus by calling
+    ``Widget.focus()``, which in Textual 8.x only QUEUES the change on the app
+    via ``call_later``. A caller that returned early and then ran
+    ``app.query_one(Editor).focus()`` queued the editor's focus FIRST; the
+    card's mount then queued its own and won, so the next Enter answered the
+    highlighted "Allow" instead of submitting the composer (4/15 failures of
+    ``test_auto_leaves_a_parked_prompt_unanswered_and_notes_it`` run alone).
+
+    So wait for the two things the next step actually depends on:
+
+    1. A card ARRIVED and every card on screen is mounted. Textual sets
+       ``is_mounted`` only after ``on_mount`` has returned, so such a card's
+       focus decision has been made and, if it chose to take focus, its
+       request is already on the app's queue. The arrival test is against the
+       count seen on entry, not a bare "some card is mounted": answered cards
+       leave ``#prompt-host`` through a DEFERRED ``card.remove()`` and can sit
+       there beside the next question, so a retained card must not be able to
+       satisfy the wait while the card this gate just raised is still about to
+       mount and steal focus. Every caller measured so far enters with no card
+       on screen, where the two tests coincide; the comparison is there for the
+       day they stop coinciding.
+    2. A barrier posted to that same queue afterwards. The queue is FIFO, so
+       when the barrier runs the card's queued focus change has been applied.
+
+    The barrier deliberately does not assert WHO holds focus. The card yields
+    to a composer with a draft and honours ``CARET_KEEP``/``CARET_TAKE``
+    (``AskPickerScreen.on_mount``), so "card focused" would be the wrong
+    condition for callers that set those up; "mount's focus request settled"
+    is correct for all of them.
+
+    It also deliberately does not target one card by identity. The callers
+    drive ``app.query(ApprovalPrompt).first()``, so with a retained card
+    present "the newest card" and "the card the caller presses into" are not
+    the same widget; "every card present is settled" is true for both.
+
+    An expired ceiling RETURNS rather than raising, on purpose: the callers
+    assert what they need next (a card to press into, a gate that stays
+    parked) and those assertions name the failure better than a generic
+    timeout here. An expiry therefore means the app never raised the card at
+    all — read the caller's failure as the symptom, not this return.
     """
-    for _ in range(200):
+    before = len(app.query(ApprovalPrompt))
+    for _ in range(_WAIT_PROMPT_TICKS):
         await pilot.pause()
-        if app.query(ApprovalPrompt):
+        cards = app.query(ApprovalPrompt)
+        if len(cards) > before and all(card.is_mounted for card in cards):
+            break
+    else:
+        # Gave up: no card arrived, or one arrived and never finished mounting.
+        return
+    settled = asyncio.Event()
+    app.call_later(settled.set)
+    for _ in range(_WAIT_PROMPT_TICKS):
+        await pilot.pause()
+        if settled.is_set():
             return
+    # Gave up: the barrier never drained, so the app's queue is wedged.
 
 
 async def _settle(pilot, ticks: int = 6) -> None:

@@ -1,0 +1,42 @@
+{
+  "affected_historical_row_index": 98,
+  "affected_historical_row": {
+    "locale": "fr",
+    "namespace": "tui.palette",
+    "source_sha256": "e3bf15fd1036f7e4aeed39dbc3800e0dd1e6736f0e0ad211cac6d6f0ada9a95f",
+    "translator": {
+      "agent": "translator",
+      "model": "deepseek/deepseek-flash",
+      "date": "2026-10-23"
+    },
+    "auditor": {
+      "agent": "translation-auditor",
+      "model": "deepseek/deepseek-flash",
+      "date": "2026-10-23",
+      "result": "passed",
+      "findings": 1
+    },
+    "status": "passed",
+    "note": "Independent audit passed: 7 keys, 1 non-gating MINOR. The placeholder's opener 'Trouver' fits the 48-cell budget; 'Rechercher' measures 51 and was refused as width-driven, not an idiom defect, so no fix was required (auditor accepted). Audited target sha256 857229201f88ffe91c5103aa1acf7e0ac058136b1d5abe1c546e4489af37698a. Report: sessions/b64104d39368/scratchpad/audit-fr.json."
+  },
+  "previous_current_row_index": 98,
+  "previous_current_row": {
+    "locale": "fr",
+    "namespace": "tui.palette",
+    "source_sha256": "e3bf15fd1036f7e4aeed39dbc3800e0dd1e6736f0e0ad211cac6d6f0ada9a95f",
+    "translator": {
+      "agent": "translator",
+      "model": "deepseek/deepseek-flash",
+      "date": "2026-10-23"
+    },
+    "auditor": {
+      "agent": "translation-auditor",
+      "model": "deepseek/deepseek-flash",
+      "date": "2026-10-23",
+      "result": "passed",
+      "findings": 1
+    },
+    "status": "passed",
+    "note": "Independent audit passed: 7 keys, 1 non-gating MINOR. The placeholder's opener 'Trouver' fits the 48-cell budget; 'Rechercher' measures 51 and was refused as width-driven, not an idiom defect, so no fix was required (auditor accepted). Audited target sha256 857229201f88ffe91c5103aa1acf7e0ac058136b1d5abe1c546e4489af37698a. Report: sessions/b64104d39368/scratchpad/audit-fr.json."
+  }
+}
