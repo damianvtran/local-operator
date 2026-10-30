@@ -4508,12 +4508,13 @@ class DesktopSessionBridge:
         Source (3) started one as a side effect: a page that answered ``building``
         began the correction, so from the NEXT read on the resident join answered
         and the companion was never opened again. A page answered from (2) never
-        enters that branch, so without this the poll loop pays a companion open on
+        enters that branch, so without this the poll loop opens the companion on
         every request forever — measured on a 36.5 MB journal, 25 identical reads:
-        median 67.8 ms with the companion alone against 18.6 ms on base once its
-        resident index existed. Same singleflight, not awaited, and only when
-        nothing is resident: no scan is added to this request's latency and none is
-        started twice.
+        25/25 companion opens and no resident index ever, against 1/25 and a
+        resident index from poll 1 once the scan is armed, which is what base
+        converges onto. Same singleflight, not awaited, and only when nothing is
+        resident: no scan is added to this request's latency and none is started
+        twice.
         """
         ids = list(dict.fromkeys(ids))
         source = index_read_model.page_source(pages)
@@ -4528,35 +4529,42 @@ class DesktopSessionBridge:
             source=source,
         )
         if projected.state == "ready" and index_read_model.apply_order(answer, projected.value):
-            self._warm_resident_index()
+            self._warm_resident_scan()
             return answer
         # A missing, stale, corrupt or unsupported projection is NOT an error: the
         # policy below is exactly what an absent companion answered before this
         # existed, so an older store degrades to today's behaviour.
         return self._journal_page(answer, pages, ids)
 
-    def _warm_resident_index(self) -> None:
-        """Offer this session to the existing background scan, and do not wait.
+    def _warm_resident_scan(self) -> None:
+        """Arm the resident index a companion answer skipped, and never wait on it.
 
-        THE SAME CALL the ``building`` branch makes from inside
-        :meth:`_journal_page` (``_order_correction``), through the same
-        ``start_refresh`` singleflight — so a refresh already running is joined,
-        not started again, and a resident index is left alone (two stats, no
-        scan). It is never awaited: this request's page is already complete, and
-        the point of arming it is the NEXT request, which then answers from the
-        resident join instead of reopening the companion.
+        THE SAME SINGLEFLIGHT the ``building`` branch calls from inside
+        :meth:`_journal_page` (``_order_correction``): a refresh already in flight
+        is joined rather than started again, and one that has already landed is
+        left alone — ``fresh_resident`` answers that from the cache's own entry,
+        so the ordinary case costs a dict lookup and no stats. Nothing is awaited:
+        this request's page is already complete, and the point of arming the scan
+        is the NEXT request, which then answers from the resident join instead of
+        reopening the companion.
 
-        A failure here is not a page failure — the facts were served — so it is
-        logged at debug and swallowed exactly as ``_frame_index`` treats it.
+        THE TASK'S FAILURE IS RETRIEVED, not swallowed. This caller owns no await
+        on it — that is the whole point — and ``start_refresh``'s own wrapper
+        logs and RE-RAISES, so an unobserved failure surfaces as a second,
+        misleading traceback at GC (``Task exception was never retrieved``) long
+        after the page that armed it. The same guard sits at this file's other
+        no-wait sites (the attention refresh and the peer display's index warm);
+        the ``except`` below covers only a SYNCHRONOUS refusal to start.
         """
         from local_operator.session import transcript_index
 
         try:
             if transcript_index.fresh_resident(self.root, self.session_id) is not None:
                 return
-            transcript_index.start_refresh(self.root, self.session_id)
+            task, _started = transcript_index.start_refresh(self.root, self.session_id)
+            task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
         except Exception:  # noqa: BLE001 — an optimisation, never the answer
-            logger.debug("journal order: resident warm failed", exc_info=True)
+            logger.debug("journal order: resident warm could not start", exc_info=True)
 
     def _journal_page(
         self,

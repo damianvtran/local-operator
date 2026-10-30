@@ -13,6 +13,7 @@ touched.
 from __future__ import annotations
 
 import asyncio
+import gc
 import time
 from pathlib import Path
 from typing import Any
@@ -1424,3 +1425,102 @@ async def test_an_append_after_publish_yields_the_appended_rows_coordinates(
         else:
             assert first["journal_order_state"] == "building"
             assert not first.get("journal_ordinals"), "a building frame carried coordinates"
+
+
+@pytest.mark.asyncio
+async def test_a_companion_answer_arms_the_resident_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The projection must not become the only source the process ever uses.
+
+    "THE SUITE CANNOT TELL THE FIX FROM ITS ABSENCE" is the failure this test
+    exists for: delete the warm and every assertion below still holds except the
+    two that matter. A page answered from the companion never enters the
+    ``building`` branch, and that branch was the only thing that started a scan —
+    so without the arm the poll loop reopens the companion forever (measured
+    25/25 opens on a 36.5 MB journal, against 1/25 once armed).
+
+    COUNTED, NOT TIMED: the number of companion opens is the mechanism, and it is
+    the one number host load cannot move. ``fresh_resident`` is asserted directly
+    for the same reason.
+    """
+    opens: list[str] = []
+    original = index_read_model.order_facts
+
+    def counted(*args: Any, **kwargs: Any) -> Any:
+        opens.append(str(kwargs.get("order_ids") or args))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(index_read_model, "order_facts", counted)
+    async with _Harness(tmp_path) as harness:
+        harness.seed(turns=6)
+        index = ti.refresh_index(harness.root, harness.session_id)
+        assert index is not None
+        _publish(harness.root, harness.session_id, index)
+        ti._reset_for_tests()  # a fresh process: the companion is the only source
+        assert harness.client is not None
+        url = f"/v1/desktop/sessions/{harness.session_id}/history"
+        params = _order_params(["ans05", "user05"])
+        first = (await harness.client.get(url, params=params)).json()["result"]
+        assert first["journal_order_state"] == "ready"
+        assert opens, "the companion did not serve the first frame at all"
+        for _ in range(200):
+            if ti.fresh_resident(harness.root, harness.session_id) is not None:
+                break
+            await asyncio.sleep(0.02)
+        assert (
+            ti.fresh_resident(harness.root, harness.session_id) is not None
+        ), "a companion answer did not arm the resident scan, so every poll reopens it"
+        after_arm = len(opens)
+        poll = (await harness.client.get(url, params=params)).json()["result"]
+        assert poll["journal_order_state"] == "ready"
+        assert poll["journal_ordinals"] == first["journal_ordinals"]
+        assert (
+            len(opens) == after_arm
+        ), "a poll reopened the companion although the resident index was in hand"
+
+
+@pytest.mark.asyncio
+async def test_a_failing_resident_scan_is_retrieved_and_never_reaches_the_page(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The armed scan is not awaited, so its failure must still be observed.
+
+    ``start_refresh``'s wrapper logs and RE-RAISES, and this caller owns no await
+    on the task: without a done-callback the exception surfaces later as
+    ``Task exception was never retrieved`` at GC — a second, misleading traceback
+    after the page that armed it (review round 2, MAJOR-1). The page must be
+    unaffected either way, which is the other half of the assertion.
+    """
+    loop = asyncio.get_running_loop()
+    unretrieved: list[dict[str, Any]] = []
+    previous = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: unretrieved.append(context))
+
+    async def boom() -> Any:
+        raise RuntimeError("the scan refused to run")
+
+    def failing(*_args: Any, **_kwargs: Any) -> Any:
+        return asyncio.ensure_future(boom()), True
+
+    monkeypatch.setattr(ti, "fresh_resident", lambda *_a, **_k: None)
+    monkeypatch.setattr(ti, "start_refresh", failing)
+    try:
+        async with _Harness(tmp_path) as harness:
+            harness.seed(turns=6)
+            index = ti.refresh_index(harness.root, harness.session_id)
+            assert index is not None
+            _publish(harness.root, harness.session_id, index)
+            ti._reset_for_tests()
+            assert harness.client is not None
+            url = f"/v1/desktop/sessions/{harness.session_id}/history"
+            params = _order_params(["ans05"])
+            page = (await harness.client.get(url, params=params)).json()["result"]
+            assert page["journal_order_state"] == "ready"
+            # Let the armed task finish and die, then look for the leak.
+            for _ in range(20):
+                await asyncio.sleep(0.01)
+                gc.collect()
+            assert not unretrieved, f"the armed scan's failure leaked: {unretrieved}"
+    finally:
+        loop.set_exception_handler(previous)
