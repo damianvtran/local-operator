@@ -5211,6 +5211,86 @@
     },
     {
       "locale": "hi",
+      "namespace": "relay.shell",
+      "source_sha256": "f53b23560b88b531ef8fc3274bc396676f26e755ad4ff9ad87ce368cebdee560",
+      "translator": {
+        "agent": "i18n-translator (lopdev lane, session 75d96e08982f)",
+        "model": "radient/auto (primary anthropic/claude-opus-5-5 fell back on provider quota)",
+        "date": "2026-10-29"
+      },
+      "status": "passed",
+      "note": "Independent hi audit, read from a worktree cut at the PR head, never the translator's copy: 44/44 keys at en sha f53b23560b88…, key set, order, ICU arguments and selectors identical to en. Exercised through messages.render / runtime.render_message at locale=hi: '1,250.5 क्रेडिट बाक़ी' reproduced exactly; Indian grouping 12,34,567.5; usage.reset and usage.as_of render '10 अक्टू॰ 2026, 3:15 pm' (real U+0970 abbreviation sign, Latin digits, lowercase am/pm); percent 43% and 15%. The four plural keys are invariant across 0/1/2/1.5/1250.5/1234567 — क्रेडिट, टोकन and अनुरोध are genuinely invariant in the direct case, so identical one/other arms are correct here, not a shortcut, and match the shipped relay.chrome.link.since_* precedent. Danda/ellipsis parity holds; no ZWJ/ZWNJ, no matra or virama boundary faults, no Latin leakage beyond Local Operator / TUI / USD. session.waiting carries its sidecar's intended meaning (waiting for the session view, connection already up), not 'projection'. No findings. Not verified: native-speaker naturalness, a rendered phone frame at 320 px, any device run.",
+      "auditor": {
+        "agent": "translation-auditor (lopdev reviewer, session 8f6a28a30c15)",
+        "model": "radient/auto (primary anthropic/claude-sonnet-5-5 fell back on provider quota)",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      }
+    },
+    {
+      "locale": "hi",
+      "namespace": "relay.session",
+      "source_sha256": "a4ae148de969d4a2e8541aca5b4b99ad311d9ef112a0d056fc21fcf90e7e0129",
+      "translator": {
+        "agent": "i18n-translator (lopdev lane, session 75d96e08982f)",
+        "model": "radient/auto (primary anthropic/claude-opus-5-5 fell back on provider quota)",
+        "date": "2026-10-29"
+      },
+      "status": "passed",
+      "note": "Independent hi audit at the PR head: 17/17 keys, key set, order and ICU arguments identical to en. One MINOR found and fixed by the auditor: directory.sheet_title कार्य फ़ोल्डर → कार्य निर्देशिका. Shipped hi renders the same English term 'working directory' as कार्य निर्देशिका (wire.slash.move 'Change this session's working directory'; wire.settings.display_composer_cwd.label 'Band: working dir'), while कार्य फ़ोल्डर is already the rendering of the different term 'Working folder' (relay.chrome.composer.folder_label), so the old value both split a term and collided with another. Register matches wire.* copy (आप-register imperatives, danda, nukta). Noted, not changed: path_placeholder keeps पाथ, which has shipped precedent in wire.errors.desktop, though tui.viewer uses पथ — the shipped set is itself split. Not verified: native-speaker naturalness, a rendered phone frame at 320 px, any device run.",
+      "auditor": {
+        "agent": "translation-auditor (lopdev reviewer, session 8f6a28a30c15)",
+        "model": "radient/auto (primary anthropic/claude-sonnet-5-5 fell back on provider quota)",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      }
+    },
+    {
+      "locale": "hi",
+      "namespace": "relay.account_policy",
+      "source_sha256": "0019b08106e6f7762194b164b9b9b37054a8cfade759aa2f6490787a73dea890",
+      "translator": {
+        "agent": "i18n-translator (lopdev lane, session 75d96e08982f)",
+        "model": "radient/auto (primary anthropic/claude-opus-5-5 fell back on provider quota)",
+        "date": "2026-10-29"
+      },
+      "status": "passed",
+      "note": "Independent hi audit at the PR head: 13/13 keys, key set, order and ICU arguments identical to en (no ICU arguments). Error direction is preserved and the error-versus-rejected distinction is right: error says बदलाव की पुष्टि नहीं हो सकी (commit status unknown, deliberately not 'was not saved') while rejected says बदलाव सहेजा नहीं गया; load_error stays a load failure. Negations intact, danda throughout, आप-register imperatives, Local Operator kept Latin, सेटिंग singular matches the shipped wire.settings convention. No findings. Not verified: native-speaker naturalness, a rendered phone frame at 320 px, any device run.",
+      "auditor": {
+        "agent": "translation-auditor (lopdev reviewer, session 8f6a28a30c15)",
+        "model": "radient/auto (primary anthropic/claude-sonnet-5-5 fell back on provider quota)",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      }
+    },
+    {
+      "locale": "hi",
+      "namespace": "relay.library",
+      "source_sha256": "ad478c433a4db3e725994766c724a2e8e92176f015f8283e71dc13b87185466a",
+      "translator": {
+        "agent": "i18n-translator (lopdev lane, session 75d96e08982f)",
+        "model": "radient/auto (primary anthropic/claude-opus-5-5 fell back on provider quota)",
+        "date": "2026-10-29"
+      },
+      "status": "passed",
+      "note": "Independent hi audit at the PR head: 1/1 key, ICU parity clean. One MINOR found and fixed by the auditor: '# आइटम' → '# संसाधन'. Shipped hi renders 'asset' as संसाधन (wire.errors.desktop.library_asset_not_found, 'That asset is not in the Library.'), and आइटम is already the shipped rendering of the different term 'item' (tui.notices.stopped_session_held, en 'The held items…'), so the old value merged two English terms into one Hindi word. The plural arms stay identical, which is correct for संसाधन; rendered 0/1/5 → '0 संसाधन', '1 संसाधन', '5 संसाधन'. Not verified: native-speaker naturalness, a rendered phone frame at 320 px, any device run.",
+      "auditor": {
+        "agent": "translation-auditor (lopdev reviewer, session 8f6a28a30c15)",
+        "model": "radient/auto (primary anthropic/claude-sonnet-5-5 fell back on provider quota)",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      }
+    },
+    {
+      "locale": "hi",
       "namespace": "cli.team_bridge",
       "source_sha256": "f029ae6953f2fce31d126e7315beaf120bc63da0fc7398fbc6b31413b962222f",
       "translator": {
