@@ -3515,10 +3515,21 @@ class TeamBridgeClient:
         endpoint_id: str | None = None,
         attachments_hash: str | None = None,
         template_sha256: str | None = None,
+        refusal_class: str | None = None,
         access: OAuthAccess | None = None,
         expected_account_id: str | None = None,
     ) -> dict[str, Any]:
         """Record the screening verdict. ``reject`` is terminal.
+
+        ``refusal_class`` (delivery-state contract v1) rides only a ``reject``:
+        the ONE coarse class from :func:`store.refusal_class`, never a raw
+        screening category. An older hub that does not know the field answers
+        ``400``; the verdict matters more than the class, so the admit is
+        retried ONCE without it (the hub then shows a generic "refused"). A
+        second refusal is the hub's real answer and propagates.
+
+        The response may carry ``probe_suspected: true`` (the hub's anti-oracle
+        clamp); acting on it is the caller's job.
 
         ``attachments_hash`` + ``template_sha256`` admit the message's IMAGES
         too: the hub binds the allow to that exact image set and requires the
@@ -3532,6 +3543,13 @@ class TeamBridgeClient:
             raise ValueError("attachments_hash and template_sha256 travel together")
         if attachments_hash is not None and verdict != "allow":
             raise ValueError("only an allow binds an attachments_hash")
+        if refusal_class is not None:
+            from local_operator.team_bridge.store import REFUSAL_CLASSES
+
+            if verdict != "reject":
+                raise ValueError("only a reject carries a refusal_class")
+            if refusal_class not in REFUSAL_CLASSES:
+                raise ValueError("refusal_class is outside the closed vocabulary")
         body: dict[str, Any] = {"verdict": verdict, "body_hash": body_hash}
         if attachments_hash is not None:
             body["attachments_hash"] = attachments_hash
@@ -3539,14 +3557,83 @@ class TeamBridgeClient:
         if tenant_id:
             body["tenant_id"] = tenant_id
         params = {"endpoint_id": endpoint_id} if endpoint_id else None
+        path = f"/messaging/conversations/{conversation_id}/messages/{message_id}/admit"
+        if refusal_class is not None:
+            try:
+                return await self._send(
+                    "POST",
+                    path,
+                    params=params,
+                    body={**body, "refusal_class": refusal_class},
+                    access=access,
+                    expected_account_id=expected_account_id,
+                )
+            except BridgeRefusal as refusal:
+                # Only a 400 can mean "this hub predates the field"; anything
+                # else (409 verdict conflict, 403, 5xx) is not about it.
+                if refusal.http_status != 400:
+                    raise
         return await self._send(
             "POST",
-            f"/messaging/conversations/{conversation_id}/messages/{message_id}/admit",
+            path,
             params=params,
             body=body,
             access=access,
             expected_account_id=expected_account_id,
         )
+
+    async def put_delivery_state(
+        self,
+        conversation_id: str,
+        message_id: str,
+        *,
+        tenant_id: str,
+        endpoint_id: str,
+        hold_class: str,
+        access: OAuthAccess | None = None,
+        expected_account_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Publish "held" for this endpoint's copy of one message (contract v1).
+
+        WHY. Without it the human sender of a message our screener is holding
+        sees nothing at all — indistinguishable from a lost message. The hub
+        upserts idempotently and ignores the write once an admission exists
+        (an admission supersedes a hold), so re-publishing on every drain is
+        safe and is how a lost write recovers.
+
+        Only ``state: "held"`` is written here: delivered/refused ride the
+        admit, write-once with the verdict. ``hold_class`` must be one of the
+        closed :data:`store.DELIVERY_HOLD_CLASSES` — the raw hold code never
+        leaves this machine.
+
+        BEST-EFFORT ON OLD HUBS: a hub without the route answers 404/405 (or
+        400 for a field it does not know); that is ``None``, not an error.
+        Other refusals propagate; the connector treats every failure as
+        best-effort anyway.
+        """
+
+        from local_operator.team_bridge.store import DELIVERY_HOLD_CLASSES
+
+        if hold_class not in DELIVERY_HOLD_CLASSES:
+            raise ValueError("hold_class is outside the closed vocabulary")
+        try:
+            return await self._send(
+                "PUT",
+                f"/messaging/conversations/{conversation_id}/messages/{message_id}"
+                "/delivery-state",
+                body={
+                    "tenant_id": tenant_id,
+                    "endpoint_id": endpoint_id,
+                    "state": "held",
+                    "hold_class": hold_class,
+                },
+                access=access,
+                expected_account_id=expected_account_id,
+            )
+        except BridgeRefusal as refusal:
+            if refusal.http_status in (400, 404, 405):
+                return None
+            raise
 
     # -- image attachments --------------------------------------------------
     #

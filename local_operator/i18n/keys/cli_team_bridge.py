@@ -54,6 +54,14 @@ def logs_none(*, path: str) -> Msg:
     return Msg("cli.team_bridge.logs.none", {"path": path})
 
 
+def notify_probe_suspected_body() -> Msg:
+    return Msg("cli.team_bridge.notify.probe_suspected_body", {})
+
+
+def notify_probe_suspected_title() -> Msg:
+    return Msg("cli.team_bridge.notify.probe_suspected_title", {})
+
+
 def outcome_absent() -> Msg:
     return Msg("cli.team_bridge.outcome.absent", {})
 

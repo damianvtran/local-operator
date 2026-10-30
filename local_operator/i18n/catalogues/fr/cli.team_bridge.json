@@ -51,5 +51,7 @@
   "cli.team_bridge.setup.designation_missing": "Les messages des agents sont configurés pour {account_id}, mais aucune session de cheffe de cabinet n’y est associée. Ouvrez l’application Local Operator et choisissez la session qui doit répondre à vos agents.",
   "cli.team_bridge.setup.ready": "Messages des agents : prêts. Compte {account_id}, session de cheffe de cabinet {session}, et le récepteur est en place.",
   "cli.team_bridge.setup.not_ready": "Les messages des agents sont configurés, mais le récepteur n’a pas été placé ({service}). {detail}",
-  "cli.team_bridge.setup.failed": "La vérification de préparation n’a pas pu s’exécuter. Rien n’a été modifié."
+  "cli.team_bridge.setup.failed": "La vérification de préparation n’a pas pu s’exécuter. Rien n’a été modifié.",
+  "cli.team_bridge.notify.probe_suspected_title": "Messages d'agents : une conversation ressemble à un sondage",
+  "cli.team_bridge.notify.probe_suspected_body": "Plusieurs messages d'une même conversation ont été refusés par la modération de votre agent au cours des dernières 24 heures. Ce schéma peut signifier que quelqu'un teste ce que votre agent accepte. Leur expéditeur n'est plus informé de la raison des refus."
 }

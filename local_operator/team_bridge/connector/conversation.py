@@ -659,6 +659,83 @@ def _clear_terminal_hold(owner: Any, ref: ConversationFeedRef, config_dir: Path)
         pass  # fenced owner: the next live generation owns its own rows
 
 
+#: Upper bound on the best-effort delivery-state write. The hold it reports is
+#: already durable locally; a slow hub must not stall the drain that re-drives
+#: every other held message.
+_DELIVERY_STATE_TIMEOUT_S = 10.0
+
+
+async def _publish_held(client: Any, owner: Any, ref: ConversationFeedRef, code: Any, access: Any) -> None:
+    """Tell the hub this endpoint is HOLDING the message (delivery-state contract v1).
+
+    WHY. A human sender otherwise cannot tell a message our screener holds from
+    one that vanished. Only the coarse class from
+    :func:`store.delivery_hold_class` leaves this machine — never the hold code,
+    a reason or a score (anti-oracle). Keyed by the BARE ``bcmsg`` id the hub
+    knows, never the composite feed ref the hold row is stored under.
+
+    BEST-EFFORT by contract: nothing here may turn a hold into a failure. The
+    loop re-drives the held ref on its backoff, which screens again and lands
+    here again, so a lost write is re-published on the next drain while the
+    hold persists; the hub's upsert is idempotent and ignores the write once an
+    admission exists.
+    """
+
+    import asyncio
+
+    from ..store import delivery_hold_class
+
+    try:
+        await asyncio.wait_for(
+            client.put_delivery_state(
+                ref.conversation_id,
+                ref.message_id,
+                tenant_id=owner.tenant_id,
+                endpoint_id=owner.endpoint_id,
+                hold_class=delivery_hold_class(code),
+                access=access,
+            ),
+            timeout=_DELIVERY_STATE_TIMEOUT_S,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception:  # noqa: BLE001 — best-effort; the local hold is the truth
+        # Closed structural line only: a refusal's text is the hub's and the
+        # exception could carry anything.
+        logger.info("bridge: delivery state unpublished code=held_write_failed")
+
+
+def _notify_probe_suspected(config_dir: Path, session_id: str, conversation_id: str) -> None:
+    """Raise ONE local owner notification that a conversation looks like probing.
+
+    WHY. The hub's anti-oracle clamp (contract v1) stops telling a sender why
+    their messages are refused once they collect several refusals here in a
+    day, and says so on the admit response. The sender is told nothing; the
+    OWNER should know, because repeated refusals from one sender are what a
+    probe of their moderation looks like.
+
+    CONTENTLESS: no body, sender, category or conversation title — the copy is
+    fixed and keyed. One item per conversation (``key``): a repeat updates it
+    rather than adding another. Best-effort: never fails the reject path.
+    """
+
+    from local_operator.i18n.keys import cli_team_bridge as _k
+    from local_operator.i18n.text import tr
+    from local_operator.notifications.store import NotificationStore
+
+    try:
+        t = tr("cli.team_bridge")
+        NotificationStore(config_dir).notify(
+            session_id,
+            title=t(_k.notify_probe_suspected_title()),
+            body_md=t(_k.notify_probe_suspected_body()),
+            priority="normal",
+            key=f"team-bridge-probe:{conversation_id}",
+        )
+    except Exception:  # noqa: BLE001 — a notification is chrome, the reject stands
+        logger.info("bridge: probe notification unrecorded code=notify_failed")
+
+
 async def handle_conversation_available(
     owner: Any,
     ref: ConversationFeedRef,
@@ -891,13 +968,16 @@ async def handle_conversation_available(
             owner, item, config_dir=config_dir, auth_store=auth_store, settings=settings
         )
         if result is None:
+            await _publish_held(client, owner, ref, "screening_unavailable", access)
             return {"action": "hold", "message_id": message_id, "code": "screening_unavailable"}
         disposition = getattr(result, "disposition", None)
         if disposition == "hold":
+            hold_code = getattr(result, "hold_code", None) or "screening_hold"
+            await _publish_held(client, owner, ref, hold_code, access)
             return {
                 "action": "hold",
                 "message_id": message_id,
-                "code": getattr(result, "hold_code", None) or "screening_hold",
+                "code": hold_code,
             }
         receipt = getattr(result, "receipt", None)
         if disposition == "bounce":
@@ -907,15 +987,26 @@ async def handle_conversation_available(
                     "message_id": message_id,
                     "code": "bounce_receipt_missing",
                 }
-            await client.conversation_admit(
+            from ..store import refusal_class
+
+            # The ONE coarse class may leave this machine with the verdict;
+            # the receipt's raw categories never do (contract v1).
+            admitted = await client.conversation_admit(
                 ref.conversation_id,
                 message_id,
                 verdict="reject",
                 body_hash=body_hash,
                 tenant_id=owner.tenant_id,
                 endpoint_id=owner.endpoint_id,
+                refusal_class=refusal_class(getattr(receipt, "categories", ())),
                 access=access,
             )
+            if isinstance(admitted, Mapping) and admitted.get("probe_suspected") is True:
+                import asyncio
+
+                await asyncio.to_thread(
+                    _notify_probe_suspected, config_dir, designation, ref.conversation_id
+                )
             # A confirmed reject retires the notification, not the moderation
             # boundary. Posting a metadata-only card here would still wake the
             # CoS for rejected input, even without exposing any body bytes.

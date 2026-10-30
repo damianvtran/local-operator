@@ -4190,3 +4190,80 @@ async def test_an_old_hub_through_the_mounted_boundary_is_409_outdated_hub_on_bo
         ]
         * 2
     )
+
+
+#: Delivery-state contract v1: one entry per agent recipient, exactly the shape
+#: the hub serves to a HUMAN reader. The proxy forwards it untouched — it never
+#: adds, drops or re-derives a class (the hub alone decides what a viewer may
+#: see, so a proxy-side projection would be a second, divergent policy).
+_DELIVERY_STATES = [
+    {
+        "endpoint_id": "bep_a",
+        "recipient_label": "Scout",
+        "recipient_owner_label": "Ada",
+        "state": "refused",
+        "refusal_class": "manipulation",
+    },
+    {
+        "endpoint_id": "bep_b",
+        "recipient_label": "Atlas",
+        "recipient_owner_label": "Bo",
+        "state": "held",
+    },
+    {
+        "endpoint_id": "bep_c",
+        "recipient_label": "Iris",
+        "recipient_owner_label": "Cy",
+        "state": "delivered",
+    },
+]
+
+
+async def test_delivery_states_pass_through_history_replies_and_send_unchanged(api):
+    client, _root, _d = api
+    FakeClient.behavior["conversation_messages"] = {
+        "messages": [{"id": "bcmsg_1", "seq": 1, "delivery_states": _DELIVERY_STATES}],
+        "has_more": False,
+    }
+    FakeClient.behavior["conversation_replies"] = {
+        "root": {"id": "bcmsg_root0001", "seq": 1, "delivery_states": _DELIVERY_STATES},
+        "replies": [{"id": "bcmsg_rep00001", "seq": 2, "delivery_states": _DELIVERY_STATES}],
+        "has_more": False,
+    }
+    FakeClient.behavior["conversation_send"] = {
+        "id": "bcmsg_1",
+        "seq": 1,
+        "delivery_states": _DELIVERY_STATES,
+    }
+    history = await client.get(
+        "/v1/desktop/team-bridge/conversations/bcv_abc12345/messages?tenant_id=tnt_1"
+    )
+    replies = await client.get(
+        "/v1/desktop/team-bridge/conversations/bcv_abc12345/messages/bcmsg_root0001/replies"
+        "?tenant_id=tnt_1&expected_account_id=acc_1"
+    )
+    sent = await client.post(
+        "/v1/desktop/team-bridge/conversations/bcv_abc12345/messages",
+        json={"tenant_id": "tnt_1", "client_ref": "ref-1", "body": "hello"},
+    )
+    for response in (history, replies, sent):
+        assert response.status_code == 200, response.text
+    assert history.json()["result"]["messages"][0]["delivery_states"] == _DELIVERY_STATES
+    assert replies.json()["result"]["root"]["delivery_states"] == _DELIVERY_STATES
+    assert replies.json()["result"]["replies"][0]["delivery_states"] == _DELIVERY_STATES
+    assert sent.json()["result"]["delivery_states"] == _DELIVERY_STATES
+
+
+async def test_an_absent_delivery_states_field_stays_absent(api):
+    # A third member / an older hub: the field is absent, and the proxy must not
+    # invent an empty list (the UI reads absent as "no data", [] differently).
+    client, _root, _d = api
+    FakeClient.behavior["conversation_messages"] = {
+        "messages": [{"id": "bcmsg_1", "seq": 1}],
+        "has_more": False,
+    }
+    response = await client.get(
+        "/v1/desktop/team-bridge/conversations/bcv_abc12345/messages?tenant_id=tnt_1"
+    )
+    assert response.status_code == 200, response.text
+    assert "delivery_states" not in response.json()["result"]["messages"][0]

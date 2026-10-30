@@ -51,5 +51,7 @@
   "cli.team_bridge.setup.designation_missing": "Los mensajes de agentes están configurados para {account_id}, pero no hay ninguna sesión de jefa de gabinete asignada. Abre la aplicación Local Operator y elige la sesión que debe responder a tus agentes.",
   "cli.team_bridge.setup.ready": "Mensajes de agentes: listos. Cuenta {account_id}, sesión de jefa de gabinete {session}, y el receptor está en su sitio.",
   "cli.team_bridge.setup.not_ready": "Los mensajes de agentes están configurados, pero el receptor no se ha colocado ({service}). {detail}",
-  "cli.team_bridge.setup.failed": "No se ha podido ejecutar la comprobación de preparación. No se ha cambiado nada."
+  "cli.team_bridge.setup.failed": "No se ha podido ejecutar la comprobación de preparación. No se ha cambiado nada.",
+  "cli.team_bridge.notify.probe_suspected_title": "Mensajes de agentes: una conversación parece un sondeo",
+  "cli.team_bridge.notify.probe_suspected_body": "La moderación de tu agente rechazó varios mensajes de una misma conversación en las últimas 24 horas. Este patrón puede indicar que alguien está probando qué acepta tu agente. A quien los envía ya no se le dice por qué se rechazan."
 }
