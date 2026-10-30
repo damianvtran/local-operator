@@ -50,6 +50,7 @@ from local_operator.team_bridge.client import (
 )
 from local_operator.team_bridge.store import OwnerSnapshot
 from local_operator.team_bridge.tool import BridgeRuntime, _failure_text, execute_bridge
+from local_operator.team_bridge.types import SEND_RECIPIENT_DESCRIPTION
 
 TENANT = "ten_1"
 PEER = "acc_peer"
@@ -360,6 +361,18 @@ async def test_dm_to_keeps_the_self_target_refusal_identical(own: dict[str, str]
     assert to_outcome == field_outcome, to_outcome
     assert to_outcome["code"] == "self_target"
     assert not [c for c in by_to.calls if c["method"] == "create_conversation"]
+
+
+def test_the_published_to_description_names_dm_among_the_id_only_ops() -> None:
+    """The schema has to agree with the executor about who may use ``to``.
+
+    ``dm`` now accepts the field, so a per-op tail naming only ``send``/``reply``
+    told a model the opposite of what the tool does — the "advertised and then
+    refused" defect in mirror image. One assertion, on the string the schema
+    actually publishes.
+    """
+
+    assert "dm takes ids only" in SEND_RECIPIENT_DESCRIPTION
 
 
 def test_a_locally_synthesised_refusal_still_names_its_code() -> None:

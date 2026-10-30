@@ -823,17 +823,23 @@ def _dm_recipient(
     naming a shape it had just been shown. Unfolding ``to`` onto the two fields
     dm already carries leaves ONE way to name one recipient.
 
-    NOT A SECOND RESOLVER. ``to`` arrives canonical — the field validator
-    delegates to ``validate_send_recipient``, so an unsupported key, two keys, a
-    name or a padded id is refused at parse time — and this function only
-    TRANSCRIBES. :func:`_resolve_dm_target` keeps owning every decision (the
-    fresh directory read, reachability, ``self_target``, the unknown-endpoint
-    and not-a-member refusals) unchanged, whichever spelling arrived.
+    NOT A SECOND RESOLVER. ``to`` arrives settled in the SHARED shape —
+    ``BridgeToolParams`` delegates to ``validate_recipient_shape``, so cardinality,
+    the closed key set and padding are already decided before this function runs —
+    and it only TRANSCRIBES. The PER-OP half deliberately lives here, where the op
+    is known: a display name is a legal SHAPE because ``channel_post`` (a room's
+    active members) and ``send``/``reply`` (the owner's own send allowlist) both
+    resolve one, and ``dm`` resolves against neither — its recipients are the
+    directory's people and their chiefs of staff — which is why that case is
+    answered below rather than in a second shape rule. :func:`_resolve_dm_target`
+    keeps owning every decision (the fresh directory read, reachability,
+    ``self_target``, the unknown-endpoint and not-a-member refusals) unchanged,
+    whichever spelling arrived.
 
     WHAT REFUSES HERE. Only what the pair itself cannot settle, in the
-    resolver's own words: a ``to`` that names a DISPLAY NAME (main's shared shape
-    validator admits ``{"name": …}`` because ``channel_post`` can resolve one;
-    ``dm`` has no conversation to scope a name to, so it refuses and points at
+    resolver's own words: a ``to`` that names a DISPLAY NAME (the shared shape
+    validator admits ``{"name": …}`` because a room post and a pair send both
+    resolve one; ``dm`` resolves against neither, so it refuses and points at
     ``op=directory`` rather than letting the name be silently dropped beside an
     id), an id standing beside a ``to`` that names the OTHER key ("exactly one of
     account_id or endpoint_id"), or the same key naming two different ids. None
