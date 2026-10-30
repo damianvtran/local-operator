@@ -1548,11 +1548,11 @@ def test_the_ssh_target_is_freed_before_the_terminal_row_is_readable(
     real_finish = onboard_approvals.finish
 
     def spy_release(lease) -> None:
-        order.append("release")
+        order.extend(["release"])
         real_release(lease)
 
     def spy_finish(*args: Any, **kwargs: Any) -> None:
-        order.append("finish:" + str(kwargs.get("step") or "?"))
+        order.extend(["finish:" + str(kwargs.get("step") or "?")])
         real_finish(*args, **kwargs)
 
     monkeypatch.setattr(onboard.TargetLease, "release", spy_release)
