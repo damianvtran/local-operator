@@ -27,6 +27,7 @@ HOUR = 3600.0
 OLD_H = 100.0
 
 _GIT_ENV = {
+    "GIT_CONFIG_NOSYSTEM": "1",
     "GIT_CONFIG_SYSTEM": "/dev/null",
     "GIT_TERMINAL_PROMPT": "0",
     "GIT_AUTHOR_NAME": "t",

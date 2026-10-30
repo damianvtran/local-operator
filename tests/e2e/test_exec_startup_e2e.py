@@ -263,6 +263,7 @@ def _resume_preflight_environment(run, root):
             "LOCAL_OPERATOR_CONFIG_DIR": str(root),
             "PYTHONPATH": str(Path(__file__).resolve().parents[2]),
             "TERM": "xterm-256color",
+            "GIT_CONFIG_NOSYSTEM": "1",
             "GIT_CONFIG_SYSTEM": os.devnull,
             "GIT_TERMINAL_PROMPT": "0",
             **NO_NOTIFY_ENV,
