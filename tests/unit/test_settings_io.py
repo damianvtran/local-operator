@@ -3360,24 +3360,44 @@ def _fold_for_search(text: str) -> str:
     return " ".join(re.sub(r"[^a-z0-9]+", " ", text.casefold()).split())
 
 
+def _row_copy_text(setting: settings_io.Setting) -> str:
+    """Every string that already reaches a query WITHOUT the synonyms.
+
+    Three surfaces, because the page searches the PAYLOAD rather than this
+    module: the row's own copy (label/help/key), its section's title (a keymap
+    row is findable by "hotkeys" today) and every choice it ships - the
+    projection puts each choice's label and description on the wire and the row
+    detail paints them (``tui.theme`` ships "dark" and "light"). A synonym
+    repeating any of these can never be the reason the row matched, which is
+    the rule the hygiene test below enforces (review round 1, R2: guarding only
+    label/help/key left the other two surfaces silently unenforced).
+    """
+    title = _SECTION_TITLES.get(setting.section, setting.section)
+    choices = " ".join(
+        f"{choice.label} {choice.description}" for choice in setting.resolved_choices
+    )
+    return _fold_for_search(f"{setting.label} {setting.help} {setting.key} {title} {choices}")
+
+
 def _row_search_text(setting: settings_io.Setting) -> str:
     """Everything one row is searched by: its own copy, its section, synonyms."""
-    title = _SECTION_TITLES.get(setting.section, setting.section)
-    return _fold_for_search(
-        f"{setting.label} {setting.help} {setting.key} {title} {' '.join(setting.synonyms)}"
-    )
+    return _fold_for_search(f"{_row_copy_text(setting)} {' '.join(setting.synonyms)}")
 
 
 def test_every_synonym_is_clean_and_absent_from_the_row_it_decorates() -> None:
     """Registry-wide hygiene for ``Setting.synonyms``.
 
     Why a test rather than a review note: the page reports WHY a row matched,
-    naming the word that hit, so a synonym repeating a word already in the row's
-    own label/help/key can never be that reason - it is dead weight wearing a
-    lie. Stray case or padding is just as costly in the other direction: a
-    synonym that is not lowercase-with-no-padding no longer matches the fold a
-    query goes through, so it silently stops working. Both are cheap to author
-    wrong, so both need a guard.
+    naming the word that hit, so a synonym repeating a word the row already
+    carries can never be that reason - it is dead weight wearing a lie. That
+    judgment is made over ``_row_copy_text``: label, help, key, its section's
+    title AND its choice labels/descriptions, because the payload ships all of
+    them and the page renders them beside the row.
+
+    Stray case or padding is just as costly in the other direction: a synonym
+    that is not lowercase-with-no-padding no longer matches the fold a query
+    goes through, so it silently stops working. Both are cheap to author wrong,
+    so both need a guard.
     """
     authored = [setting for setting in settings_io.SETTINGS if setting.synonyms]
     # An empty list here would make the query test below pass vacuously, which
@@ -3385,31 +3405,58 @@ def test_every_synonym_is_clean_and_absent_from_the_row_it_decorates() -> None:
     assert authored, "no registry row carries search synonyms"
 
     for setting in authored:
-        own = f" {_fold_for_search(f'{setting.label} {setting.help} {setting.key}')} "
-        assert len(set(setting.synonyms)) == len(setting.synonyms), (
-            f"{setting.key} repeats a synonym: {setting.synonyms}"
-        )
+        own = f" {_row_copy_text(setting)} "
+        assert len(set(setting.synonyms)) == len(
+            setting.synonyms
+        ), f"{setting.key} repeats a synonym: {setting.synonyms}"
         for synonym in setting.synonyms:
             assert synonym and synonym == synonym.strip(), (setting.key, synonym)
             assert synonym == synonym.lower(), (setting.key, synonym)
-            assert f" {_fold_for_search(synonym)} " not in own, (
-                f"{setting.key} repeats its own words: {synonym!r}"
-            )
+            assert (
+                f" {_fold_for_search(synonym)} " not in own
+            ), f"{setting.key} repeats its own words: {synonym!r}"
 
 
-@pytest.mark.parametrize("query", ["theme", "keyboard", "shortcut", "model", "effort"])
-def test_the_queries_this_vocabulary_exists_for_reach_a_row(query: str) -> None:
+@pytest.mark.parametrize(
+    ("query", "row_key"),
+    [
+        # The theme row's guard: "color"/"colors"/"palette" are NOT usable as
+        # synonyms here, because its own choice descriptions already say them
+        # ("classic 16 color discipline"), so the widened hygiene rule below
+        # rejects them. These phrases appear nowhere in the row, its section or
+        # any choice, so this case can only pass because of the vocabulary.
+        ("color scheme", "tui.theme"),
+        ("keyboard", "keymap.new_session"),
+        ("shortcut", "keymap.push_to_talk"),
+        # The singular of the section's title: `hotkeys` reaches these rows
+        # through the title, `hotkey` does not under a whole-token fold, which
+        # is why _HOTKEY_SYNONYMS spells it out.
+        ("hotkey", "keymap.resume"),
+        ("llm", "hosting"),
+        ("retention", "session.cleanup.max_sessions"),
+        ("tts", "speech.voice.gender"),
+        ("locale", "language"),
+        ("privacy", "providers.openrouter.data_collection"),
+    ],
+)
+def test_each_authored_query_reaches_the_row_it_is_about(query: str, row_key: str) -> None:
     """The gaps the slice was authored against (issue #1492).
 
-    Each of these found ZERO or almost no rows before the vocabulary existed:
-    ``keyboard``/``shortcut``/``color`` matched nothing at all, and the model
-    rows only matched through the literal ``model`` in their labels. This pins
-    the outcome a person actually cares about - typing the word finds the row -
-    without pinning which row, so curation can move.
+    Every pair here is a word that found this row in NO other way: delete the
+    row's synonyms and the assertion fails, which is what makes it a guard
+    rather than a description (review round 1, R1). Pinning the ROW rather than
+    "some row" is the whole point - `retention` used to match only through a
+    key, and the row a person typing it wants is a cleanup row.
+
+    `theme`, `model` and `effort` were dropped in the same round: they matched
+    their rows before the vocabulary existed, so they were cases that could not
+    fail. `color` was dropped for a different reason - the theme row's own
+    choice descriptions already carry it (see the case comment above) - so it
+    documents the projection rather than the vocabulary.
     """
-    matches = [
-        setting
+    reachable = {
+        setting.key
         for setting in settings_io.SETTINGS
         if f" {query} " in f" {_row_search_text(setting)} "
-    ]
-    assert matches, f"no setting is findable by {query!r}"
+    }
+    assert row_key in reachable, f"{query!r} no longer reaches {row_key}"

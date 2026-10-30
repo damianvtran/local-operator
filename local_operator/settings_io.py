@@ -394,9 +394,10 @@ class Setting:
     #: no reader ever sees one, so keying every row's would cost a full
     #: 8-locale translation wave for words nobody reads. Keep them CURATED:
     #: author one only where the word a person would actually type differs from
-    #: the row's own words. A synonym repeating a word already in
-    #: ``label``/``help``/``key`` makes the page's "why did this match" reason
-    #: false, and ``tests/unit/test_settings_io.py`` fails on it.
+    #: the row's own words. A synonym repeating a word the row already shows -
+    #: its label, help, key, its section's title, or any choice's label or
+    #: description - makes the page's "why did this match" reason false, and
+    #: ``tests/unit/test_settings_io.py`` fails on it.
     synonyms: tuple[str, ...] = ()
 
     @property
@@ -1706,10 +1707,20 @@ def _validate_librarian_name(value: Any) -> None:
 #: Aliases every hotkey row answers to. One tuple for all of them because the
 #: rows differ only in which command fires: someone hunting "how do I change
 #: that shortcut" wants the whole set, not whichever row I happened to annotate.
-#: "hotkey" is deliberately absent - the section title already reads "Hotkeys",
-#: so every row here matches it, and a synonym that only repeated the header
-#: would make the page's match reason point at the wrong thing.
-_HOTKEY_SYNONYMS: tuple[str, ...] = ("keyboard", "shortcut", "keybinding", "bind", "chord")
+#: "hotkey" is spelled out even though the section title reads "Hotkeys": the
+#: title carries the PLURAL, and a whole-token matcher - the fold this module's
+#: tests use, and the only one that can name the word that hit - does not reach
+#: `hotkey` from `hotkeys`. The singular is the likelier thing to type, and
+#: finding nothing for it is exactly the complaint #1492 is about (review
+#: round 1, R3).
+_HOTKEY_SYNONYMS: tuple[str, ...] = (
+    "keyboard",
+    "shortcut",
+    "keybinding",
+    "bind",
+    "chord",
+    "hotkey",
+)
 
 
 SETTINGS: tuple[Setting, ...] = (
@@ -1841,7 +1852,7 @@ SETTINGS: tuple[Setting, ...] = (
         # the `/model default` receipt.
         help=_t(_ws.model_effort_help()),
         choices=_effort_choices(),
-        synonyms=("thinking", "thinking budget", "intelligence"),
+        synonyms=("thinking", "thinking budget"),
     ),
     # -- providers ----------------------------------------------------------
     Setting(
@@ -2449,7 +2460,7 @@ SETTINGS: tuple[Setting, ...] = (
         # rather than being the one place a theme can only be tried by keeping
         # it (#440 §3).
         preview=True,
-        synonyms=("color", "colors", "palette", "color scheme", "dark mode", "light mode"),
+        synonyms=("color scheme", "colour scheme", "dark mode", "light mode"),
     ),
     # The five display flags below are the FLAT-DOTTED case: each `path` is a
     # single element containing a dot, because `tui/settings.py` reads
