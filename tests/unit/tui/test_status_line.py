@@ -2593,14 +2593,14 @@ def test_the_custom_segment_is_inert_when_unset() -> None:
     assert {width: status.render_text(width).plain for width in rows} == rows
 
 
-def test_the_custom_segment_outlives_the_title_and_sheds_before_session_figures(
+def test_the_custom_segment_outlives_title_and_cost_but_not_context(
     monkeypatch,
 ) -> None:
-    """Order: after the conversation name, before cost and context.
+    """Order: after the conversation name and cost, before the context reading.
 
-    The operator configured this reading on purpose, so it outranks a title
-    and the static settings; the session's own live figures still outrank it
-    because they predict the next action in THIS session.
+    The operator configured this reading on purpose, so it outranks a title,
+    the static settings and the re-derivable figures; the context reading
+    still outranks it because it predicts compaction in THIS session.
     """
     monkeypatch.setenv("HOME", "/Users/tester")
     status, _clock = _full_band()
@@ -2617,7 +2617,7 @@ def test_the_custom_segment_outlives_the_title_and_sheds_before_session_figures(
         for key, needle in probes.items():
             if key not in gone and needle not in plain:
                 gone[key] = width
-    assert gone["name"] > gone["custom"] > gone["cost"] > gone["context"], gone
+    assert gone["name"] > gone["cost"] > gone["custom"] > gone["context"], gone
 
 
 def test_the_custom_rung_is_in_every_ladder_and_bounded() -> None:
@@ -2629,7 +2629,7 @@ def test_the_custom_rung_is_in_every_ladder_and_bounded() -> None:
     ):
         assert "custom" in ladder
     assert "custom" not in _UNBOUNDED_RUNGS
-    assert _DROP_LADDER.index("name") < _DROP_LADDER.index("custom") < _DROP_LADDER.index("cost")
+    assert _DROP_LADDER.index("cost") < _DROP_LADDER.index("custom") < _DROP_LADDER.index("cwd")
 
 
 def test_command_facts_are_what_the_band_shows() -> None:

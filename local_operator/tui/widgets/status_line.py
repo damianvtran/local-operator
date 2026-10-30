@@ -490,18 +490,6 @@ _DROP_LADDER: tuple[str, ...] = (
     # Its place in the order is unchanged: below it are only figures an operator
     # acts on, which is where a title stops competing.
     "name",
-    # The operator's own status command (``display.composer.command``). It
-    # outlasts the title and every static setting above because the operator
-    # configured it ON PURPOSE to see something the harness cannot tell them —
-    # a quota, a deploy state — and a band that drops the one thing they asked
-    # for to keep a conversation title has its priorities backwards. It sheds
-    # before the harness's own live figures because those predict the next
-    # action in THIS session (compaction, spend) and the command's reading is
-    # usually account- or project-wide, available from wherever it came from.
-    # Inert (no cells, no effect on the walk) when no command is configured.
-    # BOUNDED (``status_command.MAX_CELLS``), so it is a legal neighbour of any
-    # rung under :data:`_UNBOUNDED_RUNGS`.
-    "custom",
     # The second figure that is not a live reading of this turn, and it sheds
     # BEFORE ``cost`` because it is strictly more re-derivable: one scalar about a
     # call that has already ENDED, and the same number is on a screen the operator
@@ -511,6 +499,19 @@ _DROP_LADDER: tuple[str, ...] = (
     "last-rate",
     # The one figure that is not a live reading of this turn.
     "cost",
+    # The operator's own status command (``display.composer.command``). It
+    # outlasts the title, every static setting and the two re-derivable figures
+    # above (rate, cost) because the operator configured it ON PURPOSE to keep
+    # something in view the harness cannot tell them — a quota, a deploy state —
+    # and a band that drops the one reading they asked for to keep a tok/s
+    # figure has its priorities backwards (measured: at 80 columns the earlier
+    # placement painted `96 tok/s ‹ $3.18` and no command output). It still
+    # sheds before ``cwd`` and ``context``: those answer "where am I" and "how
+    # close is compaction" for THIS session, and the alarms below it outrank
+    # any reading. Inert (no cells, no effect on the walk) when unset, and
+    # BOUNDED (``status_command.MAX_CELLS``), so it is a legal neighbour of any
+    # rung under :data:`_UNBOUNDED_RUNGS`.
+    "custom",
     # The working directory goes before the context number. Its shorten step has
     # already reduced it to a basename by now, so what remains is ~7 cells of
     # "where am I" against ~9 cells of "how close is compaction" — and the second
