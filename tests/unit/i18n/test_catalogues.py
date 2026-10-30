@@ -254,6 +254,10 @@ def test_wave3_hindi_carries_its_namespace_snapshot_with_parity(i18n_check) -> N
         "tui.review",
         "tui.schedule",
         "tui.status",
+        # The status band command's one-key failure notice, carried in all
+        # seven locales only with its independently audited ledger row at the
+        # current en bytes; sorts after tui.status.
+        "tui.status_command",
         "tui.tags",
         "tui.team_authoring",
         "tui.transcript",
