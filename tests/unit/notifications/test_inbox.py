@@ -366,7 +366,7 @@ def test_a_non_http_link_is_refused_as_invalid_arguments() -> None:
     result = _run_awaitable(
         tool.execute(
             "c",
-            {"title": "t", "links": [{"label": "x", "url": "file:///etc"}]},
+            {"title": "Storage export", "links": [{"label": "x", "url": "file:///etc"}]},
             None,
             None,
             context,
@@ -381,7 +381,9 @@ def test_the_cap_refusal_reaches_the_model_as_a_sentence() -> None:
 
     context = _context(door)
     tool = create_tools(context, enabled=["notify"])[0]
-    result = _run_awaitable(tool.execute("c", {"title": "t"}, None, None, context))
+    # A REAL title: the cap has to be what this test exercises, and the title guard
+    # (``NotifyParams``) would otherwise refuse the call before the door is reached.
+    result = _run_awaitable(tool.execute("c", {"title": "Storage export"}, None, None, context))
     assert isinstance(result.content[0], TextContent)
     assert result.is_error and "key" in result.content[0].text
 

@@ -996,6 +996,98 @@ async def test_status_v1_payload_is_unchanged_apart_from_the_additive_block(api)
     }
 
 
+async def test_status_carries_the_screening_summary_and_survives_damage(api):
+    """PR #3189: ``screening_summary`` rides the status read; a damaged store
+    (nested categories JSON, a non-numeric ``created_at``) still answers 200."""
+
+    import sqlite3
+    import time
+
+    from local_operator.team_bridge.store import OwnerReceipt, Store, state_db_path
+    from local_operator.team_bridge.types import OwnerSnapshot
+
+    client, root, _discipline = api
+    result = (await client.get("/v1/desktop/team-bridge/status")).json()["result"]
+    assert result["screening_summary"] is None  # not enrolled
+
+    owner = OwnerSnapshot(
+        credential_id=7,
+        account_id="acc_a",
+        tenant_id="tnt_1",
+        endpoint_id="bep_1",
+        canonical_base_url="https://qa.invalid/v1",
+        enrollment_generation=1,
+    ).validated()
+    store = Store(root)
+    store.commit_enrollment(owner, OwnerReceipt("bridge_consent_v1", "ref-1"))
+    store.persist_hold(owner, "bmsg_pair1", "delivery_failed")
+    with sqlite3.connect(state_db_path(root)) as conn:
+        conn.execute("UPDATE screening_holds SET created_at = 'not-a-number'")
+        conn.execute(
+            "INSERT INTO screening_receipts (owner_key, message_id, body_sha256, "
+            "template_sha256, prompt_version, model, verdict, categories, envelope_digest, "
+            "admission_revision, policy_epoch, creator_generation, created_at) "
+            "SELECT owner_key, 'bcmsg_r1', '', '', '', '', 'reject', '[[\"x\"]]', '', '', "
+            "1, 1, ? FROM enrollments",
+            (time.time(),),
+        )
+
+    response = await client.get("/v1/desktop/team-bridge/status")
+    assert response.status_code == 200
+    summary = response.json()["result"]["screening_summary"]
+    assert summary["held"]["count"] == 1
+    assert summary["held"]["by_code"] == {"delivery_failed": 1}
+    assert summary["rejected_24h"]["by_category"] == {"unknown": 1}
+
+
+async def test_status_screening_summary_survives_non_finite_timestamps(api):
+    """PR #3189 review round 2, m4: ``created_at`` = +inf/-inf/``'NaN'`` and an
+    infinite breaker deadline still answer 200 with strict-JSON numbers. (A
+    float NaN binds as NULL, which the NOT NULL column refuses.)"""
+
+    import sqlite3
+
+    from local_operator.team_bridge.store import OwnerReceipt, Store, state_db_path
+    from local_operator.team_bridge.types import OwnerSnapshot
+
+    client, root, _discipline = api
+    owner = OwnerSnapshot(
+        credential_id=7,
+        account_id="acc_a",
+        tenant_id="tnt_1",
+        endpoint_id="bep_1",
+        canonical_base_url="https://qa.invalid/v1",
+        enrollment_generation=1,
+    ).validated()
+    store = Store(root)
+    store.commit_enrollment(owner, OwnerReceipt("bridge_consent_v1", "ref-1"))
+    for message_id in ("bmsg_inf", "bmsg_ninf", "bmsg_nan"):
+        store.persist_hold(owner, message_id, "provider_error")
+    with sqlite3.connect(state_db_path(root)) as conn:
+        for message_id, value in (
+            ("bmsg_inf", float("inf")),
+            ("bmsg_ninf", float("-inf")),
+            ("bmsg_nan", "NaN"),
+        ):
+            conn.execute(
+                "UPDATE screening_holds SET created_at = ? WHERE message_id = ?",
+                (value, message_id),
+            )
+        conn.execute(
+            "INSERT INTO screening_breaker (account_scope, failures, open_until, updated_at) "
+            "VALUES (?,?,?,?)",
+            ("https://qa.invalid/v1|acc_a", float("inf"), float("inf"), 1.0),
+        )
+
+    response = await client.get("/v1/desktop/team-bridge/status")
+    assert response.status_code == 200
+    assert "Infinity" not in response.text and "NaN" not in response.text
+    summary = response.json()["result"]["screening_summary"]
+    assert summary["held"]["count"] == 3
+    assert summary["held"]["oldest_age_s"] is None
+    assert summary["breaker"] == {"state": "closed", "failures": 0, "open_until": None}
+
+
 async def test_an_explicit_local_off_wins_over_a_served_v2(api):
     client, root, discipline = api
     discipline.check_result = _v2_check()

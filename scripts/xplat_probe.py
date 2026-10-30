@@ -157,7 +157,10 @@ def isolated_env(root: Path) -> dict[str, str]:
     # system gitconfig sets `credential.helper = osxkeychain`), and `gh` keeps
     # its token there. Redirecting their config and refusing interactive
     # prompts removes the whole class, and costs the battery nothing: none of
-    # its probes needs a git or GitHub credential.
+    # its probes needs a git or GitHub credential. GIT_CONFIG_NOSYSTEM covers
+    # Apple Git's second system file, which GIT_CONFIG_SYSTEM leaves in place
+    # and which carries the same osxkeychain helper.
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
     env["GIT_CONFIG_SYSTEM"] = "/dev/null"
     env["GIT_CONFIG_GLOBAL"] = str(root / "gitconfig-none")
     env["GIT_TERMINAL_PROMPT"] = "0"

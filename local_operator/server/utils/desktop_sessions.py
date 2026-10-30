@@ -4542,8 +4542,11 @@ class DesktopSessionBridge:
         THE SAME SINGLEFLIGHT the ``building`` branch calls from inside
         :meth:`_journal_page` (``_order_correction``): a refresh already in flight
         is joined rather than started again, and one that has already landed is
-        left alone — ``fresh_resident`` answers that from the cache's own entry,
-        so the ordinary case costs a dict lookup and no stats. Nothing is awaited:
+        left alone — ``fresh_resident`` answers that from its own dict, and the
+        two branches are not the same thing: the lookup alone is paid only when
+        the dict holds no entry, while a PRESENT entry pays the two ``stat``
+        calls whether it is fresh (returned) or stale (still ``None``). It never
+        scans. Nothing is awaited:
         this request's page is already complete, and the point of arming the scan
         is the NEXT request, which then answers from the resident join instead of
         reopening the companion.

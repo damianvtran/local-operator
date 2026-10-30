@@ -878,6 +878,13 @@ export interface Capabilities {
 	    relays that have none of these routes). Absent on an older relay, which
 	    must HIDE the action rather than offer a control whose request would 404. */
 	session_tags?: { available: boolean };
+	/** The relay serves `GET /api/skills`, and honours `expand_skills` on a
+	    prompt/steer body with a `skills: {attached, skipped}` receipt. A RELAY
+	    capability like `session_tags`: an older relay drops the flag silently,
+	    which on the wire looks exactly like a skill that did not fire, so a
+	    client must gate the `$` affordance on this key rather than on the
+	    presence of the route. */
+	skill_invocation?: { available: boolean };
 	/** Creation keys are safe to replay only when this versioned contract is
 	    advertised. Older relays silently ignore unknown start-body fields. */
 	session_start?: { version: number; durable_idempotency: boolean; receipt_capacity: number };

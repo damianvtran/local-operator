@@ -454,6 +454,7 @@ export const BUNDLED_CHUNKS: Readonly<Record<string, () => Promise<
  { readonly BUNDLED_LOCALE: typeof BUNDLED_OWNED }>>> = {
   "es": () => import("./bundled.es.gen"),
   "fr": () => import("./bundled.fr.gen"),
+  "hi": () => import("./bundled.hi.gen"),
   "ru": () => import("./bundled.ru.gen"),
   "ur": () => import("./bundled.ur.gen"),
   "vi": () => import("./bundled.vi.gen"),

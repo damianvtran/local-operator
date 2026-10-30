@@ -1216,9 +1216,18 @@ def _git_env() -> dict[str, str]:
     refreshing the index of a repository we are inspecting, not changing. The
     repo-location variables in :data:`_GIT_ENV_SCRUBBED` are removed because a
     caller's environment must not be able to point a proof at another repo.
+
+    Both config variables are needed, and ``GIT_CONFIG_SYSTEM`` alone is not
+    enough: Apple Git reads a SECOND system file
+    (``/Library/Developer/CommandLineTools/usr/share/git-core/gitconfig``) which
+    carries ``credential.helper = osxkeychain``, and only
+    ``GIT_CONFIG_NOSYSTEM=1`` stops that file being read. Left in, a credential
+    lookup in this scrub raises the macOS "Keychain Not Found" dialog on the
+    operator's screen.
     """
     env = {k: v for k, v in os.environ.items() if k != "XPC_FLAGS" and k not in _GIT_ENV_SCRUBBED}
     env.update(
+        GIT_CONFIG_NOSYSTEM="1",
         GIT_CONFIG_SYSTEM="/dev/null",
         GIT_TERMINAL_PROMPT="0",
         GIT_OPTIONAL_LOCKS="0",

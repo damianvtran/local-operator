@@ -626,11 +626,15 @@ def _marker(path: Path) -> None:
 def _node_env(env: _Env) -> dict[str, str]:
     """The node's own environment: no session injection, its config, its HOME.
 
-    ``GIT_CONFIG_SYSTEM=/dev/null`` keeps the container/system config out of the
-    chain — on this fleet the SYSTEM config carries ``credential.helper =
-    osxkeychain``, which would ask the operator's keychain for a password (and
+    Both ``GIT_CONFIG_NOSYSTEM=1`` and ``GIT_CONFIG_SYSTEM=/dev/null`` keep the
+    container/system config out of the chain. The pair is required, not
+    belt-and-braces: on this fleet the SYSTEM config carries ``credential.helper
+    = osxkeychain``, which would ask the operator's keychain for a password (and
     the reset-pair semantics under test are about the GLOBAL and repo-local
-    helpers, which this cell provides itself).
+    helpers, which this cell provides itself) — and on macOS Apple Git reads a
+    SECOND system file (``/Library/Developer/CommandLineTools/usr/share/git-core/
+    gitconfig``) that carries the same helper and that ``GIT_CONFIG_SYSTEM``
+    alone does not suppress.
     """
     keep = ("PATH", "TERM", "TMPDIR", "LANG")
     base = {name: os.environ[name] for name in keep if name in os.environ}
@@ -638,6 +642,7 @@ def _node_env(env: _Env) -> dict[str, str]:
         {
             "HOME": str(env.home),
             CONFIG_DIR_ENV: str(env.root),
+            "GIT_CONFIG_NOSYSTEM": "1",
             "GIT_CONFIG_SYSTEM": os.devnull,
             "GIT_TERMINAL_PROMPT": "0",
         }
