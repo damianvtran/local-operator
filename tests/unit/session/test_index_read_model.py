@@ -842,8 +842,9 @@ async def test_a_timer_armed_before_a_publication_does_not_republish(tmp_path, m
     The cold half of an open arms the idle timer; the publication it needs then
     lands (from the same derivation) before the timer fires. Firing blind would
     call `publish` again, and that call is not a rewrite: `publish` returns at its
-    own "already published for this exact derivation" check after a token key
-    over the derivation plus one `stat` — measured by review round 6 at 6-7 ms and
+    own "already published for this exact derivation" check after a token over the
+    derivation, `_path`'s two resolves (the companion path and the cache
+    directory), and one `stat` — measured by review round 6 at 6-7 ms and
     scale-invariant (the "~5 s of work" this docstring used to claim was the
     queueing behind the build, not that check). The guard is kept because the
     arming state can be stale: it was read when the decision was made, and a
