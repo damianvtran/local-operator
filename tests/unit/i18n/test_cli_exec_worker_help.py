@@ -12,11 +12,13 @@ What this file pins, and why each pin exists:
    the render must hand back ONE. This is the only transformation this slice is
    allowed to make, and it is the one most likely to be undone by a well-meaning
    "tidy up the double apostrophes" edit.
-3. **Translated copy + per-namespace fallback.** The namespace carries French
-   and Chinese translations: both must render their own catalogue, byte-for-byte.
-   A locale that does not carry this namespace (`es`, `ru`, `vi`, `hi`,
-   `unknown`) must still render the English source, not blank and not the
-   message code — the additive contract the programme depends on.
+3. **Translated copy + per-namespace fallback, both DERIVED.** Which shipped
+   locales carry this namespace is read from the committed catalogues: each must
+   render its own copy byte-for-byte, and every shipped locale without it must
+   render the English source, not blank and not the message code — the additive
+   contract the programme depends on. The hand-kept set this replaces is the
+   cautionary case: it still listed `es` as lacking the namespace after `es`
+   shipped it, so the assertion described a tree that no longer existed.
 4. **The ratchet, both ways.** The file is ACTIVATED (its exact path in
    `enforced`, no ceiling left in `files`), and a reintroduced literal in a real
    sink is rejected by the production scanner — the negative control that makes
@@ -37,6 +39,7 @@ from local_operator.i18n import catalogues, messages
 from local_operator.i18n.keys import cli_exec_worker_help as keys
 from local_operator.i18n.runtime import render_message
 from local_operator.i18n.text import tr
+from tests.unit.i18n import locale_coverage
 
 _t = tr("cli.exec_worker_help")
 _ROOT = Path(local_operator.__file__).resolve().parent.parent
@@ -181,20 +184,35 @@ def test_every_generated_message_is_zero_argument() -> None:
 
 
 def test_translated_locales_use_their_copy_and_others_fall_back_to_english() -> None:
-    french = catalogues.load_catalogue("fr", NAMESPACE)
-    chinese = catalogues.load_catalogue("zh-CN", NAMESPACE)
-    spanish = catalogues.load_catalogue("es", NAMESPACE)
+    translated = locale_coverage.carrying(NAMESPACE)
+    untranslated = locale_coverage.absent(NAMESPACE)
+    locale_coverage.require_nonempty(
+        translated,
+        subject=f"{NAMESPACE} own copy",
+        detail="no shipped locale carries the namespace",
+    )
+    locale_coverage.require_nonempty(
+        untranslated,
+        subject=f"{NAMESPACE} fallback",
+        detail=f"every shipped locale carries it (carries={list(translated)})",
+    )
+    own_copy = {locale: catalogues.load_catalogue(locale, NAMESPACE) for locale in translated}
     for function in (keys.prompt(), keys.resume(), keys.job_id()):
         english = messages.render(function.code, function.params, locale="en")
-        for locale, catalogue in (("fr", french), ("zh-CN", chinese), ("es", spanish)):
+        for locale, catalogue in own_copy.items():
             rendered = messages.render(function.code, function.params, locale=locale)
-            # The locale carries the namespace: the catalogue is the expected
+            # The locale carries this namespace: the catalogue is the expected
             # bytes, and it must be a real translation, not the English source.
-            assert rendered == render_message(catalogue[function.code], function.params, locale)
-            assert rendered != english
-        # Every locale without this namespace still falls back to the source.
-        for locale in ("ru", "vi", "hi", "unknown"):
-            assert messages.render(function.code, function.params, locale=locale) == english
+            assert rendered == render_message(
+                catalogue[function.code], function.params, locale
+            ), locale
+            assert rendered != english, locale
+        # Every shipped locale without this namespace still renders the source.
+        for locale in untranslated:
+            assert messages.render(function.code, function.params, locale=locale) == english, locale
+        # An unshipped tag is not a locale: it resolves to the source too, which
+        # is a different guarantee from "shipped but untranslated".
+        assert messages.render(function.code, function.params, locale="unknown") == english
 
 
 def test_every_key_carries_full_context() -> None:

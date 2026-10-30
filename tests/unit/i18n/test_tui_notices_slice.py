@@ -8,12 +8,14 @@ What this file pins, and why each pin exists:
 2. **The additive event contract (RFC §2.6).** A notice now carries
    `code`/`params` beside `text`; older clients read `text` verbatim, and a
    locale-aware viewer can re-render without parsing prose.
-3. **Per-namespace fallback.** The namespace started en-only, and a shipped
-   locale that does not carry it still reads the English text. Every shipped
-   locale now carries it (the fast-mode fix translated all five), so the
-   fallback is pinned against `ur`, which is inactive and has no directory:
-   the point is that a missing namespace degrades to English and never to the
-   raw message code.
+3. **Per-namespace fallback, DERIVED.** The namespace started en-only, and a
+   shipped locale that does not carry it still reads the English text, never the
+   raw message code. WHICH locales those are is read from the committed
+   catalogues rather than pinned to one by name. `ur` was that name, and the note
+   here called it "inactive, no directory" — it is a shipped locale carrying
+   dozens of other namespaces, just not this file. When the last locale without
+   `tui.notices` lands, the derived set empties and the guard skips this half with
+   that reason (see `locale_coverage`) instead of going red on a working wave.
 """
 
 from __future__ import annotations
@@ -25,6 +27,7 @@ from local_operator.harness.loop import _notice
 from local_operator.harness.types import NoticeEvent
 from local_operator.i18n import catalogues, messages
 from local_operator.i18n.keys import tui_notices as keys
+from tests.unit.i18n import locale_coverage
 
 NAMESPACE = "tui.notices"
 _ROOT = Path(local_operator.__file__).resolve().parent.parent
@@ -197,13 +200,22 @@ def test_four_digit_counts_keep_plain_digits() -> None:
 
 
 def test_an_uncarried_locale_falls_back_to_english() -> None:
-    # `ur` rather than `fr`: fr now carries this namespace (fast-mode fix), so
-    # pinning fr here would assert translation-identity and silently rot into a
-    # duplicate of the catalogue when the copy is next reviewed. An inactive
-    # locale with no directory exercises the fallback path itself.
-    assert not (catalogues.catalogue_root() / "ur" / f"{NAMESPACE}.json").exists()
+    # The set is derived, not named: pinning one locale (`ur` was the last
+    # shipped one without this file) asserts a corpus fact the next wave
+    # retires — and the fallback path would then lose its pin entirely rather
+    # than move it.
+    untranslated = locale_coverage.absent(NAMESPACE)
+    locale_coverage.require_nonempty(
+        untranslated,
+        subject=f"{NAMESPACE} fallback",
+        detail=(
+            "every shipped locale carries it "
+            f"(carries={list(locale_coverage.carrying(NAMESPACE))})"
+        ),
+    )
     for key in REPLACED_LITERALS:
         message = getattr(keys, key)(**_SAMPLE_PARAMS.get(key, {}))
         en = messages.render(message.code, message.params, locale="en")
-        assert messages.render(message.code, message.params, locale="ur") == en
+        for locale in untranslated:
+            assert messages.render(message.code, message.params, locale=locale) == en, locale
         assert _notice(message).text == en
