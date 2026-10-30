@@ -440,9 +440,9 @@ target-version = ['py312']
 # Vendored release helpers stay byte-identical to their recorded upstream SHA.
 # `i18n/audits/evidence` holds AUDIT EVIDENCE, not source: the bundles carry the
 # scripts an auditor actually ran, and reformatting them would edit the record a
-# ledger row points at. Renaming them to `*.py.txt` (the older convention) does
-# not work — isort and black parse by content, not by suffix — so the directory
-# is excluded from the formatters instead.
+# ledger row points at. Renaming them to `*.py.txt` (the older convention) is not
+# enough on its own: flake8 and black skip by suffix, but isort parses by content
+# and keeps flagging them, so the directory is excluded from all three instead.
 extend-exclude = "F401|benchmarks/osworld_v2_adapter/src/evaluation_examples/|i18n/audits/evidence"
 
 [tool.pylint."messages control"]
