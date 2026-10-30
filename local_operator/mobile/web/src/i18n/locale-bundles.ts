@@ -3,8 +3,8 @@
  * second locale truth — `registerBundles` is the only door.
  *
  * WHY A LOADER AT ALL. Every owned string exists in English, so the eager map
- * is complete on its own; the other shipped locales are 26–36 kB built each and
- * only one is ever active (`bundled.gen.ts`, `BUNDLED_CHUNKS`). Loading one is a
+ * is complete on its own; the other shipped locales are one chunk each and only
+ * one is ever active (`bundled.gen.ts`, `BUNDLED_CHUNKS`). Loading one is a
  * SIZE optimisation, never a correctness prerequisite: a chunk that never
  * arrives leaves the whole page in English — never half of it in two languages,
  * because the runtime only selects a locale whose owned namespaces are ALL

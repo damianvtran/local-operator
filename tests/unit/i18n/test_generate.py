@@ -171,8 +171,7 @@ def test_bundled_spa_module_emits_only_shipped_localized_owned_copy(
     The synthetic Urdu text is a generation fixture, not a translation or an
     audit. An unshipped locale beside it must not leak into the client package,
     and the eager map must not carry the other locales' bytes: that is the whole
-    point of the chunk split (all eight eagerly measured +261,511 B / +36 % of
-    the built bundle to render one).
+    point of the chunk split, where a chunk is fetched only for the locale in use.
     """
     root, emitted = generated
     monkeypatch.setattr(i18n_generate, "_shipped_locales", lambda: ("en", "ur"))

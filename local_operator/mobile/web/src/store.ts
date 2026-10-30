@@ -198,11 +198,12 @@ function emitStream() {
    stays on `useLanguage`). The generator emits the explicit owned namespaces
    only; no wire prose is bundled, so this cannot smuggle a served namespace into
    the client.
-   THE OTHER SHIPPED LOCALES ARE CHUNKS, not part of this map: one 26-36 kB built
-   `bundled.<locale>.gen.ts` each (measured: ur 35,857 B, zh-CN 26,152 B),
-   requested when a locale is named and awaited only inside the pre-mount budget
-   (`localeBundleLoader`, `resolveInitialLocale`). A locale's copy is paid for
-   only when its chunk is asked for, never by a reader who never selects it.
+   THE OTHER SHIPPED LOCALES ARE CHUNKS, not part of this map: one
+   `bundled.<locale>.gen.ts` each, requested when a locale is named and awaited
+   only inside the pre-mount budget (`localeBundleLoader`, `resolveInitialLocale`).
+   A locale's copy is paid for only when its chunk is asked for, never by a reader
+   who never selects it. No size is quoted here: the chunk set grows every time a
+   catalogue completes, so measure `dist/assets` after a `vite build` instead.
    Registration runs through the ONE store channel — `registerBundle`/`registerBundles`
    -> `changed()` -> `publishLocaleSnapshot` — so it repaints and re-labels the
    document instead of creating a second locale truth. Placed AFTER the listener
