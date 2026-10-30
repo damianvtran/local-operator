@@ -48,6 +48,7 @@ from local_operator.browser_bridge import install as browser_install
 from local_operator.mobile import install as mobile_install
 from local_operator.network import relay as relay_install
 from local_operator.paths import CONFIG_DIR_ENV
+from local_operator.team_bridge.connector import install as connector_install
 from local_operator.tunnels import config as tunnel_config
 from local_operator.tunnels import install as tunnel_install
 from local_operator.tunnels import state as tunnel_state
@@ -185,7 +186,7 @@ def _patch_launcher(
 
 
 def _modules(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Target]:
-    """``name -> (module, plist path, render, label)`` for the five daemons.
+    """``name -> (module, plist path, render, label)`` for the six daemons.
 
     ``plist_path`` is patched to ``tmp_path`` on every one of them: the repair's
     job is to touch the file launchd resolves, and these tests care about which
@@ -204,7 +205,7 @@ def _modules(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Targe
     monkeypatch.setattr(launchd, "config_lives_in_real_home", lambda config: True)
     monkeypatch.setattr(launchd, "shared_label_refusal", lambda config: None)
     monkeypatch.setattr(wakes_install, "_shared_label_refusal", lambda config: None)
-    # The supervisor IDENTITY is what the five repairs branch on now (a repair is
+    # The supervisor IDENTITY is what the six repairs branch on now (a repair is
     # launchd's, and the other two platforms' units are handled elsewhere), so
     # the seam is `supervisors.supervisor` — one patch covering mobile, wakes, the
     # browser bridge and the network relay, whose own
@@ -257,6 +258,17 @@ def _modules(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Targe
             lambda: relay_install.render_plist(),
             relay_install.LABEL,
         ),
+        (
+            # The connector's own plist records NO config env (only the
+            # `LOCAL_OPERATOR_CONNECTOR` marker), so its repair reads the store off
+            # `--config-dir` in ProgramArguments — which is exactly what these cells
+            # exercise through a legacy plist written with that argument.
+            "bridge connector",
+            connector_install,
+            "plist_path",
+            lambda: connector_install.render_plist(store),
+            connector_install.LABEL,
+        ),
     ):
         path = tmp_path / f"{label}.plist"
         monkeypatch.setattr(module, path_attr, lambda path=path: path)
@@ -269,12 +281,25 @@ def targets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Target
     return _modules(tmp_path, monkeypatch)
 
 
-def _write_legacy(path: Path, label: str, module: str) -> None:
+def _write_legacy(path: Path, label: str, module: str, config: Path) -> None:
+    """The pre-branding shape: a bare interpreter, no ``Program`` key.
+
+    ``--config-dir`` is carried because every render here has one: the connector's
+    repair reads the store off that argument (its plist records no config env), and
+    a daemon repaired onto a store other than the one it serves is the defect the
+    ownership guard exists for. The other five ignore the extra argument.
+    """
     path.write_bytes(
         plistlib.dumps(
             {
                 "Label": label,
-                "ProgramArguments": [sys.executable, "-m", module],
+                "ProgramArguments": [
+                    sys.executable,
+                    "-m",
+                    module,
+                    "--config-dir",
+                    str(config),
+                ],
                 "RunAtLoad": True,
             }
         )
@@ -288,6 +313,7 @@ def _module_for(name: str) -> str:
         "tunnel": "local_operator.tunnels.service",
         "wakes supervisor": "local_operator.wakes.supervisor",
         "network relay": "local_operator.network.relay",
+        "bridge connector": "local_operator.team_bridge.connector",
     }[name]
 
 
@@ -305,6 +331,7 @@ _RECOVERY = {
     "tunnel": "lop tunnel install",
     "wakes supervisor": "lop wake install",
     "network relay": "lop network install",
+    "bridge connector": "lop team-bridge receiver install",
 }
 
 
@@ -330,13 +357,21 @@ def test_the_killed_refresh_reports_the_vocabulary_this_file_pins() -> None:
 
 
 @pytest.mark.parametrize(
-    "name", ["mobile", "browser bridge", "tunnel", "wakes supervisor", "network relay"]
+    "name",
+    [
+        "mobile",
+        "browser bridge",
+        "tunnel",
+        "wakes supervisor",
+        "network relay",
+        "bridge connector",
+    ],
 )
 def test_a_stale_plist_is_rewritten_and_the_daemon_restarted(
-    name: str, targets: dict[str, Target], monkeypatch: pytest.MonkeyPatch
+    name: str, targets: dict[str, Target], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     module, path, render, label = targets[name]
-    _write_legacy(path, label, _module_for(name))
+    _write_legacy(path, label, _module_for(name), tmp_path / "config-root")
     calls: list[tuple[str, ...]] = []
     _patch_launcher(monkeypatch, module, calls)
 
@@ -362,10 +397,18 @@ def test_a_stale_plist_is_rewritten_and_the_daemon_restarted(
 
 
 @pytest.mark.parametrize(
-    "name", ["mobile", "browser bridge", "tunnel", "wakes supervisor", "network relay"]
+    "name",
+    [
+        "mobile",
+        "browser bridge",
+        "tunnel",
+        "wakes supervisor",
+        "network relay",
+        "bridge connector",
+    ],
 )
 def test_a_current_plist_is_not_touched_at_all(
-    name: str, targets: dict[str, Target], monkeypatch: pytest.MonkeyPatch
+    name: str, targets: dict[str, Target], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """No rewrite, no restart: a healthy daemon is not bounced on every upgrade.
 
@@ -393,10 +436,18 @@ def test_a_current_plist_is_not_touched_at_all(
 
 
 @pytest.mark.parametrize(
-    "name", ["mobile", "browser bridge", "tunnel", "wakes supervisor", "network relay"]
+    "name",
+    [
+        "mobile",
+        "browser bridge",
+        "tunnel",
+        "wakes supervisor",
+        "network relay",
+        "bridge connector",
+    ],
 )
 def test_an_absent_plist_is_left_alone(
-    name: str, targets: dict[str, Target], monkeypatch: pytest.MonkeyPatch
+    name: str, targets: dict[str, Target], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     module, path, _render, _label = targets[name]
     assert not path.exists()
@@ -410,14 +461,22 @@ def test_an_absent_plist_is_left_alone(
 
 
 @pytest.mark.parametrize(
-    "name", ["mobile", "browser bridge", "tunnel", "wakes supervisor", "network relay"]
+    "name",
+    [
+        "mobile",
+        "browser bridge",
+        "tunnel",
+        "wakes supervisor",
+        "network relay",
+        "bridge connector",
+    ],
 )
 def test_a_sandbox_never_reaches_launchd(
-    name: str, targets: dict[str, Target], monkeypatch: pytest.MonkeyPatch
+    name: str, targets: dict[str, Target], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """The guard that has already cost the operator one live daemon once."""
     module, path, render, label = targets[name]
-    _write_legacy(path, label, _module_for(name))
+    _write_legacy(path, label, _module_for(name), tmp_path / "config-root")
     before = path.read_bytes()
     monkeypatch.setattr(launchd, "is_own_plist", lambda path, label: False)
     calls: list[tuple[str, ...]] = []
@@ -432,13 +491,21 @@ def test_a_sandbox_never_reaches_launchd(
 
 
 @pytest.mark.parametrize(
-    "name", ["mobile", "browser bridge", "tunnel", "wakes supervisor", "network relay"]
+    "name",
+    [
+        "mobile",
+        "browser bridge",
+        "tunnel",
+        "wakes supervisor",
+        "network relay",
+        "bridge connector",
+    ],
 )
 def test_a_failed_bootstrap_is_reported_not_raised(
-    name: str, targets: dict[str, Target], monkeypatch: pytest.MonkeyPatch
+    name: str, targets: dict[str, Target], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     module, path, _render, label = targets[name]
-    _write_legacy(path, label, _module_for(name))
+    _write_legacy(path, label, _module_for(name), tmp_path / "config-root")
     calls: list[tuple[str, ...]] = []
     _patch_launcher(monkeypatch, module, calls, fail=True)
 
@@ -457,11 +524,25 @@ def test_a_failed_bootstrap_is_reported_not_raised(
 
 
 @pytest.mark.parametrize(
-    "name", ["mobile", "browser bridge", "tunnel", "wakes supervisor", "network relay"]
+    "name",
+    [
+        "mobile",
+        "browser bridge",
+        "tunnel",
+        "wakes supervisor",
+        "network relay",
+        "bridge connector",
+    ],
 )
-def test_a_raising_repair_never_escapes(name: str, targets: dict[str, Target], monkeypatch) -> None:
+def test_a_raising_repair_never_escapes(
+    name: str, targets: dict[str, Target], monkeypatch, tmp_path: Path
+) -> None:
     """``lop-update`` has already succeeded; nothing here may roll that back."""
     module, path, _render, label = targets[name]
+    # A plist is WRITTEN first: a repair with nothing to read answers
+    # ``not-installed`` before it calls anything, so a cell that wants the reader
+    # to raise has to give it a reader.
+    _write_legacy(path, label, _module_for(name), tmp_path / "config-root")
 
     def explode(*args: object, **kwargs: object):
         raise RuntimeError("boom")
@@ -563,6 +644,7 @@ _PIDS = {
     "tunnel": 333,
     "wakes supervisor": 444,
     "network relay": 555,
+    "bridge connector": 666,
 }
 
 #: The pid a successful REVIVAL brings up for a loaded-but-stopped job. Distinct
@@ -632,7 +714,7 @@ def _rig(
     unconditionally right after this one, so ``refresh_plist_if_stale`` returns before
     touching launchd. Every test here therefore expects NO call at all for
     ``mobile`` — which is also what makes the "nothing moved" case below a statement
-    about four daemons rather than five.
+    about five daemons rather than six.
     """
     _layout(tmp_path, monkeypatch, running=running, current=current, pointer=pointer)
     for _name, (_module, path, render, _label) in targets.items():
@@ -895,7 +977,7 @@ def test_a_stale_plist_is_repaired_the_same_way_when_the_build_also_moved(
         running="20260921T125352Z-0.61.12",
         current="20260924T103058Z-509c7450dbf6",
     )
-    _write_legacy(path, label, _module_for("tunnel"))
+    _write_legacy(path, label, _module_for("tunnel"), tmp_path / "config-root")
     calls: list[tuple[str, ...]] = []
     _patch_launcher(monkeypatch, module, calls, pid=_PIDS["tunnel"])
     monkeypatch.setattr(

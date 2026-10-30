@@ -534,6 +534,10 @@ _DAEMON_PLIST_LABELS = (
     "com.local-operator.tunnel",
     "com.local-operator.wakes",
     "com.local-operator.network",
+    # The bridge connector (team bridge receiver) joined the supervised set when
+    # it stopped being macOS-optional; it is listed here so the upgrade finds it
+    # without importing an install module it may not have loaded.
+    "com.local-operator.bridge-connector",
 )
 
 #: Whether this host's supervised daemons are launchd AGENTS, i.e. whether the
@@ -7690,6 +7694,7 @@ def _refresh_steps() -> tuple[tuple[str, str, Callable[[], launchd.PlistRefresh]
     """
     from local_operator.browser_bridge import install as browser_install
     from local_operator.network import relay as relay_install
+    from local_operator.team_bridge.connector import install as connector_install
     from local_operator.tunnels import install as tunnel_install
     from local_operator.wakes import install as wakes_install
 
@@ -7698,6 +7703,16 @@ def _refresh_steps() -> tuple[tuple[str, str, Callable[[], launchd.PlistRefresh]
         ("tunnel", "lop tunnel install", tunnel_install.refresh_plist_if_stale),
         ("wakes supervisor", "lop wake install", wakes_install.refresh_plist_if_stale),
         ("network relay", "lop network install", relay_install.refresh_plist_if_stale),
+        # THE BRIDGE CONNECTOR JOINED FOR THE SAME REASON THE RELAY DID: its plist
+        # is byte-identical across generations (the stable shim), so only the
+        # second question moves it — and an always-on connector left on an old
+        # build HOLDS the account's machine-wide lock, which refuses every
+        # supervised start behind it (measured: seven days, 2,826 refusals).
+        (
+            "bridge connector",
+            "lop team-bridge receiver install",
+            connector_install.refresh_plist_if_stale,
+        ),
     )
 
 
