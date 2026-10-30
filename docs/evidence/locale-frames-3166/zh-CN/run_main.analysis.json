@@ -1,0 +1,296 @@
+[
+ {
+  "label": "zh-CN-populated-deeplink",
+  "locale": "zh-CN",
+  "mode": "populated",
+  "screen": "deeplink",
+  "configLanguage": "zh-CN",
+  "lang": "zh-CN",
+  "dir": "ltr",
+  "firstContent": {
+   "t": 350,
+   "lang": "zh-CN",
+   "dir": "ltr",
+   "text": "‹ 正在连接会话…… ↑"
+  },
+  "firstVerdict": "locale",
+  "frames": 177,
+  "framesBeforeContent": 3,
+  "contentFrames": 174,
+  "englishFrames": 0,
+  "firstEnglishAt": null,
+  "englishBeforeContent": 0,
+  "settledText": "‹ Locale evidence A 在线 · 工作中 · 38s ⋮ Which locale is on screen right now? This line rides the transcript wire rather than the bundled owned copy, so it stays English by design. ⡿ running the locale evidence pass 38s model ■ ↑",
+  "chunks": [
+   {
+    "url": "bundled.zh-CN.gen-BB836pz3.js",
+    "status": 200,
+    "mimeType": "text/javascript",
+    "fromDiskCache": false,
+    "fromServiceWorker": false,
+    "encodedDataLength": 26404
+   }
+  ],
+  "chunkResource": {
+   "path": "/assets/bundled.zh-CN.gen-BB836pz3.js",
+   "name": "bundled.zh-CN.gen-BB836pz3.js",
+   "startTime": 219,
+   "responseEnd": 249,
+   "transferSize": 26452,
+   "encodedBodySize": 26152,
+   "decodedBodySize": 26152,
+   "status": 200
+  },
+  "settle": {
+   "quietMs": 1094,
+   "waitedMs": 1603,
+   "samples": 6,
+   "capped": false
+  }
+ },
+ {
+  "label": "zh-CN-populated-list",
+  "locale": "zh-CN",
+  "mode": "populated",
+  "screen": "list",
+  "configLanguage": "zh-CN",
+  "lang": "zh-CN",
+  "dir": "ltr",
+  "firstContent": {
+   "t": 11924,
+   "lang": "zh-CN",
+   "dir": "ltr",
+   "text": "对话 全部 待你处理 · 0 未读 · 0 ＋ 新建"
+  },
+  "firstVerdict": "locale",
+  "frames": 34,
+  "framesBeforeContent": 4,
+  "contentFrames": 30,
+  "englishFrames": 0,
+  "firstEnglishAt": null,
+  "englishBeforeContent": 0,
+  "settledText": "对话 全部 待你处理 · 0 未读 · 0 活跃 Locale evidence B ⋮ Locale evidence A 工作中 ⋮ ＋ 新建",
+  "chunks": [
+   {
+    "url": "bundled.zh-CN.gen-BB836pz3.js",
+    "status": 200,
+    "mimeType": "text/javascript",
+    "fromDiskCache": false,
+    "fromServiceWorker": false,
+    "encodedDataLength": 26404
+   }
+  ],
+  "chunkResource": {
+   "path": "/assets/bundled.zh-CN.gen-BB836pz3.js",
+   "name": "bundled.zh-CN.gen-BB836pz3.js",
+   "startTime": 10981,
+   "responseEnd": 10987,
+   "transferSize": 26452,
+   "encodedBodySize": 26152,
+   "decodedBodySize": 26152,
+   "status": 200
+  },
+  "settle": {
+   "quietMs": 904,
+   "waitedMs": 3352,
+   "samples": 7,
+   "capped": false
+  }
+ },
+ {
+  "label": "zh-CN-populated-settings",
+  "locale": "zh-CN",
+  "mode": "populated",
+  "screen": "settings",
+  "configLanguage": "zh-CN",
+  "lang": "zh-CN",
+  "dir": "ltr",
+  "firstContent": {
+   "t": 521,
+   "lang": "zh-CN",
+   "dir": "ltr",
+   "text": "返回 电脑设置 更改仅对此电脑生效。 正在加载账户路由……"
+  },
+  "firstVerdict": "locale",
+  "frames": 152,
+  "framesBeforeContent": 7,
+  "contentFrames": 145,
+  "englishFrames": 0,
+  "firstEnglishAt": null,
+  "englishBeforeContent": 0,
+  "settledText": "返回 电脑设置 更改仅对此电脑生效。 account selection policy Chooses eligible sibling accounts within the same provider and credential tier. A compatible, unexpired lease from a successful request takes priority for every policy; it does not guarantee a cache hit. Reset soonest prefers the nearest weekly refill, then the five-hour refill within one-minute ties. An explicit policy overrides the legacy usage-aware account pick setting. Reset soonest Most headroom Fair spread Prefer the nearest included-plan reset; spread ties and unknown reports deterministically. Default for new configurations. 保存策略",
+  "chunks": [
+   {
+    "url": "bundled.zh-CN.gen-BB836pz3.js",
+    "status": 200,
+    "mimeType": "text/javascript",
+    "fromDiskCache": false,
+    "fromServiceWorker": false,
+    "encodedDataLength": 26404
+   }
+  ],
+  "chunkResource": {
+   "path": "/assets/bundled.zh-CN.gen-BB836pz3.js",
+   "name": "bundled.zh-CN.gen-BB836pz3.js",
+   "startTime": 457,
+   "responseEnd": 478,
+   "transferSize": 26452,
+   "encodedBodySize": 26152,
+   "decodedBodySize": 26152,
+   "status": 200
+  },
+  "settle": {
+   "quietMs": 1133,
+   "waitedMs": 1153,
+   "samples": 5,
+   "capped": false
+  }
+ },
+ {
+  "label": "zh-CN-empty-list",
+  "locale": "zh-CN",
+  "mode": "empty",
+  "screen": "list",
+  "configLanguage": "zh-CN",
+  "lang": "zh-CN",
+  "dir": "ltr",
+  "firstContent": {
+   "t": 760,
+   "lang": "zh-CN",
+   "dir": "ltr",
+   "text": "对话 全部 待你处理 · 0 未读 · 0 ＋ 新建"
+  },
+  "firstVerdict": "locale",
+  "frames": 297,
+  "framesBeforeContent": 2,
+  "contentFrames": 295,
+  "englishFrames": 0,
+  "firstEnglishAt": null,
+  "englishBeforeContent": 0,
+  "settledText": "对话 暂无对话 点击“新建”开始对话，或在电脑上用Local Operator开始 ＋ 新建",
+  "chunks": [
+   {
+    "url": "bundled.zh-CN.gen-BB836pz3.js",
+    "status": 200,
+    "mimeType": "text/javascript",
+    "fromDiskCache": false,
+    "fromServiceWorker": false,
+    "encodedDataLength": 26404
+   }
+  ],
+  "chunkResource": {
+   "path": "/assets/bundled.zh-CN.gen-BB836pz3.js",
+   "name": "bundled.zh-CN.gen-BB836pz3.js",
+   "startTime": 311,
+   "responseEnd": 316,
+   "transferSize": 26452,
+   "encodedBodySize": 26152,
+   "decodedBodySize": 26152,
+   "status": 200
+  },
+  "settle": {
+   "quietMs": 1113,
+   "waitedMs": 1128,
+   "samples": 4,
+   "capped": false
+  }
+ },
+ {
+  "label": "zh-CN-deadapi-list",
+  "locale": "zh-CN",
+  "mode": "deadapi",
+  "screen": "list",
+  "configLanguage": "zh-CN",
+  "lang": "zh-CN",
+  "dir": "ltr",
+  "firstContent": {
+   "t": 1339,
+   "lang": "zh-CN",
+   "dir": "ltr",
+   "text": "对话 全部 待你处理 · 0 未读 · 0 ＋ 新建"
+  },
+  "firstVerdict": "locale",
+  "frames": 163,
+  "framesBeforeContent": 5,
+  "contentFrames": 158,
+  "englishFrames": 0,
+  "firstEnglishAt": null,
+  "englishBeforeContent": 0,
+  "settledText": "对话 全部 待你处理 · 0 未读 · 0 ＋ 新建",
+  "chunks": [
+   {
+    "url": "bundled.zh-CN.gen-BB836pz3.js",
+    "status": 200,
+    "mimeType": "text/javascript",
+    "fromDiskCache": false,
+    "fromServiceWorker": false,
+    "encodedDataLength": 26404
+   }
+  ],
+  "chunkResource": {
+   "path": "/assets/bundled.zh-CN.gen-BB836pz3.js",
+   "name": "bundled.zh-CN.gen-BB836pz3.js",
+   "startTime": 533,
+   "responseEnd": 542,
+   "transferSize": 26452,
+   "encodedBodySize": 26152,
+   "decodedBodySize": 26152,
+   "status": 200
+  },
+  "settle": {
+   "quietMs": 1052,
+   "waitedMs": 1060,
+   "samples": 5,
+   "capped": false
+  }
+ },
+ {
+  "label": "zh-CN-deadapi-settings",
+  "locale": "zh-CN",
+  "mode": "deadapi",
+  "screen": "settings",
+  "configLanguage": "zh-CN",
+  "lang": "zh-CN",
+  "dir": "ltr",
+  "firstContent": {
+   "t": 613,
+   "lang": "zh-CN",
+   "dir": "ltr",
+   "text": "返回 电脑设置 更改仅对此电脑生效。 正在加载账户路由……"
+  },
+  "firstVerdict": "locale",
+  "frames": 169,
+  "framesBeforeContent": 3,
+  "contentFrames": 166,
+  "englishFrames": 0,
+  "firstEnglishAt": null,
+  "englishBeforeContent": 0,
+  "settledText": "返回 电脑设置 更改仅对此电脑生效。 无法加载账户路由。检查网络连接后重试。 重试",
+  "chunks": [
+   {
+    "url": "bundled.zh-CN.gen-BB836pz3.js",
+    "status": 200,
+    "mimeType": "text/javascript",
+    "fromDiskCache": false,
+    "fromServiceWorker": false,
+    "encodedDataLength": 26404
+   }
+  ],
+  "chunkResource": {
+   "path": "/assets/bundled.zh-CN.gen-BB836pz3.js",
+   "name": "bundled.zh-CN.gen-BB836pz3.js",
+   "startTime": 553,
+   "responseEnd": 562,
+   "transferSize": 26452,
+   "encodedBodySize": 26152,
+   "decodedBodySize": 26152,
+   "status": 200
+  },
+  "settle": {
+   "quietMs": 1191,
+   "waitedMs": 1194,
+   "samples": 5,
+   "capped": false
+  }
+ }
+]

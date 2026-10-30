@@ -1,0 +1,3 @@
+[{"locale":"zh-CN","mode":"populated","port":4851,"screens":[{"name":"deeplink","hash":"/s/locale-a","settle_s":4.5,"shot_first":6000},{"name":"list","hash":"/","settle_s":5.5},{"name":"settings","hash":"/settings/account-routing","settle_s":5.5}]},
+ {"locale":"zh-CN","mode":"empty","port":4852,"screens":[{"name":"list","hash":"/","settle_s":12}]},
+ {"locale":"zh-CN","mode":"deadapi","port":4853,"screens":[{"name":"list","hash":"/","settle_s":6.5},{"name":"settings","hash":"/settings/account-routing","settle_s":6.5}]}]

@@ -1,0 +1,149 @@
+[
+ {
+  "label": "zh-CN-rerun-populated-list",
+  "locale": "zh-CN",
+  "mode": "populated",
+  "screen": "list",
+  "configLanguage": "zh-CN",
+  "lang": "zh-CN",
+  "dir": "ltr",
+  "firstContent": {
+   "t": 1885,
+   "lang": "zh-CN",
+   "dir": "ltr",
+   "text": "对话 全部 待你处理 · 0 未读 · 0 ＋ 新建"
+  },
+  "firstVerdict": "locale",
+  "frames": 140,
+  "framesBeforeContent": 2,
+  "contentFrames": 138,
+  "englishFrames": 0,
+  "firstEnglishAt": null,
+  "englishBeforeContent": 0,
+  "settledText": "对话 全部 待你处理 · 0 未读 · 0 ＋ 新建",
+  "chunks": [
+   {
+    "url": "bundled.zh-CN.gen-BB836pz3.js",
+    "status": 200,
+    "mimeType": "text/javascript",
+    "fromDiskCache": false,
+    "fromServiceWorker": false,
+    "encodedDataLength": 26404
+   }
+  ],
+  "chunkResource": {
+   "path": "/assets/bundled.zh-CN.gen-BB836pz3.js",
+   "name": "bundled.zh-CN.gen-BB836pz3.js",
+   "startTime": 293,
+   "responseEnd": 297,
+   "transferSize": 26452,
+   "encodedBodySize": 26152,
+   "decodedBodySize": 26152,
+   "status": 200
+  },
+  "settle": {
+   "quietMs": 991,
+   "waitedMs": 1008,
+   "samples": 4,
+   "capped": false
+  }
+ },
+ {
+  "label": "zh-CN-rerun-populated-deeplink",
+  "locale": "zh-CN",
+  "mode": "populated",
+  "screen": "deeplink",
+  "configLanguage": "zh-CN",
+  "lang": "zh-CN",
+  "dir": "ltr",
+  "firstContent": {
+   "t": 657,
+   "lang": "zh-CN",
+   "dir": "ltr",
+   "text": "‹ 正在连接会话…… ↑"
+  },
+  "firstVerdict": "locale",
+  "frames": 111,
+  "framesBeforeContent": 6,
+  "contentFrames": 105,
+  "englishFrames": 0,
+  "firstEnglishAt": null,
+  "englishBeforeContent": 0,
+  "settledText": "‹ Locale evidence A 在线 · 工作中 · 41s ⋮ Which locale is on screen right now? This line rides the transcript wire rather than the bundled owned copy, so it stays English by design. ⣾ running the locale evidence pass 41s model ■ ↑",
+  "chunks": [
+   {
+    "url": "bundled.zh-CN.gen-BB836pz3.js",
+    "status": 200,
+    "mimeType": "text/javascript",
+    "fromDiskCache": false,
+    "fromServiceWorker": false,
+    "encodedDataLength": 26404
+   }
+  ],
+  "chunkResource": {
+   "path": "/assets/bundled.zh-CN.gen-BB836pz3.js",
+   "name": "bundled.zh-CN.gen-BB836pz3.js",
+   "startTime": 535,
+   "responseEnd": 540,
+   "transferSize": 26452,
+   "encodedBodySize": 26152,
+   "decodedBodySize": 26152,
+   "status": 200
+  },
+  "settle": {
+   "quietMs": 1624,
+   "waitedMs": 1626,
+   "samples": 5,
+   "capped": false
+  }
+ },
+ {
+  "label": "zh-CN-slowchunk-populated-deeplink",
+  "locale": "zh-CN",
+  "mode": "populated",
+  "screen": "deeplink",
+  "configLanguage": "zh-CN",
+  "lang": "zh-CN",
+  "dir": "ltr",
+  "firstContent": {
+   "t": 1823,
+   "lang": "en",
+   "dir": "ltr",
+   "text": "‹ connecting to session… ↑"
+  },
+  "firstVerdict": "english",
+  "frames": 286,
+  "framesBeforeContent": 49,
+  "contentFrames": 237,
+  "englishFrames": 9,
+  "firstEnglishAt": 1823,
+  "englishBeforeContent": 0,
+  "settledText": "‹ Locale evidence A 在线 · 工作中 · 49s ⋮ Which locale is on screen right now? This line rides the transcript wire rather than the bundled owned copy, so it stays English by design. ⣾ running the locale evidence pass 49s model ■ ↑",
+  "chunks": [
+   {
+    "url": "bundled.zh-CN.gen-BB836pz3.js",
+    "status": 200,
+    "mimeType": "text/javascript",
+    "fromDiskCache": false,
+    "fromServiceWorker": false,
+    "encodedDataLength": 26404
+   }
+  ],
+  "chunkResource": {
+   "path": "/assets/bundled.zh-CN.gen-BB836pz3.js",
+   "name": "bundled.zh-CN.gen-BB836pz3.js",
+   "startTime": 321,
+   "responseEnd": 7103,
+   "transferSize": 26452,
+   "encodedBodySize": 26152,
+   "decodedBodySize": 26152,
+   "status": 200
+  },
+  "settle": {
+   "quietMs": 1098,
+   "waitedMs": 1151,
+   "samples": 5,
+   "capped": false
+  }
+ }
+]
