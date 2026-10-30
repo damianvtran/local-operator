@@ -1,0 +1,4214 @@
+{
+  "group-dark-320": {
+    "viewport": 320,
+    "docScrollWidth": 320,
+    "docClientWidth": 320,
+    "bcvInHeadlines": 0,
+    "bcvOnPage": 0,
+    "rows": [],
+    "foldHeaders": "[\"\u25b82 team actions\u00b72 team messages\u00b71 message\",\"\u25b8\u27174 team messages1Includes a failed action\"]"
+  },
+  "group-open-dark-320": {
+    "viewport": 320,
+    "docScrollWidth": 320,
+    "docClientWidth": 320,
+    "bcvInHeadlines": 0,
+    "bcvOnPage": 0,
+    "rows": [
+      {
+        "text": "\u2713bridgeLooked up the team directory (4 members)1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713bridgePosted in a conversation \u00b7 starting1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713sendtarget=release-crew1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          92,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713bridgeRead a conversation1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713bridgeReplied to a teammate \u00b7 on itnot posted to a conversation1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          241,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713bridgePosted in a conversation \u00b7 0.93 is cut - notes in the thread.1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713bridgeMessaged Priya Shah \u00b7 Heads up - the 0.93 cut lands tonight.awaiting acceptance1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          243,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2717bridgeCouldn't post in a conversation \u00b7 rolling back qarefused \u00b7 not_member1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          210,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713bridgeSent to a teammate \u00b7 Can you take the cut?not posted to a conversation1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          241,
+          269,
+          290,
+          302
+        ]
+      }
+    ]
+  },
+  "collapsed-dark-320": {
+    "viewport": 320,
+    "docScrollWidth": 320,
+    "docClientWidth": 320,
+    "bcvInHeadlines": 0,
+    "bcvOnPage": 0,
+    "rows": [
+      {
+        "text": "\u2713bridgeLooked up the team directory (4 members)1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713bridgePosted in a conversation \u00b7 starting1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713sendtarget=release-crew1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          92,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713bridgeRead a conversation1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713bridgeReplied to a teammate \u00b7 on itnot posted to a conversation1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          241,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713bridgePosted in a conversation \u00b7 0.93 is cut - notes in the thread.1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713bridgeMessaged Priya Shah \u00b7 Heads up - the 0.93 cut lands tonight.awaiting acceptance1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          243,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2717bridgeCouldn't post in a conversation \u00b7 rolling back qarefused \u00b7 not_member1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          210,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713bridgeSent to a teammate \u00b7 Can you take the cut?not posted to a conversation1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          241,
+          269,
+          290,
+          302
+        ]
+      }
+    ]
+  },
+  "expanded-awaiting_acceptance-dark-320": {
+    "viewport": 320,
+    "docScrollWidth": 320,
+    "docClientWidth": 320,
+    "bcvInHeadlines": 0,
+    "bcvOnPage": 0,
+    "rows": [
+      {
+        "text": "\u2713bridgeLooked up the team directory (4 members)1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713bridgePosted in a conversation \u00b7 starting1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713sendtarget=release-crew1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          92,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713bridgeRead a conversation1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713bridgeReplied to a teammate \u00b7 on itnot posted to a conversation1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          241,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713bridgePosted in a conversation \u00b7 0.93 is cut - notes in the thread.1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713bridgeMessaged Priya Shah \u00b7 Heads up - the 0.93 cut lands tonight.awaiting acceptance1s\u25be",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          243,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2717bridgeCouldn't post in a conversation \u00b7 rolling back qarefused \u00b7 not_member1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          210,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713bridgeSent to a teammate \u00b7 Can you take the cut?not posted to a conversation1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          241,
+          269,
+          290,
+          302
+        ]
+      }
+    ],
+    "expandedText": "Direct message to Priya ShahHeads up - the 0.93 cut lands tonight.relay row ships with itdesktop row followsPing me if the window moves: https://example.invalid/a/very/long/link/that/must/wrap/on/a/phonePosted, but the recipient agent is invited \u2014 its owner must accept before it is woken."
+  },
+  "expanded-refused-dark-320": {
+    "viewport": 320,
+    "docScrollWidth": 320,
+    "docClientWidth": 320,
+    "bcvInHeadlines": 0,
+    "bcvOnPage": 0,
+    "rows": [
+      {
+        "text": "\u2713bridgeLooked up the team directory (4 members)1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713bridgePosted in a conversation \u00b7 starting1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713sendtarget=release-crew1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          92,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713bridgeRead a conversation1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713bridgeReplied to a teammate \u00b7 on itnot posted to a conversation1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          241,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713bridgePosted in a conversation \u00b7 0.93 is cut - notes in the thread.1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713bridgeMessaged Priya Shah \u00b7 Heads up - the 0.93 cut lands tonight.awaiting acceptance1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          243,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2717bridgeCouldn't post in a conversation \u00b7 rolling back qarefused \u00b7 not_member1s\u25be",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          210,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713bridgeSent to a teammate \u00b7 Can you take the cut?not posted to a conversation1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          241,
+          269,
+          290,
+          302
+        ]
+      }
+    ],
+    "expandedText": "Couldn't post in a conversationrolling back qaRefused: not a member of a conversation (not_member)"
+  },
+  "expanded-inbox_only-dark-320": {
+    "viewport": 320,
+    "docScrollWidth": 320,
+    "docClientWidth": 320,
+    "bcvInHeadlines": 0,
+    "bcvOnPage": 0,
+    "rows": [
+      {
+        "text": "\u2713bridgeLooked up the team directory (4 members)1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713bridgePosted in a conversation \u00b7 starting1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713sendtarget=release-crew1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          92,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713bridgeRead a conversation1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713bridgeReplied to a teammate \u00b7 on itnot posted to a conversation1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          241,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713bridgePosted in a conversation \u00b7 0.93 is cut - notes in the thread.1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713bridgeMessaged Priya Shah \u00b7 Heads up - the 0.93 cut lands tonight.awaiting acceptance1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          243,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2717bridgeCouldn't post in a conversation \u00b7 rolling back qarefused \u00b7 not_member1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          210,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713bridgeSent to a teammate \u00b7 Can you take the cut?not posted to a conversation1s\u25be",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          241,
+          269,
+          290,
+          302
+        ]
+      }
+    ],
+    "expandedText": "Sent to a teammateCan you take the cut?Accepted into their inbox \u2014 not posted to a conversation or shown in Team Bridge. Use a DM to be seen."
+  },
+  "group-dark-360": {
+    "viewport": 360,
+    "docScrollWidth": 360,
+    "docClientWidth": 360,
+    "bcvInHeadlines": 0,
+    "bcvOnPage": 0,
+    "rows": [],
+    "foldHeaders": "[\"\u25b82 team actions\u00b72 team messages\u00b71 message\",\"\u25b8\u27174 team messages1Includes a failed action\"]"
+  },
+  "group-open-dark-360": {
+    "viewport": 360,
+    "docScrollWidth": 360,
+    "docClientWidth": 360,
+    "bcvInHeadlines": 0,
+    "bcvOnPage": 0,
+    "rows": [
+      {
+        "text": "\u2713bridgeLooked up the team directory (4 members)1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713bridgePosted in a conversation \u00b7 starting1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713sendtarget=release-crew1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          92,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713bridgeRead a conversation1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713bridgeReplied to a teammate \u00b7 on itnot posted to a conversation1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          154,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713bridgePosted in a conversation \u00b7 0.93 is cut - notes in the thread.1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713bridgeMessaged Priya Shah \u00b7 Heads up - the 0.93 cut lands tonight.awaiting acceptance1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          165,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2717bridgeCouldn't post in a conversation \u00b7 rolling back qarefused \u00b7 not_member1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          168,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713bridgeSent to a teammate \u00b7 Can you take the cut?not posted to a conversation1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          154,
+          309,
+          330,
+          342
+        ]
+      }
+    ]
+  },
+  "collapsed-dark-360": {
+    "viewport": 360,
+    "docScrollWidth": 360,
+    "docClientWidth": 360,
+    "bcvInHeadlines": 0,
+    "bcvOnPage": 0,
+    "rows": [
+      {
+        "text": "\u2713bridgeLooked up the team directory (4 members)1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713bridgePosted in a conversation \u00b7 starting1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713sendtarget=release-crew1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          92,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713bridgeRead a conversation1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713bridgeReplied to a teammate \u00b7 on itnot posted to a conversation1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          154,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713bridgePosted in a conversation \u00b7 0.93 is cut - notes in the thread.1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713bridgeMessaged Priya Shah \u00b7 Heads up - the 0.93 cut lands tonight.awaiting acceptance1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          165,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2717bridgeCouldn't post in a conversation \u00b7 rolling back qarefused \u00b7 not_member1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          168,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713bridgeSent to a teammate \u00b7 Can you take the cut?not posted to a conversation1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          154,
+          309,
+          330,
+          342
+        ]
+      }
+    ]
+  },
+  "expanded-awaiting_acceptance-dark-360": {
+    "viewport": 360,
+    "docScrollWidth": 360,
+    "docClientWidth": 360,
+    "bcvInHeadlines": 0,
+    "bcvOnPage": 0,
+    "rows": [
+      {
+        "text": "\u2713bridgeLooked up the team directory (4 members)1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713bridgePosted in a conversation \u00b7 starting1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713sendtarget=release-crew1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          92,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713bridgeRead a conversation1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713bridgeReplied to a teammate \u00b7 on itnot posted to a conversation1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          154,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713bridgePosted in a conversation \u00b7 0.93 is cut - notes in the thread.1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713bridgeMessaged Priya Shah \u00b7 Heads up - the 0.93 cut lands tonight.awaiting acceptance1s\u25be",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          165,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2717bridgeCouldn't post in a conversation \u00b7 rolling back qarefused \u00b7 not_member1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          168,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713bridgeSent to a teammate \u00b7 Can you take the cut?not posted to a conversation1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          154,
+          309,
+          330,
+          342
+        ]
+      }
+    ],
+    "expandedText": "Direct message to Priya ShahHeads up - the 0.93 cut lands tonight.relay row ships with itdesktop row followsPing me if the window moves: https://example.invalid/a/very/long/link/that/must/wrap/on/a/phonePosted, but the recipient agent is invited \u2014 its owner must accept before it is woken."
+  },
+  "expanded-refused-dark-360": {
+    "viewport": 360,
+    "docScrollWidth": 360,
+    "docClientWidth": 360,
+    "bcvInHeadlines": 0,
+    "bcvOnPage": 0,
+    "rows": [
+      {
+        "text": "\u2713bridgeLooked up the team directory (4 members)1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713bridgePosted in a conversation \u00b7 starting1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713sendtarget=release-crew1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          92,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713bridgeRead a conversation1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713bridgeReplied to a teammate \u00b7 on itnot posted to a conversation1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          154,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713bridgePosted in a conversation \u00b7 0.93 is cut - notes in the thread.1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713bridgeMessaged Priya Shah \u00b7 Heads up - the 0.93 cut lands tonight.awaiting acceptance1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          165,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2717bridgeCouldn't post in a conversation \u00b7 rolling back qarefused \u00b7 not_member1s\u25be",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          168,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713bridgeSent to a teammate \u00b7 Can you take the cut?not posted to a conversation1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          154,
+          309,
+          330,
+          342
+        ]
+      }
+    ],
+    "expandedText": "Couldn't post in a conversationrolling back qaRefused: not a member of a conversation (not_member)"
+  },
+  "expanded-inbox_only-dark-360": {
+    "viewport": 360,
+    "docScrollWidth": 360,
+    "docClientWidth": 360,
+    "bcvInHeadlines": 0,
+    "bcvOnPage": 0,
+    "rows": [
+      {
+        "text": "\u2713bridgeLooked up the team directory (4 members)1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713bridgePosted in a conversation \u00b7 starting1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713sendtarget=release-crew1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          92,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713bridgeRead a conversation1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713bridgeReplied to a teammate \u00b7 on itnot posted to a conversation1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          154,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713bridgePosted in a conversation \u00b7 0.93 is cut - notes in the thread.1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713bridgeMessaged Priya Shah \u00b7 Heads up - the 0.93 cut lands tonight.awaiting acceptance1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          165,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2717bridgeCouldn't post in a conversation \u00b7 rolling back qarefused \u00b7 not_member1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          168,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713bridgeSent to a teammate \u00b7 Can you take the cut?not posted to a conversation1s\u25be",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          154,
+          309,
+          330,
+          342
+        ]
+      }
+    ],
+    "expandedText": "Sent to a teammateCan you take the cut?Accepted into their inbox \u2014 not posted to a conversation or shown in Team Bridge. Use a DM to be seen."
+  },
+  "group-dark-390": {
+    "viewport": 390,
+    "docScrollWidth": 390,
+    "docClientWidth": 390,
+    "bcvInHeadlines": 0,
+    "bcvOnPage": 0,
+    "rows": [],
+    "foldHeaders": "[\"\u25b82 team actions\u00b72 team messages\u00b71 message\",\"\u25b8\u27174 team messages1Includes a failed action\"]"
+  },
+  "group-open-dark-390": {
+    "viewport": 390,
+    "docScrollWidth": 390,
+    "docClientWidth": 390,
+    "bcvInHeadlines": 0,
+    "bcvOnPage": 0,
+    "rows": [
+      {
+        "text": "\u2713bridgeLooked up the team directory (4 members)1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713bridgePosted in a conversation \u00b7 starting1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713sendtarget=release-crew1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          92,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713bridgeRead a conversation1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713bridgeReplied to a teammate \u00b7 on itnot posted to a conversation1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          154,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713bridgePosted in a conversation \u00b7 0.93 is cut - notes in the thread.1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713bridgeMessaged Priya Shah \u00b7 Heads up - the 0.93 cut lands tonight.awaiting acceptance1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          195,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2717bridgeCouldn't post in a conversation \u00b7 rolling back qarefused \u00b7 not_member1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          198,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713bridgeSent to a teammate \u00b7 Can you take the cut?not posted to a conversation1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          154,
+          339,
+          360,
+          372
+        ]
+      }
+    ]
+  },
+  "collapsed-dark-390": {
+    "viewport": 390,
+    "docScrollWidth": 390,
+    "docClientWidth": 390,
+    "bcvInHeadlines": 0,
+    "bcvOnPage": 0,
+    "rows": [
+      {
+        "text": "\u2713bridgeLooked up the team directory (4 members)1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713bridgePosted in a conversation \u00b7 starting1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713sendtarget=release-crew1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          92,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713bridgeRead a conversation1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713bridgeReplied to a teammate \u00b7 on itnot posted to a conversation1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          154,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713bridgePosted in a conversation \u00b7 0.93 is cut - notes in the thread.1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713bridgeMessaged Priya Shah \u00b7 Heads up - the 0.93 cut lands tonight.awaiting acceptance1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          195,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2717bridgeCouldn't post in a conversation \u00b7 rolling back qarefused \u00b7 not_member1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          198,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713bridgeSent to a teammate \u00b7 Can you take the cut?not posted to a conversation1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          154,
+          339,
+          360,
+          372
+        ]
+      }
+    ]
+  },
+  "expanded-awaiting_acceptance-dark-390": {
+    "viewport": 390,
+    "docScrollWidth": 390,
+    "docClientWidth": 390,
+    "bcvInHeadlines": 0,
+    "bcvOnPage": 0,
+    "rows": [
+      {
+        "text": "\u2713bridgeLooked up the team directory (4 members)1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713bridgePosted in a conversation \u00b7 starting1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713sendtarget=release-crew1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          92,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713bridgeRead a conversation1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713bridgeReplied to a teammate \u00b7 on itnot posted to a conversation1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          154,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713bridgePosted in a conversation \u00b7 0.93 is cut - notes in the thread.1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713bridgeMessaged Priya Shah \u00b7 Heads up - the 0.93 cut lands tonight.awaiting acceptance1s\u25be",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          195,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2717bridgeCouldn't post in a conversation \u00b7 rolling back qarefused \u00b7 not_member1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          198,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713bridgeSent to a teammate \u00b7 Can you take the cut?not posted to a conversation1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          154,
+          339,
+          360,
+          372
+        ]
+      }
+    ],
+    "expandedText": "Direct message to Priya ShahHeads up - the 0.93 cut lands tonight.relay row ships with itdesktop row followsPing me if the window moves: https://example.invalid/a/very/long/link/that/must/wrap/on/a/phonePosted, but the recipient agent is invited \u2014 its owner must accept before it is woken."
+  },
+  "expanded-refused-dark-390": {
+    "viewport": 390,
+    "docScrollWidth": 390,
+    "docClientWidth": 390,
+    "bcvInHeadlines": 0,
+    "bcvOnPage": 0,
+    "rows": [
+      {
+        "text": "\u2713bridgeLooked up the team directory (4 members)1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713bridgePosted in a conversation \u00b7 starting1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713sendtarget=release-crew1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          92,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713bridgeRead a conversation1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713bridgeReplied to a teammate \u00b7 on itnot posted to a conversation1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          154,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713bridgePosted in a conversation \u00b7 0.93 is cut - notes in the thread.1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713bridgeMessaged Priya Shah \u00b7 Heads up - the 0.93 cut lands tonight.awaiting acceptance1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          195,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2717bridgeCouldn't post in a conversation \u00b7 rolling back qarefused \u00b7 not_member1s\u25be",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          198,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713bridgeSent to a teammate \u00b7 Can you take the cut?not posted to a conversation1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          154,
+          339,
+          360,
+          372
+        ]
+      }
+    ],
+    "expandedText": "Couldn't post in a conversationrolling back qaRefused: not a member of a conversation (not_member)"
+  },
+  "expanded-inbox_only-dark-390": {
+    "viewport": 390,
+    "docScrollWidth": 390,
+    "docClientWidth": 390,
+    "bcvInHeadlines": 0,
+    "bcvOnPage": 0,
+    "rows": [
+      {
+        "text": "\u2713bridgeLooked up the team directory (4 members)1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713bridgePosted in a conversation \u00b7 starting1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713sendtarget=release-crew1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          92,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713bridgeRead a conversation1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713bridgeReplied to a teammate \u00b7 on itnot posted to a conversation1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          154,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713bridgePosted in a conversation \u00b7 0.93 is cut - notes in the thread.1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713bridgeMessaged Priya Shah \u00b7 Heads up - the 0.93 cut lands tonight.awaiting acceptance1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          195,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2717bridgeCouldn't post in a conversation \u00b7 rolling back qarefused \u00b7 not_member1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          198,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713bridgeSent to a teammate \u00b7 Can you take the cut?not posted to a conversation1s\u25be",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          154,
+          339,
+          360,
+          372
+        ]
+      }
+    ],
+    "expandedText": "Sent to a teammateCan you take the cut?Accepted into their inbox \u2014 not posted to a conversation or shown in Team Bridge. Use a DM to be seen."
+  },
+  "group-light-320": {
+    "viewport": 320,
+    "docScrollWidth": 320,
+    "docClientWidth": 320,
+    "bcvInHeadlines": 0,
+    "bcvOnPage": 0,
+    "rows": [],
+    "foldHeaders": "[\"\u25b82 team actions\u00b72 team messages\u00b71 message\",\"\u25b8\u27174 team messages1Includes a failed action\"]"
+  },
+  "group-open-light-320": {
+    "viewport": 320,
+    "docScrollWidth": 320,
+    "docClientWidth": 320,
+    "bcvInHeadlines": 0,
+    "bcvOnPage": 0,
+    "rows": [
+      {
+        "text": "\u2713bridgeLooked up the team directory (4 members)1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713bridgePosted in a conversation \u00b7 starting1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713sendtarget=release-crew1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          92,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713bridgeRead a conversation1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713bridgeReplied to a teammate \u00b7 on itnot posted to a conversation1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          241,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713bridgePosted in a conversation \u00b7 0.93 is cut - notes in the thread.1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713bridgeMessaged Priya Shah \u00b7 Heads up - the 0.93 cut lands tonight.awaiting acceptance1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          243,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2717bridgeCouldn't post in a conversation \u00b7 rolling back qarefused \u00b7 not_member1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          210,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713bridgeSent to a teammate \u00b7 Can you take the cut?not posted to a conversation1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          241,
+          269,
+          290,
+          302
+        ]
+      }
+    ]
+  },
+  "collapsed-light-320": {
+    "viewport": 320,
+    "docScrollWidth": 320,
+    "docClientWidth": 320,
+    "bcvInHeadlines": 0,
+    "bcvOnPage": 0,
+    "rows": [
+      {
+        "text": "\u2713bridgeLooked up the team directory (4 members)1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713bridgePosted in a conversation \u00b7 starting1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713sendtarget=release-crew1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          92,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713bridgeRead a conversation1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713bridgeReplied to a teammate \u00b7 on itnot posted to a conversation1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          241,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713bridgePosted in a conversation \u00b7 0.93 is cut - notes in the thread.1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713bridgeMessaged Priya Shah \u00b7 Heads up - the 0.93 cut lands tonight.awaiting acceptance1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          243,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2717bridgeCouldn't post in a conversation \u00b7 rolling back qarefused \u00b7 not_member1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          210,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713bridgeSent to a teammate \u00b7 Can you take the cut?not posted to a conversation1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          241,
+          269,
+          290,
+          302
+        ]
+      }
+    ]
+  },
+  "expanded-awaiting_acceptance-light-320": {
+    "viewport": 320,
+    "docScrollWidth": 320,
+    "docClientWidth": 320,
+    "bcvInHeadlines": 0,
+    "bcvOnPage": 0,
+    "rows": [
+      {
+        "text": "\u2713bridgeLooked up the team directory (4 members)1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713bridgePosted in a conversation \u00b7 starting1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713sendtarget=release-crew1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          92,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713bridgeRead a conversation1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713bridgeReplied to a teammate \u00b7 on itnot posted to a conversation1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          241,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713bridgePosted in a conversation \u00b7 0.93 is cut - notes in the thread.1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713bridgeMessaged Priya Shah \u00b7 Heads up - the 0.93 cut lands tonight.awaiting acceptance1s\u25be",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          243,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2717bridgeCouldn't post in a conversation \u00b7 rolling back qarefused \u00b7 not_member1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          210,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713bridgeSent to a teammate \u00b7 Can you take the cut?not posted to a conversation1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          241,
+          269,
+          290,
+          302
+        ]
+      }
+    ],
+    "expandedText": "Direct message to Priya ShahHeads up - the 0.93 cut lands tonight.relay row ships with itdesktop row followsPing me if the window moves: https://example.invalid/a/very/long/link/that/must/wrap/on/a/phonePosted, but the recipient agent is invited \u2014 its owner must accept before it is woken."
+  },
+  "expanded-refused-light-320": {
+    "viewport": 320,
+    "docScrollWidth": 320,
+    "docClientWidth": 320,
+    "bcvInHeadlines": 0,
+    "bcvOnPage": 0,
+    "rows": [
+      {
+        "text": "\u2713bridgeLooked up the team directory (4 members)1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713bridgePosted in a conversation \u00b7 starting1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713sendtarget=release-crew1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          92,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713bridgeRead a conversation1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713bridgeReplied to a teammate \u00b7 on itnot posted to a conversation1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          241,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713bridgePosted in a conversation \u00b7 0.93 is cut - notes in the thread.1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713bridgeMessaged Priya Shah \u00b7 Heads up - the 0.93 cut lands tonight.awaiting acceptance1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          243,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2717bridgeCouldn't post in a conversation \u00b7 rolling back qarefused \u00b7 not_member1s\u25be",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          210,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713bridgeSent to a teammate \u00b7 Can you take the cut?not posted to a conversation1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          241,
+          269,
+          290,
+          302
+        ]
+      }
+    ],
+    "expandedText": "Couldn't post in a conversationrolling back qaRefused: not a member of a conversation (not_member)"
+  },
+  "expanded-inbox_only-light-320": {
+    "viewport": 320,
+    "docScrollWidth": 320,
+    "docClientWidth": 320,
+    "bcvInHeadlines": 0,
+    "bcvOnPage": 0,
+    "rows": [
+      {
+        "text": "\u2713bridgeLooked up the team directory (4 members)1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713bridgePosted in a conversation \u00b7 starting1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713sendtarget=release-crew1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          92,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713bridgeRead a conversation1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713bridgeReplied to a teammate \u00b7 on itnot posted to a conversation1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          241,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713bridgePosted in a conversation \u00b7 0.93 is cut - notes in the thread.1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713bridgeMessaged Priya Shah \u00b7 Heads up - the 0.93 cut lands tonight.awaiting acceptance1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          243,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2717bridgeCouldn't post in a conversation \u00b7 rolling back qarefused \u00b7 not_member1s\u25b8",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          210,
+          269,
+          290,
+          302
+        ]
+      },
+      {
+        "text": "\u2713bridgeSent to a teammate \u00b7 Can you take the cut?not posted to a conversation1s\u25be",
+        "left": 40,
+        "right": 302,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          241,
+          269,
+          290,
+          302
+        ]
+      }
+    ],
+    "expandedText": "Sent to a teammateCan you take the cut?Accepted into their inbox \u2014 not posted to a conversation or shown in Team Bridge. Use a DM to be seen."
+  },
+  "group-light-360": {
+    "viewport": 360,
+    "docScrollWidth": 360,
+    "docClientWidth": 360,
+    "bcvInHeadlines": 0,
+    "bcvOnPage": 0,
+    "rows": [],
+    "foldHeaders": "[\"\u25b82 team actions\u00b72 team messages\u00b71 message\",\"\u25b8\u27174 team messages1Includes a failed action\"]"
+  },
+  "group-open-light-360": {
+    "viewport": 360,
+    "docScrollWidth": 360,
+    "docClientWidth": 360,
+    "bcvInHeadlines": 0,
+    "bcvOnPage": 0,
+    "rows": [
+      {
+        "text": "\u2713bridgeLooked up the team directory (4 members)1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713bridgePosted in a conversation \u00b7 starting1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713sendtarget=release-crew1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          92,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713bridgeRead a conversation1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713bridgeReplied to a teammate \u00b7 on itnot posted to a conversation1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          154,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713bridgePosted in a conversation \u00b7 0.93 is cut - notes in the thread.1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713bridgeMessaged Priya Shah \u00b7 Heads up - the 0.93 cut lands tonight.awaiting acceptance1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          165,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2717bridgeCouldn't post in a conversation \u00b7 rolling back qarefused \u00b7 not_member1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          168,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713bridgeSent to a teammate \u00b7 Can you take the cut?not posted to a conversation1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          154,
+          309,
+          330,
+          342
+        ]
+      }
+    ]
+  },
+  "collapsed-light-360": {
+    "viewport": 360,
+    "docScrollWidth": 360,
+    "docClientWidth": 360,
+    "bcvInHeadlines": 0,
+    "bcvOnPage": 0,
+    "rows": [
+      {
+        "text": "\u2713bridgeLooked up the team directory (4 members)1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713bridgePosted in a conversation \u00b7 starting1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713sendtarget=release-crew1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          92,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713bridgeRead a conversation1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713bridgeReplied to a teammate \u00b7 on itnot posted to a conversation1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          154,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713bridgePosted in a conversation \u00b7 0.93 is cut - notes in the thread.1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713bridgeMessaged Priya Shah \u00b7 Heads up - the 0.93 cut lands tonight.awaiting acceptance1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          165,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2717bridgeCouldn't post in a conversation \u00b7 rolling back qarefused \u00b7 not_member1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          168,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713bridgeSent to a teammate \u00b7 Can you take the cut?not posted to a conversation1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          154,
+          309,
+          330,
+          342
+        ]
+      }
+    ]
+  },
+  "expanded-awaiting_acceptance-light-360": {
+    "viewport": 360,
+    "docScrollWidth": 360,
+    "docClientWidth": 360,
+    "bcvInHeadlines": 0,
+    "bcvOnPage": 0,
+    "rows": [
+      {
+        "text": "\u2713bridgeLooked up the team directory (4 members)1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713bridgePosted in a conversation \u00b7 starting1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713sendtarget=release-crew1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          92,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713bridgeRead a conversation1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713bridgeReplied to a teammate \u00b7 on itnot posted to a conversation1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          154,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713bridgePosted in a conversation \u00b7 0.93 is cut - notes in the thread.1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713bridgeMessaged Priya Shah \u00b7 Heads up - the 0.93 cut lands tonight.awaiting acceptance1s\u25be",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          165,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2717bridgeCouldn't post in a conversation \u00b7 rolling back qarefused \u00b7 not_member1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          168,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713bridgeSent to a teammate \u00b7 Can you take the cut?not posted to a conversation1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          154,
+          309,
+          330,
+          342
+        ]
+      }
+    ],
+    "expandedText": "Direct message to Priya ShahHeads up - the 0.93 cut lands tonight.relay row ships with itdesktop row followsPing me if the window moves: https://example.invalid/a/very/long/link/that/must/wrap/on/a/phonePosted, but the recipient agent is invited \u2014 its owner must accept before it is woken."
+  },
+  "expanded-refused-light-360": {
+    "viewport": 360,
+    "docScrollWidth": 360,
+    "docClientWidth": 360,
+    "bcvInHeadlines": 0,
+    "bcvOnPage": 0,
+    "rows": [
+      {
+        "text": "\u2713bridgeLooked up the team directory (4 members)1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713bridgePosted in a conversation \u00b7 starting1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713sendtarget=release-crew1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          92,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713bridgeRead a conversation1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713bridgeReplied to a teammate \u00b7 on itnot posted to a conversation1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          154,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713bridgePosted in a conversation \u00b7 0.93 is cut - notes in the thread.1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713bridgeMessaged Priya Shah \u00b7 Heads up - the 0.93 cut lands tonight.awaiting acceptance1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          165,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2717bridgeCouldn't post in a conversation \u00b7 rolling back qarefused \u00b7 not_member1s\u25be",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          168,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713bridgeSent to a teammate \u00b7 Can you take the cut?not posted to a conversation1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          154,
+          309,
+          330,
+          342
+        ]
+      }
+    ],
+    "expandedText": "Couldn't post in a conversationrolling back qaRefused: not a member of a conversation (not_member)"
+  },
+  "expanded-inbox_only-light-360": {
+    "viewport": 360,
+    "docScrollWidth": 360,
+    "docClientWidth": 360,
+    "bcvInHeadlines": 0,
+    "bcvOnPage": 0,
+    "rows": [
+      {
+        "text": "\u2713bridgeLooked up the team directory (4 members)1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713bridgePosted in a conversation \u00b7 starting1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713sendtarget=release-crew1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          92,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713bridgeRead a conversation1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713bridgeReplied to a teammate \u00b7 on itnot posted to a conversation1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          154,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713bridgePosted in a conversation \u00b7 0.93 is cut - notes in the thread.1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713bridgeMessaged Priya Shah \u00b7 Heads up - the 0.93 cut lands tonight.awaiting acceptance1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          165,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2717bridgeCouldn't post in a conversation \u00b7 rolling back qarefused \u00b7 not_member1s\u25b8",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          168,
+          309,
+          330,
+          342
+        ]
+      },
+      {
+        "text": "\u2713bridgeSent to a teammate \u00b7 Can you take the cut?not posted to a conversation1s\u25be",
+        "left": 40,
+        "right": 342,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          154,
+          309,
+          330,
+          342
+        ]
+      }
+    ],
+    "expandedText": "Sent to a teammateCan you take the cut?Accepted into their inbox \u2014 not posted to a conversation or shown in Team Bridge. Use a DM to be seen."
+  },
+  "group-light-390": {
+    "viewport": 390,
+    "docScrollWidth": 390,
+    "docClientWidth": 390,
+    "bcvInHeadlines": 0,
+    "bcvOnPage": 0,
+    "rows": [],
+    "foldHeaders": "[\"\u25b82 team actions\u00b72 team messages\u00b71 message\",\"\u25b8\u27174 team messages1Includes a failed action\"]"
+  },
+  "group-open-light-390": {
+    "viewport": 390,
+    "docScrollWidth": 390,
+    "docClientWidth": 390,
+    "bcvInHeadlines": 0,
+    "bcvOnPage": 0,
+    "rows": [
+      {
+        "text": "\u2713bridgeLooked up the team directory (4 members)1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713bridgePosted in a conversation \u00b7 starting1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713sendtarget=release-crew1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          92,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713bridgeRead a conversation1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713bridgeReplied to a teammate \u00b7 on itnot posted to a conversation1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          154,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713bridgePosted in a conversation \u00b7 0.93 is cut - notes in the thread.1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713bridgeMessaged Priya Shah \u00b7 Heads up - the 0.93 cut lands tonight.awaiting acceptance1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          195,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2717bridgeCouldn't post in a conversation \u00b7 rolling back qarefused \u00b7 not_member1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          198,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713bridgeSent to a teammate \u00b7 Can you take the cut?not posted to a conversation1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          154,
+          339,
+          360,
+          372
+        ]
+      }
+    ]
+  },
+  "collapsed-light-390": {
+    "viewport": 390,
+    "docScrollWidth": 390,
+    "docClientWidth": 390,
+    "bcvInHeadlines": 0,
+    "bcvOnPage": 0,
+    "rows": [
+      {
+        "text": "\u2713bridgeLooked up the team directory (4 members)1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713bridgePosted in a conversation \u00b7 starting1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713sendtarget=release-crew1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          92,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713bridgeRead a conversation1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713bridgeReplied to a teammate \u00b7 on itnot posted to a conversation1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          154,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713bridgePosted in a conversation \u00b7 0.93 is cut - notes in the thread.1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713bridgeMessaged Priya Shah \u00b7 Heads up - the 0.93 cut lands tonight.awaiting acceptance1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          195,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2717bridgeCouldn't post in a conversation \u00b7 rolling back qarefused \u00b7 not_member1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          198,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713bridgeSent to a teammate \u00b7 Can you take the cut?not posted to a conversation1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          154,
+          339,
+          360,
+          372
+        ]
+      }
+    ]
+  },
+  "expanded-awaiting_acceptance-light-390": {
+    "viewport": 390,
+    "docScrollWidth": 390,
+    "docClientWidth": 390,
+    "bcvInHeadlines": 0,
+    "bcvOnPage": 0,
+    "rows": [
+      {
+        "text": "\u2713bridgeLooked up the team directory (4 members)1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713bridgePosted in a conversation \u00b7 starting1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713sendtarget=release-crew1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          92,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713bridgeRead a conversation1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713bridgeReplied to a teammate \u00b7 on itnot posted to a conversation1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          154,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713bridgePosted in a conversation \u00b7 0.93 is cut - notes in the thread.1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713bridgeMessaged Priya Shah \u00b7 Heads up - the 0.93 cut lands tonight.awaiting acceptance1s\u25be",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          195,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2717bridgeCouldn't post in a conversation \u00b7 rolling back qarefused \u00b7 not_member1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          198,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713bridgeSent to a teammate \u00b7 Can you take the cut?not posted to a conversation1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          154,
+          339,
+          360,
+          372
+        ]
+      }
+    ],
+    "expandedText": "Direct message to Priya ShahHeads up - the 0.93 cut lands tonight.relay row ships with itdesktop row followsPing me if the window moves: https://example.invalid/a/very/long/link/that/must/wrap/on/a/phonePosted, but the recipient agent is invited \u2014 its owner must accept before it is woken."
+  },
+  "expanded-refused-light-390": {
+    "viewport": 390,
+    "docScrollWidth": 390,
+    "docClientWidth": 390,
+    "bcvInHeadlines": 0,
+    "bcvOnPage": 0,
+    "rows": [
+      {
+        "text": "\u2713bridgeLooked up the team directory (4 members)1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713bridgePosted in a conversation \u00b7 starting1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713sendtarget=release-crew1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          92,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713bridgeRead a conversation1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713bridgeReplied to a teammate \u00b7 on itnot posted to a conversation1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          154,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713bridgePosted in a conversation \u00b7 0.93 is cut - notes in the thread.1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713bridgeMessaged Priya Shah \u00b7 Heads up - the 0.93 cut lands tonight.awaiting acceptance1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          195,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2717bridgeCouldn't post in a conversation \u00b7 rolling back qarefused \u00b7 not_member1s\u25be",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          198,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713bridgeSent to a teammate \u00b7 Can you take the cut?not posted to a conversation1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          154,
+          339,
+          360,
+          372
+        ]
+      }
+    ],
+    "expandedText": "Couldn't post in a conversationrolling back qaRefused: not a member of a conversation (not_member)"
+  },
+  "expanded-inbox_only-light-390": {
+    "viewport": 390,
+    "docScrollWidth": 390,
+    "docClientWidth": 390,
+    "bcvInHeadlines": 0,
+    "bcvOnPage": 0,
+    "rows": [
+      {
+        "text": "\u2713bridgeLooked up the team directory (4 members)1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713bridgePosted in a conversation \u00b7 starting1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713sendtarget=release-crew1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          92,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713bridgeRead a conversation1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713bridgeReplied to a teammate \u00b7 on itnot posted to a conversation1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          154,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713bridgePosted in a conversation \u00b7 0.93 is cut - notes in the thread.1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713bridgeMessaged Priya Shah \u00b7 Heads up - the 0.93 cut lands tonight.awaiting acceptance1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          195,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2717bridgeCouldn't post in a conversation \u00b7 rolling back qarefused \u00b7 not_member1s\u25b8",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          198,
+          339,
+          360,
+          372
+        ]
+      },
+      {
+        "text": "\u2713bridgeSent to a teammate \u00b7 Can you take the cut?not posted to a conversation1s\u25be",
+        "left": 40,
+        "right": 372,
+        "overflowX": false,
+        "lanes": [
+          56,
+          76,
+          0,
+          154,
+          339,
+          360,
+          372
+        ]
+      }
+    ],
+    "expandedText": "Sent to a teammateCan you take the cut?Accepted into their inbox \u2014 not posted to a conversation or shown in Team Bridge. Use a DM to be seen."
+  }
+}
