@@ -1285,6 +1285,118 @@ def journal_hint() -> str | None:
     return None
 
 
+def refresh_plist_if_stale() -> launchd.PlistRefresh:
+    """Repair the connector's LaunchAgent on the upgrade path, then restart it.
+
+    WHY THIS EXISTS (2026-10-30). ``install`` renders and writes the plist at
+    install time; nothing ever read an OLD one back until a person ran
+    ``lop team-bridge receiver install`` by hand. A plist written by a build
+    before the stable shim or before branding therefore kept running whatever
+    argv it named, and the daemon became invisible to every later repair.
+
+    THE SECOND QUESTION IS THE ONE THE INCIDENT NEEDED. Under the generation
+    layout the rendered plist is byte-identical across builds (``Program`` is the
+    stable shim), so ``launchd.rewrite_if_stale`` answers ``current`` for every
+    generation at once while a connector started from an older one keeps serving
+    it — and, because it is always-on, keeps HOLDING
+    ``<config>/team_bridge/connector.lock``. That is the state of the measured
+    process (pid 48311, generation 20261023T142851Z-0.86.1, seven days) and the
+    reason a supervised job was refused exit 75 for days. So a "current" plist
+    asks :func:`launchd.restart_if_build_moved`, exactly as the network relay's
+    repair does, and the connector's own self-check (``connector/__main__``) is
+    the in-process half of the same rule.
+
+    NARROW ON PURPOSE: it rewrites the plist and reloads the job. It does not
+    enrol, touch credentials or write the store, because the upgrade must not pay
+    for an install and a repair must never change who owns the receiver.
+
+    Never raises. ``launchd.is_own_plist`` refuses a redirected ``HOME`` because
+    ``launchctl`` addresses the REAL user's session whatever the plist path says,
+    so a sandboxed run would otherwise bounce the operator's connector.
+
+    LINUX AND WINDOWS ARE OUT OF SCOPE HERE, deliberately and stated rather than
+    implied: this is the ``launchctl`` half of the upgrade, and no unit/task hook
+    is added on the other two platforms in this change (the relay's
+    ``refresh_unit_if_stale`` — ``network/relay.py`` — carries every Linux
+    constraint the connector would inherit, starting with the systemd unit's
+    ``KillMode`` and the cgroup the session runtimes live in).
+    """
+
+    name = "bridge connector"
+    try:
+        if supervisors.supervisor() != supervisors.LAUNCHCTL:
+            # NOT "not-addressable": there is no plist on this platform to repair
+            # at all. `supervisors.supervisor()` is the identity seam, so a test
+            # flips one name rather than `sys.platform` process-wide.
+            return launchd.PlistRefresh(name=name, kind="unsupported")
+        path = plist_path()
+        if not launchd.is_own_plist(path, LABEL):
+            return launchd.PlistRefresh(name=name, kind="not-addressable")
+        if not path.exists():
+            # Before the store and the render: there is nothing to repair, and
+            # this is the same "not installed is not a failure" answer every
+            # other daemon's repair gives (``rewrite_if_stale``'s own wording).
+            return launchd.PlistRefresh(name=name, kind="not-installed")
+        # The store comes off the plist being REPLACED, never this process's
+        # ambient environment: the repair's job is to bring the unit up to date
+        # IN PLACE, and re-pointing it at whatever store happens to be current
+        # here would move a daemon someone installed on another root.
+        plist = launchd.load(path)
+        config_dir = launchd.config_dir_from_plist(plist)
+        if config_dir is None:
+            argument = launchd.arg_value(plist, "--config-dir")
+            config_dir = Path(argument) if argument else None
+        if config_dir is None:
+            return launchd.PlistRefresh(name=name, kind="not-addressable")
+        if _ownership_refusal(config_dir) is not None:
+            # One name per user means one store may own it
+            # (`launchd.shared_label_refusal`): a plist pointing at any other root
+            # is not ours to rewrite, even where launchd would accept the path.
+            return launchd.PlistRefresh(name=name, kind="not-addressable")
+        # The StandardErrorPath parent must exist before the job is booted back
+        # in: launchd does not create it, and a rewritten plist pointing at a
+        # missing directory is a spawn failure on the job this repair just
+        # replaced. `_install_launchd` creates the same directory for the same
+        # reason; inside the never-raises try, so an unwritable tree is a
+        # ``failed`` outcome rather than an exception out of an upgrade.
+        stderr_path(config_dir).parent.mkdir(parents=True, exist_ok=True)
+        outcome = launchd.rewrite_if_stale(name=name, path=path, rendered=render_plist(config_dir))
+        if outcome.kind == "current":
+            # A CURRENT PLIST IS NOT A CURRENT BUILD (see the docstring): this unit
+            # names the stable shim, so its content is byte-identical across
+            # generations while a connector started from an older one keeps
+            # serving it. ONE kickstart, only when the running build is provably
+            # not `current`.
+            #
+            # NO `consequence` CLAUSE, unlike the relay's: the pending message a
+            # restart interrupts is re-delivered from the server's feed (the
+            # spine's claim is at-least-once and `stale_claim` recovers it), so
+            # there is nothing a reader could notice that the summary needs to
+            # explain.
+            return launchd.restart_if_build_moved(
+                name=name,
+                label=LABEL,
+                path=path,
+                recovery="lop team-bridge receiver install",
+                run=_launchctl,
+            )
+        if outcome.kind != "repaired":
+            return outcome
+        # bootout + bootstrap through the shared helper, never `kickstart -k`: a
+        # kickstart after a rewrite restarts the job from launchd's in-memory
+        # definition and keeps the OLD argv. See :mod:`local_operator.launchd`.
+        reloaded = launchd.reload_job(label=LABEL, path=path, runner=_launchctl)
+        if not reloaded.ok:
+            # Names the recovery command, because the job is DOWN at this point:
+            # see `launchd.reload_failure`.
+            return reloaded.as_refresh_failure(
+                name=name, path=path, recovery="lop team-bridge receiver install"
+            )
+        return outcome
+    except Exception as exc:  # noqa: BLE001 — a repair must never fail an upgrade
+        return launchd.PlistRefresh(name=name, kind="failed", detail=str(exc))
+
+
 # -- the one catch-up every surface runs at start ------------------------------
 
 

@@ -333,6 +333,27 @@ _AMBIENT_VARS = (
     # a live supervisor it is harmless on its own (no test process shares that
     # pid), but it belongs to the same live-machine state as the token.
     "LOP_WAKE_SUPERVISOR_PID",
+    # The team-bridge connector's supervision gate
+    # (``team_bridge/connector/__main__._is_supervised``). All three decide
+    # whether THIS process may exit and leave a service manager to restart it,
+    # and all three are inherited by every descendant of the owning launchd job
+    # or systemd unit (measured 2026-10-30: about ten processes under Local
+    # Operator.app carry ``application.com.local-operator.<n>``, and the wakes
+    # daemon's children carry ``com.local-operator.wakes``). Inherited into a
+    # test, a connector would take the supervised path — self-exit, and trust a
+    # restart that does not exist for it — so the cells that mean to exercise
+    # either arm build their own environment map
+    # (``test_connector_selfcheck.py``). Scrubbed rather than explained as
+    # harmless: the name alone decides a process's lifetime, which is a rule
+    # the suite asserts.
+    #
+    # The plist's / unit's own marker; required in addition to the supervisor's
+    # stamp below, because a bare marker is inherited by unrelated descendants.
+    "LOCAL_OPERATOR_CONNECTOR",
+    # macOS: launchd stamps the owning job's label; must equal it EXACTLY.
+    "XPC_SERVICE_NAME",
+    # Linux: systemd's per-invocation id; presence is the whole test.
+    "INVOCATION_ID",
     # The engage claim (``session/runtime/types.ENGAGED_ENV``), written by
     # ``launch._spawn_runtime`` for a warm and read at boot by
     # ``RuntimeServer``, which stamps ``SessionRecord.engaged_at`` from it. This
