@@ -500,10 +500,14 @@ def _publish_when_idle(key: tuple[str, str], sid: str) -> None:
         return
     root, index, loop = entry
     # A companion may have landed while this timer waited (the cold half of the
-    # same open publishes one, and the warm half then uses it). Publishing again
-    # would rewrite ~10 MB for a derivation already on disk and make a warm open
-    # pay work base never does — QA round 5 measured exactly that on the warm
-    # `eligible` open. So the state is re-read here, not trusted from the arm.
+    # same open publishes one, and the warm half then uses it). This guard is
+    # DEFENCE IN DEPTH, not a saving: ``publish`` already returns at its own
+    # "already published for this exact derivation" check, so the call it skips
+    # costs a token key over the derivation plus one ``stat`` — measured by review
+    # round 6 at 6-7 ms and scale-invariant — never a rewrite of the document. The
+    # state is still re-read here rather than trusted from the arm, because the
+    # arming decision was made when the state was different, and a future publish
+    # path that builds before checking would inherit that stale decision.
     if _companion_exists(root, sid, index):
         return
     if key in ti._IN_FLIGHT or not _MATERIALIZE_SLOTS.acquire(blocking=False):
