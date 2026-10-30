@@ -2875,6 +2875,14 @@ class ProjectionFold:
         recognises the eventual event as THIS row rather than guessing from the
         transcript tail — see that method for why the guess was wrong. Omitted
         by callers with no id to offer, which keeps the legacy tail match.
+
+        The row carries ``user_row_text(text)``, not the raw argument: the
+        handle may hold the EXPANDED payload a ``$skill`` invocation persists
+        (the TUI expands at submit), and painting that verbatim showed the whole
+        SKILL.md body on the phone — including as a phone steer's own echo —
+        until the next full repaint replaced the row with the stripped one
+        (SKM-D2). One helper, so the live row and both replay folds agree by
+        construction.
         """
         entry = TranscriptEntry(
             # Synthetic id when the handle has none: the row still needs a
@@ -2882,7 +2890,7 @@ class ProjectionFold:
             # registry below is what carries the correlation instead.
             id=message_id or f"user-{time.time_ns()}",
             kind="steer" if steer else "user",
-            text=text,
+            text=user_row_text(text),
             final=True,
         )
         self._append(entry)
@@ -2988,6 +2996,13 @@ class ProjectionFold:
             return False
         text = message.text
         refs = _image_refs(message)
+        # The row this fold PAINTS, decided by the helper both replay folds use.
+        # Envelope and marker detection below keep reading the RAW text: those
+        # are facts about the producer's message, not what the row displays. A
+        # `$skill` invocation persists as its expanded payload, so a live row
+        # built from `text` showed the whole SKILL.md body until the next full
+        # repaint — the very leak the replay folds already fixed (SKM-D2).
+        row_text = user_row_text(text)
         # Echo reconciliation runs BEFORE the envelope branch, not after. A
         # message whose text matches the envelope shape can still be one the
         # phone sent (a user quoting the wrapper, or a phone-issued steer);
@@ -3008,7 +3023,9 @@ class ProjectionFold:
             for candidate in reversed(self.projection.transcript[-3:]):
                 if (
                     candidate.kind in ("user", "steer")
-                    and candidate.text == text
+                    # Stripped text on BOTH sides: the echo row holds what the
+                    # surface paints, the event holds the persisted payload.
+                    and candidate.text == row_text
                     and candidate.id not in owned
                 ):
                     entry = candidate
@@ -3090,7 +3107,7 @@ class ProjectionFold:
             )
             return True
         self._append(
-            TranscriptEntry(id=message.id, kind="user", text=text, images=refs, final=True)
+            TranscriptEntry(id=message.id, kind="user", text=row_text, images=refs, final=True)
         )
         return True
 
