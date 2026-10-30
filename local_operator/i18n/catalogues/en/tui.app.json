@@ -44,6 +44,5 @@
   "tui.app.providers.stale_all": "stale list: all providers",
   "tui.app.providers.stale_named": "stale list: {names}",
   "tui.app.providers.stale_all_error": "stale list: all providers — {error}",
-  "tui.app.providers.no_live_list": "no live list: {names}",
-  "tui.app.status_command.failed": "Status command failed ({error}); the band keeps its last reading. Check display.composer.command."
+  "tui.app.providers.no_live_list": "no live list: {names}"
 }

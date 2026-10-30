@@ -957,6 +957,27 @@
       },
       "status": "passed",
       "note": "Status band command delta: 5 new keys (display_composer_command label/help/placeholder, display_composer_command_interval label/help). Independent translation audit round 1 at these en bytes: 2 minor/nit finding(s) applied verbatim; 0 blocker/major. Same model family as translator (disclosed). Other keys carried unchanged. Findings record: PR description (evidence stays on the PR)."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.settings",
+      "source_sha256": "ed16289b2e22de6c9d3d25bb1218cb71a9240f284bbbc13d90e2dce52fc9c17f",
+      "translator": {
+        "agent": "coder (i18n-translator brief; local-operator subagent fccefb6b69f0)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-30"
+      },
+      "auditor": {
+        "agent": "copy-reviewer (independent i18n-auditor brief; local-operator subagent 86b86b0c8800/5fa28d6084bc)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-30",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
+      },
+      "status": "passed",
+      "note": "Status band command, review round 1 delta (display_composer_command.help reworded). Independent audit at these en bytes: 1 minor/nit finding(s); 0 applied verbatim, the rest optional follow-ups; 0 blocker/major. Read route: git show HEAD blob at 8da23bdaf (read_public_copy unreachable: session cwd was a different repo). Same model family as translator (disclosed)."
     }
   ]
 }

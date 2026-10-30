@@ -1,0 +1,3 @@
+{
+  "tui.status_command.failed": "Échec de la commande d’état ({error}) ; le bandeau garde sa dernière valeur. Vérifiez display.composer.command."
+}

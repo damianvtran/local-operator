@@ -138,6 +138,7 @@ from local_operator.i18n.keys import tui_asks as _ask_keys
 from local_operator.i18n.keys import tui_library
 from local_operator.i18n.keys import tui_projects as _pc
 from local_operator.i18n.keys import tui_projects_edit as _pe
+from local_operator.i18n.keys import tui_status_command as _sc_keys
 from local_operator.i18n.keys import tui_tags as _tag_keys
 from local_operator.i18n.text import tr
 from local_operator.logger import current_log_file
@@ -47738,7 +47739,7 @@ class OperatorApp(App[None]):
         if not self._status_command_notified:
             self._status_command_notified = True
             self._notice(
-                _t(_x.status_command_failed(error=outcome.error)),
+                tr("tui.status_command")(_sc_keys.failed(error=outcome.error)),
                 "warning",
             )
 

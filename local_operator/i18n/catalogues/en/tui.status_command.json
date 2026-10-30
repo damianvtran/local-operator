@@ -1,0 +1,3 @@
+{
+  "tui.status_command.failed": "Status command failed ({error}); the band keeps its last reading. Check display.composer.command."
+}
