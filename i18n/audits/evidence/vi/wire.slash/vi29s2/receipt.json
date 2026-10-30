@@ -1,0 +1,318 @@
+{
+  "locale": "vi",
+  "scope": "local_operator/i18n/catalogues/vi/wire.slash.json — whole file, 52 keys, checked against the en source in the same tree; 11 values changed in the uncommitted working tree (agent, hub, mcp, mobile, network, provider, resume, session, sidebar, stop, team) and judged one by one; read-only, no edits made",
+  "tree": "/Users/damian/lo-core-fix",
+  "tree_head": "7159e2a30927831f5dfb88f84c588eac07770e5d",
+  "tree_dirty": true,
+  "dirty_files": [
+    "es",
+    "fr",
+    "hi",
+    "ru",
+    "ur",
+    "vi",
+    "zh-CN"
+  ],
+  "audit_date": "2026-10-29",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "f3ea10304234",
+    "model": "radient/auto",
+    "actual_model_source": "fallback: provider quota moved this session anthropic/claude-sonnet-5-5 -> openai/gpt-6-astra -> kimi/k3.1-pro -> radient/auto; every value judged and every hash/width in this receipt was read after the final switch, on the working-tree bytes",
+    "independent_from_translator": true,
+    "independent_from_previous_audit": true,
+    "previous_audit_session": "3ef6295a5545"
+  },
+  "instance": "f3ea10304234-slash2-vi",
+  "input_sha256": {
+    "en": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
+    "target": "d228f91dad840c65253a5d46919cb99c0cb0eaa21c99d315e79f55f8490dfc23"
+  },
+  "inputs": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.slash.json",
+      "keys": 52,
+      "sha256": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
+      "unchanged_since_previous_audit": true
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/vi/wire.slash.json",
+      "keys": 52,
+      "sha256": "d228f91dad840c65253a5d46919cb99c0cb0eaa21c99d315e79f55f8490dfc23",
+      "previous_audited_sha256": "8465ca765e79cd02f9a93a4fc9ada7a4444bfa6cac40ee28bb74530d665a6e05"
+    }
+  },
+  "prior_receipt": {
+    "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/slash-audit/vi/receipt.json",
+    "sha256": "66d82d9b52669372",
+    "note": "sha256 recorded truncated to 16 hex chars; treated strictly as the CLAIM LIST being verified, not as truth"
+  },
+  "counts": {
+    "BLOCKER": 0,
+    "MAJOR": 0,
+    "MINOR": 1,
+    "NIT": 4
+  },
+  "verdict": "pass",
+  "verdict_reason": "Both previous MAJORs and eight of nine MINOR/NIT findings are genuinely fixed on the bytes; the sole length regression is wire.slash.session at 59 cells against a 54-cell en source that renders whole, which is MINOR, not blocking.",
+  "previous_findings": [
+    {
+      "id": "vi-slash-M1",
+      "severity": "MAJOR",
+      "key": "wire.slash.hub",
+      "status": "fixed",
+      "evidence": "Value is now 'Mở liên kết Hub — theo dõi/tự đẩy cho từng liên kết'. Product name is Latin 'Hub' (consistent with vi wire.settings.hub.title 'Agent Hub'), and per-link scoping is explicit via 'cho từng liên kết'. Residual: 'policy' unrendered and the '/' frames the two settings as alternatives — recorded as vi2-slash-NIT1, not a reopening of this finding."
+    },
+    {
+      "id": "vi-slash-M2",
+      "severity": "MAJOR",
+      "key": "wire.slash.mcp",
+      "status": "fixed",
+      "evidence": "'quản lý cấp quyền OAuth' now carries the guide's grant term «cấp quyền» (i18n/style-guides/vi.md, wave-2 roll terminology) AND keeps en's 'manage'. Residual: 'one' after add/remove still unrendered — vi2-slash-NIT2."
+    },
+    {
+      "id": "vi-slash-m1",
+      "severity": "MINOR",
+      "key": "wire.slash.agent",
+      "status": "fixed",
+      "evidence": "Object restored: 'Liệt kê tác nhân'. 'this' before phiên is still unrendered, exactly as in the previous audit's own suggested wording, so not counted open."
+    },
+    {
+      "id": "vi-slash-m2",
+      "severity": "MINOR",
+      "key": "wire.slash.stop",
+      "status": "fixed",
+      "evidence": "'(tên/pid)' restored, so the line again says how another session is addressed."
+    },
+    {
+      "id": "vi-slash-m3",
+      "severity": "MINOR",
+      "key": "wire.slash.team",
+      "status": "fixed",
+      "evidence": "'sơ đồ tổ chức' restores the org-chart sense; 'a team's' remains implicit, which the command's own list supplies."
+    },
+    {
+      "id": "vi-slash-m4",
+      "severity": "MINOR",
+      "key": "wire.slash.resume",
+      "status": "fixed",
+      "evidence": "'hoặc tiếp tục bằng (id)' restores the resume verb; the input-method reading ('gõ') is gone."
+    },
+    {
+      "id": "vi-slash-m5",
+      "severity": "MINOR",
+      "key": "wire.slash.mobile",
+      "status": "fixed",
+      "evidence": "'Radient qua điện thoại' restores the access relation; no longer reads as a phone named Radient."
+    },
+    {
+      "id": "vi-slash-N1",
+      "severity": "NIT",
+      "key": "wire.slash.links",
+      "status": "not_fixed",
+      "evidence": "Value unchanged ('Mở liên kết cuộc trò chuyện này trong trình duyệt'); en 'a link from' still compresses to the possessive. Carried as vi2-slash-NIT4; harmless (the command opens a link picker) and not a reason to hold the file."
+    },
+    {
+      "id": "vi-slash-N2",
+      "severity": "NIT",
+      "key": "wire.slash.network",
+      "status": "fixed",
+      "evidence": "'trạng thái mesh máy này' restores 'state'."
+    },
+    {
+      "id": "vi-slash-N3",
+      "severity": "NIT",
+      "key": "wire.slash.provider",
+      "status": "fixed",
+      "evidence": "'và trạng thái đăng nhập/sử dụng' restores 'their … state' and drops the label-gloss colon."
+    },
+    {
+      "id": "vi-slash-N4",
+      "severity": "NIT",
+      "key": "wire.slash.sidebar",
+      "status": "fixed",
+      "evidence": "Curly quotes “ ” now used per the vi style guide. The 'keys the list' verb compression survives — vi2-slash-NIT3."
+    }
+  ],
+  "namespaces": {
+    "wire.slash": {
+      "status": "passed",
+      "keys_audited": 52,
+      "keys_in_file": 52,
+      "changed_values_audited": [
+        "agent",
+        "hub",
+        "mcp",
+        "mobile",
+        "network",
+        "provider",
+        "resume",
+        "session",
+        "sidebar",
+        "stop",
+        "team"
+      ],
+      "sha256": {
+        "en": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
+        "target": "d228f91dad840c65253a5d46919cb99c0cb0eaa21c99d315e79f55f8490dfc23"
+      },
+      "mechanical": {
+        "json_valid": true,
+        "keys_added_or_dropped": 0,
+        "key_order_matches_en": true,
+        "empty_values": 0,
+        "identical_to_english": 0,
+        "nfc_normalized": true,
+        "combining_mark_sequences": 0,
+        "ascii_single_quotes": 0,
+        "curly_quotes_used_in": [
+          "wire.slash.sidebar"
+        ],
+        "double_or_trailing_spaces": 0,
+        "icu_arguments_in_scope": 0,
+        "placeholders_and_tokens_verified": [
+          "<message>",
+          "<goal>",
+          "<n>",
+          "--switch",
+          "--window",
+          "--stop",
+          "--clear",
+          "--copy",
+          "--refresh",
+          "/goal",
+          "/loop",
+          "/title",
+          "/resume"
+        ],
+        "placeholders_byte_identical": true,
+        "flags_intact": true,
+        "english_left_in_place_by_design": [
+          {
+            "key": "wire.slash.mobile",
+            "tokens": "status, enable, stop, billing",
+            "why": "subverb vocabulary"
+          },
+          {
+            "key": "wire.slash.project",
+            "tokens": "list, show, new, delete, link, unlink",
+            "why": "subverb vocabulary"
+          },
+          {
+            "key": "wire.slash.mcp",
+            "tokens": "add/remove",
+            "why": "subverb vocabulary"
+          },
+          {
+            "key": "wire.slash.language",
+            "tokens": "auto",
+            "why": "config token"
+          },
+          {
+            "key": "wire.slash.model",
+            "tokens": "/model default",
+            "why": "command vocabulary"
+          }
+        ]
+      },
+      "validator": {
+        "command": "python3 scripts/i18n/check.py --catalogues-only",
+        "exit": 0,
+        "output": "check.py: catalogue checks: 0 problem(s)",
+        "note": "The full check (without --catalogues-only) was attempted first and timed out at 240 s on this host (exit 124); no pass is claimed for it. The catalogue checks ran with all seven modified catalogues present in the tree."
+      },
+      "width": {
+        "contract_source": "local_operator/slash_commands.py — the picker's description column is 46 cells at a 100-column terminal and 56 at 110; /help folds past ~55 cells",
+        "counting_method": "per-character cell count, combining marks excluded, W/F wide glyphs = 2; validated against the vi style guide's own recorded figures (wire.slash.fork: vi 81 / en 74 — both reproduced exactly)",
+        "changed_values_over_55": [
+          {
+            "key": "agent",
+            "en": 69,
+            "target": 58
+          },
+          {
+            "key": "mcp",
+            "en": 58,
+            "target": 56
+          },
+          {
+            "key": "session",
+            "en": 54,
+            "target": 59
+          },
+          {
+            "key": "stop",
+            "en": 66,
+            "target": 57
+          }
+        ],
+        "cost_of_this_revision": "Three changed values are longer than their en source (mobile 53 vs 51, provider 52 vs 42, session 59 vs 54); only session crosses the 56-cell column that its en source stays inside. agent/mcp/stop exceed 55, but so do their en sources, so the revision did not introduce that.",
+        "prior_receipt_width_claim_correction": "The previous receipt recorded a 51-cell picker budget and '50 of 52 values fit'. Recomputed on the bytes, 8 en values and 6 vi values exceed 55 cells and en itself exceeds 56 in six places, so that width block is not reliable evidence of fit. This audit measured afresh; the figures above come from this tree, not from the prior report."
+      },
+      "findings": [
+        {
+          "id": "vi2-slash-MINOR1",
+          "severity": "MINOR",
+          "kind": "fit",
+          "key": "wire.slash.session",
+          "en": "Usage, cost, diagnostics; --copy copies the session ID",
+          "en_cells": 54,
+          "current": "Lượng sử dụng, chi phí, chẩn đoán; --copy sao chép ID phiên",
+          "cells": 59,
+          "problem": "The revision correctly restored the verb that was missing ('--copy: ID phiên' said nothing about copying), but pushed the line 3 cells past the 56-cell description column the picker measures at a 110-column terminal, and past the ~55 at which /help folds. The en source at 54 renders whole. Where it clips, the clip lands on 'ID phiên' — the exact clause this revision added, so the added information is the part that gets cut. Meaning in the catalogue is intact; the loss is in the rendered row.",
+          "suggestion": "Lượng sử dụng, chi phí, chẩn đoán; --copy lấy ID phiên",
+          "suggestion_cells": 54,
+          "fix_note": "'lấy ID phiên' keeps the verb sense ('--copy takes the session ID') and the guide's pinned term «lượng sử dụng», and fits the column at 54. If 'sao chép' is preferred as the standard UI verb, the honest alternative is 'chép ID phiên' at 55; keeping 'sao chép' as written means accepting a 3-cell clip and an ellipsis on this row."
+        },
+        {
+          "id": "vi2-slash-NIT1",
+          "severity": "NIT",
+          "kind": "idiom",
+          "key": "wire.slash.hub",
+          "en": "Open Hub links — per-link subscribe and auto-push policy",
+          "current": "Mở liên kết Hub — theo dõi/tự đẩy cho từng liên kết",
+          "cells": 51,
+          "problem": "Both previous losses are gone. What remains is register: en's noun 'policy' (its sidecar note calls these the two per-link toggles) is not rendered, and the slash reads as an either/or between the two settings where en couples them with 'and'.",
+          "suggestion": "Mở liên kết Hub — theo dõi và tự đẩy cho từng liên kết",
+          "suggestion_cells": 54
+        },
+        {
+          "id": "vi2-slash-NIT2",
+          "severity": "NIT",
+          "kind": "accuracy",
+          "key": "wire.slash.mcp",
+          "en": "List MCP servers; add/remove one, or manage an OAuth grant",
+          "current": "Liệt kê máy chủ MCP; add/remove, quản lý cấp quyền OAuth",
+          "cells": 56,
+          "problem": "'one' after add/remove is still unrendered, so the line no longer says the subverbs act on a single server. No change recommended: 'add/remove một' measures 60 cells, past the column, and the quantifier is recoverable from the subverb vocabulary.",
+          "suggestion": "",
+          "suggestion_cells": null
+        },
+        {
+          "id": "vi2-slash-NIT3",
+          "severity": "NIT",
+          "kind": "accuracy",
+          "key": "wire.slash.sidebar",
+          "en": "Show or hide conversations; 'focus' keys the list",
+          "current": "Hiện/ẩn cuộc trò chuyện; “focus” điều hướng phím",
+          "cells": 48,
+          "problem": "Quotes are now the guide's “ ” (fixed). The leftover drift: en says the word 'focus' moves keyboard focus to the list; 'điều hướng phím' reads as 'keyboard navigation', describing navigation rather than focusing the list.",
+          "suggestion": "Hiện/ẩn cuộc trò chuyện; “focus” đưa phím vào danh sách",
+          "suggestion_cells": 55
+        },
+        {
+          "id": "vi2-slash-NIT4",
+          "severity": "NIT",
+          "kind": "meaning",
+          "key": "wire.slash.links",
+          "en": "Open a link from this conversation in a browser",
+          "current": "Mở liên kết cuộc trò chuyện này trong trình duyệt",
+          "cells": 53,
+          "problem": "Carried unchanged from the previous round (there vi-slash-N1). 'a link from' still compresses to the possessive reading; the singular/source nuance is unrendered. Harmless because the command opens a link picker, and it is the one previous finding still open.",
+          "suggestion": "Mở một liên kết từ cuộc trò chuyện này trong trình duyệt",
+          "suggestion_cells": 56
+        }
+      ]
+    }
+  }
+}

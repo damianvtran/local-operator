@@ -66,7 +66,12 @@ from local_operator.server.retire import RETIRING_MESSAGE, DaemonRetiring
 # one module owns the scan, its cache and its invalidation, and this adapter is
 # only the door. Imported as a module so tests can drive its decision paths off
 # the bridge without a second seam.
-from local_operator.session import open_trace, transcript_find, transcript_index
+from local_operator.session import (
+    index_read_model,
+    open_trace,
+    transcript_find,
+    transcript_index,
+)
 
 # The pin store is the sidebar's OWN module, reused rather than re-implemented —
 # for the reason the `move_targets` import above cites, which is also that
@@ -4081,11 +4086,15 @@ class DesktopSessionBridge:
                     "head_cut": False,
                 }
             anchored = self._wire_rows(page.entries)
-            anchored_index = await self._frame_index(deadline)
+            anchored_index = await self._frame_source(deadline, [page])
+            anchored_index, facts = await self._resolve_frame_source(
+                anchored_index, anchored, [page], order_ids or [], False, deadline
+            )
             result = build_frame(
                 anchored,
                 supplements=supplements,
                 index=anchored_index,
+                resolved_runs=facts.runs if facts is not None else None,
                 runs_state="building",
                 has_more=page.has_more,
                 cursor_missing=page.reconciled,
@@ -4120,6 +4129,8 @@ class DesktopSessionBridge:
             # here is "a cap dropped rows from this window".
             answer["head_cut"] = result.capped
             answer = await self._with_peer_cycle_records(answer, [page])
+            if journal_order and facts is not None and index_read_model.apply_order(answer, facts):
+                return answer
             return self._journal_page(answer, [page], order_ids or []) if journal_order else answer
 
         collected: list[dict[str, Any]] = []
@@ -4206,7 +4217,7 @@ class DesktopSessionBridge:
                 and through_id is None
                 and around_id is None
             ):
-                index = await self._frame_index(deadline)
+                index = await self._frame_source(deadline, order_pages)
                 index_at_first_page = index is not None
             if (
                 index is not None
@@ -4233,7 +4244,7 @@ class DesktopSessionBridge:
             if not cursor:
                 break
         if index is None:
-            index = await self._frame_index(deadline)
+            index = await self._frame_source(deadline, order_pages)
             if tail_read and not index_at_first_page:
                 # THE INDEX LANDED DURING THE HUNT (#3037 QA, O1; the relay twin
                 # carries the same rule): the facts will say ``ready``, so the rows
@@ -4257,11 +4268,15 @@ class DesktopSessionBridge:
         # extra rows — measured on the S3 fixture, serving the overshoot was 231
         # rows and 264 KB against 100 rows and 114 KB — so the hunt that failed is
         # not paid for, and ``runs`` carries that run's true size instead.
+        index, facts = await self._resolve_frame_source(
+            index, collected, order_pages, order_ids or [], tail_read, deadline
+        )
         kept, reached = align_page(collected, limit, supplements=supplements)
         result = build_frame(
             kept,
             supplements=supplements,
             index=index,
+            resolved_runs=facts.runs if facts is not None else None,
             runs_state="building",
             has_more=has_more,
             cursor_missing=cursor_missing,
@@ -4296,6 +4311,8 @@ class DesktopSessionBridge:
         # worse than no answer.
         answer["head_cut"] = (not reached or result.capped) and answer["has_more"]
         answer = await self._with_peer_cycle_records(answer, order_pages)
+        if journal_order and facts is not None and index_read_model.apply_order(answer, facts):
+            return answer
         return self._journal_page(answer, order_pages, order_ids or []) if journal_order else answer
 
     @staticmethod
@@ -4320,6 +4337,64 @@ class DesktopSessionBridge:
                 for entry in entries
             ]
         )
+
+    async def _frame_source(self, deadline: float, pages: list[Any]) -> Any:
+        """Resident first, then witnessed tail summary; fallback keeps its wager.
+
+        A summary only guides the head hunt. It never authorizes suppressing a
+        refresh for a later failed selection or pretending the whole index exists.
+        """
+        source = index_read_model.page_source(pages)
+        resident = transcript_index.fresh_resident(self.root, self.session_id)
+        if resident is not None:
+            expected = (
+                resident.sig.get("inode"),
+                resident.sig.get("size"),
+                resident.sig.get("mtime"),
+            )
+            return resident if source == expected else None
+        projected = await asyncio.to_thread(
+            index_read_model.summary, self.root, self.session_id, source
+        )
+        if projected.state == "ready":
+            return projected.value
+        return await self._frame_index(deadline)
+
+    async def _resolve_frame_source(
+        self,
+        candidate: Any,
+        collected: list[dict[str, Any]],
+        pages: list[Any],
+        order_ids: list[str],
+        reaches_eof: bool,
+        deadline: float,
+    ) -> tuple[Any, Any]:
+        """Materialize selected facts before build_frame, on an existing worker hop."""
+        source = index_read_model.page_source(pages)
+        if isinstance(candidate, index_read_model.FrameSummary):
+            result = await asyncio.to_thread(
+                index_read_model.frame_facts,
+                self.root,
+                self.session_id,
+                collected_ids=[row["id"] for row in collected],
+                reaches_eof=reaches_eof,
+                order_ids=order_ids,
+                source=source,
+            )
+            if result.state == "ready":
+                return None, result.value
+            # Summary success is NOT selection success. Corruption/races use the
+            # original admitted wait rather than stranding a fallback joiner.
+            candidate = await self._frame_index(deadline)
+        if candidate is not None:
+            expected = (
+                candidate.sig.get("inode"),
+                candidate.sig.get("size"),
+                candidate.sig.get("mtime"),
+            )
+            if source != expected:
+                candidate = None
+        return candidate, None
 
     async def _frame_index(self, deadline: float) -> Any:
         """The index this frame's run facts come from, or ``None``.

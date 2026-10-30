@@ -10,6 +10,7 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { BUNDLED_OWNED } from "./i18n/bundled.gen";
+import { RESOLVED_LOCALES } from "./i18n/runtime";
 import { initializeLocaleMetadata, messageRuntime, retainConfigStream, useLanguage, useLocaleSnapshot } from "./store";
 
 import { FetchStreamFixture as Stream, settleStream } from "./sse-test-fixture";
@@ -66,20 +67,34 @@ describe("retainConfigStream", () => {
 		expect(document.documentElement.lang).toBe("en"); expect(document.documentElement.dir).toBe("ltr");
 		expect(fetchMock).not.toHaveBeenCalled(); unmount();
 	});
-	it("keeps backend fr separate from English UI and publishes same-locale registration via existing subscription", async () => {
+	it("follows the shipped fr bundle, falls back to English for an unshipped locale (when one exists), and publishes same-locale registration", async () => {
 		vi.useFakeTimers(); Stream.instances = [];
 		vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(configOk()).mockImplementation(Stream.fetch));
 		initializeLocaleMetadata();
 		const languageHook = renderHook(() => useLanguage());
 		const snapshotHook = renderHook(() => useLocaleSnapshot());
+		// The locale for the FALLBACK half of this contract: supported by the
+		// product, but with no owned relay catalogue, so its preference may not
+		// claim copy nobody translated. It is DERIVED from the generated manifest
+		// rather than named, because the shipped set moves while a branch is open:
+		// vi shipped with #3163 while es (#3164) and hi (#3166) waves are still in
+		// flight, and a hardcoded locale goes red the day one of them lands and
+		// invites a "fix" that deletes this assertion. Measured on this tree:
+		// shipped en/fr/ru/vi/ur/zh-CN, so the pick is es.
+		const unshipped = RESOLVED_LOCALES.find(
+			locale => locale !== "en" && !Object.values(BUNDLED_OWNED).some(bundle => locale in bundle),
+		);
 		const close = retainConfigStream();
 		try {
 			await settleStream(); expect(Stream.instances).toHaveLength(1);
 			const source = Stream.instances[0];
 			await act(async () => { source.emit("config", JSON.stringify({ language: "fr" })); await settleStream(); });
 			expect(languageHook.result.current).toBe("fr");
-			expect(snapshotHook.result.current).toMatchObject({ backendLocale: "fr", uiLocale: "en", direction: "ltr" });
-			expect(document.documentElement.lang).toBe("en"); expect(document.documentElement.dir).toBe("ltr");
+			// #3131 ships fr's owned relay bundles, so a fr backend preference paints
+			// French copy: uiLocale follows an owned copy that exists rather than the
+			// preference alone.
+			expect(snapshotHook.result.current).toMatchObject({ backendLocale: "fr", uiLocale: "fr", direction: "ltr" });
+			expect(document.documentElement.lang).toBe("fr"); expect(document.documentElement.dir).toBe("ltr");
 			const previous = snapshotHook.result.current;
 			act(() => { messageRuntime.registerWire("wire.exec", "fr", { "wire.exec.error_line": "Fixture {error}" }); });
 			expect(snapshotHook.result.current.revision).toBe(previous.revision + 1);
@@ -87,10 +102,24 @@ describe("retainConfigStream", () => {
 			for (const invalid of ["auto", "fr-CA", "bogus", ""]) await act(async () => { source.emit("config", JSON.stringify({ language: invalid })); await settleStream(); });
 			expect(snapshotHook.result.current).toBe(registered);
 			expect(languageHook.result.current).toBe("fr");
+			// The fallback direction, and the assertion that goes red if the store
+			// ever follows the backend preference blindly: the preference lands, but
+			// the UI and the document stay on the whole English bundle. The arm needs
+			// a locale with no relay catalogue and es (#3164) / hi (#3166) are the last
+			// two, so it is skipped rather than asserted once that gap closes: a green
+			// run must not depend on a locale being untranslated.
+			if (unshipped !== undefined) {
+				await act(async () => { source.emit("config", JSON.stringify({ language: unshipped })); await settleStream(); });
+				expect(snapshotHook.result.current).toMatchObject({ backendLocale: unshipped, uiLocale: "en", direction: "ltr" });
+				expect(document.documentElement.lang).toBe("en"); expect(document.documentElement.dir).toBe("ltr");
+			}
 		} finally { close(); languageHook.unmount(); snapshotHook.unmount(); }
 		const offline = renderHook(() => useLocaleSnapshot());
-		expect(offline.result.current.backendLocale).toBe("fr");
-		expect(offline.result.current.uiLocale).toBe("en");
+		// After the stream closes the preference survives; the copy it selects does
+		// not, because that locale owns none. With no unshipped locale left the last
+		// accepted preference is the shipped fr, whose copy does exist.
+		expect(offline.result.current.backendLocale).toBe(unshipped ?? "fr");
+		expect(offline.result.current.uiLocale).toBe(unshipped === undefined ? "fr" : "en");
 		offline.unmount();
 	});
 	afterEach(() => {

@@ -1,0 +1,2 @@
+PASS
+Both previous MAJORs are fixed on the bytes; the only new defect is a 3-cell fit clip on wire.slash.session (MINOR), and 1 previous NIT (links) remains open.
