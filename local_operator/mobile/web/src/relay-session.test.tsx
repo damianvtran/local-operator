@@ -24,9 +24,9 @@
  */
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { BUNDLED_OWNED } from "./i18n/bundled.gen";
+import { BUNDLED_CHUNKS } from "./i18n/bundled.gen";
 import { RESOLVED_LOCALES } from "./i18n/runtime";
-import { messageRuntime, useLocaleSnapshot } from "./store";
+import { localeBundleLoader, messageRuntime, useLocaleSnapshot } from "./store";
 
 /** The exact copy the session surfaces hardcoded BEFORE this slice (identity). */
 const BEFORE = {
@@ -81,41 +81,40 @@ describe("relay.session extraction", () => {
 		}
 	});
 
-	it("follows the actual owned-copy language, not the backend preference", () => {
+	it("follows the actual owned-copy language, not the backend preference", async () => {
 		// The contract from #2297: lang/dir describe the ACTUAL rendered owned-copy
-<<<<<<< HEAD
-		// language (uiLocale), not the backend preference. French has no emitted
-		// owned chunk yet, so a French backend paints EN/LTR. A locale that DOES
-		// ship one arrives with its chunk on the config frame — the lazy path is
-		// relay-shell's "loads a shipped locale's chunk" test, asserted there so
-		// this one does not depend on whether that chunk has already been loaded.
-		expect(messageRuntime.uiLocaleFor("fr")).toBe("en");
-=======
-		// language (uiLocale), not the backend preference. Both directions are
-		// pinned here: a locale the relay ships paints its own language, and a
-		// SUPPORTED locale it does not ship paints the WHOLE English bundle instead
-		// of claiming copy nobody translated — the half that goes red if the store
-		// ever follows the backend preference blindly.
+		// language (uiLocale), not the backend preference. BOTH directions are pinned
+		// here, in the halves the lazy tree actually has: a shipped locale's copy is a
+		// chunk the store has to REQUEST (`BUNDLED_CHUNKS`), so until it is requested
+		// the surface is English, and once it lands the locale is that locale's — the
+		// half that goes red if the store ever follows the backend preference
+		// blindly.
 		//
-		// The unshipped locale is DERIVED from the generated manifest rather than
-		// named, because the shipped set moves while a branch is open: vi shipped
-		// with #3163 and the catalogue waves for es (#3164) and hi (#3166) are
-		// still in flight. A fixed name would turn this test red the day one of
-		// them lands and invite someone to flip it to the shipped language,
-		// deleting the assertion it exists to make. Measured on this tree, the
-		// shipped set is en/fr/ru/vi/ur/zh-CN, so the pick is es.
+		// The unshipped pick is DERIVED from the shipped manifest rather than named,
+		// because the shipped set moves while a branch is open: vi shipped with
+		// #3163, es with #3172, and the hi catalogue (#3166) is still in flight. A
+		// fixed name would turn this test red the day one of them lands and invite
+		// someone to flip it to the shipped language, deleting the assertion it
+		// exists to make. Shipped-ness is read from `BUNDLED_CHUNKS`, never from
+		// `BUNDLED_OWNED`: the eager map holds English only, so asking it would call
+		// every locale unshipped and pick one that does have copy.
 		const unshipped = RESOLVED_LOCALES.find(
-			locale => locale !== "en" && !Object.values(BUNDLED_OWNED).some(bundle => locale in bundle),
+			locale => locale !== "en" && !(locale in BUNDLED_CHUNKS),
 		);
+		// Nothing in this fixture has asked the loader for a chunk yet, so both a
+		// shipped LTR (fr) and a shipped RTL (ur) locale fall back to the WHOLE
+		// English bundle rather than claiming copy the store has not received.
+		expect(messageRuntime.uiLocaleFor("fr")).toBe("en");
+		expect(messageRuntime.uiLocaleFor("ur")).toBe("en");
+		// Then the real lazy path, through the store's own loader — the only door that
+		// registers a chunk — which is what makes French the rendered language.
+		await localeBundleLoader.ensure("fr");
 		expect(messageRuntime.uiLocaleFor("fr")).toBe("fr");
-		expect(messageRuntime.uiLocaleFor("ur")).toBe("ur");
-		// The fallback arm exists only while a supported locale still lacks a relay
-		// catalogue; es (#3164) and hi (#3166) are the last two, so the arm is
-		// skipped rather than asserted once they land. A green run must never
-		// depend on a gap in the catalogue set, which is the same trap as naming
-		// the locale: it goes red on the day the gap closes.
+		// The fallback arm exists only while a supported locale still lacks a
+		// catalogue, so it is skipped rather than asserted once hi lands: a green run
+		// must never depend on a gap in the catalogue set, which is the same trap as
+		// naming the locale — it goes red on the day the gap closes.
 		if (unshipped !== undefined) expect(messageRuntime.uiLocaleFor(unshipped)).toBe("en");
->>>>>>> origin/main
 		const { result, unmount } = renderHook(() => useLocaleSnapshot());
 		// No config frame is applied in this fixture, so the snapshot is the boot
 		// state and says nothing about either preference.

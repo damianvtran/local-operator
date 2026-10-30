@@ -1,0 +1,15 @@
+{
+  "relay.account_policy.title": "Ajustes de la máquina",
+  "relay.account_policy.back": "Volver",
+  "relay.account_policy.loading": "Cargando el enrutamiento de cuentas…",
+  "relay.account_policy.save": "Guardar política",
+  "relay.account_policy.saving": "Guardando…",
+  "relay.account_policy.saved": "Guardado en esta máquina.",
+  "relay.account_policy.retry": "Reintentar",
+  "relay.account_policy.unavailable": "Los ajustes de enrutamiento de cuentas no están disponibles en este relé. Actualiza Local Operator en esta máquina.",
+  "relay.account_policy.error": "No se pudo confirmar el cambio. Comprueba la conexión y recarga para ver la política actual.",
+  "relay.account_policy.scope": "Los cambios solo se aplican a esta máquina.",
+  "relay.account_policy.entry": "ajustes",
+  "relay.account_policy.rejected": "No se guardó el cambio. Comprueba el valor o los ajustes de esta máquina y vuelve a intentarlo.",
+  "relay.account_policy.load_error": "No se pudo cargar el enrutamiento de cuentas. Comprueba la conexión y vuelve a intentarlo."
+}
