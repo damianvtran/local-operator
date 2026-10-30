@@ -1,0 +1,14 @@
+{
+  "wire.errors.auth.account_not_found": "Compte fournisseur introuvable",
+  "wire.errors.auth.auth_refusal": "{error}",
+  "wire.errors.auth.credentials_missing": "Aucun identifiant enregistré n’a été trouvé pour ce fournisseur.",
+  "wire.errors.auth.input_invalid": "Saisissez une valeur non vide d’au plus 32768 caractères.",
+  "wire.errors.auth.key_not_accepted": "Ce fournisseur n’accepte pas de clé API.",
+  "wire.errors.auth.key_rejected": "Le fournisseur a rejeté cette clé API.",
+  "wire.errors.auth.local_server_only": "Seul le serveur d’un fournisseur local peut être testé.",
+  "wire.errors.auth.provider_refusal": "{error}",
+  "wire.errors.auth.server_address_missing": "Ce fournisseur n’a pas d’adresse de serveur à tester.",
+  "wire.errors.auth.sign_in_missing": "Cette connexion n’est plus disponible. Recommencez.",
+  "wire.errors.auth.sign_in_not_waiting": "Cette connexion n’attend aucune saisie.",
+  "wire.errors.auth.store_unreadable": "Le stockage des identifiants n’a pas pu être lu — le recensement des fournisseurs en a besoin."
+}
