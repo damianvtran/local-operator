@@ -9,7 +9,8 @@ and one that does not must not render a key token.
 """
 
 from local_operator import settings_io
-from local_operator.i18n import messages
+from local_operator.i18n import catalogues, messages
+from local_operator.i18n.runtime import render_message
 from local_operator.i18n.keys import wire_settings_account_policy as policy
 
 
@@ -23,21 +24,33 @@ def test_registry_uses_new_child_source_and_stable_machine_enum_ids():
     assert "does not guarantee a cache hit" in row.help
 
 
-def test_untranslated_child_uses_english_source_under_supported_locales():
-    # es moved out of this list when its catalogue landed, and ru when the
-    # relay ru wave carried `relay.account_policy`; the locales below still
-    # carry neither file, so the English source is the correct render and a
-    # key token would be the bug.
-    for locale in ("fr", "vi", "hi"):
-        assert messages.render(policy.label().code, {}, locale=locale) == "account selection policy"
-    # vi moved out of this half when its `relay.account_policy` catalogue shipped
-    # (2026-10-29 audit); the locales below still have no such file, so English is
-    # the correct render and a key token would be the bug.
-    for locale in ("fr", "ru", "hi"):
-        assert (
-            messages.render("relay.account_policy.loading", {}, locale=locale)
-            == "Loading account routing…"
-        )
+def test_every_supported_locale_renders_its_own_copy_or_the_english_source():
+    """A locale either carries the namespace or reads the English SOURCE.
+
+    This used to name the locales it expected to fall back ("fr", "vi", "hi", …),
+    which rots the moment any lane ships that catalogue — it went red when the
+    Russian relay wave landed, through no fault of the code it tests. The
+    property is derived from the catalogues now, so it cannot go stale: a
+    locale that has no file must render the English sentence (never a key
+    token), and a locale that has one must render ITS byte for byte.
+    """
+    for namespace, key in (
+        ("relay.account_policy", "relay.account_policy.loading"),
+        ("wire.settings.account_policy", policy.label().code),
+    ):
+        english = messages.render(key, {}, locale="en")
+        for locale in ("en", "fr", "es", "zh-CN", "ru", "vi", "ur", "hi"):
+            rendered = messages.render(key, {}, locale=locale)
+            assert f"{namespace}." not in rendered, (locale, rendered)
+            try:
+                catalogue = catalogues.load_catalogue(locale, namespace)
+            except catalogues.CatalogueNotFound:
+                assert rendered == english, (locale, namespace, rendered)
+                continue
+            if key in catalogue:
+                assert rendered == render_message(catalogue[key], {}, locale), (locale, namespace)
+            else:
+                assert rendered == english, (locale, namespace, rendered)
 
 
 def test_spanish_carries_the_policy_label_and_still_falls_back_elsewhere():
