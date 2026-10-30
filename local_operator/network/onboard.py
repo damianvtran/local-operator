@@ -2836,12 +2836,13 @@ class TargetLease:
 
     The fix is ordering, not tolerance: the runner releases the claim as its
     last act BEFORE publishing the outcome, so "no run in flight" and "target
-    free" become visible to readers in that order — never the reverse. The
-    release is idempotent and thread-safe by construction (a flag under the
-    caller's own single-threaded exit path, then the kernel unlock on the
-    process-wide descriptor, so a release from the runner's worker thread is
-    honoured), which keeps :func:`approval_run`'s ``finally`` the backstop for
-    every path that never publishes an outcome at all.
+    free" become visible to readers in that order — never the reverse. The two
+    exits cannot overlap: the runner's release runs on the worker thread, and
+    :func:`approval_run`'s ``finally`` runs on the loop thread only after that
+    worker has been joined (``join_owned`` drains before it propagates a
+    cancellation), so ``_released`` makes the second exit a no-op rather than a
+    second generator resume. That keeps the ``finally`` the backstop for every
+    path that never publishes an outcome at all.
     """
 
     #: Set by :func:`approval_run` before the lease is yielded; the admission
