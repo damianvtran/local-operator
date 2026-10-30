@@ -1,3 +1,3 @@
 {
-  "tui.status_command.failed": "状态命令失败（{error}）；状态栏保留上次结果。请检查display.composer.command。"
+  "tui.status_command.failed": "状态命令失败（{error}）。请检查display.composer.command。"
 }

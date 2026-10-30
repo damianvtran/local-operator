@@ -161,7 +161,7 @@
   "wire.settings.display_composer_chevron.choice.true.description": "चिह्न दिखाएँ",
   "wire.settings.display_composer_chevron.help": "इनपुट पंक्ति के बाएँ किनारे पर प्रॉम्प्ट चिह्न।",
   "wire.settings.display_composer_chevron.label": "प्रॉम्प्ट शेवरॉन",
-  "wire.settings.display_composer_command.help": "टाइमर पर चलती है; आउटपुट की पहली पंक्ति बैंड में दिखती है।",
+  "wire.settings.display_composer_command.help": "टाइमर पर चलती है; इसकी पहली पंक्ति बैंड में दिखती है।",
   "wire.settings.display_composer_command.label": "बैंड: स्टेटस कमांड",
   "wire.settings.display_composer_command.placeholder": "~/bin/my-status.sh",
   "wire.settings.display_composer_command_interval.help": "स्टेटस कमांड के दो बार चलने के बीच सेकंड (5-3600)।",

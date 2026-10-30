@@ -47650,7 +47650,10 @@ class OperatorApp(App[None]):
         """
         if self._status_command_armed is None:
             return
-        if self._status_command_running is not None and not self._status_command_running.is_finished:
+        if (
+            self._status_command_running is not None
+            and not self._status_command_running.is_finished
+        ):
             return
         self._start_status_command_run()
 

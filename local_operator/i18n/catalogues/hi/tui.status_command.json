@@ -1,3 +1,3 @@
 {
-  "tui.status_command.failed": "स्टेटस कमांड विफल रही ({error}); बैंड अपना पिछला परिणाम बनाए रखता है। display.composer.command जाँचें।"
+  "tui.status_command.failed": "स्टेटस कमांड विफल रही ({error})। display.composer.command जाँचें।"
 }

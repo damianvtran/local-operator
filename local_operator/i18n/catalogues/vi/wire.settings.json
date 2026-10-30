@@ -161,7 +161,7 @@
   "wire.settings.display_composer_chevron.choice.true.description": "hiện dấu này",
   "wire.settings.display_composer_chevron.help": "Dấu prompt ở mép trái của hàng nhập.",
   "wire.settings.display_composer_chevron.label": "Mũi tên prompt",
-  "wire.settings.display_composer_command.help": "Chạy định kỳ; dòng đầu tiên của đầu ra hiện trên dải.",
+  "wire.settings.display_composer_command.help": "Chạy định kỳ; dòng đầu tiên của nó hiện trên dải.",
   "wire.settings.display_composer_command.label": "Dải: lệnh trạng thái",
   "wire.settings.display_composer_command.placeholder": "~/bin/my-status.sh",
   "wire.settings.display_composer_command_interval.help": "Số giây giữa các lần chạy lệnh trạng thái (5-3600).",
