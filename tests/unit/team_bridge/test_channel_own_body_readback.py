@@ -21,6 +21,7 @@ from typing import Any, cast
 import pytest
 
 from local_operator.team_bridge import host as host_mod
+from local_operator.team_bridge import tool as tool_mod
 from local_operator.team_bridge.client import TeamBridgeClient
 from local_operator.team_bridge.tool import BridgeRuntime, execute_bridge
 from tests.unit.team_bridge.test_channel_tool import _owner
@@ -56,7 +57,7 @@ class FakeHub:
         self.body_error: Exception | None = None
         self.body_override: dict[str, Any] | None = None
 
-    def add(self, sender: str, text: str) -> str:
+    def add(self, sender: str, text: str, *, kind: str = "agent", **extra: Any) -> str:
         seq = len(self.rows) + 1
         message_id = f"bcmsg_{seq:032x}"
         self.texts[message_id] = text
@@ -65,9 +66,10 @@ class FakeHub:
                 "id": message_id,
                 "conversation_id": CONV,
                 "seq": seq,
-                "sender": {"account_id": sender, "kind": "agent"},
+                "sender": {"account_id": sender, "kind": kind},
                 "body_hash": _sha(text),
-                "origin": "agent",
+                "origin": kind,
+                **extra,
             }
         )
         return message_id
@@ -209,3 +211,70 @@ async def test_an_already_admitted_own_row_is_not_fetched_again() -> None:
     )
     assert rows[0]["body"] == "already shown"
     assert hub.body_calls == []
+
+
+@pytest.mark.asyncio
+async def test_the_accounts_own_human_row_is_not_restored() -> None:
+    """A human row of the same account is screened for the agent like anyone's."""
+
+    hub = FakeHub()
+    human = hub.add(ME, "typed by the owner", kind="human")
+    rows = _messages(
+        await execute_bridge(
+            _runtime(hub), {"op": "channel_history", "channel_id": CONV, "limit": 10}
+        )
+    )
+    assert [(r["id"], r["body"]) for r in rows] == [(human, None)]
+    assert hub.body_calls == []
+
+
+@pytest.mark.asyncio
+async def test_only_the_newest_rows_are_restored_up_to_the_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(tool_mod, "OWN_BODY_FETCH_MAX", 3)
+    hub = FakeHub()
+    ids = [hub.add(ME, f"m{n}") for n in range(5)]
+    rows = _messages(
+        await execute_bridge(
+            _runtime(hub), {"op": "channel_history", "channel_id": CONV, "limit": 10}
+        )
+    )
+    by_id = {r["id"]: r["body"] for r in rows}
+    # History is newest-first, so the cap keeps the three newest.
+    assert [by_id[i] for i in ids] == [None, None, "m2", "m3", "m4"]
+    assert sorted(hub.body_calls) == sorted(ids[2:])
+
+
+@pytest.mark.asyncio
+async def test_a_body_that_cannot_be_hashed_leaves_null_and_the_read_succeeds() -> None:
+    hub = FakeHub()
+    mine = hub.add(ME, "original")
+    hub.body_override = {"message_id": mine, "body": "lone surrogate \ud800"}
+    rows = _messages(
+        await execute_bridge(
+            _runtime(hub), {"op": "channel_history", "channel_id": CONV, "limit": 10}
+        )
+    )
+    assert rows[0]["body"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_restored_own_post_with_images_is_not_captioned_as_screened(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The 'screener has no vision' caption is about ADMITTED text; an own post is not."""
+
+    monkeypatch.setattr(tool_mod, "_screener_sees_images", lambda runtime: False)
+    hub = FakeHub()
+    mine = hub.add(ME, "see attached", attachment_count=1)
+    admitted = hub.add(THEM, "their text", attachment_count=1)
+    hub.admitted.add(admitted)
+    outcome = await execute_bridge(
+        _runtime(hub), {"op": "channel_history", "channel_id": CONV, "limit": 10}
+    )
+    captions = {c for c, _ in outcome[tool_mod._IMAGES_KEY]}
+    own_caption = next(c for c in captions if mine in c)
+    their_caption = next(c for c in captions if admitted in c)
+    assert "not admitted by screening" in own_caption
+    assert "not admitted by screening" not in their_caption

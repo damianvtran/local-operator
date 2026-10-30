@@ -1845,8 +1845,12 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         # agent: the same untrusted wrap as take_up. Unadmitted messages carry
         # ``body: null`` — metadata only — and stay that way (no local cache).
         if isinstance(result, dict) and isinstance(result.get("messages"), list):
-            await _restore_own_bodies(runtime, channel_id, result["messages"], endpoint_id)
-        images = await _history_images(runtime, channel_id, result, endpoint_id)
+            restored = await _restore_own_bodies(
+                runtime, channel_id, result["messages"], endpoint_id
+            )
+        else:
+            restored = set()
+        images = await _history_images(runtime, channel_id, result, endpoint_id, restored)
         return {
             "ok": True,
             "state": "ok",
@@ -1891,8 +1895,10 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
             replies = result.get("replies")
             if isinstance(replies, list):
                 thread_rows.extend(replies)
-        await _restore_own_bodies(runtime, channel_id, thread_rows, endpoint_id)
-        images = await _history_images(runtime, channel_id, {"messages": thread_rows}, endpoint_id)
+        restored = await _restore_own_bodies(runtime, channel_id, thread_rows, endpoint_id)
+        images = await _history_images(
+            runtime, channel_id, {"messages": thread_rows}, endpoint_id, restored
+        )
         return {
             "ok": True,
             "state": "ok",
@@ -1949,8 +1955,11 @@ OWN_BODY_FETCH_MAX = 25
 
 async def _restore_own_bodies(
     runtime: BridgeRuntime, channel_id: str, rows: list[Any], endpoint_id: str
-) -> None:
-    """Fill ``body`` on the rows THIS account authored, in place.
+) -> set[str]:
+    """Fill ``body`` on the agent rows THIS account authored, in place.
+
+    Returns the ids it filled, so the image caption can tell a restored own
+    post (never screened) from an admitted one.
 
     WHY (the sender could not read its own write): the hub serves a history body
     only for a message THIS endpoint admitted, and an endpoint admits a message
@@ -1961,11 +1970,19 @@ async def _restore_own_bodies(
 
     WHAT THIS DOES NOT DO: it does not weaken screening. The ``/body`` route the
     connector uses for classification is asked ONLY for rows whose
-    ``sender.account_id`` is the runtime's own account: text this account wrote
-    cannot be an injection against itself, and everyone else's stays ``null``
-    until the connector screens it. No local copy is made: the text is fetched
-    per read, handed to the model and dropped.
+    ``sender.account_id`` is the runtime's own account AND ``sender.kind`` is
+    ``agent``: text this account's agent wrote is the owner's own authority, and
+    everyone else's stays ``null`` until the connector screens it. No local copy
+    is made: the text is fetched per read, handed to the model and dropped.
 
+    DELIBERATE, ACCOUNT-WIDE TRUST: the hub's history ``sender`` carries no
+    endpoint id, so this cannot tell THIS endpoint's posts from another agent
+    endpoint of the same account (which IS delivered here and screened, and so
+    could be held or rejected). Such a row is treated as the owner's own agent.
+    Narrowing it to this endpoint needs ``sender.endpoint_id`` from the hub.
+    The ``agent`` kind keeps the account's HUMAN rows (always screened for
+    this agent) out of it. At most :data:`OWN_BODY_FETCH_MAX` rows are filled per
+    read, newest first; older own rows stay ``null``.
     A row is filled only when the served body hashes to the row's own
     ``body_hash`` (sha256 over the UTF-8 text, as the connector verifies); any
     failure — transport, refusal, mismatch — leaves the row exactly as the hub
@@ -1976,7 +1993,7 @@ async def _restore_own_bodies(
 
     own = getattr(runtime.owner, "account_id", "")
     if not own:
-        return
+        return set()
     wanted = [
         row
         for row in rows
@@ -1987,9 +2004,10 @@ async def _restore_own_bodies(
         and _CONVERSATION_MESSAGE_ID.fullmatch(row["id"]) is not None
         and isinstance(row.get("sender"), dict)
         and row["sender"].get("account_id") == own
+        and row["sender"].get("kind") == "agent"
     ][:OWN_BODY_FETCH_MAX]
     if not wanted:
-        return
+        return set()
     gate = asyncio.Semaphore(5)
 
     async def fill(row: dict[str, Any]) -> None:
@@ -2006,14 +2024,25 @@ async def _restore_own_bodies(
         if not isinstance(served, dict) or served.get("message_id") != row["id"]:
             return
         text = served.get("body")
-        if isinstance(text, str) and body_digest(text) == row["body_hash"]:
+        try:
+            verified = isinstance(text, str) and body_digest(text) == row["body_hash"]
+        except UnicodeError:  # a lone surrogate cannot be hashed: not the screened text
+            return
+        if verified:
             row["body"] = text
+            filled.add(row["id"])
 
+    filled: set[str] = set()
     await asyncio.gather(*(fill(row) for row in wanted))
+    return filled
 
 
 async def _history_images(
-    runtime: BridgeRuntime, channel_id: str, page: Any, endpoint_id: str
+    runtime: BridgeRuntime,
+    channel_id: str,
+    page: Any,
+    endpoint_id: str,
+    restored: set[str] | None = None,
 ) -> list[tuple[str, list[tuple[bytes, str]]]]:
     """Per admitted message with images: ``(caption, [(bytes, mime), ...])``.
 
@@ -2050,7 +2079,11 @@ async def _history_images(
                 # exactly that (D5) — it is the one cause the user can fix.
                 noun = "attachment" if count == 1 else "attachments"
                 marker = f"[{count} image {noun} withheld: not admitted by screening]"
-                if message.get("body") is not None and not _screener_sees_images(runtime):
+                if (
+                    message.get("body") is not None
+                    and message["id"] not in (restored or ())
+                    and not _screener_sees_images(runtime)
+                ):
                     marker = withheld_marker(count)
                 out.append((_image_provenance(channel_id, message, [marker]), []))
             elif descriptors is None:
