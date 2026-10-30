@@ -490,11 +490,13 @@ def test_probe_suspected_raises_one_contentless_owner_notification(
     if suspected is not True:
         assert rows == []
         return
-    # One item per conversation: the second probe updates it, never adds one.
+    # One item per recipient endpoint (the hub's clamp spans conversations):
+    # the second probe updates it, never adds one.
     assert len(rows) == 1
     row = rows[0]
     assert row["session_id"] == "sess_a"
-    assert row["title"] == "Agent messages: a conversation looks like probing"
+    assert row["key"] == "team-bridge-probe:bep_a"
+    assert row["title"] == "Agent messages: a sender looks like probing"
     rendered = json.dumps(row)
-    for leak in ("SECRET-BODY-CANARY", "harassment", "abusive", "Ada", "acc_human", MID):
+    for leak in ("SECRET-BODY-CANARY", "harassment", "abusive", "Ada", "acc_human", MID, CID):
         assert leak not in rendered, leak

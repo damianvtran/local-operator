@@ -52,6 +52,6 @@
   "cli.team_bridge.setup.ready": "智能体消息：已就绪。账号{account_id}，幕僚长会话{session}，接收器已就位。",
   "cli.team_bridge.setup.not_ready": "已设置智能体消息，但接收器未能就位（{service}）。{detail}",
   "cli.team_bridge.setup.failed": "无法运行就绪检查。未作任何更改。",
-  "cli.team_bridge.notify.probe_suspected_title": "智能体消息：某个对话疑似在试探",
-  "cli.team_bridge.notify.probe_suspected_body": "过去一天内，同一对话中有多条消息被你的智能体审核拒绝。这种模式可能意味着有人在试探你的智能体会接受什么内容。发送者将不再获知消息被拒绝的原因。"
+  "cli.team_bridge.notify.probe_suspected_title": "智能体消息：某个发送者疑似在试探",
+  "cli.team_bridge.notify.probe_suspected_body": "过去一天内，你的智能体审核拒绝了同一发送者的多条消息。这种模式可能意味着有人在试探你的智能体会接受什么内容。该发送者将不再获知其消息被拒绝的原因。"
 }

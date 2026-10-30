@@ -52,6 +52,6 @@
   "cli.team_bridge.setup.ready": "Tin nhắn tác nhân: sẵn sàng. Tài khoản {account_id}, phiên chánh văn phòng {session}, và bộ nhận đã được đặt.",
   "cli.team_bridge.setup.not_ready": "Tin nhắn tác nhân đã được thiết lập, nhưng bộ nhận chưa được đặt ({service}). {detail}",
   "cli.team_bridge.setup.failed": "Không chạy được bước kiểm tra sẵn sàng. Không có thay đổi nào.",
-  "cli.team_bridge.notify.probe_suspected_title": "Tin nhắn tác tử: một cuộc trò chuyện có dấu hiệu dò thử",
-  "cli.team_bridge.notify.probe_suspected_body": "Trong một ngày qua, bộ kiểm duyệt của tác tử đã từ chối nhiều tin nhắn trong cùng một cuộc trò chuyện. Dấu hiệu này có thể cho thấy ai đó đang thử xem tác tử của bạn chấp nhận những gì. Người gửi sẽ không còn được cho biết lý do tin nhắn bị từ chối nữa."
+  "cli.team_bridge.notify.probe_suspected_title": "Tin nhắn tác tử: một người gửi có dấu hiệu dò thử",
+  "cli.team_bridge.notify.probe_suspected_body": "Trong một ngày qua, bộ kiểm duyệt của tác tử đã từ chối nhiều tin nhắn từ cùng một người gửi. Dấu hiệu này có thể cho thấy ai đó đang thử xem tác tử của bạn chấp nhận những gì. Người gửi đó sẽ không còn được cho biết lý do tin nhắn của họ bị từ chối nữa."
 }

@@ -707,18 +707,23 @@ async def _publish_held(
         logger.info("bridge: delivery state unpublished code=held_write_failed")
 
 
-def _notify_probe_suspected(config_dir: Path, session_id: str, conversation_id: str) -> None:
-    """Raise ONE local owner notification that a conversation looks like probing.
+def _notify_probe_suspected(config_dir: Path, session_id: str, endpoint_id: str) -> None:
+    """Raise ONE local owner notification that a sender looks like probing.
 
-    WHY. The hub's anti-oracle clamp (contract v1) stops telling a sender why
-    their messages are refused once they collect several refusals here in a
-    day, and says so on the admit response. The sender is told nothing; the
-    OWNER should know, because repeated refusals from one sender are what a
-    probe of their moderation looks like.
+    WHY. The hub's anti-oracle clamp (contract v1, amended) counts a sender's
+    refusals at THIS endpoint across every conversation; past the threshold it
+    stops telling that sender why their messages are refused, and says so on
+    the admit response. The sender is told nothing; the OWNER should know,
+    because repeated refusals from one sender are what a probe of their
+    moderation looks like.
 
-    CONTENTLESS: no body, sender, category or conversation title — the copy is
-    fixed and keyed. One item per conversation (``key``): a repeat updates it
-    rather than adding another. Best-effort: never fails the reject path.
+    CONTENTLESS: no body, sender, category, conversation or title — the copy
+    is fixed and keyed. One item per recipient endpoint (``key``), not per
+    conversation: the clamp spans conversations, so a probe spread over many
+    of them must update one item rather than add one each. The hub's sender
+    key never reaches this client, so the item cannot be split per sender —
+    and must not be: naming the sender locally is not this signal's job.
+    Best-effort: never fails the reject path.
     """
 
     from local_operator.i18n.keys import cli_team_bridge as _k
@@ -732,7 +737,7 @@ def _notify_probe_suspected(config_dir: Path, session_id: str, conversation_id: 
             title=t(_k.notify_probe_suspected_title()),
             body_md=t(_k.notify_probe_suspected_body()),
             priority="normal",
-            key=f"team-bridge-probe:{conversation_id}",
+            key=f"team-bridge-probe:{endpoint_id}",
         )
     except Exception:  # noqa: BLE001 — a notification is chrome, the reject stands
         logger.info("bridge: probe notification unrecorded code=notify_failed")
@@ -1007,7 +1012,7 @@ async def handle_conversation_available(
                 import asyncio
 
                 await asyncio.to_thread(
-                    _notify_probe_suspected, config_dir, designation, ref.conversation_id
+                    _notify_probe_suspected, config_dir, designation, owner.endpoint_id
                 )
             # A confirmed reject retires the notification, not the moderation
             # boundary. Posting a metadata-only card here would still wake the

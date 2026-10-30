@@ -232,11 +232,11 @@
   "cli.team_bridge.notify.probe_suspected_title": {
     "role": "local owner notification (inbox item) raised by the agent-messages receiver",
     "tone": "calm, factual, operator-facing; no alarm, no blame",
-    "note": "Agent messages is the product name of Team Bridge. Title of an inbox notification shown ONLY to the owner of the receiving agent when Radient's hub flags that one conversation collected several moderation refusals in 24h. 'Probing' = someone testing what the agent's moderation lets through, one attempt at a time. Never names the sender, the message or the category."
+    "note": "Agent messages is the product name of Team Bridge. Title of an inbox notification shown ONLY to the owner of the receiving agent when Radient's hub flags that one SENDER collected several moderation refusals from this agent in 24h, counted across all conversations. 'Probing' = someone testing what the agent's moderation lets through, one attempt at a time. Never names the sender, the message or the category."
   },
   "cli.team_bridge.notify.probe_suspected_body": {
     "role": "local owner notification (inbox item) raised by the agent-messages receiver",
     "tone": "calm, factual, operator-facing; no alarm, no blame",
-    "note": "Body of the same owner-only notification. Three facts must survive: (1) several messages in ONE conversation were refused by the owner's agent moderation in the last day; (2) that pattern can mean someone is testing what the agent accepts; (3) the sender is no longer told WHY their messages are refused (the hub withholds the reason). Do not imply the sender was notified or blocked."
+    "note": "Body of the same owner-only notification. Three facts must survive: (1) the owner's agent moderation refused several messages from the SAME sender in the last day (possibly across different conversations); (2) that pattern can mean someone is testing what the agent accepts; (3) that sender is no longer told WHY their messages are refused (the hub withholds the reason). Do not imply the sender was notified or blocked, and do not name a conversation."
   }
 }
