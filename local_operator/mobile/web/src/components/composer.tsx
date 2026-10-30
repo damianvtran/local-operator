@@ -8,9 +8,9 @@
  * the send button switches to the `steer` op (same action, different
  * command) and a stop button appears beside it.
  */
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useFootFit } from "../lib/use-foot-fit";
-import { getCommands, HttpError, sendCommand, transcribeAudio } from "../api";
+import { getCommands, getSkills, HttpError, sendCommand, transcribeAudio } from "../api";
 import {
 	getPendingContinuation,
 	submitContinuation,
@@ -37,10 +37,17 @@ import { Sheet } from "./ui/sheet";
 import { UsageSheet } from "./usage-sheet";
 import { SessionStatus, meterFacts } from "./session-status";
 import { WorkingDirectoryChip } from "./directory-sheet";
+import { SkillTray } from "./skill-tray";
 import { cn } from "../lib/cn";
-import { textDirection } from "../lib/bidi";
+import { isolate, textDirection } from "../lib/bidi";
+import {
+	isLeadingSkillToken,
+	skillMatches,
+	skillSpanReplacement,
+	skillToken,
+} from "../lib/skill-token";
 import { messageRuntime, useCapabilities, useDraft } from "../store";
-import type { PromptImage, SessionProjection, SlashCommand } from "../types";
+import type { PromptImage, SessionProjection, SkillEntry, SlashCommand } from "../types";
 
 /** One attached image, kept as the wire form plus a local object URL for the
     thumbnail strip. */
@@ -124,6 +131,25 @@ function slashQuery(text: string): string | null {
     this predicate stays the single rule. */
 function slashTokenOnly(text: string): boolean {
 	return slashQuery(text) !== null && !text.includes(" ");
+}
+
+/** Whether the draft is a SLASH DRAFT — the ONE predicate send() and the skill
+    picker share.
+
+    The send path has always classified its input this way: a leading `/`, on a
+    single line, with no attachment is a command; anything else is a message. The
+    `$` picker must ask the same question because the two surfaces compete for
+    one composer, and a second copy of this rule is how `/team x $skill` would
+    open a skill list inside a command's argument. `/team x $skill` is out of
+    scope (SKM-D5), so a slash draft simply closes the tray: the slash surface
+    owns that draft.
+
+    The attachment clause is load-bearing rather than incidental: a "/…" caption
+    with an image is a prompt, not a command, and the send path already treats it
+    that way. */
+export function isSlashDraft(text: string, imageCount: number): boolean {
+	const trimmed = text.trim();
+	return trimmed.startsWith("/") && !trimmed.includes("\n") && imageCount === 0;
 }
 
 /** The voice state machine's four resting points (error surfaces as `idle` + copy). */
@@ -628,6 +654,24 @@ export function Composer({
 	onFitLevel?: (level: number) => void;
 }) {
 	const [text, setText] = useDraft(pid);
+	/* The skill picker's caret. `null` means "the end of the draft", which is
+	   where a field's caret sits until the user selects something; the sentinel
+	   rather than a number keeps a RESTORED draft's picker closed — caret 0 on a
+	   restored `$name …` draft would open the list over a message the user did
+	   not touch. */
+	const [caret, setCaret] = useState<number | null>(null);
+	/* IME COMPOSITION (SKM-D5). Android and iOS report selection changes
+	   mid-composition, and a token parsed from a half-composed string flickers
+	   the tray open over the keyboard; the caret is left alone until the
+	   composition ends. */
+	const [composing, setComposing] = useState(false);
+	/* The `$name` catalogue. Empty while the capability is absent or the fetch
+	   failed — both mean "no picker", never a banner (SKM-D5). */
+	const [skills, setSkills] = useState<SkillEntry[]>([]);
+	/* Set by a tray pick, consumed by the [text] layout effect to put the caret
+	   where the insertion left it. A ref because it is an instruction to an
+	   effect, not rendered state. */
+	const pendingCaretRef = useRef<number | null>(null);
 	/* U5/U8 (mobile UX batch 1): the sheet follows the draft only while the draft
 	   is still the command TOKEN (see `slashTokenOnly`), and once the user has
 	   closed it for this draft it stays closed until the draft is no longer a
@@ -715,6 +759,29 @@ export function Composer({
 	   mic, which takes 46 px from the line. Missing one let a cold load commit a
 	   stale level until the row's observer happened to fire. The count is passed
 	   on its own because the hook must know it even when it is not in the row. */
+	/* The skill catalogue, once per session, only when the relay advertises the
+	   capability. A FETCH ERROR OR AN EMPTY CATALOGUE = THE TRAY NEVER OPENS
+	   (SKM-D5): the draft keeps working as plain prose, and nothing shouts about
+	   a picker the user never asked for. */
+	const skillCapability = capabilities?.skill_invocation?.available === true;
+	useEffect(() => {
+		if (!skillCapability) {
+			setSkills([]);
+			return;
+		}
+		let cancelled = false;
+		getSkills(pid)
+			.then((answer) => {
+				if (!cancelled) setSkills(answer.skills);
+			})
+			.catch(() => {
+				if (!cancelled) setSkills([]);
+			});
+		return () => {
+			cancelled = true;
+		};
+	}, [pid, skillCapability]);
+
 	const queuedLabel = projection.queued_count > 0
 		? messageRuntime.t("relay.transcript.composer.queued", { count: projection.queued_count })
 		: "";
@@ -809,7 +876,36 @@ export function Composer({
 		}
 	}, [text]);
 
+	/* A tray pick must leave the caret where `_skill_span_replacement`'s
+	   arithmetic put it — one cell past the separator — not wherever React's
+	   value write happens to leave it. A LAYOUT effect, so the caret moves in the
+	   same paint the text lands and the next keystroke cannot read a stale
+	   position. Focus returns to the field here rather than in the pointer
+	   handler because a pick may race the field's own blur. */
+	useLayoutEffect(() => {
+		const at = pendingCaretRef.current;
+		if (at === null) return;
+		pendingCaretRef.current = null;
+		const el = textareaRef.current;
+		if (!el) return;
+		el.focus();
+		el.setSelectionRange(at, at);
+		setCaret(at);
+	}, [text]);
+
 	const disabled = false;
+
+	/* The skill tray's own parse. Slash drafts win (SKM-D5): while the draft is
+	   a slash command the slash surface owns the composer, so `/team x $skill`
+	   never opens this list. `isSlashDraft` is the same predicate send() uses. */
+	const skillDraft = skillCapability && !isSlashDraft(text, images.length);
+	const activeSkillToken = skillDraft && !composing ? skillToken(text, caret) : null;
+	const skillLeading =
+		activeSkillToken !== null && isLeadingSkillToken(text, activeSkillToken);
+	const skillRows = activeSkillToken
+		? skillMatches(activeSkillToken.query, skills, skillLeading)
+		: [];
+	const skillTrayOpen = !disabled && skillRows.length > 0;
 
 	useEffect(() => {
 		/* Envelopes are scoped per session and survive navigation (U1): moving to
@@ -1016,6 +1112,7 @@ export function Composer({
 			   commits it — scroll, never focus. */
 			revealAppendRef.current = true;
 			setText(joined);
+			setCaret(null);
 			/* U3: a polite completion line, the announcement a screen reader was
 			   missing; see the DICTATION_ADDED comment for the focus tradeoff. */
 			setDictationNotice(DICTATION_ADDED);
@@ -1032,6 +1129,7 @@ export function Composer({
 	const clearDraft = () => {
 		provenanceRef.current = emptyProvenance();
 		setText("");
+		setCaret(null);
 	};
 
 	/** Classify one USER-driven draft change (typing, a slash fill): sticky
@@ -1077,8 +1175,7 @@ export function Composer({
 		const submitted: { echo: { commandId: string; text: string } | null } = { echo: null };
 		/* A refused COMMAND and a failed CONTINUATION need different words: the first
 		   carries the runtime's own refusal sentence, the second is the retry copy. */
-		const isSlash =
-			trimmed.startsWith("/") && !trimmed.includes("\n") && images.length === 0;
+		const isSlash = isSlashDraft(raw, images.length);
 		try {
 			/* Slash input routes to the slash op rather than prompt — and only
 			   when there is no attachment, since a "/…" caption with an image
@@ -1091,6 +1188,7 @@ export function Composer({
 				if (command === "usage" && !args) {
 					setUsageOpen(true);
 					setText("");
+					setCaret(null);
 					return;
 				}
 				/* THE ROUTED OP, not `slash`. `slash` is the owner's off-terminal subset
@@ -1174,6 +1272,11 @@ export function Composer({
 							clearDraft();
 						}
 					},
+					/* The expansion request rides the FRESH envelope only (a retry
+					   replays the stored body's own flag). Gated on the capability
+					   AND on a `$`: a message without one asks the relay for nothing,
+					   and an older relay never sees a flag it would drop. */
+					skillCapability && trimmed.includes("$"),
 				);
 				setRetryEnvelope(null);
 				/* The session admitted this command — the receipt IS that fact, and it is
@@ -1206,6 +1309,23 @@ export function Composer({
 					   success notice, not the danger alert (D11). The pending row stays up
 					   either way — it is a row the session genuinely owes. */
 					setNotice(RETRY_ACK_NOTICE);
+				}
+				/* A skill the relay could not attach is SAID (SKM-D4): the message
+				   did send, and a silent skip would read as an invocation that ran
+				   when nothing was attached. One keyed line, neutral rather than
+				   success — it reports what did not happen. Last write wins on
+				   purpose: this fact changes what the message the user just sent
+				   CONTAINS, where the retry acknowledgement is about their next
+				   draft. */
+				const skippedSkills = receipt.skills?.skipped ?? [];
+				if (skippedSkills.length > 0) {
+					setNoticeTone("neutral");
+					setNotice(
+						messageRuntime.t("relay.skills.skipped", {
+							names: skippedSkills.map((name) => isolate(`$${name}`)).join(", "),
+							count: skippedSkills.length,
+						}),
+					);
 				}
 				return;
 			}
@@ -1248,6 +1368,7 @@ export function Composer({
 				   annotation, which is what a retry replays. */
 				provenanceRef.current = emptyProvenance();
 				setText(submitted.echo.text);
+				setCaret(null);
 			}
 			setRetryEnvelope(getPendingContinuation(pid));
 			setError(
@@ -1280,9 +1401,12 @@ export function Composer({
 		}
 	};
 
-	const onChange = (value: string) => {
+	const onChange = (value: string, caretAt: number | null) => {
 		applyUserEdit(value);
 		setText(value);
+		/* A composition's caret is mid-word by definition; leave it until
+		   compositionend reports the settled position (SKM-D5). */
+		if (!composing) setCaret(caretAt);
 		/* Typing is the next action: a lingering dictation outcome line is done
 		   being useful. */
 		setDictationNotice("");
@@ -1312,6 +1436,7 @@ export function Composer({
 	const onSlashPick = (fill: string, submit: boolean) => {
 		applyUserEdit(fill);
 		setText(fill);
+		setCaret(null);
 		/* The pick CLOSES the sheet for this draft: an argument-taking command
 		   lands mid-edit ("/rename ") and the sheet must not come back while the
 		   arguments are typed (U5). */
@@ -1333,12 +1458,35 @@ export function Composer({
 		const composed = `/${value}`;
 		applyUserEdit(composed);
 		setText(composed);
+		setCaret(null);
 		setSlashDismissed(true);
 		textareaRef.current?.focus();
 	};
 
+	/** Accept one skill row: replace ONLY the token's span (SKM-D5, the TUI's
+	    `_skill_span_replacement` arithmetic), then let the [text] layout effect
+	    put the caret one cell past the separator. */
+	const onSkillPick = (name: string) => {
+		if (!activeSkillToken) return;
+		const next = skillSpanReplacement(text, activeSkillToken, name);
+		applyUserEdit(next.text);
+		setText(next.text);
+		pendingCaretRef.current = next.caret;
+	};
+
+	/* `display: contents` is load-bearing, not decoration: the tray has to be a
+	   SIBLING of the composer card (a picker above the field) while this
+	   component stays one element in its parent's flex column, and re-indenting
+	   the whole card behind a fragment would bury every future diff. The wrapper
+	   itself paints nothing and has no layout box. */
 	return (
-		<div className={COMPOSER_SHELL}>
+		<div className="contents">
+			{/* The `$skill` list, in the above-composer region with the slot's own
+			    numbers (see skill-tray.tsx for why it is not inside the slot's
+			    scroller). Rendered by the composer because the draft, the caret and
+			    the insert all live here; the tray is a pure list. */}
+			{skillTrayOpen ? <SkillTray rows={skillRows} onPick={onSkillPick} /> : null}
+			<div className={COMPOSER_SHELL}>
 			{showResume && !projection.streaming && !disabled ? (
 				<button
 					type="button"
@@ -1554,7 +1702,18 @@ export function Composer({
 					<textarea
 						ref={textareaRef}
 						value={text}
-						onChange={(e) => onChange(e.target.value)}
+						onChange={(e) => onChange(e.target.value, e.target.selectionStart)}
+						/* The caret the `$` parse reads. `onSelect` also covers a tap
+						   that moves it without a change; `onChange` alone would leave a
+						   stale position after any selection move. */
+						onSelect={(e) => {
+							if (!composing) setCaret(e.currentTarget.selectionStart);
+						}}
+						onCompositionStart={() => setComposing(true)}
+						onCompositionEnd={(e) => {
+							setComposing(false);
+							setCaret(e.currentTarget.selectionStart);
+						}}
 						onPaste={(e) => {
 							const files = Array.from(e.clipboardData.files);
 							if (files.length > 0) {
@@ -1650,6 +1809,7 @@ export function Composer({
 				pid={pid}
 				projection={projection}
 			/>
+			</div>
 		</div>
 	);
 }

@@ -1,0 +1,5 @@
+{
+  "relay.skills.tray.label": "Kỹ năng",
+  "relay.skills.tray.hidden": "ẩn",
+  "relay.skills.skipped": "Đã gửi mà không kèm {names} — {count, plural, other {kỹ năng được liệt kê không có nội dung để đính kèm}}."
+}

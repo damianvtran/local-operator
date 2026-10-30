@@ -1943,6 +1943,25 @@
       },
       "status": "passed",
       "note": "Round 4 scope reduction: `lop team-bridge setup` no longer grants consent (it is granted in the Local Operator app only, #3022's bearer boundary). Copy change audited at source_sha256 f029ae6953f2fce31d126e7315beaf120bc63da0fc7398fbc6b31413b962222f: 5 keys deleted (setup.credential/account/tenant/consent/session), 7 added (setup.consent_ui_required/consent_ui_next/enable_in_app_required/designation_missing/ready/not_ready/failed), 2 updated (help.setup, outcome.not_wanted_hint). Independent audit (reviewer role, distinct agent and context from both the implementer and the translator): verdict clean, 0 blocker, 0 major, 1 minor + 4 nit, all applied (hi verbal predicate 'सेटअप हो चुके हैं'; ru agreement 'готовы' and 'предоставляется' for consent; zh-CN '就位' for the receiver and an explicit machine object in enable_in_app_required). The load-bearing sentence keeps all four elements in every locale: consent is granted in the app, NOT from a terminal, open the app once, enable agent messages."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "relay.skills",
+      "source_sha256": "604fa70ae72093282d048c4ca98d92ff825472c63b52bda9761dd7709cbd8e24",
+      "translator": {
+        "agent": "coder (lopdev mobile-web-skill-picker session 2f4ba11bb797)",
+        "model": "radient/auto",
+        "date": "2026-10-30"
+      },
+      "auditor": {
+        "agent": "codex (independent i18n audit via codex MCP; separate agent/model and context from the translator)",
+        "model": "codex default",
+        "date": "2026-10-30",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Skill picker copy (SKM-D6): three keys — relay.skills.tray.label, relay.skills.tray.hidden, relay.skills.skipped. Independent audit via the codex MCP (a separate agent and model from the translator, read-only on the checkout; thread 01a18d8c-4112-7e23-b40b-42272a8059e3): round 1 returned FAIL with 5 findings, all applied verbatim — fr typographic apostrophes; zh-CN spacing around {names}, dash and the count-1 plural; hi and ur attachment direction; vi's `other`-only plural. Round 2 on the corrected bytes: PASS for all seven locales, 0 findings. Terms follow the glossary's skill row (compétence, habilidad, 技能, навык, कौशल, مہارت, kỹ năng); placeholders and plural categories preserved per locale."
     }
   ]
 }

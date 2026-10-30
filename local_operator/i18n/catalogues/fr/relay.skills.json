@@ -1,0 +1,5 @@
+{
+  "relay.skills.tray.label": "Compétences",
+  "relay.skills.tray.hidden": "masquée",
+  "relay.skills.skipped": "Envoyé sans {names} — {count, plural, one {cette compétence n’a pas de contenu à joindre} many {ces compétences n’ont pas de contenu à joindre} other {ces compétences n’ont pas de contenu à joindre}}."
+}

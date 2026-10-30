@@ -1,0 +1,5 @@
+{
+  "relay.skills.tray.label": "技能",
+  "relay.skills.tray.hidden": "隐藏",
+  "relay.skills.skipped": "已发送，但未附带{names}——{count, plural, other {所列技能没有可附加的内容}}。"
+}

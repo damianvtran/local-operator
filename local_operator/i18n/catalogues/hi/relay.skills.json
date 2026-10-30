@@ -1,0 +1,5 @@
+{
+  "relay.skills.tray.label": "कौशल",
+  "relay.skills.tray.hidden": "छिपा",
+  "relay.skills.skipped": "{names} के बिना भेजा गया — {count, plural, one {उस कौशल में ऐसी कोई सामग्री नहीं है जिसे संलग्न किया जा सके} other {उन कौशलों में ऐसी कोई सामग्री नहीं है जिसे संलग्न किया जा सके}}।"
+}

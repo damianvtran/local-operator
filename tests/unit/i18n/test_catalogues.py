@@ -243,6 +243,10 @@ def test_wave3_hindi_carries_its_namespace_snapshot_with_parity(i18n_check) -> N
         "relay.health",
         "relay.notifications",
         "relay.session.tags",
+        # The composer's `$skill` picker (SKM-D6): 3 keys, carried in every
+        # locale only with a fresh, independently audited ledger row at the
+        # current en bytes. Sorts between relay.session.tags and relay.transcript.
+        "relay.skills",
         # Audited relay condensation copy adds 19 keys; keep this census exact.
         "relay.transcript",
         "tui.asks",
