@@ -1,0 +1,5 @@
+operator authority: the anchor's private half is a 0600 FILE, so any process running as this user can sign for the operator — loosening is authorised but NOT presence-gated on this host
+  [bridge] ' ↔ bridge   Sent to a teammate · gates are green, mer… not posted ✓ <0.1s' rows=1 h=1
+  [bridge] ' ↔ bridge   Posted in a conversation · Release v0.62.0 is cut —…  ✓ <0.1s' rows=1 h=1
+  [bridge] " ↔ bridge   Couldn't post in a conversation · d… refused · not_p… ✗ <0.1s" rows=1 h=1
+  screen=Size(width=78, height=16) virtual=Size(width=78, height=16)
