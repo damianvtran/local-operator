@@ -4641,8 +4641,15 @@ class ToolCard(ExpandableActionBlock):
         word = outcome_word(row)
         if word:
             self._bridge_word = _strip_control_sequences(word)
+            # refused/failed have no short word, so a narrow cap used to cut
+            # the machine code mid-token ("refused · not_p…", design round-2
+            # D9): a half code is unsearchable and reads as garbage. Their
+            # narrow form is the bare word; the code stays in the expanded card.
+            short_row = (
+                {**row, "code": None} if row.get("outcome") in ("refused", "failed") else row
+            )
             self._bridge_word_short = _strip_control_sequences(
-                outcome_word(row, short=True) or word
+                outcome_word(short_row, short=True) or word
             )
             # inbox_only / awaiting_acceptance / unconfirmed are not failures —
             # something was (or may have been) accepted — so they wear the amber

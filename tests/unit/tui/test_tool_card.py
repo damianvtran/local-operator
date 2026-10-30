@@ -4725,6 +4725,21 @@ def test_a_refused_bridge_call_names_the_code_in_the_error_cap() -> None:
     assert "refused · not_permitted" in row and ICON_ERROR in row
 
 
+def test_a_narrow_refused_cap_falls_back_to_the_bare_word() -> None:
+    # Design round-2 D9: a cap too narrow for "refused · not_permitted" shows
+    # the bare word, never a code cut mid-token ("not_p…").
+    card = ToolCard("b4n", "bridge", {"op": "channel_create", "name": "general"})
+    refusal = {"ok": False, "code": "not_permitted", "error": "writes are off"}
+    card.mark_failed("writes are off", "writes are off", refusal)
+    assert card._bridge_word == "refused · not_permitted"
+    assert card._bridge_word_short == "refused"
+    narrow = card._bridge_reason(cap=16, duration="")
+    assert narrow == "refused"
+    assert card._bridge_reason(cap=0, duration="") == "refused · not_permitted"
+    for width in (40, 50, 60, 70, 80):
+        assert "not_p…" not in card._build_row(width).plain
+
+
 def test_a_bridge_error_without_details_does_not_claim_the_post() -> None:
     card = ToolCard(
         "b5", "bridge", {"op": "channel_post", "channel_id": _BRIDGE_CHANNEL, "body": "hi"}

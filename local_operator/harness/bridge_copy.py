@@ -101,6 +101,12 @@ _OBJECTLESS = frozenset({"channels", "directory", "shared_conversations"})
 _FAILED_OUTCOMES = frozenset({"refused", "failed"})
 
 
+def _has_label(row: Mapping[str, Any]) -> bool:
+    raw = row.get("target")
+    label = raw.get("label") if isinstance(raw, Mapping) else None
+    return isinstance(label, str) and bool(label)
+
+
 def _target_text(row: Mapping[str, Any], *, in_thread: bool) -> str:
     """The rendered target: ``#name``, a bare person/DM label, or a kind noun.
 
@@ -216,7 +222,16 @@ def render_bridge_row(
     if action in _OBJECTLESS:
         head = _count_text(action, row.get("count"))
     else:
-        head = _target_text(row, in_thread=in_thread)
+        # `shared_history`'s verb already names its object ("Read shared
+        # conversation"), so the unlabelled kind noun would paint "Read shared
+        # conversation a conversation" (round-2 Q2-5/R2-2/R2-5). Omit the
+        # target instead; a resolved `#label` still follows the verb. The
+        # desktop twin applies the same rule, so both hosts read alike.
+        head = (
+            ""
+            if action == "shared_history" and not _has_label(row)
+            else _target_text(row, in_thread=in_thread)
+        )
         count = _count_text(action, row.get("count"))
         if count:
             head = f"{head} {count}" if head else count

@@ -387,10 +387,17 @@ def test_label_and_preview_whitespace_is_flattened() -> None:
             "Read shared conversation #board (2 messages)",
         ),
         (
-            # R5: the verb composes with the fallback noun too.
+            # Round-2 Q2-5/R2-2/R2-5: the verb already names its object, so an
+            # unlabelled shared conversation omits the target rather than
+            # doubling it ("…shared conversation a conversation").
             {"op": "shared_history", "channel_id": CHANNEL},
             {"ok": False, "code": "history_failed", "error": "down"},
-            "Couldn't read shared conversation a conversation · failed · history_failed",
+            "Couldn't read shared conversation · failed · history_failed",
+        ),
+        (
+            {"op": "shared_history", "channel_id": CHANNEL},
+            {"ok": True, "content": _untrusted({"messages": [{}] * 5})},
+            "Read shared conversation (5 messages)",
         ),
         (
             {"op": "take_up", "message_id": "m"},
