@@ -1,0 +1,108 @@
+{
+  "schema": 1,
+  "audit_id": "vi29s2",
+  "audit_kind": "independent_full_namespace_audit_of_rewritten_slash_descriptions",
+  "locale": "vi",
+  "namespace": "wire.slash",
+  "round": 2,
+  "audit_date": "2026-10-29",
+  "key_count": 52,
+  "keys_read": 52,
+  "keys_changed_in_this_commit": 11,
+  "changed_keys": [
+    "wire.slash.agent",
+    "wire.slash.hub",
+    "wire.slash.mcp",
+    "wire.slash.mobile",
+    "wire.slash.network",
+    "wire.slash.provider",
+    "wire.slash.resume",
+    "wire.slash.session",
+    "wire.slash.sidebar",
+    "wire.slash.stop",
+    "wire.slash.team"
+  ],
+  "changed_keys_method": "git show HEAD:<catalogue> compared key-by-key with the working tree at record time",
+  "tree_head_above_the_rewrite": "7159e2a30927831f5dfb88f84c588eac07770e5d",
+  "current_byte_round_for_ledger": true,
+  "sha256": {
+    "en": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
+    "context": "32b3475a5808048a6eeaae462fee0feb55405fca77026e41b9609a516d74a215",
+    "target": "d228f91dad840c65253a5d46919cb99c0cb0eaa21c99d315e79f55f8490dfc23"
+  },
+  "translator": {
+    "agent": "i18n-translator (session 137c362d5bba)",
+    "session": "137c362d5bba",
+    "model": "radienthq/auto",
+    "date": "2026-10-29",
+    "model_note": "provider-quota fallback chain anthropic/claude-sonnet-5-5 -> openai/gpt-6-astra -> kimi/k3.1-pro -> radient/auto; recorded as served, per the translator's own note"
+  },
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "f3ea10304234",
+    "instance": "f3ea10304234-slash2-vi",
+    "model": "radient/auto",
+    "date": "2026-10-29",
+    "result": "passed",
+    "findings": 0,
+    "unresolved_blocker_major": 0,
+    "counts": {
+      "BLOCKER": 0,
+      "MAJOR": 0,
+      "MINOR": 1,
+      "NIT": 4
+    },
+    "independence": "distinct session and instance from the translator and from the round-1 auditor; the receipt states this in its own independence block"
+  },
+  "prior_rounds": [
+    {
+      "round": 1,
+      "instance": "86c035febe3e-slash-vi",
+      "verdict": "changes_requested",
+      "counts": {
+        "BLOCKER": 0,
+        "MAJOR": 2,
+        "MINOR": 5,
+        "NIT": 4
+      },
+      "subject": "the shortened bytes introduced by head commit 7159e2a309",
+      "evidence": "session scratch slash-audit/vi/receipt.json (not copied; verdict + counts preserved here and in verdict-round1.txt)"
+    }
+  ],
+  "evidence": {
+    "receipt": "receipt.json",
+    "verdict": "verdict.txt",
+    "scope": "scope.json",
+    "report": "report.md",
+    "manifest": "evidence-manifest.json",
+    "round_1_verdict": "verdict-round1.txt"
+  },
+  "findings_summary": [
+    {
+      "id": "vi2-slash-MINOR1",
+      "severity": "MINOR",
+      "key": "wire.slash.session"
+    },
+    {
+      "id": "vi2-slash-NIT1",
+      "severity": "NIT",
+      "key": "wire.slash.hub"
+    },
+    {
+      "id": "vi2-slash-NIT2",
+      "severity": "NIT",
+      "key": "wire.slash.mcp"
+    },
+    {
+      "id": "vi2-slash-NIT3",
+      "severity": "NIT",
+      "key": "wire.slash.sidebar"
+    },
+    {
+      "id": "vi2-slash-NIT4",
+      "severity": "NIT",
+      "key": "wire.slash.links"
+    }
+  ],
+  "verdict": "passed"
+}

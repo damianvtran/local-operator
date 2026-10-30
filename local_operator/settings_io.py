@@ -63,6 +63,7 @@ from local_operator import keymap as _keymap
 from local_operator.config_writer import config_write_lock, serialized_config_write
 from local_operator.i18n import catalogues as _catalogues
 from local_operator.i18n import runtime as _i18n_runtime
+from local_operator.i18n import text as _i18n_text
 from local_operator.i18n.keys import wire_aida_cadence as _ac
 from local_operator.i18n.keys import wire_console as _cs
 from local_operator.i18n.keys import wire_host_speed as _hs
@@ -109,78 +110,95 @@ logger = logging.getLogger(__name__)
 # Registry copy: rendered through the i18n runtime
 # ---------------------------------------------------------------------------
 #
-# The registry's user-facing strings live in the `wire.settings` catalogue
-# (RFC §2.2); the module renders them at import through the local runtime.
-# Resolution is PINNED to `en`, and that is not a shortcut: the shipped locale
-# set is en-only while the program ships dark (RFC §9 P1), so a full resolution
-# and this pin agree byte-for-byte today. When the translation waves land, the
-# re-resolution point is this helper (and the clients, which render the served
-# catalogue by key per §2.6).
-#
-# ONE catalogue read at import, not one per message: the registry builds ~740
-# strings and a read-per-string would put ~740 file parses on the CLI's
-# import path. A broken wheel (catalogue missing/invalid) degrades the way
-# `messages.render` does — each string resolves to its own message code —
-# rather than making `lop --help` impossible.
-try:
-    _WIRE_SETTINGS_SOURCES: dict[str, str] = _catalogues.load_catalogue("en", "wire.settings")
-except Exception:  # pragma: no cover - a wheel without the catalogue is broken
-    _WIRE_SETTINGS_SOURCES = {}
+#: Child namespaces rendered beside `wire.settings`. They exist as separate
+#: namespaces so a new section never moves the audited `wire.settings` source
+#: hash the carried locales are pinned to — the SPLIT is what preserves those
+#: hashes, not a locale pin. Every one of them ships its own translated
+#: catalogues, so all seven follow the active locale exactly as `wire.settings`
+#: does; pinning them to `en` left seven English islands on a Spanish page
+#: (QA round 1, Q1) while buying nothing the namespace split did not already buy.
+_CHILD_SETTINGS_NAMESPACES = (
+    "wire.settings.account_policy",
+    "wire.settings.hub_defaults",
+    "wire.aida_cadence",
+    "wire.host_speed",
+    "wire.console",
+    "wire.memory",
+    "wire.radient_saver",
+)
 
 
-# A small English-only addition must not invalidate already-audited settings
-# translations. Keep the established import-time rendering path, with its own
-# namespace so carried locales retain their existing source hashes/eligibility.
-try:
-    _WIRE_SETTINGS_SOURCES.update(_catalogues.load_catalogue("en", "wire.aida_cadence"))
-except Exception:  # pragma: no cover - missing optional copy degrades to its code
-    pass
+@functools.lru_cache(maxsize=256)
+def _namespace_sources(root: str, namespace: str, locale: str) -> dict[str, str]:
+    """One catalogue FILE per process generation; empty when absent/invalid.
 
-# The OpenRouter host-speed row is a small English-only addition, merged for the
-# same reason as ``wire.aida_cadence``: it must not move the already-audited
-# ``wire.settings`` source hash the translated locales are pinned to.
-try:
-    _WIRE_SETTINGS_SOURCES.update(_catalogues.load_catalogue("en", "wire.host_speed"))
-except Exception:  # pragma: no cover - missing optional copy degrades to its code
-    pass
+    Keyed by the file rather than by the merged registry map, so a locale move
+    reads each file once and the English fallback shares the English children
+    with every locale. Caching only the merged map re-read all seven children on
+    each move towards a new locale — the same files, again (QA round 1, Q3).
+    """
+    try:
+        return _catalogues.load_catalogue(locale, namespace)
+    except Exception:  # pragma: no cover - a broken wheel still paints codes
+        return {}
 
-# Radient Saver's section and row carry their copy in their own namespace for the
-# same reason as ``wire.host_speed``: the section is new, so adding it must not
-# move the ``wire.settings`` source hash the translated locales are pinned to.
-try:
-    _WIRE_SETTINGS_SOURCES.update(_catalogues.load_catalogue("en", "wire.radient_saver"))
-except Exception:  # pragma: no cover - missing optional copy degrades to its code
-    pass
 
-# The console-admission section reads its copy from its own namespace for the
-# same reason as `wire.aida_cadence`: the section is new, so adding it beside
-# already-translated settings must not move those sources. Without this merge the
-# section's `_cs.*` messages resolve to their bare codes (`wire.console.title`),
-# which is what the byte-identical golden caught.
-try:
-    _WIRE_SETTINGS_SOURCES.update(_catalogues.load_catalogue("en", "wire.console"))
-    _WIRE_SETTINGS_SOURCES.update(_catalogues.load_catalogue("en", "wire.memory"))
-    # The new child keeps translated wire.settings source hashes unchanged.
-    _WIRE_SETTINGS_SOURCES.update(_catalogues.load_catalogue("en", "wire.settings.account_policy"))
-except Exception:  # pragma: no cover - missing optional copy degrades to its code
-    pass
+@functools.lru_cache(maxsize=32)
+def _sources(root: str, namespace: str, locale: str) -> dict[str, str]:
+    """The merged namespace map for one locale, composed from the file cache.
 
-# The Hub defaults rows read their copy from their own English-only child: the
-# switch they describe governs BOTH agent and skill links, and that correction
-# must not move the already-audited ``wire.settings`` source hash the carried
-# locales are pinned to (the same reason as ``wire.aida_cadence`` above).
-try:
-    _WIRE_SETTINGS_SOURCES.update(_catalogues.load_catalogue("en", "wire.settings.hub_defaults"))
-except Exception:  # pragma: no cover - missing optional copy degrades to its code
-    pass
+    The registry materialises ~740 strings at import, so resolving each through
+    `messages.render` would put ~740 file parses on the CLI import path. One
+    merged map per (root, locale), built from `_namespace_sources`, is what
+    every row reads.
+    """
+    sources: dict[str, str] = {}
+    for name in (namespace, *_CHILD_SETTINGS_NAMESPACES):
+        sources.update(_namespace_sources(root, name, locale))
+    return sources
+
+
+class _LocalizedText(str):
+    """Rendered copy retaining its message for the frozen registry refresher."""
+
+    def __new__(cls, rendered: str, message: _Msg) -> "_LocalizedText":
+        value = super().__new__(cls, rendered)
+        value.message = message
+        return value
+
+    message: _Msg
 
 
 def _t(message: _Msg) -> str:
-    """The resolved string for a generated settings message."""
-    source = _WIRE_SETTINGS_SOURCES.get(message.code)
+    """Resolve carried copy now, then English, then the message code.
+
+    The returned string remembers its message so `register_refresh` can update
+    the frozen registry in place when `/language` or the config watcher moves
+    the locale. Catalogue reads stay namespace-cached, not one per message.
+    """
+    locale = _i18n_text.active_locale()
+    root = str(_catalogues.catalogue_root())
+    source = _sources(root, "wire.settings", locale).get(message.code)
+    source_locale = locale
+    if source is None and locale != "en":
+        source = _sources(root, "wire.settings", "en").get(message.code)
+        source_locale = "en"
     if source is None:
-        return message.code
-    return _i18n_runtime.render_message(source, dict(message.params), "en")
+        return _LocalizedText(message.code, message)
+    try:
+        rendered = _i18n_runtime.render_message(source, dict(message.params), source_locale)
+        return _LocalizedText(rendered, message)
+    except _i18n_runtime.MessageError:
+        if source_locale != "en":
+            # A malformed translated value must not hide a healthy English one.
+            source = _sources(root, "wire.settings", "en").get(message.code)
+            if source is not None:
+                try:
+                    rendered = _i18n_runtime.render_message(source, dict(message.params), "en")
+                    return _LocalizedText(rendered, message)
+                except _i18n_runtime.MessageError:
+                    pass
+        return _LocalizedText(message.code, message)
 
 
 class ConfigUnreadableError(Exception):
@@ -375,6 +393,30 @@ class Setting:
     #: a desktop row with the rules that own it. Never authored twice — an
     #: empty string means "not a hotkey row".
     hotkey_scope: str = ""
+    #: SEARCH VOCABULARY for this row, never rendered: a query may match these
+    #: words, but no surface ever draws them as a sentence — the settings page
+    #: paints the row and, when it explains a match, names the word that hit.
+    #: Same shape and same job as ``PaletteEntry.aliases`` in the command
+    #: palette ("alias words a query may match without them being drawn",
+    #: ``tui/command_palette.py``:97-99), searched through ``match_text``
+    #: (:112-119) and never painted by ``rank_entries`` (:280-299).
+    #:
+    #: They live on the registry ROW because the row that defines a setting is
+    #: the only place a new setting can be made findable from: a second
+    #: catalogue beside this one would drift the first time a row was renamed
+    #: or retired, which is the rule the module docstring states.
+    #:
+    #: English, like the rest of this file's source copy — :func:`_t` renders
+    #: registry copy from the ``en`` catalogue — and deliberately NOT
+    #: ``wire.settings`` catalogue keys. A synonym is MATCHED TEXT, not copy:
+    #: no reader ever sees one, so keying every row's would cost a full
+    #: 8-locale translation wave for words nobody reads. Keep them CURATED:
+    #: author one only where the word a person would actually type differs from
+    #: the row's own words. A synonym repeating a word the row already shows -
+    #: its label, help, key, its section's title, or any choice's label or
+    #: description - makes the page's "why did this match" reason false, and
+    #: ``tests/unit/test_settings_io.py`` fails on it.
+    synonyms: tuple[str, ...] = ()
 
     @property
     def resolved_choices(self) -> tuple[Choice, ...]:
@@ -1680,6 +1722,25 @@ def _validate_librarian_name(value: Any) -> None:
     _validate_display_name(value, example="Librarian")
 
 
+#: Aliases every hotkey row answers to. One tuple for all of them because the
+#: rows differ only in which command fires: someone hunting "how do I change
+#: that shortcut" wants the whole set, not whichever row I happened to annotate.
+#: "hotkey" is spelled out even though the section title reads "Hotkeys": the
+#: title carries the PLURAL, and a whole-token matcher - the fold this module's
+#: tests use, and the only one that can name the word that hit - does not reach
+#: `hotkey` from `hotkeys`. The singular is the likelier thing to type, and
+#: finding nothing for it is exactly the complaint #1492 is about (review
+#: round 1, R3).
+_HOTKEY_SYNONYMS: tuple[str, ...] = (
+    "keyboard",
+    "shortcut",
+    "keybinding",
+    "bind",
+    "chord",
+    "hotkey",
+)
+
+
 SETTINGS: tuple[Setting, ...] = (
     Setting(
         key="memory.enabled",
@@ -1773,6 +1834,7 @@ SETTINGS: tuple[Setting, ...] = (
         # 1, D2). Measure any edit to these four before landing it.
         help=_t(_ws.hosting_help()),
         empty_unsets=True,
+        synonyms=("llm", "ai", "engine", "vendor"),
     ),
     Setting(
         key="model_name",
@@ -1784,6 +1846,7 @@ SETTINGS: tuple[Setting, ...] = (
         # 72 cells — see the note on `hosting` above.
         help=_t(_ws.model_name_help()),
         empty_unsets=True,
+        synonyms=("llm", "ai", "engine"),
     ),
     Setting(
         key="model_effort",
@@ -1807,6 +1870,7 @@ SETTINGS: tuple[Setting, ...] = (
         # the `/model default` receipt.
         help=_t(_ws.model_effort_help()),
         choices=_effort_choices(),
+        synonyms=("thinking", "thinking budget"),
     ),
     # -- providers ----------------------------------------------------------
     Setting(
@@ -2072,6 +2136,7 @@ SETTINGS: tuple[Setting, ...] = (
                 _t(_ws.providers_openrouter_data_collection_choice_deny_description()),
             ),
         ),
+        synonyms=("privacy", "tracking", "training"),
     ),
     Setting(
         key="providers.openrouter.zdr",
@@ -2413,6 +2478,7 @@ SETTINGS: tuple[Setting, ...] = (
         # rather than being the one place a theme can only be tried by keeping
         # it (#440 §3).
         preview=True,
+        synonyms=("color scheme", "colour scheme", "dark mode", "light mode"),
     ),
     # The five display flags below are the FLAT-DOTTED case: each `path` is a
     # single element containing a dot, because `tui/settings.py` reads
@@ -2670,6 +2736,7 @@ SETTINGS: tuple[Setting, ...] = (
         # (RFC §3.1 — unaudited locales are not offered). Widens by
         # regeneration, never by a code change here.
         choices_source=_language_choices,
+        synonyms=("locale", "i18n", "translation"),
     ),
     Setting(
         # The session's INITIAL dock density, not a hard override: `ctrl+g`
@@ -2959,6 +3026,7 @@ SETTINGS: tuple[Setting, ...] = (
             default=action.default,
             help=action.help,
             hotkey_scope=action.scope,
+            synonyms=_HOTKEY_SYNONYMS,
         )
         for action in _keymap.KEY_ACTIONS
     ),
@@ -3127,6 +3195,7 @@ SETTINGS: tuple[Setting, ...] = (
             _t(_ws.session_cleanup_enabled_choice_true_description()),
             _t(_ws.session_cleanup_enabled_choice_false_description()),
         ),
+        synonyms=("retention", "purge", "delete", "prune"),
     ),
     Setting(
         key="session.cleanup.max_sessions",
@@ -3138,6 +3207,7 @@ SETTINGS: tuple[Setting, ...] = (
         help=_t(_ws.session_cleanup_max_sessions_help()),
         minimum=0,
         gated_by="session.cleanup.enabled",
+        synonyms=("retention", "delete", "purge", "prune"),
     ),
     Setting(
         key="session.cleanup.max_inactive_days",
@@ -3149,6 +3219,7 @@ SETTINGS: tuple[Setting, ...] = (
         help=_t(_ws.session_cleanup_max_inactive_days_help()),
         minimum=0,
         gated_by="session.cleanup.enabled",
+        synonyms=("retention", "expiry", "age", "purge"),
     ),
     Setting(
         key="session.cleanup.max_total_bytes",
@@ -3160,6 +3231,7 @@ SETTINGS: tuple[Setting, ...] = (
         help=_t(_ws.session_cleanup_max_total_bytes_help()),
         minimum=0,
         gated_by="session.cleanup.enabled",
+        synonyms=("retention", "disk", "purge"),
     ),
     Setting(
         key="session.cleanup.remove_empty",
@@ -3174,6 +3246,7 @@ SETTINGS: tuple[Setting, ...] = (
             _t(_ws.session_cleanup_remove_empty_choice_false_description()),
         ),
         gated_by="session.cleanup.enabled",
+        synonyms=("delete", "purge", "prune"),
     ),
     # -- transcript compression ----------------------------------------------
     # The consumer is ``session/compression.py``, which reads this path back
@@ -3234,6 +3307,7 @@ SETTINGS: tuple[Setting, ...] = (
             _t(_ws.session_cleanup_delegated_enabled_choice_true_description()),
             _t(_ws.session_cleanup_delegated_enabled_choice_false_description()),
         ),
+        synonyms=("retention", "delete", "purge"),
     ),
     Setting(
         key="session.cleanup.delegated.max_age_hours",
@@ -3250,6 +3324,7 @@ SETTINGS: tuple[Setting, ...] = (
         unit="hours",
         validate_value=_validate_delegated_max_age_hours,
         gated_by="session.cleanup.delegated.enabled",
+        synonyms=("retention", "expiry", "purge"),
     ),
     Setting(
         key="runtime.unattended_gate_timeout",
@@ -3677,6 +3752,7 @@ SETTINGS: tuple[Setting, ...] = (
                 _t(_rsv.mode_choice_opt_in_description()),
             ),
         ),
+        synonyms=("privacy", "cloud", "sharing"),
     ),
     Setting(
         key="classification.timeoutMs",
@@ -5147,6 +5223,7 @@ SETTINGS: tuple[Setting, ...] = (
         minimum=60.0,
         maximum=3600.0,
         help=(_t(_ws.network_credentials_grant_ttl_s_help())),
+        synonyms=("auth", "expiry"),
     ),
     # The github adapter's allow-list (github.py's ``REPOSITORIES_PATH``; the same
     # key is read by the owner — the mint narrows to it and REFUSES when empty —
@@ -5164,6 +5241,7 @@ SETTINGS: tuple[Setting, ...] = (
         placeholder=_t(_ws.network_credentials_github_repositories_placeholder()),
         empty_unsets=True,
         validate_value=_validate_github_repositories,
+        synonyms=("auth", "access", "permissions", "scopes"),
     ),
     # -- hub ---------------------------------------------------------------
     # Defaults are LITERALS here for the same reason the aida ones are: this module
@@ -5586,6 +5664,7 @@ SETTINGS: tuple[Setting, ...] = (
                 _t(_ws.speech_voice_gender_choice_male_description()),
             ),
         ),
+        synonyms=("tts", "audio"),
     ),
     Setting(
         key="speech.voice.tone",
@@ -5622,6 +5701,7 @@ SETTINGS: tuple[Setting, ...] = (
                 _t(_ws.speech_voice_tone_choice_authoritative_description()),
             ),
         ),
+        synonyms=("tts", "audio"),
     ),
     Setting(
         key="speech.voice.expressiveness",
@@ -5670,6 +5750,7 @@ SETTINGS: tuple[Setting, ...] = (
         # Cleared, the key is removed and the consumer's own ``auto`` applies.
         empty_unsets=True,
         help=_t(_ws.speech_voice_language_help()),
+        synonyms=("tts", "audio", "locale"),
     ),
     Setting(
         key="speech.voice.accent",
@@ -5698,6 +5779,7 @@ SETTINGS: tuple[Setting, ...] = (
             'transitions, like "raha hoon" -> "rahoon" or "je m\'appelle" -> "jm\'appelle".'
         ),
         help=_t(_ws.speech_voice_instructions_help()),
+        synonyms=("tts", "audio"),
     ),
     Setting(
         key="speech.transcription.cleanup",
@@ -5732,6 +5814,7 @@ SETTINGS: tuple[Setting, ...] = (
                 _t(_ws.speech_transcription_cleanup_choice_off_description()),
             ),
         ),
+        synonyms=("stt", "speech to text", "voice", "audio"),
     ),
     # -- team bridge (agent messages, RFC §5) ---------------------------------
     # Defaults are LITERALS here, not imports: this module stays off the import
@@ -5861,6 +5944,29 @@ SETTINGS: tuple[Setting, ...] = (
 
 #: ``key -> Setting`` for the lookups the CLI and the page both do.
 BY_KEY: dict[str, Setting] = {setting.key: setting for setting in SETTINGS}
+
+
+def _refresh_registry_copy() -> None:
+    """Re-materialise localized fields after a locale move, in place.
+
+    The frozen dataclasses and registry containers are public API: refresh only
+    their catalogue-backed strings, retaining defaults, validators, identities
+    and BY_KEY. Dynamic choices remain owned by their existing providers.
+    """
+    for record in (*SECTIONS, *SETTINGS):
+        for field in dataclasses.fields(record):
+            value = getattr(record, field.name)
+            if isinstance(value, _LocalizedText):
+                object.__setattr__(record, field.name, _t(value.message))
+            elif field.name == "choices":
+                for choice in value:
+                    for choice_field in dataclasses.fields(choice):
+                        copy = getattr(choice, choice_field.name)
+                        if isinstance(copy, _LocalizedText):
+                            object.__setattr__(choice, choice_field.name, _t(copy.message))
+
+
+_i18n_text.register_refresh(_refresh_registry_copy)
 
 
 def settings_for(section: str) -> tuple[Setting, ...]:

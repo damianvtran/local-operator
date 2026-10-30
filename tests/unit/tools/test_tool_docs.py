@@ -347,8 +347,22 @@ MEASURED_TOKENS: dict[str, int] = {
     # stated in scripts/bench_context_budget.py. Measured by this test's printed
     # table, no other tool's bytes moved.
     # Converged directory/dm + recipient-description ledger: 1,736 tokens,
-    # measured by this test's canonical renderer on the merged tree.
-    "bridge": 1736,
+    # measured by this test's canonical renderer on the merged tree; 1,781 with
+    # the name-resolution clause (tb-name-resolution, +45); and 1,792 on this
+    # stacked branch (+11), where the SAME description names both scopes a
+    # display name can resolve in — the channel_post room, the sender's own send
+    # allowlist — because that difference is what decides which op a model should
+    # reach for. Measured by this test's own printed table; no other tool's bytes
+    # moved.
+    # RE-MEASURED (dm `to`): 1,792 -> 1,797 is this change's whole footprint on
+    # this tool (+5), and it is deliberate: `dm` now accepts `to` but resolves no
+    # display name, so the SAME description ends "; dm takes ids only." — the only
+    # clause added, because a model told nothing would read the name clause as
+    # covering every op that takes the field. The accepts-or-refuses detail for a
+    # name lives in dm's refusal, not in per-request schema prose. Measured by
+    # this test's own printed table on the rebased head; the paired start-context
+    # figure is in scripts/bench_context_budget.py.
+    "bridge": 1797,
     # Re-measured with this test's canonical isolated renderer: the read-only
     # inspect_ownership operation adds 19 opt-in tokens, not wire prompt cost.
     # 1327 -> 1424 (2026-10-16): the browser `type` secret_ref convention adds
