@@ -1,0 +1,68 @@
+{
+  "schema": 1,
+  "audit_id": "w3a1",
+  "audit_round": 1,
+  "locale": "es",
+  "namespace": "wire.errors.agents",
+  "audit_date": "2026-10-29",
+  "audited_revision": "66da866475f3e74553196a3167c18c6125141844",
+  "audited_revision_note": "Target es file is UNTRACKED at this revision; HEAD does not bind its bytes. The exact audited on-disk target sha256 is recorded below and in audit.log.",
+  "key_count": {
+    "en": 44,
+    "target": 44
+  },
+  "verdict": "passed",
+  "result": "clean — 0 blocker, 0 major, 0 minor, 0 nit",
+  "verdict_reason": "All 44 keys read against en. Agent/team/job/schedule lookup and mutation failures retain the same cause and failure direction; local-operation failures remain local, cancellation remains refused, validation remains validation, and no failure reads as success. No English context sidecar exists, so register was judged against shipped Spanish error copy rather than an invented role/tone/width contract.",
+  "auditor": {
+    "agent": "translation-auditor (lopdev team), es-w3-auditor-a",
+    "session_or_instance": "c328736e07e9",
+    "model": "kimi/k3.1-pro (self-reported from the current session model-switch notice)",
+    "model_note": "Primary header: anthropic/claude-sonnet-5-5. Temporary provider-failure fallback: quota via openai/gpt-6-astra to current kimi/k3.1-pro. The semantic judgements and evidence were produced under the disclosed current fallback; no primary-model audit claim.",
+    "date": "2026-10-29",
+    "independence": "I authored none of this copy and repaired none. I compared every key against en source, the es style guide/glossary and shipped Spanish error register. No catalogue, sidecar, ledger, allowance or generated file was edited; only audit evidence was written."
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.errors.agents.json",
+      "revision": "66da866475f3e74553196a3167c18c6125141844",
+      "sha256": "7800f04d031a9a97222f383dea74878acadb12d9d9382b16ba638990b77627c7"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/es/wire.errors.agents.json",
+      "sha256": "9bece5afaae31649dde1f1dd3d97d4de4517cb4c0c4a8c9ed6e477377814f448",
+      "tracked": false
+    },
+    "context": null,
+    "context_absent_reason": "local_operator/i18n/catalogues/en/wire.errors.agents.context.json does not exist; there is no role/tone/width contract to apply."
+  },
+  "findings": [],
+  "check_output": [
+    {
+      "cmd": "git rev-parse HEAD; git status --short -- <en and es inputs>; sha256sum <inputs>",
+      "result": "HEAD 66da866475f3e74553196a3167c18c6125141844; target ?? (untracked); hashes exactly match input_hashes."
+    },
+    {
+      "cmd": "isolated HOME/config, PYTHONPATH=$PWD python3 $LOCAL_OPERATOR_SCRATCHPAD/es-w3a1-checks.py",
+      "result": "exit 0; 64 keys across both assigned namespaces; this namespace 44/44 ordered-key parity and 35 source ICU arguments; real parser accepted every target; argument, plural-selector, select-label, flag, code-span and checked machine-literal parity passed; no plural branches occur; no few/zero/two."
+    },
+    {
+      "cmd": "render wire.errors.agents.variable_not_found and job_cannot_cancel with synthetic IDs",
+      "result": "No se encontró la variable de ejecución 'REGION' para el agente agent-7; El trabajo job-9 no se puede cancelar (ya terminó, falló o se canceló antes). Quotes and IDs survive; both remain failures."
+    },
+    {
+      "cmd": "compare English/Spanish string lengths (no sidecar width budget)",
+      "result": "Largest ratio 1.419x for error_updating_system_prompt, 43 -> 61 characters. Measured and reviewed; no clipping finding because no maxCells contract exists and the phrase remains concise."
+    },
+    {
+      "cmd": "read_public_copy through lop exec for en/wire.errors.media.json speech_no_credential",
+      "result": "Sanctioned reader returned the English source successfully. It cannot read untracked Spanish targets or absent sidecars; no workaround used."
+    }
+  ],
+  "display_side_risk": "No target value displayed as a redaction marker. The unrelated zh-CN speech_no_credential row appeared as [redacted] during a broad grep and was not judged or used as evidence. The sanctioned reader was exercised on tracked English media copy; it cannot read these untracked targets or sidecars.",
+  "limitations": [
+    "LLM semantic judgement; no native-speaker attestation.",
+    "No English context sidecar exists. Register was compared with shipped es/wire.errors.desktop, es/wire.errors.settings, es/wire.errors.notifications and es/wire.exec; no role/tone/maxCells contract was invented.",
+    "Static copy and narrow runtime parser/render checks only; no rendered UI fit, native review, release eligibility or repo-wide test claim."
+  ]
+}
