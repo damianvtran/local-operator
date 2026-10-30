@@ -1,0 +1,126 @@
+#!/usr/bin/env python3
+"""Read-only W3 Spanish catalogue parity probe; writes no repository inputs."""
+import hashlib
+import json
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+from local_operator.i18n.runtime import (
+    _Arg,
+    message_arguments,
+    parse_message,
+    plural_selectors,
+    render_message,
+)
+
+NS = ("wire.errors.agents", "wire.errors.media")
+ROOT = Path("local_operator/i18n/catalogues")
+FLAG = re.compile(r"(?<![\w-])--[A-Za-z0-9][\w-]*")
+CODE = re.compile(r"`[^`]*`")
+IDENTIFIERS = {
+    "RADIENT_API_KEY", "hub_agent_id", "system_prompt", "HTTP", "Radient",
+    "Radient Console", "ZIP", "JSON",
+}
+
+
+def select_shape(nodes):
+    found = []
+    for node in nodes:
+        if isinstance(node, _Arg):
+            if node.kind == "select":
+                found.append((node.name, tuple(label for label, _ in node.parts)))
+            for _, body in node.parts:
+                found.extend(select_shape(body))
+    return found
+
+
+def main():
+    failures = []
+    total = 0
+    print("$ git rev-parse HEAD")
+    print(subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip())
+    for ns in NS:
+        en_path = ROOT / "en" / f"{ns}.json"
+        es_path = ROOT / "es" / f"{ns}.json"
+        ctx_path = ROOT / "en" / f"{ns}.context.json"
+        en = json.loads(en_path.read_text())
+        es = json.loads(es_path.read_text())
+        total += len(en)
+        print(f"\n== {ns} ==")
+        for path in (en_path, es_path):
+            print(f"sha256 {path}: {hashlib.sha256(path.read_bytes()).hexdigest()}")
+        print(f"context {ctx_path}: {'PRESENT' if ctx_path.exists() else 'ABSENT'}")
+        print("status es:", subprocess.check_output(
+            ["git", "status", "--porcelain", "--", str(es_path)], text=True).strip())
+        checks = {
+            "ordered_keys": list(en) == list(es),
+            "context_absent": not ctx_path.exists(),
+        }
+        arg_count = 0
+        max_growth = (0.0, "", 0, 0)
+        for key, source in en.items():
+            target = es[key]
+            pairs = {
+                "arguments": (message_arguments(source), message_arguments(target)),
+                "plural_selectors": (plural_selectors(source), plural_selectors(target)),
+                "select_labels": (select_shape(parse_message(source)), select_shape(parse_message(target))),
+                "flags": (FLAG.findall(source), FLAG.findall(target)),
+                "code_spans": (CODE.findall(source), CODE.findall(target)),
+            }
+            for label, (a, b) in pairs.items():
+                if a != b:
+                    failures.append((key, label, a, b))
+            parse_message(target)
+            arg_count += len(message_arguments(source))
+            if any(sel in target for sel in ("few{", "zero{", "two{")):
+                failures.append((key, "non_es_plural", source, target))
+            for token in IDENTIFIERS:
+                if (token in source) != (token in target):
+                    failures.append((key, "literal_identifier", token, target))
+            growth = len(target) / len(source)
+            if growth > max_growth[0]:
+                max_growth = (growth, key, len(source), len(target))
+        print(f"keys en/es: {len(en)}/{len(es)}; ICU arguments: {arg_count}")
+        for name, passed in checks.items():
+            print(f"{name}: {'PASS' if passed else 'FAIL'}")
+            if not passed:
+                failures.append((ns, name, "", ""))
+        ns_failures = [row for row in failures if row[0].startswith(ns + ".")]
+        print("parse/ICU/plural/flags/code-spans/literal-identifiers:",
+              "PASS" if not ns_failures else f"FAIL {ns_failures}")
+        print("max length growth: %.3fx %s (%d -> %d chars)" % max_growth)
+        if ns == "wire.errors.agents":
+            print("passthrough agents_refusal:", repr(es[f"{ns}.agents_refusal"]))
+            print("render variable_not_found:", render_message(
+                es[f"{ns}.variable_not_found"],
+                {"variable_key": "REGION", "agent_id": "agent-7"}, locale="es"))
+            print("render job_cannot_cancel:", render_message(
+                es[f"{ns}.job_cannot_cancel"], {"job_id": "job-9"}, locale="es"))
+        else:
+            print("passthrough media_refusal:", repr(es[f"{ns}.media_refusal"]))
+            print("render unknown_model:", render_message(
+                es[f"{ns}.unknown_model"],
+                {"provider": "openai", "model": "tts-1", "error": "not found"}, locale="es"))
+            print("render vendor_key_refused:", render_message(
+                es[f"{ns}.speech_vendor_key_refused"], {"vendor": "ElevenLabs"}, locale="es"))
+    print("\nTotal keys:", total)
+    print("Cross-key failures:", failures)
+    print("$ explicit ICU argument negative control (not catalogue text)")
+    print("source arguments:", message_arguments("Missing {agent_id}"))
+    print("renamed arguments:", message_arguments("Falta {agente_id}"))
+    print("$ shipped Spanish register controls")
+    for ref_ns, key in (
+        ("wire.errors.settings", "wire.errors.settings.system_prompt_retrieve_failed"),
+        ("wire.errors.notifications", "wire.errors.notifications.store_unavailable"),
+        ("wire.errors.desktop", "wire.errors.desktop.aida_bootstrap_failed"),
+    ):
+        data = json.loads((ROOT / "es" / f"{ref_ns}.json").read_text())
+        print(key + ":", data[key])
+    if failures:
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

@@ -51,6 +51,7 @@ from rich.cells import cell_len
 from rich.console import Group
 from rich.padding import Padding
 from rich.style import Style
+from rich.table import Table
 from rich.terminal_theme import TerminalTheme
 from rich.text import Text
 from textual import events
@@ -12700,6 +12701,16 @@ class OperatorApp(App[None]):
         # splash once it lands (the read SKIPPED the row while the import
         # was in flight — see `tui/quota_notice`).
         self.run_worker(self._prewarm_quota_notice(), thread=False, group="quota-prewarm")
+        # THE TEAM BRIDGE RECEIVER CATCH-UP, the TUI's share of "every surface".
+        # A TUI does not host `lop serve` (its sessions are detached runtimes and
+        # the app never reaches ``server/app.py``'s lifespan), so a machine whose
+        # only surface is a terminal would otherwise never place the receiver
+        # that delivers bridge messages while nobody is looking. Same helper,
+        # same guards, same lock as the serve lifespan; a worker, so the
+        # supervisor's subprocess calls never touch the paint loop.
+        self.run_worker(
+            self._bridge_receiver_catch_up(), thread=False, group="bridge-receiver-catch-up"
+        )
         # An empty transcript is the boot layout's whole precondition, and the
         # session starts empty — so the app opens in it. Set here rather than in
         # the stylesheet's base rules because this is state, not style: it is the
@@ -14281,6 +14292,22 @@ class OperatorApp(App[None]):
                 pass  # a failed probe is the old deferred behaviour, not a crash
 
         self.run_worker(_run(), exclusive=False)
+
+    async def _bridge_receiver_catch_up(self) -> None:
+        """Run the shared receiver catch-up for this TUI's config root.
+
+        ``catch_up_at_surface_start`` never raises; the ``try`` keeps an import
+        failure (a partial install) from surfacing as a worker error on screen.
+        """
+        try:
+            from local_operator.paths import config_dir
+            from local_operator.team_bridge.connector.install import (
+                catch_up_at_surface_start,
+            )
+
+            await catch_up_at_surface_start(config_dir(), surface="tui")
+        except Exception:  # noqa: BLE001 — a surface start never fails for this
+            pass
 
     async def _boot_session(self) -> None:
         """Await the session factory; on failure surface + offer /reload."""
@@ -19734,7 +19761,9 @@ class OperatorApp(App[None]):
         terminal, a peer session) writes the same file, and a cached set would
         make `/unarchive` refuse a conversation the store already holds it for —
         the user's own two windows disagreeing about a file one of them wrote.
-        The read is one small file, only on a command that names the state.
+        The read is one small file, but every composer refresh pays it: a
+        command that names the state, a session bind and a language move all
+        re-filter the offered list (``_offered_commands``).
         """
         from local_operator.paths import config_dir
         from local_operator.session.archived import archived_ids
@@ -41914,6 +41943,14 @@ class OperatorApp(App[None]):
         """
         message.stop()
         try:
+            if message.key == "team_bridge.enabled":
+                # Terminal writes bypass the HTTP settings route; use the same
+                # guarded sync on this explicit event so Turn off stops it now.
+                self.run_worker(
+                    self._bridge_receiver_catch_up(),
+                    thread=False,
+                    group="bridge-receiver-setting",
+                )
             if message.key == "tui.theme" and message.value:
                 self._apply_theme(str(message.value))
             elif message.key in (
@@ -47196,13 +47233,21 @@ class OperatorApp(App[None]):
         which is what lets the config watcher's echo of this process's own
         write call it unconditionally.
 
-        Not covered here, by design: the slash registry's descriptions, which
-        resolve through ``messages.render`` at import (the S2 seam note says
-        where that rework starts) — they move with their own slice.
+        Not covered by ``set_active_locale``: the slash picker, which holds a
+        COPY of the registry rather than the registry itself (see below).
         """
         from local_operator.i18n import text as i18n_text
 
         i18n_text.set_active_locale(locale)
+        # The slash registry re-materialises its own descriptions in place (its
+        # ``register_refresh`` hook), which reaches ``/help`` because that block
+        # reads ``SLASH_COMMANDS`` per render. The PICKER does not: the editor
+        # hands it a plain ``list(...)`` copy, so it would keep painting the boot
+        # language for the rest of the session. Re-handing the rows is the fix,
+        # and the editor re-derives an ALREADY OPEN list from its buffer on that
+        # call, so the rows on screen repaint rather than waiting for the next
+        # keystroke (QA round 1, Q1). Silent when no editor is mounted.
+        self._refresh_offered_commands()
         # Localized transcript furniture is baked into finalized blocks just as
         # theme ink is. Reuse that same rebuild sweep so a locale move repaints
         # mounted rows at their CURRENT width, with no resize or stale cache.
@@ -47222,6 +47267,14 @@ class OperatorApp(App[None]):
         view = self._notifications_view
         if view is not None:
             view._paint()
+        # The same debt on the settings page (QA round 1, Q2): an open page keeps
+        # its PAINTED rows and its composed-line caches between repaints, and the
+        # watcher path reaches here with no keypress to follow it. `_rows_key`
+        # and `_paint_token` carry the active locale, so this repaint recomposes
+        # the whole list in the new language rather than reusing the old strips.
+        settings_view = self._settings_view
+        if settings_view is not None:
+            settings_view._repaint()
 
     def _apply_theme(self, name: str, *, preview: bool = False) -> None:
         """Switch every rendering surface to ``name``, live.
@@ -56116,12 +56169,32 @@ class OperatorApp(App[None]):
         # glued straight onto their descriptions. Derive one shared column and
         # preserve the two-cell gutter for every row.
         name_width = max((len(names) for names, _ in named_commands), default=0) + 2
-        lines = []
+        # The command table is a real GRID, not one composed ``Text`` per row.
+        # A composed row (``names.ljust(name_width) + description``) makes Rich
+        # restart a wrapped line at the Text's origin, i.e. at the name column:
+        # at 80 columns every French description over 54 cells painted its tail
+        # under the command names, where `navigateur` and `confirmation` read as
+        # commands with no description (design round 1, D1 — 8 continuations in
+        # 23 rows, en's `/fork` already one of them). A grid wraps INSIDE its
+        # second cell, so the tail hangs under the description and re-wraps on
+        # resize instead of freezing at the width the command ran at.
+        #
+        # ``padding=0`` keeps the two-cell gutter ``name_width`` already carries
+        # (a grid's default 1-cell column padding would widen the name column by
+        # one and move every description right); ``overflow="fold"`` keeps a
+        # word longer than the cell wrapping rather than ellipsizing, because
+        # this table is a reference and nothing in it may be silently cut.
+        command_rows = Table.grid(padding=0)
+        command_rows.add_column(width=name_width)
+        command_rows.add_column(ratio=1, overflow="fold")
         for names, command in named_commands:
-            line = Text()
-            line.append(names.ljust(name_width), style=muted)
-            line.append(command.description, style=dim)
-            lines.append(line)
+            command_rows.add_row(
+                Text(names, style=muted),
+                Text(command.description, style=dim),
+            )
+        # Rows and notes share one Group, so the list holds renderables rather
+        # than only Texts (the command table is the one non-Text entry).
+        lines: list[Text | Table] = [command_rows]
         # `ctrl+v` documented durably. It is not a slash command so it cannot
         # appear in the table above, and this app shows no key reference in the
         # footer - yet it is the one paste key that works on EVERY terminal.
@@ -56478,7 +56551,12 @@ class OperatorApp(App[None]):
             _t(_x.help_notify_note_more()),
             style=dim,
         )
-        if not lines or lines[-1].plain:
+        # A blank line before the notes, unless one is already there. The row
+        # list holds the command TABLE as well as Texts, so the "already blank"
+        # question only has an answer for a Text: a renderable that is not one
+        # always takes the separator.
+        last = lines[-1] if lines else None
+        if not isinstance(last, Text) or last.plain:
             lines.append(Text())
         lines.append(title_note)
         lines.append(title_note_more)

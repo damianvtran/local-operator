@@ -1,0 +1,62 @@
+# audit.log — fr / tui.analytics / frbk1
+# commands are recorded verbatim; the text under each is the command's real output.
+
+$ git -C /Users/damian/lo-i18n-base status --porcelain | grep 'catalogues/fr/'
+?? local_operator/i18n/catalogues/fr/tui.analytics.json
+
+$ git -C /Users/damian/lo-i18n-base rev-parse HEAD
+9495f8a6c3bf2b5438ef5c33d7274cf519435dda
+
+$ ls /Users/damian/lo-i18n-base/local_operator/i18n/catalogues/en/tui.analytics.context.json
+/Users/damian/lo-i18n-base/local_operator/i18n/catalogues/en/tui.analytics.context.json
+
+$ PYTHONPATH=/Users/damian/lo-i18n-base /Users/damian/local-operator/.venv/bin/python /Users/damian/.local-operator/sessions/d5db18882cb9/scratchpad/frbk1_audit_ns.py tui.analytics
+namespace=tui.analytics keys_en=98 keys_fr=98 context=present
+sidecar_keys=98 sidecar_missing=[] sidecar_extra=[]
+sha256 en=aa5221066aa84eedf0f924628d51bc8f08ccf5f26b5075638b9d40062f7b617e
+sha256 context=04356facdf1802a34a4be9ab6d3255cc9e92826d2b4e9ae917c43f687a9325eb
+sha256 fr=355bbd9d7f431fc0f088c0c5bbd452b7d1102cabe06411b401ec76e031e05f9c
+key_order_matches_en= True
+missing_in_fr= []
+extra_in_fr= []
+argument_tuple_diffs= NONE
+fr_plural_categories= ['many', 'one', 'other']
+plural_selectors_added_vs_en= 14
+  tui.analytics.search.counted_read: en=(('one', 'other'),) fr=(('one', 'many', 'other'),)
+  tui.analytics.search.counted_search: en=(('one', 'other'),) fr=(('one', 'many', 'other'),)
+  tui.analytics.search.incl_free_read: en=(('one', 'other'),) fr=(('one', 'many', 'other'),)
+  tui.analytics.search.incl_free_search: en=(('one', 'other'),) fr=(('one', 'many', 'other'),)
+  tui.analytics.search.incl_unpriced_read: en=(('one', 'other'),) fr=(('one', 'many', 'other'),)
+  tui.analytics.search.incl_unpriced_search: en=(('one', 'other'),) fr=(('one', 'many', 'other'),)
+  tui.analytics.search.note_read_full: en=(('one', 'other'),) fr=(('one', 'many', 'other'),)
+  tui.analytics.search.note_read_partial: en=(('one', 'other'),) fr=(('one', 'many', 'other'),)
+  tui.analytics.search.note_read_unpriced: en=(('one', 'other'),) fr=(('one', 'many', 'other'),)
+  tui.analytics.search.note_search_full: en=(('one', 'other'),) fr=(('one', 'many', 'other'),)
+  tui.analytics.search.note_search_partial: en=(('one', 'other'),) fr=(('one', 'many', 'other'),)
+  tui.analytics.search.note_search_unpriced: en=(('one', 'other'),) fr=(('one', 'many', 'other'),)
+  tui.analytics.table.subagent_suffix: en=(('one', 'other'),) fr=(('one', 'many', 'other'),)
+  tui.analytics.totals.days_with_usage: en=(('one', 'other'),) fr=(('one', 'many', 'other'),)
+invalid_fr_selectors= NONE
+typography_strays= NONE
+u202f_total=3 u00a0_total=0
+whitespace_signature_diffs= NONE
+maxCells_rows= [('tui.analytics.hint.expand.compact', 29, 33, 31), ('tui.analytics.hint.expand.full', 40, 46, 42), ('tui.analytics.hint.expand.full_metric', 56, 62, 57), ('tui.analytics.hint.expand.keys', 22, 25, 25), ('tui.analytics.hint.expand.keys_bare', 13, 14, 12)]
+over_budget= [('tui.analytics.hint.expand.compact', 29, 33, 31), ('tui.analytics.hint.expand.full', 40, 46, 42), ('tui.analytics.hint.expand.full_metric', 56, 62, 57), ('tui.analytics.hint.expand.keys_bare', 13, 14, 12)]
+largest_fr_minus_en  (plural=ICU template length, not rendered width):
+  + 57  tui.analytics.search.incl_unpriced_search      en= 92 fr=149 [plural-template]
+  + 56  tui.analytics.search.incl_free_search          en= 84 fr=140 [plural-template]
+  + 56  tui.analytics.search.incl_unpriced_read        en= 87 fr=143 [plural-template]
+  + 55  tui.analytics.search.incl_free_read            en= 79 fr=134 [plural-template]
+  + 38  tui.analytics.search.note                      en=171 fr=209
+  + 38  tui.analytics.search.note_search_partial       en= 84 fr=122 [plural-template]
+  + 37  tui.analytics.search.note_read_partial         en= 79 fr=116 [plural-template]
+  + 37  tui.analytics.search.note_search_unpriced      en= 73 fr=110 [plural-template]
+  + 36  tui.analytics.search.note_read_unpriced        en= 68 fr=104 [plural-template]
+  + 35  tui.analytics.table.subagent_suffix            en= 67 fr=102 [plural-template]
+  + 34  tui.analytics.search.counted_search            en= 62 fr= 96 [plural-template]
+  + 33  tui.analytics.empty.hint                       en= 78 fr=111
+
+$ PYTHONPATH=/Users/damian/lo-i18n-base /Users/damian/local-operator/.venv/bin/python scripts/i18n/check.py --catalogues-only; echo "exit=$?"
+check.py: catalogue checks: 0 problem(s)
+exit=0
+

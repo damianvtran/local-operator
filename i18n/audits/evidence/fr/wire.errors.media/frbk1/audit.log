@@ -1,0 +1,48 @@
+# fr-wire-audit-b — audit.log — fr/wire.errors.media
+# audit id frbk1 | 2026-10-29 | session 500e883ce1b1 | served model radient/auto
+# audited revision 9495f8a6c3bf2b5438ef5c33d7274cf519435dda on branch feat/i18n-core-fr-backfill
+# The target catalogue is an untracked working-tree file, so the bytes audited
+# are bound by sha256 below rather than by a commit of their own.
+
+$ git rev-parse HEAD
+9495f8a6c3bf2b5438ef5c33d7274cf519435dda
+
+$ git branch --show-current
+feat/i18n-core-fr-backfill
+
+$ shasum -a 256 local_operator/i18n/catalogues/{en,fr}/wire.errors.media*.json
+# cross-checked in this audit run: shasum and Python hashlib agree on every file
+en      1c109f63b8d3ce00657a47836199ce8ff924bb8e4bd999fda9f1d64f760a823b  en/wire.errors.media.json
+context (none)  en/wire.errors.media.context.json  [absent]
+fr      222d3cf6667d23a9b8de6e44eaddaf9fd7e5f155eb53365bc43e79d6fd921010  fr/wire.errors.media.json
+
+$ ~/local-operator/.venv/bin/python  # parity + ICU through the repo parser
+from local_operator.i18n.runtime import message_arguments, plural_selectors
+key parity              : en=20 fr=20; missing in fr=none; extra in fr=none
+key order vs english    : identical
+argument tuple mismatches: 0
+keys carrying ICU arguments: 11
+    argument names: error, model, provider, status, vendor
+keys carrying plural selectors: 0   (nothing for a plural branch to diverge on)
+
+$ ~/local-operator/.venv/bin/python  # typography by codepoint
+prose anomalies (outside quoted/code spans): 0
+hits inside quoted/code spans (must stay byte-identical): 0
+
+$ ~/local-operator/.venv/bin/python  # masking scan, ordinal comparison
+marker sequence found in any of the 20 French values: NO
+values containing '[' or ']': 0
+
+$ ~/local-operator/.venv/bin/python  # identifier tokens from English kept in French
+keys with an English identifier token missing from the French: 0
+
+$ ~/local-operator/.venv/bin/python  # width against declared maxCells
+    no maxCells in en/wire.errors.media.context.json (no sidecar)
+    widest values (fr cells, en cells, key):
+        119    98  wire.errors.media.speech_radient_credit_low
+        118    90  wire.errors.media.speech_vendor_credit_low
+         98    85  wire.errors.media.speech_upstream_reported_error
+
+$ ~/local-operator/.venv/bin/python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+exit 0

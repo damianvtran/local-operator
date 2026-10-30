@@ -878,15 +878,16 @@ async def test_status_never_claims_a_receiver_that_is_not_installed(api):
     """D2a: ``connector`` says what the SERVICE is, and fails closed here.
 
     This suite's store is a scratch root, which is exactly the shape the
-    per-user LaunchAgent must never serve (and on a non-macOS runner there is
-    no launchd at all), so the answer is the refusal code rather than a state.
+    per-user receiver unit must never serve on any platform (and a runner with
+    no user service supervisor answers that instead), so the answer is a
+    refusal code rather than a state.
     A status read that reported ``installed``/``loaded`` for a store nothing
     supervises is how "on but deaf" stays invisible.
     """
 
     client, _root, _discipline = api
     result = (await client.get("/v1/desktop/team-bridge/status")).json()["result"]
-    assert result["connector"] in {"isolated", "unsupported"}, result["connector"]
+    assert result["connector"] in {"isolated", "no_supervisor"}, result["connector"]
 
 
 async def test_status_asks_launchd_off_the_event_loop(api, monkeypatch):

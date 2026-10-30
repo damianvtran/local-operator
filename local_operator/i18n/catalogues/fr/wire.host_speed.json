@@ -1,0 +1,4 @@
+{
+  "wire.host_speed.retire_below_tps.label": "retirer un hôte lent (tok/s)",
+  "wire.host_speed.retire_below_tps.help": "Expérimental, désactivé par défaut : les preuves viennent d’un seul modèle/exécution. Un seuil positif cesse d’épingler un hôte après trois longues réponses sous ce débit de tokens de sortie par seconde, temps de consommation locale exclu. 0 efface les exclusions de débit à la prochaine requête ; les exclusions dues aux défauts de cache subsistent. Changer d’hôte peut repartir d’un cache de prompt froid."
+}

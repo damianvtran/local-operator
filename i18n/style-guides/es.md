@@ -27,6 +27,13 @@ translators and the auditor. Wave 1 locale.
   backoff. Reason: settled dev usage across Spain and LatAm.
 - Prefer Spanish where settled: servidor, archivo, carpeta, red, dispositivo,
   ajustes (settings), equipo (team), habilidad (skill).
+- **`carpeta` is a plain folder; `directorio de trabajo` is a session's cwd.**
+  The two are different things on these surfaces, and the shipped settings copy
+  already says `directorio de trabajo` for the composer's working directory
+  (`wire.settings.display_composer_cwd.*`). Use `carpeta` only for a folder the
+  user browses. (Rule recorded 2026-10-30 after the mobile relay lane's audit
+  flagged `carpeta de trabajo` for a session's directory — its own wording, not
+  ours, and the point stands regardless of which copy carries it.)
 - **Amendment (es W1, 2026-10-29): `cache` → `caché`.** The kept-English list
   above named `cache` before this amendment removed it. The shipped catalogue
   already used `caché` in 19 keys (20 occurrences: `wire.settings` 15,

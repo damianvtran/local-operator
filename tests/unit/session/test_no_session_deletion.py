@@ -89,14 +89,28 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "Rolls back only the network-request-*.body files the same read created.",
     ),
-    # The bridge connector's LaunchAgent, in ~/Library/LaunchAgents. The path
-    # comes from ``launchd.plist_path_for(LABEL)`` -- a fixed label plus
-    # ``Path.home()`` -- so it is never a session directory or a transcript, and
-    # the unlink is how an opt-out removes the user's own plist (D2a).
+    # The bridge connector's registration file, on all three receivers the
+    # cross-platform install added (the original entry covered macOS only). Each
+    # path is FIXED by the platform helper, never caller-supplied: ``plist_path()``
+    # is ``launchd.plist_path_for(LABEL)`` under ``Path.home()``,
+    # ``systemd_unit_path(SYSTEMD_UNIT)`` is the fixed per-user unit name, and
+    # ``task_record_path(config_dir)`` is ``<config_dir>/supervisor/<fixed
+    # name>.xml``. None can be a session directory or a transcript; the unlink is
+    # how an opt-out removes the user's own registration (D2a).
     (
-        "local_operator/team_bridge/connector/install.py::_remove",
+        "local_operator/team_bridge/connector/install.py::_remove_launchd",
         "<path>.unlink",
         "Unlinks the LaunchAgent plist at the fixed per-user label path, never a session path.",
+    ),
+    (
+        "local_operator/team_bridge/connector/install.py::_remove_systemd",
+        "<path>.unlink",
+        "Unlinks the fixed systemd --user unit file, never a session path.",
+    ),
+    (
+        "local_operator/team_bridge/connector/install.py::_remove_task",
+        "<path>.unlink",
+        "Unlinks the task record under the config dir's supervisor/ dir, never a session path.",
     ),
     # Dedicated credential-root cache, never a transcript path: path_for hashes
     # the opaque session id under account-affinity/<auth-db namespace>/*.json.
@@ -3770,7 +3784,53 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "Only the sibling .sidebar-tags-*.tmp leftover; never a session path",
     ),
+    (
+        "local_operator/session/transcript_index.py::write_index",
+        "<path>.unlink",
+        "Removes only the index's own sibling .tmp leftover when the commit did not land",
+    ),
+    # -- the immutable read model: cache FILES beside the index --------------
+    # `cache/transcript_index/read-models/<sid>/` holds SQLite companions and
+    # their naming sidecars. Every path below is built by `_path()` from the
+    # CONFIG ROOT plus a 32-hex token (`_token_for`), never from a caller string
+    # and never below `sessions/`: publishing writes a sibling temp FILE and
+    # renames it onto the companion, the sidecar does the same, the collector
+    # unlinks unreferenced cache FILES, and the orphan sweep deletes FILES in a
+    # directory whose own session has no index left. None of these can name a
+    # session directory, a transcript, or an entry inside `sessions/`.
+    (
+        "local_operator/session/index_read_model.py::publish",
+        "<path>.replace",
+        "tmp FILE -> the companion's 32-hex cache path under cache/, never a session path",
+    ),
+    (
+        "local_operator/session/index_read_model.py::publish",
+        "<path>.unlink",
+        "Removes only the sweep's own .tmp sibling when the publish did not commit",
+    ),
+    (
+        "local_operator/session/index_read_model.py::write_naming",
+        "<path>.replace",
+        "tmp FILE -> the naming sidecar's 32-hex cache path under cache/, never a session path",
+    ),
+    (
+        "local_operator/session/index_read_model.py::write_naming",
+        "<path>.unlink",
+        "Removes only the sidecar's own .tmp sibling; the token names a cache file",
+    ),
+    (
+        "local_operator/session/index_read_model.py::collect",
+        "<path>.unlink",
+        "Unlinks an unreferenced companion/sidecar cache FILE by its 32-hex stem",
+    ),
+    (
+        "local_operator/session/index_read_model.py::_sweep_orphans",
+        "<path>.unlink",
+        "Unlinks cache FILEs inside a read-models/<sid> directory whose session has no index; "
+        "the directory itself is left in place",
+    ),
 )
+
 
 _ALLOWED: dict[str, str] = {f"{row[0]}::{row[1]}": str(row[2]) for row in _ALLOWED_ROWS}
 _ALLOWED_COUNTS: dict[str, int] = {
@@ -3962,6 +4022,11 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         # allow-list rows above for the full argument).
         "local_operator/session/compression.py::_publish",
         "local_operator/session/cleanup.py::_write_record",  # tmp -> last-cleanup.json
+        # tmp FILE -> read-models/<32-hex>.sqlite / .naming.json under cache/: the
+        # receiver is a companion token path built from the config root, never a
+        # session directory (see the allow-list rows below for the full argument).
+        "local_operator/session/index_read_model.py::publish",
+        "local_operator/session/index_read_model.py::write_naming",
         # tmp FILE -> sessions/<id>/inbox.jsonl inside the session it was handed;
         # the commit swaps one spool file, never a directory.
         "local_operator/session/runtime/inbox.py::commit_inbox_batch",

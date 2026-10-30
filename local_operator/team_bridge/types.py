@@ -189,11 +189,11 @@ RECIPIENT_NAME_SHAPE = '{"name": "<display name>"}'
 #: reach for (``scripts/bench_context_budget.py``).
 SEND_RECIPIENT_DESCRIPTION = (
     f"Who receives it: {RECIPIENT_ACCOUNT_SHAPE} or {RECIPIENT_ENDPOINT_SHAPE}, "
-    f"or the bare account id (ids come from the bridge directory). channel_post "
-    f"also takes {RECIPIENT_NAME_SHAPE}: trimmed, case-insensitive, WHOLE display "
-    f"name only (never a handle, email or substring), among that conversation's "
-    f"active members — one match posts a mention, none or several refuse. "
-    f"send/reply: ids."
+    f"the bare account id, or {RECIPIENT_NAME_SHAPE} — trimmed, case-insensitive, "
+    f"WHOLE display name only (never a handle, email or substring). A name resolves "
+    f"in that op's own scope: channel_post inside the conversation's active members, "
+    f"send/reply inside your own send allowlist. One match delivers; none or several "
+    f"refuse. Ids come from the bridge directory; dm takes ids only."
 )
 
 
@@ -206,6 +206,14 @@ def validate_send_recipient(value: Any) -> dict[str, str]:
     use this check, so neither can silently reinterpret a destination. This is
     the existing pair-inbox contract, not conversation routing or a human fallback.
     Refusals deliberately do not quote caller-controlled keys or values.
+
+    A DISPLAY NAME never reaches this function from the tool: the tool resolves one
+    (``channel_post`` inside the conversation, ``send``/``reply`` inside the
+    owner's allowlist) and passes on the resolved id, so the pair body it builds
+    here only ever carries an address. A ``{"name": ...}`` that arrives anyway —
+    a direct client caller, a replayed intent, a bug — refuses here, because this
+    layer cannot resolve it and must not forward a string the server would read as
+    an account id.
 
     A BARE STRING is an ACCOUNT id (``"acc_123"`` → ``{"account_id": "acc_123"}``):
     one string is one recipient in one field, so there is nothing to reinterpret
@@ -227,7 +235,14 @@ def validate_send_recipient(value: Any) -> dict[str, str]:
     recipient = validate_recipient_shape(value)
     if "name" in recipient:
         raise InvalidSendRecipient(
-            "only channel_post resolves a display-label recipient; " + RECIPIENT_TEACHING
+            # This is the WIRE guard, not the op policy: the tool resolves a
+            # display-label recipient (channel_post inside the room, send/reply
+            # inside the owner's allowlist) and hands this layer an id. A name
+            # reaching HERE means a caller skipped that resolution, and the pair
+            # body has nowhere to put one — so it refuses rather than forwarding a
+            # string the server would read as an account id.
+            "this wire carries an id, not a resolved recipient; "
+            + RECIPIENT_TEACHING
         )
     return recipient
 
@@ -297,12 +312,20 @@ class MemberCandidate:
     ``display_label`` is what a human sees in the member list (server-side, from
     the member row) and is the ONLY field a name is matched against. ``kind`` and
     ``endpoint_id`` ride along because a directed post's mention row needs them.
+
+    ``bridge_enabled`` is the DIRECTORY's verdict for this account at the moment
+    the candidate set was built — the third guard of the ``send``/``reply``
+    scope, where presence in the allowlist is not the same fact as being able to
+    receive, and a resolution to a switched-off bridge is a message that goes
+    nowhere. It defaults ``True`` because the conversation scope's rule is
+    presence in the room, not this flag.
     """
 
     account_id: str
     display_label: str
-    kind: str
+    kind: str = ""
     endpoint_id: str = ""
+    bridge_enabled: bool = True
 
     def mention(self) -> dict[str, str]:
         """The wire ``mentions[]`` row for THIS member — never the asked-for name.
@@ -310,9 +333,14 @@ class MemberCandidate:
         One method rather than a literal at each call site: a mention rebuilt
         from a name somewhere else is the silent-loss class this file exists to
         close (a directed message delivered to nobody looks exactly like an
-        undirected one).
+        undirected one). A member with no addressable kind refuses HERE rather
+        than building a row the transport would reject: the conversation
+        projection filters those out already, so this is the guard that keeps a
+        future candidate source from silently reintroducing them.
         """
 
+        if self.kind not in MEMBER_KINDS:
+            raise TeamBridgeTypeError("only a human or agent member can be mentioned")
         row = {"kind": self.kind, "account_id": self.account_id}
         if self.endpoint_id:
             row["endpoint_id"] = self.endpoint_id
@@ -336,6 +364,11 @@ class ResolutionScope:
     where: str
     #: What a caller should do about an ambiguous match, e.g. "a more specific label".
     disambiguator: str
+    #: Appended to a ZERO-match refusal, when "nobody by that name" has more than
+    #: one reason and the caller cannot tell which. A model that cannot tell them
+    #: apart retries uselessly instead of telling its human something true, which
+    #: is why the reason is spelled out rather than left to be inferred.
+    miss_hint: str = ""
 
 
 #: ``channel_post``: the conversation's own active members (least privilege — a
@@ -346,14 +379,28 @@ SCOPE_CONVERSATION = ResolutionScope(
     disambiguator="a more specific label, or add the member to this conversation",
 )
 
-#: ``send``/``reply`` (ratified for the NEXT slice, deliberately unwired here):
-#: the owner's reachable set — the directory intersected with the owner's own
-#: allowlist, not directory-wide. Defined now so the resolver's sentences have
-#: one home rather than a second one arriving with the second call site.
+#: ``send``/``reply``: the owner's REACHABLE set — the bridge directory
+#: intersected with the owner's own send-allowlist, never directory-wide. A name
+#: that resolves to nobody names the reasons it MIGHT not — "not on this team",
+#: "their bridge may not be enabled", "your allowlist may not name them" — because
+#: those are different facts with different next moves for the human, and a model
+#: that cannot tell them apart retries uselessly instead of saying something true.
+#:
+#: "MAY", deliberately, and the enablement clause stays: this resolver cannot see
+#: the organization directory, so it cannot tell which of the three is true, and
+#: the point of the sentence is that the MODEL cannot either — it must ask. The
+#: one case it CAN be sure of (allowlisted but switched off) resolves and then
+#: gets its own sentence from ``resolve_for_delivery``, so wording these as
+#: certainties would be a claim this call site cannot make.
 SCOPE_ALLOWLIST = ResolutionScope(
     name="allowlist",
     where="in your bridge allowlist",
     disambiguator="a more specific label, or an explicit account id",
+    miss_hint=(
+        " — they may not be on this team, their bridge may not be enabled, or your "
+        "allowlist may not name them; ask the human which, and an explicit account "
+        "id still sends"
+    ),
 )
 
 
@@ -481,7 +528,9 @@ def resolve_member_by_name(
     if len(matches) == 1:
         return matches[0]
     if not matches:
-        raise RecipientNameRefused(f"no active member by that name {scope.where}", resolution)
+        raise RecipientNameRefused(
+            f"no active member by that name {scope.where}{scope.miss_hint}", resolution
+        )
     named = ", ".join(resolution.candidates_named())
     more = resolution.unnamed_count()
     if more:

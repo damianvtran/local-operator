@@ -124,9 +124,11 @@ import contextvars
 import json
 import logging
 import os
+import threading
 import time
 from bisect import bisect_left, bisect_right
 from collections import OrderedDict
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Iterator
@@ -136,6 +138,7 @@ from local_operator.session import open_trace
 from local_operator.session.runtime.engagement import TRANSCRIPT_FILENAME
 
 if TYPE_CHECKING:
+    from local_operator.session.index_read_model import FrameSelection
     from local_operator.session.transcript import TranscriptPage
 
 logger = logging.getLogger(__name__)
@@ -845,6 +848,11 @@ class TranscriptIndex:
     source_projection_facts: list[dict[str, Any]] = field(default_factory=list)
     source_views: SourceProjectionViews = field(init=False, repr=False)
     version: int = TRANSCRIPT_INDEX_VERSION
+    # Process-only identity of the JSON FD that supplied naming+source facts.
+    # Never serialized; delayed migration must not overwrite a newer naming write.
+    publication_identity: tuple[int, int, int] | None = field(
+        default=None, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         self.source_views = SourceProjectionViews.build(self.source_projection_facts)
@@ -900,14 +908,20 @@ def _read_raw(config_dir: str | Path, session_id: str) -> dict[str, Any] | None:
     """
     path = index_path(config_dir, session_id)
     try:
-        raw = path.read_text(encoding="utf-8", errors="replace")
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            stamp = os.fstat(handle.fileno())
+            raw = handle.read()
     except OSError:
         return None
     try:
         loaded = json.loads(raw)
     except ValueError:
         return None
-    return loaded if isinstance(loaded, dict) else None
+    if not isinstance(loaded, dict):
+        return None
+    # Private read receipt, deliberately ignored by write_index's explicit payload.
+    loaded["_publication_identity"] = (stamp.st_ino, stamp.st_size, stamp.st_mtime_ns)
+    return loaded
 
 
 def _index_from_raw(raw: dict[str, Any] | None) -> TranscriptIndex | None:
@@ -973,6 +987,7 @@ def _index_from_raw(raw: dict[str, Any] | None) -> TranscriptIndex | None:
     return TranscriptIndex(
         checkpoints=parsed_checkpoints,
         messages=parsed_messages,
+        publication_identity=raw.get("_publication_identity"),
         sig=sig,
         coverage=coverage,
         naming=naming if isinstance(naming, dict) else {},
@@ -1000,17 +1015,199 @@ def read_index(config_dir: str | Path, session_id: str) -> TranscriptIndex | Non
     return _index_from_raw(_read_raw(config_dir, session_id))
 
 
-def write_index(config_dir: str | Path, session_id: str, index: TranscriptIndex) -> None:
-    """Persist the index atomically (pid-temp + replace), best-effort.
+@contextmanager
+def _publish_lock(path: Path) -> Iterator[None]:
+    """Serialize one session's writers on every platform; readers never lock.
 
-    Atomic because a poll may read while a build writes, and the temp name
-    carries the writer's PID for ``search_index``'s measured reason: two
-    processes building one session wrote the same fixed temp path and produced
-    torn documents. Best-effort because an unwritable cache must cost the speed
-    of the next read, never the read itself.
+    ``fcntl`` DOES NOT EXIST ON WINDOWS, and this runs inside
+    ``refresh_index``/``patch_naming``: an unconditional import made the whole
+    cache raise there and left ``checkpoints_view`` at ``error``. Use the POSIX
+    advisory lock where it exists, ``msvcrt.locking`` where it does not, and an
+    in-process lock either way — so a platform with neither still serialises the
+    writers this process has, and the same thread can never deadlock itself.
+    Atomic replace is what protects READERS, so they take no lock at all.
     """
+    with _PUBLISH_THREADS.setdefault(str(path), threading.Lock()):
+        handle = None
+        try:
+            try:
+                import fcntl as _fcntl
+            except ImportError:  # pragma: no cover - Windows only
+                _fcntl = None  # type: ignore[assignment]
+            if _fcntl is not None:
+                handle = path.open("a")
+                _fcntl.flock(handle.fileno(), _fcntl.LOCK_EX)
+            else:
+                try:
+                    import msvcrt as _msvcrt
+                except ImportError:  # pragma: no cover - exotic platforms
+                    _msvcrt = None  # type: ignore[assignment]
+                # ``getattr`` because this module is only importable on Windows:
+                # a POSIX type-checker sees a stub without these members, and the
+                # lock's absence there is exactly the branch we are NOT in.
+                locking = getattr(_msvcrt, "locking", None) if _msvcrt else None
+                if _msvcrt is not None and locking is not None:
+                    handle = path.open("a")
+                    handle.seek(0)
+                    locking(handle.fileno(), getattr(_msvcrt, "LK_LOCK", 1), 1)
+            yield
+        finally:
+            if handle is not None:
+                handle.close()
+
+
+def _read_model() -> Any:
+    """The read-model module, imported lazily (it imports this one)."""
+    from local_operator.session import index_read_model
+
+    return index_read_model
+
+
+def write_index(
+    config_dir: str | Path,
+    session_id: str,
+    index: TranscriptIndex,
+    *,
+    expected_publication: tuple[int, int, int] | None = None,
+    previous: tuple[tuple[int, int, int], dict[str, Any]] | None = None,
+) -> None:
+    """Persist the index atomically (unique temp + replace), best-effort.
+
+    THIS IS BASE'S WRITE PATH, plus one small locked step. The canonical document
+    is written exactly as it always was; the read-model companion is NOT built
+    here. Building it on this path cost a measured ~1.3 s per append refresh, so
+    the append's own publication landed after the open it was meant to serve.
+    ``index_read_model.schedule_materialize`` now derives the companion from the
+    completed index afterwards, off this path.
+
+    The one addition inside the lock is the naming merge and its sidecar: naming
+    is mutable metadata a concurrent ``patch_naming`` can overwrite, so the merge
+    and the document it lands in must be one atomic step. Readers never take the
+    lock — atomic replace is what protects them.
+
+    ``expected_publication`` is compare-and-publish for a delayed writer: it
+    republishes only the document it actually read.
+
+    ``previous`` is the document the CALLER already parsed, WITH the identity it
+    was parsed from (``patch_naming`` reads it to build its merge). Handing it in
+    removes a second full JSON decode of an index that is routinely tens of MB —
+    the round-3 M3 cost — and it is safe only because the identity is re-checked
+    under the lock: if the file moved since that parse, the document is re-read, so
+    the merge can never run on a stale view (which is the round-1 R4 defect).
+
+    A FAILURE TO REPLACE IS REPORTED, NEVER SWALLOWED. A previous round fsynced a
+    read-only descriptor and then swallowed the ``OSError`` in a trailing
+    handler; on Windows that meant the index was rebuilt on every open and never
+    written. Durability is taken on the handle that wrote the bytes, and a
+    failure that leaves the old document in place is logged at ERROR level.
+    """
+    from local_operator.session import index_read_model
+
     path = index_path(config_dir, session_id)
-    payload = {
+    payload_ok = False
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(f".{os.getpid()}.{uuid4().hex}.tmp")
+        try:
+            with _publish_lock(path.with_suffix(".publish.lock")):
+                if expected_publication is not None:
+                    current = path.stat()
+                    if (
+                        current.st_ino,
+                        current.st_size,
+                        current.st_mtime_ns,
+                    ) != expected_publication:
+                        return
+                    if not _sig_matches(index.sig, _journal_path(config_dir, session_id).stat()):
+                        return
+                else:
+                    latest = _previous_if_current(previous, path)
+                    if latest is None:
+                        # The sidecar is the same naming section for the same
+                        # publication and costs a few KB; the document costs a full
+                        # decode of the whole index on every write (round-3 M3, and
+                        # the reason a one-row append could miss the open budget).
+                        sidecar = index_read_model.naming_for_root(config_dir, session_id)
+                        latest = (
+                            {"naming": sidecar}
+                            if sidecar is not None
+                            else _read_raw(config_dir, session_id)
+                        )
+                    if latest is not None:
+                        merged = preserved_naming(latest, {c.id for c in index.checkpoints})
+                        live = {c.id for c in index.checkpoints if c.kind == KIND_USER}
+                        own = index.naming.get("items") if isinstance(index.naming, dict) else None
+                        # UNION with THIS write winning (see round-1 R4): the disk
+                        # read is what a concurrent ``patch_naming`` just landed,
+                        # this index is what the caller derived. Neither clobbers
+                        # the other, and both are filtered to live turns.
+                        items = dict(merged.get("items") or {})
+                        if (
+                            isinstance(own, dict)
+                            and index.naming.get("prompt_version") == NAMING_PROMPT_VERSION
+                        ):
+                            items.update({k: v for k, v in own.items() if k in live})
+                        index.naming = {"prompt_version": NAMING_PROMPT_VERSION, "items": items}
+                document = _document(index)
+                # The sidecar is keyed by the DERIVED token, so it is correct even
+                # if the companion lands later; it costs a few KB, not the body.
+                try:
+                    index_read_model.write_naming(
+                        config_dir, session_id, index_read_model.token_for(index), index.naming
+                    )
+                except (OSError, ValueError):
+                    logger.debug("read-model naming unavailable for %s", session_id)
+                with tmp.open("w", encoding="utf-8") as handle:
+                    handle.write(json.dumps(document, separators=(",", ":")))
+                    handle.flush()
+                    # fsync the descriptor that WROTE these bytes. A read-only
+                    # handle cannot be synced on Windows, and that is exactly the
+                    # round-2 Q10 defect.
+                    os.fsync(handle.fileno())
+                tmp.replace(path)
+                payload_ok = True
+        finally:
+            tmp.unlink(missing_ok=True)
+    except OSError:
+        if not payload_ok:
+            logger.error(
+                "could not write the transcript index for %s; the previous document is "
+                "still in place and this read serves it",
+                session_id,
+                exc_info=True,
+            )
+        return
+    # Reclaim outside the lock: unlink cost must not sit in the critical section.
+    try:
+        index_read_model.collect(config_dir, session_id, index_read_model.token_for(index))
+    except OSError:
+        pass
+
+
+def _previous_if_current(
+    previous: tuple[tuple[int, int, int], dict[str, Any]] | None, path: Path
+) -> dict[str, Any] | None:
+    """The caller's parsed document, but only if the file has not moved since.
+
+    One ``stat`` under the lock is what makes reusing a parse sound: the same
+    identity means the bytes are the ones the caller read, so the merge sees the
+    truth; any motion falls back to a fresh read.
+    """
+    if previous is None:
+        return None
+    identity, document = previous
+    try:
+        current = path.stat()
+    except OSError:
+        return None
+    if (current.st_ino, current.st_size, current.st_mtime_ns) != identity:
+        return None
+    return document
+
+
+def _document(index: TranscriptIndex) -> dict[str, Any]:
+    """The canonical document, in base's key order (the head reader depends on it)."""
+    return {
         # The LIVE constant, not ``index.version``: a cache must be stamped
         # with the version this build writes, and reading it back compares
         # against the same live constant (see ``_index_from_raw``).
@@ -1022,7 +1219,9 @@ def write_index(config_dir: str | Path, session_id: str, index: TranscriptIndex)
         # whole multi-MB document (the paint hold decides that on the event
         # loop). Readers of the document are order-blind (``json.loads``); only
         # the head reader depends on this, and it falls back to the pre-head
-        # rule for any file laid out otherwise.
+        # rule for any file laid out otherwise. The read model derives its own
+        # token from exactly these fields, so publishing a companion needs no
+        # field here and no second canonical write.
         "sig": index.sig,
         "scan": index.scan.to_payload(),
         "journal_generation": index.journal_generation,
@@ -1035,13 +1234,6 @@ def write_index(config_dir: str | Path, session_id: str, index: TranscriptIndex)
         "journal_ranges": index.journal_ranges,
         "source_projection_facts": index.source_projection_facts,
     }
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(f".{os.getpid()}.tmp")
-        tmp.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
-        tmp.replace(path)
-    except OSError:
-        logger.warning("could not write the transcript index for %s", session_id, exc_info=True)
 
 
 #: How much of the cache file :func:`_read_resume_head` reads. The head holds
@@ -1055,8 +1247,13 @@ _HEAD_KEYS = ("version", "sig", "scan", "journal_generation")
 
 def _read_resume_head(
     config_dir: str | Path, session_id: str
-) -> tuple[dict[str, Any], ScanState, str] | None:
-    """``(sig, scan, journal_generation)`` from the cache file's first bytes.
+) -> tuple[dict[str, Any], ScanState, str, int] | None:
+    """``(sig, scan, journal_generation, document_bytes)`` from the first bytes.
+
+    ``document_bytes`` comes from the SAME open descriptor's ``fstat``. The paint
+    hold runs on the event loop, so the hydration charge it needs must not cost a
+    second path lookup (``stat``) on that loop: the bounded head read is already
+    happening here, and one ``fstat`` on the handle is all this adds.
 
     WHY (conversation-first-paint R2): the paint hold must decide whether a
     refresh is payable by the bytes it will RE-READ, and that is
@@ -1073,6 +1270,7 @@ def _read_resume_head(
     """
     try:
         with index_path(config_dir, session_id).open("rb") as handle:
+            size = os.fstat(handle.fileno()).st_size
             head = handle.read(_RESUME_HEAD_BYTES)
     except OSError:
         return None
@@ -1105,7 +1303,7 @@ def _read_resume_head(
         or not isinstance(generation, str)
     ):
         return None
-    return sig, scan, generation
+    return sig, scan, generation, size
 
 
 def _rederive_bytes(
@@ -1129,16 +1327,28 @@ def _rederive_bytes(
 
 def _cached_refresh_cost(
     config_dir: str | Path, session_id: str, journal: os.stat_result
-) -> tuple[bool, int | None]:
-    """``(has_previous, rederive_bytes)`` for the paint-path payability rule.
+) -> tuple[bool, int | None, int]:
+    """``(has_previous, rederive_bytes, hydration_bytes)`` without hydrating.
 
-    ``has_previous`` is "a cache file exists" exactly as before; the byte figure
-    is ``None`` when the head cannot state it (see :func:`_read_resume_head`).
+    An exact disk HIT avoids journal work, not ``_read_raw``/``_index_from_raw``:
+    the cache still contains the entire transcript's derived facts. Price that
+    document before starting its uninterruptible JSON step. Both figures come
+    from the ONE bounded head read (its ``fstat`` sizes the document), because
+    this runs inside the paint hold's event-loop decision and a separate ``stat``
+    there would be new loop I/O. Missing/old heads retain the previous
+    unknown-rederivation policy, but an existing document is never free.
+
+    This describes a REFRESH, which reads disk even if an older object is held.
+    A validated resident HIT bypasses refresh in the consumers; charging it here
+    as resident would exempt work that ``refresh_index`` actually still does.
     """
     head = _read_resume_head(config_dir, session_id)
-    if head is not None:
-        return True, _rederive_bytes(journal, *head)
-    return _stat_or_none(index_path(config_dir, session_id)) is not None, None
+    if head is None:
+        # No head means no document this build can vouch for; the pre-head rule
+        # (whatever a fresh reader sees) is the caller's fallback, not ours.
+        return _stat_or_none(index_path(config_dir, session_id)) is not None, None, 0
+    rederive = _rederive_bytes(journal, *head[:3])
+    return True, rederive, head[3]
 
 
 def _sweep_missing(config_dir: str | Path) -> None:
@@ -1175,6 +1385,14 @@ def patch_naming(config_dir: str | Path, session_id: str, items: dict[str, Any])
     (size -1), so the next refresh treats it as stale, scans the journal, and
     carries the naming forward (see :func:`preserved_naming`). Returns whether
     the write was attempted.
+
+    THIS READ IS OUTSIDE THE LOCK, and that is deliberate rather than a claim:
+    it only decides which document shape to hand ``write_index`` (an existing
+    index, a version-mismatched one, or the empty skeleton). The merge that
+    must be atomic — this patch against whatever a concurrent writer landed —
+    happens INSIDE ``write_index``, which re-reads ``naming`` under the publish
+    lock and unions it with this write winning. An earlier version of this
+    docstring claimed the whole function was under that lock; it never was.
     """
     raw = _read_raw(config_dir, session_id)
     index = _index_from_raw(raw)
@@ -1187,7 +1405,14 @@ def patch_naming(config_dir: str | Path, session_id: str, items: dict[str, Any])
         merged["prompt_version"] = NAMING_PROMPT_VERSION
         merged["items"] = merged_items
         index.naming = merged
-        write_index(config_dir, session_id, index)
+        # Hand the parse over WITH its identity: write_index would otherwise decode
+        # this same document again under the lock (round-3 M3), and the identity
+        # check there keeps a concurrent patch from being merged over stale bytes.
+        receipt = raw.get("_publication_identity")
+        if isinstance(receipt, tuple) and len(receipt) == 3:
+            write_index(config_dir, session_id, index, previous=(receipt, raw))
+        else:
+            write_index(config_dir, session_id, index)
         return True
     if raw is not None:
         # A document exists but is unreadable or another version's: leave it to
@@ -2725,6 +2950,11 @@ def refresh_index(config_dir: str | Path, session_id: str) -> TranscriptIndex | 
         raw = _read_raw(config_dir, session_id)
         previous = _index_from_raw(raw)
         if previous is not None and previous.journal_generation and _sig_matches(previous.sig, st):
+            from local_operator.session import index_read_model
+
+            # Exact HITs never reach write_index. Reuse this parsed snapshot for
+            # migration; the async refresher schedules it on return from workers.
+            index_read_model.schedule_materialize(config_dir, session_id, previous)
             return previous
         try:
             if (
@@ -2766,8 +2996,16 @@ def refresh_index(config_dir: str | Path, session_id: str) -> TranscriptIndex | 
         # to this copy. Per-key the disk wins: an item there is the newer write
         # for its turn key, while keys only the scan carries (version-bump
         # preservation) stay put.
+        # THE NAMING SIDECAR FIRST (review round 5, MAJOR-2). This merge only
+        # needs the newest ``naming`` section, and the sidecar carries exactly that
+        # for the publication on disk — including when the journal has moved, which
+        # is the append case. Reading the document here decoded the whole index a
+        # second time on every append (measured: ~90 ms on an 11 MB document);
+        # the sidecar is a few KB. Precedence is unchanged: the section is still
+        # merged with the disk winning per turn key.
+        sidecar = _read_model().naming_for_root(config_dir, session_id)
         fresh_section = preserved_naming(
-            _read_raw(config_dir, session_id),
+            {"naming": sidecar} if sidecar is not None else _read_raw(config_dir, session_id),
             {c.id for c in index.checkpoints if c.kind == KIND_USER},
         )
         if fresh_section["items"]:
@@ -2846,6 +3084,7 @@ def scan_payable_in_budget(
     has_previous: bool,
     wait_s: float,
     rederive_bytes: int | None = None,
+    hydration_bytes: int = 0,
 ) -> bool:
     """Whether a refresh can plausibly land inside a first-paint wait of ``wait_s``.
 
@@ -2865,12 +3104,19 @@ def scan_payable_in_budget(
     load; 101 ms with the scan deferred). ``rederive_bytes`` is that re-read;
     ``None`` means the caller could not state it (a cache laid out before the
     resume head) or chose not to (the manifest wager -- see the note at its call
-    in :func:`checkpoints_view`), which keeps the old answer: payable.
+    in :func:`checkpoints_view`), preserving the old unknown-rederivation
+    allowance. Callers that have proven a complete request projection can use
+    ``hydration_bytes`` to account its avoided disk work. Generic shared-flight
+    predicates deliberately retain original admission (see _defer_for_paint).
     """
+    # Hydration and rederivation spend ONE budget, not two independent wagers.
+    # Use the existing planning rate for both; this is a scheduling estimate,
+    # not a promise about wall time on a contended host. An exact disk signature
+    # removes only journal work; never infer zero hydration from that signature.
     budget = _FIRST_PAINT_SCAN_BYTES_PER_S * wait_s
     if has_previous:
-        return rederive_bytes is None or rederive_bytes <= budget
-    return journal_bytes is not None and journal_bytes <= budget
+        return hydration_bytes + (rederive_bytes or 0) <= budget
+    return journal_bytes is not None and hydration_bytes + journal_bytes <= budget
 
 
 # ---------------------------------------------------------------------------
@@ -2911,6 +3157,11 @@ def scan_payable_in_budget(
 #: this is the backstop for a hold whose release was somehow missed, not a
 #: budget anyone is expected to reach.
 _PAINT_HOLD_CEILING_S = 15.0
+
+#: In-process writer serialisation per publish-lock path. USED BY EVERY PLATFORM:
+#: the advisory lock is cross-PROCESS, this one is cross-THREAD, and neither
+#: replaces the other (a thread cannot flock its own descriptor twice safely).
+_PUBLISH_THREADS: dict[str, threading.Lock] = {}
 
 #: Live hold counts per session key. LOOP-ONLY MUTATION, like ``_IN_FLIGHT``.
 _PAINT_HOLDS: dict[tuple[str, str], int] = {}
@@ -3083,7 +3334,9 @@ def _yield_to_other_opens(
             if journal is None:
                 unpayable = False
             else:
-                has_previous, rederive = _cached_refresh_cost(config_dir, session_id, journal)
+                has_previous, rederive, _hydration = _cached_refresh_cost(
+                    config_dir, session_id, journal
+                )
                 unpayable = not scan_payable_in_budget(
                     journal.st_size,
                     has_previous=has_previous,
@@ -3187,7 +3440,7 @@ def refresh_paused_for_paint(config_dir: str | Path, session_id: str) -> bool:
     journal = _stat_or_none(_journal_path(config_dir, session_id))
     if journal is None:
         return False
-    has_previous, rederive = _cached_refresh_cost(config_dir, session_id, journal)
+    has_previous, rederive, _hydration = _cached_refresh_cost(config_dir, session_id, journal)
     return not scan_payable_in_budget(
         journal.st_size,
         has_previous=has_previous,
@@ -3213,13 +3466,13 @@ def _defer_for_paint(config_dir: str | Path, session_id: str) -> asyncio.Event |
     journal = _stat_or_none(_journal_path(config_dir, session_id))
     if journal is None:
         return None
-    # A cache file on disk stands in for "a previous index", and its HEAD for
-    # what the refresh will re-read: parsing the whole document here would be
-    # the very work this defers. A cache that exists but whose head does not
-    # state the figure makes this answer "payable" and the scan run now --
-    # today's behaviour, never a deferral the manifest's own rule would not have
-    # made.
-    has_previous, rederive = _cached_refresh_cost(config_dir, session_id, journal)
+    # Keep ORIGINAL fallback admission here. Hydration is real work (reported
+    # separately by the cost helper), but this shared flight does not know which
+    # complete facts its callers acquired. A summary/previous successful read is
+    # not enough to strand a later corrupt/stale fallback behind its own hold.
+    # Ready projection consumers return their materialized result WITHOUT
+    # scheduling hydration; only that request has the capability proof.
+    has_previous, rederive, _hydration = _cached_refresh_cost(config_dir, session_id, journal)
     if scan_payable_in_budget(
         journal.st_size,
         has_previous=has_previous,
@@ -3253,7 +3506,7 @@ def resident(config_dir: str | Path, session_id: str) -> TranscriptIndex | None:
 
 
 def _journal_order_doc(
-    index: TranscriptIndex, entry_id: str, seq: int, role: str
+    index: TranscriptIndex | FrameSelection, entry_id: str, seq: int, role: str
 ) -> MessageDoc | None:
     """Exact existing doc at a raw ordinal; no body/history scan or role guess."""
     if type(seq) is not int or seq < 0 or index.journal_rows.get(entry_id) != seq:
@@ -3269,7 +3522,9 @@ def _journal_order_doc(
     )
 
 
-def journal_order_opener(index: TranscriptIndex, entry_id: str, seq: int) -> tuple[str, int] | None:
+def journal_order_opener(
+    index: TranscriptIndex | FrameSelection, entry_id: str, seq: int
+) -> tuple[str, int] | None:
     """The genuine run opener of an exact source assistant, not a viewer guess.
 
     Sparse ready corrections previously stated an assistant's coordinate while
@@ -3503,7 +3758,12 @@ def start_refresh(config_dir: str | Path, session_id: str) -> "tuple[asyncio.Tas
         # worker: only this refresh yields, and ``refresh_index``'s signature
         # (which tests and callers substitute) stays two-argument.
         _YIELD_TO.set(_yield_to_other_opens(key, config_dir, session_id))
-        return await asyncio.to_thread(refresh_index, config_dir, session_id)
+        result = await asyncio.to_thread(refresh_index, config_dir, session_id)
+        if result is not None:
+            from local_operator.session import index_read_model
+
+            index_read_model.schedule_materialize(config_dir, session_id, result)
+        return result
 
     async def _wrapped() -> TranscriptIndex | None:
         try:
@@ -3540,54 +3800,52 @@ def start_refresh(config_dir: str | Path, session_id: str) -> "tuple[asyncio.Tas
     return task, True
 
 
+def resolve_naming_items(
+    checkpoints: list[Checkpoint], naming: Any
+) -> list[tuple[Checkpoint, Any]]:
+    """Pair each checkpoint with the raw naming item its turn owns.
+
+    THE ONE SPELLING of the turn policy, shared by the canonical manifest and the
+    read model: a completion belongs to the LAST user checkpoint of its turn, and
+    only a prompt-version-matching section supplies items at all.
+    """
+    section = naming if isinstance(naming, dict) else {}
+    items = section.get("items") if section.get("prompt_version") == NAMING_PROMPT_VERSION else {}
+    items = items if isinstance(items, dict) else {}
+    users = {c.turn: c.id for c in checkpoints if c.kind == KIND_USER}
+    return [
+        (c, items.get(users.get(c.turn)) if c.kind == KIND_COMPLETION else None)
+        for c in checkpoints
+    ]
+
+
+def checkpoint_entry(checkpoint: Checkpoint, item: Any) -> dict[str, Any]:
+    """Evaluate naming at read time: cooldown expiry needs no publication write."""
+    from local_operator.session import checkpoint_naming
+
+    entry = checkpoint.to_payload()
+    if checkpoint.kind == KIND_COMPLETION:
+        state = checkpoint_naming.naming_state(item)
+        entry["naming"] = {
+            "state": state,
+            "name": item.get("name") if state == "ready" and isinstance(item, dict) else None,
+            "summary": (
+                (item.get("summary") or "") if state == "ready" and isinstance(item, dict) else None
+            ),
+        }
+    return entry
+
+
 def _manifest_state(
     session_id: str, state: str, index: TranscriptIndex | None, built_at: float | None
 ) -> dict[str, Any]:
     """The D9 wire shape for the checkpoints manifest."""
     checkpoints: list[dict[str, Any]] = []
     if index is not None:
-        # The naming slice owns the STATE semantics for its section; this
-        # module only serves them. Function-local because the dependency runs
-        # the other way at module scope (``checkpoint_naming`` imports this
-        # module for the cache API, and a top-level import here would be a
-        # cycle). The derive covers all three states: a named item is
-        # ``ready``, an item inside ``NAMING_UNAVAILABLE_COOLDOWN_S`` of its
-        # ``failed_ts`` is ``unavailable`` (warm writes that marker on a
-        # failed call), and anything else is ``pending``.
-        from local_operator.session import checkpoint_naming
-
-        naming = index.naming if isinstance(index.naming, dict) else {}
-        items = naming.get("items") if naming.get("prompt_version") == NAMING_PROMPT_VERSION else {}
-        items = items if isinstance(items, dict) else {}
-        user_id_for_turn = {c.turn: c.id for c in index.checkpoints if c.kind == KIND_USER}
-        for checkpoint in index.checkpoints:
-            entry: dict[str, Any] = {
-                "id": checkpoint.id,
-                "kind": checkpoint.kind,
-                "turn": checkpoint.turn,
-                "ts": checkpoint.ts,
-                "seq": checkpoint.seq,
-                "text": checkpoint.text,
-            }
-            if checkpoint.outcome is not None:
-                entry["outcome"] = checkpoint.outcome
-            if checkpoint.kind == KIND_COMPLETION:
-                turn_key = user_id_for_turn.get(checkpoint.turn)
-                item = items.get(turn_key) if turn_key else None
-                item_state = checkpoint_naming.naming_state(item)
-                if item_state == "ready" and isinstance(item, dict):
-                    entry["naming"] = {
-                        "state": "ready",
-                        "name": item.get("name"),
-                        "summary": item.get("summary") or "",
-                    }
-                else:
-                    entry["naming"] = {
-                        "state": item_state,
-                        "name": None,
-                        "summary": None,
-                    }
-            checkpoints.append(entry)
+        checkpoints = [
+            checkpoint_entry(c, item)
+            for c, item in resolve_naming_items(index.checkpoints, index.naming)
+        ]
     payload: dict[str, Any] = {"session_id": session_id, "index": {"state": state}}
     if built_at is not None:
         payload["index"]["built_at"] = built_at
@@ -3628,6 +3886,15 @@ async def checkpoints_view(
         if st is not None and _sig_matches(resident_index.sig, st) and cache_stable:
             _RESIDENT.move_to_end(key)
             return _manifest_state(session_id, "ready", resident_index, _mtime_or_none(cache_st))
+    from local_operator.session import index_read_model
+
+    projected = await asyncio.to_thread(
+        index_read_model.checkpoint_manifest, config_dir, session_id
+    )
+    if projected.state == "ready":
+        return projected.value
+    # Legacy, stale, corrupt and archive cases retain the correct prior payload
+    # and its cost. A compact optimization is never authority to drop rail facts.
     probe = await asyncio.to_thread(probe_index, config_dir, session_id)
     if probe.state == "missing":
         # No journal: a draft or a session with nothing written yet. An empty
@@ -3636,6 +3903,7 @@ async def checkpoints_view(
     if probe.state == "ready":
         if probe.index is not None:
             _remember(key, probe.index, probe.built_at)
+            index_read_model.schedule_materialize(config_dir, session_id, probe.index)
         return _manifest_state(session_id, "ready", probe.index, probe.built_at)
 
     failed_at = _FAILURES.get(key)
@@ -3671,11 +3939,14 @@ async def checkpoints_view(
         # wait is an idle `await` (no CPU, no paint) that answers `building` at
         # the budget, while a refused wait answers `building` where the scan
         # might have landed — the regression QA Q1 pinned. And a refresh the
-        # hold deferred is already never awaited (`refresh_deferred` below).
+        # hold defers OR pauses is never awaited: the shared pause predicate
+        # below uses the same original rederivation admission as the worker.
+        # Ready probes still return above; changing their acquisition requires
+        # complete witnessed facts, not replacing that ready answer with building.
         payable = scan_payable_in_budget(
             probe.journal_bytes, has_previous=probe.index is not None, wait_s=wait_s
         )
-        if payable and not refresh_deferred(config_dir, session_id):
+        if payable and not refresh_paused_for_paint(config_dir, session_id):
             done, _pending = await asyncio.wait({task}, timeout=wait_s)
             settled = task in done
         else:
@@ -3737,3 +4008,9 @@ def _reset_for_tests() -> None:
     _PAINT_HOLD_SINCE.clear()
     _PAINT_RELEASED.clear()
     _DEFERRED.clear()
+    # The read model's own in-process state is keyed by the same roots, so a
+    # suite that re-creates a tmp_path must not inherit a memo or a remembered
+    # publication failure from the previous one.
+    from local_operator.session import index_read_model
+
+    index_read_model.reset_for_tests()

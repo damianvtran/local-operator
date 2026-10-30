@@ -224,6 +224,12 @@ def test_wave3_hindi_carries_its_namespace_snapshot_with_parity(i18n_check) -> N
         # only with its independently audited ledger row at the current en bytes;
         # it sorts after cli.exec_remote_help.
         "cli.services_status",
+        # The Team Bridge receiver's 45-key namespace (``lop team-bridge setup``
+        # and ``receiver <verb>``), carried in all seven locales only with its
+        # independently audited ledger row at the current en bytes; the receiver
+        # ships cross-platform, so Hindi carries it like the rest. It sorts
+        # after cli.services_status.
+        "cli.team_bridge",
         "relay.approvals",
         "relay.ask",
         "relay.asks",

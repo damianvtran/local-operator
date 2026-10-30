@@ -1,0 +1,132 @@
+{
+ "schema": 1,
+ "audit_id": "w4a1",
+ "audit_round": 1,
+ "audit_kind": "independent_current_byte_namespace_audit",
+ "locale": "es",
+ "audit_date": "2026-10-29",
+ "audited_revision": "183f7a0537e4cee42fd82f25a21fe52953a81bdf",
+ "audited_revision_note": "branch feat/i18n-es-wire-errors at HEAD 183f7a0537e4cee42fd82f25a21fe52953a81bdf. The TARGET catalogue is UNTRACKED in the worktree (`?? local_operator/i18n/catalogues/es/...`), so this audit binds to the on-disk sha256 recorded in input_hashes, not to a commit; a later commit that lands different bytes would not be covered by this verdict.",
+ "translator": {
+  "agent": "a different translator than the one that produced this audit (the W4 relay lane); identity not disclosed to the auditor",
+  "model": "unrecorded in the worktree (the catalogue is untracked working-tree bytes; no translator provenance file exists beside it)",
+  "date": "unrecorded"
+ },
+ "auditor": {
+  "agent": "translation-auditor (lopdev team), independent of the translating lane",
+  "session_or_instance": "744651c367e5",
+  "model": "radient/kimi-k2.5",
+  "actual_model_source": "this session's own model header (model-switch notices in-session)",
+  "model_fallback_notice": "FALLBACK, disclosed: the session's primary model anthropic/claude-sonnet-5-5 failed on provider quota at turn start; the harness fell back through openai/gpt-6-astra and kimi/k3.1-pro and all audit work was performed on radient/kimi-k2.5. No audit judgement here was produced by the primary model.",
+  "date": "2026-10-29",
+  "independence": "Translated none of this namespace; independent of the producing translator and of any implementation session. Read the en source and the context sidecar directly, formed this view before seeing any other auditor's findings for these namespaces (no w4a1 bundle existed), and wrote only inside its own evidence directory. The repository was not modified except under i18n/audits/evidence/es/."
+ },
+ "runtime": {
+  "renderer": "local_operator.i18n.runtime (in-house ICU subset, shipped render/envelope path)",
+  "locale_data": "local_operator.i18n.format (generated CLDR tables, golden-probed against Node Intl)",
+  "composition": "local_operator/mobile/web/src/components/usage-sheet.tsx (mirrored exactly for relay.shell)",
+  "python": "3.14.7",
+  "counts_rendered": [
+   0,
+   1,
+   2,
+   21,
+   1000000,
+   1500000
+  ]
+ },
+ "namespace": "relay.session",
+ "key_count": {
+  "en": 17,
+  "target": 17
+ },
+ "verdict": "passed",
+ "result": {
+  "mechanical_checks": "pass",
+  "findings_total": 1,
+  "blocker": 0,
+  "major": 0,
+  "minor": 1,
+  "nit": 0,
+  "note": "no blocker or major: state distinctions (idle/in-flight, loading/empty verdict, back-to-sessions/back) survive, no placeholders or ICU arguments in this namespace, casing and U+2026 ellipses mirror the English source key-for-key."
+ },
+ "verdict_reason": "One minor only: `relay.session.list.empty_hint` uses 'empieza' where the same English verb 'start' is rendered 'iniciando…' by the sibling `list.start_busy` (two Spanish verbs for one action). Everything else is accurate, idiomatic and register-consistent with the es style guide; no state promise changes. Passed subject to the translator lane choosing to close the minor.",
+ "input_hashes": {
+  "en": {
+   "path": "local_operator/i18n/catalogues/en/relay.session.json",
+   "revision": "183f7a0537e4cee42fd82f25a21fe52953a81bdf",
+   "sha256": "a4ae148de969d4a2e8541aca5b4b99ad311d9ef112a0d056fc21fcf90e7e0129"
+  },
+  "target": {
+   "path": "local_operator/i18n/catalogues/es/relay.session.json",
+   "sha256": "873014622f3fa868c32ee6164a2d12085e35dd148a64ff8663d246b4b26f7a62",
+   "tracked": false,
+   "note": "UNTRACKED working-tree bytes at the audited revision"
+  },
+  "context": {
+   "path": "local_operator/i18n/catalogues/en/relay.session.context.json",
+   "revision": "183f7a0537e4cee42fd82f25a21fe52953a81bdf",
+   "sha256": "8777c48c750d982f3f795c81d0a543e92000a3898223cfa60637f8a2edc1e2db"
+  }
+ },
+ "artifacts": [
+  "record.json",
+  "report.md",
+  "audit.log",
+  "run-script.py.txt",
+  "receipt.json"
+ ],
+ "check_output": {
+  "path": "audit.log",
+  "kind": "auditor's own execution log (produced by running run-script.py.txt, not transcribed)",
+  "command": "python3 run-script.py.txt relay.session > audit.log 2>&1",
+  "run_at_utc": "2026-10-29T22:05:33Z",
+  "contains": [
+   "HEAD/branch/tracked-state binding",
+   "sha256 of en, en-sidecar and target",
+   "key parity 17/17",
+   "ICU signature diff (0)",
+   "plural categories selectable vs used (none used; illegal_for_es: [])",
+   "rendered value of all 17 keys"
+  ],
+  "summary": {
+   "key_parity": "17/17, no missing or extra keys",
+   "placeholders": "none in either side (no ICU arguments in this namespace)",
+   "machine_tokens": "none; no code spans, paths or flags in the copy",
+   "ellipsis": "U+2026 in 6 keys in both en and es (search_placeholder, start_busy, past.search_placeholder, past.loading, directory.path_placeholder, model.loading)",
+   "casing": "all 17 keys match the English source's initial case; the single capitalised string is 'Search conversations…' in en too"
+  }
+ },
+ "findings": [
+  {
+   "id": "S1",
+   "severity": "minor",
+   "key": "relay.session.list.empty_hint",
+   "current": "empieza una abajo o desde la TUI en tu máquina",
+   "proposed": "inicia una abajo o desde la TUI en tu máquina",
+   "reason": "The same English verb 'start' is 'iniciando…' in the paired `list.start_busy` control label, so the namespace names one action two ways; 'inicia' also mirrors the control the hint points at. 'para empezar' in `view.empty_hint` renders English 'to get started' and is NOT part of this drift — leave it.",
+   "evidence": [
+    "list.empty_hint -> empieza una abajo o desde la TUI en tu máquina",
+    "list.start_busy -> iniciando…"
+   ]
+  }
+ ],
+ "noted_outside_scope": [],
+ "limitations": [
+  "Rendered with the repository's Python runtime; the phone client's TypeScript runtime was not executed. Both are parity-tested in-repo, so plural selection and formatting match, but this is not a rendered-frame capture on a device.",
+  "No native-speaker review: the auditor is an LLM; 'would a native write this' judgements are recorded as model judgements.",
+  "No screen-width measurement: no maxCells is pinned for this namespace, so overflow was judged against the sidecar's stated budgets only.",
+  "Fallback model disclosed; see auditor.model_fallback_notice."
+ ],
+ "current_report_verdict": {
+  "status": "passed",
+  "unresolved_blocker_major_count": 0,
+  "blocker": 0,
+  "major": 0,
+  "minor": 1,
+  "nit": 0,
+  "rejected": 0,
+  "deferred": 0,
+  "findings_total": 1
+ }
+}
