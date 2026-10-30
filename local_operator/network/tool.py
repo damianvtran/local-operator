@@ -244,6 +244,14 @@ class NetworkParams(BaseModel):
         ),
     )
     all_peers: bool = Field(default=False, description="For sessions: list every device.")
+    # REVIEW ROUND 2, MAJOR-1: the digest tells the reader removed devices are hidden
+    # and to look with `--all` — a flag this surface could not spell, because `show`'s
+    # argv here is fixed. A pointer to an escape hatch the reader cannot reach is
+    # worse than no pointer, so the escape hatch is now part of the tool surface.
+    all: bool = Field(
+        default=False,
+        description="For show: also list devices that were removed from this network.",
+    )
     create: bool = Field(default=False, description="For sessions: create a session on `peer`.")
     prompt: str = Field(default="", description="For create: the new session's first turn.")
     engage: str = Field(default="", description="For sessions: a session id on `peer` to warm up.")
@@ -426,6 +434,8 @@ def _argv_for(params: NetworkParams) -> tuple[list[str], str]:
         if not network:
             return [], "action='show' needs 'network' (a name or id)."
         argv = ["network", "show", network]
+        if params.all:
+            argv += ["--all"]
     elif action == "peers":
         argv = ["network", "peers"]
     elif action == "doctor":
@@ -1054,10 +1064,10 @@ def _render(action: str, payload: dict[str, Any]) -> list[str]:
                 f"{member.get('role')}  {', '.join(member.get('capabilities') or [])}{suspect}"
             )
         if departed:
-            noun = "device" if departed == 1 else "devices"
+            plural = "" if departed == 1 else "s"
             lines.append(
-                f"  ({departed} departed {noun} not listed; `show --all` returns the "
-                "full membership record)"
+                f"  {departed} removed device{plural} hidden; set all=true for the full "
+                "membership record"
             )
         for invite in payload.get("invites") or []:
             lines.append(

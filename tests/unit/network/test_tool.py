@@ -1401,6 +1401,40 @@ def test_the_peers_digest_carries_the_build_suffix(
     assert "reachable   quiet" in lines, lines
 
 
+def test_the_agent_can_actually_reach_the_full_membership_record() -> None:
+    """The digest points at a way to see removed devices, so that way must exist.
+
+    Review round 2, MAJOR-1: the sentence told a reader to look with `--all` on a
+    surface whose `show` argv was fixed to `network show <net>` — a pointer to an
+    escape hatch the reader could not reach. The parameter now exists, and this
+    test holds the two together: if the sentence mentions it, the argv must carry it.
+    """
+    params = net_tool.NetworkParams(action="show", network="devmesh", all=True)
+    argv, refusal = net_tool._argv_for(params)  # noqa: SLF001
+    assert refusal == ""
+    assert argv == ["network", "show", "devmesh", "--all", "--json"]
+
+    plain, _ = net_tool._argv_for(
+        net_tool.NetworkParams(action="show", network="devmesh")
+    )  # noqa: SLF001
+    assert plain == ["network", "show", "devmesh", "--json"]
+
+    lines = net_tool._render(
+        "show",
+        {
+            "name": "devmesh",
+            "network_id": "n_" + "a" * 22,
+            "epoch": 2,
+            "role": "admin",
+            "trust": "active",
+            "members_detail": [{"device_id": "d_2", "name": "cloud-node-1", "active": False}],
+            "membership": {"state": "active", "sentence": "this device is an active member"},
+        },
+    )
+    body = "\n".join(lines)
+    assert "all=true" in body, "the pointer must name the parameter this surface accepts"
+
+
 def test_the_agent_digest_counts_departed_devices_instead_of_listing_them_as_members() -> None:
     """A departed device is a record, not a member (operator decision 2026-10-29).
 
@@ -1426,7 +1460,7 @@ def test_the_agent_digest_counts_departed_devices_instead_of_listing_them_as_mem
     body = "\n".join(lines)
     assert "laptop" in body
     assert "cloud-node-1" not in body
-    assert "1 departed device not listed; `show --all` returns the full membership record" in body
+    assert "1 removed device hidden; set all=true for the full membership record" in body
 
 
 def test_the_agent_digest_carries_a_removed_devices_own_standing() -> None:
