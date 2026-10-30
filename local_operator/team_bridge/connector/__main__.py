@@ -314,10 +314,27 @@ async def _main_async(args: argparse.Namespace, stop: asyncio.Event | None = Non
         lock.acquire()
     except ConnectorLockBusy as busy:
         logger.warning("bridge connector waiting for singleton: %s", busy)
-        # Task Scheduler retries failures, not clean exits. A foreground owner
-        # may relinquish this lock later; exit nonzero so the logon receiver
-        # cannot remain permanently stopped after losing that race.
-        return 75
+        # ONE reap attempt before giving up: a connector left on a build the
+        # pointer has left keeps this lock for its whole life and nothing else
+        # can ever take it. The proofs (and every refusal that keeps us off
+        # someone else's process) live in `reap`; this call site decides only
+        # that one attempt is made, once per process start.
+        from local_operator.team_bridge.connector import reap as _reap
+
+        outcome = await _reap.reap_stale_holder(config_dir)
+        if outcome.kind == "reaped":
+            try:
+                lock.acquire()
+            except ConnectorLockBusy:
+                # It came back, or a third process took it in the window. There
+                # is nothing further to do from here; the supervisor's retry is
+                # the next attempt.
+                return 75
+        else:
+            # Task Scheduler retries failures, not clean exits. A foreground
+            # owner may relinquish this lock later; exit nonzero so the logon
+            # receiver cannot remain permanently stopped after losing that race.
+            return 75
 
     # F4 (live E2E): the store the screener reads its provider key from. The
     # explicit ``db_path`` is load-bearing — ``config_dir`` alone feeds only
