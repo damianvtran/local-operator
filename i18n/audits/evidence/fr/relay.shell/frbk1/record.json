@@ -1,0 +1,43 @@
+{
+  "locale": "fr",
+  "namespace": "relay.shell",
+  "audit_date": "2026-10-29",
+  "key_count": 44,
+  "translator": {
+    "agent": "translator (lopdev team)",
+    "model": "radient/auto",
+    "date": "2026-10-29"
+  },
+  "auditor": {
+    "agent": "translation-auditor (lopdev team)",
+    "session": "ab2610514b4d",
+    "model": "radient/auto",
+    "independence": "not the translator; edited nothing",
+    "date": "2026-10-29"
+  },
+  "input_hashes": {
+    "en": "f53b23560b88b531ef8fc3274bc396676f26e755ad4ff9ad87ce368cebdee560",
+    "context": "16746ecd1537006992935bb2aa88fe39c46700d9e0341e7aacd565e2366349ea",
+    "target_locale": "e4ba5dd132e8ce73b705c9cf45bd54f881c13b64275bbb8766b6819714040478"
+  },
+  "remediation": {
+    "note": "Findings were remediated after the audit. input_hashes.target_locale binds the FINAL shipped bytes (target_sha_at_audit keeps the audited bytes). The English context sidecar was amended in this PR to correct the CLDR many-arm guidance: input_hashes.context is the sidecar the auditor actually read (16746ecd...), and context_sha_after_remediation is the corrected one.",
+    "target_sha_at_audit": "d6aa26b8e8dc15fb27feed031a5595470aeda0f15374ec665312b0bfbfe4c496",
+    "target_sha_after_remediation": "e4ba5dd132e8ce73b705c9cf45bd54f881c13b64275bbb8766b6819714040478",
+    "context_sha_at_audit": "16746ecd1537006992935bb2aa88fe39c46700d9e0341e7aacd565e2366349ea",
+    "context_sha_after_remediation": "acc401ed2d76ebf858c2cc783d48f4309a05468af46cb99aa85c08fb502b0e60"
+  },
+  "artifacts": [
+    "report.md",
+    "record.json",
+    "audit.log"
+  ],
+  "current_report_verdict": "findings-remediated",
+  "findings": {
+    "blocker": 0,
+    "major": 1,
+    "minor": 1,
+    "nit": 1
+  },
+  "masking_note": "Verified by ordinal enumeration over the namespace bytes, not by reading the rendered transcript: no value contains U+003D, so no name=value run exists that the harness could mask, and no U+FFFD appears. The non-ASCII inventory is exactly the French letters present plus U+2019, U+2026, U+202F and U+2014 where the source calls for them (enumerated in audit.log). A masking marker inside a French value would be a blocker; none exists, and the codepoint enumeration rules out one having been hidden from this audit."
+}

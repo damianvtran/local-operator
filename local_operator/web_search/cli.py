@@ -79,7 +79,9 @@ def add_search_subparser(
     test.add_argument("query")
     test.add_argument("--provider", choices=PROVIDER_IDS)
     test.add_argument("--max-results", type=int, default=3)
-    test.add_argument("--json", action="store_true", dest="as_json")
+    # argparse's default dest, so every ``--json`` in the tree lands on the
+    # same attribute the boot activation's machine-readable predicate reads.
+    test.add_argument("--json", action="store_true")
 
 
 def _stack() -> tuple[ConfigManager, Path]:
@@ -311,7 +313,7 @@ async def _test_search(args: argparse.Namespace) -> int:
     except Exception as error:
         print(f"error: {error}")
         return 1
-    if args.as_json:
+    if args.json:
         print(json.dumps(response.model_dump(mode="json"), indent=2))
         return 0
     print(f"Provider: {response.provider} ({response.auth_mode})")

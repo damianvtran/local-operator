@@ -2781,6 +2781,19 @@ class Editor(TextArea):
         self._command_names = frozenset(
             name.lower() for command in commands for name in command.names
         )
+        # Re-derive what the picker PAINTS, not only what it would paint on the
+        # next keystroke. ``set_commands`` is how a live language move re-hands
+        # the rows (``OperatorApp._refresh_offered_commands``), and the picker
+        # stores a copy of the list AND of its matches: without this, an already
+        # open list kept painting the boot language until the user typed
+        # (QA round 1, Q1 — measured 5.6 s of stale rows after a watcher-driven
+        # move). The buffer is the authority for which list is showing, so this
+        # is the one seam that can re-derive it. Only when a list is OPEN: a
+        # dismissed one must stay dismissed (the Esc contract
+        # ``_sync_picker_if_phase_changed`` guards), and a pre-mount call has no
+        # rows and no screen to repaint.
+        if self._picker.is_open():
+            self._sync_picker()
 
     def current_argument(self) -> str:
         """The text after the active command word, anchored on the caret.
