@@ -801,6 +801,68 @@ def test_the_status_command_asks_the_relay_for_a_fresh_read(
     assert seen and seen[0].get("refresh") is True, seen
 
 
+def _show_payload_with_a_removed_member() -> dict:
+    return {
+        "name": "devmesh",
+        "network_id": "n_" + "a" * 22,
+        "epoch": 3,
+        "trust": "active",
+        "members": 2,
+        "membership": {"table": {}},
+        "members_detail": [
+            {
+                "device_id": "d_" + "1" * 32,
+                "name": "damians-MacBook-Pro",
+                "role": "admin",
+                "capabilities": ["admin", "view"],
+                "active": True,
+                "endpoints": [],
+                "suspect": False,
+            },
+            {
+                "device_id": "d_" + "2" * 32,
+                "name": "cloud-node-1",
+                "role": "drive",
+                "capabilities": ["view"],
+                "active": False,
+                "endpoints": [],
+                "suspect": False,
+            },
+        ],
+        "invites": [],
+    }
+
+
+def test_a_removed_device_is_hidden_by_default_and_counted_not_dropped() -> None:
+    """A departed device is a record, not a member (operator decision 2026-10-29).
+
+    It must not sit in the table as though current, and it must not vanish
+    silently either: the omitted count is printed so the table cannot read as
+    complete while rows are missing from it.
+    """
+    lines = net_cli._show_lines(_show_payload_with_a_removed_member())  # noqa: SLF001
+    joined = "\n".join(lines)
+    assert "damians-MacBook-Pro" in joined
+    assert "cloud-node-1" not in joined
+    assert "1 removed device(s) not shown — add --all to list them" in joined
+
+
+def test_all_lists_the_removed_device_and_drops_the_pointer_line() -> None:
+    lines = net_cli._show_lines(
+        _show_payload_with_a_removed_member(), show_removed=True
+    )  # noqa: SLF001
+    joined = "\n".join(lines)
+    assert "REMOVED" in joined and "cloud-node-1" in joined
+    assert "not shown" not in joined
+
+
+def test_no_pointer_line_when_nothing_was_removed() -> None:
+    payload = _show_payload_with_a_removed_member()
+    payload["members_detail"] = payload["members_detail"][:1]
+    joined = "\n".join(net_cli._show_lines(payload))  # noqa: SLF001
+    assert "removed device(s)" not in joined
+
+
 def test_the_show_member_line_does_not_say_members_twice() -> None:
     """ONE "members" at the seam (design round 1, N4).
 

@@ -280,6 +280,17 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
     # human path of a membership command is more than the one line this was filed as.
     show = actions.add_parser("show", help="Members, roles and endpoints")
     show.add_argument("network")
+    # A DEPARTED DEVICE IS A RECORD, NOT A MEMBER (operator decision, 2026-10-29):
+    # REMOVED rows used to sit inside the member table as though current. They are
+    # real and must stay inspectable, so they are disclosed behind this flag rather
+    # than deleted or silently dropped -- and the hidden count is always printed, so
+    # the table can never look complete while rows are missing from it.
+    show.add_argument(
+        "--all",
+        dest="show_removed",
+        action="store_true",
+        help="also list devices that were removed from this network",
+    )
     show.add_argument("--json", action="store_true")
 
     rename = actions.add_parser("rename", help="Rename a network locally")
@@ -1538,8 +1549,9 @@ def _cmd_show(args: argparse.Namespace) -> int:
     live = _relay_call(
         "net_show", network=args.network, timeout=_listing_timeout(), allow_no_answer=True
     )
+    show_removed = bool(getattr(args, "show_removed", False))
     if live is not None:
-        return _emit(args, {"ok": True, **live}, _show_lines(live))
+        return _emit(args, {"ok": True, **live}, _show_lines(live, show_removed=show_removed))
     from local_operator.network.relay import members_digest_of
 
     record = _resolve(args.network)
@@ -1569,10 +1581,10 @@ def _cmd_show(args: argparse.Namespace) -> int:
         }
         for invite in record.invites
     ]
-    return _emit(args, {"ok": True, **payload}, _show_lines(payload))
+    return _emit(args, {"ok": True, **payload}, _show_lines(payload, show_removed=show_removed))
 
 
-def _show_lines(payload: dict[str, Any]) -> list[str]:
+def _show_lines(payload: dict[str, Any], *, show_removed: bool = False) -> list[str]:
     from local_operator.network.relay import membership_lines
     from local_operator.resume import UNNAMED_DEVICE
 
@@ -1592,8 +1604,14 @@ def _show_lines(payload: dict[str, Any]) -> list[str]:
         # earns it.
         lines.append(f"  members: {str(table['sentence']).removeprefix('members ')}")
     lines.extend(membership_lines(payload))
+    removed_hidden = 0
     for member in payload.get("members_detail") or []:
         mark = "active" if member["active"] else "REMOVED"
+        if mark == "REMOVED" and not show_removed:
+            # Counted, never dropped: the pointer line below is what stops a table
+            # that omits rows from reading as a complete one.
+            removed_hidden += 1
+            continue
         suspect = "  [suspect: key may be copied]" if member.get("suspect") else ""
         # Names are unauthenticated labels, so the full device id stays in its own
         # leading column; putting the variable-length name after it keeps duplicate
@@ -1610,6 +1628,8 @@ def _show_lines(payload: dict[str, Any]) -> list[str]:
             f"  {mark:7} {member['device_id']}  {name}  {member['role']:5}  "
             f"{', '.join(member['capabilities'])}{suspect}"
         )
+    if removed_hidden:
+        lines.append(f"  {removed_hidden} removed device(s) not shown — add --all to list them")
     for invite in payload.get("invites") or []:
         # ``listed_state`` when the payload carries it; a relay on an older build
         # sends only ``state``.
