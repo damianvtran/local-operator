@@ -26,6 +26,7 @@ from typing import Any
 import pytest
 
 from local_operator.network import move_queue as mq
+from tests.unit.network import conftest as net_fixtures
 
 SID = "9f3ac1e0b7d2"
 
@@ -45,15 +46,6 @@ def _enqueue(root: Path, request_id: str = "rq1", **overrides: object) -> dict[s
 def _phases(root: Path) -> list[str]:
     record = mq.read_record(root, SID) or {}
     return [str(stamp.get("phase") or "") for stamp in record.get("phases") or []]
-
-
-def _wait_for(predicate, timeout_s: float = 10.0) -> bool:
-    deadline = time.monotonic() + timeout_s
-    while time.monotonic() < deadline:
-        if predicate():
-            return True
-        time.sleep(0.02)
-    return False
 
 
 class _FakeRuntime:
@@ -193,7 +185,7 @@ class TestRecord:
         )
         try:
             # Wait until the child has landed its write (the lock is held now).
-            assert _wait_for(
+            assert net_fixtures.wait_for(
                 lambda: (mq.read_record(tmp_path, SID) or {}).get("phase") == "finishing"
             )
             started = time.monotonic()
@@ -234,10 +226,10 @@ class TestDriver:
         monkeypatch.setattr(mq, "DRIVER_WAIT_S", 0.05)
         worker = threading.Thread(target=mq._driver_main, args=(server, SID), daemon=True)
         worker.start()
-        assert _wait_for(lambda: "finishing" in _phases(tmp_path))
+        assert net_fixtures.wait_for(lambda: "finishing" in _phases(tmp_path))
         assert copied == [], "the copy started while a lease holder was present"
         held["value"] = False
-        assert _wait_for(lambda: copied == [SID], timeout_s=10.0)
+        assert net_fixtures.wait_for(lambda: copied == [SID])
         worker.join(timeout=5)
         assert not worker.is_alive()
         assert copied == [SID]
@@ -263,13 +255,13 @@ class TestDriver:
 
         worker = threading.Thread(target=mq.drive, args=(server, SID), daemon=True)
         worker.start()
-        assert _wait_for(lambda: len(deliveries) == 1)
+        assert net_fixtures.wait_for(lambda: len(deliveries) == 1)
         time.sleep(0.4)
         assert deliveries == [SID], "the same runtime process was delivered to twice"
         # A REPLACED runtime (a new pid) gets the intent again — the re-arm
         # contract; the same object identity is not enough, the pid is the fact.
         current["record"] = _FakeRuntime(pid=5150)
-        assert _wait_for(lambda: len(deliveries) == 2, timeout_s=10.0)
+        assert net_fixtures.wait_for(lambda: len(deliveries) == 2)
         # End the driver deterministically: the record going terminal is its own
         # stand-down path, so the thread is gone before the monkeypatches are.
         mq.transition(tmp_path, SID, "failed", detail="test", code="x", writer="relay")
@@ -288,7 +280,7 @@ class TestDriver:
 
         worker = threading.Thread(target=mq.drive, args=(server, SID), daemon=True)
         worker.start()
-        assert _wait_for(lambda: "finishing" in _phases(tmp_path))
+        assert net_fixtures.wait_for(lambda: "finishing" in _phases(tmp_path))
         assert mq.cancel(tmp_path, SID)[1] == "cancelled"
         worker.join(timeout=5)
         assert not worker.is_alive()
@@ -313,7 +305,9 @@ class TestDriver:
         monkeypatch.setattr(mq, "_drive_copy", failing)
         worker = threading.Thread(target=mq.drive, args=(server, SID), daemon=True)
         worker.start()
-        assert _wait_for(lambda: (mq.read_record(tmp_path, SID) or {}).get("phase") == "failed")
+        assert net_fixtures.wait_for(
+            lambda: (mq.read_record(tmp_path, SID) or {}).get("phase") == "failed"
+        )
         record = mq.read_record(tmp_path, SID) or {}
         assert record["detail"] == sentence
         assert record["code"] == "unreachable"

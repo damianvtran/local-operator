@@ -56,7 +56,7 @@ from textual.widgets import Static
 from local_operator import keymap as keymap_mod
 from local_operator import settings_io
 from local_operator.i18n.keys import tui_small as _x
-from local_operator.i18n.text import register_refresh, tr, tr_record
+from local_operator.i18n.text import active_locale, register_refresh, tr, tr_record
 from local_operator.settings_io import Kind, Section, Setting
 from local_operator.team_bridge import availability as bridge_availability
 from local_operator.tui import theme as theme_mod
@@ -1325,6 +1325,12 @@ class SettingsView(Vertical):
             # read there.
             len(settings_io.SETTINGS),
             len(settings_io.SECTIONS),
+            # The registry's copy is re-materialised in place on a locale move,
+            # so the row list built under one locale must not survive into the
+            # next: the row COUNT is often identical and every other key here
+            # can be too, which would paint the old language until a mutator
+            # happened to change something (QA round 1, Q2).
+            active_locale(),
             bridge_availability.section_visible(
                 bridge_availability.BRIDGE_SECTION, self._manager.config_dir
             ),
@@ -3780,6 +3786,11 @@ class SettingsView(Vertical):
             self._suggest_index,
             self._suggest_dismissed,
             theme_mod.get_theme_epoch(),
+            # The same reason as the theme epoch: the registry's strings were
+            # re-materialised in place by the locale move, and nothing else in
+            # this token necessarily changed, so without the locale the cached
+            # strips would keep painting the previous language.
+            active_locale(),
             self._list_width(),
             # The two suggestion catalogues, by CONTENT rather than by length.
             # `load()` replaces both lists wholesale, and a same-length swap
