@@ -23,6 +23,7 @@ from typing import Any
 from local_operator.team_bridge.store import (
     OwnerReceipt,
     Store,
+    read_screening_status,
     screening_hold_message_id,
     state_db_path,
 )
@@ -61,7 +62,7 @@ def _owner_key(root: Path) -> str:
         return conn.execute("SELECT owner_key FROM enrollments").fetchone()[0]
 
 
-def _raw_hold(root: Path, message_id: str, code: str, *, created_at: float, **extra: Any) -> None:
+def _raw_hold(root: Path, message_id: str, code: str, *, created_at: Any, **extra: Any) -> None:
     """A hold row written verbatim (the screener's bare-id path, or a seeded shape)."""
 
     columns = ["owner_key", "message_id", "hold_code", "retry_at", "created_at", *extra]
@@ -145,20 +146,52 @@ def test_both_shapes_for_one_message_count_once_and_composite_code_wins(tmp_path
     assert status["held"]["oldest_age_s"] >= 599
 
 
-def test_composite_hold_whose_message_got_a_receipt_counts_zero(tmp_path) -> None:
+def test_screening_hold_retired_by_its_receipt_commit_counts_zero(tmp_path) -> None:
+    """A FRESH screen's receipt commit deletes the message's hold: nothing held."""
+
+    store, owner = _setup(tmp_path)
+    store.persist_hold(owner, _composite("bcmsg_a1"), "breaker_open")
+    # The production retirement path: the hold is gone once the loop deletes it
+    # by its OWN (composite) key after a terminal re-drive.
+    assert store.delete_hold(owner, _composite("bcmsg_a1"))
+    _receipt(tmp_path, "bcmsg_a1", verdict="allow", categories=[], created_at=time.time())
+
+    status = store.screening_status_readonly(owner)
+    assert status is not None
+    assert status["held"]["count"] == 0
+    assert status["held"]["after_screening"] == {"count": 0, "by_code": {}}
+
+
+def test_hold_written_after_an_allow_receipt_still_counts(tmp_path) -> None:
+    """PR #3189 review M1: screened-and-admitted but undelivered is NOT healthy.
+
+    Delivery-side holds (``delivery_failed``, a ``bridge_off`` fence,
+    ``phase_refused:*``, a reservation failure) are written AFTER the receipt
+    and keep retrying; a cache-hit re-drive commits no new receipt, so the
+    receipt must never hide them.
+    """
+
     store, owner = _setup(tmp_path)
     now = time.time()
-    store.persist_hold(owner, _composite("bcmsg_a1"), "breaker_open")
-    _receipt(tmp_path, "bcmsg_a1", verdict="allow", categories=[], created_at=now)
+    _receipt(tmp_path, "bcmsg_a1", verdict="allow", categories=[], created_at=now - 300)
+    store.persist_hold(owner, _composite("bcmsg_a1", 4), "delivery_failed")
+    _receipt(tmp_path, "bcmsg_a2", verdict="allow", categories=[], created_at=now - 300)
+    store.persist_hold(owner, _composite("bcmsg_a2", 5), "phase_refused:hub_said_no")
+    store.persist_hold(owner, _composite("bcmsg_a3", 6), "breaker_open")  # no receipt
 
     status = store.screening_status_readonly(owner, now=now)
     assert status is not None
-    assert status["held"] == {
-        "count": 0,
-        "by_code": {},
-        "oldest_age_s": None,
-        "dominant_failure_class": None,
+    assert status["held"]["count"] == 3
+    assert status["held"]["by_code"] == {
+        "breaker_open": 1,
+        "delivery_failed": 1,
+        "phase_refused": 1,
     }
+    assert status["held"]["after_screening"] == {
+        "count": 2,
+        "by_code": {"delivery_failed": 1, "phase_refused": 1},
+    }
+    assert "hub_said_no" not in json.dumps(status)
 
 
 def test_rejects_aggregate_by_category_within_24h_only(tmp_path) -> None:
@@ -225,6 +258,7 @@ def test_dominant_failure_class_read_when_column_exists(tmp_path) -> None:
         created_at=now,
         failure_class="timeout",
     )
+    # Not in the failure_class vocabulary: reads as ``other``, never verbatim.
     _raw_hold(tmp_path, "bmsg_pair1", "breaker_open", created_at=now, failure_class="http_5xx")
     _raw_hold(tmp_path, "bmsg_pair2", "breaker_open", created_at=now)  # NULL: no class
 
@@ -232,6 +266,7 @@ def test_dominant_failure_class_read_when_column_exists(tmp_path) -> None:
     assert status is not None
     assert status["held"]["count"] == 4
     assert status["held"]["dominant_failure_class"] == "timeout"
+    assert "http_5xx" not in json.dumps(status)
 
 
 def test_breaker_state_open_and_closed(tmp_path) -> None:
@@ -246,6 +281,65 @@ def test_breaker_state_open_and_closed(tmp_path) -> None:
     assert status["breaker"]["state"] == "open"
     assert status["breaker"]["failures"] == Store.BREAKER_THRESHOLD
     assert status["breaker"]["open_until"] > time.time()
+
+
+def test_hold_codes_pass_only_through_the_closed_whitelist(tmp_path) -> None:
+    """PR #3189 review m1: a lowercase string is not a code just by its shape."""
+
+    store, owner = _setup(tmp_path)
+    now = time.time()
+    _raw_hold(tmp_path, "bmsg_p1", "provider_error", created_at=now)  # screening
+    _raw_hold(tmp_path, "bmsg_p2", "bridge_off", created_at=now)  # producer fence
+    _raw_hold(tmp_path, "bmsg_p3", "reservation_refused", created_at=now)  # reservation
+    _raw_hold(tmp_path, "bmsg_p4", "policy_stale:hub_detail", created_at=now)  # family
+    _raw_hold(tmp_path, "bmsg_p5", "looks_like_a_code_but_is_not", created_at=now)
+    _raw_hold(tmp_path, "bmsg_p6", "unknown_family:detail", created_at=now)
+
+    status = store.screening_status_readonly(owner, now=now)
+    assert status is not None
+    assert status["held"]["by_code"] == {
+        "other": 2,
+        "bridge_off": 1,
+        "policy_stale": 1,
+        "provider_error": 1,
+        "reservation_refused": 1,
+    }
+    rendered = json.dumps(status)
+    assert "looks_like" not in rendered and "detail" not in rendered
+
+
+def test_every_screening_hold_code_is_whitelisted() -> None:
+    """The screener's own closed set must never render as ``other``."""
+
+    from local_operator.team_bridge import screening
+    from local_operator.team_bridge.store import _DELIVERY_HOLD_CODES, _status_hold_code
+
+    known = frozenset(screening.HOLD_CODES) | _DELIVERY_HOLD_CODES
+    for code in screening.HOLD_CODES:
+        assert _status_hold_code(code, known) == code
+
+
+def test_damaged_rows_are_skipped_not_fatal(tmp_path) -> None:
+    """PR #3189 review m2: nested categories JSON and a non-numeric created_at."""
+
+    store, owner = _setup(tmp_path)
+    now = time.time()
+    _raw_hold(tmp_path, "bmsg_p1", "provider_error", created_at="not-a-number")
+    _raw_hold(tmp_path, "bmsg_p2", "breaker_open", created_at=now - 120)
+    _receipt(tmp_path, "bcmsg_r1", verdict="reject", categories=[], created_at=now)
+    _receipt(tmp_path, "bcmsg_r2", verdict="reject", categories=["spam"], created_at=now)
+    with sqlite3.connect(state_db_path(tmp_path)) as conn:
+        conn.execute(
+            "UPDATE screening_receipts SET categories = ? WHERE message_id = ?",
+            ('[["x"], {"k": 1}]', "bcmsg_r1"),
+        )
+
+    status = store.screening_status_readonly(owner, now=now)
+    assert status is not None
+    # The damaged hold still counts as a held message; it just has no age.
+    assert status["held"]["count"] == 2
+    assert 119 <= status["held"]["oldest_age_s"] <= 121
+    assert status["rejected_24h"]["by_category"] == {"spam": 1, "unknown": 1}
 
 
 def test_read_is_read_only_and_absent_store_is_none(tmp_path) -> None:
@@ -347,20 +441,59 @@ def test_cli_status_not_enrolled_has_no_screening(tmp_path, capsys, monkeypatch)
     assert not state_db_path(tmp_path).exists()
 
 
-def test_desktop_status_summary_is_the_same_reading(tmp_path) -> None:
-    """The desktop status route's ``screening_summary`` is the store's answer."""
-
-    from types import SimpleNamespace
-
-    from local_operator.server.routes import desktop_team_bridge as route
+def test_shared_reader_swallows_an_unanticipated_failure(tmp_path, monkeypatch) -> None:
+    """PR #3189 review N1/m2: the ONE wrapper both surfaces call never raises."""
 
     store, owner = _setup(tmp_path)
     _seed_canaries(tmp_path, store, owner)
-    config = SimpleNamespace(config_dir=tmp_path)
-    summary = route._screening_summary(config)  # type: ignore[arg-type]
-    assert summary is not None
-    assert summary["held"]["count"] == 2
-    assert summary["rejected_24h"]["count"] == 2
+    summary = read_screening_status(tmp_path)
+    assert summary is not None and summary["held"]["count"] == 2
     assert "CANARY" not in json.dumps(summary)
-    absent = SimpleNamespace(config_dir=tmp_path / "absent")
-    assert route._screening_summary(absent) is None  # type: ignore[arg-type]
+    assert read_screening_status(tmp_path / "absent") is None
+
+    def boom(self, owner, *, now=None):
+        raise TypeError("CANARY-in-an-exception")
+
+    monkeypatch.setattr(Store, "screening_status_readonly", boom)
+    assert read_screening_status(tmp_path) is None
+
+
+def _damage(root: Path) -> None:
+    """The two corruptions review m2 reproduced as a traceback / a 500."""
+
+    now = time.time()
+    _raw_hold(root, "bmsg_p1", "provider_error", created_at="not-a-number")
+    _receipt(root, "bcmsg_r1", verdict="reject", categories=[], created_at=now)
+    with sqlite3.connect(state_db_path(root)) as conn:
+        conn.execute(
+            "UPDATE screening_receipts SET categories = ? WHERE message_id = ?",
+            ('[["x"]]', "bcmsg_r1"),
+        )
+
+
+def test_cli_status_exits_zero_on_damaged_rows(tmp_path, capsys, monkeypatch) -> None:
+    from local_operator.team_bridge.connector import cli as tb_cli
+
+    _setup(tmp_path)
+    _damage(tmp_path)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    assert tb_cli.main(_cli(["team-bridge", "receiver", "status"])) == 0
+    human = capsys.readouterr().out
+    assert "Screening: 1 held (provider_error 1; oldest 0s)" in human
+    assert tb_cli.main(_cli(["team-bridge", "receiver", "status", "--json"])) == 0
+    assert json.loads(capsys.readouterr().out)["screening"]["held"]["count"] == 1
+
+
+def test_cli_status_shows_the_after_screening_bucket(tmp_path, capsys, monkeypatch) -> None:
+    from local_operator.team_bridge.connector import cli as tb_cli
+
+    store, owner = _setup(tmp_path)
+    _receipt(tmp_path, "bcmsg_a1", verdict="allow", categories=[], created_at=time.time())
+    store.persist_hold(owner, _composite("bcmsg_a1", 4), "delivery_failed")
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    assert tb_cli.main(_cli(["team-bridge", "receiver", "status"])) == 0
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.startswith("Screening:")]
+    assert len(lines) == 1
+    assert lines[0].startswith(
+        "Screening: 1 held (delivery_failed 1, held_after_screening 1; oldest "
+    )

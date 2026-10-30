@@ -652,6 +652,7 @@ async def status(
     # which must never ride ``lop serve``'s boot path (module docstring).
     from local_operator.team_bridge.read_context import READ_AVAILABILITY
     from local_operator.team_bridge.settings import TeamBridgeSettings
+    from local_operator.team_bridge.store import read_screening_status
 
     check = await get_status_discipline(config_manager.config_dir).check(boundary)
     # The local keys come from the DIRECTORY-scoped process watcher's last-good
@@ -779,7 +780,7 @@ async def status(
         #: ``screening`` (``Store.screening_status_readonly``). Counts, codes,
         #: categories and ages only; ``None`` when not enrolled or unreadable.
         #: Additive: an older renderer that ignores the key loses nothing.
-        "screening_summary": _screening_summary(config_manager),
+        "screening_summary": read_screening_status(config_manager.config_dir),
         # The receiver's SERVICE state, distinct from enrolment, on every
         # platform (launchd, systemd --user, Task Scheduler): ``loaded`` the
         # supervisor holds it; ``installed`` registered but not running;
@@ -868,27 +869,6 @@ def _delivery_hold(config_manager: ConfigManager) -> dict[str, Any] | None:
     if count <= 0:
         return None
     return {"code": HOLD_OPEN_CHIEF_OF_STAFF, "count": count, "session": session}
-
-
-def _screening_summary(config_manager: ConfigManager) -> dict[str, Any] | None:
-    """Held / breaker / rejected screening counts for the desktop status read.
-
-    WHY: a held or rejected message was otherwise silent on every surface.
-    Read-only, local, no network; any store failure reads as "nothing to show".
-    """
-
-    import sqlite3
-
-    from local_operator.team_bridge.store import Store, StoreRefused
-
-    try:
-        store = Store(config_manager.config_dir)
-        owner = store.active_owner_readonly()
-        if owner is None:
-            return None
-        return store.screening_status_readonly(owner)
-    except (StoreRefused, sqlite3.Error):
-        return None
 
 
 @router.get("/v1/desktop/team-bridge/settings", response_model=CRUDResponse[Any])

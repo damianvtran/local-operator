@@ -1038,18 +1038,115 @@ def screening_hold_message_id(value: str) -> str:
     return ref.message_id if ref is not None else value
 
 
-#: A status read emits stored strings only when they are closed-vocabulary
-#: CODES. ``hold_code`` comes from a closed set and ``failure_class`` from a
-#: sibling writer, but both are TEXT columns: anything that is not a short
-#: lowercase code reads as ``other`` so no free text can ride a status line.
-_STATUS_CODE = re.compile(r"[a-z0-9_]{1,64}")
+#: Hold codes a status read may emit verbatim, beyond screening's own
+#: ``screening.HOLD_CODES`` (imported lazily: ``screening`` imports this
+#: module). WHY a closed list (PR #3189 review m1): ``hold_code`` is a TEXT
+#: column and not every writer passes a constant — the connector persists the
+#: hub's ``BridgeRefusal.code`` and spine outcome codes — so a shape filter
+#: would let any lowercase string through to the CLI and the desktop. These are
+#: the connector's DELIVERY-side codes, written after screening admitted the
+#: message (``connector/loop.py``, ``conversation.py``, ``wake.py``): spine
+#: outcomes, producer fences, reservation failures and the loop's own
+#: defaults. Anything not listed renders as ``other``. Extend this list when a
+#: writer gains a code.
+_DELIVERY_HOLD_CODES = frozenset(
+    {
+        # spine outcomes (wake.py / conversation.py ``{"action": "hold"}``)
+        "ack_binding_mismatch",
+        "ack_tuple_mismatch",
+        "attachments_malformed",
+        "attachments_unbound",
+        "body_invalid",
+        "body_unavailable",
+        "bounce_receipt_missing",
+        "bridge_meta_invalid",
+        "conversation_failed",
+        "delivery_failed",
+        "display_context_invalid",
+        "envelope_missing",
+        "mismatched_id",
+        "screening_bounce",
+        "screening_unavailable",
+        "screening_unknown",
+        "sender_malformed",
+        # producer fences (wake._producer_fence)
+        "bridge_off",
+        "credential_changed",
+        "consent_revoked",
+        "no_designation",
+        # body reservation failures (conversation._record_body_reservation)
+        "receipt_unavailable",
+        "reservation_refused",
+        # the loop's own defaults (connector/loop.py)
+        "hold",
+        "retry_failed",
+    }
+)
+
+#: Families written as ``<family>:<detail>`` (``phase_refused:<code>`` in
+#: wake.py, ``policy_stale:<code>`` from the pre-handoff gate): the family is
+#: the code; the detail is a hub string and is never echoed.
+_FAMILY_HOLD_CODES = frozenset({"phase_refused", "policy_stale"})
+
+#: The ``screening_holds.failure_class`` vocabulary a sibling change writes
+#: (provider failover classification). Same rule: unlisted reads ``other``.
+SCREENING_FAILURE_CLASSES = frozenset(
+    {
+        "auth_unusable",
+        "quota",
+        "timeout",
+        "provider_5xx",
+        "stream_refused",
+        "identity_refused",
+        "chain_exhausted",
+        "other",
+    }
+)
 
 #: The window the rejected count looks back over.
 SCREENING_REJECT_WINDOW_S = 24 * 3600.0
 
 
-def _status_code(value: Any) -> str:
-    return value if isinstance(value, str) and _STATUS_CODE.fullmatch(value) else "other"
+def _status_hold_code(value: Any, known: frozenset[str]) -> str:
+    if not isinstance(value, str):
+        return "other"
+    if value in known:
+        return value
+    family = value.partition(":")[0]
+    return family if family in _FAMILY_HOLD_CODES else "other"
+
+
+def _status_failure_class(value: Any) -> str:
+    return value if isinstance(value, str) and value in SCREENING_FAILURE_CLASSES else "other"
+
+
+def _status_timestamp(value: Any) -> float | None:
+    """A stored REAL as a float, or ``None`` for a damaged cell (review m2)."""
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def read_screening_status(config_dir: Path) -> dict[str, Any] | None:
+    """The screening status for the live owner of ``config_dir``, or ``None``.
+
+    The ONE wrapper both surfaces call (``lop team-bridge receiver status`` and
+    the desktop status route; PR #3189 review N1), so its error contract lives
+    in one place: a status read never fails its caller (CLI exit 0, route 200).
+    Any failure — absent store, not enrolled, fenced, unreadable, or a damaged
+    row this reader did not anticipate — is ``None``, and the exception's own
+    text is not echoed (it can name a path or a stored value).
+    """
+
+    try:
+        store = Store(config_dir)
+        owner = store.active_owner_readonly()
+        if owner is None:
+            return None
+        return store.screening_status_readonly(owner)
+    except Exception:  # noqa: BLE001 — a status read never fails its caller
+        return None
 
 
 def _contentless_delivery_key(value: str) -> str:
@@ -2093,23 +2190,38 @@ class Store:
 
         CONTENT LAW. Counts, closed codes, categories, ages and timestamps
         only — never a body, a model reply, a reason or a sender label. The
-        query selects no other column, codes are filtered through
-        :data:`_STATUS_CODE`, and categories through the closed screening
-        vocabulary. Read-only over an EXISTING store; never creates, migrates
-        or writes.
+        query selects no other column; hold codes and failure classes pass
+        only through closed whitelists (``other`` otherwise) and categories
+        only through the closed screening vocabulary (``unknown``). Read-only
+        over an EXISTING store; never creates, migrates or writes.
 
-        COUNTING. Hold rows are normalised by :func:`screening_hold_message_id`
-        and counted once per bare message id; a message that already has a
-        receipt is not "held by screening" (its leftover row is the loop's to
-        retire) and is excluded. When one message has rows in both shapes the
-        composite (canonical) row's code wins. ``failure_class`` is read only
+        COUNTING. Every ``screening_holds`` row is a live durable retry, so
+        every row counts (PR #3189 review M1). Rows are normalised by
+        :func:`screening_hold_message_id` and counted once per bare message
+        id; when one message has rows in both shapes the composite (canonical)
+        row's code wins. A held message that ALREADY has a receipt was
+        screened and admitted but not delivered (``delivery_failed``,
+        ``bridge_off``, ``phase_refused``, a reservation failure, ...): it is
+        reported in its own ``after_screening`` bucket rather than hidden.
+        The ``deliveries`` table does not prove delivery for a conversation
+        message (it carries pair deliveries only), so a hold is never
+        discounted against it; a hold whose message was in fact delivered is
+        retired by the loop's next re-drive. ``failure_class`` is read only
         when that column exists (a sibling change adds it); absent, the
         dominant class is ``None``.
+
+        DAMAGED ROWS (review m2) are read defensively: a non-numeric
+        ``created_at`` still counts the message but gives it no age, and a
+        category that is not a string is ignored. Nothing here raises past
+        :func:`read_screening_status`.
 
         ``None`` for an absent store or a fenced owner. Unreadable raises
         :class:`StoreRefused` like every ``_connect_readonly`` caller.
         """
 
+        from local_operator.team_bridge.screening import HOLD_CODES
+
+        known_codes = frozenset(HOLD_CODES) | _DELIVERY_HOLD_CODES
         at = time.time() if now is None else float(now)
         with self._connect_readonly() as conn:
             if conn is None:
@@ -2141,32 +2253,34 @@ class Store:
             ).fetchone()
 
         # One entry per bare message id: (canonical?, code, oldest created_at, class).
-        held: dict[str, tuple[bool, str, float, str | None]] = {}
+        held: dict[str, tuple[bool, str, float | None, str | None]] = {}
         for row in holds:
             stored = str(row["message_id"])
             bare = screening_hold_message_id(stored)
-            if bare in receipted:
-                continue
             canonical = bare != stored
-            code = _status_code(row["hold_code"])
-            created = float(row["created_at"] or at)
+            code = _status_hold_code(row["hold_code"], known_codes)
+            created = _status_timestamp(row["created_at"])
             raw_class = row["failure_class"] if failure_column else None
-            failure = _status_code(raw_class) if raw_class is not None else None
+            failure = _status_failure_class(raw_class) if raw_class is not None else None
             prior = held.get(bare)
             if prior is not None:
-                created = min(created, prior[2])
+                ages = [value for value in (created, prior[2]) if value is not None]
+                created = min(ages) if ages else None
                 if prior[0] and not canonical:
                     code, canonical = prior[1], True
                 failure = failure if failure is not None else prior[3]
             held[bare] = (canonical, code, created, failure)
 
         by_code: dict[str, int] = {}
+        after_by_code: dict[str, int] = {}
         classes: dict[str, int] = {}
-        for _canonical, code, _created, failure in held.values():
+        for bare, (_canonical, code, _created, failure) in held.items():
             by_code[code] = by_code.get(code, 0) + 1
+            if bare in receipted:
+                after_by_code[code] = after_by_code.get(code, 0) + 1
             if failure is not None:
                 classes[failure] = classes.get(failure, 0) + 1
-        oldest = min((entry[2] for entry in held.values()), default=None)
+        oldest = min((entry[2] for entry in held.values() if entry[2] is not None), default=None)
         # Highest count wins; a tie resolves alphabetically so the answer is stable.
         dominant = min(classes, key=lambda name: (-classes[name], name)) if classes else None
 
@@ -2176,19 +2290,36 @@ class Store:
                 decoded = json.loads(row["categories"])
             except (TypeError, ValueError):
                 decoded = None
-            names = decoded if isinstance(decoded, list) and decoded else ["unknown"]
-            for name in names:
+            names = (
+                [name for name in decoded if isinstance(name, str)]
+                if isinstance(decoded, list)
+                else []
+            )
+            for name in names or ["unknown"]:
                 category = name if name in _CLOSED_CATEGORIES else "unknown"
                 by_category[category] = by_category.get(category, 0) + 1
 
-        failures = int(breaker["failures"]) if breaker is not None else 0
-        open_until = float(breaker["open_until"]) if breaker is not None else 0.0
+        failures = 0
+        open_until = 0.0
+        if breaker is not None:
+            failures = int(_status_timestamp(breaker["failures"]) or 0)
+            open_until = _status_timestamp(breaker["open_until"]) or 0.0
+
+        def _ranked(counts: dict[str, int]) -> dict[str, int]:
+            return dict(sorted(counts.items(), key=lambda item: (-item[1], item[0])))
+
         return {
             "held": {
                 "count": len(held),
-                "by_code": dict(sorted(by_code.items(), key=lambda item: (-item[1], item[0]))),
+                "by_code": _ranked(by_code),
                 "oldest_age_s": max(0.0, at - oldest) if oldest is not None else None,
                 "dominant_failure_class": dominant,
+                # Held AFTER an admitting receipt: screened, not yet delivered.
+                # A subset of ``count``/``by_code``, never in addition to them.
+                "after_screening": {
+                    "count": sum(after_by_code.values()),
+                    "by_code": _ranked(after_by_code),
+                },
             },
             "breaker": {
                 "state": "open" if open_until > at else "closed",
@@ -2197,9 +2328,7 @@ class Store:
             },
             "rejected_24h": {
                 "count": len(rejects),
-                "by_category": dict(
-                    sorted(by_category.items(), key=lambda item: (-item[1], item[0]))
-                ),
+                "by_category": _ranked(by_category),
             },
         }
 

@@ -125,31 +125,6 @@ def _last_check(root: Path) -> float | None:
     return float(value) if isinstance(value, (int, float)) else None
 
 
-def _screening(root: Path) -> dict[str, Any] | None:
-    """Held / breaker / rejected screening counts, or ``None`` when unknowable.
-
-    WHY: screening that parks or rejects a message used to be silent — the
-    owner saw no delivery and no reason. This is the receiver's one place to
-    say so. Read-only (``Store.screening_status_readonly``: ``mode=ro``, never
-    creates a store); counts, codes and categories only. Any store failure is
-    ``None`` — a status command never fails on its own diagnostics, and the
-    refusal's own text is not echoed (it may name the database path's error).
-    """
-
-    import sqlite3
-
-    from local_operator.team_bridge.store import Store, StoreRefused
-
-    try:
-        store = Store(root)
-        owner = store.active_owner_readonly()
-        if owner is None:
-            return None
-        return store.screening_status_readonly(owner)
-    except (StoreRefused, sqlite3.Error):
-        return None
-
-
 def _compact_age(seconds: float) -> str:
     """``41m`` / ``2h 10m`` / ``30s``: minute precision once past a minute."""
 
@@ -179,7 +154,16 @@ def _screening_line(screening: dict[str, Any], *, now: float) -> Any:
         held_text = t(_k.status_screening_held_none())
     else:
         age = _compact_age(held["oldest_age_s"] or 0.0)
-        codes = _counts(held["by_code"])
+        after = held.get("after_screening") or {}
+        # Screened-but-undelivered holds ride the SAME verbatim code list as
+        # their own ``held_after_screening <n>`` entry (a subset of the codes
+        # before it), so the bucket is visible with no new localized copy.
+        codes = _counts(
+            {
+                **held["by_code"],
+                **({"held_after_screening": after["count"]} if after.get("count") else {}),
+            }
+        )
         failure_class = held.get("dominant_failure_class")
         held_text = t(
             _k.status_screening_held_class(
@@ -213,11 +197,12 @@ def _status(root: Path, *, as_json: bool) -> int:
 
     from local_operator import supervisors
     from local_operator.team_bridge.connector import install
+    from local_operator.team_bridge.store import read_screening_status
 
     state = install.connector_state(root)
     enrolment = _enrolment_state(root)
     last = _last_check(root)
-    screening = _screening(root)
+    screening = read_screening_status(root)
     log = install.log_path(root)
     journal = install.journal_hint()
     linger: bool | None = None
