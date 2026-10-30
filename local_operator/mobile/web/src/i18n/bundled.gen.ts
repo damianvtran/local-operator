@@ -452,6 +452,8 @@ export const BUNDLED_OWNED: Readonly<Record<string, Readonly<Record<string,
  * rather than mixing two languages under one page tag. */
 export const BUNDLED_CHUNKS: Readonly<Record<string, () => Promise<
  { readonly BUNDLED_LOCALE: typeof BUNDLED_OWNED }>>> = {
+  "ru": () => import("./bundled.ru.gen"),
   "ur": () => import("./bundled.ur.gen"),
+  "vi": () => import("./bundled.vi.gen"),
   "zh-CN": () => import("./bundled.zh-CN.gen"),
 };
