@@ -962,3 +962,189 @@ class TestScratchpadOutsideTheRoot:
         )
         assert "Operation not permitted" in result.text, result.text
         assert not (session_dir / "leak.txt").exists()
+
+
+def _plant_pad_symlink(tmp_path: Path, target: Path) -> tuple[ToolContext, Path, Path]:
+    """The review-round-1 R1 layout: the session's pad path is a SYMLINK.
+
+    A confined shell held a ``subpath`` grant over the pad node itself, so
+    ``rm -rf "$LOCAL_OPERATOR_SCRATCHPAD" && ln -s / "$LOCAL_OPERATOR_SCRATCHPAD"``
+    succeeded and the NEXT call's confinement followed the link and granted
+    ``/`` read+write. This plants the same link directly.
+    """
+
+    context, world, scratch = _episode_context(tmp_path)
+    scratch.parent.mkdir(parents=True)
+    scratch.symlink_to(target, target_is_directory=True)
+    return context, world, scratch
+
+
+def _outside_dir(tmp_path: Path) -> Path:
+    outside = tmp_path / "victimhome"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("SECRET\n")
+    return outside
+
+
+class TestSwappedScratchpad:
+    """Review round 1, R1: a symlink AT the pad path must never widen the grant."""
+
+    @pytest.mark.parametrize("to_root", [True, False], ids=["to-slash", "to-outside-dir"])
+    def test_a_symlinked_pad_is_not_granted(self, tmp_path: Path, to_root: bool) -> None:
+        target = Path("/") if to_root else _outside_dir(tmp_path)
+        context, _world, scratch = _plant_pad_symlink(tmp_path, target)
+        confinement = confinement_of(context)
+        assert confinement is not None
+        assert confinement.scratchpad is None
+        profile = confinement.profile()
+        read_line = next(line for line in profile.splitlines() if "(allow file-read* " in line)
+        write_line = next(line for line in profile.splitlines() if "(allow file-write* " in line)
+        for line in (read_line, write_line):
+            assert '(subpath "/")' not in line
+            assert f'(subpath "{target.resolve()}")' not in line
+            assert f'(subpath "{scratch}")' not in line
+        assert not confinement.contains((target / "secret.txt").resolve())
+
+    def test_a_pad_that_is_a_regular_file_is_not_granted(self, tmp_path: Path) -> None:
+        context, _world, scratch = _episode_context(tmp_path)
+        scratch.parent.mkdir(parents=True)
+        scratch.write_text("not a directory")
+        confinement = confinement_of(context)
+        assert confinement is not None
+        assert confinement.scratchpad is None
+
+    def test_a_pad_outside_the_session_layout_is_not_granted(self, tmp_path: Path) -> None:
+        root = tmp_path / "jail"
+        root.mkdir()
+        elsewhere = tmp_path / "elsewhere"
+        assert ToolConfinement.at(root, scratchpad=elsewhere).scratchpad is None
+
+    def test_a_pad_that_is_not_the_contexts_session_dir_is_not_granted(
+        self, tmp_path: Path
+    ) -> None:
+        context, world, scratch = _episode_context(tmp_path)
+        other_session = scratch.parent.parent / "000000000000"
+        context = ToolContext(
+            cwd=str(world),
+            session_id="confinement-test",
+            confinement_root=str(world),
+            scratchpad_dir=str(scratch),
+            session_dir=str(other_session),
+        )
+        confinement = confinement_of(context)
+        assert confinement is not None
+        assert confinement.scratchpad is None
+
+    def test_a_pad_matching_its_session_dir_is_granted(self, tmp_path: Path) -> None:
+        context, world, scratch = _episode_context(tmp_path)
+        context = ToolContext(
+            cwd=str(world),
+            session_id="confinement-test",
+            confinement_root=str(world),
+            scratchpad_dir=str(scratch),
+            session_dir=str(scratch.parent),
+        )
+        confinement = confinement_of(context)
+        assert confinement is not None
+        assert confinement.scratchpad == scratch.resolve()
+
+    def test_a_pad_holding_the_roots_parent_home_or_config_is_refused(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Defence in depth: even a session-shaped pad is dropped when it
+        equals or contains a tree the confinement exists to keep out."""
+        pad = tmp_path / "s" / "sessions" / "abc" / "scratchpad"
+        pad.mkdir(parents=True)
+        # The root's parent IS the pad.
+        world = pad / "world"
+        world.mkdir()
+        assert ToolConfinement.at(world, scratchpad=pad).scratchpad is None
+        other_root = tmp_path / "jail"
+        other_root.mkdir()
+        assert ToolConfinement.at(other_root, scratchpad=pad).scratchpad == pad.resolve()
+        monkeypatch.setenv("HOME", str(pad / "home"))
+        assert ToolConfinement.at(other_root, scratchpad=pad).scratchpad is None
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(pad))
+        assert ToolConfinement.at(other_root, scratchpad=pad).scratchpad is None
+
+    @pytest.mark.asyncio
+    async def test_the_path_tools_refuse_a_swapped_pad(self, tmp_path: Path) -> None:
+        outside = _outside_dir(tmp_path)
+        context, _world, _scratch = _plant_pad_symlink(tmp_path, outside)
+        for path in ("scratchpad://secret.txt", str(outside / "secret.txt")):
+            read = await builtin.execute_read("r", {"path": path}, None, None, context)
+            assert read.is_error, (path, read.text)
+            assert "SECRET" not in read.text
+        for path in ("scratchpad://new.txt", str(outside / "new2.txt")):
+            written = await builtin.execute_write(
+                "w", {"path": path, "content": "pwned"}, None, None, context
+            )
+            assert written.is_error, (path, written.text)
+        edited = await builtin.execute_edit(
+            "e",
+            {"path": "scratchpad://secret.txt", "old_text": "SECRET", "new_text": "PWNED"},
+            None,
+            None,
+            context,
+        )
+        assert edited.is_error, edited.text
+        assert sorted(p.name for p in outside.iterdir()) == ["secret.txt"]
+        assert (outside / "secret.txt").read_text() == "SECRET\n"
+
+    def test_refusals_name_the_scratchpad_as_an_allowed_root(self, tmp_path: Path) -> None:
+        """Review round 1, M1: a refused agent learns where it MAY work."""
+        context, world, scratch = _episode_context(tmp_path)
+        confinement = confinement_of(context)
+        assert confinement is not None
+        denial = confinement.path_denial(Path("/etc/hosts"))
+        assert denial is not None
+        assert str(world.resolve()) in denial and str(scratch.resolve()) in denial
+        cwd = confinement.cwd_denial("/etc")
+        assert cwd is not None and str(scratch.resolve()) in cwd
+        assert str(scratch.resolve()) in (
+            confinement.path_denial(Path("/x"), resolvable=False) or ""
+        )
+
+    @DARWIN_ONLY
+    @pytest.mark.asyncio
+    async def test_a_swapped_pad_does_not_open_the_shell(self, tmp_path: Path) -> None:
+        outside = _outside_dir(tmp_path)
+        context, _world, _scratch = _plant_pad_symlink(tmp_path, outside)
+        result = await builtin.execute_bash(
+            "bash-swapped",
+            {"command": f'echo pwned > "{outside}/a.txt"'},
+            AbortSignal(),
+            None,
+            context,
+        )
+        assert "Operation not permitted" in result.text, result.text
+        assert not (outside / "a.txt").exists()
+
+    @DARWIN_ONLY
+    @pytest.mark.asyncio
+    async def test_the_shell_cannot_swap_its_pad(self, tmp_path: Path) -> None:
+        """The planting step itself is denied at the kernel, while ordinary
+        create/delete INSIDE the pad keeps working."""
+        context, _world, scratch = _episode_context(tmp_path)
+        scratch.mkdir(parents=True)
+        result = await builtin.execute_bash(
+            "bash-swap",
+            {
+                "command": (
+                    'touch "$LOCAL_OPERATOR_SCRATCHPAD/f" && rm "$LOCAL_OPERATOR_SCRATCHPAD/f" '
+                    '&& mkdir "$LOCAL_OPERATOR_SCRATCHPAD/d" '
+                    '&& rmdir "$LOCAL_OPERATOR_SCRATCHPAD/d" '
+                    "&& echo inner-ok; "
+                    'rm -rf "$LOCAL_OPERATOR_SCRATCHPAD"; echo "rm=$?"; '
+                    'mv "$LOCAL_OPERATOR_SCRATCHPAD" "$LOCAL_OPERATOR_SCRATCHPAD.x"; echo "mv=$?"'
+                )
+            },
+            AbortSignal(),
+            None,
+            context,
+        )
+        assert "inner-ok" in result.text, result.text
+        assert "rm=1" in result.text and "mv=1" in result.text, result.text
+        assert scratch.is_dir() and not scratch.is_symlink()
+        assert not scratch.with_name("scratchpad.x").exists()
