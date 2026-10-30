@@ -198,11 +198,11 @@ function emitStream() {
    stays on `useLanguage`). The generator emits the explicit owned namespaces
    only; no wire prose is bundled, so this cannot smuggle a served namespace into
    the client.
-   THE OTHER SHIPPED LOCALES ARE CHUNKS, not part of this map: one 30-70 kB
-   `bundled.<locale>.gen.ts` each, requested when a locale is named and awaited
-   only inside the pre-mount budget (`localeBundleLoader`, `resolveInitialLocale`).
-   Shipping all eight eagerly measured 261,511 B (+36 % of the built bundle) to
-   render one language.
+   THE OTHER SHIPPED LOCALES ARE CHUNKS, not part of this map: one 26-36 kB built
+   `bundled.<locale>.gen.ts` each (measured: ur 35,857 B, zh-CN 26,152 B),
+   requested when a locale is named and awaited only inside the pre-mount budget
+   (`localeBundleLoader`, `resolveInitialLocale`). A locale's copy is paid for
+   only when its chunk is asked for, never by a reader who never selects it.
    Registration runs through the ONE store channel — `registerBundle`/`registerBundles`
    -> `changed()` -> `publishLocaleSnapshot` — so it repaints and re-labels the
    document instead of creating a second locale truth. Placed AFTER the listener
@@ -682,7 +682,8 @@ function applyConfigFrame(data: string): Promise<void> | null {
 	// The English surface is already complete; this asks for the resolved
 	// locale's chunk. The live stream drops the returned promise and lets the
 	// flip land when it lands; the pre-mount bootstrap awaits it inside
-	// `LOCALE_BOOTSTRAP_BUDGET_MS` and publishes once, after it settles.
+	// `LOCALE_BOOTSTRAP_BUDGET_MS` before it commits the snapshot the first frame
+	// renders from (two publishes on the way, never painted: `resolveInitialLocale`).
 	return localeBundleLoader.ensure(language);
 }
 
@@ -850,11 +851,13 @@ export async function resolveInitialLocale(): Promise<void> {
 			}
 			buffered = buffered.slice(end + 2);
 			if (language) {
-				// ONE publish for the whole boot: start the chunk, wait for it inside
-				// the budget, THEN commit the snapshot the first frame renders from.
-				// Publishing the preference first would set `lang="en"` before the
-				// chunk lands and re-create the flip this function exists to prevent
-				// (i18n review round 2, #3165 major).
+				// Start the chunk, wait for it inside the budget, THEN commit the
+				// snapshot the first frame renders from. Not one publish but two: the
+				// registration below notifies the store's one channel first, emitting an
+				// intermediate null-backend English snapshot. No frame sees it — this
+				// whole sequence runs before mount. Publishing the preference FIRST would
+				// instead set `lang="en"` before the chunk lands and re-create the flip
+				// this function exists to prevent (i18n review round 2, #3165 major).
 				await awaitBootstrapChunk(localeBundleLoader.ensure(language), deadline);
 				publishLocaleSnapshot(language);
 				return;

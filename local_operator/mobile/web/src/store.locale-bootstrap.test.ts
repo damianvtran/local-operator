@@ -37,31 +37,38 @@ async function freshStore(chunkResolves: boolean, language = "ur") {
 	const english = generated.BUNDLED_OWNED;
 	let release!: () => void;
 	const gate = new Promise<void>(resolve => { release = resolve; });
+	let loadStarted = false;
 	const previous = (generated.BUNDLED_CHUNKS as Record<string, unknown>)[language];
 	(generated.BUNDLED_CHUNKS as Record<string, () => Promise<{ BUNDLED_LOCALE: OwnedCopy }>>)[language] =
 		async () => {
+			loadStarted = true;
 			if (!chunkResolves) await new Promise<void>(() => { /* never */ });
 			await gate;
 			return { BUNDLED_LOCALE: urduCopy(Object.keys(english), english) };
 		};
 	vi.stubGlobal("fetch", vi.fn(async () => frame(language)));
 	const store = await import("./store");
-	return { store, release, english, restore: () => { (generated.BUNDLED_CHUNKS as Record<string, unknown>)[language] = previous; } };
+	return { store, release, english, started: () => loadStarted, restore: () => { (generated.BUNDLED_CHUNKS as Record<string, unknown>)[language] = previous; } };
 }
 
 afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); });
 
 describe("cold deep link before the first content paint", () => {
 	it("paints the chunk's locale on the first frame when it lands inside the budget", async () => {
-		const { store, release, restore } = await freshStore(true);
+		const { store, release, restore, started } = await freshStore(true);
 		try {
 			let settled = false;
 			const resolving = store.resolveInitialLocale();
 			void resolving.then(() => { settled = true; });
 			// The boot is WAITING on the chunk, not merely promising to fix the paint
-			// later: without this the test would pass on an English first frame too.
-			await Promise.resolve();
-			await Promise.resolve();
+			// later. Wait for the chunk load to be STARTED (the boot reached it), then
+			// burn one real macrotask: a boot that does not await has resolved inside
+			// that turn, so `settled` is false only when the await really happened.
+			// Two bare microtask ticks — what this assertion used to do — passed on
+			// that broken control too, which is why round 2 called it vacuous.
+			for (let turn = 0; turn < 5 && !started(); turn++) await new Promise<void>(resolve => { setTimeout(resolve, 0); });
+			expect(started()).toBe(true);
+			await new Promise<void>(resolve => { setTimeout(resolve, 0); });
 			expect(settled).toBe(false);
 			release();
 			await resolving;

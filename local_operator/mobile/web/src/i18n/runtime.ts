@@ -61,7 +61,7 @@ export function createMessageRuntime(
 		// per namespace (a locale chunk carries all twelve).
 		if (notify) changed();
 		return true;
-		}
+	}
 	function registerBundle(namespace: string, locale: string, messages: Record<string, string>): boolean {
 		return namespace.startsWith("relay.") && register(bundles, namespace, locale, messages);
 	}
