@@ -1108,6 +1108,16 @@ def build_cli_parser() -> argparse.ArgumentParser:
 
     add_network_parser(subparsers, parent_parser)
 
+    # Agent messages' background receiver (Team Bridge connector): status,
+    # install, remove, logs for a backend-only machine (guide://team-bridge).
+    # Same stdlib-only registration rule as the groups above: the installer,
+    # the store and sqlite are imported by the verb that runs.
+    from local_operator.team_bridge_arguments import (
+        add_parser as add_team_bridge_parser,
+    )
+
+    add_team_bridge_parser(subparsers, parent_parser, help_locale=help_locale)
+
     # Operator authority (issue #1310, revision 2). Registration is stdlib-only
     # for the same reason `secret`'s is: `lop --version` must not load
     # Security.framework, the CNG stack or `cryptography`, and the verbs that do
@@ -2888,6 +2898,14 @@ def config_edit_command(args: argparse.Namespace) -> int:
         # out-of-range number is now refused here instead of being stored and
         # silently clamped by whichever consumer reads it.
         settings_io.write_setting(config_manager, setting, value)
+        if setting.key == "team_bridge.enabled":
+            # CLI edits do not visit the desktop settings route. Reconcile at
+            # this same explicit event, not on a poll or only at next startup.
+            from local_operator.team_bridge.connector.install import (
+                sync_connector_service,
+            )
+
+            sync_connector_service(config_manager.config_dir)
 
         # Report what was STORED, not what was typed. `write_setting` may
         # normalize (a hotkey's `CTRL+G` is stored as `ctrl+g`), and echoing
@@ -17617,6 +17635,18 @@ def main() -> int:
             from local_operator.tunnels.cli import main as tunnel_main
 
             return tunnel_main(args)
+        elif args.subcommand == "team-bridge":
+            if getattr(args, "team_bridge_command", None) == "setup":
+                from local_operator.team_bridge.setup_cli import (
+                    main as team_bridge_setup,
+                )
+
+                return team_bridge_setup(args)
+            from local_operator.team_bridge.connector.cli import (
+                main as team_bridge_main,
+            )
+
+            return team_bridge_main(args)
         elif args.subcommand == "secret":
             from local_operator.secrets.cli import main as secret_main
 

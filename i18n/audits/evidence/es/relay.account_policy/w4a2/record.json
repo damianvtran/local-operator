@@ -1,0 +1,141 @@
+{
+ "schema": 1,
+ "audit_id": "w4a2",
+ "audit_round": 1,
+ "locale": "es",
+ "namespace": "relay.account_policy",
+ "audit_date": "2026-10-29",
+ "audited_revision": "183f7a0537e4cee42fd82f25a21fe52953a81bdf",
+ "audited_revision_note": "The es catalogue is UNTRACKED at this revision (`git status --porcelain` -> `?? local_operator/i18n/catalogues/es/relay.account_policy.json`), so HEAD cannot pin the audited bytes; input_hashes.target.sha256 is the exact on-disk hash and checks.py recomputes it.",
+ "key_count": {
+  "en": 13,
+  "target": 13,
+  "context": 13
+ },
+ "verdict": "failed",
+ "result": "failed — 0 blocker, 1 major, 1 minor, 1 nit",
+ "verdict_reason": "All 13 keys were read side by side with the English source and the sidecar. The four state messages keep four distinct promises and the two the sidecar constrains are exactly right: 'error' says the change could not be CONFIRMED and never claims the write failed, while 'rejected' does assert not-saved as a 4xx licenses. The brief's specific check also passes: this namespace contains no account-policy option label and no policy vocabulary at all, so no second rendering exists. The major is a term collision, not a mistranslation: 'computer' is rendered 'equipo', a word this locale binds to TEAM and which seven shipped strings in this same phone UI render as 'máquina'; because the screen's central promise is a scope promise, a reader can take 'Los cambios solo se aplican a este equipo' as 'only to this team'.",
+ "auditor": {
+  "agent": "translation-auditor (lopdev team)",
+  "session_or_instance": "8eb3b9c9a687 (lane es-w4-auditor-b)",
+  "model": "radient/auto (self-reported)",
+  "model_note": "Session header names anthropic/claude-sonnet-5-5 as primary; three provider-failure switches fired on quota before any catalogue was read (openai/gpt-6-astra, kimi/k3.1-pro, then radient/auto). Every judgement here was made under radient/auto - a disclosed fallback, not the pinned primary.",
+  "date": "2026-10-29",
+  "independence": "I wrote none of this copy and repaired none of it; this lane audits bytes produced by a different translator agent. I did not edit, delete, move or rename any file in the worktree: no catalogue, sidecar, ledger, allowance, style guide, glossary or generated file, and no git write of any kind. My only writes are this evidence directory. All three target files are untracked at HEAD, so every binding here is to the on-disk bytes recomputed by checks.py."
+ },
+ "input_hashes": {
+  "en": {
+   "path": "local_operator/i18n/catalogues/en/relay.account_policy.json",
+   "revision": "183f7a0537e4cee42fd82f25a21fe52953a81bdf",
+   "sha256": "0019b08106e6f7762194b164b9b9b37054a8cfade759aa2f6490787a73dea890"
+  },
+  "target": {
+   "path": "local_operator/i18n/catalogues/es/relay.account_policy.json",
+   "tracked": false,
+   "sha256": "074787ece57a27646c766deb3b7691979c233259c1f05987c5c79770e8f31204"
+  },
+  "context": {
+   "path": "local_operator/i18n/catalogues/en/relay.account_policy.context.json",
+   "revision": "183f7a0537e4cee42fd82f25a21fe52953a81bdf",
+   "sha256": "7e55e4fadebcde0a6b93d545a62b2743fbb16009498cdf4e2122cb309ecc07f4"
+  }
+ },
+ "display_side_risk": "none that survives verification. relay.login.error.password renders through this harness's display layer with its leading token masked; the on-disk bytes contain no 'redacted' literal (byte scan: False) and the value is 22 codepoints - the ordinary Spanish noun for a login secret (10 codepoints, last U+00F1) followed by ' incorrecta.' - plain UI copy, not a credential and not a marker in the file. The codepoint dump is authoritative; the sanctioned read_public_copy reader refused ('the workspace is not a git checkout'), which is moot here. No finding arises from this.",
+ "findings": [
+  {
+   "id": "es-w4a2-AP-01",
+   "severity": "major",
+   "status": "open",
+   "keys": [
+    "relay.account_policy.title",
+    "relay.account_policy.saved",
+    "relay.account_policy.unavailable",
+    "relay.account_policy.scope",
+    "relay.account_policy.rejected"
+   ],
+   "source_term": "computer ('Computer settings', 'this computer')",
+   "current": {
+    "title": "Ajustes del equipo",
+    "saved": "Guardado en este equipo.",
+    "unavailable": "Los ajustes de enrutamiento de cuentas no están disponibles en este relay. Actualiza Local Operator en este equipo.",
+    "scope": "Los cambios solo se aplican a este equipo.",
+    "rejected": "No se guardó el cambio. Comprueba el valor o los ajustes de este equipo y vuelve a intentarlo."
+   },
+   "proposed": {
+    "title": "Ajustes de esta máquina",
+    "saved": "Guardado en esta máquina.",
+    "unavailable": "Los ajustes de enrutamiento de cuentas no están disponibles en este relé. Actualiza Local Operator en esta máquina.",
+    "scope": "Los cambios solo se aplican a esta máquina.",
+    "rejected": "No se guardó el cambio. Comprueba el valor o los ajustes de esta máquina y vuelve a intentarlo."
+   },
+   "reason": "This locale binds 'equipo' to TEAM (glossary line 63: team -> equipo; style-guide/es.md line 29 lists 'equipo (team)'), while 'computer' ships as 'máquina' in 11 of the 17 en values that mention it, including 7 in this same phone relay surface, so this screen renames the very object it is about and its central promise ('changes apply only to this computer') becomes readable as 'changes apply only to this team'.",
+   "counter_argument": "In fairness: 'equipo' is legitimate Spanish for a computer (equipo informático) and in isolation 'Ajustes del equipo' is a correct rendering of 'Computer settings'. The finding is not that the Spanish is wrong; it is that inside this product 'equipo' already means team, and inside this phone UI the same object is called 'máquina' seven times.",
+   "resolution_note": "(a) Adopt 'máquina' here, matching the shipped sibling wire.settings.account_policy.error.write_failed ('en esta máquina'). (b) Declare 'equipo' the locale-wide word for computer, which would also require rewriting 7 shipped relay strings plus wire.errors.notifications.store_full and would still collide with glossary line 63. (a) is the cheap, consistent fix.",
+   "evidence": "Value-only scan of every es catalogue: 11/17 en 'computer' values ship as 'máquina'; 5/17, all in this namespace, use 'equipo'; 1 pre-existing outlier (wire.errors.notifications.store_full). 7 of the 11 'máquina' renderings are inside relay.* itself (relay.health x4, relay.chrome, relay.notifications x2)."
+  },
+  {
+   "id": "es-w4a2-AP-02",
+   "severity": "minor",
+   "status": "open",
+   "keys": [
+    "relay.account_policy.unavailable"
+   ],
+   "source_term": "relay",
+   "current": "Los ajustes de enrutamiento de cuentas no están disponibles en este relay. Actualiza Local Operator en este equipo.",
+   "proposed": "Los ajustes de enrutamiento de cuentas no están disponibles en este relé. Actualiza Local Operator en esta máquina.",
+   "reason": "Glossary line 59 is 'relay | translate — identifiers stay | relé', and the shipped catalogue already says 'este relé' (wire.settings.network_max_handshakes.help) and 'relé' in cli.services_help.service_description.",
+   "evidence": "Value-only scan: the only es value matching /\\brelay\\b/ is this one; 'relé' ships in wire.settings.network_max_handshakes.help and cli.services_help."
+  },
+  {
+   "id": "es-w4a2-AP-03",
+   "severity": "nit",
+   "status": "open",
+   "keys": [
+    "relay.account_policy.save"
+   ],
+   "source_term": "policy",
+   "current": "Guardar política",
+   "proposed": "Guardar política de cuentas (optional)",
+   "reason": "The en source says 'Save policy', so the shortening is faithful, and the button is unambiguous beside the policy controls; recorded only because the shipped noun for this setting is 'Política de cuentas'.",
+   "evidence": "wire.settings.account_policy.label = 'Política de cuentas'; its help and legacy.help say 'política de cuentas' repeatedly."
+  }
+ ],
+ "verified": [
+  "All four message states map to the sidecar's four distinct semantics with no collapse: unavailable (capability/version), error (UNKNOWN commit, explicitly not a failure), load_error (load failed, not a write), rejected (known not saved).",
+  "No second rendering of any account-policy option label — the namespace carries chrome only.",
+  "Terminology matches the shipped sibling: 'enrutamiento de cuentas' identical to wire.settings.account_policy.error.unavailable; 'ajustes' matches the settled settings term.",
+  "Register is tu throughout; action labels are infinitives (Volver, Reintentar, Guardar política) per the style guide.",
+  "Width is in band for a phone message card: 90-115 cells for the paragraphs against a shipped relay corpus whose longest is 758 and whose health detail strings run 176-206; no maxCells declared."
+ ],
+ "check_output": {
+  "commands": [
+   "python3 i18n/audits/evidence/es/relay.account_policy/w4a2/checks.py",
+   "python3 - (value-only scan of every es catalogue for 'computer'/'equipo'/'máquina'/'relé'/'relay')",
+   "python3 - (census of ICU plural categories across all 58 es plural messages)",
+   "python3 - (value scan for the stated a-priori must-not-appear: 'computer' was NOT one; see note)"
+  ],
+  "result": "checks.py: exit 0, ALL CHECKS PASS (40 assertions). The two term findings are judgement calls, so checks.py prints them as INFO rather than asserting them.",
+  "mechanical": {
+   "key_parity": "13/13, identical order",
+   "placeholders": "none on either side — nothing to drift",
+   "icu": "none on either side",
+   "duplicate_keys": "none",
+   "formal_address": "none (usted/ustedes/vosotros absent); tu-form imperatives present: Comprueba, Actualiza, vuelve, recarga",
+   "sentence_final_punctuation": "preserved on all 13",
+   "account_policy_labels_absent": "verified — 0 hits for all five shipped labels and for all six policy-option stems",
+   "computer_renderings": "11/17 en values ship as 'máquina' (7 of those inside relay.*); 5/17 use 'equipo', all five in this namespace; 1 pre-existing outlier in wire.errors.notifications.store_full"
+  },
+  "failures": "None from the script. Two findings are semantic (equipo/relay); one is a nit (policy noun)."
+ },
+ "artifacts": [
+  "report.md",
+  "audit.log",
+  "checks.py"
+ ],
+ "limitations": [
+  "LLM semantic judgement, not native-speaker attestation.",
+  "No rendered frame was captured; width judgements use rich.cells.cell_len against the shipped relay corpus, and none of the three audited sidecars declares maxCells.",
+  "The target catalogue is untracked, so this binding is to on-disk bytes and any further edit invalidates it; no copy of these bytes is retained elsewhere.",
+  "The audit model is an auto-routing alias; the concrete backend is not identifiable."
+ ]
+}

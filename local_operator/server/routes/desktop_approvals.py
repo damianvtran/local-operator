@@ -30,6 +30,7 @@ HTTP alone.
 from __future__ import annotations
 
 import asyncio
+import re
 from pathlib import Path
 from typing import Any
 
@@ -83,6 +84,35 @@ def _http_refusal(error: MeshRefusal) -> Exception:
         # refusal, so existing clients see the body they always did.
         body["apply_outcome"] = outcome
     return HTTPException(status, body)
+
+
+def _crash_facts(error: BaseException) -> tuple[str, str]:
+    """The onboarding step a crash came from, and the kind of exception it was.
+
+    WHAT THIS FIXES. The onboarding runner is run in a worker thread; anything
+    that escapes it lands in ``run_onboard``'s catch-all, which used to record a
+    single canned row with ``step="worker"`` — a name that is not one of
+    ``onboard.STEP_NAMES`` — and no cause at all. A run that died inside
+    ``join`` was then indistinguishable, from every surface except the raw JSON
+    store, from a credential-helper or store-write crash, and the durable
+    receipts could not say which step had been reached.
+
+    SANITISED BY CONSTRUCTION. ``str(exc)`` is never read: an exception message
+    can carry a filesystem path, a credential reference, an SSH command line or
+    a remote host's output. Only an identifier-shaped class name and a step
+    name from the runner's own vocabulary leave this function, and ``worker``
+    stays the fallback for a crash that never came from a step (claim release,
+    a store write), so the historical row is still what such a crash records.
+    """
+    from local_operator.network import onboard
+
+    step = str(getattr(error, "step", "") or "")
+    if step not in onboard.STEP_NAMES:
+        step = "worker"
+    cause = str(getattr(error, "cause_type", "") or type(error).__name__)
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", cause):
+        cause = "exception"
+    return step, cause
 
 
 async def _local(request: Request, work: Any) -> Any:
@@ -237,10 +267,14 @@ async def run_onboard(request: Request, approval_id: str):
         def admit():
             root = bound_root(_root(request))
             claim = onboard.approval_run(approval_id, root=root)
-            view = claim.__enter__()
-            return root, claim, view
+            # ``approval_run`` yields a TargetLease that holds the signed
+            # admission view. The per-target claim lives inside it and is
+            # released BY the run just before it publishes an outcome
+            # (onboard.TargetLease), so a retry that reads "run finished" is
+            # never refused on a claim the run has already stopped needing.
+            return root, claim, claim.__enter__()
 
-        root, claim, view = await asyncio.to_thread(admit)
+        root, claim, lease = await asyncio.to_thread(admit)
         tasks = getattr(request.app.state, "mesh_onboard_tasks", None)
         if tasks is None:
             tasks = request.app.state.mesh_onboard_tasks = {}
@@ -249,20 +283,37 @@ async def run_onboard(request: Request, approval_id: str):
             try:
                 operation = asyncio.create_task(
                     asyncio.to_thread(
-                        onboard._execute_admitted_approval, approval_id, view=view, root=root
+                        onboard._execute_admitted_approval,
+                        approval_id,
+                        view=lease.view,
+                        root=root,
+                        release_target=lease.release,
                     )
                 )
                 await join_owned(operation)
-            except Exception:
+            except Exception as crash:
                 # Never publish raw SSH/secret-store exception text. A crash is
                 # recorded as failed (same card may retry), not left live forever.
+                # It DOES name what died: the step it escaped from and its
+                # exception class (see onboard.OnboardStepCrash). Before that,
+                # this row was the only evidence a crashed run left and it said
+                # neither.
+                step, cause = _crash_facts(crash)
+                # Same ordering as every other outcome: the target is free
+                # before the terminal row becomes readable.
+                lease.release()
                 await asyncio.to_thread(
                     onboard_approvals.finish,
                     approval_id,
                     "failed",
-                    view.run_id,
-                    step="worker",
-                    detail="Setup worker did not finish; check the receipts before retrying",
+                    lease.view.run_id,
+                    step=step,
+                    # i18n: ignore runtime diagnostic: the suffix is a step name
+                    # and an exception class, never user copy
+                    detail=(
+                        "Setup worker did not finish; check the receipts before retrying "
+                        f"(step {step}, {cause})"
+                    ),
                     root=root,
                 )
             finally:

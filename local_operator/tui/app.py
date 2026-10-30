@@ -12701,6 +12701,16 @@ class OperatorApp(App[None]):
         # splash once it lands (the read SKIPPED the row while the import
         # was in flight — see `tui/quota_notice`).
         self.run_worker(self._prewarm_quota_notice(), thread=False, group="quota-prewarm")
+        # THE TEAM BRIDGE RECEIVER CATCH-UP, the TUI's share of "every surface".
+        # A TUI does not host `lop serve` (its sessions are detached runtimes and
+        # the app never reaches ``server/app.py``'s lifespan), so a machine whose
+        # only surface is a terminal would otherwise never place the receiver
+        # that delivers bridge messages while nobody is looking. Same helper,
+        # same guards, same lock as the serve lifespan; a worker, so the
+        # supervisor's subprocess calls never touch the paint loop.
+        self.run_worker(
+            self._bridge_receiver_catch_up(), thread=False, group="bridge-receiver-catch-up"
+        )
         # An empty transcript is the boot layout's whole precondition, and the
         # session starts empty — so the app opens in it. Set here rather than in
         # the stylesheet's base rules because this is state, not style: it is the
@@ -14282,6 +14292,22 @@ class OperatorApp(App[None]):
                 pass  # a failed probe is the old deferred behaviour, not a crash
 
         self.run_worker(_run(), exclusive=False)
+
+    async def _bridge_receiver_catch_up(self) -> None:
+        """Run the shared receiver catch-up for this TUI's config root.
+
+        ``catch_up_at_surface_start`` never raises; the ``try`` keeps an import
+        failure (a partial install) from surfacing as a worker error on screen.
+        """
+        try:
+            from local_operator.paths import config_dir
+            from local_operator.team_bridge.connector.install import (
+                catch_up_at_surface_start,
+            )
+
+            await catch_up_at_surface_start(config_dir(), surface="tui")
+        except Exception:  # noqa: BLE001 — a surface start never fails for this
+            pass
 
     async def _boot_session(self) -> None:
         """Await the session factory; on failure surface + offer /reload."""
@@ -41917,6 +41943,14 @@ class OperatorApp(App[None]):
         """
         message.stop()
         try:
+            if message.key == "team_bridge.enabled":
+                # Terminal writes bypass the HTTP settings route; use the same
+                # guarded sync on this explicit event so Turn off stops it now.
+                self.run_worker(
+                    self._bridge_receiver_catch_up(),
+                    thread=False,
+                    group="bridge-receiver-setting",
+                )
             if message.key == "tui.theme" and message.value:
                 self._apply_theme(str(message.value))
             elif message.key in (

@@ -1136,6 +1136,25 @@
       },
       "status": "passed",
       "note": "PR #3088 width rewrite, re-audited at the committed bytes. 11 of 52 values rewritten by i18n-translator (session 137c362d5bba) (actual model radienthq/auto; provider-quota fallback); round-1 audit 86c035febe3e-slash-vi rejected the shortened bytes (0B/2M/5m/4n) and round-2 independent audit f3ea10304234-slash2-vi on the new bytes passed 0B/0M/1m/4n. target sha256 d228f91dad840c65253a5d46919cb99c0cb0eaa21c99d315e79f55f8490dfc23; en source unchanged (b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202). Evidence: i18n/audits/evidence/vi/wire.slash/vi29s2/record.json (receipt.json + verdicts copied verbatim). Previous rows for this pair described audits of the pre-rewrite values and are superseded."
+    },
+    {
+      "locale": "vi",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "f029ae6953f2fce31d126e7315beaf120bc63da0fc7398fbc6b31413b962222f",
+      "translator": {
+        "agent": "tb-setup-i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": "tb-setup-i18n-audit (reviewer role, independent of implementer and translator)",
+        "model": "radient/auto",
+        "date": "2026-10-28",
+        "result": "passed",
+        "findings": 5
+      },
+      "status": "passed",
+      "note": "Round 4 scope reduction: `lop team-bridge setup` no longer grants consent (it is granted in the Local Operator app only, #3022's bearer boundary). Copy change audited at source_sha256 f029ae6953f2fce31d126e7315beaf120bc63da0fc7398fbc6b31413b962222f: 5 keys deleted (setup.credential/account/tenant/consent/session), 7 added (setup.consent_ui_required/consent_ui_next/enable_in_app_required/designation_missing/ready/not_ready/failed), 2 updated (help.setup, outcome.not_wanted_hint). Independent audit (reviewer role, distinct agent and context from both the implementer and the translator): verdict clean, 0 blocker, 0 major, 1 minor + 4 nit, all applied (hi verbal predicate 'सेटअप हो चुके हैं'; ru agreement 'готовы' and 'предоставляется' for consent; zh-CN '就位' for the receiver and an explicit machine object in enable_in_app_required). The load-bearing sentence keeps all four elements in every locale: consent is granted in the app, NOT from a terminal, open the app once, enable agent messages."
     }
   ]
 }

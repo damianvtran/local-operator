@@ -174,7 +174,11 @@ class FrameFacts:
     missing_ids: list[str]
     generation: str
     source: tuple[int, int, float]
-    summary: FrameSummary
+    #: The tail summary the frame path needs for its head hunt. ``None`` for the
+    #: order-only projection (:func:`order_facts`), which publishes no runs: a
+    #: surface that reads ``runs`` never takes that path, and a fabricated summary
+    #: would be a statement about a scan this read never performed.
+    summary: FrameSummary | None = None
 
 
 def _token_for(values: dict[str, Any]) -> str:
@@ -741,6 +745,116 @@ def summary(root: str | Path, sid: str, source: tuple[int, int, float] | None) -
     return _read(root, sid, select)
 
 
+def _projected_rows(
+    db: sqlite3.Connection, ids: list[str], collected_ids: list[str]
+) -> dict[str, int]:
+    """The ordinals this publication proves for ``ids``, bounded by input size.
+
+    THE ONE SPELLING of the identity half of a companion read, shared by
+    :func:`frame_facts` and :func:`order_facts`: chunked by the identities the
+    CALLER asked about, never by history. A collected identity the projection does
+    not hold rejects the whole read, because a page this derivation never
+    witnessed is a page joined to the wrong journal.
+    """
+    rows: dict[str, int] = {}
+    for start in range(0, len(ids), 128):
+        chunk = ids[start : start + 128]
+        slots = ",".join("?" for _ in chunk)
+        rows.update(db.execute(f"SELECT id,seq FROM nodes WHERE id IN ({slots})", chunk))
+    if any(id_ not in rows for id_ in collected_ids):
+        raise ValueError("page identity missing from projection")
+    return rows
+
+
+def order_facts(
+    root: str | Path,
+    sid: str,
+    *,
+    collected_ids: list[str],
+    order_ids: list[str],
+    source: tuple[int, int, float] | None,
+) -> Result:
+    """The journal-order half of the projection, for a read that serves no runs.
+
+    WHY THIS EXISTS BESIDE :func:`frame_facts`. ``journal_order=1`` is its own
+    capability (``features.journal_order``) and history, snapshot and events all
+    accept it WITHOUT ``open_frame=1`` — a renderer older than the open frame
+    declares only this one. Those reads have no page bounds and no ``runs``
+    payload, but they need the same two facts: the caller's own identities'
+    ordinals, and the opener closure of the rows it serves. Both are rows the
+    companion already holds.
+
+    WITHOUT THIS DOOR the warm open answers ``building`` and reconciles later,
+    because the only other source is a resident index and a process that has just
+    started holds none. Measured on a 36.5 MB journal with a warm companion on
+    disk and a fresh process: ``GET /v1/desktop/sessions/{id}?journal_order=1``
+    (the renderer's first paint) answered ``journal_order_state: "building"``
+    with 0 ordinals in 8.7 ms, while this projection's sibling read of the SAME
+    store answered ``ready`` with 9 ordinals in 5.3 ms.
+
+    THE RULES ARE NOT RESTATED HERE. ``ti.journal_order_opener`` decides which
+    opening user a coordinate may carry and ``apply_order`` narrows the answer to
+    what the caller actually serves — the same two helpers the resident join and
+    the frame path use. This function only supplies their inputs.
+    """
+
+    def select(db: sqlite3.Connection, pub: Publication, meta: dict[str, Any]) -> FrameFacts:
+        if source is None or source != pub.signature:
+            raise ValueError("page/source mismatch")
+        ids = list(dict.fromkeys(collected_ids + order_ids))
+        rows = _projected_rows(db, ids, collected_ids)
+        records: dict[int, ti.RunRecord] = {}
+        # The CONTAINING run of every identity, which is what the opener rule
+        # reads: real run membership at an exact ordinal, never a last-user guess.
+        for seq in list(rows.values()):
+            row = db.execute(
+                "SELECT position,payload FROM runs WHERE first_seq<=? "
+                "ORDER BY first_seq DESC,position DESC LIMIT 1",
+                (seq,),
+            ).fetchone()
+            if row is not None:
+                records[row[0]] = _run(row[1])
+        # An opener's own coordinate has to be IN this projection before the pair
+        # can be proved, so it is added and its containing run resolved in the
+        # same pass — the order the frame path uses, for the same reason.
+        for run in list(records.values()):
+            if run.opening_user_id:
+                row = db.execute(
+                    "SELECT seq FROM nodes WHERE id=?", (run.opening_user_id,)
+                ).fetchone()
+                if row:
+                    rows[run.opening_user_id] = row[0]
+        messages: dict[int, ti.MessageDoc] = {}
+        for seq in set(rows.values()):
+            row = db.execute("SELECT id,role,injected FROM nodes WHERE seq=?", (seq,)).fetchone()
+            if row and row[1] is not None:
+                messages[seq] = ti.MessageDoc(row[0], 0.0, row[1], "", bool(row[2]), seq)
+        selection = FrameSelection(
+            [],
+            [records[n] for n in sorted(records)],
+            [messages[n] for n in sorted(messages)],
+            rows,
+            meta["journal_generation"],
+        )
+        openers: dict[str, tuple[str, int]] = {}
+        for id_ in ids:
+            if id_ in rows:
+                opener = ti.journal_order_opener(selection, id_, rows[id_])
+                if opener:
+                    openers[id_] = opener
+        return FrameFacts(
+            [],
+            {id_: rows[id_] for id_ in ids if id_ in rows},
+            {id_: rows[id_] for id_ in order_ids if id_ in rows},
+            openers,
+            [id_ for id_ in order_ids if id_ not in rows],
+            meta["journal_generation"],
+            pub.signature,
+        )
+
+    return _read(root, sid, select)
+
+
 def frame_facts(
     root: str | Path,
     sid: str,
@@ -762,14 +876,13 @@ def frame_facts(
         if source is None or source != pub.signature:
             raise ValueError("page/source mismatch")
         ids = list(dict.fromkeys(collected_ids + order_ids))
-        rows: dict[str, int] = {}
+        rows = _projected_rows(db, ids, collected_ids)
         checkpoints: list[ti.Checkpoint] = []
         # Chunk by input identities, not history. Checkpoint duplicate IDs follow
         # the canonical dict's LAST-position policy without truncating manifests.
         for start in range(0, len(ids), 128):
             chunk = ids[start : start + 128]
             slots = ",".join("?" for _ in chunk)
-            rows.update(db.execute(f"SELECT id,seq FROM nodes WHERE id IN ({slots})", chunk))
             for (payload,) in db.execute(
                 # LAST position wins for a duplicate id, matching the canonical
                 # dict's own construction (``{c.id: c.seq}`` over the list).
@@ -781,8 +894,6 @@ def frame_facts(
                 if checkpoint is None:
                     raise ValueError("invalid checkpoint projection")
                 checkpoints.append(checkpoint)
-        if any(id_ not in rows for id_ in collected_ids):
-            raise ValueError("page identity missing from projection")
         tail = _summary(db, pub, meta)
         records: dict[int, ti.RunRecord] = {}
 

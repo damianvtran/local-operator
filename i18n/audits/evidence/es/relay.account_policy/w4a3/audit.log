@@ -1,0 +1,65 @@
+# Audit log — es / relay.account_policy / round 2 (`w4a3`)
+
+Auditor: translation-auditor (lopdev team), session 8eb3b9c9a687, lane es-w4-auditor-b
+Model: radient/auto (self-reported). Primary is anthropic/claude-sonnet-5-5; provider-failure
+switches fired on quota before the catalogues were read (openai/gpt-6-astra, kimi/k3.1-pro, then
+radient/auto). Disclosed fallback. This round began after a session-runtime restart wiped the
+working context, so everything below was re-derived from disk rather than recalled.
+Date: 2026-10-29.
+Supersedes: the `w4a2` audit of the five remediation keys; superseded target sha256 `074787ece57a27646c766deb3b7691979c233259c1f05987c5c79770e8f31204`.
+
+## 1. Orientation — read-only
+
+    cd ~/lo-i18n-es && git rev-parse HEAD
+    -> 183f7a0537e4cee42fd82f25a21fe52953a81bdf
+    git status --porcelain -- .../es/relay.account_policy.json .../es/relay.library.json .../es/relay.login.json
+    -> ?? .../relay.account_policy.json
+       ?? .../relay.library.json
+       ?? .../relay.login.json        (all three still UNTRACKED)
+
+    shasum -a 256:
+      relay.account_policy.json  67dbbf6a3bc75058b38f40a076de852c86c7d58004e938b43019513280e2a407
+      relay.library.json         0933a66475cf6b9b74bbf3befa849296f3fd5014a3707f27f451b6476b85e8bf
+      relay.login.json           b6e676acdc5cbb9a85423c458a19a5d6e5bc35594eb1dd21b23569af32f29658
+
+`relay.login` hashes IDENTICALLY to its w4a2 value, which is the mechanical proof that it was
+untouched and that its w4a2 record still binds. It is not audited again here.
+
+## 2. Mechanical pass
+
+    python3 i18n/audits/evidence/es/relay.account_policy/w4a3/checks.py
+
+    exit 0 — ALL CHECKS PASS (19 assertions)
+
+    PASS  remediation delta is exactly the five claimed keys :: changed=['rejected','saved','scope','title','unavailable']
+    PASS  no 'equipo' left in the namespace
+    PASS  team sense survives: cli.teams_help=26, tui.team_authoring=14
+    PASS  no team namespace gained 'máquina' :: []
+    PASS  error still states UNCONFIRMED, not failed
+    PASS  rejected still states not-saved
+    PASS  AP-02 known-open: 'relay' still English
+
+## 3. What was read
+
+- The five changed values, each read against its superseded text and the English source.
+- The eight unchanged values, diffed against the superseded map: character-for-character identical,
+  so their w4a2 judgements carry forward.
+- The `en` source and sidecar (unchanged, same sha256 as w4a2) re-read in full — 13 keys.
+- A value-only `equipo` census across every es catalogue, to test both directions of the fix:
+  no `equipo` left in this namespace, and no team namespace that lost its `equipo` or gained `máquina`.
+
+## 4. Judgement
+
+**PASSED.** es-w4a2-AP-01 closed by measurement (no `equipo` in the file; delta exactly the five
+keys; team sense intact at 26/14/6/5/3/2 and unchanged elsewhere). Widths: title 21 cells (+23.5%),
+saved 25, unavailable 116, scope 43, rejected 95 — no maxCells declared, no truncation risk.
+
+Still open, non-gating and reported rather than dropped:
+- es-w4a2-AP-02 (minor) — `unavailable` keeps English "relay" where glossary line 59 says `relé`.
+- es-w4a2-AP-03 (nit) — `save` says "Guardar política" vs shipped "Política de cuentas".
+
+## 5. Writes
+
+`record.json`, `report.md`, `audit.log`, `checks.py` in this directory. Nothing else. No catalogue,
+sidecar, ledger, allowance, guide or generated file touched; no git write; no file deleted, moved or
+renamed.

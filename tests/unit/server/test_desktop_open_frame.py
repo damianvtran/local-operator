@@ -13,6 +13,7 @@ touched.
 from __future__ import annotations
 
 import asyncio
+import gc
 import time
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,7 @@ from local_operator.server.utils.desktop_sessions import (
     DesktopSessionBridge,
     DesktopSessions,
 )
+from local_operator.session import index_read_model
 from local_operator.session import transcript_index as ti
 from local_operator.session.transcript import (
     TRANSCRIPT_FILENAME,
@@ -1294,3 +1296,231 @@ async def test_an_append_warm_reopen_still_reaches_final_runs(tmp_path: Path) ->
             # branch used to compare itself against steady unconditionally, which
             # made the test fail for the very answer it permits (round-3 M1).
             assert first["runs"] == [], "a building frame carried facts"
+
+
+# ---------------------------------------------------------------------------
+# journal_order=1 ON ITS OWN: the flag a renderer older than the open frame sends
+# ---------------------------------------------------------------------------
+
+
+def _order_params(ids: list[str], limit: int = 50) -> dict[str, Any]:
+    """The page a client asks for when it declares ONLY journal order."""
+    return {"limit": limit, "journal_order": 1, "order_ids": ids}
+
+
+@pytest.mark.asyncio
+async def test_a_warm_plain_journal_order_first_frame_is_ready(tmp_path: Path) -> None:
+    """THE FIRST PAINT, FOR THE FLAG THAT HAS NO ``open_frame`` TWIN.
+
+    ``journal_order=1`` is its own capability, and a renderer that declares it
+    without ``open_frame=1`` reaches a page built with no runs and no bounds. That
+    read is answered from the read-model companion now; before it was answered
+    from a resident index alone, so a process that had just started said
+    ``building`` and reconciled later — the after-paint change the capability
+    exists to remove. The resident join is the control: same store, same request,
+    and the two payloads must be identical, opener closure included.
+    """
+    async with _Harness(tmp_path) as harness:
+        harness.seed(turns=6)
+        index = ti.refresh_index(harness.root, harness.session_id)
+        assert index is not None
+        _publish(harness.root, harness.session_id, index)
+        ids = ["ans05", "user05"]
+        ti._reset_for_tests()  # a fresh process: the companion is the only source
+        assert harness.client is not None
+        url = f"/v1/desktop/sessions/{harness.session_id}/history"
+        projected = (await harness.client.get(url, params=_order_params(ids))).json()["result"]
+        assert projected["journal_order_state"] == "ready", projected.get("journal_order_state")
+        assert all(row.get("journal_seq") is not None for row in projected["entries"])
+        assert projected["journal_ordinals"], projected
+        assert projected["journal_generation"]
+
+        ti._remember(
+            ti._key(harness.root, harness.session_id),
+            index,
+            ti.index_path(harness.root, harness.session_id).stat().st_mtime,
+        )
+        control = (await harness.client.get(url, params=_order_params(ids))).json()["result"]
+        assert control["journal_order_state"] == "ready"
+        assert projected == control, "the companion's page differs from the resident join"
+
+
+@pytest.mark.asyncio
+async def test_a_cold_plain_journal_order_still_answers_building(tmp_path: Path) -> None:
+    """Nothing published: the answer is today's, not an invented ``ready``."""
+    async with _Harness(tmp_path) as harness:
+        harness.seed(turns=6)
+        ti._reset_for_tests()
+        assert harness.client is not None
+        url = f"/v1/desktop/sessions/{harness.session_id}/history"
+        first = (await harness.client.get(url, params=_order_params(["ans05"]))).json()["result"]
+        assert first["journal_order_state"] == "building"
+        assert not first.get("journal_ordinals")
+        assert not first.get("journal_generation")
+        assert all(row.get("journal_seq") is None for row in first["entries"])
+
+
+@pytest.mark.asyncio
+async def test_a_missing_companion_plain_journal_order_degrades_to_building(
+    tmp_path: Path,
+) -> None:
+    """An older or swept companion is not an error and never a fabricated fact."""
+    async with _Harness(tmp_path) as harness:
+        harness.seed(turns=6)
+        index = ti.refresh_index(harness.root, harness.session_id)
+        assert index is not None
+        _publish(harness.root, harness.session_id, index)
+        index_read_model.header(harness.root, harness.session_id).value.path.unlink()
+        ti._reset_for_tests()
+        assert harness.client is not None
+        url = f"/v1/desktop/sessions/{harness.session_id}/history"
+        first = (await harness.client.get(url, params=_order_params(["ans05"]))).json()["result"]
+        assert first["journal_order_state"] == "building"
+        assert not first.get("journal_ordinals")
+
+
+@pytest.mark.asyncio
+async def test_an_append_after_publish_yields_the_appended_rows_coordinates(
+    tmp_path: Path,
+) -> None:
+    """THE APPEND PATH IS THE RISKY ONE, so it is pinned through the real route.
+
+    A companion published for the PREVIOUS journal is stale for the suffix. The
+    read must not answer ``ready`` from it, and it must not answer a coordinate
+    for a row that projection never derived: the first frame either carries the
+    appended rows' ordinals (the refresh landed inside the budget) or says
+    ``building`` with none of them — and the settled frame then carries them all.
+    """
+    async with _Harness(tmp_path) as harness:
+        harness.seed(turns=3)
+        index = ti.refresh_index(harness.root, harness.session_id)
+        assert index is not None
+        _publish(harness.root, harness.session_id, index)
+        directory = harness.root / "sessions" / harness.session_id
+        await Transcript(directory).append_message(
+            Message(role="user", content=[TextContent(text="after the publication")])
+        )
+        await Transcript(directory).append_message(
+            Message(role="assistant", content=[TextContent(text="answered")])
+        )
+        ti._reset_for_tests()
+        assert harness.client is not None
+        url = f"/v1/desktop/sessions/{harness.session_id}/history"
+        ids = ["ans02", "user02"]
+        first = (await harness.client.get(url, params=_order_params(ids))).json()["result"]
+        # The refresh the first read started is what carries the appended rows;
+        # poll it in rather than assuming one round trip is enough. ``steady``
+        # starts as the answer already in hand so the assertion below reads a
+        # value even if the loop's own body never runs.
+        steady: dict[str, Any] = first
+        for _ in range(200):
+            steady = (await harness.client.get(url, params=_order_params(ids))).json()["result"]
+            if steady["journal_order_state"] == "ready":
+                break
+            await asyncio.sleep(0.05)
+        assert steady["journal_order_state"] == "ready"
+        assert all(row.get("journal_seq") is not None for row in steady["entries"])
+        if first["journal_order_state"] == "ready":
+            assert first["entries"] == steady["entries"], "a ready frame served stale rows"
+        else:
+            assert first["journal_order_state"] == "building"
+            assert not first.get("journal_ordinals"), "a building frame carried coordinates"
+
+
+@pytest.mark.asyncio
+async def test_a_companion_answer_arms_the_resident_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The projection must not become the only source the process ever uses.
+
+    "THE SUITE CANNOT TELL THE FIX FROM ITS ABSENCE" is the failure this test
+    exists for: delete the warm and every assertion below still holds except the
+    two that matter. A page answered from the companion never enters the
+    ``building`` branch, and that branch was the only thing that started a scan —
+    so without the arm the poll loop reopens the companion forever (measured
+    25/25 opens on a 36.5 MB journal, against 1/25 once armed).
+
+    COUNTED, NOT TIMED: the number of companion opens is the mechanism, and it is
+    the one number host load cannot move. ``fresh_resident`` is asserted directly
+    for the same reason.
+    """
+    opens: list[str] = []
+    original = index_read_model.order_facts
+
+    def counted(*args: Any, **kwargs: Any) -> Any:
+        opens.append(str(kwargs.get("order_ids") or args))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(index_read_model, "order_facts", counted)
+    async with _Harness(tmp_path) as harness:
+        harness.seed(turns=6)
+        index = ti.refresh_index(harness.root, harness.session_id)
+        assert index is not None
+        _publish(harness.root, harness.session_id, index)
+        ti._reset_for_tests()  # a fresh process: the companion is the only source
+        assert harness.client is not None
+        url = f"/v1/desktop/sessions/{harness.session_id}/history"
+        params = _order_params(["ans05", "user05"])
+        first = (await harness.client.get(url, params=params)).json()["result"]
+        assert first["journal_order_state"] == "ready"
+        assert opens, "the companion did not serve the first frame at all"
+        for _ in range(200):
+            if ti.fresh_resident(harness.root, harness.session_id) is not None:
+                break
+            await asyncio.sleep(0.02)
+        assert (
+            ti.fresh_resident(harness.root, harness.session_id) is not None
+        ), "a companion answer did not arm the resident scan, so every poll reopens it"
+        after_arm = len(opens)
+        poll = (await harness.client.get(url, params=params)).json()["result"]
+        assert poll["journal_order_state"] == "ready"
+        assert poll["journal_ordinals"] == first["journal_ordinals"]
+        assert (
+            len(opens) == after_arm
+        ), "a poll reopened the companion although the resident index was in hand"
+
+
+@pytest.mark.asyncio
+async def test_a_failing_resident_scan_is_retrieved_and_never_reaches_the_page(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The armed scan is not awaited, so its failure must still be observed.
+
+    ``start_refresh``'s wrapper logs and RE-RAISES, and this caller owns no await
+    on the task: without a done-callback the exception surfaces later as
+    ``Task exception was never retrieved`` at GC — a second, misleading traceback
+    after the page that armed it (review round 2, MAJOR-1). The page must be
+    unaffected either way, which is the other half of the assertion.
+    """
+    loop = asyncio.get_running_loop()
+    unretrieved: list[dict[str, Any]] = []
+    previous = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: unretrieved.append(context))
+
+    async def boom() -> Any:
+        raise RuntimeError("the scan refused to run")
+
+    def failing(*_args: Any, **_kwargs: Any) -> Any:
+        return asyncio.ensure_future(boom()), True
+
+    monkeypatch.setattr(ti, "fresh_resident", lambda *_a, **_k: None)
+    monkeypatch.setattr(ti, "start_refresh", failing)
+    try:
+        async with _Harness(tmp_path) as harness:
+            harness.seed(turns=6)
+            index = ti.refresh_index(harness.root, harness.session_id)
+            assert index is not None
+            _publish(harness.root, harness.session_id, index)
+            ti._reset_for_tests()
+            assert harness.client is not None
+            url = f"/v1/desktop/sessions/{harness.session_id}/history"
+            params = _order_params(["ans05"])
+            page = (await harness.client.get(url, params=params)).json()["result"]
+            assert page["journal_order_state"] == "ready"
+            # Let the armed task finish and die, then look for the leak.
+            for _ in range(20):
+                await asyncio.sleep(0.01)
+                gc.collect()
+            assert not unretrieved, f"the armed scan's failure leaked: {unretrieved}"
+    finally:
+        loop.set_exception_handler(previous)
