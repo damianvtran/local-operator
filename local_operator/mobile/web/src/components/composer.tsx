@@ -672,6 +672,11 @@ export function Composer({
 	   where the insertion left it. A ref because it is an instruction to an
 	   effect, not rendered state. */
 	const pendingCaretRef = useRef<number | null>(null);
+	/* A pick can produce the SAME buffer (tapping the name already typed with a
+	   space after it). `setText` then bails out and the [text] layout effect
+	   never runs, so the caret would stay inside the token and the tray would
+	   stay open. This tick makes the effect run on every pick regardless. */
+	const [caretTick, setCaretTick] = useState(0);
 	/* U5/U8 (mobile UX batch 1): the sheet follows the draft only while the draft
 	   is still the command TOKEN (see `slashTokenOnly`), and once the user has
 	   closed it for this draft it stays closed until the draft is no longer a
@@ -892,7 +897,7 @@ export function Composer({
 		el.focus();
 		el.setSelectionRange(at, at);
 		setCaret(at);
-	}, [text]);
+	}, [text, caretTick]);
 
 	const disabled = false;
 
@@ -1473,6 +1478,7 @@ export function Composer({
 		applyUserEdit(next.text);
 		setText(next.text);
 		pendingCaretRef.current = next.caret;
+		setCaretTick((tick) => tick + 1);
 	};
 
 	/* `display: contents` is load-bearing, not decoration: the tray has to be a

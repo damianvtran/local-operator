@@ -207,6 +207,19 @@ describe("the skill tray", () => {
 		expect(field.selectionEnd).toBe(17);
 	});
 
+	it("restores the caret even when the pick leaves the text byte-identical", async () => {
+		const field = mount();
+		type(field, "please $research now", 10);
+		await waitFor(() => expect(tray()).toBeTruthy());
+		const row = within(tray() as HTMLElement).getByText("$research");
+		fireEvent.pointerDown(row, { pointerId: 3, clientX: 12, clientY: 400 });
+		fireEvent.pointerUp(row, { pointerId: 3, clientX: 12, clientY: 400 });
+
+		expect(field.value).toBe("please $research now");
+		expect(field.selectionStart).toBe(17);
+		await waitFor(() => expect(tray()).toBeNull());
+	});
+
 	it("does not pick when the finger is dragging the list to scroll", async () => {
 		const field = mount();
 		type(field, "please $res now", 10);
