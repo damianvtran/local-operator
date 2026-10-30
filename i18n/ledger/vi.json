@@ -1233,6 +1233,27 @@
       },
       "status": "passed",
       "note": "Independent audit of PR #3198 (team-bridge probe_suspected owner notification) at source_sha256 1eee3ff395d8a346dee9574283af593c36a0953c4798db0077446e1903770707 (catalogue_sha256 and raw sha256 agree). Copy change: 2 keys added (notify.probe_suspected_title, notify.probe_suspected_body); 0 deleted, 0 updated; the other 53 keys are unchanged since the PR #3189 passed row and were not re-audited. Checked against the en context notes: same sender, last day, possibly across conversations; testing what the agent accepts; sender no longer told why; no claim the sender was notified/blocked; no conversation named. Mechanical: key parity 55/55; no placeholders; NFC; no Cf/bidi controls; rendered through messages.render after regeneration. Translator (PR #3198 coder) and auditor are distinct agents in separate sessions, same model family (disclosed). vi: 1 major, fixed: 'tác tử' used for agent; glossary and this namespace use 'tác nhân' (title prefix 'Tin nhắn tác nhân'); replaced in title and body. Unresolved blocker/major: 0. Evidence: i18n/audits/evidence/vi/cli.team_bridge/tbp3198/record.json"
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.tool_rows.bridge",
+      "source_sha256": "58e76cb3bf5872c644ad83502f9efd0e5ca304d738cfe5f430c6a04ca192ef1c",
+      "target_sha256": "7245e88afddefb102013a5869363b03fc899ec0bbe6b36b2c73158ba329b7401",
+      "translator": {
+        "agent": "i18n-translator (lopdev, PR #3203): round 1 initial 85-key catalogue (88519fb5507); delta round 2: 13 added keys + 3 shared_history rewrites + expanded.details case (4d36287022e)",
+        "model": "round 1 radient/auto (provider fallback); round 2 anthropic/claude-opus-5-5",
+        "date": "2026-10-30"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team, audit-vi, session c3ef611146c0), independent of both translator rounds; edited only the vi findings below",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback)",
+        "date": "2026-10-30",
+        "result": "passed",
+        "findings": 2,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "PR #3203 Team Bridge tool rows: all 85 keys of wire.tool_rows.bridge read against en + context sidecar, glossary and vi style guide, and against the desktop's ui.chat.canonical.tool_row.bridge.* vi copy (65 paired keys byte-identical after the fixes). Findings (both fixed in these bytes, same fix applied in the desktop catalogue; target hash is the fixed file): VI-B1 MINOR outcome.unconfirmed, expanded.unconfirmed, expanded.unconfirmed_bare 'chưa xác nhận gửi' reads as 'have not confirmed sending' (a pending confirm step), not 'delivery not confirmed' -> 'chưa xác nhận đã gửi' (20 cells, budget 32; outcome_short stays 'chưa xác nhận'). VI-B2 MINOR verb_*.ack_done 'trả lại' means 'return/give back' (reads as bouncing the message to its sender); the op releases this session's own claim -> 'Đã nhả'/'Đang nhả'/'Không thể nhả', the lock-release verb, pairing with claim 'nhận xử lý'. Recorded, not changed: target.dm 'một người' (zh-CN '对方' does the same; 'Đã nhắn cho một người' is idiomatic where 'một tin nhắn trực tiếp' would not take 'nhắn cho'); take_up 'mở' (fetch/open the body; 'nhận' is taken by claim); directory 'danh sách thành viên'; thread 'luồng' and reaction 'cảm xúc' match ui.teamBridge. Mechanical: key parity 85/85; ICU argument parity via runtime.message_arguments, 0 mismatches; 109 sentinel renders through local_operator.i18n.runtime with vi rules, 0 lost args; plurals other-only (+=0 kept) at 0/1/2/3/5/11/21/22/1e6 ('1.000.000 tin nhắn'); all maxCells keys within budget (rich cell_len); NFC, no Cf/bidi. bạn register not exercised; no pronoun drift. check.py --catalogues-only: 0 problems. Unresolved blocker/major: 0."
     }
   ]
 }
