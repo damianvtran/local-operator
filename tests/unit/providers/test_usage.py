@@ -1537,6 +1537,21 @@ async def test_anthropic_non_zero_five_hour_without_a_reset_is_kept() -> None:
     assert ids[0] == "anthropic:5h"
 
 
+@pytest.mark.asyncio
+async def test_anthropic_idle_five_hour_as_the_only_window_gives_no_report() -> None:
+    """Pins the documented edge consequence: with the idle bucket and idle
+    ``session`` entry as the ONLY data, nothing measurable remains, so the
+    fetcher returns no report (``/usage`` unavailable, policy ``unknown``)
+    instead of a "5 hour 0%" row that proves no headroom."""
+    body = _verified_ultra_body()
+    del body["seven_day"]
+    body["limits"] = [entry for entry in body["limits"] if entry["kind"] == "session"]
+    client = _client_for(body)
+    async with client:
+        report = await fetch_usage(client, "anthropic", access_token="tok")
+    assert report is None
+
+
 #: A real ``/backend-api/wham/usage`` body for a ChatGPT Pro account, matching
 #: the live response verified on 2026-08-08 (windows nested under ``rate_limit``,
 #: per-model caps under ``additional_rate_limits``).

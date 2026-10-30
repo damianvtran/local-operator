@@ -40,11 +40,12 @@ and model-family quota window gates eligibility.
 - `reset-soonest` (new default): prefer the nearest included-plan weekly refill.
   Accounts within **60,000ms inclusive** of the fixed earliest deadline tie; use
   their five-hour deadlines (where the account reports a five-hour window) with
-  the same fixed-minimum tolerance, then stable session hashing. This is not transitive neighbour chaining. All relevant caps
-  must still have capacity: one window reopening is only an opportunity to
-  recheck another spent cap, not proof the account is healthy. If several
-  applicable weekly windows exist, the earliest future refill is the next
-  useful preference; every other overlapping allowance still gates eligibility.
+  the same fixed-minimum tolerance, then stable session hashing. This is not
+  transitive neighbour chaining. All relevant caps must still have capacity: one
+  window reopening is only an opportunity to recheck another spent cap, not
+  proof the account is healthy. If several applicable weekly windows exist, the
+  earliest future refill is the next useful preference; every other overlapping
+  allowance still gates eligibility.
 - `headroom`: retain the cached-quota preference, spreading accounts within ten
   percentage points of the most remaining headroom.
 - `fair`: use a stable per-session spread, without ranking reset or headroom

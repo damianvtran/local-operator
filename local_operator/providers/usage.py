@@ -1224,8 +1224,9 @@ def _anthropic_live_five_hour(
     """The five-hour bucket, or ``None`` when it describes no running window.
 
     Anthropic removed the five-hour window for verified Ultra accounts
-    (support.claude.com/en/articles/17728952, 2026-10-30), but the usage
-    endpoint did not drop the key: measured live on verified Ultra accounts it
+    (support.claude.com/en/articles/17728952; payload measured 2026-10-30),
+    but the usage endpoint did not drop the key: measured live on verified
+    Ultra accounts it
     still sends ``five_hour: {"utilization": 0.0, "resets_at": null, ...}`` and
     a ``limits[]`` ``session`` entry at ``percent: 0`` with ``resets_at: null``
     and ``is_active: false``. The payload carries no plan, tier or verification
@@ -1244,6 +1245,13 @@ def _anthropic_live_five_hour(
     a request opens the window. That row carried no constraint information —
     nothing used, nothing to wait for. Non-zero utilization is always kept,
     even without a reset, and so is any bucket that names a reset.
+
+    Edge consequence: a payload whose ONLY window is the idle five-hour bucket
+    (no weekly, model-scoped or extra-usage data) now yields no report at all —
+    ``/usage`` shows the account as unavailable and ``reset_candidate`` reads
+    it as ``unknown`` rather than ``healthy``. Accepted because no current plan
+    sends that shape, ``unknown`` still routes through the neutral tie pool,
+    and a 0%/no-reset bucket proves no headroom anyway.
     """
     if bucket is None:
         return None
@@ -1473,7 +1481,9 @@ async def fetch_anthropic_oauth(client: httpx.AsyncClient, access_token: str) ->
     The five-hour window is not universal: verified Ultra accounts have none,
     and the endpoint reports that as an idle 0%/no-reset bucket rather than
     omitting it (see ``_anthropic_live_five_hour``), so no ``anthropic:5h`` row
-    is emitted for it.
+    is emitted for it. An idle Max or unverified-Ultra account, whose window
+    has not started yet, sends the same shape and likewise gets no row, so a
+    missing ``anthropic:5h`` row does not by itself mean verified Ultra.
     """
     payload = await _get_json(client, ANTHROPIC_USAGE_URL, _bearer(access_token))
     if payload is None:
