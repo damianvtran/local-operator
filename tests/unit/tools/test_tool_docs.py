@@ -367,9 +367,20 @@ MEASURED_TOKENS: dict[str, int] = {
     # inspect_ownership operation adds 19 opt-in tokens, not wire prompt cost.
     # 1327 -> 1424 (2026-10-16): the browser `type` secret_ref convention adds
     # the field's own description to the doc — the deliberate cost of the value
-    # never appearing in the transcript (incident: a literal password in `type`
-    # reached a subagent's transcript, where no shape pass could see it).
-    "browser": 1655,
+    # never appearing in the transcript (a literal password in `type` reached a
+    # subagent's transcript, where no shape pass could see it).
+    # 1655 -> 1801 (browser recording, D8, +146): two ops (`record_start`,
+    # `record_stop`) and one note. The note replaces the prose the guide carries
+    # in full (the AV1 caveat, the approval-before-capture rule, the desktop-only
+    # host), and the fixed caps/limits live in `guide://browser` instead of here.
+    # The schema must advertise the pair or the feature is undiscoverable.
+    # Measured by this test's own print; no other tool's entry moved. (The step
+    # is 1655 -> 1801, not 1424 -> 1801: 1424 was two ledger baselines ago,
+    # review round 1 R1-6.)
+    # 1801 -> 1803 (+2, review round 2 m2): "not expected in Chrome's <video>" replaces
+    # "not Chrome's <video>", because Chrome playback was never tested. Measured by
+    # this test's own print.
+    "browser": 1803,
     # NEW (code-requests PR1b): the ``code_requests`` doc — relation and lane
     # vocabulary, the freshness rule and the data-not-instructions framing.
     # 475 tokens is the deliberate cost of the reference detail staying OFF the

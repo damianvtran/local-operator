@@ -49,6 +49,7 @@ import fnmatch
 import heapq
 import json
 import logging
+import math
 import mimetypes
 import os
 import re
@@ -172,6 +173,7 @@ from local_operator.redaction_shapes import (
 from local_operator.scratchpad import (
     SCRATCHPAD_BUDGET_SCAN_ENTRIES,
     SCRATCHPAD_ELSEWHERE_SHORT,
+    SCRATCHPAD_MAX_WRITE_BYTES,
     SCRATCHPAD_NAMESPACE,
     SCRATCHPAD_PATH_ENV,
     SCRATCHPAD_SCHEME,
@@ -1763,6 +1765,32 @@ def _describe_browser_approval(args: dict[str, Any], cwd: str) -> str:
         except (OSError, ValueError):
             return f"screenshot: {_display_target(raw_path)}"
         return _approval_description(path, inside, "screenshot", resolvable)
+    if action == "record_start":
+        # A recording CREATES a file, so the prompt names the file — resolved
+        # through the tool's own resolver and marked when it leaves the
+        # workspace, exactly like `screenshot`. With no `path` the harness
+        # composes the name (a UTC stamp plus four hex characters), so there is
+        # no file to name when the prompt is painted: the DIRECTORY is the
+        # answer, the same shape the `download` row uses, because the directory
+        # is the part the user is really being asked about.
+        from local_operator import browser_files as _files
+
+        raw_path = str(args.get("path") or "")
+        if not raw_path.strip():
+            root = str(_files.recordings_root())
+            home = str(Path.home())
+            shown = root.replace(home, "~", 1) if root.startswith(home) else root
+            return f"record \u2192 {_display_target(shown)}/"
+        if _SCHEME_SHAPED_RE.match(raw_path.strip()):
+            # This tool resolves no scheme, so the call will be refused: naming
+            # the invented relative path would describe a write that never
+            # happens (the same reason the screenshot branch refuses to).
+            return f"record: {_display_target(raw_path.strip())}"
+        try:
+            path, inside, resolvable = _resolve_workspace_path(raw_path, cwd or ".")
+        except (OSError, ValueError):
+            return f"record: {_display_target(raw_path)}"
+        return _approval_description(path, inside, "record", resolvable)
     if action == "download":
         # The consent question is "may this page write files to your disk", and the
         # DIRECTORY is the answer — the file names are the page's to choose, and a
@@ -20722,6 +20750,14 @@ BROWSER_ACTIONS = (
     "network_stop",
     "network_read",
     "network_clear",
+    # Video recording of the tab THIS session is driving (design D8). `record_start`
+    # is a write: it approves the exact destination file before any pixel is
+    # captured, and the host writes that file at stop — bytes never cross the
+    # wire (D3/D4). `record_stop` is a read, because the write was approved at
+    # start and a denied stop would strand a running encoder (D4). Both are
+    # desktop-host only for now (D8/D10).
+    "record_start",
+    "record_stop",
 )
 
 #: ``retitle`` is a wire METHOD but deliberately NOT an action: the SESSION
@@ -20766,6 +20802,12 @@ CMUX_UNSUPPORTED_BROWSER_ACTIONS = frozenset(
         "network_stop",
         "network_read",
         "network_clear",
+        # Recording needs a host that can write the harness's path to disk and
+        # keep a standing debugger session between two commands; cmux has
+        # neither, so it degrades with the typed "use a non-cmux host" refusal
+        # rather than recording nothing and reporting success.
+        "record_start",
+        "record_stop",
     }
 )
 
@@ -20799,6 +20841,37 @@ NETWORK_MAX_ENTRIES = 200
 NETWORK_MAX_BODY_BYTES = 64 * 1024
 NETWORK_MAX_READ_BODY_BYTES = 256 * 1024
 _NETWORK_ACTIONS = frozenset({"network_start", "network_stop", "network_read", "network_clear"})
+
+#: The two halves of tab recording. One set because every branch that asks "is
+#: this a recording call" must ask it the same way: the dispatcher routes them to
+#: `_browser_record` together, and the two approvals differ only in the tier.
+_RECORD_ACTIONS = frozenset({"record_start", "record_stop"})
+
+#: The destination each surface's in-flight recording was approved to write
+#: (D4/D5). Present so `record_stop` can prove the file it is handed is the one
+#: the user approved, instead of trusting the host's word (review round 1,
+#: R1-3). Process-global: the tool executes in the session process and the
+#: surface handle is nonce-unique per tab, so two sessions cannot collide. It is
+#: deliberately NOT a member of `BrowserSurface`: that class declares `__slots__`
+#: and its protocol is `@runtime_checkable`, so a new member would break every
+#: other host implementor for a harness-only bookkeeping value (the same reason
+#: `extension_update_notified` stays off the protocol).
+_APPROVED_RECORDINGS: dict[str, str] = {}
+
+#: Refusal reasons that PROVE the host holds no recording for this surface, so
+#: the approved target may be forgotten. Deliberately a whitelist: `record_active`
+#: means a recording IS live, and a busy lane, a timeout or a reason this build
+#: does not know all leave a possible capture running whose path the later stop
+#: must still be checked against (review round 2, F1).
+_RECORD_ABSENT_REASONS = frozenset(
+    {
+        "record_not_active",
+        "record_path",
+        "record_unsupported",
+        "record_av1_unavailable",
+        "record_failed",
+    }
+)
 
 #: Style property names ``styles`` accepts as caller-requested extras. The
 #: charset is the CSS ident set that matters here: letters, digits, dashes and
@@ -20942,7 +21015,14 @@ class BrowserParams(BaseModel):
             "outranks it."
         ),
     )
-    path: str = Field(default="", description="'screenshot' only: the destination file.")
+    path: str = Field(
+        default="",
+        description=(
+            "'screenshot' and 'record_start' only: the destination file. A recording "
+            "must end .mp4 and is never overwritten; omit it to get a generated name "
+            "under the config directory."
+        ),
+    )
     selector: str = Field(
         default="",
         description="CSS selector, snapshot ref, or a11y locator for the "
@@ -21052,7 +21132,8 @@ class BrowserParams(BaseModel):
         default=None,
         description="'await_access' max seconds to wait for the user's decision "
         "(default 120, max 240); 'download' max seconds to wait for one to start "
-        "(default 120, max 600).",
+        "(default 120, max 600); 'record_start' max recording seconds "
+        "(default 120, max 600; the host auto-stops and saves at it).",
     )
 
     @field_validator("x", "y", mode="before")
@@ -21819,6 +21900,75 @@ def _validate_locator_target(action: str, params: BrowserParams) -> str:
     )
 
 
+def _validate_record_fields(action: str, params: BrowserParams) -> str:
+    """Validate the two fields recording REUSES, without adding a third (D13).
+
+    ``path`` is the approved destination and exists only at start: a stop that
+    carried one would name a file the call does not write, and honouring it
+    would mean either a second approval or an unapproved write. ``timeout_s`` is
+    the recording LENGTH at start (the host stops capture at it), so at stop it
+    has no meaning left.
+
+    The MP4 suffix is checked here as well as in the write path so the model gets
+    the reason before any approval prompt is painted, and so a caller cannot
+    believe a `.mkv` was recorded because a dialog appeared.
+    """
+    from local_operator import browser_files as _files
+
+    if action not in _RECORD_ACTIONS:
+        return ""
+    if action == "record_stop":
+        if params.path.strip():
+            return (
+                "'path' is only valid for 'record_start' (got it on 'record_stop'): the "
+                "destination is fixed and approved when the recording starts"
+            )
+        if params.timeout_s is not None:
+            return (
+                "'timeout_s' is only valid for 'record_start' (got it on 'record_stop'): "
+                "it is the recording LENGTH, fixed before the capture begins"
+            )
+        return ""
+    raw_path = params.path.strip()
+    if raw_path and not raw_path.lower().endswith(".mp4"):
+        return (
+            f"the recording path must end .mp4 (got {params.path!r}): the host writes an "
+            "MP4 container whatever the name says, and a wrong extension is a file the "
+            "next reader cannot play"
+        )
+    if params.timeout_s is not None:
+        if not math.isfinite(float(params.timeout_s)):
+            # NaN and the infinities pass every range comparison (`nan <= 1` is
+            # False and `inf > 600` is True only by luck of ordering), and
+            # `int(nan)` raises — so they are refused as their own case before
+            # any integer test (review round 2, F2).
+            return (
+                "'timeout_s' for 'record_start' must be a finite whole number of "
+                f"seconds (1 to {_files.RECORD_MAX_DURATION_S}, default "
+                f"{_files.RECORD_DEFAULT_DURATION_S}); got {params.timeout_s!r}"
+            )
+        if float(params.timeout_s) != int(params.timeout_s):
+            # The HOST takes whole seconds (`Number.isInteger` in its
+            # `durationOf`), and refuses a fraction only AFTER the approval
+            # prompt, as `record_failed` with no capture. Refusing here is
+            # cheaper and names the fix (review round 1, R1-2).
+            return (
+                "'timeout_s' for 'record_start' must be a whole number of seconds "
+                f"(1 to {_files.RECORD_MAX_DURATION_S}, default "
+                f"{_files.RECORD_DEFAULT_DURATION_S}); got {params.timeout_s:g}. Round it "
+                "to an integer and retry"
+            )
+        if not (
+            _files.RECORD_MIN_DURATION_S <= int(params.timeout_s) <= _files.RECORD_MAX_DURATION_S
+        ):
+            return (
+                "'timeout_s' for 'record_start' is the recording length in seconds "
+                f"({_files.RECORD_MIN_DURATION_S:g} to {_files.RECORD_MAX_DURATION_S:g}; "
+                f"default {_files.RECORD_DEFAULT_DURATION_S:g}); got {params.timeout_s:g}"
+            )
+    return ""
+
+
 def _validate_browser_args(action: str, params: BrowserParams) -> str:
     """Refuse an unusable argument, or "" when the call may proceed.
 
@@ -21842,6 +21992,9 @@ def _validate_browser_args(action: str, params: BrowserParams) -> str:
     network = _validate_network_fields(action, params)
     if network:
         return network
+    record = _validate_record_fields(action, params)
+    if record:
+        return record
     locator = _validate_locator_target(action, params)
     if locator:
         return locator
@@ -23532,6 +23685,14 @@ async def _bridge_call(
         # recovery, handle-drop) instead of substring-matching the human
         # diagnostic, which broke silently on any rewording (finding m4).
         problem.details = {"error_code": exc.code.value}
+        # The host's own REASON travels too. Callers that must decide whether a
+        # host still holds state — the recording approval above all — cannot do
+        # it from the code alone (`busy` covers `record_active` and
+        # `record_limit`), and substring-matching the rendered sentence is the
+        # failure mode the typed code exists to remove (review round 2, F1).
+        reason = exc.data.get("reason")
+        if isinstance(reason, str) and reason:
+            problem.details["reason"] = reason
         # A failed new allocation may also fail rollback. Keep its private
         # capability on the host, not in model-visible diagnostics.
         if exc.data.get("cleanup_pending") and isinstance(exc.data.get("tab"), str):
@@ -24711,6 +24872,412 @@ def _reason_is_refusal(reason: str) -> bool:
     return reason.strip().startswith(REFUSAL_PREFIX)
 
 
+# ---------------------------------------------------------------------------
+# browser recording — the harness half of D3-D9
+# ---------------------------------------------------------------------------
+
+
+def _drop_closed_surface(problem: ToolResult, state: BrowserSurfaceProtocol) -> ToolResult:
+    """Clear a pinned handle when the host reports the tab is gone.
+
+    The same rule `_bridge_action` applies to every generic verb, spelled once
+    here because both recording calls return their problem BEFORE that shared
+    tail: a closed tab left pinned would make every later command, including
+    the recovery verb, target state the host has already dropped.
+
+    The approved recording goes with it (review round 2, F3): the handle names
+    the tab, and a recording approved for a tab that no longer exists can never
+    be the one a later stop answers for.
+    """
+    if (problem.details or {}).get("error_code") == "tab_closed":
+        _APPROVED_RECORDINGS.pop(state.surface_id, None)
+        state.surface_id = ""
+    return problem
+
+
+def _host_holds_no_recording(problem: ToolResult) -> bool:
+    """Whether a refusal proves the host has NOTHING recording for this surface.
+
+    Anything else — `record_active` above all — leaves a live capture, and
+    forgetting its approved path would let a later stop certify whatever file
+    the host happened to name (review round 2, F1).
+    """
+    details = problem.details or {}
+    if details.get("error_code") == "tab_closed":
+        return True
+    return str(details.get("reason") or "") in _RECORD_ABSENT_REASONS
+
+
+def _recording_linked_leaf(raw: str, cwd: str) -> Path | None:
+    """The unresolved leaf of ``raw`` when it is a symlink, else None (D5).
+
+    The check has to run on the UNRESOLVED spelling: `_resolve_workspace_path`
+    follows the leaf, so the resolved target either looks like a plain file that
+    already exists or — for a dangling link — like a free name, and the write
+    then goes THROUGH the link to wherever it points. `Path.is_symlink()` lstats
+    the final component and returns False on any error, which is the right
+    answer for a name that is not there.
+    """
+    try:
+        candidate = Path(raw).expanduser()
+    except RuntimeError:
+        candidate = Path(raw)
+    if not candidate.is_absolute():
+        candidate = Path(cwd) / candidate
+    return candidate if candidate.is_symlink() else None
+
+
+def _recording_target_refusal(target: Path) -> str:
+    """Why ``target`` cannot receive a recording, or "" when it can (D5).
+
+    A PREFLIGHT, not the enforcement: the host repeats every check because it is
+    the one that writes (D3), but failing here costs nothing while failing ten
+    minutes into a capture costs the clip. The order matters — a symlink is
+    refused before ``exists()``, which follows it and would report the TARGET's
+    state rather than the entry's.
+    """
+    parent = target.parent
+    try:
+        if not parent.is_dir():
+            return f"its parent directory {parent} does not exist"
+        if not os.access(parent, os.W_OK):
+            return f"its parent directory {parent} is not writable"
+        if target.is_symlink():
+            return f"{target} is a symlink; a recording is never written through one"
+        if target.exists():
+            return f"{target} already exists; a recording never overwrites — pick another name"
+    except OSError as exc:
+        return f"it could not be inspected ({exc.strerror or exc})"
+    return ""
+
+
+def _recording_destination(
+    tool_call_id: str, raw_path: str, context: ToolContext | None
+) -> tuple[Path | None, ToolResult | None]:
+    """Resolve, confine and preflight the file a ``record_start`` will write.
+
+    The SAME path policy as ``screenshot`` — scheme refusal, the workspace
+    resolver, confinement, the pad's address rules — because a second policy for
+    the second file-writing browser action is how one of them ends up looser
+    (D3). The byte cap is the only part that cannot be checked here: the encoder
+    decides the size, so the wire carries the ceiling the host must stop at.
+    """
+    from local_operator import browser_files as files
+
+    raw = raw_path.strip()
+    if raw:
+        refusal = _scheme_refusal(tool_call_id, "browser", raw)
+        if refusal is not None:
+            return None, refusal
+        # Before resolution, which replaces the leaf with what it points at: a
+        # link is only visible on the path as spelled. A dangling link otherwise
+        # resolved to its missing target and was recorded through (QA round 1,
+        # Q1).
+        cwd = _safe_cwd(context)
+        linked = _recording_linked_leaf(raw, cwd)
+        if linked is not None:
+            return None, _error(
+                tool_call_id,
+                "browser",
+                f"cannot record to {linked}: it is a symlink and a recording is never "
+                "written through one, whether or not the link's target exists. Pick a "
+                "real file name. Nothing was written and no recording started.",
+            )
+        resolved, _inside, resolvable = _resolve_workspace_path(raw, cwd)
+        denial = _confinement_denial(resolved, context, resolvable=resolvable)
+        if denial is not None:
+            return None, _error(tool_call_id, "browser", denial)
+        target = resolved
+    else:
+        try:
+            directory = files.recordings_dir((context.session_id if context else "") or "")
+        except OSError as exc:
+            return None, _error(
+                tool_call_id,
+                "browser",
+                f"could not create the recordings directory under {files.recordings_root()}: "
+                f"{exc.strerror or exc}. Nothing was started. Pass an explicit 'path' "
+                "instead.",
+            )
+        target = directory / files.recording_name()
+        # The 4-hex suffix makes a same-second collision unlikely, not
+        # impossible; the answer to a collision is another name, never the
+        # overwrite the host refuses anyway.
+        while target.exists() or target.is_symlink():
+            target = directory / files.recording_name()
+    if target.suffix.lower() != ".mp4":
+        return None, _error(
+            tool_call_id,
+            "browser",
+            f"the recording path must end .mp4 (got {target}): the host writes an MP4 "
+            "container, and a wrong extension is a file the next reader cannot play",
+        )
+    pad_refusal = _pad_destination_refusal(tool_call_id, "browser", str(target), context)
+    if pad_refusal is not None:
+        return None, pad_refusal
+    why = _recording_target_refusal(target)
+    if why:
+        return None, _error(
+            tool_call_id,
+            "browser",
+            f"cannot record to {target}: {why}. Nothing was written and no recording " "started.",
+        )
+    return target, None
+
+
+def _recording_cap_bytes(target: Path, context: ToolContext | None) -> int:
+    """The byte ceiling to send: the pad's own cap wins under a pad (D6).
+
+    A scratchpad write is capped by the pad's policy at 32 MiB, so recording a
+    longer clip there would fail at adoption time with the pad's refusal instead
+    of stopping cleanly at the cap. Sending the smaller number makes the host the
+    one that stops, which is the only place the encoder can be stopped at all.
+    """
+    from local_operator import browser_files as files
+
+    pad = _scratchpad_root(context)
+    if pad is not None and scratchpad_contains(target, pad):
+        return min(files.RECORD_MAX_BYTES, SCRATCHPAD_MAX_WRITE_BYTES)
+    return files.RECORD_MAX_BYTES
+
+
+def _recording_landed(
+    tool_call_id: str, result: dict[str, Any], *, approved: str | None = None
+) -> ToolResult:
+    """Judge the clip the host says it published, from THIS machine's disk (D5).
+
+    The host's exit code is not evidence. A path it names that is absent, empty,
+    a different size from its own report, or not an MP4 container is a failure of
+    this call, and the model is told so while it can still retry — rather than
+    being handed a path to nothing and discovering it several turns from the
+    cause (the download precedent, `_browser_download`).
+
+    ``approved`` is the destination the user approved at ``record_start``. A path
+    that differs is refused, because the alternative is Python certifying a file
+    the approval never covered (review round 1, R1-3). ``None`` happens only when
+    no start was seen in THIS process — a resumed session whose recording was
+    started before the restart — and the structural checks below are then the
+    whole verification, which the receipt should not overstate.
+    """
+    from local_operator import browser_files as files
+
+    raw_path = str(result.get("path") or "").strip()
+    if not raw_path:
+        return _error(
+            tool_call_id,
+            "browser",
+            "the host reported a finished recording without naming a file, so nothing can "
+            "be reported as saved. Start a new recording.",
+        )
+    target = Path(raw_path)
+    if not target.is_absolute() or target.suffix.lower() != ".mp4":
+        return _error(
+            tool_call_id,
+            "browser",
+            f"the host reported {raw_path!r} as the recording, which is not an absolute "
+            ".mp4 path; nothing is reported as saved.",
+        )
+    if approved is not None and str(target) != approved:
+        return _error(
+            tool_call_id,
+            "browser",
+            f"the host saved the recording to {target}, but this session approved "
+            f"{approved} at 'record_start'. Nothing is reported as saved; the approved "
+            "file is the only one this call may vouch for. Start a new recording to the "
+            "intended path if the clip is still needed.",
+        )
+    try:
+        size = target.stat().st_size
+    except OSError as exc:
+        return _error(
+            tool_call_id,
+            "browser",
+            f"the host reported {target} but no file is there ({exc.strerror or exc}); "
+            "nothing was saved.",
+        )
+    if size <= 0:
+        return _error(
+            tool_call_id,
+            "browser",
+            f"{target} is empty; the recording did not produce a playable file and nothing "
+            "is reported as saved.",
+        )
+    reported = result.get("bytes")
+    if isinstance(reported, bool) or not isinstance(reported, int):
+        return _error(
+            tool_call_id,
+            "browser",
+            f"the host did not report a byte count for {target}, so the file could not be "
+            "verified; nothing is reported as saved.",
+        )
+    if size != reported:
+        return _error(
+            tool_call_id,
+            "browser",
+            f"{target} is {size} bytes but the host reported {reported}; the file is not "
+            "the one that was recorded, so nothing is reported as saved.",
+        )
+    try:
+        with open(target, "rb") as handle:
+            head = handle.read(8)
+    except OSError as exc:
+        return _error(
+            tool_call_id,
+            "browser",
+            f"{target} could not be read back ({exc.strerror or exc}); nothing is reported "
+            "as saved.",
+        )
+    if head[4:8] != b"ftyp":
+        # An MP4's first box is `ftyp` at bytes 4..8. Anything else is not the
+        # container this method promises, and calling it a recording would send
+        # the agent to a file no player can open.
+        return _error(
+            tool_call_id,
+            "browser",
+            f"{target} is not an MP4 (bytes 4..8 are {head[4:8]!r}, not b'ftyp'); the "
+            "recording did not finish and nothing is reported as saved.",
+        )
+    # Only clips this tool composed land under the recordings root, and only
+    # those are ours to tighten: an explicit destination may be a file the user
+    # deliberately shares with the rest of the project.
+    try:
+        target.resolve().relative_to(files.recordings_root().resolve())
+    except (OSError, ValueError):
+        pass
+    else:
+        files.chmod_private(target)
+    raw_duration = result.get("duration_ms")
+    duration_ms: float | None = None
+    if isinstance(raw_duration, int) and not isinstance(raw_duration, bool):
+        duration_ms = float(raw_duration)
+    elif isinstance(raw_duration, float):
+        duration_ms = raw_duration
+    length = f"{duration_ms / 1000:.1f} s" if duration_ms is not None else "an unrecorded length"
+    stopped = " It auto-stopped at the time limit." if bool(result.get("auto_stopped")) else ""
+    # Said in the RECEIPT, not only in the docstring: after a restart this call
+    # checked the file's shape and size, not that it is the destination the user
+    # approved, and the model must know which guarantee it actually has
+    # (review round 2, F4).
+    unverified = " (approval not re-verified after restart)" if approved is None else ""
+    return _text(
+        tool_call_id,
+        "browser",
+        f"Recording saved to {target} ({size} bytes, {length}).{stopped}{unverified} "
+        "MP4 with an AV1 track: it plays in QuickTime/AVFoundation; it is not "
+        "expected to play in Chrome's <video> (not tested).",
+        details={"path": str(target), "bytes": size},
+    )
+
+
+async def _browser_record(
+    tool_call_id: str,
+    state: BrowserSurfaceProtocol,
+    action: str,
+    params: BrowserParams,
+    context: ToolContext | None,
+    *,
+    client: Any = None,
+) -> ToolResult:
+    """`record_start` / `record_stop`: compose the path, approve it, then judge the file.
+
+    The split between the two halves is the whole design (D3/D4): Python owns
+    policy — where the file goes, whether the user approved THAT file, whether
+    this session may reach it — and the host owns the pixels and the write. So
+    start resolves the destination and sends it, and stop asks for the clip and
+    verifies it here rather than trusting the host's report.
+    """
+    from local_operator import browser_files as files
+
+    problem = _capability_problem(tool_call_id, action, client, surface=state.surface_id)
+    if problem is not None:
+        # The capability gate the other stateful actions use, before any path is
+        # resolved or any wire call is made: a pre-feature app must produce the
+        # typed refusal, not a dial that times out on an unknown method.
+        return problem
+    wire: dict[str, Any] = {
+        "tab": state.surface_id,
+        # Identity and display label are trusted host metadata, exactly as every
+        # other tab-scoped command sends them.
+        **_browser_identity_params(context, tool_call_id),
+    }
+    if action == "record_start":
+        target, refusal = _recording_destination(tool_call_id, params.path, context)
+        if refusal is not None or target is None:
+            return refusal or _error(tool_call_id, "browser", "no recording destination")
+        # Fixed capture parameters (D14): up to 1280x720 (a ceiling; the clip is
+        # scaled to fit) at 10 fps with audio off, the same viewport the agent's
+        # hidden tab already paints. Not tunable in v1
+        # and not sent as fields the host might read as requests to change.
+        # WHOLE seconds: the validator refuses a fraction, and the host's
+        # `durationOf` would too (R1-2). `int()` here is a lossless narrow of a
+        # value already proven integral, not a round.
+        timeout = params.timeout_s
+        duration = (
+            int(timeout)
+            if isinstance(timeout, (int, float)) and not isinstance(timeout, bool)
+            else files.RECORD_DEFAULT_DURATION_S
+        )
+        duration = max(files.RECORD_MIN_DURATION_S, min(duration, files.RECORD_MAX_DURATION_S))
+        cap = _recording_cap_bytes(target, context)
+        wire.update(path=str(target), max_duration_s=duration, max_bytes=cap)
+        result, problem = await _bridge_call(
+            tool_call_id, action, wire, surface=state.surface_id, client=client
+        )
+        if problem is not None:
+            # Forget the approved target only when no capture can be running.
+            # `record_active` is the case that matters: a same-owner second
+            # start is refused BECAUSE the first recording is still live, and
+            # dropping the approval there let the eventual stop certify any
+            # file the host named (review round 2, F1).
+            if _host_holds_no_recording(problem):
+                _APPROVED_RECORDINGS.pop(state.surface_id, None)
+            return _drop_closed_surface(problem, state)
+        assert result is not None
+        if not bool(result.get("recording", True)):
+            # A host that says `recording: false` started nothing; reporting a
+            # started capture would have the agent wait for a clip that cannot
+            # exist.
+            _APPROVED_RECORDINGS.pop(state.surface_id, None)
+            return _error(
+                tool_call_id,
+                "browser",
+                f"the browser host did not start a recording to {target}; nothing was "
+                "captured and nothing was written.",
+            )
+        # Remembered so the STOP can prove the file it is handed is the one the
+        # user approved (R1-3). Overwrites any earlier target on this surface,
+        # which is correct: the host replaces a different owner's recording, and
+        # a same-owner second start is refused before this line.
+        _APPROVED_RECORDINGS[state.surface_id] = str(target)
+        return _text(
+            tool_call_id,
+            "browser",
+            f"Recording started: {target} (max {duration:g} s, up to "
+            f"{cap // (1024 * 1024)} MiB). Stop it with 'record_stop' to save the file. "
+            "MP4 with an AV1 track: it plays in QuickTime/AVFoundation; it is not "
+            "expected to play in Chrome's <video> (not tested).",
+            # `target`, not `path`: a started recording has not written anything
+            # yet, and `details["path"]` is what marks a browser result as a
+            # produced file (session_files.scan records it as an artifact). A
+            # phantom row pointing at a file that does not exist until the stop
+            # would be worse than no row at all.
+            details={"target": str(target), "max_duration_s": duration, "max_bytes": cap},
+        )
+    result, problem = await _bridge_call(
+        tool_call_id, action, wire, surface=state.surface_id, client=client
+    )
+    if problem is not None:
+        # A stop refused on a TRANSIENT failure (bridge timeout, lane busy, an
+        # unexplained internal) may still have the recording running, so the
+        # approval survives; only the reasons that prove absence drop it.
+        if _host_holds_no_recording(problem):
+            _APPROVED_RECORDINGS.pop(state.surface_id, None)
+        return _drop_closed_surface(problem, state)
+    assert result is not None
+    approved = _APPROVED_RECORDINGS.pop(state.surface_id, None)
+    return _recording_landed(tool_call_id, result, approved=approved)
+
+
 async def _browser_download(
     tool_call_id: str,
     state: BrowserSurfaceProtocol,
@@ -25543,6 +26110,11 @@ async def _bridge_action(
         return await _browser_download(tool_call_id, state, params, context, client=client)
     if action == "upload":
         return await _browser_upload(tool_call_id, state, params, context, client=client)
+    if action in _RECORD_ACTIONS:
+        # Before the generic wire builder: recording has TWO methods with
+        # different wire shapes and a disk check on the way back, so it cannot
+        # be one dictionary plus one rendering (D8/D9).
+        return await _browser_record(tool_call_id, state, action, params, context, client=client)
     wire: dict[str, Any] = {
         "tab": surface,
         # Identity and display label are trusted host metadata. Keeping both on
@@ -27146,7 +27718,7 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
         # Metadata-only network actions stay on the ordinary write tier.
         call_approval_tier=lambda args: (
             "read"
-            if str(args.get("action") or "").strip().lower() == "inspect_ownership"
+            if str(args.get("action") or "").strip().lower() in ("inspect_ownership", "record_stop")
             else (
                 "exec"
                 if str(args.get("action") or "").strip().lower() == "upload"
