@@ -12,6 +12,7 @@ import { supplementsFromWire } from "./lib/supplement";
 import { createMessageRuntime, directionFor, isResolvedLocale, type LocaleSnapshot } from "./i18n/runtime";
 import { createWireLoader } from "./i18n/wire-cache";
 import { BUNDLED_OWNED } from "./i18n/bundled.gen";
+import { createLocaleBundleLoader } from "./i18n/locale-bundles";
 import type {
 	Capabilities,
 	NotificationsBlock,
@@ -107,6 +108,18 @@ export const messageRuntime = createMessageRuntime(
 	() => publishLocaleSnapshot(),
 	Object.keys(BUNDLED_OWNED),
 );
+/* The other shipped locales arrive as chunks the first time a locale is named
+   (`BUNDLED_CHUNKS`). Registered through `registerBundles`, so a chunk landing
+   repaints and re-labels the document by exactly the path the eager English map
+   uses — one notification for the whole map, no second locale truth. The
+   pre-mount bootstrap AWAITS this inside its budget (`resolveInitialLocale`), so
+   a chunk that arrives in time paints the right language on the first frame;
+   the live stream ignores the promise and lets the flip land when it lands. */
+export const localeBundleLoader = createLocaleBundleLoader({
+	activate: (entries) => {
+		messageRuntime.registerBundles(entries);
+	},
+});
 export const wireCatalogueLoader = createWireLoader({
 	context: () => ({ origin: typeof location === "object" ? location.origin : "", locale: localeSnapshot.backendLocale }),
 	capabilities: () => capabilities,
@@ -174,24 +187,29 @@ function emitStream() {
 }
 
 
-/* THE BUNDLED RELAY COPY, registered before any consumer renders the relay
+/* THE EAGER ENGLISH RELAY COPY, registered before any consumer renders the relay
    (the RFC's "bundle a bootstrap set", §2.1/§3.3). This is what makes the
-   owned-copy language an ACTUAL rendered fact rather than a claim: the bundle
-   carries every SHIPPED locale for each owned namespace (§ bundled.gen.ts, from
-   the generator's shipped set), and `uiLocaleFor` selects a non-English UI
-   locale only when EVERY owned namespace carries the WHOLE English key set plus
-   that locale. A locale with one absent or partial owned namespace therefore
-   paints the whole surface EN/LTR — never a per-key mix — and `lang`/`dir`
-   describe the copy on screen, not the backend preference (that stays on
-   `useLanguage`). The generator emits the explicit owned namespaces only; no
-   wire prose is bundled, so this cannot smuggle a served namespace into the
-   client.
-   Registration runs through the ONE store channel — `registerBundle` ->
-   `changed()` -> `publishLocaleSnapshot` — so it repaints and re-labels the
-   document instead of creating a second locale truth. Placed AFTER the
-   listener set is declared: an init-time registration notifies that set, so
-   registering above it would emit into a `listeners` binding still in its
-   temporal dead zone and abort module evaluation. */
+   owned-copy language an ACTUAL rendered fact rather than a claim: English is
+   complete in every owned namespace by construction, and `uiLocaleFor` selects a
+   non-English UI locale only when EVERY owned namespace carries the WHOLE English
+   key set plus that locale. A locale with one absent or partial owned namespace
+   therefore paints the whole surface EN/LTR — never a per-key mix — and
+   `lang`/`dir` describe the copy on screen, not the backend preference (that
+   stays on `useLanguage`). The generator emits the explicit owned namespaces
+   only; no wire prose is bundled, so this cannot smuggle a served namespace into
+   the client.
+   THE OTHER SHIPPED LOCALES ARE CHUNKS, not part of this map: one
+   `bundled.<locale>.gen.ts` each, requested when a locale is named and awaited
+   only inside the pre-mount budget (`localeBundleLoader`, `resolveInitialLocale`).
+   A locale's copy is paid for only when its chunk is asked for, never by a reader
+   who never selects it. No size is quoted here: the chunk set grows every time a
+   catalogue completes, so measure `dist/assets` after a `vite build` instead.
+   Registration runs through the ONE store channel — `registerBundle`/`registerBundles`
+   -> `changed()` -> `publishLocaleSnapshot` — so it repaints and re-labels the
+   document instead of creating a second locale truth. Placed AFTER the listener
+   set is declared: an init-time registration notifies that set, so registering
+   above it would emit into a `listeners` binding still in its temporal dead zone
+   and abort module evaluation. */
 for (const [namespace, locales] of Object.entries(BUNDLED_OWNED)) {
 	for (const [locale, messages] of Object.entries(locales)) {
 		messageRuntime.registerBundle(namespace, locale, { ...messages });
@@ -644,17 +662,30 @@ let configStreamClose: (() => void) | null = null;
 let configStreamCancel: (() => void) | null = null;
 let configStreamRefs = 0;
 
-function applyConfigFrame(data: string): void {
+/** The resolved locale a config frame names, or null if it names none. */
+function parseConfigLanguage(data: string): string | null {
 	try {
 		const payload = JSON.parse(data) as {
 			changed_keys?: string[];
 			language?: string;
 		};
-		if (!isResolvedLocale(payload.language)) return;
-		publishLocaleSnapshot(payload.language);
+		return isResolvedLocale(payload.language) ? payload.language : null;
 	} catch {
 		/* A malformed frame is dropped; the next one repaints. */
+		return null;
 	}
+}
+
+function applyConfigFrame(data: string): Promise<void> | null {
+	const language = parseConfigLanguage(data);
+	if (!language) return null;
+	publishLocaleSnapshot(language);
+	// The English surface is already complete; this asks for the resolved
+	// locale's chunk. The live stream drops the returned promise and lets the
+	// flip land when it lands; the pre-mount bootstrap awaits it inside
+	// `LOCALE_BOOTSTRAP_BUDGET_MS` before it commits the snapshot the first frame
+	// renders from (two publishes on the way, never painted: `resolveInitialLocale`).
+	return localeBundleLoader.ensure(language);
 }
 
 /* Probe ONCE whether this daemon serves the config stream.
@@ -716,7 +747,9 @@ export function retainConfigStream(): () => void {
 			configStreamClose = openEventStream(
 				CONFIG_STREAM_PATH,
 				"config",
-				applyConfigFrame,
+				// The live subscription drops the chunk promise: the flip lands when
+				// the chunk does. Only the pre-mount bootstrap awaits it.
+				(data) => { void applyConfigFrame(data); },
 				() => {},
 				() => {},
 			);
@@ -747,17 +780,50 @@ export function retainConfigStream(): () => void {
    it BEFORE `main.tsx` renders removes the flip: `lang`/`dir` and the copy they
    describe come from one snapshot on the first frame that has any content.
 
+   THAT INCLUDES THE LOCALE'S OWN CHUNK (i18n review round 2, #3165 major). A
+   non-English locale's copy is a lazily loaded chunk, so resolving only the
+   backend preference would re-create the very flip this function exists to
+   prevent: the first frame would be complete English under `lang="en"` and the
+   flip would land when the import resolved (measured at 416.8 ms on an
+   uncompressed chunk). The chunk load is therefore AWAITED inside this same
+   budget — a chunk that arrives in time paints the right language on the first
+   frame, and one that misses it falls back to the documented behaviour: the
+   complete English surface now, that locale when the chunk lands later, never a
+   half-painted mix.
+
    One-shot on purpose: this reads exactly the first frame of the SAME route the
    live subscription uses, then cancels the request (the daemon detaches on
    client close), so there is one authority and no extra stream left open. An
    older daemon (404), a dead network or a stream that never speaks before the
    budget leaves the English default in place — the same failure mode the live
    subscription has, and never a blank first paint. */
-const LOCALE_BOOTSTRAP_BUDGET_MS = 1500;
+export const LOCALE_BOOTSTRAP_BUDGET_MS = 1500;
+
+/** Wait for a locale chunk only as long as the bootstrap budget allows.
+ *
+ *  A slow chunk must never turn the first paint into a hang: past the deadline
+ *  the English default stands and the flip lands when the chunk does (the
+ *  loader keeps no timer of ours alive — `unref` below). A failed load is not
+ *  this function's to report: the loader retries it on its own schedule. */
+async function awaitBootstrapChunk(load: Promise<void> | null, deadline: number): Promise<void> {
+	if (!load) return;
+	const remaining = deadline - Date.now();
+	if (remaining <= 0) {
+		void load.catch(() => undefined);
+		return;
+	}
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	await Promise.race([
+		load.catch(() => undefined),
+		new Promise<void>(resolve => { timer = setTimeout(resolve, remaining); }),
+	]);
+	if (timer !== undefined) clearTimeout(timer);
+}
 
 export async function resolveInitialLocale(): Promise<void> {
 	if (localeSnapshot.backendLocale !== null) return;
 	if (typeof fetch !== "function" || typeof AbortController !== "function") return;
+	const deadline = Date.now() + LOCALE_BOOTSTRAP_BUDGET_MS;
 	const controller = new AbortController();
 	const timer = setTimeout(() => controller.abort(), LOCALE_BOOTSTRAP_BUDGET_MS);
 	let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
@@ -779,14 +845,24 @@ export async function resolveInitialLocale(): Promise<void> {
 			// A comment/keep-alive block before the baseline is not the baseline:
 			// keep reading until a block actually carries a `data:` line, bounded
 			// by the same abort budget.
-			let applied = false;
+			let language: string | null = null;
 			for (const line of buffered.slice(0, end).split("\n")) {
 				if (!line.startsWith("data:")) continue;
-				applyConfigFrame(line.slice(5).trim());
-				applied = true;
+				language = parseConfigLanguage(line.slice(5).trim()) ?? language;
 			}
 			buffered = buffered.slice(end + 2);
-			if (applied) return;
+			if (language) {
+				// Start the chunk, wait for it inside the budget, THEN commit the
+				// snapshot the first frame renders from. Not one publish but two: the
+				// registration below notifies the store's one channel first, emitting an
+				// intermediate null-backend English snapshot. No frame sees it — this
+				// whole sequence runs before mount. Publishing the preference FIRST would
+				// instead set `lang="en"` before the chunk lands and re-create the flip
+				// this function exists to prevent (i18n review round 2, #3165 major).
+				await awaitBootstrapChunk(localeBundleLoader.ensure(language), deadline);
+				publishLocaleSnapshot(language);
+				return;
+			}
 		}
 	} catch {
 		/* English stays: an absent or stalled stream is not a paint failure. */

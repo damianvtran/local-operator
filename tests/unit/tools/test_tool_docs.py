@@ -510,8 +510,15 @@ MEASURED_TOKENS: dict[str, int] = {
     # this file's own renderer. Re-measured via this test's print; it is the
     # ONLY entry that moved, every other count is byte-identical.
     # RE-MEASURED (ask/notify dedupe): 242 -> 241 — "FYI ... never a question
-    # (`ask` notifies)", worded to cost less than the text it replaced.
-    "notify": 241,
+    # (`ask` notifies)", worded less than the text it replaced.
+    # RE-MEASURED (title guard, notifications design §3.1): 241 -> 260, the only
+    # changed entry. The 19 tokens are the title rule (a placeholder is refused)
+    # bought here as well as in the `system.md` clause, because this doc is what
+    # the model reads at the moment it writes the title. Deliberately the SHORT
+    # form: the full rule, including the `no_reply` alternative, rides the
+    # refusal message and the prompt clause, and the context-budget ratchet bills
+    # this surface on every request. Measured by this test's print, never pasted.
+    "notify": 260,
     "patience": 330,
     # RE-MEASURED 2026-10-20 (evidence-attachment discoverability): ``project``
     # 1098 -> 1143 is the ONLY entry that moved — the ``attach`` description now

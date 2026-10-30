@@ -1812,7 +1812,21 @@ CHARS_PER_BILLED_TOKEN = 2.78
 # measurement plus the 55-token band, and main's overshoot is reported here so
 # the owner of that ledger can tighten it separately.
 # Ceiling = measured head + the 55-token band (34,805 + 55).
-BUDGET_BILLED_TOKENS = 34_860
+#
+# RAISED 34,860 -> 34,935 for the title-quality guard
+# (docs/design/notifications-inbox.md §3.1). Measured with THIS script, the base
+# re-measured over the branch's own parent by stashing the two changed files:
+#   base (origin/main 486886f744a)      96,823 chars = ~34,828 billed
+#   head (this branch)                  96,966 chars = ~34,880 billed
+#   delta                                   +143 chars = ~+52
+# The +52 is EXACTLY the copy this branch adds, nowhere else: the ``system.md``
+# ``has_notify`` clause (+26, the rule the model must have in hand before it
+# decides to notify) and the ``notify`` description (+26, the same rule where it
+# reads the tool). The base already sat 32 tokens under the old ceiling, i.e.
+# inside the band rather than below it, so the ceiling is re-derived the
+# documented way — this tree's own measurement plus the 55 band — and the next
+# branch inherits 34,880, not 34,805.
+BUDGET_BILLED_TOKENS = 34_935
 
 #: The SUBAGENT ceiling (``--kind child``), in billed tokens. Same ratchet rules
 #: as ``BUDGET_BILLED_TOKENS`` above. It is a separate number because a child's

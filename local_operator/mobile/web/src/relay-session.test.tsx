@@ -24,9 +24,9 @@
  */
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { BUNDLED_OWNED } from "./i18n/bundled.gen";
+import { BUNDLED_CHUNKS, BUNDLED_OWNED } from "./i18n/bundled.gen";
 import { RESOLVED_LOCALES } from "./i18n/runtime";
-import { messageRuntime, useLocaleSnapshot } from "./store";
+import { localeBundleLoader, messageRuntime, useLocaleSnapshot } from "./store";
 
 /** The exact copy the session surfaces hardcoded BEFORE this slice (identity). */
 const BEFORE = {
@@ -81,31 +81,39 @@ describe("relay.session extraction", () => {
 		}
 	});
 
-	it("follows the actual owned-copy language, not the backend preference", () => {
+	it("follows the actual owned-copy language, not the backend preference", async () => {
 		// The contract from #2297: lang/dir describe the ACTUAL rendered owned-copy
-		// language (uiLocale), not the backend preference. Both directions are
-		// pinned here: a locale the relay ships paints its own language, and a
-		// SUPPORTED locale it does not ship paints the WHOLE English bundle instead
-		// of claiming copy nobody translated — the half that goes red if the store
-		// ever follows the backend preference blindly.
+		// language (uiLocale), not the backend preference. BOTH directions are pinned
+		// here, in the halves the lazy tree actually has: a shipped locale's copy is a
+		// chunk the store has to REQUEST (`BUNDLED_CHUNKS`), so until it is requested
+		// the surface is English, and once it lands the locale is that locale's — the
+		// half that goes red if the store ever follows the backend preference
+		// blindly.
 		//
-		// The unshipped locale is DERIVED from the generated manifest rather than
-		// named, because the shipped set moves while a branch is open: vi shipped
-		// with #3163 and the catalogue waves for es (#3164) and hi (#3166) are
-		// still in flight. A fixed name would turn this test red the day one of
-		// them lands and invite someone to flip it to the shipped language,
-		// deleting the assertion it exists to make. Measured on this tree, the
-		// shipped set is en/fr/ru/vi/ur/zh-CN, so the pick is es.
+		// The unshipped pick is DERIVED from the shipped manifest rather than named,
+		// because the shipped set moves while a branch is open: vi shipped with
+		// #3163, es with #3172, and the hi catalogue (#3166) is still in flight. A
+		// fixed name would turn this test red the day one of them lands and invite
+		// someone to flip it to the shipped language, deleting the assertion it
+		// exists to make. Shipped-ness is read from `BUNDLED_CHUNKS`, never from
+		// `BUNDLED_OWNED`: the eager map holds English only, so asking it would call
+		// every locale unshipped and pick one that does have copy.
 		const unshipped = RESOLVED_LOCALES.find(
-			locale => locale !== "en" && !Object.values(BUNDLED_OWNED).some(bundle => locale in bundle),
+			locale => locale !== "en" && !(locale in BUNDLED_CHUNKS),
 		);
+		// Nothing in this fixture has asked the loader for a chunk yet, so both a
+		// shipped LTR (fr) and a shipped RTL (ur) locale fall back to the WHOLE
+		// English bundle rather than claiming copy the store has not received.
+		expect(messageRuntime.uiLocaleFor("fr")).toBe("en");
+		expect(messageRuntime.uiLocaleFor("ur")).toBe("en");
+		// Then the real lazy path, through the store's own loader — the only door that
+		// registers a chunk — which is what makes French the rendered language.
+		await localeBundleLoader.ensure("fr");
 		expect(messageRuntime.uiLocaleFor("fr")).toBe("fr");
-		expect(messageRuntime.uiLocaleFor("ur")).toBe("ur");
-		// The fallback arm exists only while a supported locale still lacks a relay
-		// catalogue; es (#3164) and hi (#3166) are the last two, so the arm is
-		// skipped rather than asserted once they land. A green run must never
-		// depend on a gap in the catalogue set, which is the same trap as naming
-		// the locale: it goes red on the day the gap closes.
+		// The fallback arm exists only while a supported locale still lacks a
+		// catalogue, so it is skipped rather than asserted once hi lands: a green run
+		// must never depend on a gap in the catalogue set, which is the same trap as
+		// naming the locale — it goes red on the day the gap closes.
 		if (unshipped !== undefined) expect(messageRuntime.uiLocaleFor(unshipped)).toBe("en");
 		const { result, unmount } = renderHook(() => useLocaleSnapshot());
 		// No config frame is applied in this fixture, so the snapshot is the boot
@@ -128,6 +136,39 @@ describe("relay.session extraction", () => {
 		// And the "translated" key still paints English, because the bundle is not
 		// complete enough to select at all.
 		expect(messageRuntime.t("relay.session.past.heading")).toBe("past sessions");
+	});
+
+	it("rejects a nearly-complete owned bundle whose single missing key would mix two languages", () => {
+		// The completeness gate is PER KEY, not per namespace. This locale carries all
+		// twelve owned namespaces and every English key but one — the only shape that
+		// fails when the per-key check is what is doing the work. It has to exist here:
+		// in a lazy-chunk tree nothing registers a locale by itself, so a one-namespace
+		// partial bundle (the test above) is rejected by the missing-namespace branch
+		// and stays green even if that clause is deleted. Verified by mutation, run by
+		// hand on this head: remove `every(key => key in translated)` from
+		// `uiLocaleFor` and this test goes red — ur is accepted and the siblings paint
+		// the fixture — while the test above stays green.
+		const dropped = Object.keys(BUNDLED_OWNED["relay.session"].en)[0];
+		const droppedEnglish = BUNDLED_OWNED["relay.session"].en[dropped];
+		for (const [namespace, entries] of Object.entries(BUNDLED_OWNED)) {
+			const english = entries.en;
+			expect(english).toBeTruthy();
+			messageRuntime.registerBundle(namespace, "ur", Object.fromEntries(
+				Object.entries(english)
+					.filter(([key]) => key !== dropped)
+					.map(([key, text]) => [key, `UR-FIXTURE ${text}`]),
+			));
+		}
+		// ONE dropped key rejects the whole locale: the page stays English rather than
+		// rendering eleven and a half namespaces of fixture under an `en` tag.
+		expect(messageRuntime.uiLocaleFor("ur")).toBe("en");
+		expect(messageRuntime.t(dropped as keyof typeof BEFORE)).toBe(droppedEnglish);
+		// Its siblings do not keep the fixture either — that is what whole-surface means,
+		// in the same namespace and in another one. (The reviewer's suggested wording had
+		// the siblings NOT falling back; `uiLocaleFor` is whole-surface, so the
+		// discriminating direction is that they do.)
+		expect(messageRuntime.t("relay.session.list.empty_hint")).toBe("start one below, or from the TUI on your machine");
+		expect(messageRuntime.t("relay.shell.list.empty")).toBe("no sessions running");
 	});
 
 	it("bumps the local revision on a same-locale registration through the one store channel", () => {

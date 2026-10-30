@@ -9210,6 +9210,12 @@ def _scratchpad_target(
         target = parse_scratchpad_url(url, root)
     except ScratchpadPathError as exc:
         return _invalid_arguments(tool_call_id, tool_name, str(exc))
+    # The confinement check ``_read_scratchpad`` makes, for ``write``/``edit``:
+    # a scheme target resolved through a pad swapped for a symlink must be
+    # refused like the absolute path it resolves to (review round 1, R1).
+    denial = _confinement_denial(target.path, context)
+    if denial is not None:
+        return _error(tool_call_id, tool_name, denial)
     if target.directory:
         # ``scratchpad://`` rstrips to ``scratchpad:`` — the scheme separator IS
         # the trailing slash — so the root example is spelled out rather than
@@ -9259,6 +9265,14 @@ async def _read_scratchpad(
         target = parse_scratchpad_url(url, root)
     except ScratchpadPathError as exc:
         return _invalid_arguments(tool_call_id, "read", str(exc))
+    # A CONFINED session's scheme answers to the same grant as its absolute
+    # paths (review round 1, R1): ``parse_scratchpad_url`` resolves THROUGH a
+    # symlink planted at the pad, so without this check ``scratchpad://x`` read
+    # whatever the link named. ``ToolConfinement`` drops a swapped pad from its
+    # grant, so the resolved target then lies outside every granted tree.
+    denial = _confinement_denial(target.path, context)
+    if denial is not None:
+        return _error(tool_call_id, "read", denial)
     # A URL that named a directory, and one that names a directory on disk
     # without saying so (``scratchpad://logs``), both list. One level, like the
     # file listing; ``read scratchpad://logs/`` descends explicitly.
@@ -32937,14 +32951,46 @@ class NotifyParams(BaseModel):
     )
     links: list[NotifyLink] = Field(default_factory=list, max_length=5)
 
+    @model_validator(mode="after")
+    def _title_identifies_an_event(self) -> NotifyParams:
+        """Refuse a content-free title before it can reach the store (§3.1).
+
+        Here rather than in the store: ``promote`` and the approval gates write
+        server-side items with short titles on purpose, and only the model's own
+        call is being judged. A pure function of the arguments is a model fault,
+        which is the class ``_validation_error`` bills as ``invalid arguments`` —
+        the model can correct this call from the message alone.
+
+        The refusal MUST name the silent alternative. If obeying the guard is
+        harder than posting nothing, the model's cheapest compliant move becomes
+        no notification at all, and the operator loses the item that mattered.
+        """
+        from local_operator.notifications.title_quality import title_defect
+
+        defect = title_defect(self.title, self.body)
+        if defect is None:
+            return self
+        raise ValueError(
+            f"refused: {self.title!r} is not a title — {defect}. The inbox list "
+            "shows the title alone, so it must say what happened or what the "
+            "operator should do. Write a specific statement (what changed, the "
+            "number, what needs them), or, if this turn produced nothing the "
+            "operator needs, call `no_reply` and post no notification. Nothing "
+            "was posted."
+        )
+
 
 #: The HOW lives here; the WHEN also lives in the gated ``system.md`` clause.
 #: Published after the live deferred pilot failed reliable tool discovery.
+#: The title rule is stated HERE as well as enforced in ``NotifyParams``: the
+#: validator can only refuse a call already made, and the paragraph is what
+#: stops a call that had nothing to say from being made at all.
 _NOTIFY_DESCRIPTION = (
     "Post an item to the operator's Notifications inbox; it stays until read or "
     "dismissed, on every device. For FYI results, metrics or events to see on "
     "return; never routine progress or a question (`ask` notifies). Pass a "
-    "stable `key` so a repeat (a wake tick, a new count) updates one item."
+    "stable `key` so a repeat (a wake tick, a new count) updates one item. "
+    "`title` must say what happened — a placeholder (`x`, `done`) is refused."
 )
 
 

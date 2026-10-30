@@ -3037,6 +3037,10 @@ def test_incremental_append_equals_a_full_scan_for_every_run_field(
     the mobile run bar's error/complete marks vanished after any new row until a
     full rescan. The whole ``RunRecord`` (every field) and every checkpoint must
     equal what a full scan of the same bytes derives.
+
+    The closing ``incremental.messages == full.messages`` assertion is a guard,
+    not the subject: this fix cannot affect messages, and the assertion only
+    catches an unrelated incremental-path divergence surfacing here.
     """
     write_rows(tmp_path, _settled_prefix())
     calls = _scanners(monkeypatch)

@@ -2843,6 +2843,73 @@ def test_a_legacy_handle_without_an_id_keeps_the_tail_dedup() -> None:
     assert len([e for e in fold.projection.transcript if e.text == "no id supplied"]) == 1
 
 
+# --- a $skill payload paints the typed line on the LIVE fold too ----------------
+
+
+def _skill_payload(text: str, *, body: str = "SKILL_BODY_MARKER") -> str:
+    """A `$skill` payload in the shape ``skills.invoke.render_skill_block`` writes."""
+    from local_operator.skills.invoke import render_skill_block
+
+    return f"{text}\n\n{render_skill_block([('research', body)])}"
+
+
+def test_a_live_skill_row_matches_the_replay_row() -> None:
+    """The live fold must paint what replay paints for a ``$skill`` payload.
+
+    A modern invocation persists as the typed line plus a tail
+    ``<operator-skills>`` block (``skills.invoke.render_skill_block``). Replay
+    has stripped that block since it shipped; the live paths painted the raw
+    payload, so a TUI-typed invocation showed the whole SKILL.md body on an
+    attached phone until the next full repaint — and a phone-sent steer echoed
+    the same body (SKM-D2).
+    """
+    typed = "$research fix it"
+    sent = _skill_payload(typed)
+
+    from local_operator.mobile.projection import fold_messages_to_entries
+
+    live = make_fold()
+    assert live.absorb_user_event(Message.user(sent, id="skill-live-1")) is True
+    replay = fold_messages_to_entries([Message.user(sent, id="skill-replay-1")])
+
+    live_row = live.projection.transcript[-1]
+    assert live_row.text == typed
+    assert live_row.text == replay[0].text
+    assert "SKILL_BODY_MARKER" not in live_row.text
+
+
+def test_a_phone_steer_echo_strips_the_skill_block() -> None:
+    """The queued steer row is registered before the payload comes back, so it
+    must already read as the typed line: the echo is matched to the queued
+    message by id and the envelope branch does not rewrite a plain row."""
+    typed = "$research fix it"
+    sent = _skill_payload(typed)
+
+    fold = make_fold()
+    fold.note_user_message(sent, steer=True, message_id="cmd-skill")
+    assert fold.absorb_user_event(Message.user(sent, id="cmd-skill")) is False
+
+    rows = [entry for entry in fold.projection.transcript if entry.kind == "steer"]
+    assert len(rows) == 1
+    assert rows[0].text == typed
+
+
+def test_a_legacy_echo_reconciles_across_the_skill_block() -> None:
+    """The id-less tail fallback compares the TYPED line on both sides: the
+    echo row holds the stripped text while the event carries the payload, so a
+    raw comparison would paint the skill body twice under two ids."""
+    typed = "$research fix it"
+    sent = _skill_payload(typed)
+
+    fold = make_fold()
+    fold.note_user_message(sent, steer=True)
+    assert fold.absorb_user_event(Message.user(sent)) is False
+
+    rows = [entry for entry in fold.projection.transcript if entry.kind in ("user", "steer")]
+    assert len(rows) == 1
+    assert rows[0].text == typed
+
+
 def test_a_history_fold_clears_pending_echoes() -> None:
     """A wholesale rebuild replaces the rows the entries pointed at, so a
     surviving entry would reference a row no longer in the transcript."""

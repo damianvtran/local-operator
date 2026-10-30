@@ -59,6 +59,8 @@ if TYPE_CHECKING:
     from local_operator.mobile.attach_client import AttachClient
     from local_operator.mobile.push_worker import PushWorker
     from local_operator.providers.auth_store import StoredCredential
+    from local_operator.skills.discovery import Skill
+    from local_operator.skills.invoke import ExpandedInvocation
 
 from local_operator.harness.approval import (
     frame_authority,
@@ -1869,6 +1871,128 @@ def _entry_for_session(daemon: "MobileDaemon", session_id: str) -> SessionEntry 
         if entry.record.session_id == session_id and not entry.ended
     ]
     return max(candidates, key=lambda entry: entry.record.heartbeat_at, default=None)
+
+
+#: How many rows ``GET /api/skills`` will ever return. A phone picker filters a
+#: list; it does not scroll a library, so the bound is well past any catalogue
+#: a person writes and far short of a frame worth refusing.
+_SKILL_ROWS_MAX = 500
+
+#: The description's wire length (SKM-D3). A SKILL.md description is the routing
+#: signal (one line by convention); a row's second line on a phone is the whole
+#: use for it, so this is a display prefix and not a truncation of record.
+_SKILL_DESCRIPTION_CHARS = 160
+
+
+def _skill_cwd(daemon: "MobileDaemon", session_id: str) -> Path:
+    """The directory a session's skills are discovered from.
+
+    THE SESSION'S DIRECTORY, NOT THE RELAY'S. A relay may serve several sessions
+    started in different checkouts, and ``$name`` must resolve against the tree
+    the conversation is working in — the same answer the TUI gets from its own
+    process cwd because there the two are one process.
+
+    Three sources, in this order, and each one is a different kind of fact:
+
+    1. ``entry.record.cwd`` — the live runtime's cwd, copied into the record
+       from the handle's projection seed by the 15-second republish, so a
+       session that MOVED is followed once its runtime restarts there (a bound
+       ``/move`` retires the runtime and publishes a successor's record). This
+       is the answer while the session is live.
+    2. ``session_files.service.session_cwd`` — the durable record, for a session
+       whose runtime has exited (``desktop.json`` at create, else the code-request
+       ledger). Without it a cold phone would discover the RELAY's skills.
+    3. ``Path.home()`` — the honest fallback. A silent relay-cwd here would make
+       the catalogue depend on where ``lop mobile serve`` was started.
+    """
+    entry = _entry_for_session(daemon, session_id)
+    if entry is not None:
+        recorded = str(getattr(entry.record, "cwd", "") or "")
+        if recorded:
+            return Path(recorded)
+    directory = _durable_user_session_dir(session_id)
+    if directory is not None:
+        from local_operator.paths import config_dir
+        from local_operator.session_files.service import session_cwd as durable_cwd
+
+        try:
+            stored = durable_cwd(config_dir(), session_id, directory)
+        except Exception:  # noqa: BLE001 — an unknown cwd costs the home fallback
+            stored = ""
+        if stored:
+            return Path(stored)
+    return Path.home()
+
+
+def _session_skill_roots(daemon: "MobileDaemon", session_id: str) -> list[Path]:
+    """The discovery roots this session's ``$name`` vocabulary is read from.
+
+    ``default_skill_roots`` walks UP from the session cwd and appends the home,
+    ecosystem and packaged roots, so the relay sees exactly the set the TUI
+    would from that directory — including the packaged catalogue every build
+    ships. One helper rather than a cwd passed around: the catalogue route and
+    the expansion must answer the same question, and two call sites computing
+    roots is how a skill appears in the picker and does not fire.
+    """
+    from local_operator.skills.api import default_skill_roots
+
+    return default_skill_roots(_skill_cwd(daemon, session_id))
+
+
+def _session_skills(daemon: "MobileDaemon", session_id: str) -> dict[str, Skill]:
+    """Discovered skills by name for this session, shadows already resolved.
+
+    ``config_dir`` is passed so a managed skills root is marked as such, exactly
+    as the TUI passes its own; ``discover_skills`` already applies the
+    earlier-root-wins rule this dict relies on.
+    """
+    from local_operator.paths import config_dir
+    from local_operator.skills.discovery import discover_skills
+
+    skills, _warnings = discover_skills(
+        _session_skill_roots(daemon, session_id), config_dir=config_dir()
+    )
+    return {skill.name: skill for skill in skills}
+
+
+def _skill_rows(daemon: "MobileDaemon", session_id: str) -> list[dict[str, Any]]:
+    """The phone's catalogue rows: name, a display prefix, and the hidden bit.
+
+    Sorted by name so two reads of an unchanged tree produce the same bytes (a
+    picker that reorders under the operator's finger is a different bug class
+    from a wrong list), and capped at ``_SKILL_ROWS_MAX`` so a pathological tree
+    cannot make this answer unbounded.
+    """
+    skills = _session_skills(daemon, session_id)
+    rows = [
+        {
+            "name": skill.name,
+            "description": skill.description[:_SKILL_DESCRIPTION_CHARS],
+            "hidden": bool(skill.hide),
+        }
+        for skill in sorted(skills.values(), key=lambda item: item.name)
+    ]
+    return rows[:_SKILL_ROWS_MAX]
+
+
+def _expand_session_skills(
+    daemon: "MobileDaemon", session_id: str, text: str
+) -> ExpandedInvocation:
+    """Expand ``$name`` mentions against THIS session's vocabulary.
+
+    Synchronous on purpose: it walks the filesystem (discovery plus one read per
+    attached body), so the route runs it through ``asyncio.to_thread`` and never
+    stalls an SSE stream for a submit.
+    """
+    from local_operator.skills.invoke import expand_invocation
+    from local_operator.skills.protocol import resolve_skill_url
+
+    skills = _session_skills(daemon, session_id)
+    if not skills:
+        return ExpandedInvocation(text=text)
+    return expand_invocation(
+        text, skills, lambda name: resolve_skill_url(f"skill://{name}", skills)
+    )
 
 
 def _session_folder_exists(session_id: str) -> bool:
@@ -5926,6 +6050,14 @@ def build_app(daemon: MobileDaemon):
                 # contract, not this app's routing table (see the i18n note
                 # above), and the two must not be conflated.
                 "session_tags": {"available": True},
+                # THE ``$skill`` CONTRACT (SKM-D3). Three things travel together
+                # and this key gates all of them: the catalogue route
+                # (``GET /api/skills``), the ``expand_skills`` body flag on
+                # prompt/steer, and the ``skills`` block those replies carry.
+                # A client that checks this key before offering ``$`` inline
+                # never sends a flag an older relay would silently drop — which
+                # on the wire looks exactly like a skill that did not fire.
+                "skill_invocation": {"available": True},
                 # Authenticated build support, not a claim that receipt storage
                 # is writable right now. Typed refusals preserve the same key.
                 "session_start": dict(START_CAPABILITY),
@@ -7810,9 +7942,42 @@ def build_app(daemon: MobileDaemon):
         op = body.pop("op", None)
         if not isinstance(op, str) or not op:
             return JSONResponse({"error": "op must be a non-empty string"}, status_code=422)
+        # THE ``$skill`` FLAG IS THE RELAY'S OWN (SKM-D1). It is popped BEFORE
+        # the frame is validated or forwarded, so the runtime never sees a key
+        # it does not know and a future runtime cannot reinterpret it. Only a
+        # literal ``true`` expands: a phone that sends a string or a 1 gets the
+        # additive-input treatment (ignore what you do not understand), which is
+        # the same behaviour an older relay gives the whole flag.
+        expand_skills = body.pop("expand_skills", False) is True
         denied = _device_refusal(body.get("operator_cert"))
         if denied is not None:
             return denied
+        # The receipt's additive ``skills`` block, filled only when expansion ran.
+        expansion_note: dict[str, list[str]] | None = None
+
+        def receipt(detail: Any) -> dict[str, Any]:
+            """This route's ack, carrying the ``skills`` block when one ran.
+
+            ADDITIVE, and present whenever the flag was honoured — even with
+            both lists empty. That is how the phone tells "the relay expanded
+            this and nothing matched" (send the literal text, say nothing) from
+            "this relay predates the flag" (it will never expand anything),
+            which the capability key alone cannot answer for one request.
+
+            ``detail`` IS FORWARDED AS THE RUNTIME SENT IT, which is why it is
+            typed ``Any`` rather than ``str``. The live ack's value is read off
+            ``daemon.request``'s reply — this device's own runtime, not a peer —
+            and the route put ``reply.get("detail", "")`` straight into the body
+            before the flag existed. A ``str()`` on the way in would both render
+            a mesh-shaped field (counted as a surface by
+            ``tests/unit/network/test_reason_surfaces.py``) and change the wire
+            type of a non-string detail for no reader's benefit.
+            """
+            answer: dict[str, Any] = {"ok": True, "detail": detail}
+            if expansion_note is not None:
+                answer["skills"] = expansion_note
+            return answer
+
         try:
             from local_operator.mobile.types import (
                 ContinuationCommand,
@@ -7829,6 +7994,42 @@ def build_app(daemon: MobileDaemon):
                 ContinuationCommand.from_json(
                     {**body, "session_id": session_id, "images": body.get("images", [])}
                 )
+            # EXPANSION SITS EXACTLY HERE: after the frame is known to be a
+            # well-formed prompt (so a malformed one costs no filesystem walk)
+            # and before EITHER delivery path reads ``body["text"]``. The live
+            # path forwards ``**body`` and the cold path builds its
+            # ``ContinuationCommand`` from the same dict, so one assignment
+            # covers both and neither can send the unexpanded text.
+            #
+            # A COLD STEER IS EXCLUDED because its destination does not exist:
+            # with no entry the route below raises the 409, so expanding first
+            # spent a discovery walk plus one read per body on a request that
+            # was already a refusal (agent review round 1, R-MINOR-4). A cold
+            # PROMPT is the opposite — the wake path builds its command from
+            # this same dict — so it must still expand.
+            cold_steer = op == "steer" and entry is None
+            if expand_skills and op in ("prompt", "steer") and not cold_steer:
+                text = body.get("text")
+                if isinstance(text, str):
+                    from local_operator.skills.invoke import SkillPayloadTooLarge
+
+                    try:
+                        expansion = await asyncio.to_thread(
+                            _expand_session_skills, daemon, session_id, text
+                        )
+                    except SkillPayloadTooLarge as exc:
+                        return JSONResponse(
+                            {
+                                "error": str(exc),
+                                "code": "skills_too_large",
+                            },
+                            status_code=422,
+                        )
+                    body["text"] = expansion.text
+                    expansion_note = {
+                        "attached": list(expansion.attached),
+                        "skipped": [skipped.name for skipped in expansion.skipped],
+                    }
             # ONE import for BOTH engage branches below: the prompt wake and the
             # queued-ask cold answer each need the resolved root, and two
             # function-local imports of the same name in one scope is an F811.
@@ -7859,7 +8060,7 @@ def build_app(daemon: MobileDaemon):
                 # ``_engage_and_publish``), so even a 50 ms worker is observable
                 # in list SSE and a failed engage retracts the claim.
                 detail = await _engage_and_publish(daemon, session_id, _deliver_prompt)
-                return JSONResponse({"ok": True, "detail": detail})
+                return JSONResponse(receipt(detail))
             if op in _ASK_ANSWER_OPS and not _session_is_live(daemon, session_id):
                 # THE COLD ANSWER (design §2.4). A queued ask is
                 # durable precisely so the agent can move on, so answering one
@@ -8053,7 +8254,7 @@ def build_app(daemon: MobileDaemon):
             # both are additive fields, so a client built before them reads
             # ``detail`` exactly as it always did.
             return JSONResponse({"ok": True, "detail": detail, "tone": tone, "refused": refused})
-        return JSONResponse({"ok": True, "detail": reply.get("detail", "")})
+        return JSONResponse(receipt(reply.get("detail", "")))
 
     async def api_operator_challenge(request: Request) -> Response:
         """Mint a per-action operator challenge for THIS session's live connection.
@@ -8587,6 +8788,41 @@ def build_app(daemon: MobileDaemon):
         if denied is not None:
             return denied
         return JSONResponse({"commands": daemon.slash_commands()})
+
+    async def api_skills(request: Request) -> Response:
+        """``GET /api/skills?session_id=``: the ``$name`` vocabulary for one session.
+
+        SESSION-SCOPED, not relay-scoped: discovery walks up from the SESSION's
+        directory, so a relay serving two checkouts answers each conversation
+        with the skills that checkout would see. The session id is a public
+        identifier, so the durability join goes through the same checked helper
+        every other route uses.
+
+        HIDDEN SKILLS ARE INCLUDED, marked. ``hide`` suppresses automatic
+        selection; being typed is exactly the case that flag leaves open, so a
+        catalogue for the picker that dropped them would conceal the entries a
+        hand-typed invocation exists for.
+
+        UNKNOWN SESSION IS 404 rather than an empty list: "this conversation
+        does not exist" and "this conversation knows no skills" are different
+        answers, and a phone that cannot tell them renders a picker for a
+        session it cannot message.
+
+        The walk and the reads are filesystem work, so they go through
+        ``asyncio.to_thread`` like every other blocking read on this loop.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        session_id = str(request.query_params.get("session_id") or "")
+        if _entry_for_session(daemon, session_id) is None and (
+            _durable_user_session_dir(session_id) is None
+        ):
+            return JSONResponse(
+                {"error": "unknown session", "code": "unknown_session"}, status_code=404
+            )
+        rows = await asyncio.to_thread(_skill_rows, daemon, session_id)
+        return JSONResponse({"skills": rows})
 
     async def api_start_session(request: Request) -> Response:
         """Start a daemon-owned session in ``cwd`` and register it through
@@ -10032,6 +10268,10 @@ def build_app(daemon: MobileDaemon):
         # half ships.
         Route("/api/schedules", api_schedules),
         Route("/api/commands", api_commands),
+        # The ``$skill`` vocabulary for ONE session (SKM-D3). A sibling of
+        # /api/commands rather than a session sub-route because the picker
+        # needs it BEFORE the composer is usable, and it is a pure read.
+        Route("/api/skills", api_skills),
         Route("/api/models", api_models),
         Route("/api/usage", api_usage),
         Route("/api/config/events", api_config_events),

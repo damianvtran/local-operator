@@ -615,6 +615,7 @@ def test_an_unreadable_project_file_skips_the_pass(root: Path) -> None:
 # --------------------------------------------------------------------------
 
 _GIT = {
+    "GIT_CONFIG_NOSYSTEM": "1",
     "GIT_CONFIG_SYSTEM": "/dev/null",
     "GIT_TERMINAL_PROMPT": "0",
     "GIT_AUTHOR_NAME": "t",
@@ -756,7 +757,36 @@ def test_a_scratchpad_without_repos_costs_no_git_call(
 def test_git_runs_with_a_scrubbed_environment() -> None:
     env = dr._git_env()
     assert "XPC_FLAGS" not in env
+    assert env["GIT_CONFIG_NOSYSTEM"] == "1"
     assert env["GIT_CONFIG_SYSTEM"] == "/dev/null" and env["GIT_TERMINAL_PROMPT"] == "0"
+
+
+def test_the_scrubbed_env_cannot_reach_the_system_credential_helper(tmp_path: Path) -> None:
+    """Prove it against real git: NOSYSTEM, not SYSTEM, drops the system layer.
+
+    ``GIT_CONFIG_SYSTEM=/dev/null`` is not enough on macOS. Apple Git reads a
+    SECOND system file
+    (``/Library/Developer/CommandLineTools/usr/share/git-core/gitconfig``) that
+    installs ``credential.helper = osxkeychain``, and that helper is what raises
+    the "Keychain Not Found" dialog on the operator's screen. Only
+    ``GIT_CONFIG_NOSYSTEM=1`` stops the file being read, so assert the helper is
+    absent from the chain the scrub builds — a later edit that drops the
+    variable fails here, and fails for the real reason rather than on a key's
+    presence.
+
+    HOME is redirected to the test's own directory so the user layer is empty
+    and anything printed can only have come from a system layer.
+    """
+    env = {**dr._git_env(), "HOME": str(tmp_path)}
+    completed = subprocess.run(  # noqa: S603 — fixed argv, no shell
+        ["git", "config", "--get-all", "credential.helper"],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert "osxkeychain" not in completed.stdout
 
 
 # --------------------------------------------------------------------------

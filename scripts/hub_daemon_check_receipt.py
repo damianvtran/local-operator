@@ -856,6 +856,9 @@ def _git(*args: str) -> str:
                 "HOME": str(_SANDBOX),
                 # No credential lookups under a scratch HOME (see AGENTS.md's
                 # rig guidance: a redirected HOME must not reach a keychain).
+                # NOSYSTEM as well as SYSTEM: on macOS Apple Git's second system
+                # file keeps the osxkeychain helper without it.
+                "GIT_CONFIG_NOSYSTEM": "1",
                 "GIT_CONFIG_SYSTEM": "/dev/null",
                 "GIT_CONFIG_GLOBAL": "/dev/null",
                 "GIT_TERMINAL_PROMPT": "0",
