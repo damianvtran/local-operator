@@ -38,10 +38,13 @@ import json
 import logging
 from bisect import bisect_right
 from dataclasses import dataclass
-from typing import Any, Final, Iterable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Final, Iterable, Mapping, Sequence
 
 from local_operator.harness.rows import is_harness_chrome, is_harness_injection
 from local_operator.session.transcript_index import RunRecord, TranscriptIndex
+
+if TYPE_CHECKING:
+    from local_operator.session.index_read_model import FrameSelection, FrameSummary
 
 logger = logging.getLogger(__name__)
 
@@ -413,7 +416,7 @@ def paintable(
 
 
 def tail_head_reachable(
-    index: TranscriptIndex,
+    index: TranscriptIndex | FrameSummary,
     *,
     limit: int,
     extra_rows: int = OPEN_FRAME_MAX_EXTRA_ROWS,
@@ -450,7 +453,7 @@ def late_index_stop(
     page_rows: Sequence[int],
     collected: Sequence[Mapping[str, Any]],
     *,
-    index: TranscriptIndex | None,
+    index: TranscriptIndex | FrameSummary | None,
     limit: int,
     supplements: bool = False,
 ) -> int | None:
@@ -600,7 +603,7 @@ def _run_start_ordinal(runs: Sequence[RunRecord], seq: int) -> int:
 
 
 def publish_runs(
-    index: TranscriptIndex,
+    index: TranscriptIndex | FrameSelection,
     *,
     first_seq: int | None,
     last_seq: int | None,
@@ -702,8 +705,9 @@ def run_payload(run: RunRecord) -> dict[str, Any]:
 def build_frame(
     raw_entries: Iterable[Mapping[str, Any]],
     *,
-    index: TranscriptIndex | None = None,
+    index: TranscriptIndex | FrameSummary | None = None,
     bounds: tuple[int | None, int | None] | None = None,
+    resolved_runs: list[dict[str, Any]] | None = None,
     runs_state: str | None = None,
     head_cut: bool = False,
     has_more: bool = True,
@@ -772,6 +776,10 @@ def build_frame(
         entries.reverse()
     runs: list[dict[str, Any]] = []
     state = runs_state or "unavailable"
+    if index is not None and not isinstance(index, (TranscriptIndex,)):
+        # A tail summary participates only in the head hunt; it is not a complete
+        # run/checkpoint index. Facts arrive separately through resolved_runs.
+        index = None
     if index is not None:
         # ``bounds is None`` with an index in hand is not a failure: it is a page
         # that holds no run a client could match a fact by (see
@@ -784,6 +792,11 @@ def build_frame(
             if bounds is not None
             else []
         )
+        state = "ready"
+    elif resolved_runs is not None:
+        # A witnessed worker projection already ran the SAME publish_runs
+        # helper. It supplies facts, not a partial index or a lazy disk accessor.
+        runs = resolved_runs
         state = "ready"
     return FrameResult(
         entries=entries,
@@ -845,7 +858,10 @@ def _window_around(
 
 
 def page_seq_bounds(
-    index: TranscriptIndex, entries: Sequence[Mapping[str, Any]], *, reaches_eof: bool
+    index: TranscriptIndex | FrameSelection,
+    entries: Sequence[Mapping[str, Any]],
+    *,
+    reaches_eof: bool,
 ) -> tuple[int | None, int | None] | None:
     """The row-ordinal window the runs of this page are found in.
 

@@ -22069,6 +22069,14 @@
             "type": "string",
             "title": "Unit",
             "default": ""
+          },
+          "synonyms": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Synonyms",
+            "default": []
           }
         },
         "type": "object",
