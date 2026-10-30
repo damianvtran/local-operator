@@ -24894,6 +24894,25 @@ def _host_holds_no_recording(problem: ToolResult) -> bool:
     return str(details.get("reason") or "") in _RECORD_ABSENT_REASONS
 
 
+def _recording_linked_leaf(raw: str, cwd: str) -> Path | None:
+    """The unresolved leaf of ``raw`` when it is a symlink, else None (D5).
+
+    The check has to run on the UNRESOLVED spelling: `_resolve_workspace_path`
+    follows the leaf, so the resolved target either looks like a plain file that
+    already exists or — for a dangling link — like a free name, and the write
+    then goes THROUGH the link to wherever it points. `Path.is_symlink()` lstats
+    the final component and returns False on any error, which is the right
+    answer for a name that is not there.
+    """
+    try:
+        candidate = Path(raw).expanduser()
+    except RuntimeError:
+        candidate = Path(raw)
+    if not candidate.is_absolute():
+        candidate = Path(cwd) / candidate
+    return candidate if candidate.is_symlink() else None
+
+
 def _recording_target_refusal(target: Path) -> str:
     """Why ``target`` cannot receive a recording, or "" when it can (D5).
 
@@ -24936,7 +24955,21 @@ def _recording_destination(
         refusal = _scheme_refusal(tool_call_id, "browser", raw)
         if refusal is not None:
             return None, refusal
-        resolved, _inside, resolvable = _resolve_workspace_path(raw, _safe_cwd(context))
+        # Before resolution, which replaces the leaf with what it points at: a
+        # link is only visible on the path as spelled. A dangling link otherwise
+        # resolved to its missing target and was recorded through (QA round 1,
+        # Q1).
+        cwd = _safe_cwd(context)
+        linked = _recording_linked_leaf(raw, cwd)
+        if linked is not None:
+            return None, _error(
+                tool_call_id,
+                "browser",
+                f"cannot record to {linked}: it is a symlink and a recording is never "
+                "written through one, whether or not the link's target exists. Pick a "
+                "real file name. Nothing was written and no recording started.",
+            )
+        resolved, _inside, resolvable = _resolve_workspace_path(raw, cwd)
         denial = _confinement_denial(resolved, context, resolvable=resolvable)
         if denial is not None:
             return None, _error(tool_call_id, "browser", denial)

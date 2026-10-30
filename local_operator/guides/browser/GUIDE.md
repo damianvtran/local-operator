@@ -476,6 +476,9 @@ does not have to be the visible one: recording reads the same pixels
 - Capture parameters are fixed: 1280x720, 10 fps, no audio. The file is an MP4
   with an AV1 track — it plays in QuickTime/AVFoundation; Chrome's `<video>`
   will not play it (the probe measured that).
+- A clip shorter than about half a second can hold a single frame, and a
+  one-frame AV1 track is not decodable everywhere: record for at least a second
+  or two when the clip is going to be watched.
 - One recording per session per tab, two app-wide. A clip that would exceed
   64 MiB (32 MiB under a scratchpad) is discarded rather than truncated: a
   truncated MP4 is invalid, so the error says nothing was saved.

@@ -522,7 +522,14 @@ def test_start_refuses_a_traversal_path_outside_the_confinement(
 
 
 def test_start_refuses_a_symlink_leaf(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A leaf that is a link is refused even when it points at a real file."""
+    """A leaf that is a link is refused even when it points at a real file.
+
+    The assertion names the sentence, not the word "symlink": pytest builds the
+    temp directory from the test's own name, so a bare `"symlink" in text`
+    matched THIS test's path and passed while the resolver was quietly following
+    the leaf (QA round 1, Q1). The resolved target must not be named either —
+    naming it is what "wrote through the link" looked like.
+    """
     real = tmp_path / "real.mp4"
     real.write_bytes(MP4_HEAD)
     link = tmp_path / "link.mp4"
@@ -531,7 +538,28 @@ def test_start_refuses_a_symlink_leaf(tmp_path: Path, monkeypatch: pytest.Monkey
     result, _ = _call("record_start", tmp_path, monkeypatch, path=str(link), calls=seen)
     assert result.is_error
     assert seen == []
-    assert "symlink" in result.text
+    assert "a recording is never written through one" in result.text
+    assert str(link) in result.text
+    assert str(real) not in result.text
+
+
+def test_start_refuses_a_dangling_symlink_leaf(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A link to a MISSING file is still a link: resolving it found a free name.
+
+    This is the case that actually wrote through the link — the resolved target
+    did not exist, so `exists()` and `is_symlink()` on the RESOLVED path both
+    said the destination was fine (QA round 1, Q1).
+    """
+    link = tmp_path / "dangling.mp4"
+    link.symlink_to(tmp_path / "never-written.mp4")
+    seen: list[tuple[str, dict[str, Any]]] = []
+    result, _ = _call("record_start", tmp_path, monkeypatch, path=str(link), calls=seen)
+    assert result.is_error
+    assert seen == []
+    assert "a recording is never written through one" in result.text
+    assert str(link) in result.text
 
 
 def test_start_refuses_a_symlink_parent_that_leaves_the_confinement(
