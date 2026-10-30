@@ -63,6 +63,10 @@ def test_account_policy_copy_follows_the_catalogue_tree():
         for namespace, code, english in TARGET_MESSAGES:
             rendered = messages.render(code, {}, locale=locale)
             if _carries(locale, namespace, code):
+                assert rendered.strip(), (
+                    f"{locale} carries {namespace} but {code} renders a blank value: an empty "
+                    "catalogue entry is a defect, never a fallback."
+                )
                 assert rendered != english, (
                     f"{locale} carries {namespace} but {code} still renders the English "
                     f"source {english!r}: a shipped catalogue holding an English-identical "

@@ -99,10 +99,14 @@ describe("relay.session extraction", () => {
 		const unshipped = RESOLVED_LOCALES.find(
 			locale => locale !== "en" && !Object.values(BUNDLED_OWNED).some(bundle => locale in bundle),
 		);
-		expect(unshipped).toBeDefined();
 		expect(messageRuntime.uiLocaleFor("fr")).toBe("fr");
 		expect(messageRuntime.uiLocaleFor("ur")).toBe("ur");
-		expect(messageRuntime.uiLocaleFor(unshipped!)).toBe("en");
+		// The fallback arm exists only while a supported locale still lacks a relay
+		// catalogue; es (#3164) and hi (#3166) are the last two, so the arm is
+		// skipped rather than asserted once they land. A green run must never
+		// depend on a gap in the catalogue set, which is the same trap as naming
+		// the locale: it goes red on the day the gap closes.
+		if (unshipped !== undefined) expect(messageRuntime.uiLocaleFor(unshipped)).toBe("en");
 		const { result, unmount } = renderHook(() => useLocaleSnapshot());
 		// No config frame is applied in this fixture, so the snapshot is the boot
 		// state and says nothing about either preference.
