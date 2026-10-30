@@ -445,7 +445,8 @@ def test_a_longer_localised_done_tag_does_not_orphan_itself_on_a_second_line(mon
     assert cell_len(suffix) > goal_panel._GOAL_TAG_CELLS
 
     def localised(msg):  # noqa: ANN001, ANN202
-        return suffix if getattr(msg, "code", "").endswith("done_suffix") else real_t(msg)
+        is_tag = getattr(msg, "code", "") == "tui.small.goal_panel.done_suffix"
+        return suffix if is_tag else real_t(msg)
 
     monkeypatch.setattr(goal_panel, "_t", localised)
     long_goal = " ".join(["objetivo"] * 12)

@@ -1,0 +1,105 @@
+{
+  "schema": 1,
+  "audit_id": "w6a4",
+  "audit_round": 4,
+  "audit_kind": "closing_single_finding_verification",
+  "locale": "es",
+  "namespace": "tui.small",
+  "audit_date": "2026-10-30",
+  "audited_revision": "215c87822c7c3d2b3e52a9acde39b41a570851d9",
+  "audited_revision_note": "git rev-parse HEAD of the PR #3188 worktree. Remediation commit for S1 is 3209592c2b1 (an ancestor); target catalogue blob is identical at both.",
+  "key_count": {
+    "en": 137,
+    "target": 137,
+    "context": 137
+  },
+  "verdict": "passed",
+  "verdict_reason": "S1 is closed on the head: the real build_goal_body in es keeps '  — hecho' on the goal row at 60/80/100 columns with no orphan and no over-wide line; the same probe on the pre-fix source reproduces the orphan at all three widths. Catalogue bytes unchanged since round 2.",
+  "auditor": {
+    "agent": "i18n-auditor (lopdev team), es-tui-small-close",
+    "session": "65ddc2e6e89d",
+    "model": "anthropic/claude-sonnet-5-5",
+    "actual_model_source": "the session header of this run names anthropic/claude-sonnet-5-5; no provider failure, fallback or model switch occurred, so the primary model produced every measurement and judgement.",
+    "independent_from_translator_session": true,
+    "independence": "Did not write or remediate this copy. Prior rounds (w6a1-w6a3) read as context only; every measurement here was re-derived on the current bytes.",
+    "date": "2026-10-30"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.small.json",
+      "sha256": "16d49c4ba2a514bbde7da494443abade26a3b28c0389e6bca124d00aa7d0ed75"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.small.context.json",
+      "sha256": "1e3d6785f78126b8389b2acbcc081d5bf782fbaf744114e47611fbff3c45dde1"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/es/tui.small.json",
+      "sha256": "e374959d70bb379a37e3f02e8c69edeea168b7edbd11107e4131f41fe116b9af",
+      "unchanged_since_round": 2
+    }
+  },
+  "findings": [
+    {
+      "id": "S1",
+      "severity": "major",
+      "key": "tui.small.goal_panel.done_suffix",
+      "status": "closed",
+      "closed_by_commit": "3209592c2b1",
+      "closed_in": "code (local_operator/tui/widgets/goal_panel.py build_goal_body: max(_GOAL_TAG_CELLS, cell_len(done_suffix)))",
+      "value_unchanged": "  — hecho",
+      "cells": {
+        "en": 8,
+        "es": 9
+      },
+      "verification": "checks.py: fixed code 1 painted goal line at 60/80/100 cols, ends '— hecho', max line == content width; negative control (pre-fix 4912975a4b5 from scratch copy) 2 lines with orphan 'hecho' at all three widths; 450-case sweep: fixed 0 failures, pre-fix 282 orphans; English output identical pre vs fixed; unit test test_a_longer_localised_done_tag_does_not_orphan_itself_on_a_second_line passed."
+    }
+  ],
+  "other_code_fixed_columns": {
+    "found": 0,
+    "scope": "goal_panel, info_panel, network_panel, wake_panel, session_picker read; es-wider-than-en values traced to their consumers",
+    "observation_not_finding": "es no_goal_hint (44 cells) wraps one word at the 46-col panel floor; flow text, not a fixed reserve"
+  },
+  "refresh_merge_215c87822c7": {
+    "parents": [
+      "3209592c2b1",
+      "0034441080b"
+    ],
+    "identical_blobs_vs_3209592c2b1": [
+      "es/tui.small.json",
+      "es/tui.analytics.json",
+      "goal_panel.py",
+      "test_goal_panel.py",
+      "style-guides/es.md"
+    ],
+    "ledger_delta": "+20 lines, one appended cli.team_bridge row only"
+  },
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [],
+    "blocker_major_finding_ids": [],
+    "closed_finding_ids": [
+      "S1"
+    ]
+  },
+  "execution_evidence": {
+    "checks": "i18n/audits/evidence/es/tui.small/w6a4/checks.py",
+    "log": "i18n/audits/evidence/es/tui.small/w6a4/audit.log"
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/es/tui.small/w6a4/report.md",
+      "sha256": "60e37799ae8e58e035b06ba1b5c2b03672580b760792aff85e671029d839a436"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.small/w6a4/checks.py",
+      "sha256": "e74ddbaf8f1b757142c4a56714e1c4190abc12bfb838bd1dbc4c3c3ea3d78572"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.small/w6a4/audit.log",
+      "sha256": "38e0a125aa14dfa422d258384e8de1e2d06dd650619303d3ee249e03fde9024a"
+    }
+  ],
+  "audit_notes_not_execution_log": "report.md is a finding note; execution output lives in audit.log and was produced by checks.py and the git/pytest commands recorded there."
+}

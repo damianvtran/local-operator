@@ -87,8 +87,8 @@ translators and the auditor. Wave 1 locale.
   `cuota`; where it means the paid allocation, it is `asignación`.
 - **Amendment (es TUI wave, 2026-10-30): `pull` / `push` stay English, and the
   action label is the infinitive form `Hacer pull ahora`** (en: `Pull now`). The
-  shipped catalogues already settled this, outside this wave: `Hacer pull de un
-  agente desde Radient` (`cli.agents_help`), `Hacer pull de un equipo del hub
+  shipped catalogues already settled this, outside this wave: `Hacer pull (descargar)
+  de un agente desde Radient` (`cli.agents_help`), `Hacer pull de un equipo del hub
   por ID` (`cli.teams_help`) and `hace merge … de los que hiciste pull`
   (`wire.settings`). Do not render `pull` as `extraer` or `traer` — the user pairs the
   label with the subcommand they already type.
@@ -134,7 +134,7 @@ translators and the auditor. Wave 1 locale.
   **63-column** terminal to show whole and fitted from 58 before.
   `family_caps` needs **64** columns and `eligibility_unknown` **46** (37 cells
   plus 9 of chrome), all measured with `rich.cells.cell_len` against
-  `body = columns − 9`: in the 46–63 band `family_caps` and `paid.continue`
+  `body = columns − 9`: in the 46–62 band `family_caps` and `paid.continue`
   clip, and all three fit only from 64 columns up.
 - Recorded width exception: `tui.analytics.hint.expand.keys_bare` (es TUI wave,
   2026-10-30). es measures 14 cells against the declared `maxCells` of 12 — but
