@@ -53,7 +53,7 @@ from typing import Any
 import httpx
 
 from local_operator.exec_mode import ExecArgs, resolve_hosting_model_dry
-from local_operator.i18n.boot import activate_resolved_locale
+from local_operator.i18n.boot import activate_resolved_locale, configured_language
 from local_operator.i18n.keys import wire_remote_compute as _wr
 from local_operator.i18n.resolve import resolve_language
 from local_operator.i18n.text import tr
@@ -606,13 +606,16 @@ def _install_locale() -> None:
     own module-level ``resolve_language`` binding is passed through because that
     name is the seam those tests patch.
 
-    COST: one config read (a watched snapshot when this process has a watcher,
-    a ``ConfigManager`` when it does not — the CLI case), which ``_submit``'s own
-    ``is_enabled`` read already pays for. ``i18n.resolve`` is free to import at
-    module level here: ``i18n.text`` already imports it, so the module graph is
-    unchanged.
+    COST: one config FILE read (``i18n.boot.configured_language``), which
+    ``_submit``'s own ``is_enabled`` read already pays for. It reads the same
+    ``language`` row the TUI resolves, without constructing a ``ConfigManager``
+    — construction CREATES the config directory, and this process may be on its
+    way to a refusal (``--remote-cancel`` of an unknown run, a flag missing its
+    ``--remote``) that must leave the user's home untouched. ``i18n.resolve`` is
+    free to import at module level here: ``i18n.text`` already imports it, so
+    the module graph is unchanged.
     """
-    activate_resolved_locale(resolve_language)
+    activate_resolved_locale(lambda: resolve_language(configured_language()))
 
 
 def remote_command(args: argparse.Namespace) -> int:

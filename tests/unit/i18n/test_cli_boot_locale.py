@@ -98,7 +98,7 @@ def _write_language(root: Path, locale: str) -> None:
     (root / "config.yml").write_text(f"values:\n  language: {locale}\n", encoding="utf-8")
 
 
-def _render(locale: str, code: str, **params: Any) -> str:
+def _render(locale: str, code: str, *, namespace: str = NAMESPACE, **params: Any) -> str:
     """One line rendered from the catalogue FILE, never through the active locale.
 
     Reading the file directly is what keeps the expectation independent of the
@@ -106,7 +106,7 @@ def _render(locale: str, code: str, **params: Any) -> str:
     make the "expected" string English too and the assertion would pass on the
     very defect it exists to catch.
     """
-    source = catalogues.load_catalogue(locale, NAMESPACE)[code]
+    source = catalogues.load_catalogue(locale, namespace)[code]
     return runtime.render_message(source, dict(params), locale)
 
 
@@ -148,24 +148,32 @@ def test_a_headless_command_renders_the_configured_language(
     assert _render("en", HEALTHY, value=_render("en", STATUS_NO)) not in out
 
 
-def test_english_output_is_byte_identical_to_the_unactivated_path(
+def test_english_output_is_identical_to_the_hook_removed_control(
     headless_config: Path,
     fixed_browser_status: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """The regression half: under English the bytes are the pre-change bytes.
+    """The regression half, with a control that can actually differ.
 
-    The control run switches the activation off, which is precisely what this
-    code did before the change; the activated run must be identical to it.
+    Two things are asserted, because ``set_active_locale("en")`` is a documented
+    no-op (``i18n.text`` returns before any refresher): the bytes must equal the
+    run where the boot hook is REMOVED — the true pre-change path — and the
+    measured run must have made the move at all. The second half is what makes
+    this fail when the call disappears; the first is what makes it fail if an
+    English dispatch ever re-materialises copy in another language.
     """
     _write_language(headless_config, "en")
     with monkeypatch.context() as off:
-        off.setattr(i18n_boot, "set_active_locale", lambda locale: None)
+        off.setattr(cli_module, "_install_headless_locale", lambda args: None)
         _, control = _browser_status(monkeypatch, capsys)
-    _, activated = _browser_status(monkeypatch, capsys)
-    assert activated == control
-    assert _render("en", HEALTHY, value=_render("en", STATUS_NO)) in activated
+    calls: list[str] = []
+    with monkeypatch.context() as spy:
+        spy.setattr(i18n_boot, "set_active_locale", calls.append)
+        _, measured = _browser_status(monkeypatch, capsys)
+    assert measured == control
+    assert calls == ["en"]
+    assert _render("en", HEALTHY, value=_render("en", STATUS_NO)) in measured
 
 
 def test_the_boot_path_activates_once_with_the_resolved_locale(
@@ -295,3 +303,132 @@ def test_a_remote_invocation_activates_exactly_once(
     assert code == 1
     assert out == ""
     assert activation_calls == ["es"]
+
+
+def test_the_activation_runs_after_the_startup_migrations(
+    headless_config,
+    fixed_browser_status,
+    monkeypatch,
+    capsys,
+) -> None:
+    """Order pinned: migrations first, then the move.
+
+    The move must see the config the startup repairs left behind, so moving the
+    call above ``base_dir``/``run_startup_migrations`` is a regression this test
+    fails on — the comment at the call site argues the position, and this is
+    what enforces it.
+    """
+    order: list[str] = []
+    monkeypatch.setattr(
+        "local_operator.config_migrations.run_startup_migrations",
+        lambda *args, **kwargs: order.append("migrations"),
+    )
+    # ``cli`` binds the helper at import, so the seam is ITS name, not boot's.
+    monkeypatch.setattr(cli_module, "activate_resolved_locale", lambda: order.append("activate"))
+    _browser_status(monkeypatch, capsys)
+    assert order == ["migrations", "activate"]
+
+
+def test_a_tui_launch_is_never_activated(headless_config, activation_calls) -> None:
+    """The TUI exclusion branch, on a PARSED namespace rather than a hand-built one.
+
+    ``OperatorApp.on_mount`` owns the move for the full-screen app, so the CLI
+    must not make one on that launch; the bare launch beside it (piped, no tty)
+    is a headless surface and must still get its one move.
+    """
+    _write_language(headless_config, "es")
+    parser = cli_module.build_cli_parser()
+    cli_module._install_headless_locale(parser.parse_args(["--tui"]))
+    assert activation_calls == []
+    cli_module._install_headless_locale(parser.parse_args([]))
+    assert activation_calls == ["es"]
+
+
+def test_the_boot_creates_nothing_on_disk(tmp_path, monkeypatch) -> None:
+    """Resolving the language must not CREATE the store it is only reading.
+
+    The agent-shell guard asserts a refused ``lop`` leaves ``~/.local-operator``
+    absent, and resolving through a bare ``resolve_language()`` violates it:
+    without a watcher it builds a ``ConfigManager``, whose construction makes the
+    directory (measured). ``boot.configured_language`` reads through
+    ``read_config_values``, which never writes, moves or reports anything.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("LOCAL_OPERATOR_CONFIG_DIR", raising=False)
+    monkeypatch.delenv("LOP_LANG", raising=False)
+    args = cli_module.build_cli_parser().parse_args([])
+    cli_module._install_headless_locale(args)
+    assert not (home / ".local-operator").exists()
+
+
+def test_the_spawned_exec_worker_activates_before_it_runs(headless_config, monkeypatch) -> None:
+    """``lop exec --background`` is its own process and had no activation at all.
+
+    The launcher's boot activation belongs to the launcher, so a detached run
+    rendered ``cli.exec_runtime`` chrome (``headless_print``'s import-time
+    constants) and ``cli.exec_worker_help`` in English under an ``es`` config.
+    ``run`` is stubbed: this asserts the move happens before the work starts and
+    that the chrome constant re-materialised through the refresh it registered.
+    """
+    from local_operator import exec_worker, headless_print
+    from local_operator.i18n.text import active_locale
+
+    _write_language(headless_config, "es")
+    seen: list[str] = []
+
+    def _run(parsed, *, stop_facts=None):
+        seen.append(active_locale())
+        return 0
+
+    monkeypatch.setattr(exec_worker, "run", _run)
+    monkeypatch.setattr(sys, "argv", ["exec_worker", "--prompt", "x"])
+    assert exec_worker.main() == 0
+    assert seen == ["es"]
+    assert headless_print._THINKING == _render(
+        "es", "cli.exec_runtime.thinking", namespace="cli.exec_runtime"
+    )
+
+
+def test_the_exec_worker_leaves_a_json_stream_untranslated(headless_config, monkeypatch) -> None:
+    """``--json`` workers keep the renderer on ``en``, like every other JSON path."""
+    from local_operator import exec_worker
+    from local_operator.i18n.text import active_locale
+
+    _write_language(headless_config, "es")
+    seen: list[str] = []
+
+    def _run(parsed, *, stop_facts=None):
+        seen.append(active_locale())
+        return 0
+
+    monkeypatch.setattr(exec_worker, "run", _run)
+    monkeypatch.setattr(sys, "argv", ["exec_worker", "--prompt", "x", "--json"])
+    assert exec_worker.main() == 0
+    assert seen == ["en"]
+
+
+@pytest.mark.parametrize(
+    ("argv", "machine_readable"),
+    [
+        (["memory", "list", "--json"], True),
+        (["search", "test", "q", "--json"], True),
+        (["browser", "tabs", "--json"], True),
+        (["exec", "x", "--json"], True),
+        (["fetch", "test", "https://example.invalid", "--raw"], False),
+        (["browser", "status"], False),
+    ],
+)
+def test_every_declared_json_flag_reaches_the_predicate(
+    argv: list[str], machine_readable: bool
+) -> None:
+    """Parsed through the REAL parser, so a renamed dest cannot pass silently.
+
+    ``memory``'s ``--json`` used to land on ``raw`` and ``search test``'s on
+    ``as_json``, which the predicate did not read; ``fetch test --raw`` shares the
+    ``raw`` dest but prints TEXT, which is why those two flags were normalised to
+    argparse's default instead of widening the predicate.
+    """
+    args = cli_module.build_cli_parser().parse_args(argv)
+    assert cli_module._machine_readable(args) is machine_readable

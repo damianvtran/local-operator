@@ -37,9 +37,12 @@ WHAT IS DELIBERATELY NOT ACTIVATED, and why:
   ``config.yml`` aside). Help resolves its own copy through
   ``i18n.cli_help.help_locale``, which reads the same chain through the
   side-effect-free ``read_config_values``;
-* machine-readable invocations (``--json``, and ``exec``'s ``--json`` /
-  ``json_mode``) — a document a script parses must not vary with the
-  operator's language;
+* machine-readable invocations on the LOCAL dispatch (``--json``, and
+  ``exec``'s ``--json`` / ``json_mode``) — a document a script parses must not
+  vary with the operator's language. The invariant is scoped to the local
+  dispatch on purpose: ``exec --remote --json`` is still a remote run whose
+  refusals are prose printed by ``remote_command``, and that path activates
+  before the CLI's dispatch can say anything about it;
 * the full-screen TUI — ``OperatorApp.on_mount`` resolves and applies the
   language itself (and owns the repaint that follows a move), so this is not
   its boot path.
@@ -49,8 +52,44 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from .resolve import resolve_language
+from .resolve import CONFIG_KEY, DEFAULT_LANGUAGE, resolve_language
 from .text import set_active_locale
+
+
+def configured_language() -> str:
+    """The ``language`` value on disk, or ``DEFAULT_LANGUAGE`` when unset.
+
+    Deliberately NOT a bare ``resolve_language()``: that falls back to building
+    a ``ConfigManager`` when the process has no config watcher (the CLI case),
+    and construction CREATES the config directory — measured: with no
+    ``~/.local-operator`` on disk, ``read_config_values`` leaves it absent and
+    ``ConfigManager(directory)`` creates it. Boot-time copy must create nothing:
+    a run that is about to be refused (the agent-shell guard asserts a refused
+    ``lop`` leaves the home untouched) and an argparse ``--help`` must not
+    touch a store they are not going to use, and a resolution read has no
+    business renaming an unparsable file either.
+
+    ``read_config_values`` is that reader — it never writes, moves or reports
+    anything, and it reads through the same parse memo as the manager. Returns
+    ``DEFAULT_LANGUAGE`` (``auto``) rather than ``None`` for an unreadable file
+    for the reason ``i18n.cli_help`` documents: a ``None`` would send the
+    resolver back to the manager this function exists to avoid.
+    """
+    from local_operator.config import read_config_values
+    from local_operator.paths import config_dir
+
+    try:
+        values = read_config_values(config_dir())
+    except UnicodeDecodeError:
+        # Outside read_config_values' own contract, and equally unavailable here.
+        values = None
+    value = values.get(CONFIG_KEY) if isinstance(values, dict) else None
+    return value if isinstance(value, str) else DEFAULT_LANGUAGE
+
+
+def _resolve_for_boot() -> str:
+    """The chain's answer over the read-only config value (see above)."""
+    return resolve_language(configured_language())
 
 
 def activate_resolved_locale(resolve: Callable[[], str] | None = None) -> None:
@@ -72,7 +111,7 @@ def activate_resolved_locale(resolve: Callable[[], str] | None = None) -> None:
     refresher that throws inside the move must not take the command down with
     it.
     """
-    resolver = resolve if resolve is not None else resolve_language
+    resolver = resolve if resolve is not None else _resolve_for_boot
     locale = "en"
     try:
         locale = resolver()

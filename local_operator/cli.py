@@ -16906,12 +16906,18 @@ def _is_daemon_launch(args: argparse.Namespace) -> bool:
 def _machine_readable(args: argparse.Namespace) -> bool:
     """Whether this invocation's stdout is a machine contract, not a sentence.
 
-    ``--json`` on every subcommand family that declares it, and ``exec``'s own
+    ``--json`` wherever a subcommand family declares it, and ``exec``'s own
     ``--json`` (dest ``json_mode``: one ``printable_event`` line per event and
     no chrome at all). A document a script parses must not vary with the
     operator's language: the refusal documents below carry a ``message`` field,
     and a translated one would make the payload locale-dependent with no way
     for a consumer to say which locale it holds.
+
+    Two families used to declare ``--json`` under a different dest — ``memory``
+    as ``raw`` and ``search test`` as ``as_json`` — so this predicate silently
+    missed them. Both now use argparse's default (``json``); the alternative,
+    matching on ``raw``, would have caught ``fetch test --raw``, which is TEXT
+    output and must keep its localized copy.
     """
 
     return bool(getattr(args, "json", False) or getattr(args, "json_mode", False))
