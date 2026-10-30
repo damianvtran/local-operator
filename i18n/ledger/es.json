@@ -1896,6 +1896,120 @@
       },
       "status": "passed",
       "note": "PR #3088 width rewrite, re-audited at the committed bytes. 9 of 52 values rewritten by i18n-translator (session e537e741e8d1) (actual model radient/auto; provider-quota fallback); round-1 audit e7a6d684b88a-slash-es rejected the shortened bytes (0B/1M/5m/5n) and round-2 independent audit 56bf28217956-slash2-es on the new bytes passed 0B/0M/2m/4n. target sha256 b577fc64e6ab7369a58f02d4b4653367f9169cf1a015b16168e02dae6bfc5c3b; en source unchanged (b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202). Evidence: i18n/audits/evidence/es/wire.slash/es29s2/record.json (receipt.json + verdicts copied verbatim). Previous rows for this pair described audits of the pre-rewrite values and are superseded."
+    },
+    {
+      "locale": "es",
+      "namespace": "relay.account_policy",
+      "source_sha256": "0019b08106e6f7762194b164b9b9b37054a8cfade759aa2f6490787a73dea890",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 3
+      },
+      "status": "passed",
+      "note": "w4w5 es backfill: 13 keys; independent audit w4a4 passed on the shipped bytes (target sha256 71956128095ae4afebaf4aa26356db6acf9796a100332d503fbcc785ab178453, evidence i18n/audits/evidence/es/relay.account_policy/w4a4/). Two findings were raised and closed across rounds: w4a3 'equipo' -> 'máquina' (the locale binds equipo to TEAM), w4a4 'relay' -> 'relé' (glossary §relay). One open nit (AP-03) is dispositioned in the w4a4 report.md. Note the row's source_sha256 is the ENGLISH source hash; the target binding lives in the cited record."
+    },
+    {
+      "locale": "es",
+      "namespace": "relay.library",
+      "source_sha256": "ad478c433a4db3e725994766c724a2e8e92176f015f8283e71dc13b87185466a",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "radient/auto (self-reported)",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "w4w5 es backfill: 1 keys; independent audit w4a3 passed (committed evidence i18n/audits/evidence/es/relay.library/w4a3/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "relay.login",
+      "source_sha256": "9a59686bcd0e3641a5a807ea2b778cb385e591060c26c7fb994bea95e4de5bc5",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "radient/auto (self-reported)",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w4w5 es backfill: 4 keys; independent audit w4a2 passed (committed evidence i18n/audits/evidence/es/relay.login/w4a2/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "relay.session",
+      "source_sha256": "a4ae148de969d4a2e8541aca5b4b99ad311d9ef112a0d056fc21fcf90e7e0129",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "radient/kimi-k2.5",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "w4w5 es backfill: 17 keys; independent audit w4a2 passed (committed evidence i18n/audits/evidence/es/relay.session/w4a2/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "relay.shell",
+      "source_sha256": "f53b23560b88b531ef8fc3274bc396676f26e755ad4ff9ad87ce368cebdee560",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "radient/kimi-k2.5",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 6
+      },
+      "status": "passed",
+      "note": "w4w5 es backfill: 44 keys; independent audit w4a3 passed (committed evidence i18n/audits/evidence/es/relay.shell/w4a3/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "mobile.setup",
+      "source_sha256": "6249b10379beb9b2433746416fa7baff061265a1b9315d47465140cd5fcf61e9",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 12
+      },
+      "status": "passed",
+      "note": "w4w5 es backfill: 76 keys; independent audit w5a1 passed (committed evidence i18n/audits/evidence/es/mobile.setup/w5a1/). Open minor/nit findings are dispositioned in that evidence's report.md."
     }
   ]
 }

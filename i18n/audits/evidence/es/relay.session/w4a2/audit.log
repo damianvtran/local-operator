@@ -1,0 +1,35 @@
+# w4a2 round-2 audit run — relay.session
+run_at_utc: 2026-10-29T22:15:40Z
+host: damians-MacBook-Pro / macOS-27.0.1-arm64-arm-64bit-Mach-O
+python: 3.14.7
+repo: /Users/damian/lo-i18n-es   branch: feat/i18n-es-wire-errors
+HEAD: 183f7a0537e4cee42fd82f25a21fe52953a81bdf
+tracked_state (target): ?? local_operator/i18n/catalogues/es/relay.session.json
+w4a1 log read for the neighbour comparison: audit.log
+
+## input hashes (sha256) of the ROUND-2 bytes
+  en          a4ae148de969d4a2e8541aca5b4b99ad311d9ef112a0d056fc21fcf90e7e0129  local_operator/i18n/catalogues/en/relay.session.json
+  en.context  8777c48c750d982f3f795c81d0a543e92000a3898223cfa60637f8a2edc1e2db  local_operator/i18n/catalogues/en/relay.session.context.json
+  es          6812dca69e08ab9f1cf48f271e4db20263c7bbcb659d83a2f3c1a460122a2165  local_operator/i18n/catalogues/es/relay.session.json
+
+## key parity: en=17 es=17 missing=[] extra=[]
+## delta keys claimed by this round: ['relay.session.list.empty_hint']
+
+## independent CLDR cross-check — Node Intl.PluralRules vs the repo tables
+  node={0: 'other', 1: 'one', 2: 'other', 21: 'other', 1000000: 'many', 1500000: 'other', 2000000: 'many'}
+  repo={0: 'other', 1: 'one', 2: 'other', 21: 'other', 1000000: 'many', 1500000: 'other', 2000000: 'many'}
+  agree=True
+
+## argument names per key (en vs es, recursive through every branch)
+  argument_set_diffs=0
+
+## plural categories used by the target
+  categories_used=[] selectable=['many', 'one', 'other'] illegal=[]
+
+## delta keys, rendered in place
+  relay.session.list.empty_hint
+    src: 'inicia una abajo o desde la TUI en tu máquina'
+    -> 'inicia una abajo o desde la TUI en tu máquina'
+
+## neighbour check: every non-delta key reproduces w4a1's recorded render
+  reproduced=16 changed=0 unrecorded=0 of 16 non-delta keys

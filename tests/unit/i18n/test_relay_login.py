@@ -52,7 +52,7 @@ def test_english_login_and_auth_contract() -> None:
     assert client.get("/api/sessions").status_code == 401
 
 
-@pytest.mark.parametrize("locale", ["en", "es", "ru", "vi"])
+@pytest.mark.parametrize("locale", ["en", "ru", "vi"])
 def test_actual_shipped_missing_namespace_uses_english_metadata(
     monkeypatch, tmp_path, locale: str
 ) -> None:
@@ -60,7 +60,9 @@ def test_actual_shipped_missing_namespace_uses_english_metadata(
     # committed shipped tags that do not carry relay.login (plus `en`, whose
     # source IS that fallback), so the SSR page must render English metadata.
     # `fr` left this set when PR #3131 translated relay.login; `ur`/`zh-CN`
-    # already carried it.
+    # already carried it. `es` left it with this branch's es relay wave — once
+    # Spanish carries `relay.login`, the page must render SPANISH metadata, and
+    # the case below proves that rather than weakening this assertion.
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     (tmp_path / "config.yml").write_text(f"values:\n  language: {locale}\n")
     assert daemon.resolve_language() == locale
@@ -315,3 +317,23 @@ def test_mutation_fails_normal_checker(i18n_check, monkeypatch, tmp_path) -> Non
 def test_scanner_missing_or_dynamic_template_fails() -> None:
     assert check_login_source("_LOGIN_HTML = build_template()")
     assert check_login_source("x = 'not the template'")
+
+
+def test_spanish_login_page_renders_its_own_metadata(monkeypatch, tmp_path) -> None:
+    # The other half of the fallback contract: a locale that DOES carry
+    # relay.login must not render the English page.
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "config.yml").write_text("values:\n  language: es\n")
+    assert daemon.resolve_language() == "es"
+    client = TestClient(
+        daemon.build_app(daemon.MobileDaemon(port=0, password="fixture-password")),
+        follow_redirects=False,
+    )
+    page = client.get("/login")
+    assert '<html lang="es" dir="ltr">' in page.text
+    assert "local operator — iniciar sesión" in page.text
+    assert "contraseña" in page.text
+    assert '<button type="submit">iniciar sesión</button>' in page.text
+    refused = client.post("/login", data={"password": "wrong"})
+    assert refused.status_code == 401
+    assert "incorrecta." in refused.text

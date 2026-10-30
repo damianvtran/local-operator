@@ -1,0 +1,134 @@
+{
+ "schema": 1,
+ "audit_id": "w4a3",
+ "audit_round": 2,
+ "locale": "es",
+ "namespace": "relay.library",
+ "audit_date": "2026-10-29",
+ "audited_revision": "183f7a0537e4cee42fd82f25a21fe52953a81bdf",
+ "audited_revision_note": "The es catalogue is UNTRACKED at this revision (`git status --porcelain` -> `?? local_operator/i18n/catalogues/es/relay.library.json`), so HEAD cannot pin the audited bytes; input_hashes.target.sha256 is the exact on-disk hash and checks.py recomputes it.",
+ "supersedes": "w4a2",
+ "supersedes_scope": {
+  "remediation_keys": [
+   "relay.library.count"
+  ],
+  "note": "The namespace is one key, so the delta is the whole namespace."
+ },
+ "key_count": {
+  "en": 1,
+  "target": 1,
+  "context": 1,
+  "keys_read_this_round": 1
+ },
+ "verdict": "passed",
+ "result": "passed — 1 minor closed by measurement; 0 open findings",
+ "verdict_reason": "es-w4a2-LB-01 is closed on execution, not on the implementer's word: the message now carries one/many/other and the repository's own runtime renders all six counts the implementer predicted — 0 recursos, 1 recurso, 2 recursos, 21 recursos, 1.000.000 de recursos, 1.500.000 recursos. A same-code control shows the superseded string produced '1.000.000 recursos' at the same count and agrees with the new string everywhere that is not an exact multiple of 10^6, which proves the fix is targeted and changed nothing else. The census now reports 62/62 es plural messages carrying `many`, so this key is no longer the outlier. No blocker, major, minor or nit remains on this namespace.",
+ "auditor": {
+  "agent": "translation-auditor (lopdev team)",
+  "session_or_instance": "8eb3b9c9a687 (lane es-w4-auditor-b)",
+  "model": "radient/auto (self-reported)",
+  "model_note": "Session header names anthropic/claude-sonnet-5-5 as primary; provider-failure switches fired on quota before the catalogues were read (openai/gpt-6-astra, kimi/k3.1-pro, then radient/auto). This round ran on radient/auto after a kernel restart that reset working state; the render matrix below was executed fresh, not recalled.",
+  "date": "2026-10-29",
+  "independence": "I wrote none of this copy and made none of this edit; the implementer changed the file after my w4a2 minor. I judged the new bytes and, crucially, executed the repository's own ICU runtime to test the claim rather than accepting it. I edited no catalogue, sidecar, ledger, allowance, guide or generated file and performed no git write. My only writes are this evidence directory. The target is untracked, so this binding is to on-disk bytes."
+ },
+ "input_hashes": {
+  "en": {
+   "path": "local_operator/i18n/catalogues/en/relay.library.json",
+   "revision": "183f7a0537e4cee42fd82f25a21fe52953a81bdf",
+   "sha256": "ad478c433a4db3e725994766c724a2e8e92176f015f8283e71dc13b87185466a"
+  },
+  "target": {
+   "path": "local_operator/i18n/catalogues/es/relay.library.json",
+   "tracked": false,
+   "sha256": "0933a66475cf6b9b74bbf3befa849296f3fd5014a3707f27f451b6476b85e8bf",
+   "previous_sha256": "f2d5ab3a9a5660f94b7656324a4c1069c06d88c31e908a5df1226872cb7d1a71"
+  },
+  "context": {
+   "path": "local_operator/i18n/catalogues/en/relay.library.context.json",
+   "revision": "183f7a0537e4cee42fd82f25a21fe52953a81bdf",
+   "sha256": "877b88290cf14602e63b2bb1c58719fac96a20ae53ff04b147e21de23df93c54"
+  }
+ },
+ "display_side_risk": "not applicable — this namespace has no redaction-masked value.",
+ "findings": [
+  {
+   "id": "es-w4a2-LB-01",
+   "severity": "minor",
+   "status": "closed",
+   "closed_at": "w4a3",
+   "keys": [
+    "relay.library.count"
+   ],
+   "previous": "{count, plural, one {# recurso} other {# recursos}}",
+   "current": "{count, plural, one {# recurso} many {# de recursos} other {# recursos}}",
+   "closure": "By measurement. Rendered with the repository runtime (local_operator.i18n.runtime.render_message, locale 'es') at every count the implementer named; all six outputs match the claim, and the same-code control renders the superseded string wrong at 1.000.000 while agreeing at 1.500.000.",
+   "render_matrix": {
+    "0": {
+     "expected": "0 recursos",
+     "actual": "0 recursos",
+     "category": "other",
+     "pass": true
+    },
+    "1": {
+     "expected": "1 recurso",
+     "actual": "1 recurso",
+     "category": "one",
+     "pass": true
+    },
+    "2": {
+     "expected": "2 recursos",
+     "actual": "2 recursos",
+     "category": "other",
+     "pass": true
+    },
+    "21": {
+     "expected": "21 recursos",
+     "actual": "21 recursos",
+     "category": "other",
+     "pass": true
+    },
+    "1000000": {
+     "expected": "1.000.000 de recursos",
+     "actual": "1.000.000 de recursos",
+     "category": "many",
+     "pass": true
+    },
+    "1500000": {
+     "expected": "1.500.000 recursos",
+     "actual": "1.500.000 recursos",
+     "category": "other",
+     "pass": true
+    }
+   },
+   "control": {
+    "superseded_string": "{count, plural, one {# recurso} other {# recursos}}",
+    "at_1000000": "1.000.000 recursos (ungrammatical — this is the defect the fix removes)",
+    "at_1500000": "1.500.000 recursos (identical to the new string, as it should be)",
+    "at_1000001": "1.000.001 recursos (identical, correctly still `other`)"
+   },
+   "locale_convention": "All 62 es plural messages currently on disk carry one/many/other — 62/62. The denominator moved from 58 at w4a2 because other lanes added relay.session, relay.shell and mobile.setup catalogues in the interim; the invariant that matters (no es plural message omits `many`) now holds without exception. The '# de recursos' form matches the dominant count-of-noun pattern in this locale, e.g. '# de preguntas' (relay.asks.dock.waiting) and '# de opciones' (relay.asks.pending.options)."
+  }
+ ],
+ "check_output": {
+  "commands": [
+   "python3 i18n/audits/evidence/es/relay.library/w4a3/checks.py",
+   "python3 -c \"from local_operator.i18n import runtime; runtime.render_message(src, {'count': n}, 'es')\" for n in 0,1,2,21,1000000,1500000",
+   "python3 - (same-code control with the superseded string)",
+   "python3 - (census of ICU plural categories across every es catalogue)"
+  ],
+  "result": "checks.py exit 0, ALL CHECKS PASS (17 assertions), including the six renders and both control assertions.",
+  "failures": "None.",
+  "evidence_of_execution": "The render matrix above is captured output from the repository runtime at HEAD 183f7a0537e, not a description of expected behaviour; checks.py re-executes it."
+ },
+ "artifacts": [
+  "report.md",
+  "audit.log",
+  "checks.py"
+ ],
+ "limitations": [
+  "LLM semantic judgement for the linguistic claim; the render outputs themselves are mechanical.",
+  "ICU is exercised through the repository's Python runtime, which is the one these catalogues serve; no JS/RN surface was driven.",
+  "The target is untracked, so this binding is to on-disk bytes and a further edit invalidates it.",
+  "The audit model is an auto-routing alias; the concrete backend is not identifiable."
+ ]
+}

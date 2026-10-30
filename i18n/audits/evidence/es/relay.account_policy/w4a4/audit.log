@@ -1,0 +1,69 @@
+# Audit log — es / relay.account_policy / round 4 (`w4a4`)
+
+Auditor: translation-auditor (lopdev team), session 8eb3b9c9a687, lane es-w4-auditor-b
+Model: radient/auto (self-reported). Primary is anthropic/claude-sonnet-5-5; provider-failure
+switches fired on quota before the catalogues were read (openai/gpt-6-astra, kimi/k3.1-pro, then
+radient/auto). Disclosed fallback. This round followed a session-runtime restart; every hash, value
+and git fact was recomputed from disk.
+Date: 2026-10-29.
+Supersedes: the `w4a3` audit; superseded target sha256 `67dbbf6a3bc75058b38f40a076de852c86c7d58004e938b43019513280e2a407` (untracked at that round).
+Scope: relay.account_policy.unavailable (one key).
+
+## 1. Orientation — read-only, and the binding changed
+
+    git rev-parse HEAD
+    -> 91b6984e8531bf01520690fa1196a3b8287a3556        (was 183f7a0537e at w4a3: the wave landed)
+
+    git status --porcelain -- <target>   -> (empty)
+    git ls-files --error-unmatch <target> -> TRACKED
+    git log --format='%H | %s' -3 -- <target>
+    -> b26f3276c32d802a2cdbcd7ff4f8365d743cdb38 | feat(i18n): add Spanish relay and phone-setup catalogues
+
+    shasum -a 256 <target>        -> 71956128095ae4afebaf4aa26356db6acf9796a100332d503fbcc785ab178453
+    git show HEAD:<target> | sha256sum -> the same value
+
+So the target is now committed and the working tree matches HEAD. This record binds revision and
+blob; earlier rounds could only bind untracked bytes.
+
+## 2. Mechanical pass
+
+    python3 i18n/audits/evidence/es/relay.account_policy/w4a4/checks.py
+
+    exit 0 — ALL CHECKS PASS (19 assertions)
+
+    PASS  shipped file == w4a2 + the two documented transformations
+    PASS  delta since w4a3 is exactly one key :: ['relay.account_policy.unavailable']
+    PASS  the unchanged twelve match their w4a3 values :: 12/12
+    PASS  'relé' present with its acute accent (U+00E9)
+    PASS  no English 'relay' left in any value
+    PASS  'máquina' survived in the same sentence
+    PASS  no 'equipo' anywhere in the namespace
+    PASS  file is tracked, so HEAD pins these bytes
+    PASS  working tree == HEAD blob
+
+## 3. What was read
+
+- All 13 values, and the `unavailable` value at codepoint level (the noun is r-e-l-U+00E9, NFC).
+- A value-only scan of the namespace for `/\brelay\b/` — keys excluded, so namespace names cannot
+  create a false positive. Zero matches.
+- The shipped `relé` precedents, to confirm the term now agrees rather than merely being correct in
+  isolation: `wire.settings.network_max_handshakes.help`, `wire.settings.network.description`,
+  `cli.services_help.services_description`.
+- The other twelve keys against the w4a2 base plus the round-2 substitution, so their unchanged
+  state is stated positively rather than inferred.
+
+## 4. Judgement
+
+**PASSED.** AP-02 closed by measurement: `relé` is in the bytes, the English noun is gone from every
+value, and the sentence still names the relay and the machine as two distinct referents with
+`máquina` intact. AP-01 remains closed (no `equipo`; five keys still `máquina`). AP-03 is the only
+open item, a nit the implementer chose to keep.
+
+Width: `unavailable` 115 cells (English 95, +21.1%) — one cell shorter than before.
+
+## 5. Writes
+
+`record.json`, `report.md`, `audit.log`, `checks.py` in this directory. One scratch file I created
+here this round (`_w4a2_map.tmp.json`, the reconstructed w4a2 map, now embedded in `checks.py`) was
+removed by me. No catalogue, sidecar, ledger, allowance, guide or generated file touched; no git
+write; no other file deleted, moved or renamed.

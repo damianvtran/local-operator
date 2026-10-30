@@ -1,0 +1,421 @@
+{
+  "schema": 1,
+  "audit_id": "w5a1",
+  "audit_id_assigned_by": "es-w5-auditor, audit id fixed by the wave-5 delegation",
+  "audit_round": 1,
+  "audit_kind": "independent_first_pass_namespace_audit",
+  "locale": "es",
+  "namespace": "mobile.setup",
+  "audit_date": "2026-10-29",
+  "audited_revision": "183f7a0537e4cee42fd82f25a21fe52953a81bdf",
+  "audited_revision_note": "Branch feat/i18n-es-wire-errors at 183f7a0537e4cee42fd82f25a21fe52953a81bdf. local_operator/i18n/catalogues/es/mobile.setup.json is UNTRACKED at that revision ('?? local_operator/i18n/catalogues/es/mobile.setup.json' in git status), so this audit is bound to the on-disk bytes, not to a committed blob: target sha256 a488fa214a660045363b56d6edd5a6d6f2d0a2feb1d35c689cc47ccaf51cd535. The en catalogue and its .context.json sidecar are tracked at that revision.",
+  "key_count": {
+    "en": 76,
+    "target": 76,
+    "context": 76
+  },
+  "verdict": "passed",
+  "result": "passed — 0 blocker, 0 major, 7 minor, 5 nit",
+  "verdict_reason": "All 76 keys read side by side against en and its role/tone sidecar. No state promise moved: checking, activating, already-active, unconfirmed and failed are each still themselves; 'does not purchase credit' survives as 'No compra crédito'; 'completed steps have not been undone', 'do not assume rollback' and 'owning credential unchanged' all survive; no string asserts or implies a charge that did not happen. Every placeholder and sidecar argument is byte-exact and all 76 accessor argument sets match both catalogues, so nothing can fail at render time. All 25 machine literals (commands, /mobile and /login subcommands, --flags, <id>, create.json, the console URL, cloudflared 2025.4.0, brew install cloudflared, USD) are identical, and the namespace carries no ICU constructs and therefore no plural categories to get wrong. Cross-namespace consistency with the shipped es copy is proved rather than assumed: mobile.setup.corrupt_intent is byte-identical to the shipped wire.tunnel_setup.corrupt_intent, mobile.setup.in_progress differs from shipped wire.tunnel_setup.in_progress only by the same ; / . difference the two English strings have, and 'acceso telefónico' matches the shipped wire.slash.mobile rendering. The seven minors are term and idiom refinements (one money verb, one enable-verb split, one state split, one calqued title, 'nueva' for 'fresh', 'redirigir' for 'repoint', 'móvil' beside 'teléfono'); none of them inverts a state and none is a blocker or a major under the delegation's severity rule.",
+  "finding_counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 7,
+    "nit": 5
+  },
+  "unresolved_blocker_major": 0,
+  "auditor": {
+    "agent": "translation-auditor (lopdev team delegation es-w5-auditor)",
+    "session_or_instance": "session 99bb6933f60c",
+    "model": "radient/auto",
+    "model_note": "SELF-REPORTED from this session's own model-switch notices; not independently observable. The request opened on anthropic/claude-sonnet-5-5; three provider-failure switches fired before any audit work began and the entire audit ran under radient/auto, an auto-routing alias whose concrete backend the session header does not identify. No pinned model is claimed.",
+    "model_switch_notices": "anthropic/claude-sonnet-5-5 -> openai/gpt-6-astra -> kimi/k3.1-pro -> radient/auto; each transition was a session model-switch notice reading \"provider failure: quota\"",
+    "model_switch_note": "fallback disclosed; no role, tool or default profile was changed",
+    "date": "2026-10-29",
+    "independence": "I translated none of this copy and repaired nothing in it. The catalogue, sidecar, glossary, style guide, ledger and all git state were read-only to me; my only writes are the three files in this evidence directory. I did not receive the translator's summary and did not look for one: every judgement below was formed by reading the en value, the es value and the sidecar role together."
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/mobile.setup.json",
+      "revision": "183f7a0537e4cee42fd82f25a21fe52953a81bdf",
+      "sha256": "6249b10379beb9b2433746416fa7baff061265a1b9315d47465140cd5fcf61e9"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/es/mobile.setup.json",
+      "sha256": "a488fa214a660045363b56d6edd5a6d6f2d0a2feb1d35c689cc47ccaf51cd535",
+      "tracked": false,
+      "note": "untracked at the audited revision; sha256 is of the on-disk bytes"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/mobile.setup.context.json",
+      "revision": "183f7a0537e4cee42fd82f25a21fe52953a81bdf",
+      "sha256": "be33c74a329196fdbe78f11f015848ff4f9593add57eba414163d4042807c811"
+    }
+  },
+  "safety_adjacent_verdict": {
+    "surface": "billing and activation copy (phone setup)",
+    "verdict": "no state-promise change",
+    "detail": "Read as a state machine. Checking (mobile.setup.checking, applying) claims no billing or installation work has started. Activating (activating) claims the subscription is being activated at the accepted price; billing_activated / billing_activated_status claim completion and add that it has not been undone; billing_already_active claims the subscription was already active, not that this run activated it; billing_not_activated claims activation is still needed; billing_unconfirmed claims an unconfirmed outcome and forbids assuming rollback; balance and consent both deny an automatic credit purchase; activated claims the owning credential is unchanged; configuring claims the owner is not switched; failed / failed_tui / unexpected_failure all keep 'completed steps have not been undone'. Negation parity was checked for all 76 keys and no negation was dropped."
+  },
+  "amendment": null,
+  "post_audit_drift": null,
+  "findings": [
+    {
+      "key": "mobile.setup.quote_changed",
+      "severity": "minor",
+      "replacement": "El precio vigente es USD {current}/mes, no los USD {accepted} que aceptaste. El importe que aceptaste no se aceptó; comprueba el precio vigente antes de volver a intentarlo.",
+      "alternative": "El precio vigente es USD {current}/mes, no los USD {accepted} que aceptaste. El importe aceptado no se aplicó; comprueba el precio vigente antes de volver a intentarlo.",
+      "reason": "\"el importe que enviaste\" attaches a money-transfer verb (enviar un importe) to the referent the same message has just called \"aceptaste\", so the one string that explains a rejected price can read as a payment that was sent and refused; the state promise itself survives (nothing accepted, nothing charged), which is why this is a term/connotation finding and not a blocker.",
+      "current": "El precio vigente es USD {current}/mes, no los USD {accepted} que aceptaste. El importe que enviaste no se aceptó; comprueba el precio vigente antes de volver a intentarlo.",
+      "replacement_cells": 173,
+      "current_cells": 172,
+      "replacement_keeps_placeholders": true
+    },
+    {
+      "key": "mobile.setup.quote_unread",
+      "severity": "minor",
+      "replacement": "Comprueba la cuenta actual y el precio vigente antes de habilitar el acceso telefónico.",
+      "alternative": null,
+      "reason": "the English gerund \"enabling\" is \"habilitando\" in mobile.setup.configuring but \"activar\" here, and \"activación\" is reserved for the paid subscription in nine other keys of this namespace; one term per concept should be chosen and recorded.",
+      "current": "Comprueba la cuenta actual y el precio vigente antes de activar el acceso telefónico.",
+      "replacement_cells": 87,
+      "current_cells": 85,
+      "replacement_keeps_placeholders": true
+    },
+    {
+      "key": "mobile.setup.busy",
+      "severity": "minor",
+      "replacement": "La configuración del acceso telefónico ya está en curso.",
+      "alternative": null,
+      "reason": "the same state is \"ya está en curso\" in mobile.setup.in_progress and byte-for-byte in the shipped wire.tunnel_setup.in_progress, so \"en marcha\" is a second rendering of one state inside one flow.",
+      "current": "La configuración del acceso telefónico ya está en marcha.",
+      "replacement_cells": 56,
+      "current_cells": 57,
+      "replacement_keeps_placeholders": true
+    },
+    {
+      "key": "mobile.setup.title_login",
+      "severity": "minor",
+      "replacement": "El acceso telefónico requiere iniciar sesión en Radient",
+      "alternative": "El acceso telefónico necesita un inicio de sesión en Radient",
+      "reason": "\"un inicio de sesión de Radient\" calques \"a Radient sign-in\" with the wrong preposition (a sign-in is into an account, \"en Radient\"), and it is the longest title in the namespace at 60 cells against 36 in English.",
+      "current": "El acceso telefónico necesita un inicio de sesión de Radient",
+      "replacement_cells": 55,
+      "current_cells": 60,
+      "replacement_keeps_placeholders": true
+    },
+    {
+      "key": "mobile.setup.account_failed",
+      "severity": "minor",
+      "replacement": "Falló la verificación actual de la cuenta y la ruta de Radient. Comprueba la conectividad y lop login-status; no se realizó ninguna escritura de configuración.",
+      "alternative": null,
+      "reason": "\"fresh verification\" means the verification just performed, which \"la verificación actual\" says; \"nueva\" reads as an additional attempt that the source does not claim.",
+      "current": "Falló la nueva verificación de la cuenta y la ruta de Radient. Comprueba la conectividad y lop login-status; no se realizó ninguna escritura de configuración.",
+      "replacement_cells": 159,
+      "current_cells": 158,
+      "replacement_keeps_placeholders": true
+    },
+    {
+      "key": "mobile.setup.owner_missing",
+      "severity": "minor",
+      "replacement": "Ejecuta lop login-status; restaura el inicio de sesión propietario. La configuración no reasignará un túnel existente ni una solicitud pendiente.",
+      "alternative": null,
+      "reason": "\"repoint\" is a reassignment of the tunnel's owning credential, which \"reasignará\" says; \"redirigirá\" reads as redirecting traffic, a different remedy than the one the sentence forbids.",
+      "current": "Ejecuta lop login-status; restaura el inicio de sesión propietario. La configuración no redirigirá un túnel existente ni una solicitud pendiente.",
+      "replacement_cells": 145,
+      "current_cells": 145,
+      "replacement_keeps_placeholders": true
+    },
+    {
+      "key": "mobile.setup.checking",
+      "severity": "minor",
+      "replacement": "Comprobando la cuenta propietaria, los requisitos locales y la ruta del teléfono…",
+      "alternative": null,
+      "note_also": "mobile.setup.verified_url",
+      "reason": "this namespace names the feature \"acceso telefónico\" / \"teléfono\" in 21 keys and the shipped copy settles \"acceso telefónico\", so \"la ruta móvil\" (and \"URL móvil\" in mobile.setup.verified_url) is a second name for the same thing; adjectival \"móvil\" has shipped precedent in cli.mobile_help (\"el daemon móvil\"), so this is drift, not a guide breach.",
+      "current": "Comprobando la cuenta propietaria, los requisitos locales y la ruta móvil…",
+      "replacement_cells": 81,
+      "current_cells": 74,
+      "replacement_keeps_placeholders": true
+    },
+    {
+      "key": "mobile.setup.credential_ids",
+      "severity": "nit",
+      "replacement": "IDs de credenciales: {ids}",
+      "alternative": null,
+      "reason": "plural \"IDs\" over a singular noun should read \"IDs de credenciales\".",
+      "current": "IDs de credencial: {ids}",
+      "replacement_cells": 26,
+      "current_cells": 24,
+      "replacement_keeps_placeholders": true
+    },
+    {
+      "key": "mobile.setup.billing_activated",
+      "severity": "nit",
+      "replacement": "Facturación activada al precio mensual aceptado.",
+      "alternative": null,
+      "reason": "\"Activación de facturación\" calques the English noun stack; the receipt reads more naturally as \"Facturación activada\" and is twenty cells shorter.",
+      "current": "Activación de facturación completada con el precio mensual aceptado.",
+      "replacement_cells": 48,
+      "current_cells": 68,
+      "replacement_keeps_placeholders": true
+    },
+    {
+      "key": "mobile.setup.usage",
+      "severity": "nit",
+      "replacement": "Usa /mobile status o enable [precio mensual] [--credential-id <id>], billing, start, stop.",
+      "alternative": "leave as-is: the whole usage grammar (subcommands, <id>, flags) is English, so keeping [monthly price] English is internally consistent.",
+      "reason": "the only descriptive metavariable in the line stays English while the reader is being told what to type; either rendering is defensible, but the choice should be deliberate.",
+      "current": "Usa /mobile status o enable [monthly price] [--credential-id <id>], billing, start, stop.",
+      "replacement_cells": 90,
+      "current_cells": 89,
+      "replacement_keeps_placeholders": true
+    },
+    {
+      "key": "mobile.setup.choose_login",
+      "severity": "nit",
+      "replacement": "Elige la cuenta deseada de lop login-status y después ejecuta lop tunnel setup --credential-id <id>.",
+      "alternative": null,
+      "reason": "the source says \"from lop login-status\"; \"de\" names the list the account comes from, \"en\" names the place it is chosen in.",
+      "current": "Elige la cuenta deseada en lop login-status y después ejecuta lop tunnel setup --credential-id <id>.",
+      "replacement_cells": 100,
+      "current_cells": 100,
+      "replacement_keeps_placeholders": true
+    },
+    {
+      "key": "mobile.setup.stopped",
+      "severity": "nit",
+      "replacement": "El acceso remoto se detuvo a propósito. Usa lop tunnel start solo si quieres reanudarlo.",
+      "alternative": "... solo si tienes previsto reanudarlo.",
+      "reason": "\"tienes intención de reanudarlo\" is a literal rendering of \"you intend to resume it\"; Spanish states the intent directly.",
+      "current": "El acceso remoto se detuvo a propósito. Usa lop tunnel start solo si tienes intención de reanudarlo.",
+      "replacement_cells": 88,
+      "current_cells": 100,
+      "replacement_keeps_placeholders": true
+    }
+  ],
+  "source_notes": [
+    "i18n/style-guides/es.md: tú address, infinitive action labels, sentence case, no '!', 'teléfono' preferred over region-marked 'celular'/'móvil', 'caché' amendment, es plurals one/many/other with 0 as other.",
+    "i18n/glossary.md: product names kept, machine tokens never translated, one term per concept; §5 records provider fallbacks and binds the model that actually performed a round.",
+    "es/wire.tunnel_setup.json (shipped, tracked): 'acceso telefónico' for Phone access, 'en curso' for in progress, 'no des por hecho que se haya revertido' for do-not-assume-rollback, and a byte-identical corrupt_intent.",
+    "es/wire.slash.mobile (shipped, tracked): 'Acceso telefónico de Radient' — the established name for this feature.",
+    "es/cli.mobile_help.json (shipped, tracked): adjectival 'móvil' ('el daemon móvil') and 'Activar' for enable in the cli.* family."
+  ],
+  "noted_outside_scope": [
+    "es/cli.mobile_help.json renders 'Phone access' as 'Acceso desde el teléfono' while es/wire.slash.mobile and this namespace say 'acceso telefónico'. That is a shipped-copy split in a different namespace and outside this audit's scope; recorded, not fixed, and not counted as a finding here.",
+    "Host disk was at 100% capacity with ~117 MiB free during the audit (df -h /), which is why every write in this audit is confined to small evidence files."
+  ],
+  "width_note": {
+    "declared_max_cells": "none — the en mobile.setup.context.json carries only role/tone/note, no maxCells",
+    "mean_growth_pct": 24.6,
+    "longest": [
+      {
+        "key": "mobile.setup.supervisor_tui",
+        "en_cells": 191,
+        "es_cells": 253,
+        "delta": 62,
+        "pct": 32.5
+      },
+      {
+        "key": "mobile.setup.corrupt_intent",
+        "en_cells": 165,
+        "es_cells": 221,
+        "delta": 56,
+        "pct": 33.9
+      },
+      {
+        "key": "mobile.setup.mobile_bundle",
+        "en_cells": 127,
+        "es_cells": 180,
+        "delta": 53,
+        "pct": 41.7
+      },
+      {
+        "key": "mobile.setup.account_failed",
+        "en_cells": 116,
+        "es_cells": 158,
+        "delta": 42,
+        "pct": 36.2
+      },
+      {
+        "key": "mobile.setup.owner_missing",
+        "en_cells": 109,
+        "es_cells": 145,
+        "delta": 36,
+        "pct": 33.0
+      },
+      {
+        "key": "mobile.setup.failed",
+        "en_cells": 133,
+        "es_cells": 168,
+        "delta": 35,
+        "pct": 26.3
+      },
+      {
+        "key": "mobile.setup.mobile_bundle_tui",
+        "en_cells": 141,
+        "es_cells": 175,
+        "delta": 34,
+        "pct": 24.1
+      },
+      {
+        "key": "mobile.setup.billing_unconfirmed",
+        "en_cells": 124,
+        "es_cells": 158,
+        "delta": 34,
+        "pct": 27.4
+      }
+    ],
+    "titles": [
+      {
+        "key": "mobile.setup.title_login",
+        "en_cells": 36,
+        "es_cells": 60,
+        "delta": 24,
+        "pct": 66.7
+      },
+      {
+        "key": "mobile.setup.title_quote_changed",
+        "en_cells": 43,
+        "es_cells": 59,
+        "delta": 16,
+        "pct": 37.2
+      },
+      {
+        "key": "mobile.setup.title_supervisor",
+        "en_cells": 39,
+        "es_cells": 58,
+        "delta": 19,
+        "pct": 48.7
+      },
+      {
+        "key": "mobile.setup.title_cloudflared",
+        "en_cells": 37,
+        "es_cells": 57,
+        "delta": 20,
+        "pct": 54.1
+      },
+      {
+        "key": "mobile.setup.title_failed",
+        "en_cells": 35,
+        "es_cells": 54,
+        "delta": 19,
+        "pct": 54.3
+      },
+      {
+        "key": "mobile.setup.title_mobile_bundle",
+        "en_cells": 38,
+        "es_cells": 54,
+        "delta": 16,
+        "pct": 42.1
+      },
+      {
+        "key": "mobile.setup.title_owner_choice",
+        "en_cells": 36,
+        "es_cells": 51,
+        "delta": 15,
+        "pct": 41.7
+      },
+      {
+        "key": "mobile.setup.title_balance",
+        "en_cells": 33,
+        "es_cells": 50,
+        "delta": 17,
+        "pct": 51.5
+      },
+      {
+        "key": "mobile.setup.title_apply",
+        "en_cells": 31,
+        "es_cells": 49,
+        "delta": 18,
+        "pct": 58.1
+      },
+      {
+        "key": "mobile.setup.title_stopped",
+        "en_cells": 39,
+        "es_cells": 49,
+        "delta": 10,
+        "pct": 25.6
+      },
+      {
+        "key": "mobile.setup.title_owner_missing",
+        "en_cells": 39,
+        "es_cells": 48,
+        "delta": 9,
+        "pct": 23.1
+      },
+      {
+        "key": "mobile.setup.title_account",
+        "en_cells": 41,
+        "es_cells": 48,
+        "delta": 7,
+        "pct": 17.1
+      },
+      {
+        "key": "mobile.setup.title_quote",
+        "en_cells": 32,
+        "es_cells": 43,
+        "delta": 11,
+        "pct": 34.4
+      },
+      {
+        "key": "mobile.setup.title_verification",
+        "en_cells": 40,
+        "es_cells": 40,
+        "delta": 0,
+        "pct": 0.0
+      },
+      {
+        "key": "mobile.setup.title_complete",
+        "en_cells": 25,
+        "es_cells": 35,
+        "delta": 10,
+        "pct": 40.0
+      }
+    ],
+    "text": "es runs +24.6% on average, at the top of the style guide's 15-25% expectation. The titles grow most (title_login 36->60 cells, +67%; title_apply 31->49; title_cloudflared 37->57; title_failed 35->54; title_supervisor 39->58) because the fixed lead 'El acceso telefónico necesita' costs 29 cells against 19 for 'Phone access needs'. They are NOT named as findings: these strings are the first line of a plain text block built in local_operator/tunnels/setup.py text() and passed to notice() / printed, not a fixed-width row label, and no maxCells is declared. Flagged for a rendered check on the TUI notice and CLI surfaces if a width budget is later declared."
+  },
+  "display_side_note": {
+    "text": "No value needed a sanctioned read_public_copy re-read: the displayed bytes were read directly from disk and hashed, and no redaction marker appeared in any of the 76 values. read_public_copy refuses an untracked working-tree file, and the target is untracked, so that route could not have read these bytes anyway."
+  },
+  "check_output": {
+    "commands": [
+      "git rev-parse HEAD; git status --porcelain (bind revision + untracked set)",
+      "shasum -a 256 en/mobile.setup.json es/mobile.setup.json en/mobile.setup.context.json",
+      "python3 $LOCAL_OPERATOR_SCRATCHPAD/audit_w5a1.py (mechanical checker, 76 keys)",
+      "python3 - (accessor-argument parity: Msg() call args vs {placeholders} in en and es)",
+      "python3 - (cross-namespace identical-en-string consistency vs shipped es catalogues)",
+      "python3 - (width table via cell_len equivalent, unicodedata east_asian_width)",
+      "grep/sed over local_operator/tunnels/setup.py (how the titles are rendered)"
+    ],
+    "failures": "None. Every mechanical detector passed on the final bytes: 0 problems over 76 keys.",
+    "negative_controls": "Detectors proved against deliberately broken in-memory copies: dropped placeholder, renamed placeholder, mangled placeholder, altered URL, renamed command, changed version, removed key, added key, flipped negation, English leftover, stray exclamation, em dash -> hyphen, ellipsis -> ascii all DETECTED; the unmutated copy reports 0 problems (no false positives). One refinement is recorded honestly: the first negation detector compared the word 'no' in en against 'no' in es and reported 5 keys (invalid_response, price_unavailable, activated, identity_unavailable, reservation_unconfirmed); reading each pair showed English encodes these as single lexemes (invalid/unavailable/unchanged/unconfirmed) that Spanish renders analytically (no válida / no está disponible / no ha cambiado / sin confirmar), so all five were detector false positives, not translation defects, and the check was changed to compare presence-of-negation with the English adjectives included. Re-run: 0 mismatches.",
+    "checks_run_per_key": [
+      "key-set parity and key-order parity (76/76, same order)",
+      "placeholder parity (sorted set, per key)",
+      "accessor-argument parity: Msg() kwargs vs {arg} in en and es (76 accessors, 0 mismatches)",
+      "ICU construct parity (none present in this namespace in either locale)",
+      "es plural categories (no plural/select construct exists, so no category can be wrong; no few/zero/two introduced)",
+      "digit-sequence parity outside placeholders",
+      "em dash / en dash / ellipsis count parity",
+      "newline-count and edge-whitespace parity",
+      "byte-identical machine literals (25 literals, 76 keys)",
+      "negation presence parity",
+      "untranslated-English leftover scan (only Spanish words and intentional command tokens found)",
+      "exclamation and ASCII-ellipsis hygiene",
+      "UTF-8 without BOM, no CRLF, trailing newline, valid JSON, 76 unique declared keys",
+      "width table and title budget scan"
+    ]
+  },
+  "artifacts": [
+    "report.md",
+    "audit.log"
+  ],
+  "limitations": [
+    "LLM semantic judgement, not native-speaker attestation.",
+    "Static copy audit only: no rendered frame, no runtime service, no eligibility claim. Width figures are cell counts, not screenshots.",
+    "The target catalogue is UNTRACKED at 183f7a0537e; this record binds on-disk sha256 values, not a committed blob.",
+    "The audit model is an auto-routing alias; the concrete backend is not identifiable from the session header.",
+    "Evidence files were written but not committed: this role performs no git writes."
+  ]
+}

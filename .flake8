@@ -1,4 +1,4 @@
 [flake8]
 max-line-length = 100
 extend-ignore = E203
-exclude = .venv
+exclude = .venv, i18n/audits/evidence

@@ -1,0 +1,15 @@
+{
+ "schema": 1,
+ "audit_id": "w4a3",
+ "audit_round": 3,
+ "supersedes": "w4a2",
+ "locale": "es",
+ "namespace": "relay.shell",
+ "note": "sha256 of every companion file in this bundle, so the evidence can be checked for later edits.",
+ "files": {
+  "audit.log": "9f77661c47e6404cde6949476b31ba72c4e45c2704540bc8ae0d281651cbe9ff",
+  "record.json": "683a9643991d99fafed28401addeb568bd1162b0f8c5c9dc65d5e0c19852b6dc",
+  "report.md": "6ec45fc617e06230c06954ec286be66a782b8f391aa081c3afc29f5a2432e3f5",
+  "run-script.py.txt": "8ec1a051d6601b5e09f6f9deb8760486bcb4effed80e9ec30903e595ec953d16"
+ }
+}
