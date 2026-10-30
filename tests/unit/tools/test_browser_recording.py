@@ -633,6 +633,7 @@ def test_stop_reports_what_landed_and_the_av1_caveat(
     assert set(seen[0][1]) == {"tab", "requester", "session_label"}
     assert result.details == {"path": str(target), "bytes": len(MP4_HEAD)}
     assert "AV1" in result.text
+    assert "will not play" not in result.text  # not tested in Chrome: no hard claim
     assert "QuickTime" in result.text
 
 

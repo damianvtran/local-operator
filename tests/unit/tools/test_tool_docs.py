@@ -377,7 +377,10 @@ MEASURED_TOKENS: dict[str, int] = {
     # Measured by this test's own print; no other tool's entry moved. (The step
     # is 1655 -> 1801, not 1424 -> 1801: 1424 was two ledger baselines ago,
     # review round 1 R1-6.)
-    "browser": 1801,
+    # 1801 -> 1803 (+2, review round 2 m2): "not expected in Chrome's <video>" replaces
+    # "not Chrome's <video>", because Chrome playback was never tested. Measured by
+    # this test's own print.
+    "browser": 1803,
     # NEW (code-requests PR1b): the ``code_requests`` doc — relation and lane
     # vocabulary, the freshness rule and the data-not-instructions framing.
     # 475 tokens is the deliberate cost of the reference detail staying OFF the

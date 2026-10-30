@@ -413,7 +413,7 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             "per exact origin+path and land in a private session file, never in "
             "this transcript.\n"
             "- 'record_start'/'record_stop' make an MP4 of this tab (AV1: plays "
-            "in QuickTime, not Chrome's <video>); path= is approved before "
+            "in QuickTime; not expected in Chrome's <video>); path= is approved before "
             "capture and never overwritten, timeout_s= caps the length. Desktop "
             "host only.\n"
             "- Hosts, setup, approvals, error meanings: ``guide://browser``."

@@ -25149,8 +25149,8 @@ def _recording_landed(
         tool_call_id,
         "browser",
         f"Recording saved to {target} ({size} bytes, {length}).{stopped}{unverified} "
-        "MP4 with an AV1 track: it plays in QuickTime/AVFoundation; Chrome's <video> "
-        "will not play it.",
+        "MP4 with an AV1 track: it plays in QuickTime/AVFoundation; it is not "
+        "expected to play in Chrome's <video> (not tested).",
         details={"path": str(target), "bytes": size},
     )
 
@@ -25190,8 +25190,9 @@ async def _browser_record(
         target, refusal = _recording_destination(tool_call_id, params.path, context)
         if refusal is not None or target is None:
             return refusal or _error(tool_call_id, "browser", "no recording destination")
-        # Fixed capture parameters (D14): 1280x720 at 10 fps with audio off, the
-        # same viewport the agent's hidden tab already paints. Not tunable in v1
+        # Fixed capture parameters (D14): up to 1280x720 (a ceiling; the clip is
+        # scaled to fit) at 10 fps with audio off, the same viewport the agent's
+        # hidden tab already paints. Not tunable in v1
         # and not sent as fields the host might read as requests to change.
         # WHOLE seconds: the validator refuses a fraction, and the host's
         # `durationOf` would too (R1-2). `int()` here is a lossless narrow of a
@@ -25239,8 +25240,8 @@ async def _browser_record(
             "browser",
             f"Recording started: {target} (max {duration:g} s, up to "
             f"{cap // (1024 * 1024)} MiB). Stop it with 'record_stop' to save the file. "
-            "MP4 with an AV1 track: it plays in QuickTime/AVFoundation; Chrome's <video> "
-            "will not play it.",
+            "MP4 with an AV1 track: it plays in QuickTime/AVFoundation; it is not "
+            "expected to play in Chrome's <video> (not tested).",
             # `target`, not `path`: a started recording has not written anything
             # yet, and `details["path"]` is what marks a browser result as a
             # produced file (session_files.scan records it as an artifact). A
