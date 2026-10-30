@@ -2591,8 +2591,15 @@ class _Derivation:
                 # rescan. Settled means the earlier scan already decided the
                 # outcome from every marker inside the run's own rows, and a kept
                 # run gains no rows, so the stored value is what a full scan
-                # derives. An UNSETTLED kept run is the previous scan's open tail
-                # (a user-less hub/wake run the window moved past): its stored
+                # derives -- PROVIDED the earlier scan derived it correctly. A run
+                # frozen right after an imperfect recompute (from an unsettled
+                # tail whose start lay outside that scan's window) keeps that
+                # scan's ``None`` until a full rescan: the freeze makes the earlier
+                # error sticky rather than self-healing on the next append. Not a
+                # regression -- the pre-freeze code never healed it either (#3032
+                # review M2: 36 of 4,881 measured steps). An UNSETTLED kept run is
+                # the previous scan's open tail (a user-less hub/wake run the
+                # window moved past): its stored
                 # ``open`` is provisional and its closing marker may sit in this
                 # region, so it keeps the recompute below. The tail is excluded
                 # defensively: a region with no run of its own leaves a kept run
@@ -3298,6 +3305,9 @@ _YIELD_SLICE_S = 0.002
 _YIELD_BUDGET_S = 2.0
 #: A hold older than this is not a first frame still being built (a cold one on
 #: a loaded host is a few seconds at worst); it is ignored, not yielded to.
+#: Consequence: an open still building its first frame after 5 s loses its
+#: priority, and background refreshes compete with it for the GIL exactly as
+#: they did before #3026 (#3026 review N1).
 _YIELD_HOLD_STALE_S = 5.0
 
 
