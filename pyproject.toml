@@ -438,7 +438,12 @@ lop = "local_operator.cli:main"
 line-length = 100
 target-version = ['py312']
 # Vendored release helpers stay byte-identical to their recorded upstream SHA.
-extend-exclude = "F401|benchmarks/osworld_v2_adapter/src/evaluation_examples/"
+# `i18n/audits/evidence` holds AUDIT EVIDENCE, not source: the bundles carry the
+# scripts an auditor actually ran, and reformatting them would edit the record a
+# ledger row points at. Renaming them to `*.py.txt` (the older convention) does
+# not work — isort and black parse by content, not by suffix — so the directory
+# is excluded from the formatters instead.
+extend-exclude = "F401|benchmarks/osworld_v2_adapter/src/evaluation_examples/|i18n/audits/evidence"
 
 [tool.pylint."messages control"]
 ignore = ["__init__.py"]
@@ -452,7 +457,9 @@ enable = [
 
 [tool.isort]
 profile = "black"
-extend_skip = ["benchmarks/osworld_v2_adapter/src/evaluation_examples"]
+# See the note in [tool.black]: audit evidence is data, and its scripts are kept
+# exactly as they were run.
+extend_skip = ["benchmarks/osworld_v2_adapter/src/evaluation_examples", "i18n/audits/evidence"]
 
 [tool.pyright]
 reportMissingTypeArgument = true
