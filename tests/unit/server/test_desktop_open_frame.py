@@ -1408,7 +1408,10 @@ async def test_an_append_after_publish_yields_the_appended_rows_coordinates(
         ids = ["ans02", "user02"]
         first = (await harness.client.get(url, params=_order_params(ids))).json()["result"]
         # The refresh the first read started is what carries the appended rows;
-        # poll it in rather than assuming one round trip is enough.
+        # poll it in rather than assuming one round trip is enough. ``steady``
+        # starts as the answer already in hand so the assertion below reads a
+        # value even if the loop's own body never runs.
+        steady: dict[str, Any] = first
         for _ in range(200):
             steady = (await harness.client.get(url, params=_order_params(ids))).json()["result"]
             if steady["journal_order_state"] == "ready":

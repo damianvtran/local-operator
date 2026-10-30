@@ -15,7 +15,7 @@ import os
 import threading
 import time
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
@@ -1072,7 +1072,10 @@ def test_the_order_projection_carries_an_openers_coordinate_on_its_own(publicati
     facts = _ready_order_facts(root, index, ["a1"], ["a1"])
     assert facts.ordinals == {"a1": index.journal_rows["a1"]}
     assert facts.openers["a1"] == ("u1", index.journal_rows["u1"])
-    answer = {"entries": [{"id": "a1"}]}
+    # Annotated because ``apply_order`` writes the coordinate axes into this
+    # same dict, and a literal-inferred type would describe only what was here
+    # before it ran.
+    answer: dict[str, Any] = {"entries": [{"id": "a1"}]}
     assert rm.apply_order(answer, facts)
     assert answer["journal_ordinals"]["u1"] == index.journal_rows["u1"]
 
