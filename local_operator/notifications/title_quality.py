@@ -10,7 +10,8 @@ content-free titles, never judge a short-but-real one.** Blocking a legitimate
 notification to catch noise is the worse failure, because the model's cheapest
 way to obey is then to post nothing at all, and the operator loses the item
 that mattered. So each rule below refuses only what carries no information at
-all: a null word, or fewer than three characters to identify an event by.
+all: a null word, or too few characters to identify an event by — three of
+Latin letters or digits, two when a character already carries a word.
 
 The body is deliberately NOT consulted. It is not on the list row, so a
 substantial body behind a ``x`` title still renders as a row the operator has
@@ -23,6 +24,8 @@ test's fixture is ``"one"``) use short titles on purpose and must keep working.
 """
 
 from __future__ import annotations
+
+import unicodedata
 
 #: Whole titles that name no event. Compared after :func:`_normalise`, so
 #: ``No-Op``, ``no op`` and ``noop`` are one entry; the spelling here is the
@@ -57,24 +60,53 @@ _PLACEHOLDER_TITLES = frozenset(
     }
 )
 
-#: The information floor, in alphanumerics. Three is the smallest count that
-#: still admits titles people really write (``"PR #9"`` → ``PR9``, ``"CI green"``
-#: → ``CIgreen``) while refusing the reported one- and two-character
-#: placeholders. Counting alphanumerics rather than characters is what makes the
-#: rule script-independent: ``"修复完成"`` is four, ``"Ошибка деплоя"`` is eleven,
-#: and ``"🚀"`` is zero.
+#: The information floor for a title of ASCII alphanumerics, in characters.
+#: Three is the smallest count that still admits titles people really write
+#: (``"PR #9"`` → ``PR9``, ``"CI green"`` → ``CIgreen``) while refusing the
+#: reported one- and two-character placeholders.
 _MIN_INFORMATIVE = 3
+
+#: The floor for a title whose letters are non-ASCII: CJK ideographs, kana,
+#: Hangul, Arabic, Cyrillic and the like. In those scripts a single character is
+#: already a word or a bound morpheme — ``部署`` is "deploy", ``完了`` is "done" —
+#: so two characters say as much as eight Latin ones. Counting every character
+#: alike made the floor Latin-biased by information density while calling itself
+#: script-independent, and refused precisely the short-but-real titles §3.1 says
+#: never to judge. Two is a floor, not an exemption: one character is still
+#: refused, because a word names something but a title has to say what happened.
+_MIN_INFORMATIVE_DENSE = 2
 
 
 def _normalise(title: str) -> str:
     """The title reduced to what it actually says: alphanumerics, casefolded.
+
+    NFKC first, because a compatibility form is the same word to the reader:
+    ``ＮＯＯＰ`` must be judged as ``noop``. Neither ``casefold`` nor ``isalnum``
+    folds the full-width block, so without this the guard is one keystroke — an
+    IME left in full-width mode — from bypassed, and the junk row it exists to
+    stop is written under a spelling no vocabulary entry will ever match. NFKC
+    is a compatibility fold, not a rewrite: it changes no word, only its
+    spelling, which is what the comparison is already abstracting away.
 
     Casefolding rather than lowercasing keeps the comparison honest for scripts
     where case mapping is not one character to one character; ``isalnum`` is
     Unicode-aware, so a CJK or Cyrillic title keeps its letters (and therefore
     its information) while punctuation, whitespace and emoji drop out.
     """
-    return "".join(char for char in title.casefold() if char.isalnum())
+    return "".join(
+        char for char in unicodedata.normalize("NFKC", title).casefold() if char.isalnum()
+    )
+
+
+def _floor(said: str) -> int:
+    """How many alphanumerics ``said`` needs before it can identify an event.
+
+    ``str.isascii()`` on the normalised form is the question the floor is really
+    about: is every character one Latin letter or digit, or does a character
+    carry a whole word? Only alphanumerics survive :func:`_normalise`, so a
+    non-ASCII character here is always a letter or digit of a denser script.
+    """
+    return _MIN_INFORMATIVE if said.isascii() else _MIN_INFORMATIVE_DENSE
 
 
 #: The vocabulary in the only form the comparison uses (``no-op`` → ``noop``).
@@ -97,12 +129,19 @@ def title_defect(title: str, body: str = "") -> str | None:
         # that the tool turns into "the inbox could not be written" — a dead end
         # naming neither the cause nor a way out.
         return "after ignoring punctuation and spaces the title says nothing at all"
-    if len(said) < _MIN_INFORMATIVE:
-        return (
-            f"its {len(said)} letter or digit"
-            f"{'' if len(said) == 1 else 's'} cannot identify an event "
-            f"(at least {_MIN_INFORMATIVE} are needed)"
-        )
     if said in _PLACEHOLDER_NORMALISED:
+        # Ahead of the floor because a whole-title match is the precise
+        # diagnosis: ``x`` is the placeholder word it is, not a miscount of
+        # letters. Five entries (``x``, ``y``, ``z``, ``ok``, ``n/a``) are also
+        # below the floor, so the other order makes them unreachable — a
+        # vocabulary nobody can hit, which a later floor change would silently
+        # revive.
         return f"{title.strip()!r} is a placeholder word, not a statement"
+    floor = _floor(said)
+    if len(said) < floor:
+        plural = "" if len(said) == 1 else "s"
+        return (
+            f"its {len(said)} letter{plural} or digit{plural} cannot identify "
+            f"an event (at least {floor} are needed)"
+        )
     return None

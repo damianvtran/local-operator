@@ -98,15 +98,34 @@ that identifies no event is a row the operator must read and dismiss to learn
 nothing. `NotifyParams` therefore refuses a degenerate title as
 `invalid arguments` (`local_operator/notifications/title_quality.py`):
 
-- **Information floor** — fewer than three alphanumerics after dropping
-everything else. Three admits what people really write (`PR #7`, `CI green`),
-rejects `x`/`--`/`ok`, and is script-independent: `修复完成` counts four,
-`🚀` counts zero.
-- **Placeholder vocabulary** — the WHOLE title, casefolded and stripped of
-non-alphanumerics, against a fixed set (`x`, `noop`/`no-op`, `n/a`, `test`,
-`todo`, `tbd`, `update`, `unused`, `placeholder`, `wip`, `done`, `ok`, …).
-Whole-equality only: `Update: 3 PRs merged` and `Tests failing on shard 3`
-pass, because they are statements that happen to open with a placeholder word.
+- **Normalisation** — NFKC, then casefold, then alphanumerics only. A
+compatibility form is the same word to the reader, so `ＮＯＯＰ` is judged as
+`noop` and `Ｎ／Ａ` as `na`. Neither `casefold` nor `isalnum` folds the
+full-width block, so without the NFKC step the guard is one keystroke — an IME
+left in full-width mode — from bypassed, and the junk row it exists to prevent
+is written under a spelling no vocabulary entry matches.
+- **Placeholder vocabulary** — the WHOLE title, normalised as above, against a
+fixed set (`x`/`y`/`z`, `noop`/`no-op`, `n/a`, `none`, `null`, `test`, `todo`,
+`tbd`, `update`, `unused`, `placeholder`, `wip`, `done`, `ok`/`okay`, `note`,
+`misc`). Checked BEFORE the information floor, because a whole-title match is
+the precise diagnosis: `x` is refused as the placeholder word it is, not as a
+miscount of letters — and the five entries that are also shorter than the floor
+(`x`, `y`, `z`, `ok`, `n/a`) stay reachable instead of becoming dead vocabulary
+that reappears if the floor ever moves. Whole-equality only: `Update: 3 PRs
+merged` and `Tests failing on shard 3` pass, because they are statements that
+happen to open with a placeholder word.
+- **Information floor** — measured in information, not characters: fewer than
+three alphanumerics for a title of Latin letters and digits, fewer than two
+when its letters are non-ASCII (CJK ideographs, kana, Hangul, Arabic, Cyrillic).
+In those scripts a character is already a word or a bound morpheme — `部署`
+("deploy"), `完了` ("done"), `완료` ("complete") — so one character of theirs
+says more than one Latin letter, and holding them to three refused exactly the
+short-but-real titles this section says never to judge. A floor that only
+counts characters is not script-independent; this one is stated in the unit
+that actually matters. Three still admits what people really write (`PR #7`,
+`CI green`) and refuses Latin noise (`ab`, `ok`); one character of any script
+is refused, because a word names something but a title has to say what
+happened; `修复完成` counts four, `🚀` counts zero.
 - **Nothing at all** — a whitespace/punctuation-only title is refused HERE. It
 used to reach the store, whose bare `ValueError` surfaced as "the inbox could
 not be written": a dead end naming neither the cause nor a way out.

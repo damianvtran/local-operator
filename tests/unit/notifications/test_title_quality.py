@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import pytest
 
-from local_operator.notifications.title_quality import title_defect
+from local_operator.notifications.title_quality import _PLACEHOLDER_TITLES, title_defect
 
 #: Titles that must PASS. Written as the operator would see them.
 ACCEPTED = [
@@ -25,6 +25,16 @@ ACCEPTED = [
     "3 fraud attempts blocked",
     "修复完成",
     "Ошибка деплоя",
+    # A character is a word or a morpheme in these scripts, so two of them is a
+    # title: the guard counts meaning, not characters (docs §3.1).
+    "部署",
+    "失败",
+    "完了",
+    "완료",
+    "تم",
+    # A compatibility form is the same word to the reader, so NFKC folds it and
+    # a full-width title is judged as the ASCII title it renders as.
+    "Ｒｅｌｅａｓｅ ｖ０.９２.２",
     # Same words, real information: whole-title equality only, never a prefix
     # or substring match on the placeholder vocabulary.
     "Update: 3 PRs merged",
@@ -51,6 +61,17 @@ REFUSED = [
     "wip",
     "done",
     "ok",
+    # Full-width forms are the same words, so NFKC must fold them into the
+    # vocabulary; unfolded they are unmatched "letters" that write a junk row.
+    "ＮＯＯＰ",
+    "ＴＥＳＴ",
+    "ＮＯ－ＯＰ",
+    "Ｎ／Ａ",
+    # Full-width characters count as the Latin letters they render as.
+    "ｘｘ",
+    # Below the floor in every script: one character is a word, not a title.
+    "修",
+    "完",
     "",
     "   ",
     "...",
@@ -89,6 +110,34 @@ def test_the_information_floor_counts_alphanumerics_only() -> None:
     assert title_defect("PR9") is None
 
 
+def test_the_floor_is_measured_in_information_not_characters() -> None:
+    """One character carries a word in some scripts, so two of them is a title.
+
+    ``部署``/``失败``/``完了``/``완료``/``تم`` are complete statements of two
+    characters; holding them to three refused exactly the short-but-real titles
+    §3.1 says never to judge. The Latin floor does not move, and one character
+    of any script is still refused.
+    """
+    assert title_defect("部署") is None
+    assert title_defect("失败") is None
+    assert title_defect("完了") is None
+    assert title_defect("완료") is None
+    assert title_defect("تم") is None
+    assert title_defect("ab") is not None
+    assert title_defect("ok") is not None
+    assert title_defect("修") is not None
+    assert title_defect("完") is not None
+
+
+def test_a_compatibility_form_is_the_same_word() -> None:
+    """NFKC before the vocabulary, or the guard is an IME keystroke from bypassed."""
+    assert title_defect("ＮＯＯＰ") is not None
+    assert title_defect("ＴＥＳＴ") is not None
+    assert title_defect("Ｎ／Ａ") is not None
+    # The fold is a compatibility one, not a rewrite: a real full-width title stays.
+    assert title_defect("Ｒｅｌｅａｓｅ ｖ０.９２.２") is None
+
+
 def test_a_substantial_body_cannot_rescue_a_degenerate_title() -> None:
     """The body is not on the list row, so it is not what the operator sees."""
     assert (
@@ -104,10 +153,31 @@ def test_a_whitespace_body_does_not_change_a_good_title() -> None:
 def test_the_reason_names_the_defect_for_the_model_to_correct() -> None:
     """A refusal the model cannot act on is a dead end, so each arm says which."""
     placeholder = title_defect("noop") or ""
-    floor = title_defect("x") or ""
+    floor = title_defect("ab") or ""
     empty = title_defect("   ") or ""
     assert "placeholder" in placeholder.lower()
     assert "noop" in placeholder
     assert "letter" in floor.lower() or "digit" in floor.lower() or "character" in floor.lower()
     assert "nothing" in empty.lower() or "empty" in empty.lower() or "punctuation" in empty.lower()
     assert len({placeholder, floor, empty}) == 3, "each defect arm says something different"
+
+
+def test_the_floor_reason_pluralises_both_nouns() -> None:
+    """The sentence is the correction instruction, so it has to read."""
+    assert "its 2 letters or digits cannot" in (title_defect("ab") or "")
+    assert "its 1 letter or digit cannot" in (title_defect("修") or "")
+
+
+def test_every_placeholder_entry_is_refused_as_a_placeholder() -> None:
+    """The whole-title match is the precise diagnosis, so it is checked first.
+
+    Five entries (``x``, ``y``, ``z``, ``ok``, ``n/a``) are also below the floor;
+    with the floor first they would be unreachable, which read as dead vocabulary
+    and would silently reactivate if the floor ever moved. Every member must
+    therefore report itself as the placeholder it is.
+    """
+    assert _PLACEHOLDER_TITLES, "the vocabulary is not empty"
+    for title in sorted(_PLACEHOLDER_TITLES):
+        defect = title_defect(title)
+        assert defect is not None, f"{title!r} is in the placeholder set"
+        assert "placeholder" in defect, f"{title!r} was refused as {defect!r}"
