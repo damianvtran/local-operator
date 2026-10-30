@@ -1021,3 +1021,135 @@ def test_the_companion_stays_a_small_fraction_of_the_index(tmp_path):
     share = companion_bytes / index_bytes
     print(f"index={index_bytes} companion={companion_bytes} share={share:.1%}")
     assert share < 0.5, f"companion is {share:.1%} of the index"
+
+
+# ---------------------------------------------------------------------------
+# The journal-order half: the same projection, for a read that serves no runs
+# ---------------------------------------------------------------------------
+
+
+def _ready_order_facts(root: Path, index: ti.TranscriptIndex, ids: list[str], order_ids: list[str]):
+    result = rm.order_facts(
+        root, SID, collected_ids=ids, order_ids=order_ids, source=rm.source_of(index)
+    )
+    assert result.state == "ready", result.reason
+    return result.value
+
+
+def test_the_order_projection_is_exactly_the_resident_join(publication):
+    """The resident join is the CONTROL, and the projection must produce it.
+
+    ``journal_order=1`` without ``open_frame=1`` is answered from the companion
+    now, so a page a client paints and the same page answered by an in-process
+    index have to be the same payload — including the opener closure (``a1``'s
+    coordinate carries ``u1``'s) and the explicit missing id. A projection that
+    merely resembles the join is the class of bug the read model's own review
+    found: a fact that is almost right is a row moved after paint.
+    """
+    root, index = publication
+    source = rm.source_of(index)
+    page = [{"id": "u2"}, {"id": "a2"}]
+    control = {"entries": [dict(row) for row in page]}
+    ti._remember(ti._key(root, SID), index, ti.index_path(root, SID).stat().st_mtime)
+    assert ti.apply_journal_order(root, SID, control, source, ["a1", "absent"]) is True
+    ti._reset_for_tests()
+
+    projected = {"entries": [dict(row) for row in page]}
+    facts = _ready_order_facts(root, index, ["u2", "a2"], ["a1", "absent"])
+    assert rm.apply_order(projected, facts)
+    assert projected == control
+
+
+def test_the_order_projection_carries_an_openers_coordinate_on_its_own(publication):
+    """An assistant the page holds still brings its real opening user with it.
+
+    Sparse corrections used to state an assistant's coordinate while its opener
+    had none, and the client then ordered a known row against an unknown suffix.
+    The closure is part of the answer, not a nicety: without it the projection is
+    a fact the resident join would have stated and this one would not.
+    """
+    root, index = publication
+    facts = _ready_order_facts(root, index, ["a1"], ["a1"])
+    assert facts.ordinals == {"a1": index.journal_rows["a1"]}
+    assert facts.openers["a1"] == ("u1", index.journal_rows["u1"])
+    answer = {"entries": [{"id": "a1"}]}
+    assert rm.apply_order(answer, facts)
+    assert answer["journal_ordinals"]["u1"] == index.journal_rows["u1"]
+
+
+def test_the_order_projection_rejects_a_page_this_derivation_never_witnessed(publication):
+    """A row the projection does not hold rejects the join, never answers empty."""
+    root, index = publication
+    result = rm.order_facts(
+        root, SID, collected_ids=["absent"], order_ids=["a1"], source=rm.source_of(index)
+    )
+    assert result.state != "ready"
+
+
+def test_the_order_projection_rejects_a_foreign_source(publication):
+    root, _ = publication
+    for source in ((1, 2, 3.0), None):
+        result = rm.order_facts(root, SID, collected_ids=["u1"], order_ids=[], source=source)
+        assert result.state != "ready", source
+
+
+def test_the_order_projection_refuses_a_companion_of_an_older_schema(publication):
+    """A schema this reader does not know is unsupported, never misread.
+
+    The schema number is the one promise the companion makes about its own
+    meaning: an older projection may hold the same tables with rows whose fields
+    mean something else. It must therefore degrade to the caller's policy — the
+    answer an absent companion gives — rather than answer coordinates from it.
+    """
+    import sqlite3
+
+    root, index = publication
+    pub = _pub(root)
+    with sqlite3.connect(pub.path) as db:
+        (payload,) = db.execute("SELECT payload FROM meta").fetchone()
+        meta = json.loads(payload)
+        meta["schema"] = rm.SCHEMA - 1
+        db.execute("UPDATE meta SET payload=?", (json.dumps(meta),))
+    result = rm.order_facts(
+        root, SID, collected_ids=["u1"], order_ids=["a1"], source=rm.source_of(index)
+    )
+    assert result.state != "ready", result.state
+
+
+def test_the_order_projection_is_unavailable_without_a_companion(publication):
+    """An older or deleted companion degrades to the caller's own policy."""
+    root, index = publication
+    rm.header(root, SID).value.path.unlink()
+    result = rm.order_facts(
+        root, SID, collected_ids=["u1"], order_ids=["a1"], source=rm.source_of(index)
+    )
+    assert result.state == "missing", result.state
+
+
+def test_the_order_projection_rejects_a_row_a_later_append_added(tmp_path):
+    """A companion is a fact about ONE journal, and an append moves it.
+
+    The pre-append projection answers for the rows its own derivation witnessed
+    and nothing else: an id from the appended suffix rejects the join rather than
+    borrowing the older derivation's coordinates. Serving the older answer with
+    the new row in it is precisely the stale-ready shape the caller's policy
+    exists to avoid, so it is rejected here rather than narrowed.
+    """
+    from local_operator.harness.types import Message, TextContent
+    from local_operator.session.transcript import Transcript
+
+    _journal(tmp_path)
+    index = ti.refresh_index(tmp_path, SID)
+    assert index is not None
+    _materialize(tmp_path, index)
+    appended = asyncio.run(
+        Transcript(tmp_path / "sessions" / SID).append_message(
+            Message(role="user", content=[TextContent(text="appended")])
+        )
+    )
+    new_id = str(getattr(appended, "id", "") or "")
+    assert new_id and new_id not in index.journal_rows
+    result = rm.order_facts(
+        tmp_path, SID, collected_ids=[new_id], order_ids=[], source=rm.source_of(index)
+    )
+    assert result.state != "ready", "a pre-append projection answered for an appended row"

@@ -4012,7 +4012,11 @@ class DesktopSessionBridge:
             "has_newer": page.has_newer,
         }
         answer = await self._with_peer_cycle_records(answer, [page])
-        return self._journal_page(answer, [page], order_ids or []) if journal_order else answer
+        return (
+            await self._journal_order_page(answer, [page], order_ids or [])
+            if journal_order
+            else answer
+        )
 
     async def _open_frame_history(
         self,
@@ -4131,7 +4135,11 @@ class DesktopSessionBridge:
             answer = await self._with_peer_cycle_records(answer, [page])
             if journal_order and facts is not None and index_read_model.apply_order(answer, facts):
                 return answer
-            return self._journal_page(answer, [page], order_ids or []) if journal_order else answer
+            return (
+                await self._journal_order_page(answer, [page], order_ids or [])
+                if journal_order
+                else answer
+            )
 
         collected: list[dict[str, Any]] = []
         order_pages: list[Any] = []
@@ -4313,7 +4321,11 @@ class DesktopSessionBridge:
         answer = await self._with_peer_cycle_records(answer, order_pages)
         if journal_order and facts is not None and index_read_model.apply_order(answer, facts):
             return answer
-        return self._journal_page(answer, order_pages, order_ids or []) if journal_order else answer
+        return (
+            await self._journal_order_page(answer, order_pages, order_ids or [])
+            if journal_order
+            else answer
+        )
 
     @staticmethod
     def _wire_rows(entries: Any) -> list[dict[str, Any]]:
@@ -4470,8 +4482,54 @@ class DesktopSessionBridge:
 
         return apply_journal_order(self.root, self.session_id, answer, source, ids)
 
-    def _journal_page(
+    async def _journal_order_page(
         self, answer: dict[str, Any], pages: list[Any], ids: list[str]
+    ) -> dict[str, Any]:
+        """Answer ``journal_order`` from the cheapest source that can prove it.
+
+        THREE SOURCES, IN ORDER, and the order is the contract:
+
+        1. the RESIDENT index — the derivation authority, two stats, and the only
+           source that costs nothing when the process already holds this journal;
+        2. the PERSISTED companion — the projection of that same derivation, read
+           in the caller's worker hop. Only opened once (1) has declined, so a
+           process that already holds the index never pays for it;
+        3. today's policy — a background correction and ``building``/``unavailable``
+           — through :meth:`_journal_page`, which owns that answer.
+
+        WARMTH IS THE WHOLE POINT. Before this, source (2) did not exist for this
+        flag: ``journal_order=1`` without ``open_frame=1`` reached the resident
+        join alone, so a renderer's FIRST paint on a session the process had not
+        indexed answered ``building`` and reconciled a moment later — the
+        after-paint change the capability exists to remove. Serving it from the
+        companion is what makes the answer final on the first frame.
+        """
+        ids = list(dict.fromkeys(ids))
+        source = index_read_model.page_source(pages)
+        if self._apply_journal_order(answer, source, ids):
+            return answer
+        projected = await asyncio.to_thread(
+            index_read_model.order_facts,
+            self.root,
+            self.session_id,
+            collected_ids=[row["id"] for row in answer["entries"]],
+            order_ids=ids,
+            source=source,
+        )
+        # A missing, stale, corrupt or unsupported projection is NOT an error: the
+        # policy below is exactly what an absent companion answered before this
+        # existed, so an older store degrades to today's behaviour.
+        return self._journal_page(
+            answer, pages, ids, facts=projected.value if projected.state == "ready" else None
+        )
+
+    def _journal_page(
+        self,
+        answer: dict[str, Any],
+        pages: list[Any],
+        ids: list[str],
+        *,
+        facts: index_read_model.FrameFacts | None = None,
     ) -> dict[str, Any]:
         """Opt-in source facts, from a single verified page/index view only.
 
@@ -4480,10 +4538,20 @@ class DesktopSessionBridge:
         Extra ids name already-loaded rows outside this page, never a new read
         service; their count/string bounds cap the response and source remains
         THIS session. Missing ids are explicitly unknown.
+
+        ``facts`` is the caller's already-materialized companion projection
+        (:func:`index_read_model.order_facts`), supplied by
+        :meth:`_journal_order_page` when no resident index holds this journal's
+        witness. It answers first because it is the same derivation the resident
+        join would read, already materialized in the caller's worker hop; the
+        resident attempt below still runs so this method keeps ONE policy for
+        what happens when neither can prove the rows.
         """
         from local_operator.session import transcript_index
 
         ids = list(dict.fromkeys(ids))
+        if facts is not None and index_read_model.apply_order(answer, facts):
+            return answer
         sources = [page.source_signature for page in pages]
         source = sources[0] if sources and all(s == sources[0] for s in sources) else None
         if self._apply_journal_order(answer, source, ids):

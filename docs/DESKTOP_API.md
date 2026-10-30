@@ -3559,6 +3559,22 @@ stale indexes omit authority and say `building`/`unavailable`. A peer with no
 owner-provided domain says `unsupported`; the receiver never assigns ordinals
 from its own disk. Missing information does not erase previously proven facts.
 
+**`ready` IS ANSWERED FROM THREE SOURCES, IN THIS ORDER.** The resident parsed
+index is the derivation authority and costs two stats, so it answers first. The
+persisted read-model companion beside it — the same derivation's projection, read
+in the caller's worker hop — answers when no resident index holds this journal's
+witness, which is what makes `journal_order=1` without `open_frame=1` `ready` on a
+process that has just started; the open-frame page already had this projection
+for its runs, and this is the same door for the page that serves none. The
+background correction behind `building` is unchanged, and is still what a genuine
+cold store answers. A companion that is missing, stale, corrupt or built by an
+older schema is not an error — it degrades to exactly the answer an absent
+companion gave before. The ordinals and the opener closure are the resident
+join's own helpers, so the two paths cannot disagree: measured on a 36.5 MB
+journal with the companion warm and the process fresh, base answered `building`
+with 0 ordinals in 79.1 ms and the projection answers `ready` with every served
+row carrying `journal_seq` in 12.2 ms.
+
 `order_ids` is an optional, bounded lookup on these existing requests: at most
 512 entry IDs, each 1..128 characters. It has no effect without the declaration.
 The same-session index returns `journal_ordinals` for found IDs and explicitly
