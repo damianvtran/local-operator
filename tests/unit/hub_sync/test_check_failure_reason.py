@@ -126,12 +126,12 @@ def test_a_timed_out_org_team_fetch_says_it_timed_out(tmp_path, monkeypatch):
     assert elapsed < 3
 
 
-def test_a_refused_org_team_fetch_names_the_status_and_hub_message(tmp_path):
+def test_a_failing_org_team_fetch_names_the_status_and_hub_message(tmp_path):
     with _hub("500") as (base_url, _seen):
         result = _check(tmp_path, base_url)
 
     assert result.reason == "hub-error"
-    assert result.detail == "the hub refused the request (HTTP 500: Team lookup failed.)"
+    assert result.detail == "the hub returned an error (HTTP 500: Team lookup failed.)"
 
 
 def test_a_missing_org_team_stays_hub_item_missing(tmp_path):
@@ -171,3 +171,100 @@ def test_the_transport_cause_is_read_from_the_chain(cause, phrase):
     assert detail == (
         f"could not reach the hub: {phrase} (Could not pull the team from the Radient Agent Hub)"
     )
+
+
+def _api_error(status: int | None, message: str, cause: BaseException | None = None):
+    from local_operator.clients._http import APIError
+
+    error = APIError(message, status_code=status)
+    error.__cause__ = cause
+    return error
+
+
+def test_the_most_specific_cause_anywhere_in_the_chain_wins():
+    # Round-1 R1: the old per-exception loop returned at the FIRST exception that
+    # matched ANY row, so a shallow ConnectionError hid the deeper read timeout.
+    import requests
+    import urllib3
+
+    deepest = urllib3.exceptions.ReadTimeoutError(None, "/v1/teams", "read timed out")
+    middle = requests.exceptions.ConnectionError("pool internals")
+    middle.__cause__ = deepest
+    error = _api_error(None, "Could not pull the team from the Radient Agent Hub", middle)
+
+    reason, detail = chk._failure_reason(error)
+
+    assert reason == "hub-error"
+    assert detail == (
+        "could not reach the hub: the hub did not answer in time "
+        "(Could not pull the team from the Radient Agent Hub)"
+    )
+
+
+@pytest.mark.parametrize("cause", [TimeoutError("timed out"), __import__("socket").timeout()])
+def test_a_raw_socket_timeout_is_named_not_left_generic(cause):
+    # A client that lets the builtin escape matched no row and stored only the
+    # generic fallback sentence -- the "why is missing" failure this module exists
+    # to prevent. ``socket.timeout`` is ``TimeoutError`` on 3.10+.
+    error = _api_error(None, "Could not pull the team from the Radient Agent Hub", cause)
+
+    _reason, detail = chk._failure_reason(error)
+
+    assert detail == (
+        "could not reach the hub: the request timed out "
+        "(Could not pull the team from the Radient Agent Hub)"
+    )
+
+
+def test_control_characters_in_a_hub_body_never_reach_the_report():
+    # The text lands in ``ItemMergeReport.message``, read in a terminal: an ANSI
+    # escape, CR (overwrites the line), LF or NUL must not survive.
+    error = _api_error(500, "\x1b[31mboom\rfake\nline\x00end\x7f")
+
+    _reason, detail = chk._failure_reason(error)
+
+    assert not set(detail) & {"\x1b", "\x00", "\r", "\n", "\x7f"}
+    assert "boom" in detail and "end" in detail
+
+
+def test_a_4xx_is_still_a_refusal():
+    # A 5xx is the hub failing, not refusing; a 4xx must keep the refusal wording.
+    _reason, detail = chk._failure_reason(_api_error(401, "Invalid API key."))
+
+    assert detail == "the hub refused the request (HTTP 401: Invalid API key.)"
+
+
+def test_a_5xx_html_body_does_not_repeat_the_status():
+    error = _api_error(502, "Could not pull the team from the Radient Agent Hub (HTTP 502)")
+
+    _reason, detail = chk._failure_reason(error)
+
+    assert detail == (
+        "the hub returned an error (Could not pull the team from the Radient Agent Hub (HTTP 502))"
+    )
+
+
+def test_a_bool_status_is_not_an_http_status():
+    error = _api_error(True, "something odd")  # type: ignore[arg-type]
+
+    _reason, detail = chk._failure_reason(error)
+
+    assert "HTTP True" not in detail
+    assert detail == "could not reach the hub: something odd"
+
+
+def test_the_warning_names_the_item_that_failed(caplog):
+    import requests
+
+    error = _api_error(
+        None,
+        "Could not pull the team from the Radient Agent Hub",
+        requests.exceptions.ConnectionError("pool internals"),
+    )
+
+    with caplog.at_level("WARNING", logger=chk.logger.name):
+        chk._failure_reason(error, kind="team", hub_id=HUB_ID)
+
+    (line,) = [r.getMessage() for r in caplog.records]
+    assert "team" in line and HUB_ID in line
+    assert "pool internals" not in line

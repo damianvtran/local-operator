@@ -162,7 +162,12 @@ def _status_of(error: BaseException) -> int | None:
 _TRANSPORT_PHRASES: tuple[tuple[tuple[str, ...], str], ...] = (
     (("ConnectTimeout",), "the connection timed out"),
     (("ReadTimeout", "ReadTimeoutError"), "the hub did not answer in time"),
-    (("Timeout", "TimeoutException", "PoolTimeout", "WriteTimeout"), "the request timed out"),
+    (
+        # ``TimeoutError`` is the builtin (and ``socket.timeout`` on 3.10+): a
+        # client that lets the raw socket error escape names none of the others.
+        ("Timeout", "TimeoutException", "PoolTimeout", "WriteTimeout", "TimeoutError"),
+        "the request timed out",
+    ),
     (("SSLError",), "the secure connection failed"),
     (("ProxyError",), "the proxy refused the connection"),
     (
@@ -182,17 +187,37 @@ def _cause_chain(error: BaseException) -> list[BaseException]:
 
 
 def _transport_phrase(error: BaseException) -> tuple[str, str] | None:
-    """``(phrase, exception class)`` for a request that never got a response."""
+    """``(phrase, exception class)`` for a request that never got a response.
 
-    for exc in _cause_chain(error):
-        names = {cls.__name__ for cls in type(exc).__mro__}
-        for candidates, phrase in _TRANSPORT_PHRASES:
+    The phrase table is the OUTER loop so "most specific first" holds across the
+    WHOLE chain: ``APIError -> ConnectionError -> ReadTimeoutError`` is a read
+    timeout, not "the connection failed" just because the shallower wrapper was
+    visited first.
+    """
+
+    chain = [(exc, {cls.__name__ for cls in type(exc).__mro__}) for exc in _cause_chain(error)]
+    for candidates, phrase in _TRANSPORT_PHRASES:
+        for exc, names in chain:
             if names.intersection(candidates):
                 return phrase, type(exc).__name__
     return None
 
 
-def _failure_reason(error: BaseException) -> tuple[str, str]:
+#: C0 controls and DEL. A hub body is untrusted text that ends up in a person's
+#: terminal via the live report: an ANSI escape, CR (line overwrite), LF or NUL
+#: must not survive into it.
+_CONTROL_CHARS = dict.fromkeys([*range(0x20), 0x7F])
+
+
+def _plain(text: str) -> str:
+    """``text`` with control characters replaced by a space and whitespace collapsed."""
+
+    return " ".join(text.translate(_CONTROL_CHARS).split())
+
+
+def _failure_reason(
+    error: BaseException, *, kind: str = "", hub_id: str | None = None
+) -> tuple[str, str]:
     """``(error_class, sentence)`` for a failed fetch (credentials are scrubbed upstream).
 
     THE SENTENCE MUST SAY WHY. The clients raise ``APIError`` from a
@@ -206,27 +231,37 @@ def _failure_reason(error: BaseException) -> tuple[str, str]:
     the cause chain and names it, and states the HTTP status plus the hub's own
     message when there WAS a response. The class name goes to the log, never
     the raw transport text (it carries URLs and pool internals, not prose).
+
+    ``kind`` and ``hub_id`` (``agent``/``team``/``skill`` and a UUID) are the
+    only identity the log line carries, so one dead hub does not log N
+    identical lines; both are non-secret.
     """
 
+    subject = " ".join(part for part in (kind, hub_id) if part) or "unknown item"
     status = _status_of(error)
-    text = str(error)
+    text = _plain(str(error))
     if status == 404 or "404" in text[:200] and "Not Found" in text:
         return (
             "hub-item-missing",
             "the hub no longer lists this item, or this account cannot see it",
         )
-    if isinstance(status, int):
-        logger.warning("hub fetch refused: HTTP %s (%s)", status, type(error).__name__)
+    # ``bool`` is an ``int`` subclass; ``True`` is not an HTTP status.
+    if type(status) is int and 100 <= status <= 599:
+        logger.warning(
+            "hub fetch refused: HTTP %s (%s) for %s", status, type(error).__name__, subject
+        )
         # ``text`` is the hub's designed ``error`` string, or the client's
         # fallback already suffixed "(HTTP n)"; do not say the status twice.
         reason = text if f"HTTP {status}" in text else f"HTTP {status}: {text}"
-        return "hub-error", f"the hub refused the request ({reason[:200]})"
+        # Only a 4xx is the hub declining the request; a 5xx is the hub failing.
+        verb = "refused the request" if 400 <= status < 500 else "returned an error"
+        return "hub-error", f"the hub {verb} ({reason[:200]})"
     transport = _transport_phrase(error)
     if transport is not None:
         phrase, cause = transport
-        logger.warning("hub fetch got no response: %s (%s)", phrase, cause)
+        logger.warning("hub fetch got no response: %s (%s) for %s", phrase, cause, subject)
         return "hub-error", f"could not reach the hub: {phrase} ({text[:160]})"
-    logger.warning("hub fetch failed: %s", type(error).__name__)
+    logger.warning("hub fetch failed: %s for %s", type(error).__name__, subject)
     return "hub-error", f"could not reach the hub: {text[:200]}"
 
 
@@ -348,7 +383,7 @@ def check_hub_agents(
                 else:
                     text, desc = fetcher(client, hub_id, timeout=REQUEST_TIMEOUT_S)
             except Exception as error:  # noqa: BLE001 - classified below
-                reason, detail = _failure_reason(error)
+                reason, detail = _failure_reason(error, kind="agent", hub_id=hub_id)
                 checks.append(
                     ItemCheck(
                         "agent",
@@ -659,7 +694,7 @@ def check_hub_teams(
                 record.hub_id, timeout=REQUEST_TIMEOUT_S, with_credential=bool(tenant)
             )
         except Exception as error:  # noqa: BLE001
-            reason, detail = _failure_reason(error)
+            reason, detail = _failure_reason(error, kind="team", hub_id=record.hub_id)
             checks.append(
                 ItemCheck(
                     "team",
@@ -905,7 +940,7 @@ def check_hub_skills(
             conditional_match = True
             matched_revision = record.remote_revision or not_modified.etag
         except Exception as error:  # noqa: BLE001
-            reason, detail = _failure_reason(error)
+            reason, detail = _failure_reason(error, kind="skill", hub_id=record.hub_id)
             checks.append(
                 ItemCheck(
                     "skill",
