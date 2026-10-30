@@ -19,6 +19,7 @@ without it):
     value cannot change a cell count by an unbounded amount and those keys have
     no ICU branch to widen.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -101,35 +102,56 @@ def main() -> int:
 
     print(f"namespace: {ns}   keys: en={len(en)} fr={len(fr)}")
     missing, unknown = sorted(set(en) - set(fr)), sorted(set(fr) - set(en))
-    print(f"key_set: missing={len(missing)} unknown={len(unknown)} -> "
-          + ("OK" if not missing and not unknown else f"FAIL {missing} {unknown}"))
+    print(
+        f"key_set: missing={len(missing)} unknown={len(unknown)} -> "
+        + ("OK" if not missing and not unknown else f"FAIL {missing} {unknown}")
+    )
     print(f"key_order_identical_to_en: {list(en) == list(fr)}")
 
     mism = [k for k in en if arg_names(en[k]) != arg_names(fr[k])]
     print(f"argument_parity: mismatches={len(mism)} -> " + ("OK" if not mism else f"FAIL {mism}"))
 
-    pdiff = [(k, plural_arms(en[k]), plural_arms(fr[k])) for k in en
-             if plural_arms(en[k]) != plural_arms(fr[k])]
+    pdiff = [
+        (k, plural_arms(en[k]), plural_arms(fr[k]))
+        for k in en
+        if plural_arms(en[k]) != plural_arms(fr[k])
+    ]
     for k, pe, pf in pdiff:
         print(f"plural_arms: {k}: en={pe} fr={pf}")
-    print("plural_arms: -> " + ("OK (fr adds 'many' where en has one/other; never 'few')"
-                               if pdiff else "no plural/select constructs -> vacuous OK"))
+    print(
+        "plural_arms: -> "
+        + (
+            "OK (fr adds 'many' where en has one/other; never 'few')"
+            if pdiff
+            else "no plural/select constructs -> vacuous OK"
+        )
+    )
     print("plural_uses_few: " + str(any("few" in src for src in fr.values())))
 
     typo = {k: typography(v) for k, v in fr.items() if typography(v)}
-    print(f"typography: violations={len(typo)} U+202F={sum(v.count(chr(0x202f)) for v in fr.values())} "
-          f"U+00A0={sum(v.count(chr(0xa0)) for v in fr.values())} -> "
-          + ("OK" if not typo else f"FAIL {typo}"))
+    thin = sum(v.count(chr(0x202F)) for v in fr.values())
+    nbsp = sum(v.count(chr(0xA0)) for v in fr.values())
+    print(
+        f"typography: violations={len(typo)} U+202F={thin} U+00A0={nbsp} -> "
+        + ("OK" if not typo else f"FAIL {typo}")
+    )
 
     budgeted = [k for k, v in fr.items() if (ctx.get(k) or {}).get("maxCells")]
     icu = [k for k in budgeted if ICU_TYPED.search(fr[k])]
     brace = [k for k in budgeted if ANY_BRACE.search(fr[k])]
-    over = [(k, cell_len(fr[k]), cell_len(en[k]), ctx[k]["maxCells"]) for k in budgeted
-            if k not in icu and cell_len(fr[k]) > ctx[k]["maxCells"]]
-    print("width_definition: scored_keys = fr keys declaring maxCells, minus keys matching "
-          r"/\{\w+\s*,/ (ICU type-tagged); simple {name} placeholders ARE scored")
-    print(f"width_key_set: budgeted={len(budgeted)} placeholder_bearing_any_brace={len(brace)} "
-          f"icu_type_tagged_excluded={len(icu)} scored_exact={len(budgeted) - len(icu)}")
+    over = [
+        (k, cell_len(fr[k]), cell_len(en[k]), ctx[k]["maxCells"])
+        for k in budgeted
+        if k not in icu and cell_len(fr[k]) > ctx[k]["maxCells"]
+    ]
+    print(
+        "width_definition: scored_keys = fr keys declaring maxCells, minus keys matching "
+        r"/\{\w+\s*,/ (ICU type-tagged); simple {name} placeholders ARE scored"
+    )
+    print(
+        f"width_key_set: budgeted={len(budgeted)} placeholder_bearing_any_brace={len(brace)} "
+        f"icu_type_tagged_excluded={len(icu)} scored_exact={len(budgeted) - len(icu)}"
+    )
     print(f"width_vs_declared_maxCells_exact: over={len(over)}")
     for k, wf, we, b in over:
         print(f"  OVER {k}: fr={wf} en={we} budget={b} (+{wf - b})")
