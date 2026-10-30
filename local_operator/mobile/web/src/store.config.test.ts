@@ -72,13 +72,18 @@ describe("retainConfigStream", () => {
 		vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(configOk()).mockImplementation(Stream.fetch));
 		// Hold the French chunk open for the whole test: the frame only STARTS the
 		// request, and this stub is what that request waits on. Racing the real
-		// `import("./bundled.fr.gen")` made the frame-time assertion below a
-		// scheduling coin-flip (measured 4/4 cold three-file runs and 2/10 single-test
-		// repeats red): a chunk that settles before the assertion reads the store has
-		// already flipped the surface to French, which is the store behaving correctly
-		// read back as a failure. `BUNDLED_CHUNKS` is the seam the loader reads at call
-		// time (`start` does `manifest[locale]`), and the one
+		// chunk — the manifest's own lazy loader for the generated French bundle —
+		// made the frame-time assertion below a scheduling coin-flip (measured 4/4
+		// cold three-file runs and 2/10 single-test repeats red): a chunk that
+		// settles before the assertion reads the store has already flipped the
+		// surface to French, which is the store behaving correctly read back as a
+		// failure. `BUNDLED_CHUNKS` is the seam the loader reads at call time
+		// (`start` does `manifest[locale]`), and the one
 		// `store.locale-bootstrap.test.ts` already patches to hold a chunk open.
+		// The module is therefore reached only THROUGH the manifest here: spelling
+		// its path as a quoted relative specifier in prose fails the packaging guard,
+		// whose import scanner reads comments too
+		// (`tests/unit/mobile/test_web_package_data.py`).
 		const manifest = BUNDLED_CHUNKS as Record<string, () => Promise<{ readonly BUNDLED_LOCALE: typeof BUNDLED_OWNED }>>;
 		const realFr = manifest["fr"];
 		let releaseFr!: () => void;
