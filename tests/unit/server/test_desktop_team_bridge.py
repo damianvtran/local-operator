@@ -4392,3 +4392,19 @@ async def test_agent_notify_passes_a_hub_refusal_through(api):
     )
     assert response.status_code == 404
     assert response.json()["detail"]["code"] == "not_found"
+
+
+async def test_agent_notify_is_advertised_with_its_required_receipt():
+    """The UI shows the wake-level control only when this flag is served; the
+    flag means "the route exists AND refuses an unguarded call", so it is
+    asserted beside the DTO's required receipt fields."""
+
+    from local_operator.server.features import static_feature_flags
+
+    assert static_feature_flags()["team_bridge_agent_notify"] == 1
+    fields = desktop_team_bridge.ConversationAgentNotifyIn.model_fields
+    assert fields["expected_account_id"].is_required()
+    assert fields["tenant_id"].is_required()
+    assert "endpoint_id" not in fields
+    paths = {route.path for route in desktop_team_bridge.router.routes}
+    assert "/v1/desktop/team-bridge/conversations/{conversation_id}/agent-notify" in paths
