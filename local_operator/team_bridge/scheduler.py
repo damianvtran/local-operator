@@ -865,7 +865,7 @@ async def run_screening_cycle(
         resolve_screening_chain,
     )
     from local_operator.team_bridge.screening import screen_message_async
-    from local_operator.team_bridge.store import Store, StoreRefused
+    from local_operator.team_bridge.store import Store, StoreRefused, serialize_serving
 
     # ONE capture of the whole hop list: hop 0 is the configured default (the
     # published policy's model), the rest are the operator's configured
@@ -1007,6 +1007,9 @@ async def run_screening_cycle(
         template_hash,
         selection.model_id,
         revision,
+        # m3: a damaged serving set must REPUBLISH, not keep holding every
+        # fallback allow as stale; it is part of what "unchanged" means.
+        serialize_serving(serving if len(chain) > 1 else None),
     )
     row = (
         None
@@ -1016,6 +1019,7 @@ async def run_screening_cycle(
             current["template_sha256"],
             current["default_model"],
             current["revision"],
+            current.get("approved_serving"),
         )
     )
     if row != expected:

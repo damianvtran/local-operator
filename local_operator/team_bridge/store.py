@@ -944,6 +944,15 @@ def policy_serving_models(policy: Mapping[str, Any]) -> frozenset[str]:
     return frozenset(models)
 
 
+_POLICY_FIELDS = ("version", "template_sha256", "default_model", "revision", "epoch")
+
+
+def serialize_serving(pairs: "Sequence[tuple[str, str]] | None") -> str | None:
+    """The ONE stored form of ``approved_serving`` (publisher and republish check)."""
+
+    return json.dumps(sorted([str(p), str(m)] for p, m in set(pairs))) if pairs else None
+
+
 def receipt_authority(
     owner: OwnerSnapshot, policy: Mapping[str, Any], receipt: Mapping[str, Any]
 ) -> tuple[dict[str, Any] | None, str | None, str]:
@@ -3679,11 +3688,7 @@ class Store:
         bridge-screen-v1/v2 today; the floor row is what a future version bumps).
         """
 
-        serving = (
-            json.dumps(sorted([str(p), str(m)] for p, m in set(approved_serving)))
-            if approved_serving
-            else None
-        )
+        serving = serialize_serving(approved_serving)
         with self._connect() as conn:
             self._init(conn)
             self._begin_write(conn)
@@ -3762,12 +3767,19 @@ class Store:
         try:
             with self._connect() as conn:
                 self._init(conn)
+                # ``*``: ``approved_serving`` is absent on a legacy table (only a
+                # publish ALTERs), and the republish check must SEE a damaged one.
                 row = conn.execute(
-                    "SELECT version, template_sha256, default_model, revision, epoch "
-                    "FROM screening_policy WHERE owner_key = ?",
+                    "SELECT * FROM screening_policy WHERE owner_key = ?",
                     (_owner_key(owner),),
                 ).fetchone()
-                return dict(row) if row is not None else None
+                if row is None:
+                    return None
+                policy = {k: row[k] for k in _POLICY_FIELDS}
+                policy["approved_serving"] = (
+                    row["approved_serving"] if "approved_serving" in row.keys() else None
+                )
+                return policy
         except sqlite3.Error:
             return None
 

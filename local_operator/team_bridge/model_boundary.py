@@ -336,8 +336,27 @@ _ADVANCE_STATUSES = frozenset({502, 503, 504, 529})
 #: Rate limit / out of quota. Floodable in principle, but bounded by the
 #: per-account HTTP budget and accepted by the operator (PR #3194 decisions).
 _QUOTA_STATUSES = frozenset({429})
-#: The provider rejected OUR credential, never the content.
-_AUTH_STATUSES = frozenset({401, 403})
+#: The provider rejected OUR credential, never the content. 401 ONLY: a 403 is
+#: how OpenRouter reports moderation flags, guardrail blocks,
+#: ``content_policy_violation`` and ``refusal`` (its documented error codes),
+#: and failover's ``_classify_fields`` labels every marker-less 403
+#: ``kind="auth"`` — so neither the status nor the kind can separate a bad
+#: credential from a content verdict. A 403 HOLDS (PR #3194 review M2 / S-5).
+_AUTH_STATUSES = frozenset({401})
+#: Content-verdict wording a provider can relay on an otherwise-advancing
+#: gateway status — Alibaba's "Output data may contain inappropriate content"
+#: arrives as a relayed 502 (``failover.py`` ``is_input_refusal`` docstring).
+#: Matched case-insensitively on the RAW message. ONE-WAY by construction: it
+#: can only turn an advance into a hold, never the reverse, so a provider
+#: phrasing an outage this way costs a held message, not a weaker screener.
+_CONTENT_VERDICT_MARKERS = (
+    "inappropriate content",
+    "moderation",
+    "flagged",
+    "content_policy",
+    "content policy",
+    "guardrail",
+)
 
 #: Typed flag the guard sets on a scrubbed wire failure. ``True`` only when
 #: the RAW failure was on the allow-list below; the walk reads nothing else.
@@ -352,14 +371,16 @@ def _sender_cannot_cause(failure: BaseException) -> bool:
     a 413 / bad-image 400, an output-filter 5xx, a length or refusal stop —
     must HOLD, because falling over would let crafted content buy a weaker
     screener, and the first provider refusing the input is itself evidence.
-    Only failures of the ROUTE advance: our credential rejected (401/403, an
-    OAuth refresh that failed), quota (429 / ``kind == "quota"``), a timeout,
-    a gateway/overload status (502/503/504/529), or a transport error our own
-    client raised before the body was sent.
+    Only failures of the ROUTE advance: our credential rejected (401, or an
+    OAuth refresh that failed — never 403, see ``_AUTH_STATUSES``), quota
+    (429), a timeout, a gateway/overload status (502/503/504/529) whose raw
+    text names no content verdict, or a transport error our own client raised
+    before the body was sent.
 
     MUST be evaluated on the RAW exception, before ``_scrub_wire_failure``
-    erases everything but typed fields; it reads only types, ``status`` and
-    typed flags, never message prose. The guard's own fail-closed refusals
+    erases everything but typed fields; it reads types, ``status``, typed
+    flags and, one-way and hold-only, the content-verdict markers on an
+    advancing gateway status; no other prose. The guard's own fail-closed refusals
     (owner moved, policy stale, budget exhausted, route changed) are built
     AFTER this point and never carry the flag, so they stop the walk.
     """
@@ -391,18 +412,18 @@ def _sender_cannot_cause(failure: BaseException) -> bool:
     status = getattr(failure, "status", None)
     kind = getattr(failure, "kind", None)
     if isinstance(status, int) and status:
-        return (
-            status in _ADVANCE_STATUSES
-            or status in _QUOTA_STATUSES
-            or (status in _AUTH_STATUSES and kind in ("auth", "quota"))
-        )
+        if status in _AUTH_STATUSES or status in _QUOTA_STATUSES:
+            return True
+        if status not in _ADVANCE_STATUSES:
+            return False
+        raw = str(getattr(failure, "message", "") or "").lower()
+        return not any(marker in raw for marker in _CONTENT_VERDICT_MARKERS)
     # No status: a status-less ``kind`` is classified from PROVIDER TEXT (an
     # in-band error chunk on a 200 stream), which a crafted body can steer — so
-    # it never advances on its own. Only typed provenance does: the bearer
-    # flagged unusable, or a failure OUR client observed (``transport``, set
-    # solely by ``wrap_transport_error``) that is a timeout or a connect error.
-    if getattr(failure, "auth_error", False):
-        return True
+    # it never advances on its own. Only typed provenance does: a failure OUR
+    # client observed (``transport``, set solely by ``wrap_transport_error``)
+    # that is a timeout or a connect error. (``auth_error`` is NOT read: the
+    # clients set it for 401 AND 403, and a 403 can be a content verdict.)
     if not getattr(failure, "transport", False):
         return False
     if kind == "timeout":

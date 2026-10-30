@@ -574,6 +574,7 @@ def test_legacy_policy_table_gains_approved_serving_and_keeps_its_row(tmp_path) 
         "default_model": "gpt-5.4",
         "revision": "rev-old",
         "epoch": 4,
+        "approved_serving": None,
     }
     epoch = reopened.publish_screening_policy(
         owner,
@@ -624,7 +625,7 @@ def test_input_refusal_400_on_hop0_holds_and_never_reaches_hop1(tmp_path, monkey
     assert _rows(tmp_path, "SELECT failure_class FROM screening_holds") == [("other",)]
 
 
-@pytest.mark.parametrize("status", [400, 404, 413, 422, 500, 501])
+@pytest.mark.parametrize("status", [400, 403, 404, 413, 422, 500, 501])
 def test_sender_triggerable_statuses_stop_the_walk(tmp_path, monkeypatch, status) -> None:
     store, owner = _setup(tmp_path)
     _config(tmp_path, chain=["deepseek/deepseek-flash"])
@@ -634,7 +635,7 @@ def test_sender_triggerable_statuses_stop_the_walk(tmp_path, monkeypatch, status
     assert [s["model"] for s in wire.sends] == ["gpt-5.4"]
 
 
-@pytest.mark.parametrize("status", [401, 403, 429, 502, 503, 504, 529])
+@pytest.mark.parametrize("status", [401, 429, 502, 503, 504, 529])
 def test_route_failures_advance_to_hop1(tmp_path, monkeypatch, status) -> None:
     store, owner = _setup(tmp_path)
     _config(tmp_path, chain=["deepseek/deepseek-flash"])
@@ -742,3 +743,129 @@ def test_store_clamps_failure_class_to_the_closed_set(tmp_path) -> None:
         ("bmsg_b", "quota"),
         ("bmsg_c", None),
     ]
+
+
+# -- remediation round 2 (review M2 / security S-5, review m3) -----------------
+
+
+class _BodyWire(_Wire):
+    """A hop 0 that fails with a SPECIFIC provider body (the vendor's own words)."""
+
+    def __init__(self, status: int, body: str) -> None:
+        super().__init__({"deepseek-flash": ("reply", DELIVER)})
+        self.status, self.body = status, body
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        import json
+
+        payload = json.loads(request.content or b"{}")
+        if payload["model"] == "gpt-5.4":
+            self.sends.append(payload)
+            return httpx.Response(self.status, json={"error": {"message": self.body}})
+        return super().handler(request)
+
+
+def _install_body_wire(monkeypatch: pytest.MonkeyPatch, wire: _BodyWire) -> None:
+    """As ``_install_wire``, but the vendor client raises with the BODY's text,
+    the way a real client surfaces a provider's error message."""
+
+    _install_wire(monkeypatch, wire)
+    original = ProviderError.__init__
+
+    def with_body(self: ProviderError, status: Any, message: str, **kwargs: Any) -> None:
+        if message == VENDOR_CANARY and status == wire.status:
+            message = wire.body
+        original(self, status, message, **kwargs)
+
+    monkeypatch.setattr(ProviderError, "__init__", with_body)
+
+
+@pytest.mark.parametrize(
+    "status, body",
+    [
+        (
+            403,
+            "anthropic/claude-3.5-sonnet requires moderation on Anthropic. Your input was "
+            'flagged for "misc". No credits were charged.',
+        ),
+        (403, "Request blocked by guardrail: prompt-injection"),
+        (502, "Output data may contain inappropriate content."),
+        (503, "content_policy_violation: the response was flagged by moderation"),
+    ],
+)
+def test_content_verdicts_on_route_statuses_hold_with_zero_hop1_sends(
+    tmp_path, monkeypatch, status, body
+) -> None:
+    """M2/S-5: a provider's CONTENT verdict carried on 403 (OpenRouter
+    moderation / guardrail) or on a relayed gateway status (Alibaba's output
+    filter on 502) must hold — falling over would let crafted content buy a
+    different screener."""
+
+    store, owner = _setup(tmp_path)
+    _config(tmp_path, chain=["deepseek/deepseek-flash"])
+    wire = _BodyWire(status, body)
+    _install_body_wire(monkeypatch, wire)
+
+    result = _cycle(tmp_path, owner)
+
+    assert result.disposition == "hold" and result.hold_code == "provider_error"
+    assert [s["model"] for s in wire.sends] == ["gpt-5.4"], "hop 1 must never be sent"
+    assert _rows(tmp_path, "SELECT 1 FROM screening_receipts") == []
+
+
+@pytest.mark.parametrize(
+    "status, body",
+    [
+        (401, "invalid x-api-key"),
+        (502, "Bad gateway"),
+        (503, "upstream connect error or disconnect/reset before headers"),
+    ],
+)
+def test_plain_route_failures_still_advance(tmp_path, monkeypatch, status, body) -> None:
+    store, owner = _setup(tmp_path)
+    _config(tmp_path, chain=["deepseek/deepseek-flash"])
+    wire = _BodyWire(status, body)
+    _install_body_wire(monkeypatch, wire)
+
+    result = _cycle(tmp_path, owner)
+
+    assert result.disposition == "deliver" and result.receipt.model == "deepseek-flash"
+    assert [s["model"] for s in wire.sends] == ["gpt-5.4", "deepseek-flash"]
+
+
+def test_content_marker_only_ever_turns_advance_into_hold() -> None:
+    from local_operator.team_bridge.model_boundary import _sender_cannot_cause
+
+    # Holding statuses stay held whatever the text says.
+    assert not _sender_cannot_cause(ProviderError(400, "rate limit timeout bad gateway"))
+    assert not _sender_cannot_cause(ProviderError(403, "invalid api key"))
+    assert not _sender_cannot_cause(ProviderError(403, "x", auth_error=True))
+    # Advancing statuses hold on a marker, case-insensitively.
+    assert _sender_cannot_cause(ProviderError(502, "Bad gateway"))
+    assert not _sender_cannot_cause(ProviderError(502, "INAPPROPRIATE CONTENT"))
+    # 401 and 429 are credential/quota facts: no marker can apply to them.
+    assert _sender_cannot_cause(ProviderError(401, "flagged"))
+    assert _sender_cannot_cause(ProviderError(429, "x"))
+
+
+def test_damaged_serving_set_is_repaired_by_the_next_cycle(tmp_path, monkeypatch) -> None:
+    """m3: a damaged ``approved_serving`` fails closed (fallback allows hold as
+    stale) — the next cycle must republish it rather than leave it damaged."""
+
+    store, owner = _setup(tmp_path)
+    _config(tmp_path, chain=["deepseek/deepseek-flash"])
+    _install_wire(monkeypatch, _Wire({"gpt-5.4": ("reply", HOLD)}))
+    _cycle(tmp_path, owner, message_id="bmsg_1")
+    good = _rows(tmp_path, "SELECT approved_serving, epoch FROM screening_policy")
+    assert good[0][0] == '[["deepseek", "deepseek-flash"], ["openai", "gpt-5.4"]]'
+    with sqlite3.connect(state_db_path(tmp_path)) as db:
+        db.execute("UPDATE screening_policy SET approved_serving = 'junk'")
+
+    _cycle(tmp_path, owner, message_id="bmsg_2")
+
+    repaired = _rows(tmp_path, "SELECT approved_serving, epoch FROM screening_policy")
+    assert repaired[0][0] == good[0][0]
+    assert repaired[0][1] == good[0][1] + 1
+    # An undamaged row is NOT republished (no epoch churn per cycle).
+    _cycle(tmp_path, owner, message_id="bmsg_3")
+    assert _rows(tmp_path, "SELECT epoch FROM screening_policy") == [(repaired[0][1],)]
