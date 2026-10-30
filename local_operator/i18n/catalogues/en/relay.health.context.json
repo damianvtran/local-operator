@@ -40,11 +40,5 @@
     "role": "composer error message",
     "tone": "Plain, actionable; no blame; sentence case.",
     "note": "Owned relay SPA chrome for the session header's status dot and the sheet it opens (docs/design/mobile-relay-guidelines.md, Composer and startup). Shown in the message box's error area when sending to an ENDED session failed to reopen it. 'Try again' means sending again. “Ended” (keep the quotation marks, using the locale's own quotation marks) is the status word shown under the conversation title at the top of the screen; tapping it opens a sheet whose button is Resume. Use the same words as relay.chrome.session.subtitle.ended and relay.chrome.session.resume."
-  },
-  "relay.health.ended_placeholder": {
-    "role": "message field placeholder",
-    "tone": "Short hint; sentence case; ends with an ellipsis (…).",
-    "maxCells": 36,
-    "note": "Owned relay SPA chrome for the session header's status dot and the sheet it opens (docs/design/mobile-relay-guidelines.md, Composer and startup). Placeholder text inside the empty message field of an ENDED conversation (it replaces the usual 'Message…'). It tells the reader, before they send, that sending reopens the session in their home folder on the computer. Must fit one line in a 276 px field at 16 px on a 320 px phone; keep the trailing ellipsis character (…)."
   }
 }

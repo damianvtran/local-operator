@@ -1,0 +1,17 @@
+{
+  "wire.radient_saver.section.title": "Radient Saver (beta)",
+  "wire.radient_saver.section.description": "Rút gọn lịch sử cuộc trò chuyện mà tác nhân của bạn gửi lại ở mỗi lượt. Saver không bao giờ gửi thông tin xác thực nhà cung cấp AI của bạn tới Radient. Thay đổi có hiệu lực từ lượt kế tiếp.",
+  "wire.radient_saver.mode.label": "Radient Saver (beta)",
+  "wire.radient_saver.mode.help": "Bản beta. Gửi tới Radient phần lịch sử đã sẵn sàng để rút gọn; Radient không giữ lại nội dung nào. Saver không bao giờ gửi thông tin xác thực nhà cung cấp AI của bạn tới Radient. Saver chỉ trừ vào tín dụng Radient, tính theo số token được loại bỏ, không bao giờ tính vào tài khoản nhà cung cấp; cần đăng nhập Radient và còn tín dụng. Nhà cung cấp vẫn tính phí phần nhận được theo điều khoản riêng. LOP_RADIENT_SAVER ghi đè cài đặt này.",
+  "wire.radient_saver.mode.choice.off.label": "tắt",
+  "wire.radient_saver.mode.choice.off.description": "không bao giờ gửi lịch sử tới Radient (mặc định)",
+  "wire.radient_saver.mode.choice.opt_in.label": "chọn bật",
+  "wire.radient_saver.mode.choice.opt_in.description": "khả dụng, nhưng vẫn tắt cho đến khi một phiên bật tính năng này",
+  "wire.radient_saver.notice.unavailable": "Radient Saver hiện không khả dụng, nên lượt này gửi toàn bộ lịch sử. Mọi thứ khác không bị ảnh hưởng.",
+  "wire.radient_saver.notice.rejected": "Radient Saver trả về một phản hồi không vượt qua các bước kiểm tra an toàn, nên phản hồi đó đã bị loại bỏ và lượt này gửi toàn bộ lịch sử.",
+  "wire.radient_saver.notice.signed_out": "Radient Saver đang tạm dừng trong phiên này vì bạn chưa đăng nhập Radient. Hãy chạy /login radient để dùng Saver.",
+  "wire.radient_saver.notice.no_credit": "Radient Saver đang tạm dừng trong phiên này vì số dư Radient của bạn đã hết. Hãy nạp thêm tín dụng tại console.radienthq.com để dùng Saver.",
+  "wire.radient_saver.notice.rate_limited": "Radient Saver đang bận, nên toàn bộ lịch sử sẽ được gửi cho đến khi Saver nhận yêu cầu trở lại.",
+  "wire.radient_saver.notice.disabled": "Radient Saver không khả dụng với cấu hình này, nên toàn bộ lịch sử sẽ được gửi.",
+  "wire.radient_saver.notice.oversize": "Một tin nhắn trong cuộc trò chuyện này quá lớn đối với Radient Saver, nên tin nhắn đó được giữ nguyên, không rút gọn. Saver vẫn tiếp tục rút gọn phần còn lại của cuộc trò chuyện."
+}

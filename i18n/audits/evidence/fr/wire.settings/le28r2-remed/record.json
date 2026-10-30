@@ -1,0 +1,79 @@
+{
+  "schema": 1,
+  "audit_id": "le28r2-remed",
+  "locale": "fr",
+  "namespace": "wire.settings",
+  "audit_date": "2026-10-28",
+  "round": 2,
+  "scope": "delta: the corrected keys only, plus their direct sentence",
+  "remediation_commit": "4d38a1d4b8e9a36fa0a38f4833ecf86263da45db",
+  "previous_revision": "9495f8a6c3bf2b5438ef5c33d7274cf519435dda",
+  "key_count": 820,
+  "keys_reaudited": 2,
+  "input_hashes": {
+    "en": "a31ff23241581dddb24f3cd2b93444a408734bbcb0957b0068a97806bf7c36d3",
+    "target_before": "b40cae2e2b2bdce3fdfe52c0107e682aa5acfbe2d9d24f27586ba4bb95ae4e49",
+    "target_after": "14ea05608da7c9c0480f5399f1f87c380dc96c0484fe538ec5a182676aafee18"
+  },
+  "input_paths": {
+    "en": "local_operator/i18n/catalogues/en/wire.settings.json",
+    "target": "local_operator/i18n/catalogues/fr/wire.settings.json"
+  },
+  "current_bytes_match_audited_hashes": true,
+  "source_sha256": "a31ff23241581dddb24f3cd2b93444a408734bbcb0957b0068a97806bf7c36d3",
+  "target_sha256": "14ea05608da7c9c0480f5399f1f87c380dc96c0484fe538ec5a182676aafee18",
+  "current_report_verdict": "PASS",
+  "ledger_status": "passed",
+  "unresolved_blocker_major": 0,
+  "auditor": {
+    "agent": "translation-reviewer (independent; did not translate)",
+    "session": "bc5209588225",
+    "models": "anthropic/claude-sonnet-5-5 for the original wire.settings audits; openai/gpt-6-astra for reconciliation and packaging; provider fallbacks disclosed in the pair record",
+    "independence": "The remediation was authored in a separate translator session (c57356a6dc11 lane); this audit only judged the resulting bytes."
+  },
+  "read_provenance": {
+    "method": "delta judgement on the merged working tree; routed read_public_copy receipt at the remediation commit",
+    "mechanism": "lop exec --run-in <translator worktree at 4d38a1d4> --tools read_public_copy",
+    "sanctioned_reader_receipts": [
+      "route-receipt.json"
+    ],
+    "routed_files": [
+      "local_operator/i18n/catalogues/fr/wire.settings.json"
+    ],
+    "context_sidecar_routed": false,
+    "sanctioned_route_verified": "partial",
+    "note": "The en context sidecar is not routable at this tool version (non-string values); the unchanged English source hash is the one audited in le28r2."
+  },
+  "findings": [
+    {
+      "key": "wire.settings.local_providers.base_url.label",
+      "severity_raised": "minor",
+      "disposition": "fixed",
+      "resolved": true,
+      "new_value": "endpoint {name}",
+      "en": "{name} endpoint",
+      "note": "Drops «de» before a provider display name whose vowel would require elision (Ollama, OpenAI-compatible). Correct: 15 cells, was 18."
+    },
+    {
+      "key": "wire.settings.local_providers.models.label",
+      "severity_raised": "minor",
+      "disposition": "fixed",
+      "resolved": true,
+      "new_value": "surcharges de modèle pour {name}",
+      "en": "{name} model overrides",
+      "note": "Same elision fix via «pour». 32 cells, was 30. No declared maxCells for this key; it was already above the inferred 29-cell row budget before this change (the fr over-budget label count is unchanged at 48)."
+    }
+  ],
+  "limitations": [
+    "Delta scope only: the 809 unchanged keys keep their le28r2 judgement.",
+    "No native-speaker certification; Hindi idiom would need one.",
+    "Scalar text/ICU checks, not a rendered frame."
+  ],
+  "artifacts": [
+    "findings.json",
+    "receipt.json",
+    "record.json",
+    "report.md",
+    "route-receipt.json"
+  ]
+}

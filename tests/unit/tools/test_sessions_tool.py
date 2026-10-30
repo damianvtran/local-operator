@@ -1393,6 +1393,93 @@ async def test_peek_cursor_pages_round_trip_without_gaps_or_repeats(root: Path) 
 
 
 @pytest.mark.asyncio
+async def test_sessions_peek_hides_the_account_notice_and_keeps_cursors_aligned(
+    root: Path,
+) -> None:
+    """``sessions peek`` is model context too, and its cursors must not shift.
+
+    Round 1, R1. The account-change notice names the account, and this surface
+    rendered it as a ``system`` step — a sentence carrying an email, inside a tool
+    result. It is not a step now, and because the window arithmetic counts with the
+    SAME predicate (``_peek_message_entries``), the pages either side of a hidden
+    row still meet exactly: no gap, no repeat, and the footer's cursor is the
+    oldest SHOWN row rather than the oldest row the walk read past.
+
+    The journal is 20 message rows with the notice between rows 8 and 9, and the
+    page is anchored so the 12-step window STRADDLES it. Were the notice still a
+    step, that window would begin at row 2 and carry the label — so the shown rows,
+    the cursor and the absence of the label all discriminate.
+    """
+    from local_operator.harness.message_types import SESSION_BINDING_NOTICE_MESSAGE_TYPE
+    from local_operator.harness.types import CustomMessage, Message
+    from local_operator.session.transcript import Transcript
+
+    label = "bound-account@example.test"
+    session_id = "eeee55556666"
+    directory = root / "sessions" / session_id
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "created_at.json").write_text("1700000000.0", encoding="utf-8")
+    # Seeded through the real writer: the hidden row must be the shape the
+    # transcript actually persists, or the cell would prove nothing about it.
+    journal = Transcript(directory)
+    for i in range(1, 21):
+        await journal.append_message(Message.user(f"row {i}"))
+        if i == 8:
+            await journal.append_message(
+                CustomMessage(
+                    custom_type=SESSION_BINDING_NOTICE_MESSAGE_TYPE,
+                    attribution="system",
+                    details={
+                        "text": (
+                            "[session credential] This session is now using " f"{label} on my-mac."
+                        ),
+                        "provider": "stub",
+                        "owner_device": "d_local",
+                        "credential_id": 125,
+                    },
+                ),
+                preserve_mtime=True,
+            )
+    # A stored title keeps ``session_name`` (derived from the first message) out
+    # of the header, exactly as ``_write_journal`` does for the other peek cells.
+    write_session_title(directory, "journal eeee", user_set=False, past_names=[])
+    ids = [
+        entry.id
+        for entry in journal.entries()
+        if (entry.payload or {}).get("custom_type") != SESSION_BINDING_NOTICE_MESSAGE_TYPE
+    ]
+    assert len(ids) == 20
+
+    tail = await _peek(root, {"op": "peek", "session": session_id, "steps": 3})
+    assert not tail.is_error, tail.text
+    assert label not in tail.text
+    assert label not in json.dumps(tail.details or {})
+    assert _rows_in(tail.text) == {18, 19, 20}
+    assert (tail.details or {}).get("steps_shown") == 3
+
+    # A 12-step window anchored at row 15 is rows 3..14 — the notice sits inside
+    # it. Were it still a step, the window would begin at row 2 and carry the
+    # label, which is what makes this page the discriminating one.
+    first = await _peek(root, {"op": "peek", "session": session_id, "before_id": ids[14]})
+    assert not first.is_error, first.text
+    assert label not in first.text
+    assert _rows_in(first.text) == set(range(3, 15))
+    cursor = re.search(r"before_id=([0-9a-f]{32}) for earlier", first.text)
+    assert cursor is not None, first.text
+    assert cursor.group(1) == ids[2], "the cursor is the oldest SHOWN step, row 3"
+
+    second = await _peek(root, {"op": "peek", "session": session_id, "before_id": cursor.group(1)})
+    assert not second.is_error, second.text
+    assert _rows_in(second.text) == {1, 2}
+
+    # The digest counts the rows a reader can SEE: the hidden one is not a step.
+    digest = await _peek(root, {"op": "peek", "session": session_id, "digest": True})
+    assert not digest.is_error, digest.text
+    assert label not in digest.text
+    assert "20 steps seen" in digest.text
+
+
+@pytest.mark.asyncio
 async def test_peek_around_window_reports_both_edges(root: Path) -> None:
     directory, ids, _ = _big_journal(root, "dddd77778888", rows=100, pad=40)
     result = await _peek(root, {"op": "peek", "session": "dddd77778888", "around_id": ids[49]})
@@ -1450,6 +1537,70 @@ async def test_peek_search_budget_is_a_depth_and_moves_with_the_needle(
     details = miss.details or {}
     assert details["steps_shown"] == 0
     assert 64 * 1024 <= details["scanned_bytes"] <= 64 * 1024 + 2000
+
+
+@pytest.mark.asyncio
+async def test_peek_search_cannot_use_a_refused_row_as_an_oracle(root: Path) -> None:
+    """A query can neither print nor MATCH a row the peek refuses (QA r1, Q1).
+
+    The step filter is what keeps the account label out of a peek. Testing the
+    raw JSON of every row BEFORE that filter made the filter itself observable:
+    a query for a substring of a label this surface never prints still answered
+    yes/no, and QA rebuilt a whole email in 513 of them on `b6759d3be`. So a
+    refused row may neither match nor become an anchor — and the second half of
+    this cell proves the walk still finds a row it is allowed to show, which is
+    what stops the fix from being "search nothing".
+    """
+    from local_operator.harness.message_types import SESSION_BINDING_NOTICE_MESSAGE_TYPE
+    from local_operator.harness.types import CustomMessage, Message
+    from local_operator.session.transcript import Transcript
+
+    label = "qa.alpha.operator@example.test"
+    session_id = "eeee77778888"
+    directory = root / "sessions" / session_id
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "created_at.json").write_text("1700000000.0", encoding="utf-8")
+    journal = Transcript(directory)
+    await journal.append_message(Message.user("an ordinary row about widgets"))
+    await journal.append_message(
+        CustomMessage(
+            custom_type=SESSION_BINDING_NOTICE_MESSAGE_TYPE,
+            attribution="system",
+            details={
+                "text": f"[session credential] This session is now using {label} on qa-node.",
+                "provider": "stub",
+                "owner_device": "d_local",
+                "credential_id": 125,
+            },
+        ),
+        preserve_mtime=True,
+    )
+    await journal.append_message(Message.user("another ordinary row"))
+    write_session_title(directory, "oracle case", user_set=False, past_names=[])
+
+    # A substring of the label the peek refuses to print: this must be a MISS.
+    oracle = await _peek(root, {"op": "peek", "session": session_id, "query": "qa.alpha.operator"})
+    assert not oracle.is_error, oracle.text
+    assert oracle.text.startswith("no match for 'qa.alpha.operator'"), oracle.text
+    assert (oracle.details or {})["steps_shown"] == 0
+    assert label not in oracle.text and label not in json.dumps(oracle.details or {})
+    # ...and it is not an anchor either, so the refusal cannot be walked around
+    # one id at a time: the id the row really has finds no window of its own.
+    refused_ids = [
+        entry.id
+        for entry in journal.entries()
+        if (entry.payload or {}).get("custom_type") == SESSION_BINDING_NOTICE_MESSAGE_TYPE
+    ]
+    assert len(refused_ids) == 1
+    around = await _peek(root, {"op": "peek", "session": session_id, "around_id": refused_ids[0]})
+    assert not around.is_error, around.text
+    assert label not in around.text and label not in json.dumps(around.details or {})
+
+    # The control half: a row the peek MAY show is still found, and named.
+    hit = await _peek(root, {"op": "peek", "session": session_id, "query": "about widgets"})
+    assert not hit.is_error, hit.text
+    assert (hit.details or {})["mode"] == "search"
+    assert "about widgets" in hit.text and "← match" in hit.text
 
 
 @pytest.mark.asyncio

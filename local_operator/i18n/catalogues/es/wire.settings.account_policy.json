@@ -1,0 +1,16 @@
+{
+  "wire.settings.account_policy.label": "Política de cuentas",
+  "wire.settings.account_policy.help": "Elige cuentas hermanas aptas dentro del mismo proveedor y nivel de credencial. Una concesión compatible y sin vencer de una petición con éxito tiene prioridad en todas las políticas; no garantiza un acierto de caché. Reinicio más próximo prefiere la recarga semanal más cercana y, si hay empate dentro de un minuto, la recarga de cinco horas. Una política explícita anula el ajuste heredado de elección de cuenta según uso.",
+  "wire.settings.account_policy.reset_soonest.label": "Reinicio más próximo",
+  "wire.settings.account_policy.reset_soonest.description": "preferir el reinicio más próximo del plan incluido; repartir los empates y los informes desconocidos de forma determinista. Predeterminada para configuraciones nuevas.",
+  "wire.settings.account_policy.headroom.label": "Más margen",
+  "wire.settings.account_policy.headroom.description": "preferir la cuota restante en caché y repartir entre las cuentas que estén a diez puntos porcentuales o menos de la mejor.",
+  "wire.settings.account_policy.fair.label": "Reparto equitativo",
+  "wire.settings.account_policy.fair.description": "usar un reparto estable por sesión en vez de clasificar los reinicios en caché o la cuota restante.",
+  "wire.settings.account_policy.legacy.label": "Elección heredada según uso",
+  "wire.settings.account_policy.legacy.help": "Ajuste de compatibilidad que solo se usa cuando no hay ninguna política de cuentas definida: true elige Más margen; false elige Reparto equitativo. Una política de cuentas explícita tiene prioridad. Devuelve la fila de la política de cuentas a su valor predeterminado para recuperar Reinicio más próximo y borrar las anulaciones heredadas.",
+  "wire.settings.account_policy.error.unavailable": "El enrutamiento de cuentas no está disponible.",
+  "wire.settings.account_policy.error.invalid_shape": "Solo se esperaba un campo de valor.",
+  "wire.settings.account_policy.error.invalid_json": "Se esperaba un objeto JSON.",
+  "wire.settings.account_policy.error.write_failed": "No se pudo guardar el ajuste. Comprueba los permisos de configuración en esta máquina y vuelve a intentarlo."
+}

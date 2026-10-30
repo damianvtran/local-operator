@@ -1,0 +1,120 @@
+#!/usr/bin/env python3
+"""Independent audit-only parity probe; never writes catalogue inputs."""
+import hashlib
+import json
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+from local_operator.i18n.runtime import (
+    _Arg,
+    message_arguments,
+    parse_message,
+    plural_selectors,
+    render_message,
+)
+
+NS = [
+    "cli.agents_help",
+    "cli.teams_help",
+    "cli.sessions_help",
+    "cli.wake_help",
+    "cli.mcp_help",
+    "cli.global_help",
+]
+ROOT = Path("local_operator/i18n/catalogues")
+FLAG = re.compile(r"(?<![\w-])--[A-Za-z0-9][\w-]*")
+CODE = re.compile(r"`[^`]*`")
+PRINTF = re.compile(r"%\([^)]+\)[a-zA-Z]|%%")
+
+
+def select_shape(nodes):
+    found = []
+    for node in nodes:
+        if isinstance(node, _Arg):
+            if node.kind == "select":
+                found.append((node.name, tuple(label for label, _ in node.parts)))
+            for _, body in node.parts:
+                found.extend(select_shape(body))
+    return found
+
+
+def main():
+    failures = []
+    total = 0
+    print("$ git rev-parse HEAD")
+    print(subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip())
+    for ns in NS:
+        en_path = ROOT / "en" / f"{ns}.json"
+        es_path = ROOT / "es" / f"{ns}.json"
+        ctx_path = ROOT / "en" / f"{ns}.context.json"
+        en = json.loads(en_path.read_text())
+        es = json.loads(es_path.read_text())
+        ctx = json.loads(ctx_path.read_text())
+        total += len(en)
+        print(f"\n== {ns} ==")
+        for path in (en_path, es_path, ctx_path):
+            print(f"sha256 {path}: {hashlib.sha256(path.read_bytes()).hexdigest()}")
+        print("status es:", subprocess.check_output(
+            ["git", "status", "--porcelain", "--", str(es_path)], text=True).strip())
+        checks = {
+            "ordered_keys": list(en) == list(es) == list(ctx),
+            "context_complete": len(ctx) == len(en),
+            "no_maxCells_declared": not any("maxCells" in row for row in ctx.values()),
+        }
+        arg_count = 0
+        for key, source in en.items():
+            target = es[key]
+            pairs = {
+                "arguments": (message_arguments(source), message_arguments(target)),
+                "plural_selectors": (plural_selectors(source), plural_selectors(target)),
+                "select_labels": (select_shape(parse_message(source)), select_shape(parse_message(target))),
+                "printf_tokens": (PRINTF.findall(source), PRINTF.findall(target)),
+                "flags": (FLAG.findall(source), FLAG.findall(target)),
+                "code_spans": (CODE.findall(source), CODE.findall(target)),
+            }
+            for label, (a, b) in pairs.items():
+                if a != b:
+                    failures.append((key, label, a, b))
+            parse_message(target)
+            arg_count += len(message_arguments(source))
+            if any(sel in target for sel in ("few{", "zero{", "two{")):
+                failures.append((key, "non_es_plural", source, target))
+        print(f"keys en/es/context: {len(en)}/{len(es)}/{len(ctx)}; ICU arguments: {arg_count}")
+        for name, passed in checks.items():
+            print(f"{name}: {'PASS' if passed else 'FAIL'}")
+            if not passed:
+                failures.append((ns, name, "", ""))
+        print("parse/ICU/plural/printf/flags/code-spans: PASS" if not any(
+            row[0].startswith(ns + ".") for row in failures) else "FAILURES above/below")
+    print("\nTotal keys:", total)
+    print("Cross-key failures:", failures)
+    print("$ render cli.wake_help.create_message with max='4000'")
+    wake = json.loads((ROOT / "es" / "cli.wake_help.json").read_text())
+    print(render_message(wake["cli.wake_help.create_message"], {"max": "4000"}, locale="es"))
+    print("$ explicit ICU select-label negative control (not catalogue text)")
+    source = "{action, select, start{Start} stop{Stop} restart{Restart} other{{action}}} the daemon"
+    broken = "{action, select, iniciar{Iniciar} detener{Detener} reiniciar{Reiniciar} other{{action}}} el daemon"
+    print("labels:", select_shape(parse_message(source)))
+    print("source start:", render_message(source, {"action": "start"}, locale="es"))
+    print("translated-label start:", render_message(broken, {"action": "start"}, locale="es"))
+    print("$ cross-file terminology controls")
+    authoring = json.loads((ROOT / "es" / "tui.authoring.json").read_text())
+    settings = json.loads((ROOT / "es" / "wire.settings.json").read_text())
+    print("en starter:", json.loads((ROOT / "en" / "tui.authoring.json").read_text())["tui.authoring.seed_not_installed"])
+    print("shipped es starter:", authoring["tui.authoring.seed_not_installed"])
+    print("shipped es headless:", settings["wire.settings.auto_save_conversation.help"])
+    print("$ scratchpad destructive implementation (read-only source excerpts)")
+    for path, start, end in (("local_operator/cli.py", 5908, 5914),
+                             ("local_operator/session/cleanup.py", 1622, 1643)):
+        lines = Path(path).read_text().splitlines()
+        print(f"--- {path}:{start}-{end} ---")
+        for number in range(start, end + 1):
+            print(f"{number}|{lines[number - 1]}")
+    if failures:
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,17 @@
+{
+  "form_raw_string_cell_widths": {},
+  "settings_nonchoice_labels_over29": [],
+  "settings_english_nonchoice_labels_over29": [],
+  "prior_claims_rederived": {
+    "queued.older strict prefix of queued.newest": {
+      "en": true,
+      "es": true,
+      "fr": true,
+      "ru": true,
+      "vi": true,
+      "hi": true
+    }
+  },
+  "numeric_token_differences": [],
+  "qualification": "Scalar measurements, not rendered layout evidence. Lengths of strings containing placeholders include placeholder spelling, not all runtime value lengths."
+}

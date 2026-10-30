@@ -154,9 +154,12 @@ function open(transcript: TranscriptEntry[] = [], streaming = false) {
 }
 
 async function type(text: string) {
-	const composer = (await screen.findByPlaceholderText(
-		"Message…",
-	)) as HTMLTextAreaElement;
+	/* The field's accessible name, not its placeholder: these cases type both
+	   while idle ("Ask anything…") and mid-turn ("Steer the agent…"), and the
+	   placeholder is pinned by session-view.status-dot.test.tsx. */
+	const composer = (await screen.findByRole("textbox", {
+		name: "Message",
+	})) as HTMLTextAreaElement;
 	fireEvent.change(composer, { target: { value: text } });
 	return composer;
 }

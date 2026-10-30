@@ -85,6 +85,7 @@ from local_operator.i18n.keys import cli_resume_click_help as _rc
 from local_operator.i18n.keys import cli_send_help as _se
 from local_operator.i18n.keys import cli_serve_help as _sv
 from local_operator.i18n.keys import cli_services_help as _sr
+from local_operator.i18n.keys import cli_services_status as _svc
 from local_operator.i18n.keys import cli_sessions_help as _sh
 from local_operator.i18n.keys import cli_stop_help as _st
 from local_operator.i18n.keys import cli_teams_help as _th
@@ -994,6 +995,11 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "--reload",
         action="store_true",
         help=_sv.reload().envelope(locale=help_locale)["text"],
+    )
+    serve_parser.add_argument(
+        "--install-service",
+        action="store_true",
+        help=_svc.install_service_help().envelope(locale=help_locale)["text"],
     )
     serve_parser.add_argument(
         "--listener-fd",
@@ -17500,6 +17506,15 @@ def main() -> int:
                 print(f"\n\033[1;31mError: {str(e)}\033[0m", file=sys.stderr)
                 return 1
         elif args.subcommand == "serve":
+            if args.install_service:
+                # Installation returns before warming a runtime: this command's
+                # product is the user unit, not a second foreground API listener.
+                from local_operator import services
+
+                result = services.install_linux_serve_service(args.port)
+                for line in result["lines"]:
+                    print(line)
+                return 0 if result["ok"] else 1
             # The desktop daemon engages a runtime for every conversation the app
             # opens cold, so it keeps ONE pre-imported standby for its root (see
             # ``session/runtime/standby.py`` for the cost it removes and the

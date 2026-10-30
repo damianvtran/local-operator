@@ -994,3 +994,378 @@ def test_ledger_lock_never_blocks_when_held_by_another_process(tmp_path):
     finally:
         holder.kill()
         holder.wait(timeout=5)
+
+
+# --------------------------------------------------------------------------- #
+# survivors: a group that outlived its leader (``server & echo $!``)
+# --------------------------------------------------------------------------- #
+# These drive the REAL execute_bash against real subprocesses (no mocked ps or
+# killpg) because the bug was in the seam: the shell leader exits, the server
+# stays in the group, and the old unconditional unregister dropped the record.
+import asyncio  # noqa: E402
+import re  # noqa: E402
+
+from local_operator.harness.types import ToolContext  # noqa: E402
+from local_operator.tools import builtin  # noqa: E402
+
+
+def _own_ledger_path(config_dir):
+    """The ledger path with a start token pyright can see is not None."""
+    start = group_reaper._owner_start_token(os.getpid())
+    assert start is not None
+    return group_reaper._ledger_path(config_dir, os.getpid(), start)
+
+
+def _ledger_entries(config_dir):
+    entries = []
+    for ledger in _groups_dir(config_dir).glob("*.jsonl"):
+        entries.extend(group_reaper._read_ledger(ledger))
+    return entries
+
+
+async def _run_bash_bg(command: str, session_id: str) -> str:
+    result = await builtin.execute_bash(
+        "t1", {"command": command, "timeout": 20}, None, None, ToolContext(session_id=session_id)
+    )
+    return json.dumps(result.model_dump(mode="json"))
+
+
+def _bash_bg(command, session_id, config_dir, monkeypatch):
+    """Run ``command`` through the real bash tool; return the pid it printed."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+    text = asyncio.run(_run_bash_bg(command, session_id))
+    match = re.search(r"pid=(\d+)", text)
+    assert match, text
+    return int(match.group(1))
+
+
+def _pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def _wait_dead(pid, timeout=5.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not _pid_alive(pid):
+            return True
+        time.sleep(0.05)
+    return False
+
+
+@pytest.fixture
+def _kill_pids():
+    """Reap, by EXACT pid, anything a test started — never by pattern."""
+    pids: list[int] = []
+    yield pids
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
+def test_survivor_stays_in_ledger_and_session_reap_kills_it(tmp_path, monkeypatch, _kill_pids):
+    pid = _bash_bg("sleep 4242 >/dev/null 2>&1 & echo pid=$!", "sess-a", tmp_path, monkeypatch)
+    _kill_pids.append(pid)
+    assert _pid_alive(pid)
+    (entry,) = _ledger_entries(tmp_path)
+    assert entry["session_id"] == "sess-a"
+    assert pid in [s["pid"] for s in entry["survivors"]]
+    assert "detached" not in entry
+
+    assert group_reaper.reap_session_groups("sess-a", config_dir=tmp_path) == 1
+    assert _wait_dead(pid)
+    assert _ledger_entries(tmp_path) == []  # idempotent: nothing left to do
+    assert group_reaper.reap_session_groups("sess-a", config_dir=tmp_path) == 0
+
+
+def test_session_reap_leaves_a_sibling_sessions_survivor(tmp_path, monkeypatch, _kill_pids):
+    mine = _bash_bg("sleep 4243 >/dev/null 2>&1 & echo pid=$!", "sess-a", tmp_path, monkeypatch)
+    theirs = _bash_bg("sleep 4244 >/dev/null 2>&1 & echo pid=$!", "sess-b", tmp_path, monkeypatch)
+    _kill_pids.extend([mine, theirs])
+    group_reaper.reap_session_groups("sess-a", config_dir=tmp_path)
+    assert _wait_dead(mine)
+    assert _pid_alive(theirs)
+    assert [e["session_id"] for e in _ledger_entries(tmp_path)] == ["sess-b"]
+
+
+@pytest.mark.parametrize("word", ["nohup", "setsid", "disown"])
+def test_detach_words_mark_a_command_detached_and_nothing_else_does(word):
+    assert group_reaper._DETACH_RE.search(f"{word} sleep 1 &")
+    assert not group_reaper._DETACH_RE.search("pnpm storybook & echo $!")
+    assert not group_reaper._DETACH_RE.search("echo nohupped setsidx")
+
+
+@pytest.mark.parametrize("prefix", ["nohup ", "disown; "])
+def test_explicit_detach_is_spared(tmp_path, monkeypatch, _kill_pids, prefix):
+    # `disown` goes after the job; the others prefix it. Any of the three words
+    # marks the line detached. The trailing short sleep keeps the group LEADER
+    # alive across the settle probe: with a leader that exits immediately, a
+    # loaded host can see the group briefly empty and settle unregisters it (a
+    # pre-existing race, observed once in three xdist runs), which would test
+    # nothing rather than test the spare.
+    cmd = (
+        "sleep 4245 >/dev/null 2>&1 & echo pid=$!; disown; sleep 0.3"
+        if prefix == "disown; "
+        else f"{prefix}sleep 4245 >/dev/null 2>&1 & echo pid=$!; sleep 0.3"
+    )
+    pid = _bash_bg(cmd, "sess-a", tmp_path, monkeypatch)
+    _kill_pids.append(pid)
+    (entry,) = _ledger_entries(tmp_path)
+    assert entry.get("detached") is True
+    assert group_reaper.reap_session_groups("sess-a", config_dir=tmp_path) == 0
+    assert _pid_alive(pid)
+    # The process-exit and hard-death paths spare it too.
+    kill_own_groups(config_dir=tmp_path)
+    assert _pid_alive(pid)
+
+
+def test_no_matching_member_kills_nothing(tmp_path, monkeypatch):
+    """A recorded survivor that is gone (pgid maybe recycled onto a bystander)
+    must drop the line and signal nothing."""
+    bystander, bystander_pgid = _spawn_group()
+    try:
+        # Recorded survivor pid is a dead process; the pgid now belongs to the
+        # live bystander group, exactly the recycled-pgid shape.
+        dead = subprocess.Popen(["/bin/sh", "-c", "true"])
+        dead.wait()
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+        register_group(bystander_pgid, "x", config_dir=tmp_path, session_id="sess-a")
+        group_reaper._annotate_entry(
+            _own_ledger_path(tmp_path),
+            bystander_pgid,
+            {"survivors": [{"pid": dead.pid, "start": "Mon Jan  1 00:00:00 2001"}]},
+        )
+        assert group_reaper.reap_session_groups("sess-a", config_dir=tmp_path) == 0
+        assert _alive(bystander_pgid)
+        assert _ledger_entries(tmp_path) == []  # stale line dropped
+    finally:
+        _reap_group(bystander_pgid)
+        bystander.wait(timeout=2)
+
+
+def test_recorded_member_with_different_start_is_not_ours(tmp_path, monkeypatch):
+    """Same pid + same pgid but a different start token = a recycled pid."""
+    bystander, bystander_pgid = _spawn_group()
+    try:
+        register_group(bystander_pgid, "x", config_dir=tmp_path, session_id="sess-a")
+        group_reaper._annotate_entry(
+            _own_ledger_path(tmp_path),
+            bystander_pgid,
+            {"survivors": [{"pid": bystander.pid, "start": "Mon Jan  1 00:00:00 2001"}]},
+        )
+        assert group_reaper.reap_session_groups("sess-a", config_dir=tmp_path) == 0
+        assert _alive(bystander_pgid)
+    finally:
+        _reap_group(bystander_pgid)
+        bystander.wait(timeout=2)
+
+
+def test_ps_failure_kills_nothing_and_keeps_the_line(tmp_path, monkeypatch, _kill_pids):
+    pid = _bash_bg("sleep 4246 >/dev/null 2>&1 & echo pid=$!", "sess-a", tmp_path, monkeypatch)
+    _kill_pids.append(pid)
+
+    def _boom(*_a, **_k):
+        raise OSError("ps unavailable")
+
+    # BOTH identity probes unreadable: the contract under test is "nothing can
+    # establish the group is ours -> kill nothing, keep the line". Patching only
+    # `ps` would now be answered by the fork-free listing, which is the point of
+    # the fix, so the ambiguity has to be total to test the ambiguous branch.
+    monkeypatch.setattr(group_reaper.subprocess, "run", _boom)
+    monkeypatch.setattr(group_reaper, "_group_pids_fork_free", lambda _pgid: None)
+    assert group_reaper.reap_session_groups("sess-a", config_dir=tmp_path) == 0
+    monkeypatch.undo()
+    assert _pid_alive(pid)
+    assert len(_ledger_entries(tmp_path)) == 1  # ambiguous -> kept for a retry
+
+
+def test_settle_with_no_survivors_unregisters_without_forking(tmp_path, monkeypatch):
+    proc, pgid = _spawn_group("true")
+    proc.wait(timeout=2)
+    register_group(pgid, "true", config_dir=tmp_path, session_id="s")
+    assert len(_ledger_entries(tmp_path)) == 1
+
+    def _no_fork(*_a, **_k):
+        raise AssertionError("hot path must not fork")
+
+    monkeypatch.setattr(group_reaper.subprocess, "run", _no_fork)
+    group_reaper.settle_group(pgid, config_dir=tmp_path)
+    assert _ledger_entries(tmp_path) == []
+
+
+def test_kill_own_groups_reaps_a_non_detached_survivor(tmp_path, monkeypatch, _kill_pids):
+    pid = _bash_bg("sleep 4247 >/dev/null 2>&1 & echo pid=$!", "sess-a", tmp_path, monkeypatch)
+    _kill_pids.append(pid)
+    kill_own_groups(config_dir=tmp_path)
+    assert _wait_dead(pid)
+
+
+def test_sweep_reaps_a_dead_owners_survivor(tmp_path, monkeypatch, _kill_pids):
+    pid = _bash_bg("sleep 4248 >/dev/null 2>&1 & echo pid=$!", "sess-a", tmp_path, monkeypatch)
+    _kill_pids.append(pid)
+    (ledger,) = _groups_dir(tmp_path).glob("*.jsonl")
+    # Re-key the ledger to a dead owner, as a hard-killed lop would leave it.
+    dead = subprocess.Popen(["/bin/sh", "-c", "true"])
+    dead.wait()
+    entries = group_reaper._read_ledger(ledger)
+    ledger.unlink()
+    for entry in entries:
+        entry["runtime_pid"], entry["runtime_start"] = dead.pid, "gone"
+    _write_ledger(tmp_path, dead.pid, "gone", entries)
+    result = sweep_orphan_groups(tmp_path)
+    assert result.reaped_groups == 1
+    assert _wait_dead(pid)
+
+
+def test_recycled_pgid_line_of_another_session_never_inherits_survivors(tmp_path):
+    """Review M1: two lines, same pgid, different sessions. Session B's settle
+    must annotate only B's (newest) line, so A's dispose cannot pass the
+    ownership check against B's live group and kill it."""
+    live, pgid = _spawn_group()
+    try:
+        dead = subprocess.Popen(["/bin/sh", "-c", "true"])
+        dead.wait()
+        # Session A's stale line: its group is long gone, survivor pid is dead.
+        register_group(pgid, "old", config_dir=tmp_path, session_id="sess-a")
+        ledger = _own_ledger_path(tmp_path)
+        group_reaper._annotate_entry(
+            ledger, pgid, {"survivors": [{"pid": dead.pid, "start": "Mon Jan  1 00:00:00 2001"}]}
+        )
+        # The pgid is then handed to session B's live group, which settles.
+        register_group(pgid, "new", config_dir=tmp_path, session_id="sess-b")
+        group_reaper.settle_group(pgid, config_dir=tmp_path)
+
+        by_session = {e["session_id"]: e for e in _ledger_entries(tmp_path)}
+        # MEMBERSHIP, not an exact list: a group may legitimately hold more than
+        # one member (a shell that forked rather than exec'd, a worker), and the
+        # property under test is which session's line carries which survivor.
+        assert live.pid in {s["pid"] for s in by_session["sess-b"]["survivors"]}
+        # The regression: A's stale line must NOT have been stamped with B's
+        # survivor (that is what let A's dispose kill B's group).
+        assert live.pid not in {s["pid"] for s in by_session["sess-a"]["survivors"]}
+        assert [s["pid"] for s in by_session["sess-a"]["survivors"]] == [dead.pid]
+
+        assert group_reaper.reap_session_groups("sess-a", config_dir=tmp_path) == 0
+        assert _alive(pgid)  # B's group untouched
+        remaining = _ledger_entries(tmp_path)
+        assert [e["session_id"] for e in remaining] == ["sess-b"]  # A's stale line dropped only
+    finally:
+        _reap_group(pgid)
+        live.wait(timeout=2)
+
+
+def test_settle_records_survivors_even_when_the_token_read_fails(tmp_path, monkeypatch, _kill_pids):
+    """CI regression: a slow/unreadable ``ps`` must not lose the survivor record.
+
+    Membership comes from the fork-free listing; only the start token costs a
+    ``ps``. The old full-table snapshot timed out under four-worker load (measured
+    ``TimeoutExpired`` on 3/9 settles) and left the line with no members at all,
+    which then read as "leader gone, group dead" and was dropped without a kill.
+    A token-less survivor is still a proof of ownership, so the reap ends it.
+    """
+    monkeypatch.setattr(group_reaper, "_start_tokens", lambda _pids: {})
+    pid = _bash_bg("sleep 4321 >/dev/null 2>&1 & echo pid=$!", "sess-a", tmp_path, monkeypatch)
+    _kill_pids.append(pid)
+    (entry,) = _ledger_entries(tmp_path)
+    recorded = {s["pid"]: s["start"] for s in entry["survivors"]}
+    assert pid in recorded and recorded[pid] == ""  # recorded, token unavailable
+    assert group_reaper.reap_session_groups("sess-a", config_dir=tmp_path) == 1
+    assert _wait_dead(pid)
+
+
+# --------------------------------------------------------------------------- #
+# B1 (review round 4): a dead creator pid proves NOTHING about a pgid
+# --------------------------------------------------------------------------- #
+def _orphaned_group(cmd="sleep 600"):
+    """A group whose LEADER exits while a member stays in the same pgid.
+
+    The shape the settle snapshot records: ``sh -c "<cmd> & exit"`` leaves the
+    backgrounded child alone in the leader's group, so ``pgid`` names a live
+    group whose creator pid is gone.
+    """
+    proc = subprocess.Popen(
+        ["/bin/sh", "-c", f"{cmd} & exit 0"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    proc.wait(timeout=5)
+    return proc.pid  # the creator pid, now dead, which IS the pgid
+
+
+def test_dead_creator_pid_with_live_members_is_ambiguous_not_ours(tmp_path):
+    """B1: a freed pgid can be taken by another session's group, and with the
+    creator pid dead there is no token left to compare. Head used to answer True
+    here and kill a group this session never started. It must be ``None``."""
+    pgid = _orphaned_group()
+    try:
+        entry = {"pgid": pgid, "grp_leader_start": "SOME-OTHER-GROUPS-TOKEN", "cmd": "x"}
+        assert group_reaper._leader_verdict(entry) is None
+        assert group_reaper._reap_if_still_ours(entry) is False
+        assert _alive(pgid)  # the third-party group survives
+    finally:
+        _reap_group(pgid)
+
+
+def test_sweep_leaves_a_dead_creators_group_with_no_survivor_proof(tmp_path):
+    """The same shape through the hard-death sweep: no kill, and no drop either."""
+    pgid = _orphaned_group()
+    try:
+        dead = subprocess.Popen(["/bin/sh", "-c", "true"])
+        dead.wait()
+        _write_ledger(
+            tmp_path,
+            dead.pid,
+            "gone",
+            [
+                {
+                    "pgid": pgid,
+                    "runtime_pid": dead.pid,
+                    "runtime_start": "gone",
+                    "grp_leader_start": "SOME-OTHER-GROUPS-TOKEN",
+                    "cmd": "sleep 600",
+                    "ts": 1.0,
+                }
+            ],
+        )
+        assert sweep_orphan_groups(tmp_path).reaped_groups == 0
+        assert _alive(pgid)
+    finally:
+        _reap_group(pgid)
+
+
+def test_a_group_whose_creator_died_is_still_reaped_via_its_survivors(tmp_path):
+    """The legitimate half: our own orphaned group carries the survivor proof the
+    settle snapshot recorded, and that — not the dead creator pid — is what lets
+    the reap end it."""
+    pgid = _orphaned_group()
+    try:
+        survivors = group_reaper._group_survivors(pgid)
+        assert survivors, "the fork-free listing must see the surviving member"
+        dead = subprocess.Popen(["/bin/sh", "-c", "true"])
+        dead.wait()
+        _write_ledger(
+            tmp_path,
+            dead.pid,
+            "gone",
+            [
+                {
+                    "pgid": pgid,
+                    "runtime_pid": dead.pid,
+                    "runtime_start": "gone",
+                    "grp_leader_start": "whatever-the-leader-recorded",
+                    "survivors": survivors,
+                    "cmd": "sleep 600",
+                    "ts": 1.0,
+                }
+            ],
+        )
+        assert sweep_orphan_groups(tmp_path).reaped_groups == 1
+        assert not _alive(pgid)
+    finally:
+        _reap_group(pgid)

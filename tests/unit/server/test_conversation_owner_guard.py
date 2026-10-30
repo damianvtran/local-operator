@@ -308,3 +308,209 @@ async def test_refresh_cannot_retry_under_replacement_account(rig):
     assert len(calls) == 1
     assert calls[0].headers["authorization"] == "Bearer synthetic-acc_a"
     assert rig.effects == []
+
+
+# -- threads and reactions: REQUIRED receipts (team_bridge_threads/_reactions) --
+#
+# These routes were held closed in the desktop UI until they carried this guard,
+# and the two capabilities are advertised only because they do. Unlike CASES
+# above, the receipt is REQUIRED here (no legacy omission), so each case below is
+# driven through the same real router -> client -> disposable AuthStore path,
+# with only the hub simulated. `reaction` covers PUT (body) and DELETE (query);
+# `replies` is the thread read, whose answer would otherwise fill the renderer's
+# thread cache with the wrong account's thread.
+
+REACTION_PATH = "/bcv_01234567/messages/bcmsg_01234567/reactions/%F0%9F%91%8D"
+REPLIES_PATH = "/bcv_01234567/messages/bcmsg_01234567/replies"
+GUARDED_THREAD_CASES = [
+    pytest.param("PUT", REACTION_PATH, False, id="react-add"),
+    pytest.param("DELETE", REACTION_PATH, True, id="react-remove"),
+    pytest.param("GET", REPLIES_PATH, True, id="replies"),
+]
+
+
+def guarded_args(query, *, owner="acc_a", tenant="org_other"):
+    receipt = {"tenant_id": tenant, "expected_account_id": owner}
+    return {"params": receipt} if query else {"json": receipt}
+
+
+@pytest.mark.parametrize("method,path,query", GUARDED_THREAD_CASES)
+async def test_thread_and_reaction_owner_mismatch_refuses_before_dispatch(rig, method, path, query):
+    """Captured as A, signed in as B: coded refusal, zero hub requests."""
+    rig.login("acc_b")
+    response = await rig.http.request(method, PREFIX + path, **guarded_args(query))
+    print(
+        json.dumps(
+            {
+                "case": method + " " + path,
+                "status": response.status_code,
+                "response": response.json(),
+                "outbound": len(rig.calls),
+            }
+        )
+    )
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["code"] == "account_mismatch"
+    assert rig.calls == rig.effects == []
+
+
+@pytest.mark.parametrize("method,path,query", GUARDED_THREAD_CASES)
+async def test_thread_and_reaction_switch_mid_request_refuses(
+    rig, monkeypatch, method, path, query
+):
+    """The account changes AFTER the route accepted the request, BEFORE dispatch.
+
+    The receipt is valid when the route reads it (A is signed in), then the
+    machine signs in as B while the request is in flight -- the delayed click or
+    retry the UI hold existed for. The guard runs against the bearer snapshot
+    the dispatch would use, so the request is refused rather than sent as B.
+    """
+
+    real_wire = rig.wire
+
+    def wire_then_switch():
+        client = real_wire()
+        rig.login("acc_b")  # the switch lands between route validation and dispatch
+        return client
+
+    monkeypatch.setattr(routes, "_conversation_client", lambda config: wire_then_switch())
+    response = await rig.http.request(method, PREFIX + path, **guarded_args(query))
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["code"] == "account_mismatch"
+    assert rig.calls == rig.effects == []
+
+
+@pytest.mark.parametrize("method,path,query", GUARDED_THREAD_CASES)
+async def test_thread_and_reaction_matched_owner_dispatches_and_strips_receipt(
+    rig, method, path, query
+):
+    """Matched A: exactly one hub request as A, to the target org, no receipt upstream."""
+    response = await rig.http.request(method, PREFIX + path, **guarded_args(query))
+    assert response.status_code == 200, response.text
+    assert len(rig.calls) == len(rig.effects) == 1
+    request = rig.calls[0]
+    assert rig.effects[0] == (method, request.url.path)
+    assert request.headers["authorization"] == "Bearer synthetic-acc_a"
+    assert "expected_account_id" not in request.url.params
+    assert b"expected_account_id" not in request.content
+    upstream_body = json.loads(request.content) if request.content else {}
+    assert (upstream_body.get("tenant_id") or request.url.params.get("tenant_id")) == "org_other"
+
+
+@pytest.mark.parametrize("method,path,query", GUARDED_THREAD_CASES)
+@pytest.mark.parametrize(
+    "receipt",
+    [
+        pytest.param({}, id="none"),
+        pytest.param({"tenant_id": "org_other"}, id="tenant-only"),
+        pytest.param({"expected_account_id": "acc_a"}, id="owner-only"),
+        pytest.param({"tenant_id": "  ", "expected_account_id": "acc_a"}, id="blank-tenant"),
+    ],
+)
+async def test_thread_and_reaction_receipt_is_required(rig, method, path, query, receipt):
+    """No legacy omission on this plane: an unguarded call never reaches the hub."""
+    args = {"params": receipt} if query else {"json": receipt}
+    response = await rig.http.request(method, PREFIX + path, **args)
+    assert response.status_code == 422, response.text
+    assert rig.calls == rig.effects == []
+
+
+async def test_reaction_retry_after_switch_is_refused(rig):
+    """A react that succeeded as A, retried after B signs in, never reacts as B."""
+    args = guarded_args(False)
+    assert (await rig.http.put(PREFIX + REACTION_PATH, **args)).status_code == 200
+    rig.login("acc_b")
+    assert (await rig.http.put(PREFIX + REACTION_PATH, **args)).status_code == 409
+    assert len(rig.calls) == len(rig.effects) == 1
+
+
+# -- the threaded send: a thread MUTATION, so the receipt is REQUIRED ----
+#
+# Round-1 review R1 found `POST .../messages` still dispatched a reply with
+# `thread_root_id` after an account switch, because the send DTO inherited the
+# legacy OPTIONAL receipt. `team_bridge_threads` advertises the thread surface,
+# so the mutation half is required here exactly as the read half is; an ordinary
+# top-level send (no `thread_root_id`) keeps the legacy shape.
+THREADED_SEND = {
+    "body": "reply in thread",
+    "client_ref": "ref_t1",
+    "thread_root_id": "bcmsg_01234567",
+}
+
+
+@pytest.mark.parametrize(
+    "receipt",
+    [
+        pytest.param({}, id="none"),
+        pytest.param({"tenant_id": "org_other"}, id="tenant-only"),
+        pytest.param({"expected_account_id": "acc_a"}, id="owner-only"),
+        pytest.param({"tenant_id": "  ", "expected_account_id": "acc_a"}, id="blank-tenant"),
+    ],
+)
+async def test_threaded_reply_send_requires_receipt(rig, receipt):
+    """A pre-fix client cannot mutate the thread surface: 422 before any I/O."""
+    response = await rig.http.post(
+        PREFIX + "/bcv_01234567/messages", json={**THREADED_SEND, **receipt}
+    )
+    assert response.status_code == 422, response.text
+    assert rig.calls == rig.effects == []
+
+
+async def test_threaded_reply_after_switch_is_refused(rig):
+    """Composed as A, sent after B signs in: never posted as B."""
+    args = {"json": {**THREADED_SEND, "tenant_id": "org_other", "expected_account_id": "acc_a"}}
+    assert (await rig.http.post(PREFIX + "/bcv_01234567/messages", **args)).status_code == 200
+    rig.login("acc_b")
+    assert (await rig.http.post(PREFIX + "/bcv_01234567/messages", **args)).status_code == 409
+    assert len(rig.calls) == len(rig.effects) == 1
+
+
+async def test_ordinary_top_level_send_keeps_legacy_receipt_omission(rig):
+    """The thread guard must not tighten the ordinary send an old renderer makes."""
+    response = await rig.http.post(
+        PREFIX + "/bcv_01234567/messages", json={"body": "hi", "client_ref": "ref_plain"}
+    )
+    assert response.status_code == 200, response.text
+    assert len(rig.effects) == 1
+
+
+async def test_thread_and_reaction_capabilities_ship_with_their_guard():
+    """The keys PROMISE the required receipt; they must not outlive it.
+
+    Two halves. This one is a STATIC contract check — the DTO field and the two
+    allowed-name sets plus each handler's own source calling the guard helper —
+    because those are the things that can be checked without a request. The
+    behavioural proof that a receipt-less call is refused (422) and a mismatched
+    one refuses to dispatch (409) is `test_thread_and_reaction_receipt_is_required`
+    and the mismatch cases above, which drive the real router. Neither half alone
+    is sufficient: this one catches a handler or DTO that stopped consulting the
+    guard, the end-to-end ones catch a guard that stopped refusing.
+    """
+
+    import inspect
+
+    from local_operator.server.features import static_feature_flags
+
+    flags = static_feature_flags()
+    assert flags["team_bridge_threads"] == 1
+    assert flags["team_bridge_reactions"] == 1
+    assert routes.ConversationReactIn.model_fields["expected_account_id"].is_required()
+    assert "expected_account_id" in routes._REPLIES_QUERY
+    assert "expected_account_id" in routes._REACTION_DELETE_QUERY
+    # A threaded reply is a thread MUTATION, so the send DTO refuses one without
+    # the receipt (round-1 review R1: it used to dispatch receipt-less).
+    with pytest.raises(ValueError):
+        routes.ConversationSendIn(client_ref="ref_1", body="hi", thread_root_id="bcmsg_01234567")
+    # The routes that keep the promise must actually call the guard helper; a
+    # handler that stopped consulting it would otherwise only be caught by the
+    # end-to-end cases, and only for the shapes they cover.
+    for handler in (routes.conversation_replies, routes.conversation_react_remove):
+        assert "_required_owner_query(" in inspect.getsource(handler), handler.__name__
+    # ...and keep forwarding the receipt to the client, which is where the
+    # atomic compare against the dispatch snapshot happens.
+    from local_operator.team_bridge.client import TeamBridgeClient
+
+    for method in ("conversation_replies", "conversation_react", "conversation_send"):
+        assert (
+            "expected_account_id" in inspect.signature(getattr(TeamBridgeClient, method)).parameters
+        ), method

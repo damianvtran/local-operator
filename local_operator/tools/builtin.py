@@ -4415,7 +4415,11 @@ async def execute_bash(
     spawned_pgid: int | None = None
     with contextlib.suppress(Exception):
         spawned_pgid = os.getpgid(process.pid)
-        group_reaper.register_group(spawned_pgid, params.command)
+        group_reaper.register_group(
+            spawned_pgid,
+            params.command,
+            session_id=(context.session_id if context else "") or "",
+        )
 
     # The memory guard, bound to EXACTLY the group we just spawned. It is built
     # only when we actually captured a pgid AND the budget resolved to something
@@ -4442,14 +4446,19 @@ async def execute_bash(
     memory_advisory: str | None = None
 
     def _unregister_group() -> None:
-        # Drop this group's ledger line once it is confirmed dead, so a clean
+        # Close this group's ledger line once the command has exited, so a clean
         # run leaves nothing for the startup sweep to consider and a long host
-        # session's ledger cannot grow without bound. Best-effort; a miss is
-        # harmless (the sweep finds the leader gone and drops the line anyway).
+        # session's ledger cannot grow without bound. NOT an unconditional drop:
+        # `server & echo $!` exits the shell leader while the server stays in
+        # the group, and dropping the line then hid it from every reaper (a
+        # Storybook server lived 10.5 h). settle_group drops the line only when
+        # no member remains (a zero-fork probe) and otherwise keeps it, with the
+        # survivors recorded, for the session-end reap. Best-effort; a miss is
+        # harmless.
         if spawned_pgid is None:
             return
         with contextlib.suppress(Exception):
-            group_reaper.unregister_group(spawned_pgid)
+            group_reaper.settle_group(spawned_pgid)
 
     def _reap_synchronously() -> None:
         """The drain/reap tail's NON-awaiting cleanup, shareable by early returns.
@@ -18382,15 +18391,19 @@ class _PeekDigest(NamedTuple):
 def _peek_message_entries(entries: Sequence[TranscriptEntry]) -> list[TranscriptEntry]:
     """The entries that RENDER as steps — the renderer's own filter.
 
-    ``_render_transcript_steps`` counts only ``message`` rows (compaction and
-    bookkeeping rows are invisible to a reader), so any step arithmetic must
-    count with the same predicate; keeping it in one place is what stops the
-    walk's window from disagreeing with the renderer's count.
+    ``_render_transcript_steps`` numbers only the rows it renders, so any step
+    arithmetic must count with the SAME predicate; keeping it in one place is
+    what stops the walk's window from disagreeing with the renderer's count.
+    Since round 1 of #3098 that predicate also refuses the account-change
+    notice (``harness/comms.py`` ``is_peek_step_entry``: its sentence names the
+    account, and peek lands in model context), so this function must drop it
+    too — otherwise the window would reserve a slot for a step that is never
+    rendered and every cursor computed from these rows would sit one step off.
     """
 
-    from local_operator.session.transcript import ENTRY_MESSAGE
+    from local_operator.harness.comms import is_peek_step_entry
 
-    return [entry for entry in entries if entry.type == ENTRY_MESSAGE]
+    return [entry for entry in entries if is_peek_step_entry(entry)]
 
 
 def _peek_window(
@@ -18647,6 +18660,7 @@ def _peek_search(
     read (a compaction between the two reads, reported as the miss it is).
     """
 
+    from local_operator.harness.comms import is_peek_step_entry
     from local_operator.session import compression
     from local_operator.session.transcript import (
         TranscriptEntry,
@@ -18682,15 +18696,25 @@ def _peek_search(
                     break
                 scanned += len(raw) + 1
                 text = raw.decode("utf-8", errors="replace")
+                # A REFUSED ROW CANNOT MATCH (QA round 1, Q1). The step filter is
+                # what keeps the account label out of a peek — and testing the raw
+                # JSON first made the FILTER itself an oracle: a query for a
+                # substring of a label this surface will never print answered
+                # yes/no, and 513 of those rebuilt an email. So the row is parsed
+                # and gated BEFORE the needle is tested, and a refused row can
+                # neither match nor become an anchor. The cost is one parse per
+                # row already inside the byte budget, which is the same decode
+                # this loop was doing anyway.
+                entry = TranscriptEntry.from_json(text)
+                if entry is None or not is_peek_step_entry(entry):
+                    continue
                 if pattern is None:
                     found = needle in text
                 else:
                     found = pattern.search(text) is not None
                 if found:
-                    entry = TranscriptEntry.from_json(text)
-                    if entry is not None:
-                        hit_id = entry.id
-                        break
+                    hit_id = entry.id
+                    break
             if hit_id or budget_stop:
                 break
     if not hit_id:

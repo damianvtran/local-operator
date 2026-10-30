@@ -57,6 +57,7 @@ from collections.abc import (
     Callable,
     Collection,
     Coroutine,
+    Iterable,
     Iterator,
     Mapping,
     Sequence,
@@ -401,6 +402,28 @@ logger = logging.getLogger(__name__)
 #: is a paid turn the same failure would refuse. The card stays durable in the
 #: transcript and on the live context, so the next ordinary turn still reads it.
 BRIDGE_CARD_FALLBACK_ATTEMPTS = 3
+
+
+def _saver_redaction(variables: Any) -> Any:
+    """The session's two redaction passes as Radient Saver's ``Redaction``, or ``None``.
+
+    ``redact`` (registered values plus the credential-shape table) for text and
+    tool results, ``redact_arguments`` (the high-confidence floor that never
+    rewrites code) for tool-call arguments, and ``redaction_values`` so the
+    projection cache re-projects when a new secret is registered (contract §3.1).
+    """
+    redact: Any = getattr(variables, "redact", None)
+    redact_arguments: Any = getattr(variables, "redact_arguments", None)
+    if not callable(redact) or not callable(redact_arguments):
+        return None
+    from local_operator.saver.projection import Redaction, Redactor
+
+    values: Any = getattr(variables, "redaction_values", None)
+    return Redaction(
+        redact=cast(Redactor, redact),
+        redact_arguments=cast(Redactor, redact_arguments),
+        values=cast(Callable[[], Iterable[str]], values) if callable(values) else (lambda: ()),
+    )
 
 
 def _notice(
@@ -3786,6 +3809,18 @@ class Session:
         self._goal_state = goal_state if goal_state is not None else GoalState()
         self._variables = variables
         self._job_id = job_id
+        saver_bridge = getattr(self._stream_fn, "bind_saver", None)
+        if callable(saver_bridge):
+            # Radient Saver (contract §3.1, §7): the upload re-applies THIS
+            # session's two redaction passes, and a charged prepare lands in THIS
+            # session's channel ledger. The same division of labour as the notice
+            # bridge above — the stream owns the call, the session owns the
+            # secrets and the ledger. A session without a variable store keeps the
+            # stream's credential-shape floor.
+            saver_bridge(
+                redaction=_saver_redaction(variables),
+                spend=self.record_channel_spend,
+            )
         #: The parent link (see the ``parent_session`` parameter). The id is
         #: kept even when the OBJECT is gone — a resumed child still answers
         #: "whose child am I" for its analytics rows (QA round 1, Q3).
@@ -11615,7 +11650,20 @@ class Session:
             return self._standing_grants
         from local_operator.team_bridge import ask_issuance as ledger_mod
         from local_operator.team_bridge.authority import authority_fence
+        from local_operator.team_bridge.host import owner_fence_refusal
         from local_operator.team_bridge.store import Store
+
+        # THE STRICT FENCE RUNS ONCE, BEFORE THE LOOP (review round 1 MAJOR 1).
+        # The bridge runtime now exists on every writer session, so presence is no
+        # longer "this is the inbox reader". A non-designated session must return
+        # EMPTY here — never walk the ledger — because the walk's per-row fence
+        # miss calls `ledger.mark_held(...)`, which would let an ordinary turn in
+        # a task session overwrite every real hold reason for the owner
+        # (`standing_no_envelope`, `standing_uncertain`, ...) with
+        # `standing_fence`. The authority contract says a fence miss performs NO
+        # mutation; that has to be true at the entry, not only per row.
+        if owner_fence_refusal(runtime) is not None:
+            return self._standing_grants
 
         ledger = ledger_mod.AskIssuance(runtime.config_dir)
         stale = [
@@ -18754,12 +18802,16 @@ class Session:
     async def _open_pending_body_turn(self, *, selected: tuple[str, str] | None = None) -> None:
         """Claim this session's oldest pending BODY for the turn about to run.
 
-        ONLY a session the bridge runtime already admitted reaches here (owner
-        pinned, generation live, designated, consenting — all inside
-        ``bridge_runtime_for_session``), and only when a read-only check finds a
-        ``pending`` row for THIS session. Anything else leaves
-        ``transform_context`` unset, so an ordinary turn pays nothing and no
-        other session's row is ever served.
+        THE GATE IS THE ROW, NOT THE DESIGNATION (review round 2, MINOR D). The
+        bridge runtime is built for EVERY writer session of the enrolled owner, so
+        presence proves only owner/generation/consent — it no longer proves "this
+        is the chief-of-staff session". What keeps a body out of the wrong session
+        is ``pending_body_reservation_for(owner, session_id)``: reservations are
+        scoped per session, so a non-designated session finds no row and
+        ``open()`` returns False. That scoping is the invariant to preserve; the
+        earlier wording here asserted a designation check the construction no
+        longer performs, which is the same false-contract class as the ask-ledger
+        write fixed in round 1.
         """
 
         self._pending_body_turn = None
@@ -21984,6 +22036,15 @@ class Session:
                 "owner_device": binding.owner_device,
                 "owner_device_name": binding.owner_device_name,
                 "credential_id": binding.credential_id,
+                # NO DERIVED IDENTIFIER IS RECORDED HERE, deliberately: a digest
+                # or hash of the account label is dictionary-reversible (an
+                # email is low-entropy) and this row is copied to peers and moved
+                # between devices, so the pseudonym would be a linkable
+                # identifier for the operator's account on every replica — the
+                # leak class this notice's operator-only rule exists to stop. The
+                # transcript's fold uses ``credential_id`` above instead: a store
+                # fact, stable across restarts, not reversible, and different for
+                # two accounts.
             },
         )
         try:
@@ -23714,6 +23775,17 @@ class Session:
             # Before the render below, so the bound reads the flushed history.
             await self._flush_stale_if_due(compaction_api, settings)
             rendered = self._render_history(messages)
+            # RADIENT SAVER (contract §7, agent review R-8): the contract says the
+            # trigger "reads provider usage (now reduced), so compaction fires
+            # later". It does not, here, ON PURPOSE: the gate takes
+            # ``max(provider_reported, current_bound)`` and this bound is over
+            # the UNREDUCED render, so with Saver on compaction still fires at
+            # the unreduced size. That is the conservative side for LO1: the
+            # session never depends on a reduction that a fail-open (a 402, an
+            # outage, a rejection) can withdraw on the very next turn, which
+            # would put an unreduced request over the window with no compaction
+            # behind it. Recorded under "Where the contract did not fit" in the
+            # PR; firing later is an LO2 decision once the badge can show it.
             current_bound = compaction_api.messages_tokens_upper_bound(rendered)
             if not _should_compact(
                 compaction_api,
@@ -24275,15 +24347,33 @@ class Session:
         now_ms = int(time.time() * 1000)
         last_ms = self._last_provider_request_ms
         frames = _history_captured_browser_views(llm_history)
+        # RADIENT SAVER (contract §7): while Saver is reducing the request, both
+        # sweeps act only on messages at or after the chain's frontier. Rows
+        # before it are already frozen into epochs: blanking one saves nothing on
+        # the wire (the epoch replaces it) and costs a chain truncation and a
+        # re-upload. Both sweeps mutate the messages they are given in place, so
+        # handing them the tail restricts them without copying.
+        #
+        # The batch-flush ceiling is judged over THAT SAME TAIL (R-3): judged
+        # over the whole history, stale rows in the frozen prefix (which the
+        # sweep may not touch) kept the flush due at every tool boundary, and
+        # each due flush lifted the sent-prefix guard on the tail: one cache
+        # break per boundary instead of one per batch. Frame victims are
+        # computed over the tail too, so their indices are already the tail's.
+        # ``0`` (Saver off, bypassed, or not reducing) is main's behaviour
+        # exactly: the chain clears its frozen set whenever a request goes out
+        # unspliced (R-2).
+        frontier = self._saver_frontier(llm_history)
+        swept = llm_history[frontier:] if frontier else llm_history
         flush = False
         stale: Any = None
         compute: Any = getattr(compaction_api, "stale_set", None)
         due: Any = getattr(compaction_api, "stale_flush_due", None)
         if callable(compute) and callable(due):
-            stale = compute(llm_history, frames=frames)
+            stale = compute(swept, frames=frames)
             flush = bool(
                 due(
-                    llm_history,
+                    swept,
                     context_window=self.effective_model.context_window,
                     wire_bytes_trigger=self._wire_trigger_bytes(compaction_api, settings) or 0,
                     stale=stale,
@@ -24297,7 +24387,7 @@ class Session:
         # old signature.
         extra: dict[str, Any] = {"flush": True} if flush else {}
         try:
-            compaction_api.prune_tool_outputs(llm_history, now_ms, last_ms, **extra)
+            compaction_api.prune_tool_outputs(swept, now_ms, last_ms, **extra)
         except (ImportError, AttributeError):
             pass  # optional pruning hook absent; degrade to no pruning
         if frames:
@@ -24306,12 +24396,31 @@ class Session:
                 frame_extra["victims"] = stale.frames
             try:
                 compaction_api.prune_stale_frames_in_place(
-                    llm_history, now_ms=now_ms, last_activity_ms=last_ms, **frame_extra
+                    swept, now_ms=now_ms, last_activity_ms=last_ms, **frame_extra
                 )
             except (ImportError, AttributeError):
                 pass  # optional frame sweep absent; degrade to no sweep
         await self._journal_prunes(llm_history, pruned_before)
         return flush
+
+    def _saver_frontier(self, llm_history: Sequence[Message]) -> int:
+        """Where pruning may start while Radient Saver is on (contract §7), or 0.
+
+        The index just past the last ``llm_history`` message the stream's Saver
+        chain has frozen into an epoch. Matched by MESSAGE ID, not by the chain's
+        index: this sweep runs on ``_render_for_compaction`` (live-only
+        injections removed) while the chain counts the request's rows, so the
+        two lists are not index-aligned. ``0`` when Saver never ran for this
+        conversation or holds no epochs.
+        """
+        chain = getattr(self._stream_fn, "_saver_chain", None)
+        frozen = getattr(chain, "frozen_ids", None) if chain is not None else None
+        if not frozen:
+            return 0
+        for index in range(len(llm_history) - 1, -1, -1):
+            if llm_history[index].id in frozen:
+                return index + 1
+        return 0
 
     async def _flush_stale_if_due(self, compaction_api: Any, settings: Any) -> None:
         """Batch-flush stale outputs at a tool boundary when a ceiling is crossed.
@@ -30888,7 +30997,17 @@ class Session:
         # ``retry.*`` edit landing in the same tick, which is both arbitrary
         # and the thing that made its NEW_LAUNCH label a lie. They are all in
         # the LIVE ``providers`` section now, so the trigger matches the scope.
-        if any(key.startswith("retry.") or key.startswith("providers.") for key in changed):
+        # ``radient.saver.`` joins for the same reason: Radient Saver's gate is
+        # read per turn off this mapping (``saver.gate.configured_mode`` in
+        # ``SessionStreamFn._apply_saver``), so an operator switching it OFF from
+        # another process must stop the next upload, which is what its LIVE label
+        # promises (the cross-process probe in test_config_live.py proves it).
+        if any(
+            key.startswith("retry.")
+            or key.startswith("providers.")
+            or key.startswith("radient.saver.")
+            for key in changed
+        ):
             apply_settings = getattr(self._stream_fn, "apply_settings", None)
             if callable(apply_settings):
                 apply_settings(values)
@@ -31700,6 +31819,28 @@ class Session:
             self._disposal_task = task
         return task
 
+    async def _reap_session_process_groups(self) -> None:
+        """End process groups this session's bash calls left running.
+
+        A finished subagent child shares its parent's ``lop`` process, so the
+        process-exit reaper never fires for it; this runs on every disposal
+        (top-level or child). Strictly this session's own, non-detached,
+        ownership-proven groups (``group_reaper.reap_session_groups``). Threaded
+        and time-boxed because it may fork ``ps`` and waits out a SIGTERM grace;
+        dispose must never raise or stall on it.
+        """
+        from local_operator.tools import group_reaper
+
+        try:
+            await asyncio.wait_for(
+                asyncio.to_thread(group_reaper.reap_session_groups, self._session_id),
+                timeout=10.0,
+            )
+        except asyncio.CancelledError:
+            raise
+        except BaseException:  # noqa: BLE001 — teardown must proceed
+            logger.debug("session process-group reap failed", exc_info=True)
+
     async def _dispose_impl(self) -> None:
         """Abort any in-flight turn, close the browser surface, cancel
         background work, dispose jobs and the wake scheduler, flush the
@@ -32073,13 +32214,18 @@ class Session:
             # substitute — delivering it onto the next turn — is exactly the wrong
             # attribution the queue exists to avoid. Before the hooks, so the event
             # stream is still live when it goes out.
-            await self._flush_queued_notices()
-            # The same canonical owner teardown serves agent and subagent
-            # sessions. Console cleanup is completed-only; quitting a turn must
-            # never terminate a live prompt, REPL or background PTY.
-            from local_operator.ui_console.backend import cleanup_owner_completed
+            try:
+                await self._flush_queued_notices()
+                # The same canonical owner teardown serves agent and subagent
+                # sessions. Console cleanup is completed-only; quitting a turn must
+                # never terminate a live prompt, REPL or background PTY.
+                from local_operator.ui_console.backend import cleanup_owner_completed
 
-            await cleanup_owner_completed(self._session_id, self._config_dir)
+                await cleanup_owner_completed(self._session_id, self._config_dir)
+            finally:
+                # Own finally: a fault in the notice flush or console cleanup must
+                # not leak this session's servers (the reap never raises itself).
+                await self._reap_session_process_groups()
             # ``finally``: host-owned resources must be released even when the
             # session's own teardown blew up part way through.
             for hook in self._dispose_hooks:

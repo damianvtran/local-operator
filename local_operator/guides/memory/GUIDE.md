@@ -42,13 +42,25 @@ global; `scope="session"` or `scope="global"` restricts it. Only those two scope
 values are accepted; team/agent and anything else is refused, never coerced.
 
 Global keeps a bounded shape check: a `#N` tracker reference next to a work word,
-any `!N` (GitLab work syntax), a `commit`/`sha`/`head` hex, a CI/release status verb,
-a `next step`/`HOLD` tied to a work word, a 12-hex session ID, a line opening as a
-goal statement (`Session goal (…):`), or an ISO date near PR/MR/merged/release/QA/
-review/round/lane/worktree/CI/gate/vX.Y.Z is refused, naming the marker and
-`scope="session"`. It is a bounded locator filter, not a classifier — prose work text
-with no locator, or a hyphenated key like `LOH-13`, still passes, and it is not a
-guarantee that a model will always choose the right scope.
+any `!N` (GitLab work syntax), a `commit`/`sha`/`head` hex, a line OPENING with
+`PR1234`/`MR1234` (a list marker or numbering before it is fine), a CI status verb, a
+merge/release verb, a `next step`/`next action` carrying an unambiguous work token — a
+tracker ref, `PR`/`MR`/`commit`/`CI`/`pipeline`/`worktree`/`rebase`/`deploy`/`rollout`,
+or a tool name (`mcp__…`) — a `task progress` report (the phrase followed by `:`, `is`,
+`was` or `on`), `session todo`, a `HOLD` on a PR/release/lane/merge/CI/deploy (or on a
+branch with a review state), a 12-hex session ID, a line opening as a goal statement
+(`Session goal (…):`), or an ISO date near PR/MR/merged/release/QA/review/round/lane/
+worktree/CI/gate/vX.Y.Z is refused, naming the shape that matched. It is a bounded
+locator filter, not a classifier — prose work text with no locator, a hyphenated key
+like `LOH-13`, or a personal reference number (`Flight PR102`, `policy PR90021`) still
+passes, and it is not a guarantee that a model will always choose the right scope. Two
+boundaries are stated rather than implied: a line whose FIRST token is a bare
+`PR#####`/`MR#####` reference reads as a branch or status tag and is refused (`PR102
+Manila to Sydney`), while the same number inside a sentence or behind a leading word
+(`Flight PR102 Manila to Sydney`) stores; and only a `task progress` REPORT is work — a
+preference that merely lists the phrase (`… not task progress, release status …`) is
+not a report and stores. A `Session todo:` line is refused: write the reminder itself,
+without the session framing, and it stores in global.
 
 Work state and checkpoints use `memory://session`; intentionally shared work uses
 `memory://team`, and persistent profile knowledge uses `memory://agent` when authorized.
@@ -177,12 +189,13 @@ wakes a session. A crash between commit and capture is retried idempotently.
 Capture is bounded per session: its candidates share a 16k-token budget inside the
 50k session quota, and a pass that exceeds it forgets the session's oldest untouched
 captured candidates, never stated facts. Past the session's eviction tombstone
-floor (half of the 5,000 tombstone cap) eviction stops and only the 50k quota binds.
+floor — once the session holds 2,500 tombstones, its forgets and expiries counted
+with its evictions — eviction stops and only the 50k quota binds.
 Goal, progress and next-step are each one row revised in place. Unreviewed captures
 expire 14 days after their last revision (a re-capture refreshes the deadline;
 older rows with no stored deadline use `source_time`, else `created_at`). Any edit
 or move by an agent or person makes the fact deliberate: no expiry, kept on session
-delete, and once edited never evicted. Its label turns `stated` only when its status
+delete, and never evicted again. Its label turns `stated` only when its status
 becomes `active` (`lop memory edit` does this); an agent edit or a move keeps the
 `candidate` status and still lists as `captured`. Expired text can be captured
 again; a deliberate forget stays final. Only the host that holds the session
@@ -205,8 +218,10 @@ for policy, quotas and peer exclusions. Human inspection/correction uses
 consolidate. Rows print
 a paste-ready `SCOPE/ID`; `list` and `search` cover every scope the context is
 authorized for (`--session ID` adds a session), and items are labelled `captured`
-(automatic, unreviewed) or `stated` (deliberate). `edit ID --revision REV --body …`
-changes only the named fields; `--json` prints machine-readable output.
+(status `candidate`, even when a deliberate edit or move has already taken it out of
+the automatic pass — see the capture paragraph above) or `stated`.
+`edit ID --revision REV --body …` changes only the named fields; `--json` prints
+machine-readable output.
 
 Bulk maintenance is deliberate. `lop memory forget --scope S [--older-than 30d]
 [--unverified] [--tag T] [--title-matches RE] [--body-matches RE]` is a DRY RUN: it
