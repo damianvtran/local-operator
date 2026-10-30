@@ -1750,9 +1750,7 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
                 mentions=mentions or None,
             )
         except Exception as failure:
-            return _error(
-                f"the post did not confirm: {_failure_text(failure)}", code="post_failed"
-            )
+            return _error(f"the post did not confirm: {_failure_text(failure)}", code="post_failed")
         # ONE receipt shape for every conversation write (main's `_post_receipt`,
         # shared with `dm`), EXTENDED with the resolved recipient rather than
         # rebuilt here: a second construction site is how the two lanes drift.
