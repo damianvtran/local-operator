@@ -1419,20 +1419,24 @@ def test_the_agent_can_actually_reach_the_full_membership_record() -> None:
     )  # noqa: SLF001
     assert plain == ["network", "show", "devmesh", "--json"]
 
-    lines = net_tool._render(
-        "show",
-        {
-            "name": "devmesh",
-            "network_id": "n_" + "a" * 22,
-            "epoch": 2,
-            "role": "admin",
-            "trust": "active",
-            "members_detail": [{"device_id": "d_2", "name": "cloud-node-1", "active": False}],
-            "membership": {"state": "active", "sentence": "this device is an active member"},
-        },
-    )
-    body = "\n".join(lines)
-    assert "all=true" in body, "the pointer must name the parameter this surface accepts"
+    payload = {
+        "name": "devmesh",
+        "network_id": "n_" + "a" * 22,
+        "epoch": 2,
+        "role": "admin",
+        "trust": "active",
+        "members_detail": [{"device_id": "d_2", "name": "cloud-node-1", "active": False}],
+        "membership": {"state": "active", "sentence": "this device is an active member"},
+    }
+    default_body = "\n".join(net_tool._render("show", payload))
+    assert "all=true" in default_body, "the pointer must name the parameter this surface accepts"
+    # THE INSTRUCTION MUST DO SOMETHING (QA round 2, Q-R2-1): telling a reader to set
+    # `all=true` while rendering the same text either way sends it round a loop. The
+    # two arms must actually differ, and the escape hatch must reveal the row.
+    followed_body = "\n".join(net_tool._render("show", payload, show_removed=True))
+    assert followed_body != default_body
+    assert "cloud-node-1" in followed_body
+    assert "hidden" not in followed_body
 
 
 def test_the_agent_digest_counts_departed_devices_instead_of_listing_them_as_members() -> None:

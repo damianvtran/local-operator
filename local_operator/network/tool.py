@@ -978,7 +978,7 @@ def _pilot_receipt_lines(verb: str, payload: dict[str, Any]) -> list[str]:
     return lines
 
 
-def _render(action: str, payload: dict[str, Any]) -> list[str]:
+def _render(action: str, payload: dict[str, Any], *, show_removed: bool = False) -> list[str]:
     """The human-readable digest of one parsed payload.
 
     Deliberately a summary: the parsed fields ride in ``details`` (which never
@@ -1055,12 +1055,13 @@ def _render(action: str, payload: dict[str, Any]) -> list[str]:
         # not the whole record; `show --all` and `--json` still return every one.
         departed = 0
         for member in payload.get("members_detail") or []:
-            if not member.get("active"):
+            if not member.get("active") and not show_removed:
                 departed += 1
                 continue
+            mark = "active" if member.get("active") else "REMOVED"
             suspect = "  [suspect]" if member.get("suspect") else ""
             lines.append(
-                f"  {'active':7} {member.get('device_id')}  {member.get('name')}  "
+                f"  {mark:7} {member.get('device_id')}  {member.get('name')}  "
                 f"{member.get('role')}  {', '.join(member.get('capabilities') or [])}{suspect}"
             )
         if departed:
@@ -1540,7 +1541,7 @@ async def execute_network(
             # dropping exactly the rows the hint says to read, on the one path
             # they exist for. The rows read through the same renderer the
             # healthy path uses; the raw payload still rides ``details``.
-            body = "\n".join(_render(params.action, scrubbed))
+            body = "\n".join(_render(params.action, scrubbed, show_removed=params.all))
             text, spill = spill_truncate(body, _TOOL, context)
             return _error(tool_call_id, _TOOL, text, details=spill or {"network": scrubbed})
         if params.action == "sessions" and str(scrubbed.get("verb") or "") in (
@@ -1555,7 +1556,7 @@ async def execute_network(
             # generic branch below would keep only ``code: message`` and drop the
             # outcome — and, for a finished send, the owner's reply. Rendering the
             # receipt keeps them; the error result still marks the non-completion.
-            body = "\n".join(_render(params.action, scrubbed))
+            body = "\n".join(_render(params.action, scrubbed, show_removed=params.all))
             text, spill = spill_truncate(body, _TOOL, context)
             return _error(tool_call_id, _TOOL, text, details=spill or {"network": scrubbed})
         # ``code`` + ``message`` IS THE REFUSAL FAMILY'S SHAPE, so it is read
@@ -1574,7 +1575,7 @@ async def execute_network(
             (f"{reason}: {message}" if reason else message) + (f"\n{hint}" if hint else ""),
         )
 
-    body = "\n".join(_render(params.action, scrubbed))
+    body = "\n".join(_render(params.action, scrubbed, show_removed=params.all))
     text, spill = spill_truncate(body, _TOOL, context)
     return _text(tool_call_id, _TOOL, text, details=spill or {"network": scrubbed})
 
