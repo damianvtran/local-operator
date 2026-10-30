@@ -2010,6 +2010,25 @@
       },
       "status": "passed",
       "note": "w4w5 es backfill: 76 keys; independent audit w5a1 passed (committed evidence i18n/audits/evidence/es/mobile.setup/w5a1/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "f029ae6953f2fce31d126e7315beaf120bc63da0fc7398fbc6b31413b962222f",
+      "translator": {
+        "agent": "tb-setup-i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": "tb-setup-i18n-audit (reviewer role, independent of implementer and translator)",
+        "model": "radient/auto",
+        "date": "2026-10-28",
+        "result": "passed",
+        "findings": 5
+      },
+      "status": "passed",
+      "note": "Round 4 scope reduction: `lop team-bridge setup` no longer grants consent (it is granted in the Local Operator app only, #3022's bearer boundary). Copy change audited at source_sha256 f029ae6953f2fce31d126e7315beaf120bc63da0fc7398fbc6b31413b962222f: 5 keys deleted (setup.credential/account/tenant/consent/session), 7 added (setup.consent_ui_required/consent_ui_next/enable_in_app_required/designation_missing/ready/not_ready/failed), 2 updated (help.setup, outcome.not_wanted_hint). Independent audit (reviewer role, distinct agent and context from both the implementer and the translator): verdict clean, 0 blocker, 0 major, 1 minor + 4 nit, all applied (hi verbal predicate 'सेटअप हो चुके हैं'; ru agreement 'готовы' and 'предоставляется' for consent; zh-CN '就位' for the receiver and an explicit machine object in enable_in_app_required). The load-bearing sentence keeps all four elements in every locale: consent is granted in the app, NOT from a terminal, open the app once, enable agent messages."
     }
   ]
 }

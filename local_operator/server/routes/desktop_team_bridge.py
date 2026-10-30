@@ -774,12 +774,15 @@ async def status(
         #: when nothing waits, so an older renderer that ignores the key loses
         #: nothing.
         "delivery_hold": _delivery_hold(config_manager),
-        # The receiver's SERVICE state, distinct from enrolment: installed is
-        # a plist launchd does not hold; missing is no receiver at all. Off
-        # macOS this says ``unsupported``; for an isolated store, ``isolated``.
-        # Awaited IN A THREAD (review R1-3): the reading runs ``launchctl
-        # print``, so on the loop one wedged launchd would stall every status
-        # poll rather than only this field.
+        # The receiver's SERVICE state, distinct from enrolment, on every
+        # platform (launchd, systemd --user, Task Scheduler): ``loaded`` the
+        # supervisor holds it; ``installed`` registered but not running;
+        # ``missing`` no receiver at all. A host with no user service
+        # supervisor says ``no_supervisor``, a Linux login with no systemd
+        # user instance ``no_user_manager``, an isolated store ``isolated``
+        # (``install.connector_state``). Awaited IN A THREAD (review R1-3): the
+        # reading runs one supervisor query, so on the loop one wedged
+        # supervisor would stall every status poll rather than only this field.
         "connector": await asyncio.to_thread(_connector_state, config_manager.config_dir),
     }
     return reply(result)
@@ -789,10 +792,11 @@ def _connector_state(config_dir: Path) -> str:
     """The connector's service state, as ``install.connector_state`` reports it.
 
     SYNCHRONOUS on purpose: the caller owns the thread (``asyncio.to_thread``),
-    because the reading runs ``launchctl print`` and must not sit on the event
-    loop. It is otherwise cheap — one plist existence check plus at most that
-    one probe — never raises, and never installs; installation belongs to the
-    commit, opt-out and app-start events.
+    because the reading runs one supervisor query (``launchctl print``,
+    ``systemctl --user is-active`` or ``schtasks /Query``) and must not sit on
+    the event loop. It is otherwise cheap — one registration existence check
+    plus at most that one probe — never raises, and never installs;
+    installation belongs to the commit, opt-out and surface-start events.
     """
 
     from local_operator.team_bridge.connector.install import connector_state

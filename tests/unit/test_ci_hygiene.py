@@ -2933,6 +2933,8 @@ def test_the_windows_input_set_covers_what_that_job_loads() -> None:
         "tests/unit/network/test_credentials_real_link.py",
         "tests/unit/network/test_credentials_owner.py",
         "tests/unit/network/test_relay_e2e.py",
+        "tests/unit/team_bridge/test_connector_platforms.py",
+        "tests/unit/team_bridge/__init__.py",
     )
     conftest = (REPO / "conftest.py").read_text()
     for helper in ("shard_memory_dump", "shard_stall_watchdog"):

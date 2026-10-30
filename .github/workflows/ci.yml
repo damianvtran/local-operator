@@ -697,6 +697,24 @@ jobs:
           New-Item -ItemType Directory -Force $env:HOME | Out-Null
           python -m pytest tests/unit/test_agent_import_boundary.py tests/unit/server/test_edit_workspace_boundary.py tests/unit/network/test_credentials_private_paths.py::test_missing_root_creates_only_leaf_and_missing_parent_refuses tests/unit/network/test_credentials_private_paths.py::test_public_writer_preserves_existing_root_and_ancestors tests/unit/network/test_credentials_private_paths.py::test_two_process_lock_retains_inode_and_actual_timeout -n0 -q
 
+      # The Team Bridge receiver is cross-platform (Task Scheduler on Windows),
+      # and its Windows arm has properties a POSIX host cannot answer: the
+      # `msvcrt` lock that replaced `fcntl` for the connector singleton and the
+      # cross-process sync lock, and the `pythonw.exe` (no console window)
+      # choice for the logon task. The file's native cells run only here; the
+      # rest of it is the per-platform lifecycle against the schtasks/systemctl
+      # SEAMS (no real schtasks is ever called — the package conftest makes the
+      # seam a hard failure), so this job also proves the module imports and
+      # behaves on Windows. Its own sandbox, for the reason the step above has.
+      - name: Verify the Team Bridge receiver's Windows arm
+        shell: pwsh
+        run: |
+          $env:HOME = Join-Path $env:RUNNER_TEMP "lop-receiver-home"
+          $env:USERPROFILE = $env:HOME
+          $env:LOCAL_OPERATOR_CONFIG_DIR = Join-Path $env:HOME ".local-operator"
+          New-Item -ItemType Directory -Force $env:HOME | Out-Null
+          python -m pytest tests/unit/team_bridge/test_connector_platforms.py -n0 -q
+
   # The cross-platform probe battery (`scripts/xplat_probe.py`), one leg per OS.
   #
   # WHY THIS IS NOT COVERED BY THE UNIT MATRIX: the suite runs on Linux and the
