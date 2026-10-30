@@ -78,6 +78,9 @@ def generated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, i18n_generate):
     monkeypatch.setattr(i18n_generate, "DATA_DIR", tmp_path / "data")
     monkeypatch.setattr(i18n_generate, "KEYS_DIR", tmp_path / "keys")
     monkeypatch.setattr(i18n_generate, "LEDGER", tmp_path / "ledger.json")
+    # No shard dir in fixture trees: the aggregate fallback is under test, and
+    # the real tree's shards must not shadow the fixture ledger.
+    monkeypatch.setattr(i18n_generate, "LEDGER_SHARDS", tmp_path / "ledger")
     # `_check` relativises planned paths against REPO for its messages (and
     # only for that); point it at the temp root so the fixture paths resolve.
     monkeypatch.setattr(i18n_generate, "REPO", tmp_path)
