@@ -2801,36 +2801,43 @@ export const BUNDLED_OWNED: Readonly<Record<string, Readonly<Record<string,
   "relay.skills": {
     "en": {
       "relay.skills.skipped": "Sent without {names} \u2014 {count, plural, one {that skill has} other {those skills have}} no content to attach.",
+      "relay.skills.too_large": "These skills are too large to send together. Remove one skill and send again.",
       "relay.skills.tray.hidden": "hidden",
       "relay.skills.tray.label": "Skills",
     },
     "es": {
       "relay.skills.skipped": "Enviado sin {names} \u2014 {count, plural, one {esa habilidad no tiene contenido que adjuntar} many {esas habilidades no tienen contenido que adjuntar} other {esas habilidades no tienen contenido que adjuntar}}.",
+      "relay.skills.too_large": "Estas habilidades son demasiado grandes para enviarlas juntas. Quita una habilidad y env\u00eda de nuevo.",
       "relay.skills.tray.hidden": "oculta",
       "relay.skills.tray.label": "Habilidades",
     },
     "fr": {
       "relay.skills.skipped": "Envoy\u00e9 sans {names} \u2014 {count, plural, one {cette comp\u00e9tence n\u2019a pas de contenu \u00e0 joindre} many {ces comp\u00e9tences n\u2019ont pas de contenu \u00e0 joindre} other {ces comp\u00e9tences n\u2019ont pas de contenu \u00e0 joindre}}.",
+      "relay.skills.too_large": "Ces comp\u00e9tences sont trop volumineuses pour \u00eatre envoy\u00e9es ensemble. Retirez-en une et renvoyez le message.",
       "relay.skills.tray.hidden": "masqu\u00e9e",
       "relay.skills.tray.label": "Comp\u00e9tences",
     },
     "ru": {
       "relay.skills.skipped": "\u041e\u0442\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u043e \u0431\u0435\u0437 {names} \u2014 {count, plural, one {\u0443 \u044d\u0442\u043e\u0433\u043e \u043d\u0430\u0432\u044b\u043a\u0430 \u043d\u0435\u0442 \u0441\u043e\u0434\u0435\u0440\u0436\u0438\u043c\u043e\u0433\u043e \u0434\u043b\u044f \u0432\u043b\u043e\u0436\u0435\u043d\u0438\u044f} few {\u0443 \u044d\u0442\u0438\u0445 \u043d\u0430\u0432\u044b\u043a\u043e\u0432 \u043d\u0435\u0442 \u0441\u043e\u0434\u0435\u0440\u0436\u0438\u043c\u043e\u0433\u043e \u0434\u043b\u044f \u0432\u043b\u043e\u0436\u0435\u043d\u0438\u044f} many {\u0443 \u044d\u0442\u0438\u0445 \u043d\u0430\u0432\u044b\u043a\u043e\u0432 \u043d\u0435\u0442 \u0441\u043e\u0434\u0435\u0440\u0436\u0438\u043c\u043e\u0433\u043e \u0434\u043b\u044f \u0432\u043b\u043e\u0436\u0435\u043d\u0438\u044f} other {\u0443 \u044d\u0442\u0438\u0445 \u043d\u0430\u0432\u044b\u043a\u043e\u0432 \u043d\u0435\u0442 \u0441\u043e\u0434\u0435\u0440\u0436\u0438\u043c\u043e\u0433\u043e \u0434\u043b\u044f \u0432\u043b\u043e\u0436\u0435\u043d\u0438\u044f}}.",
+      "relay.skills.too_large": "\u042d\u0442\u0438 \u043d\u0430\u0432\u044b\u043a\u0438 \u0441\u043b\u0438\u0448\u043a\u043e\u043c \u0432\u0435\u043b\u0438\u043a\u0438, \u0447\u0442\u043e\u0431\u044b \u043e\u0442\u043f\u0440\u0430\u0432\u0438\u0442\u044c \u0438\u0445 \u0432\u043c\u0435\u0441\u0442\u0435. \u0423\u0434\u0430\u043b\u0438\u0442\u0435 \u043e\u0434\u0438\u043d \u043d\u0430\u0432\u044b\u043a \u0438 \u043e\u0442\u043f\u0440\u0430\u0432\u044c\u0442\u0435 \u0441\u043d\u043e\u0432\u0430.",
       "relay.skills.tray.hidden": "\u0441\u043a\u0440\u044b\u0442",
       "relay.skills.tray.label": "\u041d\u0430\u0432\u044b\u043a\u0438",
     },
     "ur": {
       "relay.skills.skipped": "{names} \u06a9\u06d2 \u0628\u063a\u06cc\u0631 \u0628\u06be\u06cc\u062c\u0627 \u06af\u06cc\u0627 \u2014 {count, plural, one {\u0627\u0633 \u0645\u06c1\u0627\u0631\u062a \u0645\u06cc\u06ba \u0627\u06cc\u0633\u0627 \u06a9\u0648\u0626\u06cc \u0645\u0648\u0627\u062f \u0646\u06c1\u06cc\u06ba \u06c1\u06d2 \u062c\u0633\u06d2 \u0645\u0646\u0633\u0644\u06a9 \u06a9\u06cc\u0627 \u062c\u0627 \u0633\u06a9\u06d2} other {\u0627\u0646 \u0645\u06c1\u0627\u0631\u062a\u0648\u06ba \u0645\u06cc\u06ba \u0627\u06cc\u0633\u0627 \u06a9\u0648\u0626\u06cc \u0645\u0648\u0627\u062f \u0646\u06c1\u06cc\u06ba \u06c1\u06d2 \u062c\u0633\u06d2 \u0645\u0646\u0633\u0644\u06a9 \u06a9\u06cc\u0627 \u062c\u0627 \u0633\u06a9\u06d2}}\u06d4",
+      "relay.skills.too_large": "\u06cc\u06c1 \u0645\u06c1\u0627\u0631\u062a\u06cc\u06ba \u0627\u06cc\u06a9 \u0633\u0627\u062a\u06be \u0628\u06be\u06cc\u062c\u0646\u06d2 \u06a9\u06d2 \u0644\u06cc\u06d2 \u0628\u06c1\u062a \u0628\u0691\u06cc \u06c1\u06cc\u06ba\u06d4 \u0627\u06cc\u06a9 \u0645\u06c1\u0627\u0631\u062a \u06c1\u0679\u0627 \u06a9\u0631 \u062f\u0648\u0628\u0627\u0631\u06c1 \u0628\u06be\u06cc\u062c\u06cc\u06ba\u06d4",
       "relay.skills.tray.hidden": "\u067e\u0648\u0634\u06cc\u062f\u06c1",
       "relay.skills.tray.label": "\u0645\u06c1\u0627\u0631\u062a\u06cc\u06ba",
     },
     "vi": {
       "relay.skills.skipped": "\u0110\u00e3 g\u1eedi m\u00e0 kh\u00f4ng k\u00e8m {names} \u2014 {count, plural, other {k\u1ef9 n\u0103ng \u0111\u01b0\u1ee3c li\u1ec7t k\u00ea kh\u00f4ng c\u00f3 n\u1ed9i dung \u0111\u1ec3 \u0111\u00ednh k\u00e8m}}.",
+      "relay.skills.too_large": "C\u00e1c k\u1ef9 n\u0103ng n\u00e0y qu\u00e1 l\u1edbn \u0111\u1ec3 g\u1eedi c\u00f9ng nhau. B\u1ecf m\u1ed9t k\u1ef9 n\u0103ng v\u00e0 g\u1eedi l\u1ea1i.",
       "relay.skills.tray.hidden": "\u1ea9n",
       "relay.skills.tray.label": "K\u1ef9 n\u0103ng",
     },
     "zh-CN": {
       "relay.skills.skipped": "\u5df2\u53d1\u9001\uff0c\u4f46\u672a\u9644\u5e26{names}\u2014\u2014{count, plural, other {\u6240\u5217\u6280\u80fd\u6ca1\u6709\u53ef\u9644\u52a0\u7684\u5185\u5bb9}}\u3002",
+      "relay.skills.too_large": "\u8fd9\u4e9b\u6280\u80fd\u592a\u5927\uff0c\u65e0\u6cd5\u4e00\u8d77\u53d1\u9001\u3002\u79fb\u9664\u4e00\u4e2a\u6280\u80fd\u540e\u91cd\u65b0\u53d1\u9001\u3002",
       "relay.skills.tray.hidden": "\u9690\u85cf",
       "relay.skills.tray.label": "\u6280\u80fd",
     },

@@ -39,6 +39,20 @@ vi.mock("./api", () => ({
 	changeDirectory: vi.fn(async () => ({ ok: true, pid: 1, session_id: "s1" })),
 	sendCommand: mocks.sendCommand,
 	markSessionSeen: vi.fn(async () => ({ ok: true })),
+	/* The composer's send failure branch asks `instanceof HttpError` for the
+	   wire's typed refusal codes (e.g. `skills_too_large`); a stub that omits the
+	   class makes that branch throw instead of falling through to the retry
+	   copy. Every rejection here is a transport failure, so the fall-through is
+	   the behaviour under test. */
+	HttpError: class HttpError extends Error {
+		constructor(
+			readonly status: number,
+			message: string,
+			readonly code = "",
+		) {
+			super(message);
+		}
+	},
 }));
 
 let slot: { projection: SessionProjection | null; connected: boolean } = {

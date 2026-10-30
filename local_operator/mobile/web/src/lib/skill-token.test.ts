@@ -16,6 +16,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
 	isLeadingSkillToken,
+	isMentionableSkillName,
 	skillMatches,
 	skillSpanReplacement,
 	skillToken,
@@ -121,6 +122,56 @@ describe("matching keeps the TUI's positive-evidence rule", () => {
 	it("a LOWERCASE query with uppercase elsewhere still counts as evidence", () => {
 		// `$Re` has one lowercase letter; the prefix rule is case-insensitive.
 		expect(skillMatches("Re", SKILLS, false).map((s) => s.name)).toEqual(["research"]);
+	});
+});
+
+describe("the evidence rule uses Unicode Lowercase, which is Python's test", () => {
+	/* Python asks `any(char.islower())`, and one character's `str.islower()` is true
+	   for exactly `Lowercase` = Ll + Other_Lowercase. `\p{Ll}` missed 311 code
+	   points — `ª`, `ʰ` and `ⓐ` are lowercase to Python and are not Ll — so a
+	   `$ªx` that opens the TUI's list stayed shut here (agent review m1). */
+	const ODD: SkillEntry[] = [
+		{ name: "ªlpha", description: "", hidden: false },
+		{ name: "ʰnote", description: "", hidden: false },
+		{ name: "ⓐrt", description: "", hidden: false },
+		{ name: "Ǆcase", description: "", hidden: false },
+	];
+
+	it("accepts Other_Lowercase letters the Ll category excludes", () => {
+		expect(skillMatches("ª", ODD, false).map((s) => s.name)).toEqual(["ªlpha"]);
+		expect(skillMatches("ʰ", ODD, false).map((s) => s.name)).toEqual(["ʰnote"]);
+		expect(skillMatches("ⓐ", ODD, false).map((s) => s.name)).toEqual(["ⓐrt"]);
+	});
+
+	it("refuses a titlecase letter, which Python does not call lowercase", () => {
+		// `ǅ` is Lt: `'ǅ'.islower()` is False and lowering it would reach `Ǆcase`.
+		expect(skillMatches("ǅ", ODD, false)).toEqual([]);
+	});
+});
+
+describe("the catalogue is filtered to names a mention can express", () => {
+	/* The token ends at the first whitespace, on this side and in the server's
+	   `skill_name_spans`. A name with a space therefore can never fire from a
+	   mention, and offering it made the user believe the skill ran (UX review
+	   U3: `$ux spaced` sent with no block and no skip notice). */
+	it("drops every name containing Python whitespace, and the empty name", () => {
+		expect(isMentionableSkillName("ux spaced")).toBe(false);
+		expect(isMentionableSkillName("tab\tname")).toBe(false);
+		expect(isMentionableSkillName("nbsp\u00a0name")).toBe(false);
+		expect(isMentionableSkillName("line\nname")).toBe(false);
+		expect(isMentionableSkillName("")).toBe(false);
+		expect(isMentionableSkillName("code-review.v2")).toBe(true);
+		expect(isMentionableSkillName("under_score")).toBe(true);
+	});
+
+	it("applies to the leading list and a narrowed list alike", () => {
+		const mixed: SkillEntry[] = [
+			...SKILLS,
+			{ name: "uxcheck", description: "", hidden: false },
+			{ name: "ux spaced", description: "", hidden: false },
+		];
+		expect(skillMatches("", mixed, true).map((s) => s.name)).not.toContain("ux spaced");
+		expect(skillMatches("ux", mixed, false).map((s) => s.name)).toEqual(["uxcheck"]);
 	});
 });
 

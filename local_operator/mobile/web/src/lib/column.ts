@@ -65,6 +65,19 @@ export const SHORT_COLUMN_PX = 480;
 export const PENDING_CARD_FRACTION = 0.6;
 export const PANEL_FRACTION = 0.4;
 
+/**
+ * The `$skill` tray's share of the column.
+ *
+ * Shown while the keyboard is up by definition, so a `vh` cap measured the
+ * wrong box: on a 390x844 phone the old `min(45vh, 22rem)` resolved to its
+ * `22rem` term while the keyboard-shrunk column was 508 px, leaving the tray
+ * 69 % of the column and the composer's send disc 12 of its 44 px on screen
+ * (design D1 / agent review M2). 0.45 of the COLUMN leaves the composer's own
+ * height plus the above-composer slot the rest at every keyboard size the
+ * product supports, and the tray scrolls rather than growing.
+ */
+export const SKILL_TRAY_FRACTION = 0.45;
+
 /** `max-height` in column units — see the module docstring for why not `dvh`. */
 export function columnCap(fraction: number): { maxHeight: string } {
 	return {

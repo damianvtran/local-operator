@@ -1,5 +1,6 @@
 {
   "relay.skills.tray.label": "Skills",
   "relay.skills.tray.hidden": "hidden",
-  "relay.skills.skipped": "Sent without {names} — {count, plural, one {that skill has} other {those skills have}} no content to attach."
+  "relay.skills.skipped": "Sent without {names} — {count, plural, one {that skill has} other {those skills have}} no content to attach.",
+  "relay.skills.too_large": "These skills are too large to send together. Remove one skill and send again."
 }

@@ -14,6 +14,10 @@ def skipped(*, names: str, count: int | float) -> Msg:
     return Msg("relay.skills.skipped", {"names": names, "count": count})
 
 
+def too_large() -> Msg:
+    return Msg("relay.skills.too_large", {})
+
+
 def tray_hidden() -> Msg:
     return Msg("relay.skills.tray.hidden", {})
 

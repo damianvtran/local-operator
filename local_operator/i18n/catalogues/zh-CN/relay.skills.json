@@ -1,5 +1,6 @@
 {
   "relay.skills.tray.label": "技能",
   "relay.skills.tray.hidden": "隐藏",
-  "relay.skills.skipped": "已发送，但未附带{names}——{count, plural, other {所列技能没有可附加的内容}}。"
+  "relay.skills.skipped": "已发送，但未附带{names}——{count, plural, other {所列技能没有可附加的内容}}。",
+  "relay.skills.too_large": "这些技能太大，无法一起发送。移除一个技能后重新发送。"
 }

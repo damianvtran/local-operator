@@ -43,6 +43,18 @@
  *    `research` here even though the TUI would stay closed. The evidence rule
  *    only requires a lowercase letter SOMEWHERE in the query, which keeps the
  *    safety property (`$PATH` has none) while accepting `$Research`.
+ *
+ * THE EVIDENCE RULE'S CHARACTER TEST is Unicode's `Lowercase` property, not
+ * the general category `Ll`. The TUI asks Python `any(char.islower())`, and a
+ * single character's `str.islower()` is true exactly for `Lowercase` — which is
+ * `Ll` PLUS `Other_Lowercase`. `\p{Ll}` disagrees on 311 code points: `ª`,
+ * `º`, `ʰ`, `ᵃ`, `ⓐ` are lowercase to Python and are not `Ll`, so `$ªx` opened
+ * the TUI's list and stayed shut here (agent review m1). `\p{Lowercase}`
+ * matches Python's rule. The residue is Unicode VERSION skew, not a rule
+ * difference — Python 3.12 carries Unicode 15.0, the browser runtime 17.0, so
+ * 52 code points added since 15.0 are `Lowercase` to the browser alone; no
+ * shipped skill name reaches them, and this gate only decides whether a list
+ * opens, never which row matches.
  */
 
 import type { SkillEntry } from "../types";
@@ -197,10 +209,38 @@ export function skillMatches(
 	skills: readonly SkillEntry[],
 	leading: boolean,
 ): SkillEntry[] {
-	if (!leading && !/\p{Ll}/u.test(query)) return [];
-	if (query === "") return leading ? [...skills] : [];
+	if (!leading && !/\p{Lowercase}/u.test(query)) return [];
+	if (query === "") return leading ? mentionable(skills) : [];
 	const needle = query.toLowerCase();
-	return skills.filter((skill) => skill.name.toLowerCase().startsWith(needle));
+	return mentionable(skills).filter((skill) =>
+		skill.name.toLowerCase().startsWith(needle),
+	);
+}
+
+/**
+ * Whether the `$` grammar can express this name at all.
+ *
+ * The token ends at the first whitespace (this file's `skillToken`, and the
+ * server's `skill_name_spans`), so a name containing any Python whitespace can
+ * only ever be typed as its first word: the row is offered, the pick inserts
+ * `$ux spaced `, the mention parses as `ux`, and the send goes out with no
+ * skill attached and no skip receipt — the user believes the skill ran (UX
+ * review U3). Offering it is therefore a promise the grammar cannot keep, and
+ * the list is the only place that can decline to make it. Empty names are
+ * excluded for the same reason: `$` alone is the "list everything" query.
+ *
+ * The relay's catalogue is the only writer of this field and its own names are
+ * filesystem stems, so this rejects what a stray `name: ux spaced` fixture or a
+ * future catalogue with free-form names would otherwise advertise.
+ */
+export function isMentionableSkillName(name: string): boolean {
+	if (name === "") return false;
+	return ![...name].some((char) => isPySpace(char));
+}
+
+/** The catalogue minus every name a mention cannot express. */
+function mentionable(skills: readonly SkillEntry[]): SkillEntry[] {
+	return skills.filter((skill) => isMentionableSkillName(skill.name));
 }
 
 /**

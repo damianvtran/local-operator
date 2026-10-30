@@ -78,6 +78,13 @@ CASES: list[tuple[str, str, str]] = [
     ("money parses; matching is the caller's gate", "costs ", "$5"),
     ("glued sigil is punctuation", "costs$", "5"),
     ("double sigil opens on the first", "a ", "$$x"),
+    # THE "LAST BOUNDARY $ AT OR BEFORE THE CARET" RULE (agent review m2): the
+    # only multi-sigil case used to be `$$x`, which cannot distinguish "the last
+    # one" from "the first one". These two can: an earlier token's `$` would
+    # close the parse (caret past its end), and a sigil exactly AT the caret is
+    # inside its own token.
+    ("the last boundary $ before the caret wins", "$a $r", "e"),
+    ("a sigil exactly at the caret opens its own token", "$a ", "$b"),
     ("backtick glue is not a boundary", "`", "$x`"),
     ("paren glue is not a boundary", "(", "$x)"),
     ("quote glue is not a boundary", '"', '$x"'),

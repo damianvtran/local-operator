@@ -14,6 +14,8 @@
   {"note": "money parses; matching is the caller's gate", "head": "costs ", "tail": "$5", "prefix": "costs ", "token": "$5", "query": "5", "suffix": "", "leading": false, "insertHead": "costs $planning ", "insertTail": ""},
   {"note": "glued sigil is punctuation", "head": "costs$", "tail": "5", "token": null},
   {"note": "double sigil opens on the first", "head": "a ", "tail": "$$x", "prefix": "a ", "token": "$$x", "query": "$x", "suffix": "", "leading": false, "insertHead": "a $planning ", "insertTail": ""},
+  {"note": "the last boundary $ before the caret wins", "head": "$a $r", "tail": "e", "prefix": "$a ", "token": "$re", "query": "re", "suffix": "", "leading": false, "insertHead": "$a $planning ", "insertTail": ""},
+  {"note": "a sigil exactly at the caret opens its own token", "head": "$a ", "tail": "$b", "prefix": "$a ", "token": "$b", "query": "b", "suffix": "", "leading": false, "insertHead": "$a $planning ", "insertTail": ""},
   {"note": "backtick glue is not a boundary", "head": "`", "tail": "$x`", "token": null},
   {"note": "paren glue is not a boundary", "head": "(", "tail": "$x)", "token": null},
   {"note": "quote glue is not a boundary", "head": "\"", "tail": "$x\"", "token": null},

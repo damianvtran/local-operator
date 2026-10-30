@@ -30,12 +30,28 @@
  * 160 chars by the relay), and a `hidden` tag for a skill whose `hide`
  * frontmatter suppresses automatic selection — the picker still offers it,
  * because being TYPED is exactly the case `hide` leaves open. `$name` is a
- * Latin technical token and keeps `dir="ltr"` under the RTL document; the tag
- * and description follow the document's direction.
+ * Latin technical token and keeps `dir="ltr"` under the RTL document; the
+ * description takes its own first-strong direction (skill descriptions are
+ * author-written English in every shipped locale, and without `dir` the RTL
+ * document also decides WHICH END a truncated description loses — the leading
+ * ellipsis ate the subject and verb, design D2); the tag follows the document.
+ *
+ * THE CAP IS IN COLUMN UNITS (`columnCap`, lib/column.ts). The tray exists for
+ * the keyboard-up state, where `vh` still measures the device height: the old
+ * `min(45vh, 22rem)` took 69 % of a 508 px column and pushed the composer's
+ * foot under the clipped edge (design D1 / agent review M2).
+ *
+ * THE FOOT CUE is the repo's existing one — `lo-fade-y` plus `useScrollCues`,
+ * the pair every other scroller here uses. `lo-scroll`'s scrollbar is an
+ * overlay that paints nothing at rest, so a capped list whose last row is cut
+ * by 4 px advertised nothing below the fold (design D3).
  */
 import { useRef } from "react";
 import type { SkillEntry } from "../types";
 import { messageRuntime } from "../store";
+import { textDirection } from "../lib/bidi";
+import { columnCap, SKILL_TRAY_FRACTION } from "../lib/column";
+import { useScrollCues } from "../lib/use-scroll-cues";
 
 export function SkillTray({
 	rows,
@@ -56,12 +72,17 @@ export function SkillTray({
 	   finger to have stayed within a tap's slop. A scroll that begins fires
 	   pointercancel, so it picks nothing at all. */
 	const start = useRef<{ id: number; x: number; y: number } | null>(null);
+	/* The "more below" cue's JS half (Safari without scroll timelines); on
+	   Chromium the class alone tracks the scroll position in CSS. */
+	const scrollCue = useScrollCues();
 	if (rows.length === 0) return null;
 	return (
 		<ul
 			data-skill-tray=""
 			aria-label={messageRuntime.t("relay.skills.tray.label")}
-			className="lo-scroll mx-2 mb-2 max-h-[min(45vh,22rem)] shrink-0 overflow-y-auto overflow-x-hidden rounded-frame bg-elevated py-1"
+			ref={scrollCue}
+			style={columnCap(SKILL_TRAY_FRACTION)}
+			className="lo-scroll lo-fade-y mx-2 mb-2 shrink-0 overflow-y-auto overflow-x-hidden rounded-frame bg-elevated py-1"
 		>
 			{rows.map((row) => (
 				<li key={row.name}>
@@ -102,7 +123,10 @@ export function SkillTray({
 								{messageRuntime.t("relay.skills.tray.hidden")}
 							</span>
 						) : null}
-						<span className="min-w-0 flex-1 truncate text-body-sm text-ink-dim">
+						<span
+							dir={textDirection(row.description)}
+							className="min-w-0 flex-1 truncate text-body-sm text-ink-dim"
+						>
 							{row.description}
 						</span>
 					</button>
