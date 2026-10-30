@@ -159,9 +159,10 @@ async def test_ack_working_claims_and_done_releases_with_the_same_token(tmp_path
         {"account_id": "acc_2", "kind": "agent"},
         {"endpoint_id": "bep_9", "kind": "agent"},
         {"account_id": "acc_2", "endpoint_id": "bep_9"},
-        # A display label is NOT a destination: names are ambiguous and belong
-        # to the caller's own directory read, never to this client.
-        {"name": "Ada Lovelace"},
+        # A LABEL key is not a recipient: the shape is one of the three keys
+        # (endpoint_id, account_id, name) and nothing else, so a caller cannot
+        # smuggle a second opinion about who the destination is.
+        {"name": "Ada Lovelace", "account_id": "acc_2"},
         {"display_label": "Ada Lovelace"},
         {},
     ],
@@ -185,9 +186,11 @@ def test_tool_recipient_schema_is_closed(target):
         ({"account_id": "acc_2", "endpoint_id": "bep_9"}, False),
         ({"account_id": ""}, False),
         ({"account_id": 42}, False),
-        # A guessed name object is not an addressable destination, in the
-        # PUBLISHED schema either.
-        ({"name": "Ada Lovelace"}, False),
+        # A display name is a legal SHAPE for the one op that can resolve it
+        # (channel_post); whether an op may use it is the executor's rule, tested
+        # in ``test_recipient_name_resolution.py``. Two keys are still refused.
+        ({"name": "Ada Lovelace"}, True),
+        ({"name": "Ada Lovelace", "account_id": "acc_2"}, False),
         # The bare-string form a model reaches for: accepted, and only as an id.
         # ``" acc_2"`` is NOT listed here on purpose: padding is refused by the
         # shared validator/executor (asserted below and in the client test), not
@@ -252,8 +255,11 @@ def test_compact_recipient_wire_schema_preserves_closed_one_of(target, valid):
         {"account_id": "acc_2", "endpoint_id": ""},
         {"account_id": "acc_2", "endpoint_id": "bep_9"},
         {"account_id": "   "},
-        # A guessed name learns the accepted shapes from the refusal itself.
-        {"name": "Ada Lovelace"},
+        # A DISPLAY NAME is no longer a refused SHAPE for send/reply: it is a
+        # RESOLUTION REQUEST that needs the directory and the owner's allowlist,
+        # so it refuses after the admission gate instead of here (that path has
+        # its own test below). The keys around it still refuse with no I/O.
+        {"name": "Ada Lovelace", "kind": "human"},
         # The bare-string form is an id or nothing: empty, padded, and a display
         # NAME written as a bare string (ids never contain whitespace) refuse.
         "",
@@ -716,10 +722,14 @@ def test_a_guessed_name_is_refused_with_the_accepted_shapes_and_the_directory(
 ) -> None:
     """The refusal is the correction: a model that guessed a name learns the move.
 
-    Names are ambiguous and resolvable by the caller's own directory read, never
-    by this client — but a bare "unsupported field" taught the model nothing, so
-    every shape refusal names BOTH accepted shapes and where the ids come from.
-    It still quotes nothing caller-controlled (no value, no key).
+    This is the WIRE guard, and it is what a name gets when it reaches the pair
+    body without being resolved first. The TOOL resolves one — ``channel_post``
+    inside that conversation's active members, ``send``/``reply`` inside the
+    owner's own allowlist, never the org directory as a whole — and hands this
+    layer an id; see ``test_recipient_name_resolution.py`` and
+    ``test_recipient_name_resolution_send.py``. A bare "unsupported field" taught
+    the model nothing, so every refusal names BOTH accepted shapes and where the
+    ids come from. It still quotes nothing caller-controlled (no value, no key).
     """
     from local_operator.team_bridge.types import (
         RECIPIENT_ACCOUNT_SHAPE,
@@ -794,3 +804,83 @@ def test_the_published_to_schema_names_both_shapes_and_the_directory() -> None:
             )
             == []
         )
+
+
+@pytest.mark.asyncio
+async def test_a_send_name_is_refused_after_the_scope_reads_not_before(
+    tmp_path, monkeypatch
+) -> None:
+    """A name is a RESOLUTION REQUEST, so its refusal costs the scope reads — and no intent.
+
+    The property this file exists for still holds: a refused recipient leaves no
+    retryable outbox intent and dispatches no message. What changed with name
+    resolution is WHEN it can refuse: the bridge directory and the owner's own
+    allowlist are wire reads behind the admission gate, so a name that resolves to
+    nobody refuses after them — naming BOTH reasons it might be (not on this team,
+    or their bridge is not enabled) — and still leaves nothing behind.
+    """
+    from local_operator.team_bridge.outbox import Outbox
+
+    records = []
+    original = Outbox.record_send
+
+    def record(self, *args, **kwargs):
+        records.append(kwargs)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Outbox, "record_send", record)
+    requests: list[httpx.Request] = []
+    runtime = BridgeRuntime(
+        client=_client(
+            lambda request: (
+                requests.append(request),
+                # A directory with one member, and an allowlist naming somebody
+                # else: the asked-for name is simply not in the reachable set.
+                (
+                    _ok(
+                        {
+                            "members": [
+                                {
+                                    "account_id": "acc_other",
+                                    "display_label": "Bo Chen",
+                                    "bridge_enabled": True,
+                                }
+                            ]
+                        }
+                    )
+                    if request.url.path.endswith("/directory")
+                    else _ok(
+                        {
+                            "allowlist": {
+                                "entries": [
+                                    {
+                                        "direction": "send",
+                                        "effect": "allow",
+                                        "target": {"account_id": "acc_other"},
+                                    }
+                                ]
+                            }
+                        }
+                    )
+                ),
+            )[1],
+        ),
+        config_dir=tmp_path,
+        tenant_id=TENANT,
+        owner=_owner(),
+        session_id="synthetic-session",
+    )
+    result = await execute_bridge(
+        runtime, {"op": "send", "to": {"name": "Ada Lovelace"}, "text": "synthetic"}
+    )
+    assert result["ok"] is False and result["code"] == "invalid_request"
+    # EVERY reason it MIGHT be, because a model that cannot tell them apart
+    # guesses instead of telling its human something true; the sentences are
+    # "may" because this resolver cannot see the directory and so cannot say
+    # which is the case.
+    assert "may not be on this team" in result["error"]
+    assert "bridge may not be enabled" in result["error"]
+    assert "allowlist may not name them" in result["error"]
+    assert records == []
+    # The scope reads happened; nothing was sent.
+    assert [request.method for request in requests] == ["GET", "GET"]
