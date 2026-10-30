@@ -16,7 +16,7 @@ from local_operator.session.coalescing_writer import EVIDENCE_WRITER
 
 def git(repo: Path, *args: str) -> str:
     env = os.environ.copy()
-    env.update(GIT_CONFIG_SYSTEM=os.devnull, GIT_TERMINAL_PROMPT="0")
+    env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_SYSTEM=os.devnull, GIT_TERMINAL_PROMPT="0")
     return subprocess.run(
         ["git", "-C", str(repo), *args],
         env=env,

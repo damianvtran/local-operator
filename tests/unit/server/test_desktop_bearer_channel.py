@@ -350,6 +350,7 @@ def test_a_recognised_launch_leaves_no_bearer_in_the_exec_time_environment(
         "LOCAL_OPERATOR_CONFIG_DIR": str(config),
         "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
         "PYTHONPATH": str(root),
+        "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_CONFIG_SYSTEM": "/dev/null",
         desktop.TOKEN_ENV: token,
     }
