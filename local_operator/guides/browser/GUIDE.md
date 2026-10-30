@@ -473,12 +473,15 @@ does not have to be the visible one: recording reads the same pixels
 - `record_stop` stops the capture, saves it and reports the path and size. It
   is a `read`-tier call: the write was approved at start, and a stop the user
   denied would strand a running encoder until the timer fired.
-- Capture parameters are fixed: 1280x720, 10 fps, no audio. The file is an MP4
-  with an AV1 track — it plays in QuickTime/AVFoundation; Chrome's `<video>`
-  will not play it (the probe measured that).
-- A clip shorter than about half a second can hold a single frame, and a
-  one-frame AV1 track is not decodable everywhere: record for at least a second
-  or two when the clip is going to be watched.
+- Capture parameters are fixed: at most 1280x720 (the clip is scaled to fit, so a
+  visible, larger tab can come out smaller, e.g. 1144x720), 10 fps, no audio. The
+  file is an MP4 with an AV1 track. It plays in QuickTime/AVFoundation (decoded
+  there in the desktop PR's real-path run). Chrome's `<video>` and H.264-only
+  players are expected not to play AV1-in-MP4; that has not been tested in Chrome
+  here, so check before promising playback to someone.
+- Keep a clip to a second or two at least when it is going to be watched: a very
+  short clip has few frames, and a one-frame AV1 track may not decode everywhere.
+  This is a precaution, not a measured threshold.
 - One recording per session per tab, two app-wide. A clip that would exceed
   64 MiB (32 MiB under a scratchpad) is discarded rather than truncated: a
   truncated MP4 is invalid, so the error says nothing was saved.

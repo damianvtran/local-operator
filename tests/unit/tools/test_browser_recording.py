@@ -622,8 +622,6 @@ def test_stop_reports_what_landed_and_the_av1_caveat(
             "bytes": len(MP4_HEAD),
             "duration_ms": 4200,
             "auto_stopped": False,
-            "width": 1280,
-            "height": 720,
             "fps": 10,
             "container": "mp4",
             "codec": "av1",
