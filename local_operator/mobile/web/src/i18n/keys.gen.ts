@@ -881,6 +881,11 @@ export type MessageParams = {
   "wire.settings.display_composer_chevron.choice.true.description": undefined;
   "wire.settings.display_composer_chevron.help": undefined;
   "wire.settings.display_composer_chevron.label": undefined;
+  "wire.settings.display_composer_command.help": undefined;
+  "wire.settings.display_composer_command.label": undefined;
+  "wire.settings.display_composer_command.placeholder": undefined;
+  "wire.settings.display_composer_command_interval.help": undefined;
+  "wire.settings.display_composer_command_interval.label": undefined;
   "wire.settings.display_composer_context.choice.false.description": undefined;
   "wire.settings.display_composer_context.choice.true.description": undefined;
   "wire.settings.display_composer_context.help": undefined;

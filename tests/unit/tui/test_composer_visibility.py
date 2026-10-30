@@ -176,3 +176,80 @@ async def test_the_local_path_applies_on_the_settings_pages_own_call_stack(
         assert chevron.display is True
         assert app._status.is_showing("cost") is True
         assert band.display is True
+
+
+async def _band_shows(app, pilot, needle: str, *, present: bool = True) -> str:
+    """Pump the loop until the band does (or does not) paint ``needle``.
+
+    The command runs in a worker on a real subprocess, so its output lands a
+    few loop turns after the write; bounded by turns, never by the clock.
+    """
+    painted = ""
+    for _ in range(400):
+        await pilot.pause()
+        painted = _painted_band(app)
+        if (needle in painted) is present:
+            return painted
+    raise AssertionError(f"band never {'showed' if present else 'dropped'} {needle!r}: {painted}")
+
+
+@pytest.mark.asyncio
+async def test_the_status_command_paints_live_and_clears_when_removed(
+    monkeypatch, tmp_path
+) -> None:
+    """``display.composer.command`` reaches a running TUI without a relaunch.
+
+    Set from another process: the command runs AT ONCE (not after a full
+    interval) and its first line lands on the band. A new command replaces the
+    old reading, and removing the command clears the segment and the timer.
+    The script reads its stdin payload, so the payload path is exercised too.
+    """
+    app = _boot(monkeypatch, tmp_path)
+    async with app.run_test(size=(140, 24)) as pilot:
+        await _adopted(app, pilot)
+        assert app._status_command_timer is None
+
+        _write_elsewhere(
+            tmp_path,
+            "display.composer.command",
+            "python3 -c 'import json,sys; "
+            'print("acct", json.load(sys.stdin)["model"]["display_name"])\'',
+        )
+        process_watcher(tmp_path).poll_now()
+        await _band_shows(app, pilot, "acct test/model")
+        assert app._status_command_timer is not None
+
+        _write_elsewhere(tmp_path, "display.composer.command", "echo second")
+        process_watcher(tmp_path).poll_now()
+        painted = await _band_shows(app, pilot, "second")
+        assert "acct" not in painted
+
+        _write_elsewhere(tmp_path, "display.composer.command", "")
+        process_watcher(tmp_path).poll_now()
+        await _band_shows(app, pilot, "second", present=False)
+        assert app._status_command_timer is None
+        assert app._status_command_armed is None
+
+
+@pytest.mark.asyncio
+async def test_an_unrelated_composer_edit_does_not_rearm_the_command(monkeypatch, tmp_path) -> None:
+    """Every ``display.composer.*`` edit lands in the same apply; only a change
+    to the command or its interval may reset the cadence or fork a shell."""
+    app = _boot(monkeypatch, tmp_path)
+    async with app.run_test(size=(140, 24)) as pilot:
+        await _adopted(app, pilot)
+        _write_here(tmp_path, "display.composer.command_interval", 60)
+        _write_elsewhere(tmp_path, "display.composer.command", "echo steady")
+        process_watcher(tmp_path).poll_now()
+        await _band_shows(app, pilot, "steady")
+        timer = app._status_command_timer
+        assert app._status_command_armed == ("echo steady", 60)
+
+        _write_here(tmp_path, "display.composer.cost", False)
+        await pilot.pause()
+        assert app._status_command_timer is timer
+
+        _write_here(tmp_path, "display.composer.command_interval", 120)
+        await pilot.pause()
+        assert app._status_command_timer is not timer
+        assert app._status_command_armed == ("echo steady", 120)

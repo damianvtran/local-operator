@@ -2568,3 +2568,74 @@ def test_the_composed_fork_and_liveness_row_fits_and_keeps_the_age_last(monkeypa
         # the head is intact.
         if "Not answering" in row and "4m" not in row:
             assert row.rstrip().endswith(("\u2026", "…", "reconnec…")), (width, row)
+
+
+# -- the operator's status command segment ----------------------------------
+
+
+def test_the_custom_segment_paints_unadorned_and_clears_on_empty() -> None:
+    """The script's own text, no band icon in front (scripts bring their own
+    glyphs), and "" removes it — the runner sends "" on failure."""
+    status, _clock = _full_band()
+    status.update(custom="quota 42%")
+    row = status.render_text(200).plain
+    # Leftmost of the figures, nothing between the seam and the script's text.
+    assert f"quota 42% {_SEP_RIGHT} {ICON_CONTEXT} 49.6%/1M" in row
+    status.update(custom="")
+    assert "quota" not in status.render_text(200).plain
+
+
+def test_the_custom_segment_is_inert_when_unset() -> None:
+    """No command configured: the band is byte-identical to before the rung."""
+    status, _clock = _full_band()
+    rows = {width: status.render_text(width).plain for width in range(200, 20, -7)}
+    status.update(custom="")
+    assert {width: status.render_text(width).plain for width in rows} == rows
+
+
+def test_the_custom_segment_outlives_the_title_and_sheds_before_session_figures(
+    monkeypatch,
+) -> None:
+    """Order: after the conversation name, before cost and context.
+
+    The operator configured this reading on purpose, so it outranks a title
+    and the static settings; the session's own live figures still outrank it
+    because they predict the next action in THIS session.
+    """
+    monkeypatch.setenv("HOME", "/Users/tester")
+    status, _clock = _full_band()
+    status.update(custom="acct 42%")
+    gone: dict[str, int] = {}
+    probes = {
+        "name": "Status band enric",
+        "custom": "acct 42%",
+        "cost": "$12.40",
+        "context": "49.6%/1M",
+    }
+    for width in range(200, 4, -1):
+        plain = status.render_text(width).plain
+        for key, needle in probes.items():
+            if key not in gone and needle not in plain:
+                gone[key] = width
+    assert gone["name"] > gone["custom"] > gone["cost"] > gone["context"], gone
+
+
+def test_the_custom_rung_is_in_every_ladder_and_bounded() -> None:
+    for ladder in (
+        _DROP_LADDER,
+        _DROP_LADDER_QUIET,
+        _DROP_LADDER_ESTIMATE,
+        _DROP_LADDER_QUIET_ESTIMATE,
+    ):
+        assert "custom" in ladder
+    assert "custom" not in _UNBOUNDED_RUNGS
+    assert _DROP_LADDER.index("name") < _DROP_LADDER.index("custom") < _DROP_LADDER.index("cost")
+
+
+def test_command_facts_are_what_the_band_shows() -> None:
+    status, _clock = _full_band()
+    facts = status.command_facts()
+    assert facts["model_label"] == "openrouter/moonshotai/kimi-k2-thinking"
+    assert facts["context_tokens"] == 496_000
+    assert facts["context_window"] == 1_000_000
+    assert facts["cost"] == "$12.40"

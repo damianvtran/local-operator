@@ -490,6 +490,18 @@ _DROP_LADDER: tuple[str, ...] = (
     # Its place in the order is unchanged: below it are only figures an operator
     # acts on, which is where a title stops competing.
     "name",
+    # The operator's own status command (``display.composer.command``). It
+    # outlasts the title and every static setting above because the operator
+    # configured it ON PURPOSE to see something the harness cannot tell them —
+    # a quota, a deploy state — and a band that drops the one thing they asked
+    # for to keep a conversation title has its priorities backwards. It sheds
+    # before the harness's own live figures because those predict the next
+    # action in THIS session (compaction, spend) and the command's reading is
+    # usually account- or project-wide, available from wherever it came from.
+    # Inert (no cells, no effect on the walk) when no command is configured.
+    # BOUNDED (``status_command.MAX_CELLS``), so it is a legal neighbour of any
+    # rung under :data:`_UNBOUNDED_RUNGS`.
+    "custom",
     # The second figure that is not a live reading of this turn, and it sheds
     # BEFORE ``cost`` because it is strictly more re-derivable: one scalar about a
     # call that has already ENDED, and the same number is on a screen the operator
@@ -1274,6 +1286,9 @@ class StatusLine:
         self._cost: str = ""
         self._last_rate: str = ""
         self._conversation_name: str = ""
+        #: The operator's status-command line (``tui/status_command.py``),
+        #: already sanitised and capped. Empty means no segment.
+        self._custom: str = ""
         # True while this session is a FORK still wearing the title it inherited
         # from its parent. Only the terminal title reads it, and it is pushed by
         # the app rather than read off the session for the same reason every
@@ -1652,8 +1667,14 @@ class StatusLine:
         tunnel_parked: bool | None = None,
         approvals_auto: bool | None = None,
         approvals_always: bool | None = None,
+        custom: str | None = None,
     ) -> None:
         """Update any subset of segments and repaint the band."""
+        # "" is meaningful (clear the segment: the command failed, printed
+        # nothing, or was unset), so None stays leave-alone as for every other
+        # segment.
+        if custom is not None:
+            self._custom = custom
         if connection is not None:
             self._connection = connection
         if connection_muted is not None:
@@ -1951,6 +1972,25 @@ class StatusLine:
                 return self._model_name
             return ""
         return self._model_name
+
+    def command_facts(self) -> dict[str, object]:
+        """What the band is showing for THIS session, for the status command.
+
+        The status command's stdin payload is built from these rather than
+        from the session, so a script sees the same model, context and cost
+        the operator is reading on the row beside its output — never a figure
+        the band would spell differently. The main session's figures, not a
+        pinned child's: the command describes the conversation, and its
+        interval does not track pins.
+        """
+        return {
+            "model_label": self._model_label,
+            "model_name": self._model_name,
+            "cwd": self._cwd,
+            "context_tokens": self._context_tokens,
+            "context_window": self._context_window,
+            "cost": self._cost,
+        }
 
     def _shown_context(self) -> tuple[int, int]:
         """``(tokens, window)`` for the context segment."""
@@ -2647,6 +2687,15 @@ class StatusLine:
         # transcript is still signalled by the in-transcript "older messages
         # above" notice on scroll, so the at-rest counter is not needed — do
         # not re-add it to "fix" discoverability.
+        if self._custom and "custom" not in dropped:
+            # NO icon: the text is the operator's script's own, and scripts that
+            # serve other harnesses already carry their own glyph, so a band icon
+            # in front of it would double up. Leftmost of the figures, so the
+            # session's own readings (context, cost, duration) stay together
+            # against the right edge and the command's reading — usually about
+            # an account or a project, not this session — sits apart from them.
+            # `fg`: the operator configured this reading specifically.
+            parts.append(("", self._custom, Style(color=theme_mod.semantic_color("fg"))))
         if "context" not in dropped:
             tokens, window = self._shown_context()
             usage = format_context_usage(tokens, window)

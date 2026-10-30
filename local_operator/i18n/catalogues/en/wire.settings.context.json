@@ -166,5 +166,34 @@
     "role": "numeric setting label",
     "tone": "plain",
     "maxCells": 29
+  },
+  "wire.settings.display_composer_command.label": {
+    "role": "settings row label",
+    "tone": "plain",
+    "maxCells": 29,
+    "note": "'Band' is the status row under the input, as in the sibling 'Band: …' rows; keep that prefix consistent with them. 'Status command' is a shell command the user writes."
+  },
+  "wire.settings.display_composer_command.help": {
+    "role": "help text",
+    "tone": "plain, precise",
+    "maxCells": 67,
+    "note": "The command's first line of standard output becomes a segment on the status band. Empty means nothing runs. Keep 'shell command' technical."
+  },
+  "wire.settings.display_composer_command.placeholder": {
+    "role": "input placeholder",
+    "tone": "literal",
+    "note": "An example file path, shown faint in the empty editor. Do not translate: it is a path."
+  },
+  "wire.settings.display_composer_command_interval.label": {
+    "role": "settings row label",
+    "tone": "plain",
+    "maxCells": 29,
+    "note": "How often the status command reruns. Same 'Band:' prefix as the sibling rows."
+  },
+  "wire.settings.display_composer_command_interval.help": {
+    "role": "help text",
+    "tone": "plain, precise",
+    "maxCells": 58,
+    "note": "The unit is seconds; 5-3600 is the accepted range and must stay as digits."
   }
 }

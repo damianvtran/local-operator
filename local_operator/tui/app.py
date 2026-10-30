@@ -225,6 +225,7 @@ from local_operator.slash_commands import (
 from local_operator.supplements.contract import SUPERSEDED_ERROR, reader_disposition
 from local_operator.team_bridge.card import bridge_card_sender, bridge_card_text
 from local_operator.tui import images as images_mod
+from local_operator.tui import status_command as status_command_mod
 from local_operator.tui import supplements as supplement_mod
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.ask_open_policy import (
@@ -5219,6 +5220,10 @@ class OperatorApp(App[None]):
         self._session: SessionProtocol | None = None
         self._controller: EventController | None = None
         self._status: StatusLine | None = None
+        #: The ``(command, interval)`` the status-command timer was armed with,
+        #: ``None`` when no command is configured (`_arm_status_command`).
+        self._status_command_armed: tuple[str, int] | None = None
+        self._status_command_timer: Timer | None = None
         #: The park reason this app has already announced, so a 5-second poll
         #: raises one card per episode rather than holding the toast slot
         #: forever (see `_poll_tunnel_park`).
@@ -12793,6 +12798,10 @@ class OperatorApp(App[None]):
         # sidebar — the state the leak was reported from — stops reaping
         # entirely and keeps every runtime they ever clicked.
         self.set_interval(SIDEBAR_IDLE_SWEEP_S, self._sweep_idle_sidebar_sources)
+        # The operator's status command (``display.composer.command``): armed
+        # here for its first run and re-armed by `_apply_composer_settings`
+        # whenever the command or its interval moves.
+        self._arm_status_command()
 
         # Await the session in a worker so the app paints first.
         self.run_worker(self._boot_session(), thread=False, group="session")
@@ -47578,8 +47587,79 @@ class OperatorApp(App[None]):
             )
         except Exception:  # noqa: BLE001 — cosmetic; must never fail a boot
             logger.debug("composer settings: widget display not applied", exc_info=True)
+        self._arm_status_command()
         if self._status is not None:
             self._status.refresh()
+
+    def _arm_status_command(self) -> None:
+        """(Re)arm the status-command timer from the stored settings.
+
+        Idempotent like its caller: an unchanged ``(command, interval)`` pair
+        leaves the running timer alone, so the repaint every unrelated
+        ``display.composer.*`` edit triggers does not also reset the cadence
+        or fork a shell. A changed pair stops the old timer, clears a stale
+        segment when the command was removed, and runs the new command at once
+        — waiting a full interval to see whether an edit worked is how a user
+        concludes it did not.
+        """
+        command = str(settings_get("display.composer.command", "") or "").strip()
+        interval = status_command_mod.clamp_interval(
+            settings_get("display.composer.command_interval", status_command_mod.DEFAULT_INTERVAL_S)
+        )
+        armed = (command, interval) if command else None
+        if armed == self._status_command_armed:
+            return
+        self._status_command_armed = armed
+        if self._status_command_timer is not None:
+            self._status_command_timer.stop()
+            self._status_command_timer = None
+        if armed is None:
+            if self._status is not None:
+                self._status.update(custom="")
+            return
+        self._status_command_timer = self.set_interval(interval, self._tick_status_command)
+        self._tick_status_command()
+
+    def _tick_status_command(self) -> None:
+        """Interval callback: run the status command in its exclusive worker.
+
+        ``exclusive=True`` cancels a run still in flight when the next tick
+        lands, and the runner reaps the cancelled child's process group, so a
+        script slower than its interval never stacks shells.
+        """
+        if self._status_command_armed is None:
+            return
+        command = self._status_command_armed[0]
+        self.run_worker(
+            self._status_command_worker(command),
+            thread=False,
+            group="status-command",
+            exclusive=True,
+        )
+
+    async def _status_command_worker(self, command: str) -> None:
+        status = self._status
+        if status is None:
+            return
+        facts = status.command_facts()
+        spec = _effective_spec(self._session)
+        payload = status_command_mod.build_payload(
+            session_id=str(getattr(self._session, "session_id", "") or ""),
+            cwd=os.getcwd(),
+            provider=str(getattr(spec, "provider", "") or ""),
+            model_id=str(getattr(spec, "model_id", "") or ""),
+            model_label=str(facts["model_label"]),
+            context_tokens=int(cast(int, facts["context_tokens"])),
+            context_window=int(cast(int, facts["context_window"])),
+            cost=str(facts["cost"]),
+            version=welcome_mod.app_version(),
+        )
+        line = await status_command_mod.run(command, payload, cwd=os.getcwd())
+        # The command may have been changed or removed while this run was in
+        # flight; its output must not overwrite the newer state.
+        if self._status_command_armed is None or self._status_command_armed[0] != command:
+            return
+        status.update(custom=line)
 
     def action_keymap_new_session(self) -> None:
         """The remappable "new session" hotkey — ``ctrl+n`` unless remapped.
