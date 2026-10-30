@@ -1,0 +1,95 @@
+[
+ {
+  "label": "main-hi-control-populated-deeplink",
+  "locale": "hi",
+  "mode": "populated",
+  "screen": "deeplink",
+  "configLanguage": "hi",
+  "lang": "en",
+  "dir": "ltr",
+  "firstContent": {
+   "t": 1037,
+   "lang": "en",
+   "dir": "ltr",
+   "text": "‹ connecting to session… ↑"
+  },
+  "firstVerdict": "english",
+  "frames": 115,
+  "framesBeforeContent": 2,
+  "contentFrames": 113,
+  "englishFrames": 113,
+  "firstEnglishAt": 1037,
+  "englishBeforeContent": 0,
+  "settledText": "‹ connecting to session… ↑",
+  "chunks": [],
+  "chunkResource": null,
+  "settle": {
+   "quietMs": 905,
+   "waitedMs": 916,
+   "samples": 4,
+   "capped": false
+  }
+ },
+ {
+  "label": "main-hi-control-populated-list",
+  "locale": "hi",
+  "mode": "populated",
+  "screen": "list",
+  "configLanguage": "hi",
+  "lang": "en",
+  "dir": "ltr",
+  "firstContent": {
+   "t": 2848,
+   "lang": "en",
+   "dir": "ltr",
+   "text": "Conversations All Needs you · 0 Unread · 0 ＋ New"
+  },
+  "firstVerdict": "english",
+  "frames": 100,
+  "framesBeforeContent": 11,
+  "contentFrames": 89,
+  "englishFrames": 89,
+  "firstEnglishAt": 2848,
+  "englishBeforeContent": 0,
+  "settledText": "Conversations All Needs you · 0 Unread · 0 ＋ New",
+  "chunks": [],
+  "chunkResource": null,
+  "settle": {
+   "quietMs": 1102,
+   "waitedMs": 1159,
+   "samples": 5,
+   "capped": false
+  }
+ },
+ {
+  "label": "main-hi-control-populated-settings",
+  "locale": "hi",
+  "mode": "populated",
+  "screen": "settings",
+  "configLanguage": "hi",
+  "lang": "en",
+  "dir": "ltr",
+  "firstContent": {
+   "t": 4383,
+   "lang": "en",
+   "dir": "ltr",
+   "text": "Back Computer settings Changes apply only to this computer. Loading account routing…"
+  },
+  "firstVerdict": "english",
+  "frames": 52,
+  "framesBeforeContent": 3,
+  "contentFrames": 49,
+  "englishFrames": 49,
+  "firstEnglishAt": 4383,
+  "englishBeforeContent": 0,
+  "settledText": "Back Computer settings Changes apply only to this computer. account selection policy Chooses eligible sibling accounts within the same provider and credential tier. A compatible, unexpired lease from a successful request takes priority for every policy; it does not guarantee a cache hit. Reset soonest prefers the nearest weekly refill, then the five-hour refill within one-minute ties. An explicit policy overrides the legacy usage-aware account pick setting. Reset soonest Most headroom Fair spread Prefer the nearest included-plan reset; spread ties and unknown reports deterministically. Default for new configurations. Save policy",
+  "chunks": [],
+  "chunkResource": null,
+  "settle": {
+   "quietMs": 1116,
+   "waitedMs": 1117,
+   "samples": 5,
+   "capped": false
+  }
+ }
+]

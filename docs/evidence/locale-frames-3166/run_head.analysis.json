@@ -1,0 +1,639 @@
+[
+ {
+  "label": "hi-populated-deeplink",
+  "locale": "hi",
+  "mode": "populated",
+  "screen": "deeplink",
+  "configLanguage": "hi",
+  "lang": "hi",
+  "dir": "ltr",
+  "firstContent": {
+   "t": 812,
+   "lang": "hi",
+   "dir": "ltr",
+   "text": "‹ सत्र से कनेक्ट हो रहा है… ↑"
+  },
+  "firstVerdict": "locale",
+  "frames": 121,
+  "framesBeforeContent": 2,
+  "contentFrames": 119,
+  "englishFrames": 0,
+  "firstEnglishAt": null,
+  "englishBeforeContent": 0,
+  "settledText": "‹ Locale evidence A ऑनलाइन · कार्यरत · 40s ⋮ Which locale is on screen right now? This line rides the transcript wire rather than the bundled owned copy, so it stays English by design. ⢿ running the locale evidence pass 40s model ■ ↑",
+  "chunks": [
+   {
+    "url": "bundled.hi.gen-DIE_q6ar.js",
+    "status": 200,
+    "mimeType": "text/javascript",
+    "fromDiskCache": false,
+    "fromServiceWorker": false,
+    "encodedDataLength": 44260
+   }
+  ],
+  "chunkResource": {
+   "path": "/assets/bundled.hi.gen-DIE_q6ar.js",
+   "name": "bundled.hi.gen-DIE_q6ar.js",
+   "startTime": 457,
+   "responseEnd": 466,
+   "transferSize": 44308,
+   "encodedBodySize": 44008,
+   "decodedBodySize": 44008,
+   "status": 200
+  },
+  "settle": {
+   "quietMs": 1118,
+   "waitedMs": 1124,
+   "samples": 5,
+   "capped": false
+  }
+ },
+ {
+  "label": "hi-populated-list",
+  "locale": "hi",
+  "mode": "populated",
+  "screen": "list",
+  "configLanguage": "hi",
+  "lang": "hi",
+  "dir": "ltr",
+  "firstContent": {
+   "t": 2609,
+   "lang": "hi",
+   "dir": "ltr",
+   "text": "बातचीत सभी आपका ध्यान चाहिए · 0 अपठित · 0 ＋ नया"
+  },
+  "firstVerdict": "locale",
+  "frames": 96,
+  "framesBeforeContent": 4,
+  "contentFrames": 92,
+  "englishFrames": 0,
+  "firstEnglishAt": null,
+  "englishBeforeContent": 0,
+  "settledText": "बातचीत सभी आपका ध्यान चाहिए · 0 अपठित · 0 सक्रिय Locale evidence B ⋮ Locale evidence A कार्यरत ⋮ ＋ नया",
+  "chunks": [
+   {
+    "url": "bundled.hi.gen-DIE_q6ar.js",
+    "status": 200,
+    "mimeType": "text/javascript",
+    "fromDiskCache": false,
+    "fromServiceWorker": false,
+    "encodedDataLength": 44260
+   }
+  ],
+  "chunkResource": {
+   "path": "/assets/bundled.hi.gen-DIE_q6ar.js",
+   "name": "bundled.hi.gen-DIE_q6ar.js",
+   "startTime": 2305,
+   "responseEnd": 2310,
+   "transferSize": 44308,
+   "encodedBodySize": 44008,
+   "decodedBodySize": 44008,
+   "status": 200
+  },
+  "settle": {
+   "quietMs": 905,
+   "waitedMs": 1000,
+   "samples": 4,
+   "capped": false
+  }
+ },
+ {
+  "label": "hi-populated-settings",
+  "locale": "hi",
+  "mode": "populated",
+  "screen": "settings",
+  "configLanguage": "hi",
+  "lang": "hi",
+  "dir": "ltr",
+  "firstContent": {
+   "t": 943,
+   "lang": "hi",
+   "dir": "ltr",
+   "text": "वापस कंप्यूटर सेटिंग बदलाव सिर्फ़ इस कंप्यूटर पर लागू होते हैं। खाता रूटिंग लोड हो रही है…"
+  },
+  "firstVerdict": "locale",
+  "frames": 143,
+  "framesBeforeContent": 4,
+  "contentFrames": 139,
+  "englishFrames": 0,
+  "firstEnglishAt": null,
+  "englishBeforeContent": 0,
+  "settledText": "वापस कंप्यूटर सेटिंग बदलाव सिर्फ़ इस कंप्यूटर पर लागू होते हैं। account selection policy Chooses eligible sibling accounts within the same provider and credential tier. A compatible, unexpired lease from a successful request takes priority for every policy; it does not guarantee a cache hit. Reset soonest prefers the nearest weekly refill, then the five-hour refill within one-minute ties. An explicit policy overrides the legacy usage-aware account pick setting. Reset soonest Most headroom Fair spread Prefer the nearest included-plan reset; spread ties and unknown reports deterministically. Default for new configurations. नीति सहेजें",
+  "chunks": [
+   {
+    "url": "bundled.hi.gen-DIE_q6ar.js",
+    "status": 200,
+    "mimeType": "text/javascript",
+    "fromDiskCache": false,
+    "fromServiceWorker": false,
+    "encodedDataLength": 44260
+   }
+  ],
+  "chunkResource": {
+   "path": "/assets/bundled.hi.gen-DIE_q6ar.js",
+   "name": "bundled.hi.gen-DIE_q6ar.js",
+   "startTime": 912,
+   "responseEnd": 921,
+   "transferSize": 44308,
+   "encodedBodySize": 44008,
+   "decodedBodySize": 44008,
+   "status": 200
+  },
+  "settle": {
+   "quietMs": 1074,
+   "waitedMs": 1120,
+   "samples": 5,
+   "capped": false
+  }
+ },
+ {
+  "label": "hi-empty-list",
+  "locale": "hi",
+  "mode": "empty",
+  "screen": "list",
+  "configLanguage": "hi",
+  "lang": "hi",
+  "dir": "ltr",
+  "firstContent": {
+   "t": 580,
+   "lang": "hi",
+   "dir": "ltr",
+   "text": "बातचीत सभी आपका ध्यान चाहिए · 0 अपठित · 0 ＋ नया"
+  },
+  "firstVerdict": "locale",
+  "frames": 171,
+  "framesBeforeContent": 6,
+  "contentFrames": 165,
+  "englishFrames": 0,
+  "firstEnglishAt": null,
+  "englishBeforeContent": 0,
+  "settledText": "बातचीत अभी कोई बातचीत नहीं “नया” दबाएँ या अपने कंप्यूटर पर Local Operator से शुरू करें ＋ नया",
+  "chunks": [
+   {
+    "url": "bundled.hi.gen-DIE_q6ar.js",
+    "status": 200,
+    "mimeType": "text/javascript",
+    "fromDiskCache": false,
+    "fromServiceWorker": false,
+    "encodedDataLength": 44260
+   }
+  ],
+  "chunkResource": {
+   "path": "/assets/bundled.hi.gen-DIE_q6ar.js",
+   "name": "bundled.hi.gen-DIE_q6ar.js",
+   "startTime": 224,
+   "responseEnd": 233,
+   "transferSize": 44308,
+   "encodedBodySize": 44008,
+   "decodedBodySize": 44008,
+   "status": 200
+  },
+  "settle": {
+   "quietMs": 1112,
+   "waitedMs": 1124,
+   "samples": 5,
+   "capped": false
+  }
+ },
+ {
+  "label": "hi-deadapi-list",
+  "locale": "hi",
+  "mode": "deadapi",
+  "screen": "list",
+  "configLanguage": "hi",
+  "lang": "hi",
+  "dir": "ltr",
+  "firstContent": {
+   "t": 2518,
+   "lang": "hi",
+   "dir": "ltr",
+   "text": "बातचीत सभी आपका ध्यान चाहिए · 0 अपठित · 0 ＋ नया"
+  },
+  "firstVerdict": "locale",
+  "frames": 133,
+  "framesBeforeContent": 6,
+  "contentFrames": 127,
+  "englishFrames": 0,
+  "firstEnglishAt": null,
+  "englishBeforeContent": 0,
+  "settledText": "बातचीत सभी आपका ध्यान चाहिए · 0 अपठित · 0 ＋ नया",
+  "chunks": [
+   {
+    "url": "bundled.hi.gen-DIE_q6ar.js",
+    "status": 200,
+    "mimeType": "text/javascript",
+    "fromDiskCache": false,
+    "fromServiceWorker": false,
+    "encodedDataLength": 44260
+   }
+  ],
+  "chunkResource": {
+   "path": "/assets/bundled.hi.gen-DIE_q6ar.js",
+   "name": "bundled.hi.gen-DIE_q6ar.js",
+   "startTime": 1522,
+   "responseEnd": 1550,
+   "transferSize": 44308,
+   "encodedBodySize": 44008,
+   "decodedBodySize": 44008,
+   "status": 200
+  },
+  "settle": {
+   "quietMs": 1062,
+   "waitedMs": 1063,
+   "samples": 5,
+   "capped": false
+  }
+ },
+ {
+  "label": "hi-deadapi-settings",
+  "locale": "hi",
+  "mode": "deadapi",
+  "screen": "settings",
+  "configLanguage": "hi",
+  "lang": "hi",
+  "dir": "ltr",
+  "firstContent": {
+   "t": 1018,
+   "lang": "hi",
+   "dir": "ltr",
+   "text": "वापस कंप्यूटर सेटिंग बदलाव सिर्फ़ इस कंप्यूटर पर लागू होते हैं। खाता रूटिंग लोड हो रही है…"
+  },
+  "firstVerdict": "locale",
+  "frames": 172,
+  "framesBeforeContent": 5,
+  "contentFrames": 167,
+  "englishFrames": 0,
+  "firstEnglishAt": null,
+  "englishBeforeContent": 0,
+  "settledText": "वापस कंप्यूटर सेटिंग बदलाव सिर्फ़ इस कंप्यूटर पर लागू होते हैं। खाता रूटिंग लोड नहीं हो सकी। कनेक्शन जाँचें और फिर कोशिश करें। फिर कोशिश करें",
+  "chunks": [
+   {
+    "url": "bundled.hi.gen-DIE_q6ar.js",
+    "status": 200,
+    "mimeType": "text/javascript",
+    "fromDiskCache": false,
+    "fromServiceWorker": false,
+    "encodedDataLength": 44260
+   }
+  ],
+  "chunkResource": {
+   "path": "/assets/bundled.hi.gen-DIE_q6ar.js",
+   "name": "bundled.hi.gen-DIE_q6ar.js",
+   "startTime": 780,
+   "responseEnd": 811,
+   "transferSize": 44308,
+   "encodedBodySize": 44008,
+   "decodedBodySize": 44008,
+   "status": 200
+  },
+  "settle": {
+   "quietMs": 1141,
+   "waitedMs": 1145,
+   "samples": 5,
+   "capped": false
+  }
+ },
+ {
+  "label": "es-populated-deeplink",
+  "locale": "es",
+  "mode": "populated",
+  "screen": "deeplink",
+  "configLanguage": "es",
+  "lang": "es",
+  "dir": "ltr",
+  "firstContent": {
+   "t": 1042,
+   "lang": "es",
+   "dir": "ltr",
+   "text": "‹ conectando con la sesión… ↑"
+  },
+  "firstVerdict": "locale",
+  "frames": 76,
+  "framesBeforeContent": 7,
+  "contentFrames": 69,
+  "englishFrames": 0,
+  "firstEnglishAt": null,
+  "englishBeforeContent": 0,
+  "settledText": "‹ Locale evidence A En línea · Trabajando · 39s ⋮ Which locale is on screen right now? This line rides the transcript wire rather than the bundled owned copy, so it stays English by design. ⡿ running the locale evidence pass 39s model ■ ↑",
+  "chunks": [
+   {
+    "url": "bundled.es.gen-CUF1LkYQ.js",
+    "status": 200,
+    "mimeType": "text/javascript",
+    "fromDiskCache": false,
+    "fromServiceWorker": false,
+    "encodedDataLength": 30891
+   }
+  ],
+  "chunkResource": {
+   "path": "/assets/bundled.es.gen-CUF1LkYQ.js",
+   "name": "bundled.es.gen-CUF1LkYQ.js",
+   "startTime": 592,
+   "responseEnd": 608,
+   "transferSize": 30939,
+   "encodedBodySize": 30639,
+   "decodedBodySize": 30639,
+   "status": 200
+  },
+  "settle": {
+   "quietMs": 902,
+   "waitedMs": 961,
+   "samples": 4,
+   "capped": false
+  }
+ },
+ {
+  "label": "es-populated-list",
+  "locale": "es",
+  "mode": "populated",
+  "screen": "list",
+  "configLanguage": "es",
+  "lang": "es",
+  "dir": "ltr",
+  "firstContent": {
+   "t": 2664,
+   "lang": "es",
+   "dir": "ltr",
+   "text": "Conversaciones Todas Te necesita · 0 Sin leer · 0 ＋ Nuevo"
+  },
+  "firstVerdict": "locale",
+  "frames": 84,
+  "framesBeforeContent": 7,
+  "contentFrames": 77,
+  "englishFrames": 0,
+  "firstEnglishAt": null,
+  "englishBeforeContent": 0,
+  "settledText": "Conversaciones Todas Te necesita · 0 Sin leer · 0 Activas Locale evidence B ⋮ Locale evidence A Trabajando ⋮ ＋ Nuevo",
+  "chunks": [
+   {
+    "url": "bundled.es.gen-CUF1LkYQ.js",
+    "status": 200,
+    "mimeType": "text/javascript",
+    "fromDiskCache": false,
+    "fromServiceWorker": false,
+    "encodedDataLength": 30891
+   }
+  ],
+  "chunkResource": {
+   "path": "/assets/bundled.es.gen-CUF1LkYQ.js",
+   "name": "bundled.es.gen-CUF1LkYQ.js",
+   "startTime": 2001,
+   "responseEnd": 2030,
+   "transferSize": 30939,
+   "encodedBodySize": 30639,
+   "decodedBodySize": 30639,
+   "status": 200
+  },
+  "settle": {
+   "quietMs": 1009,
+   "waitedMs": 1020,
+   "samples": 5,
+   "capped": false
+  }
+ },
+ {
+  "label": "es-populated-settings",
+  "locale": "es",
+  "mode": "populated",
+  "screen": "settings",
+  "configLanguage": "es",
+  "lang": "es",
+  "dir": "ltr",
+  "firstContent": {
+   "t": 334,
+   "lang": "es",
+   "dir": "ltr",
+   "text": "Volver Ajustes de la máquina Los cambios solo se aplican a esta máquina. Cargando el enrutamiento de cuentas…"
+  },
+  "firstVerdict": "locale",
+  "frames": 158,
+  "framesBeforeContent": 7,
+  "contentFrames": 151,
+  "englishFrames": 0,
+  "firstEnglishAt": null,
+  "englishBeforeContent": 0,
+  "settledText": "Volver Ajustes de la máquina Los cambios solo se aplican a esta máquina. account selection policy Chooses eligible sibling accounts within the same provider and credential tier. A compatible, unexpired lease from a successful request takes priority for every policy; it does not guarantee a cache hit. Reset soonest prefers the nearest weekly refill, then the five-hour refill within one-minute ties. An explicit policy overrides the legacy usage-aware account pick setting. Reset soonest Most headroom Fair spread Prefer the nearest included-plan reset; spread ties and unknown reports deterministically. Default for new configurations. Guardar política",
+  "chunks": [
+   {
+    "url": "bundled.es.gen-CUF1LkYQ.js",
+    "status": 200,
+    "mimeType": "text/javascript",
+    "fromDiskCache": false,
+    "fromServiceWorker": false,
+    "encodedDataLength": 30891
+   }
+  ],
+  "chunkResource": {
+   "path": "/assets/bundled.es.gen-CUF1LkYQ.js",
+   "name": "bundled.es.gen-CUF1LkYQ.js",
+   "startTime": 233,
+   "responseEnd": 244,
+   "transferSize": 30939,
+   "encodedBodySize": 30639,
+   "decodedBodySize": 30639,
+   "status": 200
+  },
+  "settle": {
+   "quietMs": 1075,
+   "waitedMs": 1076,
+   "samples": 5,
+   "capped": false
+  }
+ },
+ {
+  "label": "es-empty-list",
+  "locale": "es",
+  "mode": "empty",
+  "screen": "list",
+  "configLanguage": "es",
+  "lang": "es",
+  "dir": "ltr",
+  "firstContent": {
+   "t": 2246,
+   "lang": "es",
+   "dir": "ltr",
+   "text": "Conversaciones Todas Te necesita · 0 Sin leer · 0 ＋ Nuevo"
+  },
+  "firstVerdict": "locale",
+  "frames": 91,
+  "framesBeforeContent": 5,
+  "contentFrames": 86,
+  "englishFrames": 0,
+  "firstEnglishAt": null,
+  "englishBeforeContent": 0,
+  "settledText": "Conversaciones Todas Te necesita · 0 Sin leer · 0 ＋ Nuevo",
+  "chunks": [
+   {
+    "url": "bundled.es.gen-CUF1LkYQ.js",
+    "status": 200,
+    "mimeType": "text/javascript",
+    "fromDiskCache": false,
+    "fromServiceWorker": false,
+    "encodedDataLength": 30891
+   }
+  ],
+  "chunkResource": {
+   "path": "/assets/bundled.es.gen-CUF1LkYQ.js",
+   "name": "bundled.es.gen-CUF1LkYQ.js",
+   "startTime": 901,
+   "responseEnd": 913,
+   "transferSize": 30939,
+   "encodedBodySize": 30639,
+   "decodedBodySize": 30639,
+   "status": 200
+  },
+  "settle": {
+   "quietMs": 1060,
+   "waitedMs": 1084,
+   "samples": 5,
+   "capped": false
+  }
+ },
+ {
+  "label": "es-deadapi-list",
+  "locale": "es",
+  "mode": "deadapi",
+  "screen": "list",
+  "configLanguage": "es",
+  "lang": "es",
+  "dir": "ltr",
+  "firstContent": {
+   "t": 2148,
+   "lang": "es",
+   "dir": "ltr",
+   "text": "Conversaciones Todas Te necesita · 0 Sin leer · 0 ＋ Nuevo"
+  },
+  "firstVerdict": "locale",
+  "frames": 138,
+  "framesBeforeContent": 5,
+  "contentFrames": 133,
+  "englishFrames": 0,
+  "firstEnglishAt": null,
+  "englishBeforeContent": 0,
+  "settledText": "Conversaciones Todas Te necesita · 0 Sin leer · 0 ＋ Nuevo",
+  "chunks": [
+   {
+    "url": "bundled.es.gen-CUF1LkYQ.js",
+    "status": 200,
+    "mimeType": "text/javascript",
+    "fromDiskCache": false,
+    "fromServiceWorker": false,
+    "encodedDataLength": 30891
+   }
+  ],
+  "chunkResource": {
+   "path": "/assets/bundled.es.gen-CUF1LkYQ.js",
+   "name": "bundled.es.gen-CUF1LkYQ.js",
+   "startTime": 1480,
+   "responseEnd": 1503,
+   "transferSize": 30939,
+   "encodedBodySize": 30639,
+   "decodedBodySize": 30639,
+   "status": 200
+  },
+  "settle": {
+   "quietMs": 1078,
+   "waitedMs": 1449,
+   "samples": 5,
+   "capped": false
+  }
+ },
+ {
+  "label": "es-deadapi-settings",
+  "locale": "es",
+  "mode": "deadapi",
+  "screen": "settings",
+  "configLanguage": "es",
+  "lang": "es",
+  "dir": "ltr",
+  "firstContent": {
+   "t": 1226,
+   "lang": "es",
+   "dir": "ltr",
+   "text": "Volver Ajustes de la máquina Los cambios solo se aplican a esta máquina. Cargando el enrutamiento de cuentas…"
+  },
+  "firstVerdict": "locale",
+  "frames": 170,
+  "framesBeforeContent": 5,
+  "contentFrames": 165,
+  "englishFrames": 0,
+  "firstEnglishAt": null,
+  "englishBeforeContent": 0,
+  "settledText": "Volver Ajustes de la máquina Los cambios solo se aplican a esta máquina. No se pudo cargar el enrutamiento de cuentas. Comprueba la conexión y vuelve a intentarlo. Reintentar",
+  "chunks": [
+   {
+    "url": "bundled.es.gen-CUF1LkYQ.js",
+    "status": 200,
+    "mimeType": "text/javascript",
+    "fromDiskCache": false,
+    "fromServiceWorker": false,
+    "encodedDataLength": 30891
+   }
+  ],
+  "chunkResource": {
+   "path": "/assets/bundled.es.gen-CUF1LkYQ.js",
+   "name": "bundled.es.gen-CUF1LkYQ.js",
+   "startTime": 733,
+   "responseEnd": 870,
+   "transferSize": 30939,
+   "encodedBodySize": 30639,
+   "decodedBodySize": 30639,
+   "status": 200
+  },
+  "settle": {
+   "quietMs": 1508,
+   "waitedMs": 1514,
+   "samples": 4,
+   "capped": false
+  }
+ },
+ {
+  "label": "hi-slowchunk-populated-deeplink",
+  "locale": "hi",
+  "mode": "populated",
+  "screen": "deeplink",
+  "configLanguage": "hi",
+  "lang": "hi",
+  "dir": "ltr",
+  "firstContent": {
+   "t": 3604,
+   "lang": "en",
+   "dir": "ltr",
+   "text": "‹ connecting to session… ↑"
+  },
+  "firstVerdict": "english",
+  "frames": 161,
+  "framesBeforeContent": 40,
+  "contentFrames": 121,
+  "englishFrames": 20,
+  "firstEnglishAt": 3604,
+  "englishBeforeContent": 0,
+  "settledText": "‹ Locale evidence A ऑनलाइन · कार्यरत · 42s ⋮ Which locale is on screen right now? This line rides the transcript wire rather than the bundled owned copy, so it stays English by design. ⣻ running the locale evidence pass 42s model ■ ↑",
+  "chunks": [
+   {
+    "url": "bundled.hi.gen-DIE_q6ar.js",
+    "status": 200,
+    "mimeType": "text/javascript",
+    "fromDiskCache": false,
+    "fromServiceWorker": false,
+    "encodedDataLength": 44260
+   }
+  ],
+  "chunkResource": {
+   "path": "/assets/bundled.hi.gen-DIE_q6ar.js",
+   "name": "bundled.hi.gen-DIE_q6ar.js",
+   "startTime": 1221,
+   "responseEnd": 5778,
+   "transferSize": 44308,
+   "encodedBodySize": 44008,
+   "decodedBodySize": 44008,
+   "status": 200
+  },
+  "settle": {
+   "quietMs": 1119,
+   "waitedMs": 1120,
+   "samples": 5,
+   "capped": false
+  }
+ }
+]

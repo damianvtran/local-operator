@@ -1,0 +1,51 @@
+[
+ {
+  "label": "hi-slowchunk2-populated-deeplink",
+  "locale": "hi",
+  "mode": "populated",
+  "screen": "deeplink",
+  "configLanguage": "hi",
+  "lang": "hi",
+  "dir": "ltr",
+  "firstContent": {
+   "t": 1841,
+   "lang": "en",
+   "dir": "ltr",
+   "text": "‹ connecting to session… ↑"
+  },
+  "firstVerdict": "english",
+  "frames": 374,
+  "framesBeforeContent": 41,
+  "contentFrames": 333,
+  "englishFrames": 33,
+  "firstEnglishAt": 1841,
+  "englishBeforeContent": 0,
+  "settledText": "‹ Locale evidence A ऑनलाइन · कार्यरत · 49s ⋮ Which locale is on screen right now? This line rides the transcript wire rather than the bundled owned copy, so it stays English by design. ⣻ running the locale evidence pass 49s model ■ ↑",
+  "chunks": [
+   {
+    "url": "bundled.hi.gen-DIE_q6ar.js",
+    "status": 200,
+    "mimeType": "text/javascript",
+    "fromDiskCache": false,
+    "fromServiceWorker": false,
+    "encodedDataLength": 44260
+   }
+  ],
+  "chunkResource": {
+   "path": "/assets/bundled.hi.gen-DIE_q6ar.js",
+   "name": "bundled.hi.gen-DIE_q6ar.js",
+   "startTime": 232,
+   "responseEnd": 5002,
+   "transferSize": 44308,
+   "encodedBodySize": 44008,
+   "decodedBodySize": 44008,
+   "status": 200
+  },
+  "settle": {
+   "quietMs": 1060,
+   "waitedMs": 1076,
+   "samples": 5,
+   "capped": false
+  }
+ }
+]

@@ -1,0 +1,125 @@
+[
+ {
+  "locale": "hi",
+  "mode": "populated",
+  "port": 4801,
+  "screens": [
+   {
+    "name": "deeplink",
+    "hash": "/s/locale-a",
+    "settle_s": 4.5,
+    "shot_first": 6000
+   },
+   {
+    "name": "list",
+    "hash": "/",
+    "settle_s": 5.5
+   },
+   {
+    "name": "settings",
+    "hash": "/settings/account-routing",
+    "settle_s": 5.5
+   }
+  ]
+ },
+ {
+  "locale": "hi",
+  "mode": "empty",
+  "port": 4802,
+  "screens": [
+   {
+    "name": "list",
+    "hash": "/",
+    "settle_s": 5.5
+   }
+  ]
+ },
+ {
+  "locale": "hi",
+  "mode": "deadapi",
+  "port": 4803,
+  "screens": [
+   {
+    "name": "list",
+    "hash": "/",
+    "settle_s": 6.5
+   },
+   {
+    "name": "settings",
+    "hash": "/settings/account-routing",
+    "settle_s": 6.5
+   }
+  ]
+ },
+ {
+  "locale": "es",
+  "mode": "populated",
+  "port": 4804,
+  "screens": [
+   {
+    "name": "deeplink",
+    "hash": "/s/locale-a",
+    "settle_s": 4.5,
+    "shot_first": 6000
+   },
+   {
+    "name": "list",
+    "hash": "/",
+    "settle_s": 5.5
+   },
+   {
+    "name": "settings",
+    "hash": "/settings/account-routing",
+    "settle_s": 5.5
+   }
+  ]
+ },
+ {
+  "locale": "es",
+  "mode": "empty",
+  "port": 4805,
+  "screens": [
+   {
+    "name": "list",
+    "hash": "/",
+    "settle_s": 5.5
+   }
+  ]
+ },
+ {
+  "locale": "es",
+  "mode": "deadapi",
+  "port": 4806,
+  "screens": [
+   {
+    "name": "list",
+    "hash": "/",
+    "settle_s": 6.5
+   },
+   {
+    "name": "settings",
+    "hash": "/settings/account-routing",
+    "settle_s": 6.5
+   }
+  ]
+ },
+ {
+  "locale": "hi",
+  "mode": "populated",
+  "port": 4807,
+  "tag": "hi-slowchunk",
+  "slow_chunk": "hi",
+  "slow_ms": 2500,
+  "screens": [
+   {
+    "name": "deeplink",
+    "hash": "/s/locale-a",
+    "settle_s": 9.5,
+    "mid_ms": [
+     2400,
+     7000
+    ]
+   }
+  ]
+ }
+]

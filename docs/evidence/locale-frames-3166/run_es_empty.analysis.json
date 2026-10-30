@@ -1,0 +1,100 @@
+[
+ {
+  "label": "es-empty-long-empty-list",
+  "locale": "es",
+  "mode": "empty",
+  "screen": "list",
+  "configLanguage": "es",
+  "lang": "es",
+  "dir": "ltr",
+  "firstContent": {
+   "t": 605,
+   "lang": "es",
+   "dir": "ltr",
+   "text": "Conversaciones Todas Te necesita · 0 Sin leer · 0 ＋ Nuevo"
+  },
+  "firstVerdict": "locale",
+  "frames": 331,
+  "framesBeforeContent": 3,
+  "contentFrames": 328,
+  "englishFrames": 0,
+  "firstEnglishAt": null,
+  "englishBeforeContent": 0,
+  "settledText": "Conversaciones Aún no hay conversaciones Empieza una con el botón Nuevo, o desde Local Operator en tu máquina ＋ Nuevo",
+  "chunks": [
+   {
+    "url": "bundled.es.gen-CUF1LkYQ.js",
+    "status": 200,
+    "mimeType": "text/javascript",
+    "fromDiskCache": false,
+    "fromServiceWorker": false,
+    "encodedDataLength": 30891
+   }
+  ],
+  "chunkResource": {
+   "path": "/assets/bundled.es.gen-CUF1LkYQ.js",
+   "name": "bundled.es.gen-CUF1LkYQ.js",
+   "startTime": 214,
+   "responseEnd": 220,
+   "transferSize": 30939,
+   "encodedBodySize": 30639,
+   "decodedBodySize": 30639,
+   "status": 200
+  },
+  "settle": {
+   "quietMs": 1094,
+   "waitedMs": 1113,
+   "samples": 5,
+   "capped": false
+  }
+ },
+ {
+  "label": "hi-empty-long-empty-list",
+  "locale": "hi",
+  "mode": "empty",
+  "screen": "list",
+  "configLanguage": "hi",
+  "lang": "hi",
+  "dir": "ltr",
+  "firstContent": {
+   "t": 703,
+   "lang": "hi",
+   "dir": "ltr",
+   "text": "बातचीत सभी आपका ध्यान चाहिए · 0 अपठित · 0 ＋ नया"
+  },
+  "firstVerdict": "locale",
+  "frames": 322,
+  "framesBeforeContent": 7,
+  "contentFrames": 315,
+  "englishFrames": 0,
+  "firstEnglishAt": null,
+  "englishBeforeContent": 0,
+  "settledText": "बातचीत अभी कोई बातचीत नहीं “नया” दबाएँ या अपने कंप्यूटर पर Local Operator से शुरू करें ＋ नया",
+  "chunks": [
+   {
+    "url": "bundled.hi.gen-DIE_q6ar.js",
+    "status": 200,
+    "mimeType": "text/javascript",
+    "fromDiskCache": false,
+    "fromServiceWorker": false,
+    "encodedDataLength": 44260
+   }
+  ],
+  "chunkResource": {
+   "path": "/assets/bundled.hi.gen-DIE_q6ar.js",
+   "name": "bundled.hi.gen-DIE_q6ar.js",
+   "startTime": 220,
+   "responseEnd": 303,
+   "transferSize": 44308,
+   "encodedBodySize": 44008,
+   "decodedBodySize": 44008,
+   "status": 200
+  },
+  "settle": {
+   "quietMs": 1047,
+   "waitedMs": 1049,
+   "samples": 4,
+   "capped": false
+  }
+ }
+]

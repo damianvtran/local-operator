@@ -1,0 +1,26 @@
+[
+ {
+  "locale": "hi",
+  "mode": "populated",
+  "port": 4811,
+  "tag": "main-hi-control",
+  "screens": [
+   {
+    "name": "deeplink",
+    "hash": "/s/locale-a",
+    "settle_s": 4.5,
+    "shot_first": 6000
+   },
+   {
+    "name": "list",
+    "hash": "/",
+    "settle_s": 5.5
+   },
+   {
+    "name": "settings",
+    "hash": "/settings/account-routing",
+    "settle_s": 5.5
+   }
+  ]
+ }
+]
