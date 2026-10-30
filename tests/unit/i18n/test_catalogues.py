@@ -99,6 +99,11 @@ def test_shipped_wire_namespaces_exist() -> None:
         # locale ledger hashes do not move).
         "wire.errors.notifications",
         "wire.slash.notifications_page",
+        # The Team Bridge tool row (TUI card + phone projection): verbs, kind
+        # fallbacks, counts and outcome words keyed off `bridge_row` tokens.
+        # Its own namespace so no audited catalogue's hash moves; the
+        # translation wave lands its seven locales in a follow-up.
+        "wire.tool_rows.bridge",
     }
     for namespace in _PENDING_EXTRACTION:
         assert catalogues.load_catalogue("en", namespace) == {}
@@ -119,6 +124,7 @@ def test_shipped_wire_namespaces_exist() -> None:
     assert catalogues.load_catalogue("en", "wire.slash.library") != {}
     assert catalogues.load_catalogue("en", "wire.errors.notifications") != {}
     assert catalogues.load_catalogue("en", "wire.slash.notifications_page") != {}
+    assert catalogues.load_catalogue("en", "wire.tool_rows.bridge") != {}
     assert catalogues.load_catalogue("en", "wire.settings") != {}
     # The Aida cadence interval row is a small English-only addition carried in
     # its own `wire.*` namespace so already-audited `wire.settings` locale
