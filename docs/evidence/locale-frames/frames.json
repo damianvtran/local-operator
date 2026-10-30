@@ -1,0 +1,794 @@
+{
+ "captures": [
+  {
+   "case": "ru/populated",
+   "screen": "ru-populated-deeplink",
+   "configLanguageServer": "ru",
+   "documentLang": "ru",
+   "documentDir": "ltr",
+   "framesSampled": 65,
+   "contentFrames": 63,
+   "firstContentFrameMs": 635,
+   "firstContentLang": "ru",
+   "firstContentVerdict": "locale",
+   "firstContentText": "‹ подключение к сессии… ↑",
+   "framesBeforeFirstContent": 2,
+   "englishContentFrames": 0,
+   "firstEnglishFrameMs": null,
+   "lastEnglishFrameMs": null,
+   "settledText": "‹ Locale evidence A В сети · Работает · 40s ⋮ Which locale is on screen right now? This line rides the transcript wire rather than the bundled owned copy, so it stays English by design. ⣻ running the locale evidence pass 40s model ■ ↑",
+   "settle": {
+    "quietMs": 1005,
+    "waitedMs": 1006,
+    "samples": 4,
+    "capped": false
+   },
+   "localeChunkRequests": [
+    {
+     "file": "bundled.ru.gen-CAXLVLTN.js",
+     "status": 200,
+     "startMs": 333,
+     "endMs": 336,
+     "transferBytes": 40989,
+     "decodedBytes": 40689
+    }
+   ]
+  },
+  {
+   "case": "ru/populated",
+   "screen": "ru-populated-list",
+   "configLanguageServer": "ru",
+   "documentLang": "ru",
+   "documentDir": "ltr",
+   "framesSampled": 86,
+   "contentFrames": 82,
+   "firstContentFrameMs": 704,
+   "firstContentLang": "ru",
+   "firstContentVerdict": "locale",
+   "firstContentText": "Беседы Все Ждут вас · 0 Непрочитано · 0 ＋ Новая",
+   "framesBeforeFirstContent": 4,
+   "englishContentFrames": 0,
+   "firstEnglishFrameMs": null,
+   "lastEnglishFrameMs": null,
+   "settledText": "Беседы Все Ждут вас · 0 Непрочитано · 0 Активные Locale evidence B ⋮ Locale evidence A Работает ⋮ ＋ Новая",
+   "settle": {
+    "quietMs": 1049,
+    "waitedMs": 1055,
+    "samples": 4,
+    "capped": false
+   },
+   "localeChunkRequests": [
+    {
+     "file": "bundled.ru.gen-CAXLVLTN.js",
+     "status": 200,
+     "startMs": 227,
+     "endMs": 232,
+     "transferBytes": 40989,
+     "decodedBytes": 40689
+    }
+   ]
+  },
+  {
+   "case": "ru/populated",
+   "screen": "ru-populated-settings",
+   "configLanguageServer": "ru",
+   "documentLang": "ru",
+   "documentDir": "ltr",
+   "framesSampled": 99,
+   "contentFrames": 97,
+   "firstContentFrameMs": 602,
+   "firstContentLang": "ru",
+   "firstContentVerdict": "locale",
+   "firstContentText": "Назад Настройки компьютера Изменения применяются только к этому компьютеру. Загрузка маршрутизации аккаунтов…",
+   "framesBeforeFirstContent": 2,
+   "englishContentFrames": 0,
+   "firstEnglishFrameMs": null,
+   "lastEnglishFrameMs": null,
+   "settledText": "Назад Настройки компьютера Изменения применяются только к этому компьютеру. account selection policy Chooses eligible sibling accounts within the same provider and credential tier. A compatible, unexpired lease from a successful request takes priority for every policy; it does not guarantee a cache hit. Reset soonest prefers the nearest weekly refill, then the five-hour refill within one-minute ti",
+   "settle": {
+    "quietMs": 1004,
+    "waitedMs": 1006,
+    "samples": 4,
+    "capped": false
+   },
+   "localeChunkRequests": [
+    {
+     "file": "bundled.ru.gen-CAXLVLTN.js",
+     "status": 200,
+     "startMs": 169,
+     "endMs": 176,
+     "transferBytes": 40989,
+     "decodedBytes": 40689
+    }
+   ]
+  },
+  {
+   "case": "ru/empty",
+   "screen": "ru-empty-list",
+   "configLanguageServer": "ru",
+   "documentLang": "ru",
+   "documentDir": "ltr",
+   "framesSampled": 80,
+   "contentFrames": 75,
+   "firstContentFrameMs": 1057,
+   "firstContentLang": "ru",
+   "firstContentVerdict": "locale",
+   "firstContentText": "Беседы Все Ждут вас · 0 Непрочитано · 0 ＋ Новая",
+   "framesBeforeFirstContent": 5,
+   "englishContentFrames": 0,
+   "firstEnglishFrameMs": null,
+   "lastEnglishFrameMs": null,
+   "settledText": "Беседы Бесед пока нет Начните беседу кнопкой «Новая» или в Local Operator на компьютере ＋ Новая",
+   "settle": {
+    "quietMs": 1256,
+    "waitedMs": 1257,
+    "samples": 5,
+    "capped": false
+   },
+   "localeChunkRequests": [
+    {
+     "file": "bundled.ru.gen-CAXLVLTN.js",
+     "status": 200,
+     "startMs": 311,
+     "endMs": 315,
+     "transferBytes": 40989,
+     "decodedBytes": 40689
+    }
+   ]
+  },
+  {
+   "case": "ru/deadapi",
+   "screen": "ru-deadapi-list",
+   "configLanguageServer": "ru",
+   "documentLang": "ru",
+   "documentDir": "ltr",
+   "framesSampled": 82,
+   "contentFrames": 79,
+   "firstContentFrameMs": 444,
+   "firstContentLang": "ru",
+   "firstContentVerdict": "locale",
+   "firstContentText": "Беседы Все Ждут вас · 0 Непрочитано · 0 ＋ Новая",
+   "framesBeforeFirstContent": 3,
+   "englishContentFrames": 0,
+   "firstEnglishFrameMs": null,
+   "lastEnglishFrameMs": null,
+   "settledText": "Беседы Все Ждут вас · 0 Непрочитано · 0 ＋ Новая",
+   "settle": {
+    "quietMs": 903,
+    "waitedMs": 903,
+    "samples": 4,
+    "capped": false
+   },
+   "localeChunkRequests": [
+    {
+     "file": "bundled.ru.gen-CAXLVLTN.js",
+     "status": 200,
+     "startMs": 162,
+     "endMs": 166,
+     "transferBytes": 40989,
+     "decodedBytes": 40689
+    }
+   ]
+  },
+  {
+   "case": "ru/deadapi",
+   "screen": "ru-deadapi-settings",
+   "configLanguageServer": "ru",
+   "documentLang": "ru",
+   "documentDir": "ltr",
+   "framesSampled": 104,
+   "contentFrames": 104,
+   "firstContentFrameMs": 234,
+   "firstContentLang": "ru",
+   "firstContentVerdict": "locale",
+   "firstContentText": "Назад Настройки компьютера Изменения применяются только к этому компьютеру. Загрузка маршрутизации аккаунтов…",
+   "framesBeforeFirstContent": 0,
+   "englishContentFrames": 0,
+   "firstEnglishFrameMs": null,
+   "lastEnglishFrameMs": null,
+   "settledText": "Назад Настройки компьютера Изменения применяются только к этому компьютеру. Не удалось загрузить маршрутизацию аккаунтов. Проверьте подключение и повторите попытку. Повторить",
+   "settle": {
+    "quietMs": 1044,
+    "waitedMs": 1138,
+    "samples": 4,
+    "capped": false
+   },
+   "localeChunkRequests": [
+    {
+     "file": "bundled.ru.gen-CAXLVLTN.js",
+     "status": 200,
+     "startMs": 142,
+     "endMs": 145,
+     "transferBytes": 40989,
+     "decodedBytes": 40689
+    }
+   ]
+  },
+  {
+   "case": "vi/populated",
+   "screen": "vi-populated-deeplink",
+   "configLanguageServer": "vi",
+   "documentLang": "vi",
+   "documentDir": "ltr",
+   "framesSampled": 75,
+   "contentFrames": 71,
+   "firstContentFrameMs": 1140,
+   "firstContentLang": "vi",
+   "firstContentVerdict": "locale",
+   "firstContentText": "‹ đang kết nối tới phiên… ↑",
+   "framesBeforeFirstContent": 4,
+   "englishContentFrames": 0,
+   "firstEnglishFrameMs": null,
+   "lastEnglishFrameMs": null,
+   "settledText": "‹ Locale evidence A Đang hoạt động · Đang làm việc · 40s ⋮ Which locale is on screen right now? This line rides the transcript wire rather than the bundled owned copy, so it stays English by design. ⢿ running the locale evidence pass 40s model ■ ↑",
+   "settle": {
+    "quietMs": 1219,
+    "waitedMs": 1224,
+    "samples": 5,
+    "capped": false
+   },
+   "localeChunkRequests": [
+    {
+     "file": "bundled.vi.gen-D0sZsHop.js",
+     "status": 200,
+     "startMs": 775,
+     "endMs": 785,
+     "transferBytes": 30696,
+     "decodedBytes": 30396
+    }
+   ]
+  },
+  {
+   "case": "vi/populated",
+   "screen": "vi-populated-list",
+   "configLanguageServer": "vi",
+   "documentLang": "vi",
+   "documentDir": "ltr",
+   "framesSampled": 33,
+   "contentFrames": 28,
+   "firstContentFrameMs": 5754,
+   "firstContentLang": "vi",
+   "firstContentVerdict": "locale",
+   "firstContentText": "Cuộc trò chuyện Tất cả Cần bạn · 0 Chưa đọc · 0 ＋ Mới",
+   "framesBeforeFirstContent": 5,
+   "englishContentFrames": 0,
+   "firstEnglishFrameMs": null,
+   "lastEnglishFrameMs": null,
+   "settledText": "Cuộc trò chuyện Tất cả Cần bạn · 0 Chưa đọc · 0 Đang chạy Locale evidence B ⋮ Locale evidence A Đang làm việc ⋮ ＋ Mới",
+   "settle": {
+    "quietMs": 1046,
+    "waitedMs": 1821,
+    "samples": 5,
+    "capped": false
+   },
+   "localeChunkRequests": [
+    {
+     "file": "bundled.vi.gen-D0sZsHop.js",
+     "status": 200,
+     "startMs": 5317,
+     "endMs": 5319,
+     "transferBytes": 30696,
+     "decodedBytes": 30396
+    }
+   ]
+  },
+  {
+   "case": "vi/populated",
+   "screen": "vi-populated-settings",
+   "configLanguageServer": "vi",
+   "documentLang": "vi",
+   "documentDir": "ltr",
+   "framesSampled": 92,
+   "contentFrames": 91,
+   "firstContentFrameMs": 387,
+   "firstContentLang": "vi",
+   "firstContentVerdict": "locale",
+   "firstContentText": "Quay lại Cài đặt máy tính Thay đổi chỉ áp dụng cho máy tính này. Đang tải định tuyến tài khoản…",
+   "framesBeforeFirstContent": 1,
+   "englishContentFrames": 0,
+   "firstEnglishFrameMs": null,
+   "lastEnglishFrameMs": null,
+   "settledText": "Quay lại Cài đặt máy tính Thay đổi chỉ áp dụng cho máy tính này. account selection policy Chooses eligible sibling accounts within the same provider and credential tier. A compatible, unexpired lease from a successful request takes priority for every policy; it does not guarantee a cache hit. Reset soonest prefers the nearest weekly refill, then the five-hour refill within one-minute ties. An expl",
+   "settle": {
+    "quietMs": 992,
+    "waitedMs": 993,
+    "samples": 4,
+    "capped": false
+   },
+   "localeChunkRequests": [
+    {
+     "file": "bundled.vi.gen-D0sZsHop.js",
+     "status": 200,
+     "startMs": 93,
+     "endMs": 96,
+     "transferBytes": 30696,
+     "decodedBytes": 30396
+    }
+   ]
+  },
+  {
+   "case": "vi/empty",
+   "screen": "vi-empty-list",
+   "configLanguageServer": "vi",
+   "documentLang": "vi",
+   "documentDir": "ltr",
+   "framesSampled": 75,
+   "contentFrames": 69,
+   "firstContentFrameMs": 782,
+   "firstContentLang": "vi",
+   "firstContentVerdict": "locale",
+   "firstContentText": "Cuộc trò chuyện Tất cả Cần bạn · 0 Chưa đọc · 0 ＋ Mới",
+   "framesBeforeFirstContent": 6,
+   "englishContentFrames": 0,
+   "firstEnglishFrameMs": null,
+   "lastEnglishFrameMs": null,
+   "settledText": "Cuộc trò chuyện Chưa có cuộc trò chuyện nào Bắt đầu bằng Mới, hoặc từ Local Operator trên máy tính của bạn ＋ Mới",
+   "settle": {
+    "quietMs": 1016,
+    "waitedMs": 1017,
+    "samples": 4,
+    "capped": false
+   },
+   "localeChunkRequests": [
+    {
+     "file": "bundled.vi.gen-D0sZsHop.js",
+     "status": 200,
+     "startMs": 432,
+     "endMs": 434,
+     "transferBytes": 30696,
+     "decodedBytes": 30396
+    }
+   ]
+  },
+  {
+   "case": "vi/deadapi",
+   "screen": "vi-deadapi-list",
+   "configLanguageServer": "vi",
+   "documentLang": "vi",
+   "documentDir": "ltr",
+   "framesSampled": 71,
+   "contentFrames": 66,
+   "firstContentFrameMs": 681,
+   "firstContentLang": "vi",
+   "firstContentVerdict": "locale",
+   "firstContentText": "Cuộc trò chuyện Tất cả Cần bạn · 0 Chưa đọc · 0 ＋ Mới",
+   "framesBeforeFirstContent": 5,
+   "englishContentFrames": 0,
+   "firstEnglishFrameMs": null,
+   "lastEnglishFrameMs": null,
+   "settledText": "Cuộc trò chuyện Tất cả Cần bạn · 0 Chưa đọc · 0 ＋ Mới",
+   "settle": {
+    "quietMs": 901,
+    "waitedMs": 904,
+    "samples": 4,
+    "capped": false
+   },
+   "localeChunkRequests": [
+    {
+     "file": "bundled.vi.gen-D0sZsHop.js",
+     "status": 200,
+     "startMs": 207,
+     "endMs": 212,
+     "transferBytes": 30696,
+     "decodedBytes": 30396
+    }
+   ]
+  },
+  {
+   "case": "vi/deadapi",
+   "screen": "vi-deadapi-settings",
+   "configLanguageServer": "vi",
+   "documentLang": "vi",
+   "documentDir": "ltr",
+   "framesSampled": 87,
+   "contentFrames": 83,
+   "firstContentFrameMs": 564,
+   "firstContentLang": "vi",
+   "firstContentVerdict": "locale",
+   "firstContentText": "Quay lại Cài đặt máy tính Thay đổi chỉ áp dụng cho máy tính này. Không thể tải định tuyến tài khoản. Hãy kiểm tra kết nối rồi thử lại. Thử lại",
+   "framesBeforeFirstContent": 4,
+   "englishContentFrames": 0,
+   "firstEnglishFrameMs": null,
+   "lastEnglishFrameMs": null,
+   "settledText": "Quay lại Cài đặt máy tính Thay đổi chỉ áp dụng cho máy tính này. Không thể tải định tuyến tài khoản. Hãy kiểm tra kết nối rồi thử lại. Thử lại",
+   "settle": {
+    "quietMs": 1033,
+    "waitedMs": 1036,
+    "samples": 4,
+    "capped": false
+   },
+   "localeChunkRequests": [
+    {
+     "file": "bundled.vi.gen-D0sZsHop.js",
+     "status": 200,
+     "startMs": 478,
+     "endMs": 486,
+     "transferBytes": 30696,
+     "decodedBytes": 30396
+    }
+   ]
+  },
+  {
+   "case": "fr/populated",
+   "screen": "fr-populated-deeplink",
+   "configLanguageServer": "fr",
+   "documentLang": "fr",
+   "documentDir": "ltr",
+   "framesSampled": 77,
+   "contentFrames": 74,
+   "firstContentFrameMs": 775,
+   "firstContentLang": "fr",
+   "firstContentVerdict": "locale",
+   "firstContentText": "‹ connexion à la session… ↑",
+   "framesBeforeFirstContent": 3,
+   "englishContentFrames": 0,
+   "firstEnglishFrameMs": null,
+   "lastEnglishFrameMs": null,
+   "settledText": "‹ Locale evidence A En ligne · En cours · 40s ⋮ Which locale is on screen right now? This line rides the transcript wire rather than the bundled owned copy, so it stays English by design. ⢿ running the locale evidence pass 40s model ■ ↑",
+   "settle": {
+    "quietMs": 904,
+    "waitedMs": 905,
+    "samples": 4,
+    "capped": false
+   },
+   "localeChunkRequests": [
+    {
+     "file": "bundled.fr.gen-BSzuhkb2.js",
+     "status": 200,
+     "startMs": 610,
+     "endMs": 614,
+     "transferBytes": 31526,
+     "decodedBytes": 31226
+    }
+   ]
+  },
+  {
+   "case": "fr/populated",
+   "screen": "fr-populated-list",
+   "configLanguageServer": "fr",
+   "documentLang": "fr",
+   "documentDir": "ltr",
+   "framesSampled": 80,
+   "contentFrames": 77,
+   "firstContentFrameMs": 887,
+   "firstContentLang": "fr",
+   "firstContentVerdict": "locale",
+   "firstContentText": "Conversations Toutes À traiter · 0 Non lues · 0 ＋ Nouvelle",
+   "framesBeforeFirstContent": 3,
+   "englishContentFrames": 0,
+   "firstEnglishFrameMs": null,
+   "lastEnglishFrameMs": null,
+   "settledText": "Conversations Toutes À traiter · 0 Non lues · 0 Actives Locale evidence B ⋮ Locale evidence A En cours ⋮ ＋ Nouvelle",
+   "settle": {
+    "quietMs": 1044,
+    "waitedMs": 1045,
+    "samples": 4,
+    "capped": false
+   },
+   "localeChunkRequests": [
+    {
+     "file": "bundled.fr.gen-BSzuhkb2.js",
+     "status": 200,
+     "startMs": 284,
+     "endMs": 286,
+     "transferBytes": 31526,
+     "decodedBytes": 31226
+    }
+   ]
+  },
+  {
+   "case": "fr/populated",
+   "screen": "fr-populated-settings",
+   "configLanguageServer": "fr",
+   "documentLang": "fr",
+   "documentDir": "ltr",
+   "framesSampled": 81,
+   "contentFrames": 79,
+   "firstContentFrameMs": 253,
+   "firstContentLang": "fr",
+   "firstContentVerdict": "locale",
+   "firstContentText": "Retour Paramètres de l’ordinateur Les modifications ne s’appliquent qu’à cet ordinateur. Chargement du routage des comptes…",
+   "framesBeforeFirstContent": 2,
+   "englishContentFrames": 0,
+   "firstEnglishFrameMs": null,
+   "lastEnglishFrameMs": null,
+   "settledText": "Retour Paramètres de l’ordinateur Les modifications ne s’appliquent qu’à cet ordinateur. account selection policy Chooses eligible sibling accounts within the same provider and credential tier. A compatible, unexpired lease from a successful request takes priority for every policy; it does not guarantee a cache hit. Reset soonest prefers the nearest weekly refill, then the five-hour refill within ",
+   "settle": {
+    "quietMs": 1100,
+    "waitedMs": 1101,
+    "samples": 4,
+    "capped": false
+   },
+   "localeChunkRequests": [
+    {
+     "file": "bundled.fr.gen-BSzuhkb2.js",
+     "status": 200,
+     "startMs": 142,
+     "endMs": 146,
+     "transferBytes": 31526,
+     "decodedBytes": 31226
+    }
+   ]
+  },
+  {
+   "case": "fr/empty",
+   "screen": "fr-empty-list",
+   "configLanguageServer": "fr",
+   "documentLang": "fr",
+   "documentDir": "ltr",
+   "framesSampled": 79,
+   "contentFrames": 76,
+   "firstContentFrameMs": 452,
+   "firstContentLang": "fr",
+   "firstContentVerdict": "locale",
+   "firstContentText": "Conversations Toutes À traiter · 0 Non lues · 0 ＋ Nouvelle",
+   "framesBeforeFirstContent": 3,
+   "englishContentFrames": 0,
+   "firstEnglishFrameMs": null,
+   "lastEnglishFrameMs": null,
+   "settledText": "Conversations Pas encore de conversation Démarrez-en une avec « Nouvelle », ou depuis Local Operator sur votre ordinateur ＋ Nouvelle",
+   "settle": {
+    "quietMs": 1059,
+    "waitedMs": 1061,
+    "samples": 4,
+    "capped": false
+   },
+   "localeChunkRequests": [
+    {
+     "file": "bundled.fr.gen-BSzuhkb2.js",
+     "status": 200,
+     "startMs": 133,
+     "endMs": 142,
+     "transferBytes": 31526,
+     "decodedBytes": 31226
+    }
+   ]
+  },
+  {
+   "case": "fr/deadapi",
+   "screen": "fr-deadapi-list",
+   "configLanguageServer": "fr",
+   "documentLang": "fr",
+   "documentDir": "ltr",
+   "framesSampled": 123,
+   "contentFrames": 121,
+   "firstContentFrameMs": 479,
+   "firstContentLang": "fr",
+   "firstContentVerdict": "locale",
+   "firstContentText": "Conversations Toutes À traiter · 0 Non lues · 0 ＋ Nouvelle",
+   "framesBeforeFirstContent": 2,
+   "englishContentFrames": 0,
+   "firstEnglishFrameMs": null,
+   "lastEnglishFrameMs": null,
+   "settledText": "Conversations Toutes À traiter · 0 Non lues · 0 ＋ Nouvelle",
+   "settle": {
+    "quietMs": 1024,
+    "waitedMs": 1048,
+    "samples": 4,
+    "capped": false
+   },
+   "localeChunkRequests": [
+    {
+     "file": "bundled.fr.gen-BSzuhkb2.js",
+     "status": 200,
+     "startMs": 201,
+     "endMs": 204,
+     "transferBytes": 31526,
+     "decodedBytes": 31226
+    }
+   ]
+  },
+  {
+   "case": "fr/deadapi",
+   "screen": "fr-deadapi-settings",
+   "configLanguageServer": "fr",
+   "documentLang": "fr",
+   "documentDir": "ltr",
+   "framesSampled": 122,
+   "contentFrames": 120,
+   "firstContentFrameMs": 344,
+   "firstContentLang": "fr",
+   "firstContentVerdict": "locale",
+   "firstContentText": "Retour Paramètres de l’ordinateur Les modifications ne s’appliquent qu’à cet ordinateur. Chargement du routage des comptes…",
+   "framesBeforeFirstContent": 2,
+   "englishContentFrames": 0,
+   "firstEnglishFrameMs": null,
+   "lastEnglishFrameMs": null,
+   "settledText": "Retour Paramètres de l’ordinateur Les modifications ne s’appliquent qu’à cet ordinateur. Impossible de charger le routage des comptes. Vérifiez la connexion et réessayez. Réessayer",
+   "settle": {
+    "quietMs": 1033,
+    "waitedMs": 1035,
+    "samples": 4,
+    "capped": false
+   },
+   "localeChunkRequests": [
+    {
+     "file": "bundled.fr.gen-BSzuhkb2.js",
+     "status": 200,
+     "startMs": 148,
+     "endMs": 154,
+     "transferBytes": 31526,
+     "decodedBytes": 31226
+    }
+   ]
+  },
+  {
+   "case": "hi/populated",
+   "screen": "hi-control-populated-deeplink",
+   "configLanguageServer": "hi",
+   "documentLang": "en",
+   "documentDir": "ltr",
+   "framesSampled": 78,
+   "contentFrames": 75,
+   "firstContentFrameMs": 809,
+   "firstContentLang": "en",
+   "firstContentVerdict": "english",
+   "firstContentText": "‹ connecting to session… ↑",
+   "framesBeforeFirstContent": 3,
+   "englishContentFrames": 23,
+   "firstEnglishFrameMs": 809,
+   "lastEnglishFrameMs": 2115,
+   "settledText": "‹ Locale evidence A Live · Working · 40s ⋮ Which locale is on screen right now? This line rides the transcript wire rather than the bundled owned copy, so it stays English by design. ⡿ running the locale evidence pass 40s model ■ ↑",
+   "settle": {
+    "quietMs": 1091,
+    "waitedMs": 1092,
+    "samples": 4,
+    "capped": false
+   },
+   "localeChunkRequests": []
+  },
+  {
+   "case": "hi/populated",
+   "screen": "hi-control-populated-list",
+   "configLanguageServer": "hi",
+   "documentLang": "en",
+   "documentDir": "ltr",
+   "framesSampled": 80,
+   "contentFrames": 77,
+   "firstContentFrameMs": 580,
+   "firstContentLang": "en",
+   "firstContentVerdict": "english",
+   "firstContentText": "Conversations All Needs you · 0 Unread · 0 ＋ New",
+   "framesBeforeFirstContent": 3,
+   "englishContentFrames": 77,
+   "firstEnglishFrameMs": 580,
+   "lastEnglishFrameMs": 6604,
+   "settledText": "Conversations All Needs you · 0 Unread · 0 Active Locale evidence B ⋮ Locale evidence A Working ⋮ ＋ New",
+   "settle": {
+    "quietMs": 930,
+    "waitedMs": 932,
+    "samples": 4,
+    "capped": false
+   },
+   "localeChunkRequests": []
+  },
+  {
+   "case": "fr/populated",
+   "screen": "fr-slowchunk-populated-deeplink",
+   "configLanguageServer": "fr",
+   "documentLang": "fr",
+   "documentDir": "ltr",
+   "framesSampled": 126,
+   "contentFrames": 103,
+   "firstContentFrameMs": 1855,
+   "firstContentLang": "en",
+   "firstContentVerdict": "english",
+   "firstContentText": "‹ connecting to session… ↑",
+   "framesBeforeFirstContent": 23,
+   "englishContentFrames": 7,
+   "firstEnglishFrameMs": 1855,
+   "lastEnglishFrameMs": 2350,
+   "settledText": "‹ Locale evidence A En ligne · En cours · 46s ⋮ Which locale is on screen right now? This line rides the transcript wire rather than the bundled owned copy, so it stays English by design. ⡿ running the locale evidence pass 46s model ■ ↑",
+   "settle": {
+    "quietMs": 1042,
+    "waitedMs": 1043,
+    "samples": 4,
+    "capped": false
+   },
+   "localeChunkRequests": [
+    {
+     "file": "bundled.fr.gen-BSzuhkb2.js",
+     "status": 200,
+     "startMs": 156,
+     "endMs": 3726,
+     "transferBytes": 31526,
+     "decodedBytes": 31226
+    }
+   ]
+  }
+ ],
+ "stills": [
+  {
+   "file": "ru-1-first-content-session-deeplink.png",
+   "from": "ru-populated-deeplink-first-content.png"
+  },
+  {
+   "file": "ru-2-populated-list.png",
+   "from": "ru-populated-list-settled.png"
+  },
+  {
+   "file": "ru-3-populated-settings.png",
+   "from": "ru-populated-settings-settled.png"
+  },
+  {
+   "file": "ru-4-empty-list.png",
+   "from": "ru-empty-list-settled.png"
+  },
+  {
+   "file": "ru-5-list-unavailable.png",
+   "from": "ru-deadapi-list-settled.png"
+  },
+  {
+   "file": "ru-6-settings-load-error.png",
+   "from": "ru-deadapi-settings-settled.png"
+  },
+  {
+   "file": "vi-1-first-content-session-deeplink.png",
+   "from": "vi-populated-deeplink-first-content.png"
+  },
+  {
+   "file": "vi-2-populated-list.png",
+   "from": "vi-populated-list-settled.png"
+  },
+  {
+   "file": "vi-3-populated-settings.png",
+   "from": "vi-populated-settings-settled.png"
+  },
+  {
+   "file": "vi-4-empty-list.png",
+   "from": "vi-empty-list-settled.png"
+  },
+  {
+   "file": "vi-5-list-unavailable.png",
+   "from": "vi-deadapi-list-settled.png"
+  },
+  {
+   "file": "vi-6-settings-load-error.png",
+   "from": "vi-deadapi-settings-settled.png"
+  },
+  {
+   "file": "fr-1-first-content-session-deeplink.png",
+   "from": "fr-populated-deeplink-first-content.png"
+  },
+  {
+   "file": "fr-2-deeplink-settled.png",
+   "from": "fr-populated-deeplink-settled.png"
+  },
+  {
+   "file": "fr-3-populated-list.png",
+   "from": "fr-populated-list-settled.png"
+  },
+  {
+   "file": "fr-4-populated-settings.png",
+   "from": "fr-populated-settings-settled.png"
+  },
+  {
+   "file": "fr-5-empty-list.png",
+   "from": "fr-empty-list-settled.png"
+  },
+  {
+   "file": "fr-6-list-unavailable.png",
+   "from": "fr-deadapi-list-settled.png"
+  },
+  {
+   "file": "fr-7-settings-load-error.png",
+   "from": "fr-deadapi-settings-settled.png"
+  },
+  {
+   "file": "control-hi-1-first-content-English.png",
+   "from": "hi-control-populated-deeplink-first-content.png"
+  },
+  {
+   "file": "control-hi-2-list-English.png",
+   "from": "hi-control-populated-list-settled.png"
+  },
+  {
+   "file": "control-slowchunk-1-English-fallback.png",
+   "from": "fr-slowchunk-populated-deeplink-at2400.png"
+  },
+  {
+   "file": "control-slowchunk-2-after-flip.png",
+   "from": "fr-slowchunk-populated-deeplink-at7000.png"
+  }
+ ]
+}

@@ -1,0 +1,54 @@
+[
+ {"locale": "ru", "mode": "populated", "port": 4781,
+  "screens": [
+    {"name": "deeplink", "hash": "/s/locale-a", "settle_s": 4.5, "shot_first": 6000},
+    {"name": "list", "hash": "/", "settle_s": 5.5},
+    {"name": "settings", "hash": "/settings/account-routing", "settle_s": 5.5}
+  ]},
+ {"locale": "ru", "mode": "empty", "port": 4782,
+  "screens": [{"name": "list", "hash": "/", "settle_s": 5.5}]},
+ {"locale": "ru", "mode": "deadapi", "port": 4783,
+  "screens": [
+    {"name": "list", "hash": "/", "settle_s": 6.5},
+    {"name": "settings", "hash": "/settings/account-routing", "settle_s": 6.5}
+  ]},
+
+ {"locale": "vi", "mode": "populated", "port": 4784,
+  "screens": [
+    {"name": "deeplink", "hash": "/s/locale-a", "settle_s": 4.5, "shot_first": 6000},
+    {"name": "list", "hash": "/", "settle_s": 5.5},
+    {"name": "settings", "hash": "/settings/account-routing", "settle_s": 5.5}
+  ]},
+ {"locale": "vi", "mode": "empty", "port": 4785,
+  "screens": [{"name": "list", "hash": "/", "settle_s": 5.5}]},
+ {"locale": "vi", "mode": "deadapi", "port": 4786,
+  "screens": [
+    {"name": "list", "hash": "/", "settle_s": 6.5},
+    {"name": "settings", "hash": "/settings/account-routing", "settle_s": 6.5}
+  ]},
+
+ {"locale": "fr", "mode": "populated", "port": 4787,
+  "screens": [
+    {"name": "deeplink", "hash": "/s/locale-a", "settle_s": 4.5, "shot_first": 6000},
+    {"name": "list", "hash": "/", "settle_s": 5.5},
+    {"name": "settings", "hash": "/settings/account-routing", "settle_s": 5.5}
+  ]},
+ {"locale": "fr", "mode": "empty", "port": 4788,
+  "screens": [{"name": "list", "hash": "/", "settle_s": 5.5}]},
+ {"locale": "fr", "mode": "deadapi", "port": 4789,
+  "screens": [
+    {"name": "list", "hash": "/", "settle_s": 6.5},
+    {"name": "settings", "hash": "/settings/account-routing", "settle_s": 6.5}
+  ]},
+
+ {"locale": "hi", "mode": "populated", "port": 4790, "tag": "hi-control",
+  "screens": [
+    {"name": "deeplink", "hash": "/s/locale-a", "settle_s": 4.5, "shot_first": 6000},
+    {"name": "list", "hash": "/", "settle_s": 5.5}
+  ]},
+
+ {"locale": "fr", "mode": "populated", "port": 4791, "tag": "fr-slowchunk", "slow_chunk": "fr", "slow_ms": 2600,
+  "screens": [
+    {"name": "deeplink", "hash": "/s/locale-a", "settle_s": 9.5, "mid_ms": [2400, 7000]}
+  ]}
+]
