@@ -161,7 +161,7 @@
   "wire.settings.display_composer_chevron.choice.true.description": "نشان دکھائیں",
   "wire.settings.display_composer_chevron.help": "ان پٹ قطار کے بائیں کنارے پرامپٹ کا نشان۔",
   "wire.settings.display_composer_chevron.label": "پرامپٹ شیوران",
-  "wire.settings.display_composer_command.help": "ٹائمر پر چلتی ہے؛ اس کی پہلی لائن بینڈ میں دکھتی ہے۔",
+  "wire.settings.display_composer_command.help": "ٹائمر پر چلتی ہے؛ آؤٹ پٹ کی پہلی لائن بینڈ میں آتی ہے۔",
   "wire.settings.display_composer_command.label": "بینڈ: اسٹیٹس کمانڈ",
   "wire.settings.display_composer_command.placeholder": "~/bin/my-status.sh",
   "wire.settings.display_composer_command_interval.help": "اسٹیٹس کمانڈ کے دو بار چلنے کے درمیان سیکنڈ (5-3600)۔",

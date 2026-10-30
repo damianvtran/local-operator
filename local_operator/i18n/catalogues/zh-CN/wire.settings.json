@@ -161,7 +161,7 @@
   "wire.settings.display_composer_chevron.choice.true.description": "显示标记",
   "wire.settings.display_composer_chevron.help": "输入行左缘的提示符标记。",
   "wire.settings.display_composer_chevron.label": "提示符箭头",
-  "wire.settings.display_composer_command.help": "定时运行；其第一行显示在状态栏中。",
+  "wire.settings.display_composer_command.help": "定时运行；其输出的第一行显示在状态栏中。",
   "wire.settings.display_composer_command.label": "状态栏：状态命令",
   "wire.settings.display_composer_command.placeholder": "~/bin/my-status.sh",
   "wire.settings.display_composer_command_interval.help": "状态命令两次运行之间的秒数（5-3600）。",

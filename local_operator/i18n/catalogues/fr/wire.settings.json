@@ -161,7 +161,7 @@
   "wire.settings.display_composer_chevron.choice.true.description": "afficher le repère",
   "wire.settings.display_composer_chevron.help": "Le repère du prompt au bord gauche de la ligne de saisie.",
   "wire.settings.display_composer_chevron.label": "Chevron du prompt",
-  "wire.settings.display_composer_command.help": "Lancée à intervalles ; 1re ligne affichée au bandeau.",
+  "wire.settings.display_composer_command.help": "Lancée à intervalles ; 1re ligne de sortie au bandeau.",
   "wire.settings.display_composer_command.label": "Bandeau : commande d’état",
   "wire.settings.display_composer_command.placeholder": "~/bin/my-status.sh",
   "wire.settings.display_composer_command_interval.help": "Secondes entre deux exécutions de la commande (5-3600).",
