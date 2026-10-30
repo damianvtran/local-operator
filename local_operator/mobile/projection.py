@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
@@ -430,6 +431,18 @@ def _settled_bridge_summary(
     )
 
 
+#: Opaque Team Bridge ids (conversation, message, account, endpoint). The tail
+#: takes ``_`` and ``-`` too: real ids include ``acc_remote_9`` and
+#: ``ep_01J-ABC``, and a ``[A-Za-z0-9]`` tail left the second half visible
+#: (review round 1, R3). Kept in step with ``harness/rows.py``'s prefix tuple.
+_BRIDGE_ID_RE = re.compile(r"\b(?:bcv|bcmsg|acc|ep)_[A-Za-z0-9_-]+")
+
+
+def _scrub_bridge_ids(text: str) -> str:
+    """``text`` with every bridge id replaced by an ellipsis, spaces tidied."""
+    return " ".join(_BRIDGE_ID_RE.sub("…", text).split())
+
+
 def _bridge_copy(
     row: Mapping[str, Any], args: Mapping[str, Any], details: Mapping[str, Any] | None
 ) -> dict[str, str]:
@@ -437,16 +450,20 @@ def _bridge_copy(
 
     ``outcome`` is the short word the row's chip shows (``None`` → "" for a
     plain landed call); ``outcome_sentence`` the expanded card's full sentence.
-    Every value is rendered text, never an id (``bridge_expanded`` keeps ids in
-    ``internals``, which is not carried).
+    Every value is id-free ON THE WIRE, not just on screen: the sentence
+    interpolates the tool's raw ``error``, and real refusals name the
+    conversation (``team_bridge/tool.py`` ``channel_id={conversation_id}``), so
+    each value is scrubbed here rather than trusting every client to do it
+    (review round 1, R3 / QA Q2). ``internals`` - where ids belong - is not
+    carried.
     """
     from local_operator.harness.bridge_copy import bridge_expanded, outcome_word
 
     expanded = bridge_expanded(row, args, details)
     return {
-        "outcome": outcome_word(row) or "",
-        "headline": str(expanded.get("headline") or ""),
-        "outcome_sentence": str(expanded.get("outcome") or ""),
+        "outcome": _scrub_bridge_ids(outcome_word(row) or ""),
+        "headline": _scrub_bridge_ids(str(expanded.get("headline") or "")),
+        "outcome_sentence": _scrub_bridge_ids(str(expanded.get("outcome") or "")),
     }
 
 

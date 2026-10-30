@@ -14,7 +14,8 @@ palettes:
   side by side in ONE group;
 * ``collapsed`` - the latest turn's four bridge rows (post, DM, refusal,
   inbox-only send), one line each;
-* ``expanded`` - the DM row opened: headline, markdown body, outcome sentence.
+* ``expanded-<outcome>`` - the awaiting DM, the refusal and the inbox-only
+  send each opened: headline, markdown body, outcome sentence.
 
 ``Chrome``/``Page`` come from ``scripts/mobile_overflow_capture.py`` (one
 throwaway ``--headless=new`` browser, own profile, ``--use-mock-keychain``,
@@ -66,6 +67,7 @@ GEOMETRY_JS = r"""
     docScrollWidth: doc.scrollWidth,
     docClientWidth: doc.clientWidth,
     bcvInHeadlines: rows.filter((r) => /\b(?:bcv|bcmsg|acc|ep)_/.test(r.text)).length,
+    bcvOnPage: /\b(?:bcv|bcmsg|acc|ep)_/.test(document.body.innerText) ? 1 : 0,
     rows,
   });
 })()
@@ -193,28 +195,40 @@ def main() -> None:
                 page.shot(outdir / f"{name}.png")
                 report[name] = json.loads(page.js(GEOMETRY_JS))
 
-                # expanded: the DM row (markdown body, Conversation, Outcome).
-                # The DM row: a bridge row whose summary names the dm op. Matched
-                # on both spellings - the generic `op=dm` before the sibling
-                # lane's localized summary lands, and its `dm · …` after.
-                page.js(
-                    "(() => { const b = [...document.querySelectorAll('button')]"
-                    ".filter((n) => /bridge/.test(n.textContent || '')"
-                    " && /op=dm|DM|awaiting acceptance/.test(n.textContent || '')).pop();"
-                    " if (!b) return false; b.scrollIntoView({block: 'start'}); b.click();"
-                    " return true; })()"
-                )
-                time.sleep(0.8)
-                # Bring the expansion's outcome sentence above the
-                # composer: the frame must show them, not just the body's top.
-                page.js(
-                    "(() => { const d = document.querySelector('[data-bridge-outcome-sentence]');"
-                    " if (d) d.scrollIntoView({block: 'center'}); return !!d; })()"
-                )
-                time.sleep(0.5)
-                name = f"expanded-{tone}-{width}"
-                page.shot(outdir / f"{name}.png")
-                report[name] = json.loads(page.js(GEOMETRY_JS))
+                # expanded-<outcome>: one row per chip-carrying outcome, opened
+                # by its chip's `data-bridge-outcome` (not by row text - the
+                # narrow shed hides the tool name). The LAST match is the live
+                # turn's row; each is closed again before the next opens.
+                # Round-1 design asked for refused and inbox_only expansions
+                # beside the awaiting DM.
+                for outcome in ("awaiting_acceptance", "refused", "inbox_only"):
+                    toggle = (
+                        "(() => { const c = [...document.querySelectorAll("
+                        f"'[data-bridge-outcome=\"{outcome}\"]')].pop();"
+                        " const b = c && c.closest('button');"
+                        " if (!b) return false; b.scrollIntoView({block: 'start'});"
+                        " b.click(); return true; })()"
+                    )
+                    page.js(toggle)
+                    time.sleep(0.8)
+                    # Bring the outcome sentence above the composer.
+                    page.js(
+                        "(() => { const d = [...document.querySelectorAll("
+                        "'[data-bridge-outcome-sentence]')].pop();"
+                        " if (d) d.scrollIntoView({block: 'center'}); return !!d; })()"
+                    )
+                    time.sleep(0.5)
+                    name = f"expanded-{outcome}-{tone}-{width}"
+                    page.shot(outdir / f"{name}.png")
+                    report[name] = json.loads(page.js(GEOMETRY_JS))
+                    report[name]["expandedText"] = page.js(
+                        "(() => { const s = [...document.querySelectorAll("
+                        "'[data-bridge-outcome-sentence]')].pop();"
+                        " const box = s && s.closest('.lo-scroll');"
+                        " return box ? box.textContent : ''; })()"
+                    )
+                    page.js(toggle)
+                    time.sleep(0.4)
                 print(f"{tone} {width}: ok", flush=True)
         page.close()
     finally:

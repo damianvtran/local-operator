@@ -99,7 +99,10 @@ const BRIDGE_TOOL = "bridge";
 /* Opaque Team Bridge ids. The headline never prints one: a person reads a
    channel name, not `bcv_01J…`. The server already composes a label; this is
    the renderer's own floor for a summary or label that still carries one. */
-const BRIDGE_ID = /\b(?:bcv|bcmsg|acc|ep)_[A-Za-z0-9]+\b/g;
+/* The tail takes `_` and `-`: real ids include `acc_remote_9` and
+   `ep_01J-ABC`, and an alphanumeric-only tail left their second half visible
+   (review round 1, R3). Same rule as `projection._BRIDGE_ID_RE`. */
+const BRIDGE_ID = /\b(?:bcv|bcmsg|acc|ep)_[A-Za-z0-9_-]+/g;
 
 function scrubBridgeIds(text: string): string {
 	return text.replace(BRIDGE_ID, "…").replace(/\s{2,}/g, " ").trim();
@@ -173,7 +176,7 @@ function bridgeCopy(entry: TranscriptEntry): BridgeRowCopy {
 	return copy && typeof copy === "object" ? copy : {};
 }
 
-type OutcomeTone = "warning" | "danger" | "muted";
+type OutcomeTone = "warning" | "danger" | "pending";
 
 /* Ink per outcome. `inbox_only` is warning, never success: the send was
    accepted into a peer inbox and appears in NO conversation. */
@@ -181,8 +184,12 @@ const OUTCOME_TONE: Record<NonNullable<BridgeRowFacts["outcome"]>, OutcomeTone> 
 	inbox_only: "warning",
 	refused: "danger",
 	failed: "danger",
-	unconfirmed: "muted",
-	awaiting_acceptance: "muted",
+	/* Not yet / maybe not: the TUI's amber `warn` tier and the desktop's
+	   `partial` ink (design round 1, D6). `unconfirmed` means "may not have
+	   landed - don't re-post blindly", not a quiet fact. Only `inbox_only`
+	   keeps the wash, so it stays the loudest of the three. */
+	unconfirmed: "pending",
+	awaiting_acceptance: "pending",
 };
 
 const OUTCOME_MARK: Partial<Record<NonNullable<BridgeRowFacts["outcome"]>, keyof typeof LUCIDE>> = {
@@ -195,12 +202,18 @@ const OUTCOME_MARK: Partial<Record<NonNullable<BridgeRowFacts["outcome"]>, keyof
 function bridgeOutcome(
 	facts: BridgeRowFacts | null,
 	copy: BridgeRowCopy,
-): { text: string; tone: OutcomeTone; mark?: keyof typeof LUCIDE } | null {
+): { text: string; word: string; code: string; tone: OutcomeTone; mark?: keyof typeof LUCIDE } | null {
 	const outcome = facts?.outcome;
 	if (!outcome || !Object.hasOwn(OUTCOME_TONE, outcome)) return null;
 	const text = copy.outcome ? scrubBridgeIds(copy.outcome) : "";
 	if (!text) return null;
-	return { text, tone: OUTCOME_TONE[outcome], mark: OUTCOME_MARK[outcome] };
+	/* `refused · not_member`: the WORD stays at every width, the code is the
+	   first thing a narrow row sheds (it is repeated in the expansion's
+	   sentence) - design round 1, D3(c). */
+	const sep = text.indexOf(" · ");
+	const word = sep > 0 ? text.slice(0, sep) : text;
+	const code = sep > 0 ? text.slice(sep) : "";
+	return { text, word, code, tone: OUTCOME_TONE[outcome], mark: OUTCOME_MARK[outcome] };
 }
 
 /** The row's summary, id-free, without the outcome tail the chip shows.
@@ -209,17 +222,30 @@ function bridgeOutcome(
     because the TUI-shaped single cell has no status cap. The phone row DOES
     (the chip), so leaving the tail would print the caveat twice - and the
     copy in the summary is the one that truncates away first at 320px. */
-function bridgeSummary(summary: string, outcome: { text: string } | null): string {
+function bridgeSummary(summary: string, outcome: { text: string; word: string } | null): string {
 	const text = scrubBridgeIds(summary);
 	if (!outcome) return text;
-	const tail = ` · ${outcome.text}`;
-	return text.endsWith(tail) ? text.slice(0, -tail.length) : text;
+	/* The daemon caps the line BEFORE the phone sees it, so the tail may arrive
+	   cut (`· awaiting…`) and an exact-suffix match misses it - the caveat then
+	   read twice, and a screen reader heard it twice (design D5 / QA Q3). Strip
+	   the last ` · ` segment when it is the outcome, whole or as a capped
+	   prefix of it. */
+	const sep = text.lastIndexOf(" · ");
+	if (sep < 0) return text;
+	const tail = text.slice(sep + 3);
+	const stem = tail.endsWith("…") ? tail.slice(0, -1) : tail;
+	const full = outcome.text;
+	const matches =
+		tail === full ||
+		tail === outcome.word ||
+		(tail.endsWith("…") && stem.length > 0 && (full.startsWith(stem) || outcome.word.startsWith(stem)));
+	return matches ? text.slice(0, sep) : text;
 }
 
 const OUTCOME_INK: Record<OutcomeTone, string> = {
 	warning: "text-warning",
 	danger: "text-danger",
-	muted: "text-ink-dim",
+	pending: "text-warning",
 };
 
 /* Args the bridge expansion already says in words (the body as markdown, the
@@ -353,13 +379,22 @@ export function ToolRow({
 			<button
 				type="button"
 				onClick={() => hasDetails && setOpen(!open)}
-				className="flex min-h-11 w-full items-center gap-1.5 text-start select-none"
+				className={cn(
+					"flex min-h-11 w-full items-center gap-1.5 text-start select-none",
+					/* A container only for the bridge row's narrow-width shed (D3). */
+					bridge && "@container",
+				)}
 			>
 				<span
 					className={cn(
 						"w-4 shrink-0 text-center font-mono text-mono-sm",
 						entry.tool_state === "failed" && "text-danger",
-						entry.tool_state === "done" && "text-success",
+						/* A bridge call that landed with a caveat (inbox-only, awaiting,
+						   unconfirmed) keeps the ✓ SHAPE - nothing failed - but never the
+						   success ink: the leading glyph is what a reader scans first
+						   (design round 1, D1; the TUI's amber `warn` tier). */
+						entry.tool_state === "done" && !(outcome && outcome.tone !== "danger") && "text-success",
+						entry.tool_state === "done" && outcome && outcome.tone !== "danger" && "text-warning",
 						(entry.tool_state === "interrupted" ||
 							entry.tool_state === "composing" ||
 							queued) &&
@@ -386,7 +421,21 @@ export function ToolRow({
 						<LucideIcon name="messages-square" />
 					</span>
 				) : null}
-				<span dir="ltr" className="min-w-0 shrink truncate text-body-sm text-ink-muted">
+				{/* NARROW-ROW PRIORITY for a bridge row (design round 1, D3; the
+				    desktop's container shed in #1529). Below an 18rem row (a 320px
+				    phone measures 262px) the row could hold neither what happened
+				    nor to whom. Shed in order: (1) the `bridge` name - the
+				    messages-square mark already says which tool; (2) the
+				    inbox/awaiting chip's words - its mark and ink stay, the word
+				    stays for screen readers; (3) a refusal's `· code` - the word
+				    stays, the code is in the expansion's sentence. */}
+				<span
+					dir="ltr"
+					className={cn(
+						"min-w-0 shrink truncate text-body-sm text-ink-muted",
+						bridge && "@max-[18rem]:hidden",
+					)}
+				>
 					{entry.tool_name}
 				</span>
 				{/* A bridge row with an outcome chip holds a floor for the summary
@@ -403,25 +452,29 @@ export function ToolRow({
 				</span>
 				{outcome ? (
 					/* The outcome chip may truncate (its whole sentence is in the
-					   expansion's Outcome row); it shrinks AFTER the flex-1 summary
-					   has given up to its floor, so a long summary cannot squeeze an
-					   `inbox_only` caveat to nothing - the caveat is the reason the
-					   chip exists. */
+					   expansion); it shrinks AFTER the flex-1 summary has given up to
+					   its floor, so a long summary cannot squeeze the caveat to
+					   nothing. Wash chips carry a hairline in their own border token
+					   so they read as a chip on the light ground, where the wash
+					   alone measures ~1.03:1 against canvas (design D7). */
 					<span
 						data-bridge-outcome={facts?.outcome ?? undefined}
 						className={cn(
 							"min-w-0 max-w-[55%] shrink truncate rounded-sm px-1 text-mono-sm",
-							outcome.tone === "warning" && "bg-warning-wash text-warning",
-							outcome.tone === "danger" && "bg-danger-wash text-danger",
-							outcome.tone === "muted" && "text-ink-dim",
+							outcome.tone === "warning" && "border border-warning-border/40 bg-warning-wash text-warning",
+							outcome.tone === "danger" && "border border-danger-border/40 bg-danger-wash text-danger",
+							outcome.tone === "pending" && "text-warning",
 						)}
 					>
 						{outcome.mark ? (
-							<span className="me-0.5 inline-block align-[-2px]">
+							<span className="me-0.5 inline-block align-[-2px] @max-[18rem]:me-0">
 								<LucideIcon name={outcome.mark} size={12} />
 							</span>
 						) : null}
-						{outcome.text}
+						{/* A marked chip may collapse to its mark; the word stays in
+						    the accessibility tree (sr-only), never dropped. */}
+						<span className={cn(outcome.mark && "@max-[18rem]:sr-only")}>{outcome.word}</span>
+						{outcome.code ? <span className="@max-[18rem]:hidden">{outcome.code}</span> : null}
 					</span>
 				) : null}
 				{entry.diff_added > 0 || entry.diff_removed > 0 ? (
@@ -460,9 +513,13 @@ export function ToolRow({
 							{entry.intent}
 						</p>
 					) : null}
-					{entry.error ? (
+					{entry.error && !(bridge && bridgeCopy(entry).outcome_sentence) ? (
+						/* A bridge row whose daemon sentence states the refusal does
+						   not repeat it in a raw red line above - that line led the
+						   panel with a `bcv_` id (design D2 / QA Q2). Without a
+						   sentence the error still shows, id-scrubbed. */
 						<p className="text-body-sm text-danger">
-							{entry.error}
+							{bridge ? scrubBridgeIds(entry.error) : entry.error}
 						</p>
 					) : null}
 					{bridge ? <BridgeExpansion entry={entry} facts={facts} /> : null}
@@ -502,9 +559,15 @@ export function ToolRow({
 					{entry.details.diff ? (
 						<DiffBlock diff={entry.details.diff} />
 					) : null}
-					{entry.details.output ? (
+					{entry.details.output && !(bridge && bridgeCopy(entry).outcome_sentence) ? (
+						/* Same rule for the raw output on a bridge row: the tool's
+						   text is the refusal/receipt the sentence already states,
+						   and it interpolates conversation ids. Shown (scrubbed) only
+						   when there is no sentence. */
 						<pre dir="ltr" className="lo-scroll max-h-48 overflow-auto rounded-sm bg-sunken p-2 font-mono text-mono-sm whitespace-pre-wrap text-ink-muted">
-							{toLines(entry.details.output).join("\n")}
+							{bridge
+								? toLines(entry.details.output).join("\n").replace(BRIDGE_ID, "…")
+								: toLines(entry.details.output).join("\n")}
 						</pre>
 					) : null}
 				</div>

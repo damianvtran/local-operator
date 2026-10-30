@@ -43,6 +43,7 @@ from local_operator.mobile.projection import (
     ProjectionFold,
     _diff_counts,
     _image_refs,
+    _peer_cycle_child_row,
     _summarize_args,
     fold_messages_to_entries,
     monotonic_from_epoch,
@@ -5011,3 +5012,55 @@ def test_bridge_body_keeps_its_lines_for_the_markdown_render() -> None:
         )
     )
     assert fold.projection.transcript[-1].details["args"]["command"] == "a b"
+
+
+def test_bridge_copy_scrubs_ids_from_every_field_including_the_error() -> None:
+    """Review R3 / QA Q2: the outcome sentence interpolates the tool's raw
+    ``error``, and real refusals name the conversation. Every copy field must be
+    id-free on the WIRE, including ids whose tail carries ``_`` or ``-``."""
+    row = _settle_bridge(
+        {"op": "channel_post", "conversation_id": "bcv_Z", "body": "hi"},
+        {
+            "ok": False,
+            "code": "not_member",
+            "error": "you are not in bcv_Z (acc_remote_9) via ep_01J-ABC msg bcmsg_7",
+        },
+        error=True,
+    )
+    copy = row.details["bridge_copy"]
+    assert copy["outcome_sentence"].startswith("Refused: you are not in …")
+    for value in copy.values():
+        assert "remote_9" not in value and "-ABC" not in value
+    _no_bridge_ids(copy)
+    unconfirmed = _settle_bridge(
+        {"op": "channel_post", "conversation_id": "bcv_Z", "body": "hi"},
+        {"ok": False, "code": "post_failed", "error": "upstream 500 for bcv_QA0Z"},
+        error=True,
+    )
+    assert unconfirmed.details["bridge_row"]["outcome"] == "unconfirmed"
+    _no_bridge_ids(unconfirmed.details["bridge_copy"])
+
+
+def test_bridge_peer_cycle_child_row_carries_the_same_facts() -> None:
+    """Review R5: the peer-cycle child path is the third producer of a bridge
+    row; it must carry the same tokens and copy as the live settle."""
+    args = {"op": "send", "recipient": "acc_01J9PRIYA", "body": "ping"}
+    details = {"ok": True, "destination_type": "peer_inbox"}
+    live = _settle_bridge(args, details)
+    child = _peer_cycle_child_row(
+        {
+            "tool_call_id": "b1",
+            "tool_name": "bridge",
+            "arguments": args,
+            "result": {
+                "tool_call_id": "b1",
+                "tool_name": "bridge",
+                "content": [{"type": "text", "text": "{}"}],
+                "details": details,
+            },
+        }
+    )
+    assert child.details["bridge_row"] == live.details["bridge_row"]
+    assert child.details["bridge_copy"] == live.details["bridge_copy"]
+    assert child.details["bridge_copy"]["outcome"] == "not posted to a conversation"
+    _no_bridge_ids(child.details["bridge_copy"])

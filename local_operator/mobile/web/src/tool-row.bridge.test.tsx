@@ -129,7 +129,7 @@ describe("the phone's bridge tool row", () => {
 		expect(chip.className).toContain("text-danger");
 	});
 
-	it("keeps unconfirmed and awaiting-acceptance as quiet words", () => {
+	it("puts unconfirmed and awaiting-acceptance on warning ink without a wash", () => {
 		const { container } = render(
 			<>
 				<ToolRow entry={entry({ id: "a" }, { ...POST, outcome: "unconfirmed" })} />
@@ -138,7 +138,12 @@ describe("the phone's bridge tool row", () => {
 		);
 		const quiet = [...container.querySelectorAll("[data-bridge-outcome]")];
 		expect(quiet.map((n) => n.textContent)).toEqual(["delivery unconfirmed", "awaiting acceptance"]);
-		for (const n of quiet) expect(n.className).toContain("text-ink-dim");
+		/* Design D6: the TUI's amber `warn` tier, not muted ink; no wash, so
+		   inbox-only stays the loudest of the three. */
+		for (const n of quiet) {
+			expect(n.className).toContain("text-warning");
+			expect(n.className).not.toContain("bg-warning-wash");
+		}
 		expect(quiet[1].querySelector('svg[data-icon="hourglass"]')).toBeTruthy();
 	});
 
@@ -163,7 +168,7 @@ describe("the phone's bridge tool row", () => {
 		expect(container.querySelector("code")?.textContent).toBe("0.93");
 		const sentence = container.querySelector("[data-bridge-outcome-sentence]")!;
 		expect(sentence.textContent).toMatch(/^Posted, but the recipient agent is invited/);
-		expect(sentence.className).toContain("text-ink-dim");
+		expect(sentence.className).toContain("text-warning");
 		/* The generic args block keeps only what the expansion did not say. */
 		const text = container.textContent ?? "";
 		expect(text).toContain("silent");
@@ -201,5 +206,109 @@ describe("the phone's bridge tool row", () => {
 		const summary = screen.getByText(/post · #release ·/);
 		expect(summary.className).toContain("truncate");
 		expect(summary.className).toContain("min-w-0");
+	});
+
+	it("never paints a caveat row's leading tick in success ink", () => {
+		/* Design D1: the ✓ shape stays (nothing failed) but the ink is warning. */
+		const { container } = render(
+			<>
+				<ToolRow entry={entry({ id: "a" }, { ...POST, op: "send", outcome: "inbox_only" })} />
+				<ToolRow entry={entry({ id: "b" }, { ...POST, op: "dm", outcome: "awaiting_acceptance" })} />
+				<ToolRow entry={entry({ id: "c" }, POST)} />
+			</>,
+		);
+		const glyphs = [...container.querySelectorAll("button > span:first-child")];
+		expect(glyphs.map((g) => g.textContent)).toEqual(["✓", "✓", "✓"]);
+		expect(glyphs[0].className).toContain("text-warning");
+		expect(glyphs[1].className).toContain("text-warning");
+		expect(glyphs[0].className).not.toContain("text-success");
+		/* The control: a plain landed post keeps the success tick. */
+		expect(glyphs[2].className).toContain("text-success");
+	});
+
+	it("sheds the name, then the chip words, then the code on a narrow row", () => {
+		/* Design D3: the shed is container-query driven (`@max-[18rem]`); this
+		   pins the classes and that the words stay in the accessibility tree. */
+		const { container } = render(
+			<>
+				<ToolRow entry={entry({ id: "a" }, { ...POST, op: "send", outcome: "inbox_only" })} />
+				<ToolRow entry={entry({ id: "b", tool_state: "failed" }, { ...POST, outcome: "refused", code: "not_member" })} />
+			</>,
+		);
+		const [inbox, refused] = [...container.querySelectorAll("button")];
+		expect(inbox.className).toContain("@container");
+		const name = [...inbox.querySelectorAll("span")].find((n) => n.textContent === "bridge")!;
+		expect(name.className).toContain("@max-[18rem]:hidden");
+		const inboxChip = inbox.querySelector("[data-bridge-outcome]")!;
+		const word = [...inboxChip.querySelectorAll("span")].find((n) => n.textContent === "not posted to a conversation")!;
+		expect(word.className).toContain("@max-[18rem]:sr-only");
+		const refusedChip = refused.querySelector("[data-bridge-outcome]")!;
+		const parts = [...refusedChip.children].map((n) => [n.textContent, n.className]);
+		/* `refused` has no mark, so its word never collapses; only the code sheds. */
+		expect(parts).toEqual([
+			["refused", ""],
+			[" · not_member", "@max-[18rem]:hidden"],
+		]);
+	});
+
+	it("strips a capped outcome tail so the caveat is said once", () => {
+		/* Design D5 / QA Q3: the daemon caps the line before the phone sees it. */
+		render(
+			<ToolRow
+				entry={entry(
+					{ summary: "Messaged Priya Shah · Heads up - the 0.93 cut lands tonight. · awaiting…" },
+					{ ...POST, op: "dm", outcome: "awaiting_acceptance" },
+				)}
+			/>,
+		);
+		expect(screen.getByText("Messaged Priya Shah · Heads up - the 0.93 cut lands tonight.")).toBeTruthy();
+		const name = screen.getByRole("button").textContent ?? "";
+		expect(name.match(/awaiting/g)?.length).toBe(1);
+	});
+
+	it("keeps a summary whose last segment is not the outcome", () => {
+		render(
+			<ToolRow
+				entry={entry({ summary: "Messaged Priya Shah · await the go-ahead" }, { ...POST, op: "dm", outcome: "inbox_only" })}
+			/>,
+		);
+		expect(screen.getByText("Messaged Priya Shah · await the go-ahead")).toBeTruthy();
+	});
+
+	it("does not repeat a refusal as a raw red line or output block, and shows no id", () => {
+		/* Design D2 / QA Q2: the daemon's sentence states the refusal; the
+		   generic error line and output repeated it with a raw `bcv_` id. */
+		const { container } = render(
+			<ToolRow
+				entry={entry(
+					{
+						tool_state: "failed",
+						error: "not a member of bcv_FIXTURE0OPS",
+						summary: "Couldn't post in a conversation · rolling back",
+					},
+					{ ...POST, outcome: "refused", code: "not_member" },
+					{ op: "channel_post", conversation_id: "bcv_FIXTURE0OPS", body: "rolling back" },
+					{ headline: "Couldn't post in a conversation", outcome_sentence: "Refused: not a member of … (not_member)" },
+				)}
+			/>,
+		);
+		fireEvent.click(screen.getByRole("button"));
+		const text = container.textContent ?? "";
+		expect(text).not.toMatch(/\b(?:bcv|bcmsg|acc|ep)_/);
+		expect(text.match(/not a member/g)?.length).toBe(1);
+		expect(container.querySelector("pre")).toBeNull();
+	});
+
+	it("still shows the error, scrubbed, when the daemon sent no sentence", () => {
+		const e = entry(
+			{ tool_state: "failed", error: "upstream 500 for bcv_Q-1 acc_remote_9" },
+			{ ...POST, outcome: "failed", code: "x_failed" },
+			{ op: "channel_post", body: "b" },
+			{ outcome_sentence: "" },
+		);
+		const { container } = render(<ToolRow entry={e} />);
+		fireEvent.click(screen.getByRole("button"));
+		const err = [...container.querySelectorAll("p")].find((p) => p.textContent?.startsWith("upstream"))!;
+		expect(err.textContent).toBe("upstream 500 for … …");
 	});
 });
