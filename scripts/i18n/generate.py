@@ -439,12 +439,15 @@ def _render_bundled_module(
     WHY ENGLISH IS THE ONLY EAGER LOCALE. Every owned string exists in English
     and English is what ``uiLocaleFor`` reads while a locale is incomplete, so
     it is the one map that must exist before the first paint. The other shipped
-    locales are 30-70 kB each and only one is ever active: shipping all eight
-    eagerly measured 261,511 B of copy (+36 % of the built bundle) to render
-    one. The manifest therefore names one chunk per complete locale, and the
-    eager map keeps its namespace->locale->messages shape with the ``en`` tag
-    alone — the shape is shared with the chunks so the store registers both
-    through ONE code path.
+    locales are one chunk per complete locale and only one is ever active, so a
+    reader pays only for the locale they select. NO SIZE BELONGS IN THIS
+    DOCSTRING: the chunk set grows as catalogues complete, so any kB figure
+    written here goes stale — measure it instead, from ``dist/assets`` after a
+    ``vite build`` of ``local_operator/mobile/web`` (raw bytes from the files;
+    ``gzip -9 -n -c <file> | wc -c`` for the compressed size). The manifest
+    names one chunk per complete locale, and the eager map keeps its
+    namespace->locale->messages shape with the ``en`` tag alone — the shape is
+    shared with the chunks so the store registers both through ONE code path.
     """
     lines = [*_BUNDLED_EAGER_HEADER, *_BUNDLED_OWNED_OPEN]
     for namespace in sorted(namespaces):
