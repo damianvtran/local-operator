@@ -1401,6 +1401,34 @@ def test_the_peers_digest_carries_the_build_suffix(
     assert "reachable   quiet" in lines, lines
 
 
+def test_the_agent_digest_counts_departed_devices_instead_of_listing_them_as_members() -> None:
+    """A departed device is a record, not a member (operator decision 2026-10-29).
+
+    The digest put tombstone rows under the "members" heading, so an agent reading
+    its own tool output counted devices that had left. They are now counted out
+    loud, because a list that silently drops rows reads as the whole record.
+    """
+    lines = net_tool._render(
+        "show",
+        {
+            "name": "devmesh",
+            "network_id": "n_" + "a" * 22,
+            "epoch": 2,
+            "role": "admin",
+            "trust": "active",
+            "members_detail": [
+                {"device_id": "d_1", "name": "laptop", "active": True},
+                {"device_id": "d_2", "name": "cloud-node-1", "active": False},
+            ],
+            "membership": {"state": "active", "sentence": "this device is an active member"},
+        },
+    )
+    body = "\n".join(lines)
+    assert "laptop" in body
+    assert "cloud-node-1" not in body
+    assert "1 departed device not listed; `show --all` returns the full membership record" in body
+
+
 def test_the_agent_digest_carries_a_removed_devices_own_standing() -> None:
     """`show` on a removed device: the sentence, not a healthy-looking member list."""
     lines = net_tool._render(

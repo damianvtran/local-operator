@@ -94,6 +94,19 @@ def _group_parser() -> argparse.ArgumentParser:
     return net_fixtures.subcommands_of(_parser())["network"]
 
 
+def test_the_all_flag_actually_reaches_the_renderer() -> None:
+    """`--all` must be wired, not merely accepted.
+
+    The three rendering cells drive `_show_lines` directly, so all of them would stay
+    green if the parser's dest and the attribute the command reads ever drifted
+    apart. This pins the seam through the real parser.
+    """
+    parsed = _parser().parse_args(["network", "show", "damian-mesh", "--all"])
+    assert getattr(parsed, "show_removed", False) is True
+    plain = _parser().parse_args(["network", "show", "damian-mesh"])
+    assert getattr(plain, "show_removed", False) is False
+
+
 def test_every_action_from_the_design_is_registered() -> None:
     group = _group_parser()
     assert set(net_fixtures.subcommands_of(group)) == set(ACTIONS)
@@ -807,7 +820,9 @@ def _show_payload_with_a_removed_member() -> dict:
         "network_id": "n_" + "a" * 22,
         "epoch": 3,
         "trust": "active",
-        "members": 2,
+        # ``members`` is the ACTIVE count (``active_members()`` in both payload
+        # builders), so it must agree with the rows below: one active, one removed.
+        "members": 1,
         "membership": {"table": {}},
         "members_detail": [
             {

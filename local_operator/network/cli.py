@@ -3639,7 +3639,8 @@ def _member_name(record: Any, device_id: str) -> str:
 def _member_rm_already_revoked(args: argparse.Namespace, record: Any) -> int | None:
     """``member rm`` on an EXACT id that is already removed: say so, and repair.
 
-    WHY. ``lop network show`` lists a removed member (``active:false``) with its id,
+    WHY. ``lop network show --all`` lists a removed member (``active:false``) with its
+    id — the default table hides departed devices as records rather than members —
     so an operator cleaning up copies that id into ``member rm`` — and used to be
     told ``unknown_member``, while credential metadata still named the device as a
     holder and nothing would ever prune it. The removal already happened; what is

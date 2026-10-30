@@ -1037,12 +1037,27 @@ def _render(action: str, payload: dict[str, Any]) -> list[str]:
         # member table looks perfectly healthy, and the sentence is the only thing on
         # this surface that says otherwise (QA round 3, Q-R3-2).
         lines.extend(membership_lines(payload))
+        # A DEPARTED DEVICE IS A RECORD, NOT A MEMBER (operator decision 2026-10-29 —
+        # the same rule the CLI's `show` table now follows): tombstone rows used to sit
+        # under the "members" heading here too, so a reader — an agent reading its own
+        # digest — counted devices that had left. They are counted out loud rather than
+        # dropped, because an agent must be able to tell that the list it is reading is
+        # not the whole record; `show --all` and `--json` still return every one.
+        departed = 0
         for member in payload.get("members_detail") or []:
-            mark = "active" if member.get("active") else "REMOVED"
+            if not member.get("active"):
+                departed += 1
+                continue
             suspect = "  [suspect]" if member.get("suspect") else ""
             lines.append(
-                f"  {mark:7} {member.get('device_id')}  {member.get('name')}  "
+                f"  {'active':7} {member.get('device_id')}  {member.get('name')}  "
                 f"{member.get('role')}  {', '.join(member.get('capabilities') or [])}{suspect}"
+            )
+        if departed:
+            noun = "device" if departed == 1 else "devices"
+            lines.append(
+                f"  ({departed} departed {noun} not listed; `show --all` returns the "
+                "full membership record)"
             )
         for invite in payload.get("invites") or []:
             lines.append(
