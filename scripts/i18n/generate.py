@@ -143,7 +143,6 @@ def _aggregate_rows_missing_from_shards() -> list[str]:
     ]
 
 
-
 def _bundled_dir() -> Path:
     """The relay SPA's generated own-copy modules — one eager English map beside
     one chunk per complete shipped locale (see ``_render_bundled_module``).
