@@ -14721,7 +14721,15 @@ def _unit_config_root() -> Path | None:
         return None
     last = matched[-1]
     tail = text[last.end() :]
-    if any(CONFIG_DIR_ENV in line for line in tail.splitlines()):
+    # A COMMENTED line is not an assignment: systemd ignores it, so refusing on one
+    # would turn a determinately pinned unit into "unknown" and label an ordinary
+    # stop as a crash -- the very symptom this reader exists to prevent. Only lines
+    # systemd would read are allowed to make the answer unknown.
+    if any(
+        CONFIG_DIR_ENV in line
+        for line in tail.splitlines()
+        if not line.lstrip().startswith(("#", ";"))
+    ):
         return None
     value = re.sub(r"\\(.)", r"\1", last.group(1)).replace("%%", "%")
     return Path(value) if value else None

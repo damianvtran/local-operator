@@ -1959,6 +1959,28 @@ def test_a_later_pin_the_pattern_cannot_read_refuses_rather_than_falling_back(
     assert relay._unit_config_root() is None  # noqa: SLF001
 
 
+def test_a_trailing_comment_naming_the_variable_does_not_suppress_the_pin(
+    linux_host: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """systemd ignores a commented line, so it must not make the answer unknown.
+
+    Reviewer r2's MINOR-1 and QA's observation: a blanket substring test would turn a
+    determinately pinned unit into ``None`` because a trailing comment mentioned the
+    variable — and the consequence of that is the symptom this reader exists to
+    prevent, an ordinary stop being labelled a crash.
+    """
+    config = tmp_path / "cfg"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "override"))
+    unit = _write_unit_pinning(linux_host, config)
+    unit.write_text(
+        unit.read_text(encoding="utf-8")
+        + f"# see Environment={relay.CONFIG_DIR_ENV}={tmp_path / 'commented'}\n",
+        encoding="utf-8",
+    )
+
+    assert relay._unit_config_root() == config  # noqa: SLF001
+
+
 def test_one_pin_still_resolves_to_that_pin(
     linux_host: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
