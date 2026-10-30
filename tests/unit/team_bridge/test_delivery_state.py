@@ -94,9 +94,9 @@ _DELIVERY_PENDING = {"delivery_failed", "bridge_off", "phase_refused"}
 
 
 def test_every_screening_category_has_exactly_the_contract_class() -> None:
-    assert set(_EXPECTED_REFUSAL) == set(SCREENING_CATEGORIES), (
-        "a screening category was added or removed: give it a contract class"
-    )
+    assert set(_EXPECTED_REFUSAL) == set(
+        SCREENING_CATEGORIES
+    ), "a screening category was added or removed: give it a contract class"
     for category in SCREENING_CATEGORIES:
         assert refusal_class([category]) == _EXPECTED_REFUSAL[category]
         assert refusal_class((category,)) == _EXPECTED_REFUSAL[category]
@@ -378,16 +378,20 @@ def test_a_screening_hold_publishes_held_with_the_bare_id_on_every_drain(
     assert first["outcomes"][0]["action"] == "hold"
     assert second["outcomes"][0]["action"] == "hold"
     # Re-published on each drain while the hold persists; keyed by the BARE id.
-    assert published == [
-        {
-            "conversation_id": CID,
-            "message_id": MID,
-            "tenant_id": "tnt_1",
-            "endpoint_id": "bep_a",
-            "hold_class": "awaiting_review",
-            "access": published[0]["access"],
-        }
-    ] * 2
+    assert (
+        published
+        == [
+            {
+                "conversation_id": CID,
+                "message_id": MID,
+                "tenant_id": "tnt_1",
+                "endpoint_id": "bep_a",
+                "hold_class": "awaiting_review",
+                "access": published[0]["access"],
+            }
+        ]
+        * 2
+    )
     assert ":" not in published[0]["message_id"]
 
 
@@ -405,7 +409,9 @@ def test_a_provider_hold_publishes_only_the_coarse_class(tmp_path, monkeypatch) 
     Store(config_dir).persist_hold(a, ref.encode(), "screening_hold", retry_at=0)
     _retry(a, config_dir)
     assert [entry["hold_class"] for entry in published] == ["screening_unavailable"]
-    assert "breaker_open" not in json.dumps({k: v for k, v in published[0].items() if k != "access"})
+    assert "breaker_open" not in json.dumps(
+        {k: v for k, v in published[0].items() if k != "access"}
+    )
 
 
 def test_a_failed_held_write_never_changes_the_hold(tmp_path, monkeypatch) -> None:
@@ -425,7 +431,8 @@ def _bounce_with(categories: tuple[str, ...], server: FakeServer) -> Any:
     from dataclasses import replace
 
     return ScreenResult(
-        disposition="bounce", receipt=replace(_receipt("reject", server.body), categories=categories)
+        disposition="bounce",
+        receipt=replace(_receipt("reject", server.body), categories=categories),
     )
 
 

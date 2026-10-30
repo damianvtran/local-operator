@@ -665,7 +665,9 @@ def _clear_terminal_hold(owner: Any, ref: ConversationFeedRef, config_dir: Path)
 _DELIVERY_STATE_TIMEOUT_S = 10.0
 
 
-async def _publish_held(client: Any, owner: Any, ref: ConversationFeedRef, code: Any, access: Any) -> None:
+async def _publish_held(
+    client: Any, owner: Any, ref: ConversationFeedRef, code: Any, access: Any
+) -> None:
     """Tell the hub this endpoint is HOLDING the message (delivery-state contract v1).
 
     WHY. A human sender otherwise cannot tell a message our screener holds from

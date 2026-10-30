@@ -1309,7 +1309,9 @@ def refusal_class(categories: Any) -> str | None:
     is deterministic and a single class. No known category → ``None``.
     """
 
-    if isinstance(categories, (str, bytes)) or not isinstance(categories, (list, tuple, frozenset, set)):
+    if isinstance(categories, (str, bytes)) or not isinstance(
+        categories, (list, tuple, frozenset, set)
+    ):
         return None
     present = {name for name in categories if isinstance(name, str)}
     for name in SCREENING_CATEGORIES:
