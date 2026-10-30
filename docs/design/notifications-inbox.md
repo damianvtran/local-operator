@@ -122,8 +122,8 @@ nothing the operator needs ends with `no_reply` and posts no notification.
 `no_reply` itself is untouched, so a quiet turn stays zero-friction. The guard
 lives on the tool params, NOT in `NotificationStore.notify`: server-side writers
 (an approval gate titled with the tool name, tests) use short titles on purpose
-and must keep working. The 25 legacy placeholder rows were retired by hand;
-this guard is what stops new ones.
+and must keep working. The rows written before this guard were dismissed from
+the list and remain in the store's history; the guard is what stops new ones.
 
 ### 3.2 Who gets it (createIf rung 3)
 
