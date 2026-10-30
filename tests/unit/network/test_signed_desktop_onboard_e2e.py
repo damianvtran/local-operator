@@ -31,6 +31,7 @@ from local_operator.network.types import (
     capabilities_for_role,
 )
 from tests.unit.network.test_approvals_store import _make_key
+from tests.unit.server.test_desktop_mesh_onboard import _drain_server
 from tests.unit.server.test_desktop_mesh_onboard import live as live_http
 from tests.unit.server.test_desktop_mesh_onboard import root as isolated_root
 
@@ -74,7 +75,13 @@ class Node:
         self.stdin, self.stdout = self.process.stdin, self.process.stdout
         self.lock = threading.Lock()
         try:
-            self.ready = self.read(15)
+            # A HANG BACKSTOP, NOT A LATENCY ASSERTION: the child imports the
+            # package, binds a real relay and prints its first line. Measured
+            # at 24.1 s and 25.2 s per node on this fleet's loaded host
+            # (2026-10-30, 14 cores, load average 112-142); the old 15 s bound
+            # turned that load into "node pipe exceeded its safety bound"
+            # before the product ran a single step.
+            self.ready = self.read(NODE_STARTUP_BACKSTOP_S)
         except BaseException:
             self.close()
             raise
@@ -313,6 +320,63 @@ class SshBoundary:
         pass
 
 
+#: The join barrier's HANG backstop, never a latency assertion. The barrier is
+#: set by the node's real ``join --automated`` returning, which happens only
+#: after invite, pre-read, install, ``identity show`` and the join handshake have
+#: all run as real subprocess/relay work inside the two node processes.
+#: MEASURED on this fleet's loaded host (2026-10-30, 14 cores, load average
+#: 112-142): 41.8 s for the invite step alone. The wait below lasts exactly as
+#: long as the work does; this number only ends a genuine hang.
+JOIN_BARRIER_BACKSTOP_S = 300.0
+
+#: Node process startup: the child imports local_operator, binds a real relay and
+#: answers. Same class of bound as the join barrier, measured at 24.1/25.2 s when
+#: the host is saturated.
+NODE_STARTUP_BACKSTOP_S = 120.0
+
+#: Teardown waits for the app's in-flight run workers before reaping the nodes.
+#: A backstop again: the workers are local, but a loaded host slows their last
+#: store write too.
+WORKER_DRAIN_BACKSTOP_S = 120.0
+
+
+async def joined(client, aid, ssh):
+    """Wait until the node's join CLI returned; fail FAST if the run ended first.
+
+    Replaces ``asyncio.to_thread(ssh.after_join.wait, 15)``, which was a bet on
+    machine load rather than a test of anything: on a saturated host the first
+    phase alone (invite 41.8 s measured) outruns a fixed 15 s budget, so the
+    assertion went red while the product was doing exactly what it should — and
+    then the teardown closed the node pipe under the still-running worker, which
+    is how a clean run came to leave a ``step=worker`` receipt behind
+    (AGENTS.md, "Wait on the event, never on the clock").
+
+    The event IS the assertion; the record is what makes a real failure fast. A
+    run that stops being active before the barrier fires is a product outcome,
+    so the receipts — not a timeout — are the failure message.
+    """
+
+    async def wait():
+        while not ssh.after_join.is_set():
+            payload = (await client.get(f"/v1/desktop/approvals/{aid}")).json()["result"]
+            if not payload["run_active"]:
+                pytest.fail(
+                    "the run ended before the node's join returned: "
+                    + json.dumps(
+                        [(row["step"], row["ok"], row["detail"]) for row in payload["receipts"]]
+                    ),
+                    pytrace=False,
+                )
+            await asyncio.sleep(0.05)
+
+    try:
+        await asyncio.wait_for(wait(), JOIN_BARRIER_BACKSTOP_S)
+    except asyncio.TimeoutError:  # pragma: no cover - a genuine hang only
+        pytest.fail(
+            f"the node's join never returned within {JOIN_BARRIER_BACKSTOP_S:.0f}s", pytrace=False
+        )
+
+
 async def terminal(client, aid):
     async def wait():
         while True:
@@ -372,6 +436,17 @@ async def rig(live, monkeypatch):
         aid = response.json()["result"]["approval_id"]
         yield client, root, node_a, node_b, ssh, body, aid
     finally:
+        # DRAIN THE APP'S OWN WORKERS BEFORE THE NODES DIE. Fixtures tear down in
+        # reverse setup order, so this rig closed the node pipes first and the
+        # `live` fixture's own drain then resumed a worker that was still inside
+        # a step: the product raised `ValueError: I/O operation on closed file`
+        # in `step_join` and the durable record said "Setup worker did not
+        # finish" — the fixture's own teardown wearing the product's name, and
+        # the reason a red here could not be read off the receipts.
+        try:
+            await asyncio.wait_for(_drain_server(app), WORKER_DRAIN_BACKSTOP_S)
+        except asyncio.TimeoutError:  # pragma: no cover - a wedged worker only
+            pass
         if node_b:
             node_b.close()
         node_a.close()
@@ -570,7 +645,7 @@ async def test_lost_join_response_same_card_retry_and_single_target_writer(rig):
             base_url=str(client.base_url), headers=client.headers
         ) as closer:
             assert (await closer.post(f"/v1/desktop/approvals/{aid}/run")).status_code == 202
-        assert await asyncio.to_thread(ssh.after_join.wait, 15)
+        await joined(client, aid, ssh)
         first = (await client.get(f"/v1/desktop/approvals/{aid}")).json()["result"]
         assert first["run_active"]
         assert (await client.post(f"/v1/desktop/approvals/{aid}/run")).status_code == 409

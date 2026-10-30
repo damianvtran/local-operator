@@ -58,7 +58,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Protocol, Sequence
@@ -196,6 +196,31 @@ class OnboardContradiction(MeshRefusal):
         super().__init__("pre_read_contradiction", sentence)
         self.finding = finding
         self.refiled = refiled
+
+
+class OnboardStepCrash(Exception):
+    """An unexpected exception escaped the step named in ``step``.
+
+    THE RECEIPT USED TO SAY NOTHING (main-red investigation, 2026-10-30).
+    ``server/routes/desktop_approvals.py``'s catch-all records any escaping
+    exception as a bare ``step="worker"`` row — a name that is not in
+    :data:`STEP_NAMES` — under one canned sentence. That row is the only trace a
+    crashed run leaves: the exception, its type and the step it came from are
+    all discarded, so telling "the join fixture died" from "the credential
+    helper crashed" meant reading the raw JSON store afterwards. Carrying the
+    step on the exception is what lets the receipt name it.
+
+    ``cause_type`` is only ever an exception CLASS NAME: class names are code
+    identifiers, so a receipt built from one cannot leak a path, a token or a
+    credential value the way ``str(exc)`` can — the same reason the runner
+    never stores a raw exception message. The exception object rides
+    ``__cause__`` for a Python traceback and is never serialised.
+    """
+
+    def __init__(self, step: str, cause: BaseException):
+        self.step = step
+        self.cause_type = type(cause).__name__
+        super().__init__(f"{self.cause_type} raised during step {step!r}")
 
 
 # ---------------------------------------------------------------------------
@@ -2795,14 +2820,57 @@ def _receipt(
     }
 
 
+class TargetLease:
+    """The one per-target claim a run holds, releasable BEFORE its outcome lands.
+
+    The claim is right: two distinct cards must not install on one SSH target
+    at the same time (``approval_target_in_flight``). What was wrong is WHEN it
+    stopped excluding (main-red investigation, 2026-10-30). The claim's ``with``
+    block outlives the run's *terminal record write* (``finish``), and that
+    write is exactly what a client polls for ``run_active`` — so a client that
+    reads "the run is over" and immediately retries was refused 409
+    ``approval_target_in_flight`` by a run it had just been told was finished.
+    That contradiction is main's ``assert 409 == 202`` on the retry after a
+    failed join; it is a race, so it shows up as a CI failure rather than a
+    local one, and the window is as wide as a loaded runner's thread handoff.
+
+    The fix is ordering, not tolerance: the runner releases the claim as its
+    last act BEFORE publishing the outcome, so "no run in flight" and "target
+    free" become visible to readers in that order — never the reverse. The
+    release is idempotent and thread-safe by construction (a flag under the
+    caller's own single-threaded exit path, then the kernel unlock on the
+    process-wide descriptor, so a release from the runner's worker thread is
+    honoured), which keeps :func:`approval_run`'s ``finally`` the backstop for
+    every path that never publishes an outcome at all.
+    """
+
+    #: Set by :func:`approval_run` before the lease is yielded; the admission
+    #: this run was granted for.
+    view: approvals_adapter.ApprovalView
+
+    def __init__(self, claim: AbstractContextManager[bool]) -> None:
+        self._claim = claim
+        self._released = False
+
+    def release(self) -> None:
+        """Free the target. Idempotent; safe to call from the runner thread."""
+        if self._released:
+            return
+        self._released = True
+        self._claim.__exit__(None, None, None)
+
+
 @contextmanager
-def approval_run(approval_id: str, *, root: Any = None) -> Iterator[approvals_adapter.ApprovalView]:
+def approval_run(approval_id: str, *, root: Any = None) -> Iterator["TargetLease"]:
     """Shared CLI/desktop target lease around the EXISTING signed run admission.
 
     Distinct cards for one network/SSH target must not install concurrently. The
     file claim is nonblocking and per target, not a fleet-wide queue, and its
     inode is never removed. Existing begin_run still verifies signature, expiry,
     state and per-record stale-run semantics before any step/credential lookup.
+
+    Yields a :class:`TargetLease`, not the view: the run inside must be able to
+    free the target BEFORE it publishes its outcome (see that class for why).
     """
     from local_operator.config_writer import nonblocking_file_claim
     from local_operator.network import approvals as store
@@ -2835,13 +2903,26 @@ def approval_run(approval_id: str, *, root: Any = None) -> Iterator[approvals_ad
     target = store.ensure_approvals_dir(root) / (
         ".target-" + hashlib.sha256(key.encode()).hexdigest() + ".lock"
     )
-    with nonblocking_file_claim(target) as acquired:
+    claim = nonblocking_file_claim(target)
+    acquired = claim.__enter__()
+    lease: TargetLease | None = None
+    try:
         if not acquired:
             raise MeshRefusal(
                 "approval_target_in_flight",
                 "Setup already owns this SSH target; read its progress before retrying",
             )
-        yield approvals_adapter.begin_run(approval_id, root=root)
+        lease = TargetLease(claim)
+        lease.view = approvals_adapter.begin_run(approval_id, root=root)
+        yield lease
+    finally:
+        # ONE exit owner: the lease, which the run itself releases before it
+        # publishes its outcome. This finally covers the paths that never reach
+        # a yield (a refusal above) and a body that raises.
+        if lease is not None:
+            lease.release()
+        else:
+            claim.__exit__(None, None, None)
 
 
 def execute_approval(
@@ -2856,10 +2937,10 @@ def execute_approval(
     root: Any = None,
 ) -> dict[str, Any]:
     """One runner for CLI and desktop; hold admission until all nine steps drain."""
-    with approval_run(approval_id, root=root) as view:
+    with approval_run(approval_id, root=root) as lease:
         return _execute_admitted_approval(
             approval_id,
-            view=view,
+            view=lease.view,
             transport=transport,
             transport_factory=transport_factory,
             resolve=resolve,
@@ -2867,6 +2948,7 @@ def execute_approval(
             run_local=run_local,
             clock=clock,
             root=root,
+            release_target=lease.release,
         )
 
 
@@ -2881,6 +2963,7 @@ def _execute_admitted_approval(
     run_local: Callable[..., CommandResult] = _run_local,
     clock: Callable[[], float] = _now,
     root: Any = None,
+    release_target: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     """Execute an approved onboarding record. THE runner entry point.
 
@@ -2918,6 +3001,20 @@ def _execute_admitted_approval(
         clock=clock,
         root=root,
     )
+
+    def release_claim() -> None:
+        """Free the SSH target BEFORE any terminal row becomes readable.
+
+        ``finish`` is the write a client's ``run_active`` poll observes, and
+        the target claim is what a retry is refused on. Released in that
+        order, nobody can read "this run is over" and then be told the
+        target is busy (see :class:`TargetLease`). Called at every terminal
+        write; idempotent, so the outermost ``finally`` still covers paths
+        that never reach one.
+        """
+        if release_target is not None:
+            release_target()
+
     steps: list[dict[str, Any]] = []
     state = "connecting"
     error: dict[str, str] | None = None
@@ -2941,6 +3038,7 @@ def _execute_admitted_approval(
                 # The FAILING receipt is written by the store's own terminal
                 # write in the same locked mutation (mark_failed); appending it
                 # separately would leave the step on the record twice.
+                release_claim()
                 approvals_adapter.finish(
                     approval_id,
                     "failed",
@@ -2963,9 +3061,20 @@ def _execute_admitted_approval(
                 next_step = step
                 error = {"code": contradiction.code, "message": contradiction.sentence}
                 break
+            except MeshRefusal:
+                # A step may raise the gate's own refusal; the outer handler
+                # folds it into the "gate" receipt it has always used.
+                # Wrapping it would change which arm answers.
+                raise
+            except Exception as crash:
+                # THE RECEIPT NAMES THE STEP THAT DIED: see
+                # :class:`OnboardStepCrash`. Only the class name rides the
+                # receipt, never ``str(crash)``.
+                raise OnboardStepCrash(step, crash) from crash
             receipt = _receipt(run.view.run_id, step, outcome)
             steps.append(receipt)
             if not outcome.ok:
+                release_claim()
                 approvals_adapter.finish(
                     approval_id,
                     "failed",
@@ -2982,6 +3091,7 @@ def _execute_admitted_approval(
                 # The LAST step's receipt is the terminal write's own
                 # (mark_connected lands it in the same mutation); every earlier
                 # ok step appends here.
+                release_claim()
                 approvals_adapter.finish(
                     approval_id,
                     "connected",
@@ -3010,6 +3120,7 @@ def _execute_admitted_approval(
             # observation the store's fold already reflects, so finish() is a
             # no-op there. A deny is already on the record — its write is
             # refused, and that is the honest outcome for this run.
+            release_claim()
             approvals_adapter.finish(
                 approval_id,
                 terminal,
