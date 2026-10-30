@@ -86,7 +86,7 @@ vi.mock("../store", async (importOriginal) => {
 	};
 });
 
-function projection(): SessionProjection {
+function projection(pending: SessionProjection["pending"] = null): SessionProjection {
 	return {
 		session_id: "s1",
 		pid: 1,
@@ -107,19 +107,25 @@ function projection(): SessionProjection {
 		transcript: [],
 		todos: [],
 		subagents: [],
-		pending: null,
-		pending_count: 0,
+		pending,
+		pending_count: pending === null ? 0 : 1,
 		usage: {},
 		version: 1,
 	} as unknown as SessionProjection;
 }
 
-function TestComposer({ pid = "p1" }: { pid?: string }) {
+function TestComposer({
+	pid = "p1",
+	pending = null,
+}: {
+	pid?: string;
+	pending?: SessionProjection["pending"];
+}) {
 	return (
 		<Composer
 			ended={false}
 			pid={pid}
-			projection={projection()}
+			projection={projection(pending)}
 			onOpenModels={() => {}}
 			onReturnToModels={() => {}}
 			onOpenEffort={() => {}}
@@ -129,8 +135,8 @@ function TestComposer({ pid = "p1" }: { pid?: string }) {
 	);
 }
 
-function mount(pid = "p1") {
-	render(<TestComposer pid={pid} />);
+function mount(pid = "p1", pending: SessionProjection["pending"] = null) {
+	render(<TestComposer pid={pid} pending={pending} />);
 	return screen.getByPlaceholderText("Ask anything…") as HTMLTextAreaElement;
 }
 
@@ -140,7 +146,11 @@ function mountWithHandle(pid = "p1") {
 	return { view, field: screen.getByPlaceholderText("Ask anything…") as HTMLTextAreaElement };
 }
 
-/** Type `value` and put the caret at `caret` — what a phone reports as it types. */
+/** Type `value` and put the caret at `caret` — what a phone reports as it types.
+
+    The trailing `select` is the caret report the `$` parse reads; `onChange`
+    alone reports the position BEFORE the character landed. One test below
+    deliberately types without it — see the Escape case. */
 function type(field: HTMLTextAreaElement, value: string, caret = value.length) {
 	fireEvent.change(field, { target: { value } });
 	field.setSelectionRange(caret, caret);
@@ -150,6 +160,18 @@ function type(field: HTMLTextAreaElement, value: string, caret = value.length) {
 function tray(): HTMLElement | null {
 	return document.querySelector("[data-skill-tray]");
 }
+
+/** An ask waiting for an answer, as the projection publishes it (design D5). */
+const ASK: SessionProjection["pending"] = {
+	request_id: "r1",
+	kind: "ask",
+	title: "Which database should the migration target?",
+	detail: "The two candidates differ in how they handle the rollback.",
+	options: [],
+	secret: false,
+	question_index: 0,
+	question_total: 1,
+};
 
 afterEach(() => {
 	cleanup();
@@ -356,6 +378,22 @@ describe("the skill tray", () => {
 		expect((tray() as HTMLElement).className).toContain("lo-fade-y");
 	});
 
+	it("drops to TWO rows while a question is waiting (D5)", async () => {
+		const field = mount("p1", ASK);
+		type(field, "$", 1);
+		await waitFor(() => expect(tray()).toBeTruthy());
+
+		/* A question outranks a list. At every phone column with the keyboard up
+		   the 45 % tray pushed the ask's question above the slot and left only
+		   its decision row — 14 px of it clipped at 508 — so the user was asked
+		   to approve what they could not read. Two 44 px rows plus the tray's
+		   own `py-1` is 96 px, and the list scrolls inside it. */
+		expect((tray() as HTMLElement).style.maxHeight).toBe("calc(2 * 2.75rem + 0.5rem)");
+		/* The rows are still there to be scrolled through — the cap narrows the
+		   window, it does not narrow the list. */
+		expect(within(tray() as HTMLElement).getAllByRole("button")).toHaveLength(3);
+	});
+
 	it("opens mid-composition — Android composes every Latin word (M1)", async () => {
 		const field = mount();
 		/* Gboard reports a composition for `$res` as it is typed. The dropped guard
@@ -398,6 +436,102 @@ describe("the skill tray", () => {
 		fireEvent.keyDown(field, { key: "Escape" });
 		await waitFor(() => expect(tray()).toBeNull());
 		expect(field.value).toBe("$research the bug");
+	});
+
+	it("closes on ONE Escape, with the selection report the same press makes (Q-R2-1)", async () => {
+		const field = mount();
+		/* Two things the old test was missing, both halves of the bug.
+
+		   FOCUS: React reports the selection of the focused control, so without
+		   focus there is no second event to reproduce.
+
+		   NO `select` AFTER TYPING (hence no `type()` here): a real keypress
+		   reports the selection as it was BEFORE the character landed, so the
+		   event a real Escape press produces IS a change — the one path that
+		   re-armed the dismissal. Handing the composer a selection report right
+		   after the edit, as the helper does, hides exactly that. */
+		field.focus();
+		fireEvent.change(field, { target: { value: "$res" } });
+		field.setSelectionRange(4, 4);
+		await waitFor(() => expect(tray()).toBeTruthy());
+
+		fireEvent.keyDown(field, { key: "Escape" });
+		fireEvent.keyUp(field, { key: "Escape" });
+
+		await waitFor(() => expect(tray()).toBeNull());
+		expect(field.value).toBe("$res");
+	});
+
+	it("re-opens when the caret actually moves, or on a tap in the field (U1/m7)", async () => {
+		const field = mount();
+		type(field, "$res", 4);
+		await waitFor(() => expect(tray()).toBeTruthy());
+
+		fireEvent.keyDown(field, { key: "Escape" });
+		fireEvent.select(field);
+		fireEvent.keyUp(field, { key: "Escape" });
+		await waitFor(() => expect(tray()).toBeNull());
+
+		/* A caret move inside the token is a fresh decision. */
+		field.setSelectionRange(3, 3);
+		fireEvent.select(field);
+		await waitFor(() => expect(tray()).toBeTruthy());
+
+		/* And so is a tap that lands where the caret already was — the gesture,
+		   not the position, is what re-arms (review m7: returning from another
+		   app and tapping back into the field must not leave the list stuck
+		   closed until the next keystroke). */
+		fireEvent.keyDown(field, { key: "Escape" });
+		fireEvent.select(field);
+		await waitFor(() => expect(tray()).toBeNull());
+		fireEvent.pointerDown(field, { pointerId: 4 });
+		await waitFor(() => expect(tray()).toBeTruthy());
+	});
+
+	it("stays open when focus moves into a row, and the row still picks (U7)", async () => {
+		const field = mount();
+		type(field, "$res", 4);
+		await waitFor(() => expect(tray()).toBeTruthy());
+		const row = within(tray() as HTMLElement).getByText("$research").closest("button") as HTMLButtonElement;
+
+		/* Shift+Tab from the field lands on the last row. The blur that precedes
+		   it used to remove the target before the browser could focus it, so
+		   focus fell through to the attach control and the row's keyboard path
+		   was advertised but unreachable. */
+		fireEvent.blur(field, { relatedTarget: row });
+		await Promise.resolve();
+		expect(tray()).toBeTruthy();
+
+		/* A keyboard activation (no pointer detail) is the row's third path. */
+		fireEvent.click(row, { detail: 0 });
+		await waitFor(() => expect(field.value).toBe("$research "));
+	});
+
+	it("closes once focus leaves the tray for something outside it (U7)", async () => {
+		const field = mount();
+		type(field, "$res", 4);
+		await waitFor(() => expect(tray()).toBeTruthy());
+
+		fireEvent.focusIn(document.body);
+		await waitFor(() => expect(tray()).toBeNull());
+	});
+
+	it("Escape from a focused row closes the list and returns to the field (U7)", async () => {
+		const field = mount();
+		type(field, "$res", 4);
+		await waitFor(() => expect(tray()).toBeTruthy());
+		const row = within(tray() as HTMLElement).getByText("$research").closest("button") as HTMLButtonElement;
+
+		fireEvent.blur(field, { relatedTarget: row });
+		await Promise.resolve();
+		expect(tray()).toBeTruthy();
+
+		/* The field's own handler cannot see a key pressed on a row, so the list
+		   would otherwise have no keyboard exit once focus is inside it. */
+		fireEvent.keyDown(row, { key: "Escape" });
+		await waitFor(() => expect(tray()).toBeNull());
+		expect(document.activeElement).toBe(field);
+		expect(field.value).toBe("$res");
 	});
 
 	it("a restored draft stays closed until the user edits it (U2)", async () => {

@@ -86,6 +86,35 @@ export function columnCap(fraction: number): { maxHeight: string } {
 }
 
 /**
+ * The `$skill` tray's cap while a question is waiting — TWO rows, not a share
+ * of the column (design D5).
+ *
+ * A question outranks a list (branding §7), and 45 % of the column did not
+ * leave it room. Measured on this branch with a pending approval and the tray
+ * at eight rows: the slot was 29.4 px at a 508 px column, 52.5 at 470, 54.2 at
+ * 553 and 62.4 at 320x568, while the card's question needs ~114 px — so the
+ * question started ABOVE the slot and only the green decision row stayed on
+ * screen (at 508 even that row was 14.4 px clipped). The user was asked to
+ * approve something they could not read.
+ *
+ * Two rows keep `$name` discoverable, the list scrolls inside them, and the
+ * card gets the rest: the same columns then land at 162/168/207/222.
+ *
+ * Rows rather than a fraction because the bound is a COUNT. A row's floor is
+ * the repo's 44 px touch target (`min-h-11`) and the tray adds `py-1`, so the
+ * cap is `2 x 44 + 8` = 96 px — written in rem so a reader who scales the root
+ * type still gets exactly two rows rather than two-and-a-bit.
+ */
+export const SKILL_TRAY_ASK_ROWS = 2;
+
+/** `max-height` while an ask or approval is pending, else the usual fraction. */
+export function skillTrayCap(questionPending: boolean): { maxHeight: string } {
+	return questionPending
+		? { maxHeight: `calc(${SKILL_TRAY_ASK_ROWS} * 2.75rem + 0.5rem)` }
+		: columnCap(SKILL_TRAY_FRACTION);
+}
+
+/**
  * The box a VIEWPORT-anchored overlay must cover, in column units.
  *
  * `position: fixed` resolves against the LAYOUT viewport, and a virtual

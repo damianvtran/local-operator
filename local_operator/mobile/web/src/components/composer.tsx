@@ -654,16 +654,34 @@ export function Composer({
 	onFitLevel?: (level: number) => void;
 }) {
 	const [text, setText] = useDraft(pid);
-	/* The skill picker's caret, and whether the draft counts as touched for the
-	   picker at all. `null` means "the field has not reported a caret since this
-	   draft was restored", and the parse treats it as CLOSED rather than as
-	   end-of-text: a restored `$ux` draft used to open the tray before the user
-	   had touched anything (UX review U2). Typing or moving the caret sets a
-	   number; there is no route back to `null` except a restore. */
+	/* Whether the draft counts as a gesture for the picker at all. `null` means
+	   "the field has not reported a caret since this draft was restored", and
+	   the parse treats it as CLOSED rather than as end-of-text: a restored `$ux`
+	   draft used to open the tray before the user had touched anything (UX
+	   review U2). Typing or moving the caret sets a number; there is no route
+	   back to `null` except a restore. */
 	const [caret, setCaret] = useState<number | null>(null);
 	/* Whether the user closed the tray for this draft (UX review U1). Reset by
-	   the next edit or caret move, so dismissing is per-gesture, never sticky. */
+	   the next EDIT or caret move, so dismissing is per-gesture, never sticky. */
 	const [skillDismissed, setSkillDismissed] = useState(false);
+	/* The parse the user CLOSED the tray at: caret and token, captured by the
+	   gesture that dismissed it.
+
+	   WHY A SNAPSHOT AND NOT JUST `setSkillDismissed(false)`. An Escape press is
+	   not one event. The key reaches `onKeyDown`, and the same key press also
+	   makes React report the selection (`onSelect`) with the caret unchanged —
+	   which re-armed the dismissal in the same gesture. One Escape then appeared
+	   to do nothing and a second worked, because only the first press carries
+	   that report (UX review U1, QA round 2 Q-R2-1; measured with trusted key
+	   events and with React's own props wrapped). Re-arming only when the parse's
+	   inputs changed makes the GESTURE the trigger rather than the event: the
+	   pair the dismissal recorded arriving again is that gesture's own tail,
+	   while a moved caret or a different token at it is a fresh decision. */
+	const closedAtRef = useRef<{ caret: number | null; token: string | null } | null>(null);
+	/* The parse as of THIS render, readable from a handler that may run after a
+	   re-render (the document-level dismiss listener). */
+	const parseRef = useRef<{ text: string; caret: number | null }>({ text, caret });
+	parseRef.current = { text, caret };
 	/* Whether the notice currently painted is the skipped-skill receipt, which
 	   describes the message just SENT and must not outlive it into the next
 	   draft (UX review U5). A ref: it gates a clear, and never renders. */
@@ -932,6 +950,18 @@ export function Composer({
 		: [];
 	const skillTrayOpen = !disabled && skillRows.length > 0;
 
+	/** Close the tray, recording the parse it was closed at, so the selection
+	    report the SAME gesture also produces is not mistaken for a new one. */
+	const dismissSkillTray = () => {
+		const { text: drafted, caret: at } = parseRef.current;
+		const token = at === null ? null : skillToken(drafted, at);
+		closedAtRef.current = {
+			caret: at,
+			token: token ? `${token.start}:${token.end}:${token.query}` : null,
+		};
+		setSkillDismissed(true);
+	};
+
 	/* A tap ANYWHERE outside the list and the field closes it (UX review U1):
 	   before this, the only exits were editing the token away or sending, and on
 	   a phone the list covers up to 45 % of the column while the user reads.
@@ -946,10 +976,41 @@ export function Composer({
 			if (!(target instanceof Element)) return;
 			if (target.closest("[data-skill-tray]")) return;
 			if (target === textareaRef.current) return;
-			setSkillDismissed(true);
+			dismissSkillTray();
+		};
+		/* The same rule for the KEYBOARD (UX round 2 U7): the tray follows the
+		   field, so focus landing anywhere else closes it. Without this, moving
+		   focus from a row to the transcript would strand an open list behind a
+		   field nobody is typing in — the blur that used to close it belongs to
+		   the textarea, which is not the element being left. */
+		const onFocusIn = (event: FocusEvent) => {
+			const target = event.target;
+			if (!(target instanceof Element)) return;
+			if (target === textareaRef.current) return;
+			if (target.closest("[data-skill-tray]")) return;
+			dismissSkillTray();
+		};
+		/* An Escape pressed while a ROW has focus closes the list too, and puts
+		   the caret back where it came from: the field's own handler cannot see
+		   the key, and a list that the keyboard can enter but not leave would be
+		   a trap (U7). `preventDefault` keeps the browser's own Escape (stop the
+		   page load, close a native popup) from racing a gesture the app is
+		   already handling. */
+		const onKeyDown = (event: KeyboardEvent) => {
+			if (event.key !== "Escape") return;
+			if (event.target === textareaRef.current) return;
+			event.preventDefault();
+			dismissSkillTray();
+			textareaRef.current?.focus();
 		};
 		document.addEventListener("pointerdown", onPointerDown, true);
-		return () => document.removeEventListener("pointerdown", onPointerDown, true);
+		document.addEventListener("focusin", onFocusIn, true);
+		document.addEventListener("keydown", onKeyDown, true);
+		return () => {
+			document.removeEventListener("pointerdown", onPointerDown, true);
+			document.removeEventListener("focusin", onFocusIn, true);
+			document.removeEventListener("keydown", onKeyDown, true);
+		};
 	}, [skillTrayOpen]);
 
 	useEffect(() => {
@@ -1463,7 +1524,10 @@ export function Composer({
 		   is the caret the user sees, which is the caret the parse needs (M1). */
 		setCaret(caretAt);
 		/* An edit is a fresh gesture: a tray the user dismissed, or that a restored
-		   draft never opened, is allowed back the moment they type (U1/U2). */
+		   draft never opened, is allowed back the moment they type (U1/U2) — and
+		   the edit invalidates the parse the dismissal recorded, because the
+		   text it was taken from no longer exists. */
+		closedAtRef.current = null;
 		setSkillDismissed(false);
 		/* The skipped-skill receipt described the message that was SENT. The moment
 		   the user starts another one it reads as a statement about the new draft,
@@ -1551,7 +1615,14 @@ export function Composer({
 			    numbers (see skill-tray.tsx for why it is not inside the slot's
 			    scroller). Rendered by the composer because the draft, the caret and
 			    the insert all live here; the tray is a pure list. */}
-			{skillTrayOpen ? <SkillTray rows={skillRows} onPick={onSkillPick} /> : null}
+			{skillTrayOpen ? (
+				<SkillTray
+					rows={skillRows}
+					onPick={onSkillPick}
+					/* A waiting question outranks the list (design D5). */
+					questionPending={projection.pending != null}
+				/>
+			) : null}
 			<div className={COMPOSER_SHELL}>
 			{showResume && !projection.streaming && !disabled ? (
 				<button
@@ -1774,8 +1845,17 @@ export function Composer({
 						   stale position after any selection move. */
 						onSelect={(e) => {
 							/* Also covers a tap that moves the caret without a change, and
-							   re-opens a tray the user dismissed (U1). */
-							setCaret(e.currentTarget.selectionStart);
+							   re-opens a tray the user dismissed (U1) — but only for a
+							   parse that differs from the one the dismissal recorded. The
+							   `select` the same Escape press produces is the tail of a
+							   gesture already taken (Q-R2-1). */
+							const at = e.currentTarget.selectionStart;
+							setCaret(at);
+							const token = skillToken(text, at);
+							const mark = token ? `${token.start}:${token.end}:${token.query}` : null;
+							const closed = closedAtRef.current;
+							if (closed && closed.caret === at && closed.token === mark) return;
+							closedAtRef.current = null;
 							setSkillDismissed(false);
 						}}
 						onCompositionEnd={(e) => {
@@ -1783,7 +1863,27 @@ export function Composer({
 							   browser is guaranteed to make (M1). */
 							setCaret(e.currentTarget.selectionStart);
 						}}
-						onBlur={() => setSkillDismissed(true)}
+						onBlur={(e) => {
+							/* Focus moving INTO the list is not a dismissal (UX round 2
+							   U7). The rows are buttons with a keyboard path, and closing
+							   on the way there removed the target before the browser could
+							   focus it — Shift+Tab landed on the attach control instead,
+							   so the path was advertised and unreachable. React's `onBlur`
+							   is the bubbling `focusout`, so `relatedTarget` is the control
+							   about to receive focus. Anything else — the keyboard going
+							   away, another control, the page — still closes it (U1). */
+							const next = e.relatedTarget;
+							if (next instanceof Element && next.closest("[data-skill-tray]")) return;
+							dismissSkillTray();
+						}}
+						onPointerDown={() => {
+							/* A tap in the field is an explicit gesture, even when it lands on
+							   the caret already there: a restored draft's first tap reports a
+							   new caret anyway, but a return from another app taps where it
+							   left off and `select` alone stays quiet (review round 2 m7). */
+							closedAtRef.current = null;
+							setSkillDismissed(false);
+						}}
 						onPaste={(e) => {
 							const files = Array.from(e.clipboardData.files);
 							if (files.length > 0) {
@@ -1803,7 +1903,7 @@ export function Composer({
 							   `$skill` tray without touching the draft (U1); with the tray
 							   closed it is not this field's key. */
 							if (e.key === "Escape" && skillTrayOpen) {
-								setSkillDismissed(true);
+								dismissSkillTray();
 								return;
 							}
 							if (e.key === "Enter" && !e.shiftKey) {

@@ -7,12 +7,15 @@
  * useful. A skill name is typed INSIDE a sentence. A sheet here would take
  * focus out of the textarea, drop the software keyboard mid-word, and hand the
  * rest of the draft to a filter that rewrites the buffer when accepted. So this
- * tray never takes focus: each row answers `onPointerDown` with
+ * tray does not take focus BY POINTER: each row answers `onPointerDown` with
  * `preventDefault` (the caret stays in the field, the keyboard stays up, and
  * the compatibility click never reaches the row), and the pick itself fires on
  * the pointer RELEASE so a drag that scrolls the list cannot insert a name. The
  * component installs no key handler at all — hardware Enter still sends the
- * message, exactly as it does with the tray closed.
+ * message, exactly as it does with the tray closed — and the rows' own
+ * activation path is a browser keyboard gesture, so a `Tab` into the list is
+ * allowed to land there (UX round 2 U7: the field's blur no longer closes the
+ * tray when focus is on its way into it).
  *
  * PLACEMENT AND RHYTHM. `docs/design/mobile-relay-guidelines.md` puts
  * everything stacked between the transcript and the composer inside the one
@@ -41,6 +44,12 @@
  * `min(45vh, 22rem)` took 69 % of a 508 px column and pushed the composer's
  * foot under the clipped edge (design D1 / agent review M2).
  *
+ * WHILE A QUESTION IS WAITING the cap drops to TWO rows (`skillTrayCap`). The
+ * card outranks the list, and at every phone column with the keyboard up the
+ * 45 % tray pushed the question itself above the slot — the user was asked to
+ * approve what they could not read (design D5). Two rows keep `$name`
+ * discoverable and the list scrolls inside them.
+ *
  * THE FOOT CUE is the repo's existing one — `lo-fade-y` plus `useScrollCues`,
  * the pair every other scroller here uses. `lo-scroll`'s scrollbar is an
  * overlay that paints nothing at rest, so a capped list whose last row is cut
@@ -50,12 +59,13 @@ import { useRef } from "react";
 import type { SkillEntry } from "../types";
 import { messageRuntime } from "../store";
 import { textDirection } from "../lib/bidi";
-import { columnCap, SKILL_TRAY_FRACTION } from "../lib/column";
+import { skillTrayCap } from "../lib/column";
 import { useScrollCues } from "../lib/use-scroll-cues";
 
 export function SkillTray({
 	rows,
 	onPick,
+	questionPending,
 }: {
 	/** The matched rows, already filtered and ordered by the caller. */
 	rows: SkillEntry[];
@@ -63,6 +73,9 @@ export function SkillTray({
 	    caret. Called from a tap's pointer release (or a keyboard activation), so
 	    focus never left the field on the way here. */
 	onPick: (name: string) => void;
+	/** True while an ask or approval is waiting. The list yields the column to
+	    the question — two rows instead of 45 % (design D5). */
+	questionPending: boolean;
 }) {
 	/* A tap picks; a DRAG does not. The tray is a scroller on a short column
 	   (45vh), and picking on touch-down made a scroll gesture start by inserting
@@ -81,7 +94,7 @@ export function SkillTray({
 			data-skill-tray=""
 			aria-label={messageRuntime.t("relay.skills.tray.label")}
 			ref={scrollCue}
-			style={columnCap(SKILL_TRAY_FRACTION)}
+			style={skillTrayCap(questionPending)}
 			className="lo-scroll lo-fade-y mx-2 mb-2 shrink-0 overflow-y-auto overflow-x-hidden rounded-frame bg-elevated py-1"
 		>
 			{rows.map((row) => (

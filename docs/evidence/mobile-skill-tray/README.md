@@ -1,66 +1,102 @@
-# The `$skill` tray — rendered evidence for the round-1 fixes
+# The `$skill` tray — rendered evidence
 
-Frames for the review round that moved the tray's cap into column units (design
-D1 / agent review M2), fixed the RTL description direction (D2), added the
-"more below" cue (D3), and replaced SKM-D5's IME composition guard (M1).
+Frames for the `$skill` picker: the column-unit cap (design D1 / agent review
+M2), the RTL description direction (D2), the "more below" cue (D3), the tray
+under a waiting question (D5), and the sharded test rig's keep-the-foot rule at
+keyboard heights.
+
+Every frame here is a render of the **shipped palettes** — `localOperatorLight`
+(`*-light`) or `localOperatorDark` (`*-dark`) — set through the app's own
+`data-theme`. An earlier set was a forced-colors render: grayscale, so it could
+evidence geometry and direction but not surfaces, the accent, the `hidden` tag's
+colour, or contrast (design round 2, D6). Geometry is identical between the two
+palettes; the pairs are there for the colour that is now real.
 
 ## How they were captured
 
-One browser instance, throwaway context, DPR 2. The **real components** —
-`Composer`, `AboveComposerStack`, `PendingCard` — rendered inside a column that
-reproduces `screens/session-view.tsx`'s layout (header, transcript `flex-1`,
-the above-composer slot, the composer), with only the data layer stubbed
-(`GET /api/skills` answering a fixture catalogue, `useCapabilities` answering
-`skill_invocation.available = true`, an empty draft). The locale goes through the
-product's own bootstrap: `resolveInitialLocale()` fed a `{"language":"ur"}` frame
-on `/api/config/events`, so the Urdu frame uses the shipped copy and the real
+One browser instance, throwaway profile, DPR 2. The **real components** —
+`App` → `SessionScreen` → `AboveComposerStack` → `Composer` → `SkillTray` —
+against the app's own stylesheet, with only the wire stubbed: `/api/*` answers
+are built in the harness (`GET /api/skills` a fixture catalogue,
+`useCapabilities`/`skill_invocation.available = true`, the projection frame with
+or without `pending`). The locale goes through the product's own bootstrap
+(`resolveInitialLocale()` fed a `{"language":"ur"}` frame on
+`/api/config/events`), so the Urdu frame uses the shipped copy and the real
 `<html dir>`.
 
 **The keyboard is reproduced the way the product sees it**, not by shrinking the
 viewport: the column is pinned to a `--lo-vvh` height while `vh` stays at the
-device height (844). The session view's own handler makes exactly these two
-writes; a real keyboard shrinks only the visual viewport, so `vh` is untouched.
+device height (844). `screens/session-view.tsx` makes exactly those two writes;
+a real keyboard shrinks only the visual viewport, so `vh` is untouched.
 
-The `*before*` frame paints the round-1 cap on the SAME frame
-(`max-height: min(45vh, 22rem)`), so the pair differs by one declaration.
-
-Rig: a Vite config whose `resolveId` points the composer's `../api` and
-`../store` imports at stub modules; the height, `--lo-vvh`, catalogue size,
-draft and approval card are query parameters. Not committed because it needs a
-`node_modules` symlink into `local_operator/mobile/web`; the frames and the
-numbers below are what a re-render should reproduce.
+The rig is the same one round 1 and round 2 used (a Vite config whose `resolveId`
+points `@lo` at the PR worktree's `src/`, plus a `node_modules` symlink into
+`local_operator/mobile/web`), with the theme, column height, catalogue size,
+draft and pending card as query parameters. It is still not committed because it
+needs that symlink; the frames and the numbers below are what a re-render
+reproduces.
 
 ## The numbers (read from the DOM, CSS px, column-relative)
 
-| frame | column | tray cap | tray client / content | composer top→bottom | clipped | send disc |
-|---|---|---|---|---|---|---|
-| `keyboard-508-before.png` | 508 | 352 (`min(45vh, 22rem)`) | 352 / 360 | 432 → 586 | **78** | 496 → 540, 12 of 44 px visible |
-| `keyboard-508-after.png` | 508 | **228.6** (`0.45 × column`) | 229 / 360 | 346 → 500 | **0** | 410 → 454, fully visible |
-| `keyboard-553-after.png` | 553 | 248.85 | 249 / 360 | 391 → 545 | 0 | 455 → 499, fully visible |
-| `column-470-with-approval.png` | 470 | 211.5 | 212 / 360 | 352 → 462 | 0 | 416 → 460, fully visible |
-| `8rows-390x844.png` | 844 | 379.8 | 360 / 360 | 682 → 836 | 0 | 746 → 790, fully visible |
+| frame | column | tray cap | tray client / content | above-composer slot | composer top→bottom |
+|---|---|---|---|---|---|
+| `keyboard-508-before-light` | 508 | 352 (`min(45vh, 22rem)`) | 352 / 360 | — | 432 → 586, **78 px clipped** |
+| `keyboard-508-after-light` / `-dark` | 508 | **228.6** (`0.45 × column`) | 229 / 360 | — | 346 → 500 |
+| `keyboard-553-after-light` / `-dark` | 553 | 248.85 | 249 / 360 | — | 391 → 545 |
+| `8rows-390x844-light` / `-dark` | 844 | 379.8 | 360 / 360 | — | 682 → 836 |
+| `3rows-320x568-light` | 568 | 255.6 | 140 / 140 | — | 406 → 560 |
+| `ask-508-before-light` / `-dark` | 508 | 228.6 | 229 / 360 | **29.4** | 346 → 500 |
+| `ask-508-light` / `-dark` | 508 | **96** (two rows) | 96 / 360 | **162** | 346 → 500 |
+| `ask-553-light` / `-dark` | 553 | 96 | 96 / 360 | 207 | 391 → 545 |
+| `ask-470-light` / `-dark` | 470 | 96 | 96 / 360 | 168 | 352 → 462 |
+| `ask-320-light` / `-dark` | 568 | 96 | 96 / 360 | 222 | 406 → 560 |
+| `ask-844-light` / `-dark` | 844 | 96 | 96 / 360 | 271.1 | 682 → 836 |
 
-The before row is the review's measurement, reproduced exactly (432 → 586
-against a 508 foot, 78 px clipped, 12 of the send disc's 44 px on screen).
+The before row is round 1's measurement reproduced exactly (432 → 586 against a
+508 foot, 78 px clipped, only the top 12 of the send disc's 44 px on screen).
 
 ## What each frame shows
 
-- `1row-390x844.png` — draft `$res`, one matching row.
-- `3rows-390x844.png` — draft `$`, three rows, `hidden` tag on `incident-retro`.
-- `8rows-390x844.png` — the whole fixture catalogue; at this column all eight
-  rows fit (360 px of content inside a 379.8 px cap), so nothing is clipped.
-- `8rows-ur-rtl-390x844.png` — Urdu: rows mirror, `$name` stays LTR, the tag is
-  `پوشیدہ`. Every description keeps its opening words and now truncates at its
-  END (`Read the sources before changing any code…`), because the description
-  carries its own first-strong direction.
-- `3rows-320x568.png` — the narrow column; the composer's existing fit is
-  unchanged.
-- `keyboard-508-before.png` / `keyboard-508-after.png` — the blocker, before and
-  after, on the same column.
-- `keyboard-553-after.png` — a smaller keyboard; the sixth row fades out under
-  the `lo-fade-y` cue while the composer keeps its whole foot.
-- `column-470-with-approval.png` — a landscape/short column with a pending
-  approval. The composer's foot is fully visible. The approval card is still
-  squeezed to its decision row (slot 52.5 px): at a 470 px column `0.45 × column`
-  equals the old `45vh`, so this state is unchanged by the cap — see the PR
-  comment's note under D1.
+**Without a question waiting** — the cap is 45 % of the column:
+
+- `keyboard-508-before-light` / `keyboard-508-after-light` — the D1/M2 blocker
+  and its fix on the same column, one declaration apart.
+- `keyboard-553-after-light` / `-dark` — a smaller keyboard; the sixth row fades
+  under the `lo-fade-y` cue while the composer keeps its whole foot.
+- `8rows-390x844-light` / `-dark` — the whole fixture catalogue; all eight rows
+  fit (360 px of content inside a 379.8 px cap), so nothing is clipped.
+- `8rows-ur-rtl-390x844-light` / `-dark` — Urdu: rows mirror, `$name` stays
+  LTR, the tag reads `پوشیدہ`. Every description keeps its opening words and
+  truncates at its END, because it carries its own first-strong direction.
+- `3rows-320x568-light` — the narrow column with a three-row list: the cap is
+  above the content (140 px), so the tray is its own height and the composer's
+  fit is untouched.
+
+**With an approval waiting** — the cap drops to two rows (design D5):
+
+- `ask-508-before-light` / `-dark` — the blocker: at a 508 px column the 45 %
+  tray took 228.6 px, the above-composer slot fell to **29.4 px**, and the card
+  scrolled its own question (title at y −24.6) above the column, leaving the
+  approve/deny row sliced at the slot's edge.
+- `ask-508-light` / `-dark`, `ask-553-light` / `-dark`, `ask-470-light` /
+  `-dark`, `ask-320-light` / `-dark`, `ask-844-light` / `-dark` — the same
+  columns with the two-row cap: the tray keeps `$name` discoverable and
+  scrolls, the slot grows to 162 / 207 / 168 / 222 / 271.1 px, and the card's
+  meta row, title and decision row are all inside it (`textVisibleInSlot`
+  true in every one of these runs, false in the before frame).
+
+At 844 the tray is two rows as well: with an ask on screen the list yields the
+column everywhere, not only where it had to, so the slot measures 271.1 px and
+the card has room to spare. That is the one state where the round-2 design
+report's target said "unchanged" (it measured a 234 px slot with the eight-row
+tray, the state this PR's 45 % cap produces without an ask); the verdict — whole
+card, nothing clipped — is the same either way, and only the number moves.
+
+## What is not evidenced here
+
+- A real phone keyboard, IME, or on-screen keyboard: the column is pinned, not
+  squeezed by a real inset.
+- The keyboard-closed layout below 470 px with an ask, and the RTL ask card.
+- Colour contrast ratios: the frames are rendered with the shipped palettes, so
+  contrast can be judged from them, but no ratio is asserted here — the
+  contrast contract is `scripts/contrast-contract.mjs` in the web app.
