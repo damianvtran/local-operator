@@ -24,11 +24,14 @@ def test_registry_uses_new_child_source_and_stable_machine_enum_ids():
 
 
 def test_untranslated_child_uses_english_source_under_supported_locales():
-    # es moved out of this list when its catalogue landed, and ru when the
-    # relay ru wave carried `relay.account_policy`; the locales below still
-    # carry neither file, so the English source is the correct render and a
-    # key token would be the bug.
-    for locale in ("fr", "vi", "hi"):
+    # es moved out of this list when its catalogue landed, ru when the relay ru
+    # wave carried `relay.account_policy`, and fr when #3131 shipped that same
+    # namespace in French; the locales below still carry neither file, so the
+    # English source is the correct render and a key token would be the bug.
+    # Measured at this merge: `relay.account_policy` ships en/fr/ru/ur/zh-CN and
+    # `wire.settings.account_policy` ships en/es, so vi and hi are the only
+    # supported locales that carry neither.
+    for locale in ("vi", "hi"):
         assert messages.render(policy.label().code, {}, locale=locale) == "account selection policy"
     # vi moved out of this half when its `relay.account_policy` catalogue shipped
     # (2026-10-29 audit); the locales below still have no such file, so English is
