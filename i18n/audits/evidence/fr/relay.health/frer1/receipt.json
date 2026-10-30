@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "audit_id": "frer1",
+  "locale": "fr",
+  "namespace": "relay.health",
+  "source_sha256": "e060aed0898c7aa9951f7abf18c6792cc4629ee490b10546aabd36aac8187f5b",
+  "target_sha256": "af3ac7a7cd3eb258228cda49c7c7c1e366f02983e9c3a1a41983589e7e8487ec",
+  "hashes": {
+    "findings.json": "b1baa74967a45bdb02bfe276e8c3c1e2969340180b1c5ca841732adb6dac0058",
+    "record.json": "b52959af055342fec18c596205a706f2330814a95e8ed1ddf7a4d73314d3d91c",
+    "report.md": "db40113e6599f2c0d49c20c8097d28e9a83dc49727357bcb72072d04a919d860"
+  }
+}

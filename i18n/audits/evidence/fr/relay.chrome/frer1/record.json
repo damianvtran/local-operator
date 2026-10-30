@@ -1,0 +1,64 @@
+{
+  "schema": 1,
+  "audit_id": "frer1",
+  "locale": "fr",
+  "namespace": "relay.chrome",
+  "audit_date": "2026-10-29",
+  "packaged_at_utc": "2026-10-30T03:47:13Z",
+  "key_count": 85,
+  "auditor": {
+    "agent": "qa-tester (independent audit lane; did not translate or edit any copy)",
+    "session": "a2d5d1f4d736",
+    "model": "radient/auto — session opened on anthropic/claude-sonnet-5-5 and fell back on provider quota (openai/gpt-6-astra, then kimi/k3.1-pro, settling on radient/auto). radient/auto is the harness selector; the underlying provider model was not exposed and is not inferred here.",
+    "independence": "The auditor did not translate, author or edit any value in this namespace. Every audited byte is the committed origin/main value; this audit added evidence files only and changed no copy. The auditor is a different agent and a different session from the translator and auditor named in the ledger row."
+  },
+  "source_audit_revision": "da6d1b92665f4a43188385bedd42c5df00616709",
+  "packaging_base_revision": "da6d1b92665f4a43188385bedd42c5df00616709",
+  "input_hashes": {
+    "en": "0456005a0730d99a27656f1b0413b751c5916630e4c56aad346238e25c0c5994",
+    "context": "c1bb1c588c6dfb3f68974b4d6fea6ab8faf504f2829d3b245f73e8fbbcb60668",
+    "target": "7fcb90164e52be98e209b6a88fcc0b0818785f2ee6825bcbd2fcefe7fb032104",
+    "style_guide": "ae1519ab7617d19aa826918d607de1d018595094166edbc18aa58f6a8f0a4226",
+    "glossary": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8"
+  },
+  "input_paths": {
+    "en": "local_operator/i18n/catalogues/en/relay.chrome.json",
+    "context": "local_operator/i18n/catalogues/en/relay.chrome.context.json",
+    "target": "local_operator/i18n/catalogues/fr/relay.chrome.json",
+    "style_guide": "i18n/style-guides/fr.md",
+    "glossary": "i18n/glossary.md"
+  },
+  "current_bytes_match_audited_hashes": true,
+  "source_sha256": "0456005a0730d99a27656f1b0413b751c5916630e4c56aad346238e25c0c5994",
+  "target_sha256": "7fcb90164e52be98e209b6a88fcc0b0818785f2ee6825bcbd2fcefe7fb032104",
+  "current_report_verdict": "PASS for copy correctness with 5 accepted minor layout findings",
+  "ledger_status": "passed",
+  "unresolved_blocker_major": 0,
+  "finding_counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 5,
+    "nit": 0
+  },
+  "limitations": [
+    "This bundle documents an INDEPENDENT evidence-recovery audit by the local-operator qa-tester role. It does not reconstruct, replay or endorse the audit the ledger note cites. The ledger rows stay `passed`; this audit supplies the missing committed evidence and changes no copy and no ledger field.",
+    "No lost scratchpad, screenshot, rendered frame, geometry file or prior audit trajectory was recovered or inferred. The only facts asserted are ones recomputed from the committed bytes at da6d1b92665f4a43188385bedd42c5df00616709.",
+    "Independent LLM review, not native-speaker certification. The operator waived human/native-speaker sign-off for all locales; it is not a merge gate here.",
+    "Scalar text evidence only: catalogue values, ICU branch rendering and rich.cells.cell_len. No relay app, phone, browser, terminal or device geometry was exercised, so this is not rendered-layout proof.",
+    "The sanctioned read_public_copy route was unavailable to this session: it resolves against the session workspace (/Users/damian) and refused with \"the workspace is not a git checkout\". No lop exec child session was opened. Judgement came from direct reads of the committed files in a throwaway worktree; no routed receipt exists for this audit and none is claimed."
+  ],
+  "artifacts": [
+    "findings.json",
+    "receipt.json",
+    "record.json",
+    "report.md"
+  ],
+  "read_provenance": {
+    "method": "direct Python reads of the committed catalogue files in a throwaway /tmp worktree at da6d1b92665f4a43188385bedd42c5df00616709",
+    "mechanism": "python + rich.cells + local_operator.i18n.runtime.render_message",
+    "sanctioned_reader_receipts": [],
+    "sanctioned_route_verified": "none",
+    "sanctioned_route_verified_reason": "read_public_copy refused: the workspace is not a git checkout",
+    "receipts_obtained_after_judgement": false
+  }
+}

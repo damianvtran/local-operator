@@ -1,0 +1,104 @@
+{
+  "locale": "fr",
+  "namespace": "relay.chrome",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 5,
+    "nit": 0
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "id": "F1",
+      "key": "relay.chrome.list.search_close",
+      "severity": "minor",
+      "category": "layout (fr length over declared maxCells)",
+      "en": "Close search",
+      "current": "Fermer la recherche",
+      "problem": "19 cells against a 16-cell maxCells budget (en: 12). The role is a search field close button ACCESSIBLE NAME, so the string is spoken by the screen reader and never laid out: no truncation or overflow is reachable from this key. Recorded because the declared budget is exceeded, not because it renders wrong.",
+      "proposed": "unchanged — keep the descriptive accessible name; either record the overrun for this a11y-only key or drop its maxCells, since a spoken name has no cell budget",
+      "source": "qa-tester mechanical width sweep against en context maxCells",
+      "disposition": "accepted"
+    },
+    {
+      "id": "F2",
+      "key": "relay.chrome.list.mark_all",
+      "severity": "minor",
+      "category": "layout (fr length over declared maxCells)",
+      "en": "Mark all read",
+      "current": "Tout marquer comme lu",
+      "problem": "21 cells against a 20-cell maxCells budget (en: 13), a visible header action. One cell over. « Tout marquer comme lu » is the standard French label; the shorter « Tout marquer lu » loses the standard « comme » and was not adopted.",
+      "proposed": "unchanged — record as a width exception in i18n/style-guides/fr.md",
+      "source": "qa-tester mechanical width sweep against en context maxCells",
+      "disposition": "accepted"
+    },
+    {
+      "id": "F3",
+      "key": "relay.chrome.row.unpin",
+      "severity": "minor",
+      "category": "layout (fr length over declared maxCells)",
+      "en": "Unpin",
+      "current": "Désépingler",
+      "problem": "11 cells against a 10-cell maxCells budget (en: 5), used as a row action sheet item and a swipe action. One cell over. French has no shorter synonym: « Détacher » is a different operation and « Épingler » is the opposite action.",
+      "proposed": "unchanged — record as a width exception in i18n/style-guides/fr.md",
+      "source": "qa-tester mechanical width sweep against en context maxCells",
+      "disposition": "accepted"
+    },
+    {
+      "id": "F4",
+      "key": "relay.chrome.row.saving",
+      "severity": "minor",
+      "category": "layout (fr length over declared maxCells)",
+      "en": "Saving…",
+      "current": "Enregistrement…",
+      "problem": "15 cells against a 12-cell maxCells budget (en: 7), the busy state of a row action. Three cells over. The namespace already renders every busy state as a French action-noun + ellipsis (Marquage…, Démarrage…, Reprise…, Connexion…), so « Enregistrement… » is the register-correct form; « Sauvegarde… » would fit but means backup, not save.",
+      "proposed": "unchanged — record as a width exception in i18n/style-guides/fr.md",
+      "source": "qa-tester mechanical width sweep against en context maxCells",
+      "disposition": "accepted"
+    },
+    {
+      "id": "F5",
+      "key": "relay.chrome.session.loading",
+      "severity": "minor",
+      "category": "layout (fr length over declared maxCells)",
+      "en": "Loading conversation…",
+      "current": "Chargement de la conversation…",
+      "problem": "30 cells against a 28-cell maxCells budget (en: 21), a visible conversation loading state. Two cells over. Dropping « de la conversation » would fit the budget but stops naming what is loading.",
+      "proposed": "unchanged — record as a width exception in i18n/style-guides/fr.md",
+      "source": "qa-tester mechanical width sweep against en context maxCells",
+      "disposition": "accepted"
+    }
+  ],
+  "adjudication": [
+    {
+      "id": "F1",
+      "disposition": "accepted",
+      "reason": "Correct, idiomatic French; the overrun is a declared-width budget matter with no shorter correct synonym, so it is recorded rather than rewritten."
+    },
+    {
+      "id": "F2",
+      "disposition": "accepted",
+      "reason": "Correct, idiomatic French; the overrun is a declared-width budget matter with no shorter correct synonym, so it is recorded rather than rewritten."
+    },
+    {
+      "id": "F3",
+      "disposition": "accepted",
+      "reason": "Correct, idiomatic French; the overrun is a declared-width budget matter with no shorter correct synonym, so it is recorded rather than rewritten."
+    },
+    {
+      "id": "F4",
+      "disposition": "accepted",
+      "reason": "Correct, idiomatic French; the overrun is a declared-width budget matter with no shorter correct synonym, so it is recorded rather than rewritten."
+    },
+    {
+      "id": "F5",
+      "disposition": "accepted",
+      "reason": "Correct, idiomatic French; the overrun is a declared-width budget matter with no shorter correct synonym, so it is recorded rather than rewritten."
+    }
+  ],
+  "linguistic_gate_status": "passed",
+  "publication_hold_reasons": []
+}

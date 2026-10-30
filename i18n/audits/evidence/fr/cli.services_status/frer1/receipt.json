@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "audit_id": "frer1",
+  "locale": "fr",
+  "namespace": "cli.services_status",
+  "source_sha256": "ae14884d1c5a795724b95b29f8abe620975e96cc895384923788faa1b22611df",
+  "target_sha256": "23422bc3f65261cc4bc05511089d311b0dc5c16591a6e2c44c2483088eb68a90",
+  "hashes": {
+    "findings.json": "6cb030618950ff395f45c4d1f564df34b6ec47cf2bea376dd205e6aa666c167b",
+    "record.json": "813d378d084231063c5bfab972a00a10c408586f850fdbcd344c07faabff986b",
+    "report.md": "75325d70ac78e77a1885f57eb20eb985ba23a57df701bd6dd113f05a625a5958"
+  }
+}
