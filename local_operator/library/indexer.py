@@ -660,8 +660,9 @@ class LibraryIndexer:
         measurement are on ``transcript_index.yield_to_any_open``). Only here:
         :meth:`rebuild` (the CLI's and the tests' synchronous path) and every
         request-path ledger read run unpaused. :meth:`reconcile` (the startup
-        backfill and the idle-timeout pass) is not an exception: it only stats
-        journals and queues the moved ids, which are then scanned HERE, paused.
+        backfill, the idle-timeout pass and the wake reconcile after a batch) is
+        not an exception: it only stats journals and queues the moved ids, which
+        are then scanned HERE, paused.
         """
         # Deferred: the index module graph costs ~0.4 s to import, and the
         # Library's readers (the TUI, the phone portal) load this module without
