@@ -41,6 +41,7 @@ from local_operator.tui import app as app_mod
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets import status_line as status_line_mod
 from local_operator.tui.widgets import welcome as welcome_mod
+from local_operator.tui.widgets.settings_view import SettingsView
 from local_operator.tui.widgets.transcript import NoticeBlock
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
@@ -273,6 +274,44 @@ async def test_a_write_from_this_process_applies_silently(
         assert status_line_mod.TUNNEL_PARKED_TEXT == "FR:parked"
         # Silent: the page (or the command) already showed its own receipt.
         assert [n for n in _notices(app) if "config.yml changed" in n] == []
+
+
+@pytest.mark.asyncio
+async def test_an_open_settings_page_repaints_on_a_watcher_locale_move(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """QA round 1, Q2: a move written by ANOTHER process must repaint the page.
+
+    Reproduced before the fix: the registry re-materialised (the model strings
+    behind its frozen rows moved), but the open page kept its PAINTED strips and
+    its row cache, so a Spanish page did not appear until the next keypress.
+    ``es`` is a SHIPPED locale, so this drives the real catalogues rather than a
+    fixture root. The frame is read without any key press between the write and
+    the assert — that is the whole claim.
+    """
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir()
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(config_dir))
+    monkeypatch.setenv("LOP_LANG", "en")
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 32)) as pilot:
+        await _boot(pilot, app, watcher=True)
+        app._run_slash_command("/settings")
+        await pilot.pause()
+        view = app.query_one(SettingsView)
+        before = view.render_lines_for_test()
+        assert any(line.startswith("Model") for line in before), before[:5]
+        assert not any("Proveedor predeterminado" in line for line in before)
+
+        _write_elsewhere(config_dir, "es")
+        process_watcher(config_dir).poll_now()
+        await pilot.pause()
+
+        after = view.render_lines_for_test()
+        assert any(line.startswith("Modelo") for line in after), after[:5]
+        assert any("Proveedor predeterminado" in line for line in after), after[:8]
+        # The English header is gone from the frame, not merely outnumbered.
+        assert not any(line.startswith("Model ") for line in after), after[:5]
 
 
 @pytest.mark.asyncio

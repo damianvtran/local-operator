@@ -347,8 +347,14 @@ MEASURED_TOKENS: dict[str, int] = {
     # stated in scripts/bench_context_budget.py. Measured by this test's printed
     # table, no other tool's bytes moved.
     # Converged directory/dm + recipient-description ledger: 1,736 tokens,
-    # measured by this test's canonical renderer on the merged tree.
-    "bridge": 1736,
+    # measured by this test's canonical renderer on the merged tree; 1,781 with
+    # the name-resolution clause (tb-name-resolution, +45); and 1,792 on this
+    # stacked branch (+11), where the SAME description names both scopes a
+    # display name can resolve in — the conversation's active members for
+    # ``channel_post``, the owner's own send allowlist for ``send``/``reply`` —
+    # because that difference is what decides which op a model should reach for.
+    # Measured by this test's own printed table; no other tool's bytes moved.
+    "bridge": 1792,
     # Re-measured with this test's canonical isolated renderer: the read-only
     # inspect_ownership operation adds 19 opt-in tokens, not wire prompt cost.
     # 1327 -> 1424 (2026-10-16): the browser `type` secret_ref convention adds
