@@ -1409,10 +1409,42 @@ def _validate_schedule_time(value: str) -> None:
     datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
-class ScheduledMentionIn(_Strict):
+class MentionIn(_Strict):
+    """One structured mention: the hub's Send-policy row ``{kind, account_id[, endpoint_id]}``.
+
+    Shared by the immediate send (``ConversationSendIn``) and the scheduled
+    send (``ScheduledCreateIn``) so the two bodies cannot drift into two
+    mention vocabularies. ``endpoint_id`` is present for an agent member and
+    absent for a human; the hub, not this route, owns whether the pair names a
+    real member.
+    """
+
     kind: Literal["human", "agent"]
     account_id: str = Field(min_length=1, max_length=128)
     endpoint_id: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+#: The scheduled-send name predates the immediate send's mentions; kept so
+#: existing imports keep resolving to the one shared model.
+ScheduledMentionIn = MentionIn
+
+
+def _validate_mentions(mentions: list[MentionIn]) -> None:
+    # A duplicate row would be a second "mention" bit for the same member;
+    # refused rather than deduped so a renderer bug is visible, matching the
+    # attachment_ids rule above.
+    keys = [(m.kind, m.account_id, m.endpoint_id) for m in mentions]
+    if len(set(keys)) != len(keys):
+        raise ValueError("mentions must be distinct")
+    # The immediate-send client re-validates each row at serialization
+    # (``validate_member_mention``), which refuses padded ids; a row that
+    # passed here but failed there would surface as a server error instead of
+    # a clean 422. Held here, not on ``MentionIn``, so the scheduled body's
+    # accepted shape is unchanged by this slice.
+    for m in mentions:
+        for value in (m.account_id, m.endpoint_id):
+            if value is not None and value != value.strip():
+                raise ValueError("mention ids must not carry surrounding whitespace")
 
 
 class ScheduledCreateIn(_Strict):
@@ -1627,10 +1659,18 @@ class ConversationSendIn(ConversationOwnerIn):
     #: minted message-id grammar here so a malformed id never reaches the hub;
     #: the hub owns the real rule (same conversation, root not a reply).
     thread_root_id: str | None = Field(default=None, pattern=CONVERSATION_REPLY_ROOT_PATTERN)
+    #: Members this message is directed at (the @-mention autocomplete). The
+    #: hub sets each named member's ``mention`` bit from it, which is what
+    #: makes the wake card read ``mention: yes``. Empty (the default) is
+    #: forwarded as NO key at all, so an undirected send stays byte-identical
+    #: to the pre-mention wire and an older hub never sees the field. Gated in
+    #: the UI by the ``team_bridge_send_mentions`` capability.
+    mentions: list[MentionIn] = Field(default_factory=list, max_length=50)
 
     @model_validator(mode="after")
     def _content(self) -> "ConversationSendIn":
         _validate_attachment_ids(self.attachment_ids)
+        _validate_mentions(self.mentions)
         if not self.body and not self.attachment_ids:
             raise ValueError("a message needs body or attachment_ids")
         # A THREADED send (``thread_root_id`` present) REQUIRES the captured-owner
@@ -2582,6 +2622,9 @@ async def send_conversation_message(
                 agent_label=body.agent_label,
                 thread_root_id=body.thread_root_id,
                 attachment_ids=body.attachment_ids,
+                # ``or None``: the client adds the key only for a non-empty
+                # list, so an undirected send keeps today's exact wire.
+                mentions=[m.model_dump(exclude_none=True) for m in body.mentions] or None,
             )
         )
     )
