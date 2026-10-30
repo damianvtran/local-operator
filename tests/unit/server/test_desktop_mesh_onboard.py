@@ -197,12 +197,16 @@ async def test_owned_signed_admission_single_writer_and_cancellation(live, monke
     release = threading.Event()
     calls = []
 
-    def worker(approval_id, *, view, root):
+    def worker(approval_id, *, view, root, release_target=None):
         calls.append(view.run_id)
         worker_entered.set()
         assert release.wait(10), "test did not release owned worker"
         from local_operator.network import onboard_approvals
 
+        # The real runner frees the target just before its terminal row; this
+        # fake speaks the same contract so the claim below is the real one.
+        if release_target is not None:
+            release_target()
         onboard_approvals.finish(
             approval_id,
             "connected",
@@ -238,6 +242,124 @@ async def test_owned_signed_admission_single_writer_and_cancellation(live, monke
     r = await client.get(f"/v1/desktop/approvals/{aid}")
     assert r.json()["result"]["state"] == "connected"
     assert r.json()["result"]["run_active"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("crash", "expected_step", "expected_cause"),
+    [
+        # A crash inside a step: the receipt names THAT step.
+        ("step", "join", "ValueError"),
+        # Anything else keeps the historical fallback name, and still says what
+        # kind of failure it was.
+        ("bare", "worker", "RuntimeError"),
+    ],
+)
+async def test_a_crashed_worker_receipt_names_the_step_and_the_error_class(
+    live, monkeypatch, crash, expected_step, expected_cause
+):
+    """The catch-all used to record ``step="worker"`` and nothing else.
+
+    ``worker`` is not one of ``onboard.STEP_NAMES`` and the sentence was fixed,
+    so a run that died inside the join was indistinguishable - from every
+    surface except the raw JSON store - from a credential-helper or store-write
+    crash. The receipt now names the step and the exception CLASS, and it must
+    never carry the exception's message: that is where paths, credentials and
+    remote command lines live.
+    """
+    client, app, root = live
+    record = _file_device_record(root, with_anchor=True)
+    aid = record["approval_id"]
+    secret = "top-secret-value /home/op/.ssh/lop.pem"
+
+    def worker(approval_id, *, view, root, release_target=None):
+        if crash == "step":
+            raise onboard.OnboardStepCrash("join", ValueError(secret))
+        # A crash that never came from a step: the fallback row must survive,
+        # and its class is still the truth about what stopped the worker.
+        raise RuntimeError(secret)
+
+    monkeypatch.setattr(onboard, "_execute_admitted_approval", worker)
+    assert (await client.post(f"/v1/desktop/approvals/{aid}/approve")).status_code == 200
+    approvals.verify_for_run(aid, root=root)
+    assert (await client.post(f"/v1/desktop/approvals/{aid}/run")).status_code == 202
+    payload = await _settled(client, aid)
+    row = payload["receipts"][-1]
+    assert row["step"] == expected_step, row
+    assert row["ok"] is False
+    assert expected_cause in row["detail"] and expected_step in row["detail"], row
+    assert secret not in row["detail"]
+    # The durable record - not only the API view - is what a later reader sees.
+    stored = approvals.load_record(aid, root=root)["receipts"][-1]
+    assert stored["step"] == expected_step
+    assert secret not in stored["detail"]
+
+
+async def _settled(client, aid):
+    """Poll the card until the run is no longer active (a load bound, not a claim)."""
+    for _ in range(600):
+        payload = (await client.get(f"/v1/desktop/approvals/{aid}")).json()["result"]
+        if not payload["run_active"]:
+            return payload
+        await asyncio.sleep(0.05)
+    pytest.fail("the crashed worker never published a terminal row")
+
+
+@pytest.mark.asyncio
+async def test_a_finished_run_frees_the_ssh_target_before_any_retry(live, monkeypatch):
+    """MAIN-RED SHAPE 2 at the seam a client sees: retry right after a failure.
+
+    The runner frees the per-target claim BEFORE it publishes the terminal row
+    (``onboard.TargetLease``), and the row is what ``run_active`` reports. So a
+    retry posted once ``run_active`` is false must be admitted even while the
+    previous worker is still finishing — it used to be refused 409
+    ``approval_target_in_flight``, the ``assert 409 == 202`` the signed E2E went
+    red on in CI.
+
+    The fake below models only that order; the claim, the record, the admission
+    and the refusal are the real ones.
+    """
+    client, app, root = live
+    record = _file_device_record(root, with_anchor=True)
+    aid = record["approval_id"]
+    holds = threading.Event()
+    terminal = threading.Event()
+
+    def worker(approval_id, *, view, root, release_target=None):
+        # The runner's own order: free the target, THEN publish the outcome.
+        # A route that does not hand the claim over leaves it held here, which
+        # is exactly what the retry below used to hit.
+        if release_target is not None:
+            release_target()
+        from local_operator.network import onboard_approvals
+
+        onboard_approvals.finish(
+            approval_id,
+            "failed",
+            view.run_id,
+            step="join",
+            detail="the join was refused",
+            root=root,
+        )
+        terminal.set()
+        # Still holding the run open: the retry below must not depend on this
+        # worker having returned, only on the claim being free.
+        assert holds.wait(30), "test did not release the first worker"
+        return {"ok": False}
+
+    monkeypatch.setattr(onboard, "_execute_admitted_approval", worker)
+    approved = await client.post(f"/v1/desktop/approvals/{aid}/approve")
+    assert approved.status_code == 200, approved.text
+    approvals.verify_for_run(aid, root=root)  # real file-only signature
+    try:
+        assert (await client.post(f"/v1/desktop/approvals/{aid}/run")).status_code == 202
+        assert await asyncio.to_thread(terminal.wait, 30)
+        detail = (await client.get(f"/v1/desktop/approvals/{aid}")).json()["result"]
+        assert detail["run_active"] is False
+        retry = await client.post(f"/v1/desktop/approvals/{aid}/run")
+        assert retry.status_code == 202, retry.text
+    finally:
+        holds.set()
 
 
 @pytest.mark.asyncio
