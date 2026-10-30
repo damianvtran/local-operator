@@ -188,30 +188,5 @@
     "role": "lop CLI help text",
     "tone": "terse, plain English, operator-facing",
     "note": "Backend-only setup argument help. Commands and argument names stay verbatim."
-  },
-  "cli.team_bridge.setup.credential": {
-    "role": "lop CLI help text",
-    "tone": "terse, plain English, operator-facing",
-    "note": "Backend-only setup argument help. Commands and argument names stay verbatim."
-  },
-  "cli.team_bridge.setup.account": {
-    "role": "lop CLI help text",
-    "tone": "terse, plain English, operator-facing",
-    "note": "Backend-only setup argument help. Commands and argument names stay verbatim."
-  },
-  "cli.team_bridge.setup.tenant": {
-    "role": "lop CLI help text",
-    "tone": "terse, plain English, operator-facing",
-    "note": "Backend-only setup argument help. Commands and argument names stay verbatim."
-  },
-  "cli.team_bridge.setup.consent": {
-    "role": "lop CLI help text",
-    "tone": "terse, plain English, operator-facing",
-    "note": "Backend-only setup argument help. Commands and argument names stay verbatim."
-  },
-  "cli.team_bridge.setup.session": {
-    "role": "lop CLI help text",
-    "tone": "terse, plain English, operator-facing",
-    "note": "Backend-only setup argument help. Commands and argument names stay verbatim."
   }
 }
