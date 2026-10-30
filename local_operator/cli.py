@@ -60,6 +60,7 @@ from local_operator.agent_profiles import (
 from local_operator.agent_shell import exec_session_refusal, interactive_session_refusal
 from local_operator.config import ConfigManager
 from local_operator.env import get_env_config
+from local_operator.i18n.boot import activate_resolved_locale
 from local_operator.i18n.keys import cli_agents_help as _ag
 from local_operator.i18n.keys import cli_aida_help as _ad
 from local_operator.i18n.keys import cli_browser as _b
@@ -16902,6 +16903,63 @@ def _is_daemon_launch(args: argparse.Namespace) -> bool:
     )
 
 
+def _machine_readable(args: argparse.Namespace) -> bool:
+    """Whether this invocation's stdout is a machine contract, not a sentence.
+
+    ``--json`` wherever a subcommand family declares it, and ``exec``'s own
+    ``--json`` (dest ``json_mode``: one ``printable_event`` line per event and
+    no chrome at all). A document a script parses must not vary with the
+    operator's language: the refusal documents below carry a ``message`` field,
+    and a translated one would make the payload locale-dependent with no way
+    for a consumer to say which locale it holds.
+
+    Two families used to declare ``--json`` under a different dest — ``memory``
+    as ``raw`` and ``search test`` as ``as_json`` — so this predicate silently
+    missed them. Both now use argparse's default (``json``); the alternative,
+    matching on ``raw``, would have caught ``fetch test --raw``, which is TEXT
+    output and must keep its localized copy.
+    """
+
+    return bool(getattr(args, "json", False) or getattr(args, "json_mode", False))
+
+
+def _install_headless_locale(args: argparse.Namespace) -> None:
+    """Activate the resolved language ONCE for the command this process runs.
+
+    THE ROOT CAUSE THIS CLOSES. ``i18n.text`` starts at ``en`` and only moves
+    when a surface calls ``set_active_locale``; until this call the only
+    callers were the TUI's boot and ``--remote`` dispatch, so every headless
+    ``lop <command>`` rendered its keyed copy in English whatever
+    ``language:`` said — while ``lop <command> --help`` in the same shell was
+    translated, because help resolves through its own read-only locale reader.
+    Measured: with ``language: fr`` (a locale whose ``cli.browser`` wave has
+    shipped) ``lop browser status`` printed every line in English beside a
+    French ``--help``.
+
+    WHERE IT RUNS. :func:`main` calls this after the config store this process
+    will read is final (``config_dir()`` plus the startup migrations) and
+    before the first dispatch branch, so every command below, the headless
+    REPL and the local ``exec`` run inherit the one move. It is deliberately
+    not per-command: one move per process is the contract ``set_active_locale``
+    documents, and a second call would only pay another config read.
+
+    THE TWO EXCLUSIONS, both of them reasoned in ``i18n.boot``:
+
+    * machine-readable output — a payload a script parses must not change with
+      the language;
+    * the full-screen TUI — ``OperatorApp.on_mount`` resolves and applies it
+      itself, and owns the repaint that follows a move. ``_startup_surface``
+      is the same helper ``main``'s ``use_tui`` decision reads, so the two
+      cannot disagree about which launch this is. (A ``--tui`` launch whose
+      build lacks the app falls back to the REPL and keeps English copy — the
+      single accepted drift ``_startup_surface`` already documents.)
+    """
+
+    if _machine_readable(args) or _startup_surface(args) == "tui":
+        return
+    activate_resolved_locale()
+
+
 def _startup_surface(args: argparse.Namespace) -> str:
     """The surface the startup seam tags its notices for: "tui", "cli" or "daemon".
 
@@ -17249,6 +17307,18 @@ def main() -> int:
             surface=_startup_surface(args),
             command=_seed_sync_command(args),
         )
+        # THE HEADLESS COMMAND'S LANGUAGE, ONCE, BEFORE THE FIRST BRANCH BELOW.
+        # Every dispatch branch below renders keyed copy, and until this call
+        # nothing had moved the process off the renderer's `en` default — so a
+        # command whose namespace HAS a shipped translation wave (French
+        # `cli.browser`, say) still printed English, while `--help` in the same
+        # locale was translated. Here rather than earlier because this is the
+        # first point where the config store this process will read is final;
+        # here rather than per command because one move per process is the
+        # renderer's contract. The `--remote` dispatch above returns into its own
+        # activation (it must: it runs before this), and `_install_headless_locale`
+        # leaves `--json` and the TUI alone — see its docstring.
+        _install_headless_locale(args)
         # The agent home is NO LONGER created here. Creating it unconditionally
         # before dispatch meant `config list`, `login`, `--version` and every
         # other non-session subcommand created a workspace directory they never
