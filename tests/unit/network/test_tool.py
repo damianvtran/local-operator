@@ -1193,9 +1193,7 @@ def test_a_join_from_the_tool_parks_and_never_supplies_the_code() -> None:
     # all three dial outcomes are accepted here, and the teeth are the sentences below,
     # which are the same whichever one a given environment produces.
     assert (
-        "no endpoint" in text
-        or "nothing was listening at" in text
-        or "the handshake at" in text
+        "no endpoint" in text or "nothing was listening at" in text or "the handshake at" in text
     ), text
     assert "Pairing needs a person" in text
     assert "This tool has no way to answer a pairing" in text
