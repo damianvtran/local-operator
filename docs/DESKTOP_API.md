@@ -3570,13 +3570,14 @@ the same instant (§"Complete peer-source contract") — which is what makes
 `journal_order=1` without `open_frame=1` `ready` on a process that has just
 started; the open-frame page already had this projection for its runs, and this
 is the same door for the page that serves none. The background correction behind
-`building` is unchanged, and is still what a genuine cold store answers. A companion that is missing, stale, corrupt or built
-by an older schema is not an error — it degrades to exactly the answer an absent
-companion gave before. The ordinals and the opener closure are the resident
-join's own helpers, so the two paths cannot disagree: measured on a 36.5 MB
-journal with the companion warm and the process fresh, base answered `building`
-with 0 ordinals in 79.1 ms and the projection answers `ready` with every served
-row carrying `journal_seq` in 12.2 ms.
+`building` is unchanged, and is still what a genuine cold store answers. A
+companion that is missing, stale, corrupt or built by an older schema is not an
+error — it degrades to exactly the answer an absent companion gave before. The
+ordinals and the opener closure are the resident join's own helpers, so the two
+paths cannot disagree: measured on a 36.5 MB journal with the companion warm and
+the process fresh, base answered `building` with 0 ordinals in 79.1 ms and the
+projection answers `ready` with every served row carrying `journal_seq` in
+12.2 ms.
 
 **KNOWN LIMITATION, recorded not fixed: the open-frame door still reopens the
 companion on every poll.** The renderer's own first paint and poll loop is
