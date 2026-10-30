@@ -109,7 +109,10 @@ def test_active_ledger_carries_the_released_chinese_candidate() -> None:
     # deleted ended placeholder): two more. Both contributions are counted.
     # The serve-supervision slice adds the independently audited 14-key
     # `cli.services_status` row at the current English bytes: one more again.
-    assert len(chinese) == 97
+    # PR #3121's independently audited `relay.account_policy` backfill (13 keys)
+    # is the final one: main reached 97 while this branch was open, and the
+    # append-only tail gains one more row for the namespace this PR lands.
+    assert len(chinese) == 98
     assert all(entry["status"] == "passed" for entry in chinese)
     carried = set(catalogues.namespaces("zh-CN"))
     assert {entry["namespace"] for entry in chinese} == carried

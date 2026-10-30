@@ -9462,6 +9462,25 @@
       },
       "status": "passed",
       "note": "Independent audit by a different agent at head 35c7be9989db. Read every value against en, glossary §2 and style-guides/vi.md; ICU argument names/kinds and plural arms verified with the repo parser; NFC, ellipsis and quote typography checked; terminology compared with already-shipped catalogues/vi/**. Single plural key; other-only arm per the vi guide renders correctly (# at 0/1/2/21). «tài nguyên» matches the shipped vi resource wording. 0 blocker/major/minor. 1 keys. Not checked: native-speaker review, rendered layout/width, device run. Target vi catalogue SHA-256 3841bfe2c60bcf0496d5f57ad237dfc71ee92bf396fdd4ed4a296655e1ab7c85."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "relay.account_policy",
+      "source_sha256": "0019b08106e6f7762194b164b9b9b37054a8cfade759aa2f6490787a73dea890",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "model": "radient/auto",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "radient/auto",
+        "date": "2026-10-28",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent zh-CN audit, 13 keys, clean: 0 blocker/major/minor/nit. Evidence i18n/audits/evidence/zh-CN/relay.account_policy/zhc1. Auditor read the English source and sidecar at the hashes recorded there; route and marker scan recorded in record.json (worktree reads per docs/security/redaction-policy.md 2.2; 0 markers; assignment tokens verified by ordinals). Translator session 809b6f2773e0, auditor session e139d7f8f30c; both ran on radient/auto after anthropic quota fallbacks. No native-speaker pass claimed."
     }
   ]
 }
