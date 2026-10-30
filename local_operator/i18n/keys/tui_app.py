@@ -182,6 +182,10 @@ def skills_teams_heading() -> Msg:
     return Msg("tui.app.skills.teams_heading", {})
 
 
+def status_command_failed(*, error: str) -> Msg:
+    return Msg("tui.app.status_command.failed", {"error": error})
+
+
 def stop_all_already_leaving(*, shown: str) -> Msg:
     return Msg("tui.app.stop_all.already_leaving", {"shown": shown})
 

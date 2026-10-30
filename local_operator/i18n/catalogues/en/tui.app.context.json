@@ -228,5 +228,10 @@
     "role": "status",
     "tone": "dim",
     "note": "Providers with nothing stored to list; names are identifiers."
+  },
+  "tui.app.status_command.failed": {
+    "role": "warning notice",
+    "tone": "plain, precise",
+    "note": "Shown once when the operator's status-band shell command fails. {error} is a short English machine reason such as 'exit 127' or 'timed out after 10s' and is not translated. 'display.composer.command' is a config key: keep it verbatim. 'band' is the status band under the input."
   }
 }

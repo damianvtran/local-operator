@@ -44,5 +44,6 @@
   "tui.app.providers.stale_all": "列表已过期：所有提供商",
   "tui.app.providers.stale_named": "列表已过期：{names}",
   "tui.app.providers.stale_all_error": "列表已过期：所有提供商 — {error}",
-  "tui.app.providers.no_live_list": "无实时列表：{names}"
+  "tui.app.providers.no_live_list": "无实时列表：{names}",
+  "tui.app.status_command.failed": "状态命令失败（{error}）；状态栏保留上次读数。请检查display.composer.command。"
 }

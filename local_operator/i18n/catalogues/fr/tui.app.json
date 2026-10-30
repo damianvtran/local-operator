@@ -44,5 +44,6 @@
   "tui.app.providers.stale_all": "liste périmée : tous les fournisseurs",
   "tui.app.providers.stale_named": "liste périmée : {names}",
   "tui.app.providers.stale_all_error": "liste périmée : tous les fournisseurs — {error}",
-  "tui.app.providers.no_live_list": "aucune liste à jour : {names}"
+  "tui.app.providers.no_live_list": "aucune liste à jour : {names}",
+  "tui.app.status_command.failed": "Échec de la commande d’état ({error}) ; le bandeau garde sa dernière valeur. Vérifiez display.composer.command."
 }

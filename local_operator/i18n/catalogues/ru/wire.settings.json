@@ -161,7 +161,7 @@
   "wire.settings.display_composer_chevron.choice.true.description": "показывать метку",
   "wire.settings.display_composer_chevron.help": "Метка промпта у левого края строки ввода.",
   "wire.settings.display_composer_chevron.label": "Шеврон промпта",
-  "wire.settings.display_composer_command.help": "Команда shell; первая строка её вывода видна в полосе состояния.",
+  "wire.settings.display_composer_command.help": "Запуск по таймеру; первая строка вывода видна в полосе.",
   "wire.settings.display_composer_command.label": "Полоса: команда состояния",
   "wire.settings.display_composer_command.placeholder": "~/bin/my-status.sh",
   "wire.settings.display_composer_command_interval.help": "Секунды между запусками команды состояния (5-3600).",

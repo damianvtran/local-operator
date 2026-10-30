@@ -196,7 +196,7 @@
  "wire.settings.display_composer_chevron.choice.true.label": "on",
  "wire.settings.display_composer_chevron.help": "The prompt mark at the left edge of the input row.",
  "wire.settings.display_composer_chevron.label": "Prompt chevron",
- "wire.settings.display_composer_command.help": "Shell command; its first output line shows in the status band.",
+ "wire.settings.display_composer_command.help": "Runs on a timer; its first output line shows on the band.",
  "wire.settings.display_composer_command.label": "Band: status command",
  "wire.settings.display_composer_command.placeholder": "~/bin/my-status.sh",
  "wire.settings.display_composer_command_interval.help": "Seconds between status command runs (5-3600).",

@@ -41,6 +41,8 @@ import logging
 import os
 import re
 import signal
+import unicodedata
+from dataclasses import dataclass
 from typing import Any, Mapping
 
 from rich.cells import cell_len
@@ -61,8 +63,9 @@ MAX_INTERVAL_S = 3600
 #: cache it reads, and a shorter bound keeps a hung script from holding the
 #: worker group across several ticks.
 TIMEOUT_S = 10.0
-#: How much of stdout is read. The segment is one line capped at
-#: :data:`MAX_CELLS`; a script that dumps a log must not be buffered whole.
+#: How much of stdout is KEPT. The segment is one line capped at
+#: :data:`MAX_CELLS`; anything past this is read and discarded (see
+#: :func:`_collect`), so memory per run is bounded whatever the script prints.
 MAX_READ_BYTES = 4096
 #: Cell cap for the painted segment. A BOUNDED rung, so it may sit anywhere in
 #: the drop ladder (``status_line._UNBOUNDED_RUNGS``); 40 cells holds a
@@ -74,10 +77,42 @@ MAX_CELLS = 40
 # cleans our own CLI's output, this one cleans arbitrary third-party output.
 _ESCAPE_RE = re.compile(
     r"\x1b\[[0-?]*[ -/]*[@-~]"  # CSI
-    r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?"  # OSC, BEL- or ST-terminated
+    # OSC, DCS, SOS, PM and APC are all STRINGS terminated by BEL or ST; strip
+    # the payload with the introducer, or a DCS leaves its parameters behind as
+    # junk text on the band (review round 1, m3).
+    r"|\x1b[\]PX^_][^\x07\x1b]*(?:\x07|\x1b\\)?"
     r"|\x1b[@-Z\\-_]"  # two-byte escapes
 )
-_CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+#: Unicode categories that never belong on a one-row status: controls (Cc),
+#: format characters (Cf: bidi overrides/isolates such as U+202E and U+2066,
+#: zero-width space/joiners, BOM) and line/paragraph separators (Zl, Zp). A
+#: right-to-left override in a script's output visually reorders every segment
+#: after it in a bidi-aware terminal — the band's alarms included — and a
+#: zero-width character makes ``cell_len`` and the painted width disagree.
+_STRIPPED_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp"})
+#: Read size per ``StreamReader.read``. Independent of :data:`MAX_READ_BYTES`:
+#: past the cap the reader still drains, and draining in 64 KiB steps keeps a
+#: flood from costing a Python call per byte.
+_CHUNK_BYTES = 65536
+
+
+#: Consecutive failures after which a stale reading is cleared from the band.
+#: Below it the last good line stays, dimmed (design round 1, T-3): a script
+#: calling a network API fails now and then, and clearing on every miss made
+#: three sibling segments appear and vanish each interval as the row re-fit.
+STALE_AFTER_FAILURES = 3
+
+
+@dataclass(frozen=True)
+class Outcome:
+    """One run's result. ``error`` is empty on success.
+
+    A success with no output is NOT an error: a script printing nothing is
+    saying "nothing to show right now", and the segment clears.
+    """
+
+    line: str = ""
+    error: str = ""
 
 
 def clamp_interval(value: Any) -> int:
@@ -97,8 +132,15 @@ def clamp_interval(value: Any) -> int:
 def sanitize(raw: str) -> str:
     """The first non-blank line of ``raw`` as plain, single-row band text."""
     text = _ESCAPE_RE.sub("", raw)
-    for line in text.splitlines():
-        cleaned = " ".join(_CONTROL_RE.sub(" ", line).split())
+    # Split on real newlines BEFORE category stripping: Zl/Zp would otherwise be
+    # treated as line breaks by ``splitlines`` and promote a second line.
+    for line in text.split("\n"):
+        visible = "".join(
+            " " if char == "\t" else char
+            for char in line
+            if char == "\t" or unicodedata.category(char) not in _STRIPPED_CATEGORIES
+        )
+        cleaned = " ".join(visible.split())
         if cleaned:
             return _truncate(cleaned, MAX_CELLS)
     return ""
@@ -107,12 +149,15 @@ def sanitize(raw: str) -> str:
 def _truncate(text: str, cells: int) -> str:
     if cell_len(text) <= cells:
         return text
-    out = ""
-    for char in text:
-        if cell_len(out + char) > cells - 1:
+    used = 0
+    end = 0
+    for index, char in enumerate(text):
+        width = cell_len(char)
+        if used + width > cells - 1:
             break
-        out += char
-    return out.rstrip() + "…"
+        used += width
+        end = index + 1
+    return text[:end].rstrip() + "…"
 
 
 def build_payload(
@@ -151,16 +196,15 @@ async def run(
     *,
     cwd: str | None = None,
     timeout: float = TIMEOUT_S,
-) -> str:
-    """Run ``command`` once and return its sanitised first line ("" on failure).
+) -> Outcome:
+    """Run ``command`` once: its sanitised first line, or why it failed.
 
-    Never raises: every failure — no shell, a non-zero exit, a timeout, bytes
-    that do not decode — reads as an empty segment and a debug log line. The
-    band is a passive surface; it does not get to interrupt the operator with
-    a script's problems.
+    Never raises: every failure — no shell, a non-zero exit, a timeout, a read
+    error — comes back as an :class:`Outcome` with a short machine-ish
+    ``error`` (``exit 127``, ``timed out after 10s``) the app can surface once.
     """
     if not command.strip():
-        return ""
+        return Outcome()
     try:
         process = await asyncio.create_subprocess_exec(
             "/bin/sh",
@@ -174,27 +218,57 @@ async def run(
         )
     except Exception:  # noqa: BLE001 — a missing shell is an empty segment
         logger.debug("status command: could not start", exc_info=True)
-        return ""
+        return Outcome(error="could not start /bin/sh")
     data = json.dumps(dict(payload), ensure_ascii=False).encode("utf-8")
     try:
-        stdout, _ = await asyncio.wait_for(process.communicate(data), timeout=timeout)
+        kept = await asyncio.wait_for(_collect(process, data), timeout=timeout)
     except asyncio.TimeoutError:
         await _reap(process)
         logger.debug("status command: timed out after %.1fs", timeout)
-        return ""
+        return Outcome(error=f"timed out after {timeout:g}s")
     except asyncio.CancelledError:
-        # The worker was cancelled (app exit, or a newer run replaced this one
-        # in the exclusive group). The child must not outlive the cancellation.
+        # The worker was cancelled (app exit, or the command changed while this
+        # run was in flight). The child must not outlive the cancellation.
         await _reap(process)
         raise
-    except Exception:  # noqa: BLE001 — e.g. BrokenPipe when the script ignores stdin and exits
-        logger.debug("status command: communicate failed", exc_info=True)
+    except Exception:  # noqa: BLE001 — a read error is an empty segment
+        logger.debug("status command: read failed", exc_info=True)
         await _reap(process)
-        return ""
+        return Outcome(error="output could not be read")
     if process.returncode != 0:
         logger.debug("status command: exited %s", process.returncode)
-        return ""
-    return sanitize(stdout[:MAX_READ_BYTES].decode("utf-8", errors="replace"))
+        return Outcome(error=f"exit {process.returncode}")
+    return Outcome(line=sanitize(kept.decode("utf-8", errors="replace")))
+
+
+async def _collect(process: asyncio.subprocess.Process, data: bytes) -> bytes:
+    """Feed stdin, keep the first :data:`MAX_READ_BYTES` of stdout, drain the rest.
+
+    INCREMENTAL, never ``communicate()``: that buffers ALL of stdout before a
+    slice could cap it, so a script that floods (``yes``, a chatty log) grew the
+    TUI by gigabytes inside one timeout (review round 1, M1: 3.6 GB measured in
+    one second). Past the cap the reader keeps DRAINING and discards, rather
+    than stopping: a child blocked writing into a full pipe never exits, and a
+    script that prints a lot and then exits 0 is still a success whose first
+    line is in the kept prefix.
+    """
+    assert process.stdin is not None and process.stdout is not None
+    try:
+        process.stdin.write(data)
+        await process.stdin.drain()
+    except (BrokenPipeError, ConnectionResetError):
+        pass  # the script ignores stdin and already exited: allowed
+    finally:
+        try:
+            process.stdin.close()
+        except Exception:  # noqa: BLE001 — closing a dead pipe is not an error
+            pass
+    kept = bytearray()
+    while chunk := await process.stdout.read(_CHUNK_BYTES):
+        if len(kept) < MAX_READ_BYTES:
+            kept += chunk[: MAX_READ_BYTES - len(kept)]
+    await process.wait()
+    return bytes(kept)
 
 
 async def _reap(process: asyncio.subprocess.Process) -> None:
@@ -202,9 +276,13 @@ async def _reap(process: asyncio.subprocess.Process) -> None:
 
     The wait is what closes the child's pipes on THIS loop: without it the
     transport is left for the garbage collector, which may run after the loop
-    has closed and log a spurious "Event loop is closed" per killed run.
-    Shielded so a second cancellation cannot abandon the wait half-way; that
-    cancellation itself still propagates, so a cancelled worker stays cancelled.
+    has closed and log a spurious "Event loop is closed" per killed run. It
+    DRAINS stdout first, because asyncio's ``wait()`` resolves only once every
+    pipe has reported EOF, and a stream reader paused on a full buffer never
+    reads to EOF — the round-1 flood case waited out the whole bound here and
+    leaked the transport. Shielded so a second cancellation cannot abandon the
+    wait half-way; that cancellation itself still propagates, so a cancelled
+    worker stays cancelled.
     """
     try:
         os.killpg(os.getpgid(process.pid), signal.SIGKILL)
@@ -213,7 +291,14 @@ async def _reap(process: asyncio.subprocess.Process) -> None:
             process.kill()
         except (ProcessLookupError, OSError):
             pass
+
+    async def drain_and_wait() -> None:
+        if process.stdout is not None:
+            while await process.stdout.read(_CHUNK_BYTES):
+                pass
+        await process.wait()
+
     try:
-        await asyncio.shield(asyncio.wait_for(process.wait(), timeout=2.0))
+        await asyncio.shield(asyncio.wait_for(drain_and_wait(), timeout=2.0))
     except Exception:  # noqa: BLE001 — best effort; the kill already landed
         logger.debug("status command: reaped child did not report exit", exc_info=True)

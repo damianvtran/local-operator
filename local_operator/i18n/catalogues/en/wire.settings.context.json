@@ -176,8 +176,8 @@
   "wire.settings.display_composer_command.help": {
     "role": "help text",
     "tone": "plain, precise",
-    "maxCells": 67,
-    "note": "The command's first line of standard output becomes a segment on the status band. Empty means nothing runs. Keep 'shell command' technical."
+    "maxCells": 58,
+    "note": "The value is a shell command; the terminal UI runs it on a timer and shows the first line of its standard output as a segment of the status band (the row under the input). 'the band' = that status band, as in the sibling 'Band: …' rows. Keep it under 60 cells: the settings page clips help at 60 columns."
   },
   "wire.settings.display_composer_command.placeholder": {
     "role": "input placeholder",

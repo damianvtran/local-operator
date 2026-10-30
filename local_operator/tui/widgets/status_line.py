@@ -299,6 +299,11 @@ FORK_PENDING_TEXT = "forking \u00b7 esc"
 #: widest floor that still survives 100 columns with everything else on screen.
 NAME_CELLS = 40
 NAME_CELLS_FLOOR = 18
+#: The status command's floor once ``shorten-custom`` fires: the narrowest cut
+#: that still reads as a value (`acct 5h 42…`) rather than a stub. The full cap
+#: is the runner's own (``status_command.MAX_CELLS``), applied before the line
+#: reaches the band.
+CUSTOM_CELLS_FLOOR = 12
 
 #: Cells the row keeps free between its two groups for the LIVENESS SLOT — the
 #: ``connecting…`` caption a saved conversation paints while its owner binds.
@@ -511,6 +516,14 @@ _DROP_LADDER: tuple[str, ...] = (
     # any reading. Inert (no cells, no effect on the walk) when unset, and
     # BOUNDED (``status_command.MAX_CELLS``), so it is a legal neighbour of any
     # rung under :data:`_UNBOUNDED_RUNGS`.
+    #
+    # SHORTEN BEFORE DROP, like cwd and the model label (design round 1, T-1):
+    # all-or-nothing meant a 40-cell reading vanished whole at 80 columns and
+    # left a 41-cell hole. ``shorten-custom`` caps the reading at
+    # :data:`CUSTOM_CELLS_FLOOR` and the fitting row regrows it into whatever is
+    # spare, so it is truncated with an ellipsis to the space left; only below
+    # the floor does ``custom`` drop.
+    "shorten-custom",
     "custom",
     # The working directory goes before the context number. Its shorten step has
     # already reduced it to a basename by now, so what remains is ~7 cells of
@@ -1290,6 +1303,8 @@ class StatusLine:
         #: The operator's status-command line (``tui/status_command.py``),
         #: already sanitised and capped. Empty means no segment.
         self._custom: str = ""
+        #: The reading is the last GOOD line, held through a failing run.
+        self._custom_stale: bool = False
         # True while this session is a FORK still wearing the title it inherited
         # from its parent. Only the terminal title reads it, and it is pushed by
         # the app rather than read off the session for the same reason every
@@ -1669,6 +1684,7 @@ class StatusLine:
         approvals_auto: bool | None = None,
         approvals_always: bool | None = None,
         custom: str | None = None,
+        custom_stale: bool | None = None,
     ) -> None:
         """Update any subset of segments and repaint the band."""
         # "" is meaningful (clear the segment: the command failed, printed
@@ -1676,6 +1692,8 @@ class StatusLine:
         # segment.
         if custom is not None:
             self._custom = custom
+        if custom_stale is not None:
+            self._custom_stale = custom_stale
         if connection is not None:
             self._connection = connection
         if connection_muted is not None:
@@ -2356,8 +2374,9 @@ class StatusLine:
                 if "name" in dropped or not self._conversation_name
                 else NAME_CELLS_FLOOR if flexed else NAME_CELLS
             )
+            custom_cap = CUSTOM_CELLS_FLOOR if "custom" in short else 0
             left = self._left_text(dropped, short, dim, muted, seam, accent)
-            right = self._right_text(dropped, short, cap, dim, seam)
+            right = self._right_text(dropped, short, cap, dim, seam, custom_cap=custom_cap)
             # The fit test reserves the group gap rather than asking whether the
             # composed row happens to fit. `_compose` pads with `max(1, …)`, so a
             # row could "fit" with the two groups ONE cell apart — tighter than
@@ -2387,7 +2406,16 @@ class StatusLine:
                 # construction.
                 ink = cell_len(truncate_name(self._conversation_name, cap))
                 cap = min(NAME_CELLS, ink + slack)
-                right = self._right_text(dropped, short, cap, dim, seam)
+                right = self._right_text(dropped, short, cap, dim, seam, custom_cap=custom_cap)
+                slack = width - cell_len(left.plain) - cell_len(right.plain) - gap
+            full = cell_len(self._custom)
+            if custom_cap and slack > 0 and "custom" not in dropped and custom_cap < full:
+                # The same regrow for the command's reading, after the name's:
+                # from its measured ink, so the rebuilt row adds at most
+                # `slack` cells and fits by construction.
+                ink = cell_len(truncate_cells(self._custom, custom_cap))
+                custom_cap = min(full, ink + slack)
+                right = self._right_text(dropped, short, cap, dim, seam, custom_cap=custom_cap)
             return frozenset(dropped), left, right
         return None
 
@@ -2644,9 +2672,19 @@ class StatusLine:
         return left
 
     def _right_text(
-        self, dropped: set[str], short: set[str], name_cells: int, dim: Style, seam: Style
+        self,
+        dropped: set[str],
+        short: set[str],
+        name_cells: int,
+        dim: Style,
+        seam: Style,
+        *,
+        custom_cap: int = 0,
     ) -> Text:
-        """agents ‹ jobs ‹ context ‹ cost ‹ duration ‹ [!] ‹ name.
+        """agents ‹ jobs ‹ custom ‹ context ‹ rate ‹ cost ‹ duration ‹ [!] ‹ name.
+
+        ``custom_cap`` is the cell cap :meth:`_walk` granted the status
+        command's reading once ``shorten-custom`` fired; 0 means uncapped.
 
         ``name_cells`` is the CAP :meth:`_walk` granted the trailing name —
         zero when the ladder dropped it. The title is emitted unpadded and cut
@@ -2695,8 +2733,16 @@ class StatusLine:
             # session's own readings (context, cost, duration) stay together
             # against the right edge and the command's reading — usually about
             # an account or a project, not this session — sits apart from them.
-            # `fg`: the operator configured this reading specifically.
-            parts.append(("", self._custom, Style(color=theme_mod.semantic_color("fg"))))
+            #
+            # `muted`, not `fg` (design round 1, T-4): with no icon and no
+            # leading seam, ink is what separates it from the left group's `fg`
+            # model label when only the minimum gap stands between them. A
+            # STALE reading (the last good line kept through a failure) takes
+            # `dim`, the band's last-known ink, so a held value never reads as
+            # a fresh one.
+            ink = dim if self._custom_stale else Style(color=theme_mod.semantic_color("muted"))
+            text = truncate_cells(self._custom, custom_cap) if custom_cap else self._custom
+            parts.append(("", text, ink))
         if "context" not in dropped:
             tokens, window = self._shown_context()
             usage = format_context_usage(tokens, window)

@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
 import time
 
 import pytest
@@ -30,8 +31,12 @@ _PAYLOAD = sc.build_payload(
 )
 
 
-def _run(command: str, **kwargs) -> str:  # noqa: ANN003
+def _outcome(command: str, **kwargs) -> sc.Outcome:  # noqa: ANN003
     return asyncio.run(sc.run(command, _PAYLOAD, **kwargs))
+
+
+def _run(command: str, **kwargs) -> str:  # noqa: ANN003
+    return _outcome(command, **kwargs).line
 
 
 def test_the_first_non_blank_line_is_the_segment() -> None:
@@ -54,9 +59,21 @@ def test_a_script_that_ignores_stdin_still_works() -> None:
     assert _run("echo ok") == "ok"
 
 
-@pytest.mark.parametrize("command", ["exit 3", "echo partial; exit 1", "true", "printf ''"])
-def test_failure_or_no_output_clears_the_segment(command: str) -> None:
-    assert _run(command) == ""
+@pytest.mark.parametrize(
+    ("command", "error"),
+    [
+        ("exit 3", "exit 3"),
+        ("echo partial; exit 1", "exit 1"),
+        ("/no/such/status-script", "exit 127"),
+    ],
+)
+def test_a_failure_reports_why_and_paints_nothing(command: str, error: str) -> None:
+    assert _outcome(command) == sc.Outcome(line="", error=error)
+
+
+@pytest.mark.parametrize("command", ["true", "printf ''"])
+def test_no_output_is_a_success_that_clears(command: str) -> None:
+    assert _outcome(command) == sc.Outcome()
 
 
 def test_an_empty_command_runs_nothing() -> None:
@@ -68,8 +85,8 @@ def test_a_hung_script_times_out_and_its_process_group_is_reaped(tmp_path) -> No
     would live for the whole TUI session, once per tick."""
     pidfile = tmp_path / "child.pid"
     started = time.monotonic()
-    line = _run(f"sleep 30 & echo $! > {pidfile}; wait", timeout=0.5)
-    assert line == ""
+    outcome = _outcome(f"sleep 30 & echo $! > {pidfile}; wait", timeout=0.5)
+    assert outcome == sc.Outcome(error="timed out after 0.5s")
     assert time.monotonic() - started < 5
     grandchild = int(pidfile.read_text().strip())
     for _ in range(50):
@@ -109,6 +126,33 @@ def test_cancellation_reaps_the_child(tmp_path) -> None:
     raise AssertionError("the cancelled run's shell survived")
 
 
+def test_a_flooding_script_is_bounded_in_memory_and_time() -> None:
+    """``yes`` writes forever: the run must time out promptly with bounded memory.
+
+    ``communicate()`` buffered all of stdout before the 4 KiB slice, measured at
+    3.6 GB inside a one-second timeout, and the reap then waited out its own
+    limit because nothing drained the pipe (review round 1, M1). Peak RSS is
+    the process's high-water mark, so it is compared before and after.
+    """
+    import resource
+
+    def peak_mb() -> float:
+        rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        return rss / (1024 * 1024) if sys.platform == "darwin" else rss / 1024
+
+    before = peak_mb()
+    started = time.monotonic()
+    assert _run("yes flooding", timeout=1.0) == ""
+    elapsed = time.monotonic() - started
+    assert elapsed < 2.5, f"timeout+reap took {elapsed:.2f}s"
+    assert peak_mb() - before < 64, f"peak RSS grew {peak_mb() - before:.0f} MB"
+
+
+def test_a_script_that_prints_a_lot_then_exits_keeps_its_first_line() -> None:
+    """Draining past the cap is what lets a verbose script finish successfully."""
+    assert _run("echo headline; head -c 2000000 /dev/zero | tr '\\0' x; echo") == "headline"
+
+
 def test_escapes_and_controls_never_reach_the_band() -> None:
     """Colour, OSC titles/hyperlinks and control bytes are stripped.
 
@@ -118,7 +162,17 @@ def test_escapes_and_controls_never_reach_the_band() -> None:
     raw = (
         "\x1b[31mred\x1b[0m \x1b]0;title\x07\x1b]8;;https://x\x1b\\link\x1b]8;;\x1b\\\ttab\x07bell"
     )
-    assert sc.sanitize(raw) == "red link tab bell"
+    assert sc.sanitize(raw) == "red link tabbell"  # BEL is removed, not spaced
+
+
+def test_bidi_overrides_and_invisible_characters_are_stripped() -> None:
+    """A right-to-left override would visually reorder every segment after it
+    (alarms included) in a bidi-aware terminal; zero-width characters make the
+    measured and painted widths disagree (review round 1, m3)."""
+    raw = "abc\u202edef\u200bghi\u2066x\u2069\ufeffy\u2028z"
+    assert sc.sanitize(raw) == "abcdefghixyz"
+    # A DCS string is removed with its payload, not left behind as text.
+    assert sc.sanitize("\x1bP1;2q payload\x1b\\ ok") == "ok"
 
 
 def test_long_output_is_capped_to_the_bounded_rung() -> None:

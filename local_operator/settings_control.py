@@ -84,6 +84,10 @@ def is_default(manager: "ConfigManager", setting: "Setting") -> bool:
 #: reads could ask it to. Refused for the same reason: a write-tier card does
 #: not say "this will run every 30 s, forever". Its interval is NOT listed —
 #: changing how often an operator-chosen command runs grants nothing new.
+#: Scope, stated so nobody over-reads it: this closes the ``setting`` tool
+#: only. An approved shell call (``lop config edit``, a write to config.yml)
+#: can still set the key, exactly as it can any other — the same class of
+#: residual ``tools/shell_env.py`` documents for the shell surface.
 OPERATOR_ONLY = frozenset({"radient.saver.mode", "display.composer.command"})
 
 #: Why each operator-only row is refused, in the words the agent receives.

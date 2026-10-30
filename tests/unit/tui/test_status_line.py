@@ -2620,6 +2620,58 @@ def test_the_custom_segment_outlives_title_and_cost_but_not_context(
     assert gone["name"] > gone["cost"] > gone["custom"] > gone["context"], gone
 
 
+def test_a_long_custom_reading_shortens_before_it_drops(monkeypatch) -> None:
+    """All-or-nothing left a 41-cell hole at 80 columns (design round 1, T-1).
+
+    Wherever the reading is painted it is whole or cut with an ellipsis, never
+    below the floor; and wherever cwd survives but the reading is gone, the
+    blank run between the groups is too narrow to have held the floor plus its
+    seam, so no width drops it while there was room for it.
+    """
+    from local_operator.tui.widgets.status_line import CUSTOM_CELLS_FLOOR
+
+    monkeypatch.setenv("HOME", "/Users/tester")
+    reading = "acct 5h 42% · 7d 18% · resets in 3h 12m"  # 40 cells, the runner's cap
+    status, _clock = _full_band()
+    status.update(custom=reading)
+    assert reading in status.render_text(140).plain
+    seen_cut = False
+    for width in range(140, 40, -1):
+        plain = status.render_text(width).plain
+        assert cell_len(plain) <= width
+        if "local-operator" not in plain:
+            continue
+        if "acct" not in plain:
+            hole = max(len(run) for run in re.findall(r" {2,}", plain))
+            room = hole - _MIN_GROUP_GAP
+            assert room < CUSTOM_CELLS_FLOOR + 3, f"dropped with {room} spare at {width}: {plain!r}"
+            continue
+        if reading not in plain:
+            seen_cut = True
+            shown = plain[plain.index("acct") :].split(f" {_SEP_RIGHT}")[0]
+            assert shown.endswith("…") and cell_len(shown) >= CUSTOM_CELLS_FLOOR, shown
+    assert seen_cut, "no width exercised the shortened form"
+
+
+def test_a_stale_reading_takes_the_last_known_ink() -> None:
+    """A held line (the script just failed) must not read as a fresh one."""
+    status, _clock = _full_band()
+    status.update(custom="acct 42%")
+
+    def style_of(needle: str) -> Style:
+        text = status.render_text(200)
+        start = text.plain.index(needle)
+        style = next(span.style for span in text.spans if span.start <= start < span.end)
+        assert isinstance(style, Style)
+        return style
+
+    fresh = style_of("acct 42%")
+    status.update(custom_stale=True)
+    stale = style_of("acct 42%")
+    assert fresh != stale
+    assert stale == Style(color=theme_mod.semantic_color("dim"))
+
+
 def test_the_custom_rung_is_in_every_ladder_and_bounded() -> None:
     for ladder in (
         _DROP_LADDER,
@@ -2628,6 +2680,7 @@ def test_the_custom_rung_is_in_every_ladder_and_bounded() -> None:
         _DROP_LADDER_QUIET_ESTIMATE,
     ):
         assert "custom" in ladder
+        assert ladder.index("shorten-custom") == ladder.index("custom") - 1
     assert "custom" not in _UNBOUNDED_RUNGS
     assert _DROP_LADDER.index("cost") < _DROP_LADDER.index("custom") < _DROP_LADDER.index("cwd")
 

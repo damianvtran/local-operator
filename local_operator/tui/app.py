@@ -77,6 +77,7 @@ from textual.screen import Screen
 from textual.timer import Timer
 from textual.widget import Widget
 from textual.widgets import Static
+from textual.worker import Worker
 
 from local_operator import keymap as _keymap
 from local_operator.ansi import strip_control_sequences
@@ -5224,6 +5225,13 @@ class OperatorApp(App[None]):
         #: ``None`` when no command is configured (`_arm_status_command`).
         self._status_command_armed: tuple[str, int] | None = None
         self._status_command_timer: Timer | None = None
+        #: The in-flight run, so a tick can skip while it is still going and a
+        #: command change can cancel it.
+        self._status_command_running: Worker[None] | None = None
+        #: Consecutive failed runs, and whether this armed command's failure
+        #: episode has been announced (`_apply_status_command_outcome`).
+        self._status_command_failures = 0
+        self._status_command_notified = False
         #: The park reason this app has already announced, so a 5-second poll
         #: raises one card per episode rather than holding the toast slot
         #: forever (see `_poll_tunnel_park`).
@@ -47610,56 +47618,129 @@ class OperatorApp(App[None]):
         if armed == self._status_command_armed:
             return
         self._status_command_armed = armed
+        self._status_command_failures = 0
+        self._status_command_notified = False
         if self._status_command_timer is not None:
             self._status_command_timer.stop()
             self._status_command_timer = None
         if armed is None:
+            if self._status_command_running is not None:
+                self._status_command_running.cancel()
+                self._status_command_running = None
             if self._status is not None:
-                self._status.update(custom="")
+                self._status.update(custom="", custom_stale=False)
             return
         self._status_command_timer = self.set_interval(interval, self._tick_status_command)
-        self._tick_status_command()
+        self._restart_status_command()
 
     def _tick_status_command(self) -> None:
-        """Interval callback: run the status command in its exclusive worker.
+        """Interval callback: run the status command unless a run is in flight.
 
-        ``exclusive=True`` cancels a run still in flight when the next tick
-        lands, and the runner reaps the cancelled child's process group, so a
-        script slower than its interval never stacks shells.
+        A tick that lands while the previous run is still going is SKIPPED, not
+        a cancellation: the runner's timeout (10 s) exceeds the shortest
+        interval (5 s), so cancelling on every tick meant a script slower than
+        its interval was killed every time and the segment never painted
+        (review round 1, m2). A run that hangs is still bounded by that
+        timeout. A COMMAND change does cancel (``_arm_status_command`` calls
+        :meth:`_restart_status_command`), because the old run's output is then
+        stale by definition.
         """
         if self._status_command_armed is None:
             return
+        if self._status_command_running is not None and self._status_command_running.is_running:
+            return
+        self._start_status_command_run()
+
+    def _restart_status_command(self) -> None:
+        """Cancel any in-flight run and start one for the newly armed command."""
+        if self._status_command_running is not None:
+            self._status_command_running.cancel()
+            self._status_command_running = None
+        self._start_status_command_run()
+
+    def _start_status_command_run(self) -> None:
+        assert self._status_command_armed is not None
         command = self._status_command_armed[0]
-        self.run_worker(
+        # `exit_on_error=False`: this is a cosmetic surface, and Textual's
+        # default would end the whole app on an exception in it (review round
+        # 1, m1) — the cosmetic-worker rule the other band workers follow.
+        self._status_command_running = self.run_worker(
             self._status_command_worker(command),
             thread=False,
             group="status-command",
-            exclusive=True,
+            exit_on_error=False,
         )
 
     async def _status_command_worker(self, command: str) -> None:
         status = self._status
         if status is None:
             return
-        facts = status.command_facts()
-        spec = _effective_spec(self._session)
-        payload = status_command_mod.build_payload(
-            session_id=str(getattr(self._session, "session_id", "") or ""),
-            cwd=os.getcwd(),
-            provider=str(getattr(spec, "provider", "") or ""),
-            model_id=str(getattr(spec, "model_id", "") or ""),
-            model_label=str(facts["model_label"]),
-            context_tokens=int(cast(int, facts["context_tokens"])),
-            context_window=int(cast(int, facts["context_window"])),
-            cost=str(facts["cost"]),
-            version=welcome_mod.app_version(),
-        )
-        line = await status_command_mod.run(command, payload, cwd=os.getcwd())
+        try:
+            # Guarded: `os.getcwd()` raises once the directory the TUI was
+            # started in is deleted (a removed git worktree), and the payload
+            # must never be the reason the segment stops updating.
+            cwd = _status_command_cwd()
+            facts = status.command_facts()
+            spec = _effective_spec(self._session)
+            payload = status_command_mod.build_payload(
+                session_id=str(getattr(self._session, "session_id", "") or ""),
+                cwd=cwd or "",
+                provider=str(getattr(spec, "provider", "") or ""),
+                model_id=str(getattr(spec, "model_id", "") or ""),
+                model_label=str(facts["model_label"]),
+                context_tokens=int(cast(int, facts["context_tokens"])),
+                context_window=int(cast(int, facts["context_window"])),
+                cost=str(facts["cost"]),
+                version=welcome_mod.app_version(),
+            )
+        except Exception:  # noqa: BLE001 — cosmetic; the segment just does not update
+            logger.debug("status command: payload not built", exc_info=True)
+            return
+        outcome = await status_command_mod.run(command, payload, cwd=cwd)
         # The command may have been changed or removed while this run was in
         # flight; its output must not overwrite the newer state.
         if self._status_command_armed is None or self._status_command_armed[0] != command:
             return
-        status.update(custom=line)
+        self._apply_status_command_outcome(command, outcome)
+
+    def _apply_status_command_outcome(
+        self, command: str, outcome: status_command_mod.Outcome
+    ) -> None:
+        """Paint one run's result, holding the last good line through a blip.
+
+        The band itself never paints an error (design round 1, T-2/T-3):
+
+        - success paints the line (or clears on empty output) and resets the
+          failure count;
+        - a failure KEEPS the last good line in the stale ink, so a flaky
+          network script does not make its siblings re-fit every interval,
+          and clears it only after ``STALE_AFTER_FAILURES`` in a row;
+        - the FIRST failure for an armed command raises one warning notice
+          naming why (``exit 127``, ``timed out after 10s``), so a mistyped
+          path is distinguishable from "not configured". Once per armed
+          command, the ``_poll_tunnel_park`` once-per-episode rule: a script
+          that keeps failing does not re-announce itself every 30 s, and a
+          success re-arms the notice for the next episode.
+        """
+        status = self._status
+        if status is None:
+            return
+        if not outcome.error:
+            self._status_command_failures = 0
+            self._status_command_notified = False
+            status.update(custom=outcome.line, custom_stale=False)
+            return
+        self._status_command_failures += 1
+        if self._status_command_failures >= status_command_mod.STALE_AFTER_FAILURES:
+            status.update(custom="", custom_stale=False)
+        else:
+            status.update(custom_stale=True)
+        if not self._status_command_notified:
+            self._status_command_notified = True
+            self._notice(
+                _t(_x.status_command_failed(error=outcome.error)),
+                "warning",
+            )
 
     def action_keymap_new_session(self) -> None:
         """The remappable "new session" hotkey — ``ctrl+n`` unless remapped.
@@ -63659,6 +63740,20 @@ def _model_spec(session) -> Any | None:
     :func:`_effective_spec`, which differs while a provider fallback serves.
     """
     return getattr(session, "model", None)
+
+
+def _status_command_cwd() -> str | None:
+    """The TUI's working directory, or ``None`` once it has been deleted.
+
+    ``os.getcwd()`` raises after the directory the TUI started in is removed (a
+    deleted git worktree). The status command then runs without a ``cwd``
+    override and its payload carries an empty one, rather than the worker
+    failing every interval.
+    """
+    try:
+        return os.getcwd()
+    except OSError:
+        return None
 
 
 def _effective_spec(session) -> Any | None:
