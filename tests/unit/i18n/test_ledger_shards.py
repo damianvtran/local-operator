@@ -77,9 +77,12 @@ def test_shards_and_aggregate_yield_identical_shipped_set(i18n_generate) -> None
         from_aggregate = i18n_generate._shipped_locales()
 
     # Same rows, same shipped set. The mirror groups by locale, so compare
-    # per-locale ordered rows rather than raw array order.
-    assert len(shard_entries) == len(legacy_entries) == 481
-    assert sum(count for count, _ in PRE_MIGRATION.values()) == 481
+    # per-locale ordered rows rather than raw array order. NO row-count literal:
+    # the ledger grows on every locale wave, so a pinned total turns an
+    # unrelated contribution into a red mechanism test. The invariant is that
+    # both read paths see the same rows, whatever today's count is.
+    assert len(shard_entries) == len(legacy_entries)
+    assert len(shard_entries) > 0
 
     def per_locale(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
         out: dict[str, list[dict[str, Any]]] = {}
@@ -89,13 +92,16 @@ def test_shards_and_aggregate_yield_identical_shipped_set(i18n_generate) -> None
 
     assert per_locale(shard_entries) == per_locale(legacy_entries)
     assert from_shards == from_aggregate
-    assert from_shards == ["en", "fr", "es", "zh-CN", "ru", "vi", "ur", "hi"]
 
-    # And the generated shipped.json on disk matches both.
+    # The generated shipped.json on disk must agree with BOTH read paths. WHO
+    # ships is product state that a locale wave legitimately changes; the
+    # property here is that the two paths and the committed artifact cannot
+    # disagree about it, so no literal locale list is pinned.
     generated = json.loads(
         (REPO / "local_operator/i18n/data/shipped.json").read_text(encoding="utf-8")
     )
     assert generated["locales"] == from_shards
+    assert "en" in from_shards  # the one invariant that is not product state
 
 
 def test_migration_is_order_preserving_and_lossless(tmp_path: Path) -> None:
@@ -118,7 +124,9 @@ def test_migration_is_order_preserving_and_lossless(tmp_path: Path) -> None:
     expected: dict[str, list[dict[str, Any]]] = {}
     for row in aggregate["entries"]:
         expected.setdefault(row["locale"], []).append(row)
-    assert len(expected) == 7  # seven non-en locales carry rows
+    # Derived, not counted: every locale present in the aggregate must appear,
+    # and no other. A new locale is a contribution, not a test failure.
+    assert set(expected) == {row["locale"] for row in aggregate["entries"]}
     for locale, rows in expected.items():
         shard = json.loads((out / f"{locale}.json").read_text(encoding="utf-8"))
         # Row-for-row equality in the original per-locale order: this is the
@@ -347,16 +355,18 @@ def test_two_locales_touch_disjoint_files() -> None:
     pins is that no shared file (the aggregate) is a WRITE target for locale
     contributions anymore: the aggregate is regenerated, never appended to.
     """
-    shards = {p.name for p in (REPO / "i18n" / "ledger").glob("*.json")}
-    assert shards == {
-        "es.json",
-        "fr.json",
-        "hi.json",
-        "ru.json",
-        "ur.json",
-        "vi.json",
-        "zh-CN.json",
+    # Derived from the ledger itself: one shard per locale the aggregate
+    # carries, named for that locale. A hard-coded file list would have to be
+    # edited every time a locale lands, which is the defect this whole change
+    # exists to remove.
+    aggregate_locales = {
+        row["locale"]
+        for row in json.loads((REPO / "i18n" / "ledger.json").read_text(encoding="utf-8"))[
+            "entries"
+        ]
     }
+    shard_locales = {p.stem for p in (REPO / "i18n" / "ledger").glob("*.json")}
+    assert shard_locales == aggregate_locales
     # Each shard names exactly its own locale in every row.
     for path in (REPO / "i18n" / "ledger").glob("*.json"):
         shard = json.loads(path.read_text(encoding="utf-8"))
@@ -364,7 +374,12 @@ def test_two_locales_touch_disjoint_files() -> None:
         assert path.stem == shard["locale"]
 
 
-@pytest.mark.parametrize("locale", ["es", "fr", "hi", "ru", "ur", "vi", "zh-CN"])
+# Derived at collection time, so a new locale shard is covered without editing
+# this file — the point of a mechanism test.
+SHARD_LOCALES = sorted(p.stem for p in (REPO / "i18n" / "ledger").glob("*.json"))
+
+
+@pytest.mark.parametrize("locale", SHARD_LOCALES)
 def test_shard_round_trips_through_aggregate_mirror(locale: str, i18n_generate) -> None:
     """Every shard's rows appear verbatim in the regenerated aggregate."""
     shard = json.loads((REPO / "i18n" / "ledger" / f"{locale}.json").read_text(encoding="utf-8"))
