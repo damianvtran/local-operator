@@ -2105,6 +2105,25 @@
       },
       "status": "passed",
       "note": "Independent fr audit (frbk1), 5 keys, auditor session 500e883ce1b1. Findings at audit: 0 blocker / 0 major / 0 minor / 1 nit. Every blocker/major has been remediated in the commit that adds this row; the remediated bytes are bound by input_hashes.target_locale in the bundle, and the pre-remediation hash is kept as remediation.target_sha_at_audit. Nits are answered in the audit report and the PR. Route: direct worktree reads (docs/security/redaction-policy.md 2.2); marker verified by ordinals, 0 markers in the French bytes. Auditor served on radient/auto after provider-quota fallbacks (disclosed); no native-speaker pass claimed."
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "f029ae6953f2fce31d126e7315beaf120bc63da0fc7398fbc6b31413b962222f",
+      "translator": {
+        "agent": "tb-setup-i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": "tb-setup-i18n-audit (reviewer role, independent of implementer and translator)",
+        "model": "radient/auto",
+        "date": "2026-10-28",
+        "result": "passed",
+        "findings": 5
+      },
+      "status": "passed",
+      "note": "Round 4 scope reduction: `lop team-bridge setup` no longer grants consent (it is granted in the Local Operator app only, #3022's bearer boundary). Copy change audited at source_sha256 f029ae6953f2fce31d126e7315beaf120bc63da0fc7398fbc6b31413b962222f: 5 keys deleted (setup.credential/account/tenant/consent/session), 7 added (setup.consent_ui_required/consent_ui_next/enable_in_app_required/designation_missing/ready/not_ready/failed), 2 updated (help.setup, outcome.not_wanted_hint). Independent audit (reviewer role, distinct agent and context from both the implementer and the translator): verdict clean, 0 blocker, 0 major, 1 minor + 4 nit, all applied (hi verbal predicate 'सेटअप हो चुके हैं'; ru agreement 'готовы' and 'предоставляется' for consent; zh-CN '就位' for the receiver and an explicit machine object in enable_in_app_required). The load-bearing sentence keeps all four elements in every locale: consent is granted in the app, NOT from a terminal, open the app once, enable agent messages."
     }
   ]
 }

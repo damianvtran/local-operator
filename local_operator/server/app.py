@@ -302,19 +302,23 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.librarian_boot_task = asyncio.create_task(_librarian_boot_ensure())
 
     # CONNECTOR CATCH-UP (D2a): a machine enrolled before the auto-install
-    # shipped has a committed owner but no LaunchAgent. One scheduled, best-
+    # shipped has a committed owner but no receiver unit. One scheduled, best-
     # effort sync at serve start is the repair; no poller is introduced. It is
-    # a task rather than an await because launchctl is synchronous and must
-    # never hold the server's readiness, and best-effort because the boot is
-    # the real work. The task name is ``bridge_connector_boot_task`` so a
+    # a task rather than an await because the supervisor calls are synchronous
+    # and must never hold the server's readiness, and best-effort because the
+    # boot is the real work. This is the BACKEND-ONLY entry: a plain `lop
+    # serve` with no desktop and no TUI reaches it, and it is the same helper
+    # the TUI and the mobile daemon call at their own start
+    # (``catch_up_at_surface_start``), so every surface runs one function with
+    # one guard set. The task name is ``bridge_connector_boot_task`` so a
     # caller/test can settle it without inspecting this closure.
     async def _bridge_connector_boot_sync() -> None:
         try:
             from local_operator.team_bridge.connector.install import (
-                sync_connector_service,
+                catch_up_at_surface_start,
             )
 
-            await asyncio.to_thread(sync_connector_service, config_dir)
+            await catch_up_at_surface_start(config_dir, surface="serve")
         except Exception:  # noqa: BLE001 — service catch-up must never fail boot
             logger.debug("bridge connector boot catch-up failed", exc_info=True)
 

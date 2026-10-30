@@ -1,0 +1,286 @@
+{
+ "schema": 1,
+ "audit_id": "w4a3",
+ "audit_round": 3,
+ "audit_kind": "independent_delta_reaudit",
+ "supersedes": "w4a2",
+ "supersedes_scope": [
+  "relay.shell.usage.used",
+  "relay.shell.usage.remaining",
+  "relay.shell.usage.remaining_unknown_unit",
+  "relay.shell.usage.used_unknown_unit"
+ ],
+ "locale": "es",
+ "namespace": "relay.shell",
+ "audit_date": "2026-10-29",
+ "audited_revision": "183f7a0537e4cee42fd82f25a21fe52953a81bdf",
+ "audited_revision_note": "branch feat/i18n-es-wire-errors at HEAD 183f7a0537e4cee42fd82f25a21fe52953a81bdf. The TARGET catalogue is UNTRACKED (`?? local_operator/i18n/catalogues/es/relay.shell.json`), so this round binds to the on-disk sha256 in input_hashes, not to a commit.",
+ "key_count": {
+  "en": 44,
+  "target": 44,
+  "delta_audited": 4,
+  "neighbours_checked": 40
+ },
+ "verdict": "passed",
+ "result": {
+  "mechanical_checks": "pass",
+  "findings_total": 6,
+  "blocker": 0,
+  "major": 0,
+  "minor": 1,
+  "nit": 2,
+  "closed_by_measurement": [
+   "F1",
+   "F2",
+   "F3"
+  ],
+  "partially_closed": [
+   "F4"
+  ],
+  "held_nits": [
+   "F5",
+   "F6"
+  ],
+  "composed_rows_checked": 84,
+  "composed_rows_failed": 0,
+  "note": "The four delta keys match an independently written grammar oracle on the composed path at every sampled count and unit kind, including exact multiples of 10^6.",
+  "closed": 3
+ },
+ "verdict_reason": "F1, F2 and F3 are closed by measurement: on the path the SPA actually composes (unit message rendered first with the same count, then the row message), all 84 rows match the oracle and the round-2 regressions ('de de', 'de restantes', 'de usados', 'de USD') are absent. The `many` branch is now a literal alias of `other`, which is correct under this locale's CLDR rules and required by check.py's lossless-upgrade rule; the `de` at 10^6 comes from unit_* alone. F4 remains partially closed (elided subject, minor, non-gating); F5/F6 remain held nits.",
+ "auditor": {
+  "agent": "translation-auditor (lopdev team), independent of the translating lane",
+  "session_or_instance": "744651c367e5",
+  "model": "radient/kimi-k2.5",
+  "actual_model_source": "this session's own model header (model-switch notices in-session)",
+  "model_fallback_notice": "FALLBACK, disclosed: the session's primary model anthropic/claude-sonnet-5-5 failed on provider quota; the harness fell back through openai/gpt-6-astra and kimi/k3.1-pro and all three rounds ran on radient/kimi-k2.5. No judgement here was produced by the primary model.",
+  "date": "2026-10-29",
+  "independence": "Translated none of this namespace and repaired nothing. Re-derived every result from the round-3 bytes; the grammar oracle used for the matrix is written by hand from Spanish agreement and CLDR grouping rather than from the catalogue's own unit messages, so a wrong unit message cannot mask a wrong row. Wrote only inside its own evidence directory; no git writes."
+ },
+ "runtime": {
+  "renderer": "local_operator.i18n.runtime (in-house ICU subset, shipped render/envelope path)",
+  "locale_data": "local_operator.i18n.format (generated CLDR tables)",
+  "composition": "local_operator/mobile/web/src/components/usage-sheet.tsx (mirrored exactly)",
+  "phone_runtime": "intl-messageformat (not executed here; standard ICU)",
+  "python": "3.14.7",
+  "counts_rendered": [
+   0,
+   1,
+   2,
+   21,
+   1000000,
+   1500000,
+   2000000
+  ]
+ },
+ "input_hashes": {
+  "en": {
+   "path": "local_operator/i18n/catalogues/en/relay.shell.json",
+   "revision": "183f7a0537e4cee42fd82f25a21fe52953a81bdf",
+   "sha256": "f53b23560b88b531ef8fc3274bc396676f26e755ad4ff9ad87ce368cebdee560"
+  },
+  "context": {
+   "path": "local_operator/i18n/catalogues/en/relay.shell.context.json",
+   "revision": "183f7a0537e4cee42fd82f25a21fe52953a81bdf",
+   "sha256": "16746ecd1537006992935bb2aa88fe39c46700d9e0341e7aacd565e2366349ea"
+  },
+  "target": {
+   "path": "local_operator/i18n/catalogues/es/relay.shell.json",
+   "sha256": "1c7a98ad133f4a3f8339b6d465b7692806639bc278ffe5e2607863d8e36d9c2f",
+   "tracked": false,
+   "note": "UNTRACKED working-tree bytes at the audited revision",
+   "previous_round_sha256": "fdc0d458f441d6e2097ff0f69722025c1b6f7294089ad9886827ec0c2fd3fde2"
+  },
+  "untouched_sibling": {
+   "path": "local_operator/i18n/catalogues/es/relay.session.json",
+   "sha256": "6812dca69e08ab9f1cf48f271e4db20263c7bbcb659d83a2f3c1a460122a2165",
+   "note": "not in this round's scope; hash recorded so a later reader can prove it did not move"
+  }
+ },
+ "findings": [
+  {
+   "id": "F1",
+   "severity": "major",
+   "status": "closed",
+   "key": "relay.shell.usage.used",
+   "previous": "{value, plural, one {Se usó # {unit}} many {Se usaron # de {unit}} other {Se usaron # {unit}}}",
+   "current": "{value, plural, one {Se usó # {unit}} many {Se usaron # {unit}} other {Se usaron # {unit}}}",
+   "reason": "Agreement and the 10^6 composition are now both correct on the composed path.",
+   "evidence": [
+    "credits used 1 -> Se usó 1 crédito",
+    "requests used 21 -> Se usaron 21 solicitudes",
+    "credits used 1000000 -> Se usaron 1.000.000 de créditos",
+    "credits used 2000000 -> Se usaron 2.000.000 de créditos"
+   ]
+  },
+  {
+   "id": "F2",
+   "severity": "minor",
+   "status": "closed",
+   "key": "relay.shell.usage.remaining",
+   "previous": "{value, plural, one {Queda # {unit} restante} many {Quedan # de {unit} restantes} other {Quedan # {unit} restantes}}",
+   "current": "{value, plural, one {Queda # {unit} restante} many {Quedan # {unit} restantes} other {Quedan # {unit} restantes}}",
+   "reason": "Singular at 1 and the `de` at 10^6 both correct on the composed path.",
+   "evidence": [
+    "credits remaining 1 -> Queda 1 crédito restante",
+    "requests remaining 1000000 -> Quedan 1.000.000 de solicitudes restantes"
+   ]
+  },
+  {
+   "id": "F3",
+   "severity": "minor",
+   "status": "closed",
+   "key": "relay.shell.usage.remaining_unknown_unit, relay.shell.usage.used_unknown_unit",
+   "previous": "many {Quedan # de restantes} / many {Se usaron # de usados}",
+   "current": "{value, plural, one {Queda # restante} many {Quedan # restantes} other {Quedan # restantes}} / {value, plural, one {Se usó #} many {Se usaron #} other {Se usaron #}}",
+   "reason": "The unit-less rows no longer carry a dangling `de`; the round-2 malformed strings are gone.",
+   "evidence": [
+    "unknown remaining 1000000 -> Quedan 1.000.000 restantes",
+    "unknown used 1000000 -> Se usaron 1.000.000"
+   ]
+  },
+  {
+   "id": "F4",
+   "severity": "minor",
+   "status": "partially_closed",
+   "key": "relay.shell.usage.continue",
+   "current": "Asignación incluida agotada; continuará con créditos.",
+   "reason": "Term drift closed in round 2 and still closed (one rendering of the included allowance; `agotada` kept as required). Not closed: `continuará` still has no stated subject. Held as minor, non-gating.",
+   "evidence": [
+    "relay.shell.usage.continue -> Asignación incluida agotada; continuará con créditos."
+   ]
+  },
+  {
+   "id": "F5",
+   "severity": "nit",
+   "status": "held_unchanged",
+   "key": "relay.shell.usage.window_lifetime",
+   "current": "Total",
+   "proposed": "Histórico (or De por vida where the width budget allows)",
+   "reason": "Still held as a nit; bytes unchanged this round. Non-gating."
+  },
+  {
+   "id": "F6",
+   "severity": "nit",
+   "status": "held_unchanged",
+   "key": "relay.shell.usage.eligibility_unknown",
+   "current": "Elegibilidad para gasto desconocida",
+   "proposed": "Elegibilidad de gasto desconocida",
+   "reason": "Still held as a nit; bytes unchanged this round. Non-gating."
+  }
+ ],
+ "branch_inventory": {
+  "relay.shell.usage.used": {
+   "selectors": [
+    "one",
+    "many",
+    "other"
+   ],
+   "many_is_alias_of_other": true,
+   "every_branch_renders_the_number": true
+  },
+  "relay.shell.usage.remaining": {
+   "selectors": [
+    "one",
+    "many",
+    "other"
+   ],
+   "many_is_alias_of_other": true,
+   "every_branch_renders_the_number": true
+  },
+  "relay.shell.usage.remaining_unknown_unit": {
+   "selectors": [
+    "one",
+    "many",
+    "other"
+   ],
+   "many_is_alias_of_other": true,
+   "every_branch_renders_the_number": true
+  },
+  "relay.shell.usage.used_unknown_unit": {
+   "selectors": [
+    "one",
+    "many",
+    "other"
+   ],
+   "many_is_alias_of_other": true,
+   "every_branch_renders_the_number": true
+  },
+  "illegal_categories": [],
+  "note": "`many` kept as a literal alias of `other` is CORRECT here, not dead weight: es CLDR emits `many` only at exact multiples of 10^6, the branch text is identical to `other`, and scripts/i18n/check.py's lossless-upgrade rule (check.py:582-588) requires a translation's plural to carry every CLDR category of the locale. This supersedes the round-2 remark that such an alias was 'not recommended' — that remark predated reading the checker rule, and the alias is the way to satisfy it without double-supplying `de`."
+ },
+ "checker_confirmation": {
+  "command": "python3 scripts/i18n/check.py --catalogues-only",
+  "output": "check.py: catalogue checks: 0 problem(s)",
+  "exit_code": 0,
+  "run_by": "the auditor, independently of the translator's run",
+  "note": "Recorded in audit.log after the matrix. Confirms the manager's claim rather than quoting it."
+ },
+ "root_cause": {
+  "summary": "The `de` belongs to exactly one side of the composition. It lives in unit_credits|unit_tokens|unit_requests' `many` branch (still unchanged), so the composing messages must not add it — and now do not.",
+  "status": "resolved",
+  "tested_remedy_applied": true
+ },
+ "neighbour_check": {
+  "method": "plain keys re-rendered against w4a1's log (usage.continue against w4a2's recorded value); parameterised keys covered by the matrix and by explicit row/timestamp re-renders",
+  "plain_reproduced": 30,
+  "plain_differing": 0,
+  "parameterised_checked": 10,
+  "template_rerenders": 5,
+  "template_rerenders_passed": 5
+ },
+ "process_note": {
+  "what": "During round 2 the session report for the OTHER namespace (relay.session) was first drafted from a template and contained invented hashes and invented text; it was caught against the log and rewritten before the bundle was receipted.",
+  "why_it_matters": "A later reader should know that every figure in all three rounds was produced by execution rather than carried forward from prose. The relay.session w4a2 bundle on disk is the rewritten, measurement-derived version, and its receipt.json hashes bind that version.",
+  "effect_on_findings": "None on relay.shell: no relay.shell document was affected, and every relay.shell figure here is reproducible from audit.log."
+ },
+ "artifacts": [
+  "record.json",
+  "report.md",
+  "audit.log",
+  "run-script.py.txt",
+  "receipt.json"
+ ],
+ "check_output": {
+  "path": "audit.log",
+  "kind": "auditor's own execution log (produced by running run-script.py.txt, then the checker, not transcribed)",
+  "command": "python3 i18n/audits/evidence/es/relay.shell/w4a3/run-script.py.txt i18n/audits/evidence/es/relay.shell/w4a1/audit.log i18n/audits/evidence/es/relay.shell/w4a2/record.json > …/w4a3/audit.log",
+  "contains": [
+   "HEAD/branch/tracked-state binding",
+   "sha256 of en, sidecar, target and the untouched session sibling",
+   "key parity 44/44",
+   "branch inventory of the four delta keys (selectors, alias check, number rendering)",
+   "84-row composed matrix against a hand-written grammar oracle (PASS/FAIL per row)",
+   "regression substrings ('de de', 'de restantes', 'de usados', 'de USD')",
+   "neighbour check of plain keys",
+   "row/timestamp re-renders",
+   "check.py --catalogues-only with exit code"
+  ],
+  "summary": {
+   "key_parity": "44/44",
+   "matrix": "84 PASS / 0 FAIL of 84",
+   "regressions": "all four forbidden substrings ABSENT",
+   "neighbours": "30 plain keys reproduce recorded text, 0 differing; 10 parameterised covered",
+   "templates": "5/5 row+timestamp re-renders match",
+   "checker": "0 problem(s), exit 0"
+  }
+ },
+ "limitations": [
+  "Python runtime only; the phone's TypeScript runtime (intl-messageformat) was not executed — no dependency tree in this worktree and no scratch installs. The branch shape is standard ICU, so the exposure is the runtime's CLDR table, which agrees with Node Intl.PluralRules('es') on the sampled counts.",
+  "No native-speaker review: the auditor is an LLM.",
+  "No screen-width measurement.",
+  "Fallback model disclosed; see auditor.model_fallback_notice."
+ ],
+ "noted_outside_scope": [],
+ "current_report_verdict": {
+  "status": "passed",
+  "unresolved_blocker_major_count": 0,
+  "blocker": 0,
+  "major": 0,
+  "minor": 1,
+  "nit": 2,
+  "closed": 3,
+  "rejected": 0,
+  "deferred": 0,
+  "findings_total": 6
+ }
+}

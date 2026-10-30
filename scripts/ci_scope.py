@@ -156,6 +156,9 @@ WINDOWS_TEST_PATHS = frozenset(
         "tests/unit/test_agent_import_boundary.py",
         "tests/unit/server/test_edit_workspace_boundary.py",
         "tests/unit/network/test_credentials_private_paths.py",
+        # The receiver's native Windows step (`Verify the Team Bridge receiver's
+        # Windows arm`): a test-only change to it must still reach Windows.
+        "tests/unit/team_bridge/test_connector_platforms.py",
     }
 )
 
@@ -191,6 +194,7 @@ WINDOWS_LOADED_PATHS = frozenset(
         "tests/__init__.py",
         "tests/unit/__init__.py",
         "tests/unit/server/__init__.py",
+        "tests/unit/team_bridge/__init__.py",
         "tests/unit/network/test_credential_inherit.py",
         "tests/unit/network/test_credentials_consent.py",
         "tests/unit/network/test_approvals_store.py",

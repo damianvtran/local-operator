@@ -16,6 +16,7 @@ from fastapi import FastAPI
 from local_operator.i18n import locale_direction, resolve
 from local_operator.i18n.format import format_number, plural_category
 from local_operator.server.routes import capabilities, i18n
+from tests.unit.i18n import locale_coverage
 
 
 @pytest.mark.parametrize(
@@ -79,15 +80,23 @@ async def test_mounted_capabilities_metadata_and_catalogue_gate(
         result = response.json()["result"]
         assert result["language"] == expected
         assert result["language_direction"] == direction
-        for blocked_path in ("zh-CN/wire.settings.account_policy", "ur/wire.exec"):
+        # Genuinely absent (locale, namespace) pairs, DERIVED from the committed
+        # catalogues: the raw route serves committed files only, and must 404 an
+        # absence rather than forge an English copy under the locale's tag. A
+        # hardcoded pair retires itself the moment that wave lands — this loop has
+        # already had to move it twice, most recently when `relay.approvals`
+        # reached every locale.
+        absent = locale_coverage.absent_pairs()
+        locale_coverage.require_nonempty(
+            absent,
+            subject="catalogue 404",
+            detail="every shipped locale carries every authored namespace",
+        )
+        for locale, namespace in absent[:2]:
             blocked = await client.get(
-                f"/v1/i18n/catalogues/{blocked_path}", headers={"If-None-Match": "*"}
+                f"/v1/i18n/catalogues/{locale}/{namespace}", headers={"If-None-Match": "*"}
             )
-            # Neither locale carries that namespace: account_policy is an
-            # approved English-only child, and Urdu does not carry wire.exec.
-            # The raw route serves committed namespaces only, not synthetic
-            # fallback files.
-            assert blocked.status_code == 404
+            assert blocked.status_code == 404, (locale, namespace)
         for shipped in ("ur", "zh-CN", "en"):
             control = await client.get(
                 f"/v1/i18n/catalogues/{shipped}/wire.errors", headers={"If-None-Match": "*"}

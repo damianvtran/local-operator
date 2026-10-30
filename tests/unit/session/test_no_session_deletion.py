@@ -89,14 +89,28 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "Rolls back only the network-request-*.body files the same read created.",
     ),
-    # The bridge connector's LaunchAgent, in ~/Library/LaunchAgents. The path
-    # comes from ``launchd.plist_path_for(LABEL)`` -- a fixed label plus
-    # ``Path.home()`` -- so it is never a session directory or a transcript, and
-    # the unlink is how an opt-out removes the user's own plist (D2a).
+    # The bridge connector's registration file, on all three receivers the
+    # cross-platform install added (the original entry covered macOS only). Each
+    # path is FIXED by the platform helper, never caller-supplied: ``plist_path()``
+    # is ``launchd.plist_path_for(LABEL)`` under ``Path.home()``,
+    # ``systemd_unit_path(SYSTEMD_UNIT)`` is the fixed per-user unit name, and
+    # ``task_record_path(config_dir)`` is ``<config_dir>/supervisor/<fixed
+    # name>.xml``. None can be a session directory or a transcript; the unlink is
+    # how an opt-out removes the user's own registration (D2a).
     (
-        "local_operator/team_bridge/connector/install.py::_remove",
+        "local_operator/team_bridge/connector/install.py::_remove_launchd",
         "<path>.unlink",
         "Unlinks the LaunchAgent plist at the fixed per-user label path, never a session path.",
+    ),
+    (
+        "local_operator/team_bridge/connector/install.py::_remove_systemd",
+        "<path>.unlink",
+        "Unlinks the fixed systemd --user unit file, never a session path.",
+    ),
+    (
+        "local_operator/team_bridge/connector/install.py::_remove_task",
+        "<path>.unlink",
+        "Unlinks the task record under the config dir's supervisor/ dir, never a session path.",
     ),
     # Dedicated credential-root cache, never a transcript path: path_for hashes
     # the opaque session id under account-affinity/<auth-db namespace>/*.json.

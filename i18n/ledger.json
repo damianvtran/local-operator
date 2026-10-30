@@ -1897,6 +1897,139 @@
       "note": "PR #3088 width rewrite, re-audited at the committed bytes. 9 of 52 values rewritten by i18n-translator (session e537e741e8d1) (actual model radient/auto; provider-quota fallback); round-1 audit e7a6d684b88a-slash-es rejected the shortened bytes (0B/1M/5m/5n) and round-2 independent audit 56bf28217956-slash2-es on the new bytes passed 0B/0M/2m/4n. target sha256 b577fc64e6ab7369a58f02d4b4653367f9169cf1a015b16168e02dae6bfc5c3b; en source unchanged (b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202). Evidence: i18n/audits/evidence/es/wire.slash/es29s2/record.json (receipt.json + verdicts copied verbatim). Previous rows for this pair described audits of the pre-rewrite values and are superseded."
     },
     {
+      "locale": "es",
+      "namespace": "relay.account_policy",
+      "source_sha256": "0019b08106e6f7762194b164b9b9b37054a8cfade759aa2f6490787a73dea890",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 3
+      },
+      "status": "passed",
+      "note": "w4w5 es backfill: 13 keys; independent audit w4a4 passed on the shipped bytes (target sha256 71956128095ae4afebaf4aa26356db6acf9796a100332d503fbcc785ab178453, evidence i18n/audits/evidence/es/relay.account_policy/w4a4/). Two findings were raised and closed across rounds: w4a3 'equipo' -> 'máquina' (the locale binds equipo to TEAM), w4a4 'relay' -> 'relé' (glossary §relay). One open nit (AP-03) is dispositioned in the w4a4 report.md. Note the row's source_sha256 is the ENGLISH source hash; the target binding lives in the cited record."
+    },
+    {
+      "locale": "es",
+      "namespace": "relay.library",
+      "source_sha256": "ad478c433a4db3e725994766c724a2e8e92176f015f8283e71dc13b87185466a",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "radient/auto (self-reported)",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "w4w5 es backfill: 1 keys; independent audit w4a3 passed (committed evidence i18n/audits/evidence/es/relay.library/w4a3/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "relay.login",
+      "source_sha256": "9a59686bcd0e3641a5a807ea2b778cb385e591060c26c7fb994bea95e4de5bc5",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "radient/auto (self-reported)",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "w4w5 es backfill: 4 keys; independent audit w4a2 passed (committed evidence i18n/audits/evidence/es/relay.login/w4a2/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "relay.session",
+      "source_sha256": "a4ae148de969d4a2e8541aca5b4b99ad311d9ef112a0d056fc21fcf90e7e0129",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "radient/kimi-k2.5",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "w4w5 es backfill: 17 keys; independent audit w4a2 passed (committed evidence i18n/audits/evidence/es/relay.session/w4a2/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "relay.shell",
+      "source_sha256": "f53b23560b88b531ef8fc3274bc396676f26e755ad4ff9ad87ce368cebdee560",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "radient/kimi-k2.5",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 6
+      },
+      "status": "passed",
+      "note": "w4w5 es backfill: 44 keys; independent audit w4a3 passed (committed evidence i18n/audits/evidence/es/relay.shell/w4a3/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "mobile.setup",
+      "source_sha256": "6249b10379beb9b2433746416fa7baff061265a1b9315d47465140cd5fcf61e9",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 12
+      },
+      "status": "passed",
+      "note": "w4w5 es backfill: 76 keys; independent audit w5a1 passed (committed evidence i18n/audits/evidence/es/mobile.setup/w5a1/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "f029ae6953f2fce31d126e7315beaf120bc63da0fc7398fbc6b31413b962222f",
+      "translator": {
+        "agent": "tb-setup-i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": "tb-setup-i18n-audit (reviewer role, independent of implementer and translator)",
+        "model": "radient/auto",
+        "date": "2026-10-28",
+        "result": "passed",
+        "findings": 5
+      },
+      "status": "passed",
+      "note": "Round 4 scope reduction: `lop team-bridge setup` no longer grants consent (it is granted in the Local Operator app only, #3022's bearer boundary). Copy change audited at source_sha256 f029ae6953f2fce31d126e7315beaf120bc63da0fc7398fbc6b31413b962222f: 5 keys deleted (setup.credential/account/tenant/consent/session), 7 added (setup.consent_ui_required/consent_ui_next/enable_in_app_required/designation_missing/ready/not_ready/failed), 2 updated (help.setup, outcome.not_wanted_hint). Independent audit (reviewer role, distinct agent and context from both the implementer and the translator): verdict clean, 0 blocker, 0 major, 1 minor + 4 nit, all applied (hi verbal predicate 'सेटअप हो चुके हैं'; ru agreement 'готовы' and 'предоставляется' for consent; zh-CN '就位' for the receiver and an explicit machine object in enable_in_app_required). The load-bearing sentence keeps all four elements in every locale: consent is granted in the app, NOT from a terminal, open the app once, enable agent messages."
+    },
+    {
       "locale": "fr",
       "namespace": "tui.status",
       "source_sha256": "2403f9c4f37b40264f575929627b99a0bcabb0baf1bcb6a0b951c6c31ec6843a",
@@ -4001,6 +4134,25 @@
       "note": "Independent fr audit (frbk1), 5 keys, auditor session 500e883ce1b1. Findings at audit: 0 blocker / 0 major / 0 minor / 1 nit. Every blocker/major has been remediated in the commit that adds this row; the remediated bytes are bound by input_hashes.target_locale in the bundle, and the pre-remediation hash is kept as remediation.target_sha_at_audit. Nits are answered in the audit report and the PR. Route: direct worktree reads (docs/security/redaction-policy.md 2.2); marker verified by ordinals, 0 markers in the French bytes. Auditor served on radient/auto after provider-quota fallbacks (disclosed); no native-speaker pass claimed."
     },
     {
+      "locale": "fr",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "f029ae6953f2fce31d126e7315beaf120bc63da0fc7398fbc6b31413b962222f",
+      "translator": {
+        "agent": "tb-setup-i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": "tb-setup-i18n-audit (reviewer role, independent of implementer and translator)",
+        "model": "radient/auto",
+        "date": "2026-10-28",
+        "result": "passed",
+        "findings": 5
+      },
+      "status": "passed",
+      "note": "Round 4 scope reduction: `lop team-bridge setup` no longer grants consent (it is granted in the Local Operator app only, #3022's bearer boundary). Copy change audited at source_sha256 f029ae6953f2fce31d126e7315beaf120bc63da0fc7398fbc6b31413b962222f: 5 keys deleted (setup.credential/account/tenant/consent/session), 7 added (setup.consent_ui_required/consent_ui_next/enable_in_app_required/designation_missing/ready/not_ready/failed), 2 updated (help.setup, outcome.not_wanted_hint). Independent audit (reviewer role, distinct agent and context from both the implementer and the translator): verdict clean, 0 blocker, 0 major, 1 minor + 4 nit, all applied (hi verbal predicate 'सेटअप हो चुके हैं'; ru agreement 'готовы' and 'предоставляется' for consent; zh-CN '就位' for the receiver and an explicit machine object in enable_in_app_required). The load-bearing sentence keeps all four elements in every locale: consent is granted in the app, NOT from a terminal, open the app once, enable agent messages."
+    },
+    {
       "locale": "hi",
       "namespace": "tui.status",
       "source_sha256": "2403f9c4f37b40264f575929627b99a0bcabb0baf1bcb6a0b951c6c31ec6843a",
@@ -5138,6 +5290,25 @@
       }
     },
     {
+      "locale": "hi",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "f029ae6953f2fce31d126e7315beaf120bc63da0fc7398fbc6b31413b962222f",
+      "translator": {
+        "agent": "tb-setup-i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": "tb-setup-i18n-audit (reviewer role, independent of implementer and translator)",
+        "model": "radient/auto",
+        "date": "2026-10-28",
+        "result": "passed",
+        "findings": 5
+      },
+      "status": "passed",
+      "note": "Round 4 scope reduction: `lop team-bridge setup` no longer grants consent (it is granted in the Local Operator app only, #3022's bearer boundary). Copy change audited at source_sha256 f029ae6953f2fce31d126e7315beaf120bc63da0fc7398fbc6b31413b962222f: 5 keys deleted (setup.credential/account/tenant/consent/session), 7 added (setup.consent_ui_required/consent_ui_next/enable_in_app_required/designation_missing/ready/not_ready/failed), 2 updated (help.setup, outcome.not_wanted_hint). Independent audit (reviewer role, distinct agent and context from both the implementer and the translator): verdict clean, 0 blocker, 0 major, 1 minor + 4 nit, all applied (hi verbal predicate 'सेटअप हो चुके हैं'; ru agreement 'готовы' and 'предоставляется' for consent; zh-CN '就位' for the receiver and an explicit machine object in enable_in_app_required). The load-bearing sentence keeps all four elements in every locale: consent is granted in the app, NOT from a terminal, open the app once, enable agent messages."
+    },
+    {
       "locale": "ru",
       "namespace": "tui.status",
       "source_sha256": "2403f9c4f37b40264f575929627b99a0bcabb0baf1bcb6a0b951c6c31ec6843a",
@@ -6273,6 +6444,25 @@
       "note": "PR #3088 width rewrite, re-audited at the committed bytes. 13 of 52 values rewritten by i18n-translator (session aec007cb64fd) (actual model radient/auto; provider-quota fallback); round-1 audit 2c04d4b44ec7-slash-ru rejected the shortened bytes (0B/3M/5m/5n) and round-2 independent audit 1ad20cd0410c-slash2-ru on the new bytes passed 0B/0M/6m/5n. target sha256 09b51528fb14e80fd3db33367624762ef33c47a4668a1a99e6946f451bd5761f; en source unchanged (b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202). Evidence: i18n/audits/evidence/ru/wire.slash/ru29s2/record.json (receipt.json + verdicts copied verbatim). Previous rows for this pair described audits of the pre-rewrite values and are superseded."
     },
     {
+      "locale": "ru",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "f029ae6953f2fce31d126e7315beaf120bc63da0fc7398fbc6b31413b962222f",
+      "translator": {
+        "agent": "tb-setup-i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": "tb-setup-i18n-audit (reviewer role, independent of implementer and translator)",
+        "model": "radient/auto",
+        "date": "2026-10-28",
+        "result": "passed",
+        "findings": 5
+      },
+      "status": "passed",
+      "note": "Round 4 scope reduction: `lop team-bridge setup` no longer grants consent (it is granted in the Local Operator app only, #3022's bearer boundary). Copy change audited at source_sha256 f029ae6953f2fce31d126e7315beaf120bc63da0fc7398fbc6b31413b962222f: 5 keys deleted (setup.credential/account/tenant/consent/session), 7 added (setup.consent_ui_required/consent_ui_next/enable_in_app_required/designation_missing/ready/not_ready/failed), 2 updated (help.setup, outcome.not_wanted_hint). Independent audit (reviewer role, distinct agent and context from both the implementer and the translator): verdict clean, 0 blocker, 0 major, 1 minor + 4 nit, all applied (hi verbal predicate 'सेटअप हो चुके हैं'; ru agreement 'готовы' and 'предоставляется' for consent; zh-CN '就位' for the receiver and an explicit machine object in enable_in_app_required). The load-bearing sentence keeps all four elements in every locale: consent is granted in the app, NOT from a terminal, open the app once, enable agent messages."
+    },
+    {
       "locale": "ur",
       "namespace": "cli.exec_remote_help",
       "source_sha256": "c555648c19dd25af507951dc828f3fffbedc44feb579192c9c3fa7c6952e365e",
@@ -7187,6 +7377,25 @@
       },
       "status": "passed",
       "note": "PR #3088 width rewrite, re-audited at the committed bytes. 8 of 52 values rewritten by i18n-translator (session e0c37577f3ce) (actual model radient/auto; provider-quota fallback); round-1 audit 2f076e039aec-slash-ur rejected the shortened bytes (1B/0M/5m/4n) and round-2 independent audit 1ecfefb83d14-slash2-ur on the new bytes passed 0B/0M/3m/3n. target sha256 7c950b38d91902600488c29a5f13fbdaaf52f5fd8af69001fb9803e448a80959; en source unchanged (b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202). Evidence: i18n/audits/evidence/ur/wire.slash/ur29s2/record.json (receipt.json + verdicts copied verbatim). Previous rows for this pair described audits of the pre-rewrite values and are superseded."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "f029ae6953f2fce31d126e7315beaf120bc63da0fc7398fbc6b31413b962222f",
+      "translator": {
+        "agent": "tb-setup-i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": "tb-setup-i18n-audit (reviewer role, independent of implementer and translator)",
+        "model": "radient/auto",
+        "date": "2026-10-28",
+        "result": "passed",
+        "findings": 5
+      },
+      "status": "passed",
+      "note": "Round 4 scope reduction: `lop team-bridge setup` no longer grants consent (it is granted in the Local Operator app only, #3022's bearer boundary). Copy change audited at source_sha256 f029ae6953f2fce31d126e7315beaf120bc63da0fc7398fbc6b31413b962222f: 5 keys deleted (setup.credential/account/tenant/consent/session), 7 added (setup.consent_ui_required/consent_ui_next/enable_in_app_required/designation_missing/ready/not_ready/failed), 2 updated (help.setup, outcome.not_wanted_hint). Independent audit (reviewer role, distinct agent and context from both the implementer and the translator): verdict clean, 0 blocker, 0 major, 1 minor + 4 nit, all applied (hi verbal predicate 'सेटअप हो चुके हैं'; ru agreement 'готовы' and 'предоставляется' for consent; zh-CN '就位' for the receiver and an explicit machine object in enable_in_app_required). The load-bearing sentence keeps all four elements in every locale: consent is granted in the app, NOT from a terminal, open the app once, enable agent messages."
     },
     {
       "locale": "vi",
@@ -8322,6 +8531,25 @@
       },
       "status": "passed",
       "note": "PR #3088 width rewrite, re-audited at the committed bytes. 11 of 52 values rewritten by i18n-translator (session 137c362d5bba) (actual model radienthq/auto; provider-quota fallback); round-1 audit 86c035febe3e-slash-vi rejected the shortened bytes (0B/2M/5m/4n) and round-2 independent audit f3ea10304234-slash2-vi on the new bytes passed 0B/0M/1m/4n. target sha256 d228f91dad840c65253a5d46919cb99c0cb0eaa21c99d315e79f55f8490dfc23; en source unchanged (b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202). Evidence: i18n/audits/evidence/vi/wire.slash/vi29s2/record.json (receipt.json + verdicts copied verbatim). Previous rows for this pair described audits of the pre-rewrite values and are superseded."
+    },
+    {
+      "locale": "vi",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "f029ae6953f2fce31d126e7315beaf120bc63da0fc7398fbc6b31413b962222f",
+      "translator": {
+        "agent": "tb-setup-i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": "tb-setup-i18n-audit (reviewer role, independent of implementer and translator)",
+        "model": "radient/auto",
+        "date": "2026-10-28",
+        "result": "passed",
+        "findings": 5
+      },
+      "status": "passed",
+      "note": "Round 4 scope reduction: `lop team-bridge setup` no longer grants consent (it is granted in the Local Operator app only, #3022's bearer boundary). Copy change audited at source_sha256 f029ae6953f2fce31d126e7315beaf120bc63da0fc7398fbc6b31413b962222f: 5 keys deleted (setup.credential/account/tenant/consent/session), 7 added (setup.consent_ui_required/consent_ui_next/enable_in_app_required/designation_missing/ready/not_ready/failed), 2 updated (help.setup, outcome.not_wanted_hint). Independent audit (reviewer role, distinct agent and context from both the implementer and the translator): verdict clean, 0 blocker, 0 major, 1 minor + 4 nit, all applied (hi verbal predicate 'सेटअप हो चुके हैं'; ru agreement 'готовы' and 'предоставляется' for consent; zh-CN '就位' for the receiver and an explicit machine object in enable_in_app_required). The load-bearing sentence keeps all four elements in every locale: consent is granted in the app, NOT from a terminal, open the app once, enable agent messages."
     },
     {
       "locale": "zh-CN",
@@ -10245,6 +10473,25 @@
       },
       "status": "passed",
       "note": "PR #3088 width rewrite, re-audited at the committed bytes. 5 of 52 values rewritten by i18n-translator (session 1fe5533c9a8f) (actual model radient/auto; provider-quota fallback); round-1 audit a303f65af544-slash-zh-CN rejected the shortened bytes (0B/1M/3m/2n) and round-2 independent audit 7b1ecf2ef33b-slash-zh-cn on the new bytes passed 0B/0M/0m/1n. target sha256 ebc0ae0101022d4ff31ca7e54f0e0d34d000c7e3b46e62b54ac3ed132a88cd55; en source unchanged (b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202). Evidence: i18n/audits/evidence/zh-CN/wire.slash/zh-CN29s2/record.json (receipt.json + verdicts copied verbatim). Previous rows for this pair described audits of the pre-rewrite values and are superseded."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "f029ae6953f2fce31d126e7315beaf120bc63da0fc7398fbc6b31413b962222f",
+      "translator": {
+        "agent": "tb-setup-i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": "tb-setup-i18n-audit (reviewer role, independent of implementer and translator)",
+        "model": "radient/auto",
+        "date": "2026-10-28",
+        "result": "passed",
+        "findings": 5
+      },
+      "status": "passed",
+      "note": "Round 4 scope reduction: `lop team-bridge setup` no longer grants consent (it is granted in the Local Operator app only, #3022's bearer boundary). Copy change audited at source_sha256 f029ae6953f2fce31d126e7315beaf120bc63da0fc7398fbc6b31413b962222f: 5 keys deleted (setup.credential/account/tenant/consent/session), 7 added (setup.consent_ui_required/consent_ui_next/enable_in_app_required/designation_missing/ready/not_ready/failed), 2 updated (help.setup, outcome.not_wanted_hint). Independent audit (reviewer role, distinct agent and context from both the implementer and the translator): verdict clean, 0 blocker, 0 major, 1 minor + 4 nit, all applied (hi verbal predicate 'सेटअप हो चुके हैं'; ru agreement 'готовы' and 'предоставляется' for consent; zh-CN '就位' for the receiver and an explicit machine object in enable_in_app_required). The load-bearing sentence keeps all four elements in every locale: consent is granted in the app, NOT from a terminal, open the app once, enable agent messages."
     }
   ]
 }

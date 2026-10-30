@@ -217,13 +217,6 @@ def test_wave3_hindi_carries_its_namespace_snapshot_with_parity(i18n_check) -> N
     # the other seven locales; it sorts after `relay.chrome`. Carrying it
     # pins key/placeholder parity here, while shipping still waits on its
     # independent audit row, exactly as each namespace above did.
-    # The relay-locale backfill adds the four owned relay-SPA namespaces the
-    # phone client needs to render this locale: `relay.account_policy` (13),
-    # `relay.library` (1), `relay.session` (17) and `relay.shell` (44) — 75 keys
-    # whose key sets are identical to en. They are carried on the translator's
-    # own fresh row at the current en bytes; the independent audit is dispatched
-    # separately on this PR and adds its attestation, so this census records what
-    # is carried, not an audit this commit cannot perform.
     locale = "hi"
     namespaces = (
         "cli.exec_remote_help",
@@ -231,7 +224,12 @@ def test_wave3_hindi_carries_its_namespace_snapshot_with_parity(i18n_check) -> N
         # only with its independently audited ledger row at the current en bytes;
         # it sorts after cli.exec_remote_help.
         "cli.services_status",
-        "relay.account_policy",
+        # The Team Bridge receiver's 45-key namespace (``lop team-bridge setup``
+        # and ``receiver <verb>``), carried in all seven locales only with its
+        # independently audited ledger row at the current en bytes; the receiver
+        # ships cross-platform, so Hindi carries it like the rest. It sorts
+        # after cli.services_status.
+        "cli.team_bridge",
         "relay.approvals",
         "relay.ask",
         "relay.asks",
@@ -243,11 +241,8 @@ def test_wave3_hindi_carries_its_namespace_snapshot_with_parity(i18n_check) -> N
         # doubly audited ledger row; it keeps relay.chrome's English bytes
         # frozen, and sorts between relay.chrome and relay.session.tags.
         "relay.health",
-        "relay.library",
         "relay.notifications",
-        "relay.session",
         "relay.session.tags",
-        "relay.shell",
         # Audited relay condensation copy adds 19 keys; keep this census exact.
         "relay.transcript",
         "tui.asks",
