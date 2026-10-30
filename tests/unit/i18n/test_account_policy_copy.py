@@ -49,8 +49,9 @@ def test_spanish_carries_the_policy_label_and_still_falls_back_elsewhere():
     # source rather than to a key token, in the same locale. `wire.errors.sdk_spec`
     # is English-pinned by caller contract, so it is a real missing namespace
     # rather than a synthetic one.
-    assert messages.render(
-        "wire.errors.sdk_spec.attach_fields_unsupported", {"fields": "x"}, locale="es"
-    ) == messages.render(
-        "wire.errors.sdk_spec.attach_fields_unsupported", {"fields": "x"}, locale="en"
-    )
+    key = "wire.errors.sdk_spec.attach_fields_unsupported"
+    fallback = messages.render(key, {"fields": "x"}, locale="es")
+    assert fallback == messages.render(key, {"fields": "x"}, locale="en")
+    # …and the fallback must be the ENGLISH SENTENCE, never the key token — the
+    # property the original "still falls back elsewhere" assertion protected.
+    assert "wire.errors.sdk_spec." not in fallback

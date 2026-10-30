@@ -9496,10 +9496,10 @@
         "model": "radient/auto",
         "date": "2026-10-29",
         "result": "passed",
-        "findings": 0
+        "findings": 2
       },
       "status": "passed",
-      "note": "w4w5 es backfill: 13 keys; independent audit w4a3 passed (committed evidence i18n/audits/evidence/es/relay.account_policy/w4a3/). Open minor/nit findings are dispositioned in that evidence's report.md."
+      "note": "w4w5 es backfill: 13 keys; independent audit w4a4 passed on the shipped bytes (target sha256 71956128095ae4afebaf4aa26356db6acf9796a100332d503fbcc785ab178453, evidence i18n/audits/evidence/es/relay.account_policy/w4a4/). Two findings were raised and closed across rounds: w4a3 'equipo' -> 'máquina' (the locale binds equipo to TEAM), w4a4 'relay' -> 'relé' (glossary §relay). One open nit (AP-03) is dispositioned in the w4a4 report.md. Note the row's source_sha256 is the ENGLISH source hash; the target binding lives in the cited record."
     },
     {
       "locale": "es",
@@ -9512,13 +9512,14 @@
       },
       "auditor": {
         "agent": "i18n-auditor",
-        "model": "radient/auto",
+        "model": "radient/auto (self-reported)",
         "date": "2026-10-29",
         "result": "passed",
         "findings": 0
       },
       "status": "passed",
-      "note": "w4w5 es backfill: 1 keys; independent audit w4a3 passed (committed evidence i18n/audits/evidence/es/relay.library/w4a3/). Open minor/nit findings are dispositioned in that evidence's report.md."
+      "note": "w4w5 es backfill: 1 keys; independent audit w4a3 passed (committed evidence i18n/audits/evidence/es/relay.library/w4a3/). Open minor/nit findings are dispositioned in that evidence's report.md.",
+      "findings": 1
     },
     {
       "locale": "es",
@@ -9531,13 +9532,14 @@
       },
       "auditor": {
         "agent": "i18n-auditor",
-        "model": "radient/auto",
+        "model": "radient/auto (self-reported)",
         "date": "2026-10-29",
         "result": "passed",
         "findings": 0
       },
       "status": "passed",
-      "note": "w4w5 es backfill: 4 keys; independent audit w4a2 passed (committed evidence i18n/audits/evidence/es/relay.login/w4a2/). Open minor/nit findings are dispositioned in that evidence's report.md."
+      "note": "w4w5 es backfill: 4 keys; independent audit w4a2 passed (committed evidence i18n/audits/evidence/es/relay.login/w4a2/). Open minor/nit findings are dispositioned in that evidence's report.md.",
+      "findings": 0
     },
     {
       "locale": "es",
@@ -9550,13 +9552,14 @@
       },
       "auditor": {
         "agent": "i18n-auditor",
-        "model": "radient/auto",
+        "model": "radient/kimi-k2.5",
         "date": "2026-10-29",
         "result": "passed",
         "findings": 0
       },
       "status": "passed",
-      "note": "w4w5 es backfill: 17 keys; independent audit w4a2 passed (committed evidence i18n/audits/evidence/es/relay.session/w4a2/). Open minor/nit findings are dispositioned in that evidence's report.md."
+      "note": "w4w5 es backfill: 17 keys; independent audit w4a2 passed (committed evidence i18n/audits/evidence/es/relay.session/w4a2/). Open minor/nit findings are dispositioned in that evidence's report.md.",
+      "findings": 1
     },
     {
       "locale": "es",
@@ -9569,13 +9572,14 @@
       },
       "auditor": {
         "agent": "i18n-auditor",
-        "model": "radient/auto",
+        "model": "radient/kimi-k2.5",
         "date": "2026-10-29",
         "result": "passed",
         "findings": 0
       },
       "status": "passed",
-      "note": "w4w5 es backfill: 44 keys; independent audit w4a3 passed (committed evidence i18n/audits/evidence/es/relay.shell/w4a3/). Open minor/nit findings are dispositioned in that evidence's report.md."
+      "note": "w4w5 es backfill: 44 keys; independent audit w4a3 passed (committed evidence i18n/audits/evidence/es/relay.shell/w4a3/). Open minor/nit findings are dispositioned in that evidence's report.md.",
+      "findings": 6
     },
     {
       "locale": "es",
@@ -9594,7 +9598,8 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "w4w5 es backfill: 76 keys; independent audit w5a1 passed (committed evidence i18n/audits/evidence/es/mobile.setup/w5a1/). Open minor/nit findings are dispositioned in that evidence's report.md."
+      "note": "w4w5 es backfill: 76 keys; independent audit w5a1 passed (committed evidence i18n/audits/evidence/es/mobile.setup/w5a1/). Open minor/nit findings are dispositioned in that evidence's report.md.",
+      "findings": 12
     }
   ]
 }

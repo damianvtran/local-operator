@@ -56,8 +56,9 @@ def test_english_login_and_auth_contract() -> None:
 def test_actual_shipped_missing_namespace_uses_english_metadata(
     monkeypatch, tmp_path, locale: str
 ) -> None:
-    # Real resolver/catalogues, not a mocked language string: these are the
-    # committed shipped tags while relay.login currently carries English only.
+    # Real resolver/catalogues, not a mocked language string: relay.login still
+    # carries English only for these locales, so a resolved non-English tag must
+    # fall back to the English page (Spanish carries it now — see the case below).
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     (tmp_path / "config.yml").write_text(f"values:\n  language: {locale}\n")
     assert daemon.resolve_language() == locale

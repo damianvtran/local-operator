@@ -48,13 +48,38 @@ def _compose(shell, n: int, unit_key: str) -> tuple[str, str]:
     return used, left
 
 
-def test_usage_row_agrees_at_one_and_at_many(shell):
-    used_one, left_one = _compose(shell, 1, "relay.shell.usage.unit_credits")
-    assert used_one == "Se usó 1 crédito", used_one
-    assert left_one == "Queda 1 crédito restante", left_one
-    used_many, left_many = _compose(shell, 21, "relay.shell.usage.unit_requests")
-    assert used_many == "Se usaron 21 solicitudes", used_many
-    assert left_many == "Quedan 21 solicitudes restantes", left_many
+def test_usage_row_agrees_at_every_count_the_sheet_renders(shell):
+    """The counts the relay sheet actually emits, on the composed path."""
+    cases = (
+        (
+            0,
+            "relay.shell.usage.unit_credits",
+            "Se usaron 0 créditos",
+            "Quedan 0 créditos restantes",
+        ),
+        (1, "relay.shell.usage.unit_credits", "Se usó 1 crédito", "Queda 1 crédito restante"),
+        (
+            2,
+            "relay.shell.usage.unit_requests",
+            "Se usaron 2 solicitudes",
+            "Quedan 2 solicitudes restantes",
+        ),
+        (
+            21,
+            "relay.shell.usage.unit_requests",
+            "Se usaron 21 solicitudes",
+            "Quedan 21 solicitudes restantes",
+        ),
+    )
+    for count, unit_key, used_expected, left_expected in cases:
+        used, left = _compose(shell, count, unit_key)
+        assert used == used_expected, (count, used)
+        assert left == left_expected, (count, left)
+    # USD carries no `de` and no agreement on the noun: it must stay untouched.
+    used_usd, left_usd = _compose(shell, 1, "relay.shell.usage.unit_usd")
+    assert "USD" in used_usd and "USD" in left_usd, (used_usd, left_usd)
+    used_usd_big, _ = _compose(shell, 2_000_000, "relay.shell.usage.unit_usd")
+    assert "de " not in used_usd_big.replace("Quedan ", ""), used_usd_big
 
 
 def test_exact_million_carries_exactly_one_de(shell):
@@ -67,6 +92,9 @@ def test_exact_million_carries_exactly_one_de(shell):
     used_15, left_15 = _compose(shell, 1500000, "relay.shell.usage.unit_credits")
     assert used_15 == "Se usaron 1.500.000 créditos", used_15
     assert "de " not in left_15.removeprefix("Quedan "), left_15
+    used_2m, left_2m = _compose(shell, 2000000, "relay.shell.usage.unit_credits")
+    assert used_2m == "Se usaron 2.000.000 de créditos", used_2m
+    assert left_2m == "Quedan 2.000.000 de créditos restantes", left_2m
 
 
 def test_unit_less_rows_do_not_dangle_a_de(shell):
