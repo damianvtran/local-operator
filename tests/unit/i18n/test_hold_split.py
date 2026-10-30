@@ -112,7 +112,9 @@ def test_active_ledger_carries_the_released_chinese_candidate() -> None:
     # PR #3121's independently audited `relay.account_policy` backfill (13 keys)
     # is the final one: main reached 97 while this branch was open, and the
     # append-only tail gains one more row for the namespace this PR lands.
-    assert len(chinese) == 98
+    # The cross-platform receiver adds the audited 45-key `cli.team_bridge` row
+    # (one row per shipped locale, this one included): one more again.
+    assert len(chinese) == 99
     assert all(entry["status"] == "passed" for entry in chinese)
     carried = set(catalogues.namespaces("zh-CN"))
     assert {entry["namespace"] for entry in chinese} == carried
@@ -175,8 +177,10 @@ def test_active_ledger_carries_the_released_chinese_candidate() -> None:
     # placeholder slice then appends fresh hi `relay.chrome` and `relay.health`
     # rows at the new English bytes: two more.
     # The serve-supervision slice adds the audited `cli.services_status` row at
-    # the current English bytes: one more again.
-    assert len(hindi) == 52
+    # the current English bytes: one more again. The cross-platform receiver's
+    # independently audited 45-key `cli.team_bridge` row is one more again; a
+    # locale that carries the new namespace must carry its audit row too.
+    assert len(hindi) == 53
     assert all(entry["status"] == "passed" for entry in hindi)
     _assert_latest_row_is_fresh_and_earlier_rows_superseded(hindi)
 

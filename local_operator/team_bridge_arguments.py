@@ -21,7 +21,12 @@ from local_operator.i18n.keys import cli_team_bridge as _k
 DEFAULT_LOG_LINES = 50
 
 
-def add_parser(subparsers: Any, parent_parser: argparse.ArgumentParser | None = None) -> None:
+def add_parser(
+    subparsers: Any,
+    parent_parser: argparse.ArgumentParser | None = None,
+    *,
+    help_locale: str | None = None,
+) -> None:
     """Register ``lop team-bridge setup`` and ``lop team-bridge receiver <verb>``.
 
     Consent is deliberately NOT part of this group: it is granted in the app
@@ -33,12 +38,18 @@ def add_parser(subparsers: Any, parent_parser: argparse.ArgumentParser | None = 
     uses the product name ("agent messages") the rest of the product shows.
     """
 
-    from local_operator.i18n.cli_help import help_locale as resolve_help_locale
+    # One build owns ONE locale snapshot, and ``build_cli_parser`` hands its own
+    # to every group it registers. Resolving again here would read the config a
+    # second time per start (and break the one-build-one-snapshot contract the
+    # i18n help slices pin), so the parameter is the whole point. Standalone
+    # callers, which have no build to inherit from, still resolve freshly.
+    if help_locale is None:
+        from local_operator.i18n.cli_help import help_locale as resolve_help_locale
 
-    locale = resolve_help_locale()
+        help_locale = resolve_help_locale()
 
     def text(message: Any) -> str:
-        return str(message.envelope(locale=locale)["text"])
+        return str(message.envelope(locale=help_locale)["text"])
 
     parents = [parent_parser] if parent_parser is not None else []
     group = subparsers.add_parser("team-bridge", help=text(_k.help_group()), parents=parents)

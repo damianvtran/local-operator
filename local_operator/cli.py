@@ -1115,7 +1115,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
         add_parser as add_team_bridge_parser,
     )
 
-    add_team_bridge_parser(subparsers, parent_parser)
+    add_team_bridge_parser(subparsers, parent_parser, help_locale=help_locale)
 
     # Operator authority (issue #1310, revision 2). Registration is stdlib-only
     # for the same reason `secret`'s is: `lop --version` must not load
