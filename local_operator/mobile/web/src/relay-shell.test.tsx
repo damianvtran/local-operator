@@ -23,9 +23,9 @@
  */
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { BUNDLED_OWNED } from "./i18n/bundled.gen";
-import { RESOLVED_LOCALES } from "./i18n/runtime";
-import { messageRuntime, retainConfigStream, useLocaleSnapshot } from "./store";
+import { BUNDLED_CHUNKS, BUNDLED_OWNED } from "./i18n/bundled.gen";
+import { directionFor, RESOLVED_LOCALES } from "./i18n/runtime";
+import { localeBundleLoader, messageRuntime, retainConfigStream, useLocaleSnapshot } from "./store";
 import { FetchStreamFixture as Stream, settleStream } from "./sse-test-fixture";
 
 /** The exact copy the shell hardcoded BEFORE this slice (the identity target). */
@@ -68,28 +68,34 @@ describe("relay.shell extraction", () => {
 
 	it("follows the actual owned-copy language, not the backend preference", () => {
 		// The contract from #2297: lang/dir describe the ACTUAL rendered owned-copy
-		// language (uiLocale), not the backend preference. Both directions are
-		// pinned here: a locale the relay ships paints its own language, and a
-		// SUPPORTED locale it does not ship paints the WHOLE English bundle instead
-		// of claiming copy nobody translated — the half that goes red if the store
-		// ever follows the backend preference blindly.
+		// language (uiLocale), not the backend preference. This arm pins the FALLBACK
+		// direction — copy the store has not received must not be claimed — and the
+		// positive direction is "loads a shipped locale's chunk" below, which drives
+		// the real dynamic import through a config frame. Kept apart so this test
+		// never depends on whether some earlier test already loaded a chunk.
+		// Both directions go red if the store ever reads the preference as the
+		// language on screen: this arm would answer "fr"/"ur" with no copy, and the
+		// chunk test would stay English after the copy arrived.
 		//
 		// The unshipped locale is DERIVED from the generated manifest rather than
 		// named, because the shipped set moves while a branch is open: vi shipped
-		// with #3163 and the catalogue waves for es (#3164) and hi (#3166) are
-		// still in flight. A fixed name would turn this test red the day one of
-		// them lands and invite someone to flip it to the shipped language,
-		// deleting the assertion it exists to make. Measured on this tree, the
-		// shipped set is en/fr/ru/vi/ur/zh-CN, so the pick is es.
+		// with #3163, es with #3172, and the hi catalogue (#3166) is still in
+		// flight. A fixed name would turn this test red the day one lands and invite
+		// someone to flip it to the shipped language, deleting the assertion it
+		// exists to make. Shipped-ness is read from `BUNDLED_CHUNKS`, never from
+		// `BUNDLED_OWNED`: the eager map holds English only, so asking it would call
+		// every locale unshipped and pick one that does have copy.
 		const unshipped = RESOLVED_LOCALES.find(
-			locale => locale !== "en" && !Object.values(BUNDLED_OWNED).some(bundle => locale in bundle),
+			locale => locale !== "en" && !(locale in BUNDLED_CHUNKS),
 		);
-		expect(messageRuntime.uiLocaleFor("fr")).toBe("fr");
-		expect(messageRuntime.uiLocaleFor("ur")).toBe("ur");
-		// The fallback arm exists only while some supported locale still lacks a
-		// relay catalogue. es (#3164) and hi (#3166) are the last two, so once they
-		// land there is no gap left to assert: the arm is skipped, never asserted,
-		// because a green suite must not depend on a locale being untranslated.
+		// Same claim from the shipped side: the manifest HAS French and Urdu, but no
+		// chunk has been requested in this fixture, so the surface is English rather
+		// than a tag nobody's copy backs yet.
+		expect(messageRuntime.uiLocaleFor("fr")).toBe("en");
+		expect(messageRuntime.uiLocaleFor("ur")).toBe("en");
+		// The arm exists only while some supported locale still lacks a relay
+		// catalogue, so it is skipped rather than asserted once hi lands: a green
+		// suite must not depend on a locale being untranslated.
 		if (unshipped !== undefined) expect(messageRuntime.uiLocaleFor(unshipped)).toBe("en");
 		const { result, unmount } = renderHook(() => useLocaleSnapshot());
 		// No config frame is applied in this fixture, so the snapshot is the boot
@@ -129,9 +135,16 @@ describe("relay.shell extraction", () => {
 		unmount();
 	});
 
-	it("switches the real document en→ur→en only after every owned synthetic bundle is complete", async () => {
-		// These values are fixtures, not Urdu translations. They exercise the same
-		// generated manifest, registration, config event and root metadata path.
+	it("switches the real document en→fr→en for a locale whose owned copy is synthetic", async () => {
+		// French ships a real chunk (`BUNDLED_CHUNKS` → bundled.fr.gen), so the store
+		// registers real French for `fr` as soon as the loader resolves it — and the
+		// frame below asks for it. Settle that load BEFORE the fake timers and register
+		// the fixture on top, so what these assertions read is the fixture by
+		// construction: the frame then joins the settled promise instead of racing a
+		// live import. Measured before this: with fr shipping, the real copy landed
+		// inside the frame and `t("relay.shell.list.empty")` came back
+		// "aucune session en cours" on some runs and the fixture string on others.
+		await localeBundleLoader.ensure("fr");
 		/* The config channel is a FETCH-streamed SSE reader, not an EventSource:
 		   the tunnel's 60 s lease rotation needs the fetch lifecycle. Drive the
 		   same fixture the rest of the config tests use — one probing response
@@ -149,8 +162,8 @@ describe("relay.shell extraction", () => {
 		for (const [namespace, locales] of Object.entries(BUNDLED_OWNED)) {
 			const english = locales.en;
 			expect(english).toBeTruthy();
-			messageRuntime.registerBundle(namespace, "ur", Object.fromEntries(
-				Object.keys(english).map(key => [key, `UR-FIXTURE ${key}`]),
+			messageRuntime.registerBundle(namespace, "fr", Object.fromEntries(
+				Object.keys(english).map(key => [key, `FR-FIXTURE ${key}`]),
 			));
 		}
 		const { result, unmount } = renderHook(() => useLocaleSnapshot());
@@ -165,15 +178,14 @@ describe("relay.shell extraction", () => {
 			});
 		};
 		try {
-			await emit("ur");
-			expect(result.current).toMatchObject({ backendLocale: "ur", uiLocale: "ur", direction: "rtl" });
-			expect(document.documentElement.lang).toBe("ur");
-			expect(document.documentElement.dir).toBe("rtl");
-			expect(messageRuntime.t("relay.shell.list.empty")).toBe("UR-FIXTURE relay.shell.list.empty");
+			await emit("fr");
+			expect(result.current).toMatchObject({ backendLocale: "fr", uiLocale: "fr", direction: "ltr" });
+			expect(document.documentElement.lang).toBe("fr");
+			expect(document.documentElement.dir).toBe("ltr");
+			expect(messageRuntime.t("relay.shell.list.empty")).toBe("FR-FIXTURE relay.shell.list.empty");
 			await emit("en");
 			expect(result.current).toMatchObject({ backendLocale: "en", uiLocale: "en", direction: "ltr" });
 			expect(document.documentElement.lang).toBe("en");
-			expect(document.documentElement.dir).toBe("ltr");
 			expect(messageRuntime.t("relay.shell.list.empty")).toBe(englishBefore);
 		} finally {
 			await emit("en");
@@ -185,4 +197,63 @@ describe("relay.shell extraction", () => {
 			Stream.instances = [];
 		}
 	});
+
+	it("loads a shipped locale's chunk on the config frame and flips the document only then", async () => {
+		/* The real lazy path: the eager map is English, so the frame leaves the
+		   page English until `bundled.<locale>.gen` lands, then registers through
+		   the same `registerBundle` channel. Pre-loading the module only settles
+		   WHEN the store's own import resolves; nothing is registered by hand. */
+		const shipped = Object.keys(BUNDLED_CHUNKS);
+		// Loud on purpose: `ur` is complete today, so an empty or ur-less manifest
+		// means the copy regressed (or the emitter stopped intersecting) and this
+		// is the only test that drives the real chunk through the config frame.
+		// Skipping quietly here is how the lazy path would stop being covered.
+		expect(shipped).toContain("ur");
+		const locale = "ur";
+		await BUNDLED_CHUNKS[locale]();
+		vi.useFakeTimers();
+		Stream.instances = [];
+		vi.stubGlobal("fetch", vi.fn()
+			.mockResolvedValueOnce(new Response(null, {
+				status: 200,
+				headers: { "content-type": "text/event-stream" },
+			}))
+			.mockImplementation(Stream.fetch));
+		const englishBefore = messageRuntime.t("relay.session.list.empty_hint");
+		const { result, unmount } = renderHook(() => useLocaleSnapshot());
+		const release = retainConfigStream();
+		await settleStream();
+		const source = Stream.instances[0];
+		const emit = async (language: string) => {
+			await act(async () => {
+				source.emit("config", JSON.stringify({ changed_keys: ["language"], language }));
+				await settleStream();
+			});
+		};
+		try {
+			await emit(locale);
+			// The chunk resolves outside the timer queue: pump until the snapshot
+			// reports the loaded locale, then assert the whole page moved together.
+			for (let tick = 0; tick < 20 && result.current.uiLocale !== locale; tick += 1) {
+				await act(async () => { await settleStream(); });
+			}
+			expect(result.current).toMatchObject({
+				backendLocale: locale,
+				uiLocale: locale,
+				direction: directionFor(locale),
+			});
+			expect(document.documentElement.lang).toBe(locale);
+			expect(document.documentElement.dir).toBe(directionFor(locale));
+			// The copy actually came from the chunk, not the English fallback.
+			expect(messageRuntime.t("relay.session.list.empty_hint")).not.toBe(englishBefore);
+		} finally {
+			await emit("en");
+			release();
+			unmount();
+			vi.useRealTimers();
+			vi.unstubAllGlobals();
+			Stream.instances = [];
+		}
+	});
+
 });
