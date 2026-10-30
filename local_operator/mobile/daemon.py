@@ -7955,7 +7955,7 @@ def build_app(daemon: MobileDaemon):
         # The receipt's additive ``skills`` block, filled only when expansion ran.
         expansion_note: dict[str, list[str]] | None = None
 
-        def receipt(detail: str) -> dict[str, Any]:
+        def receipt(detail: Any) -> dict[str, Any]:
             """This route's ack, carrying the ``skills`` block when one ran.
 
             ADDITIVE, and present whenever the flag was honoured — even with
@@ -7963,6 +7963,15 @@ def build_app(daemon: MobileDaemon):
             this and nothing matched" (send the literal text, say nothing) from
             "this relay predates the flag" (it will never expand anything),
             which the capability key alone cannot answer for one request.
+
+            ``detail`` IS FORWARDED AS THE RUNTIME SENT IT, which is why it is
+            typed ``Any`` rather than ``str``. The live ack's value is read off
+            ``daemon.request``'s reply — this device's own runtime, not a peer —
+            and the route put ``reply.get("detail", "")`` straight into the body
+            before the flag existed. A ``str()`` on the way in would both render
+            a mesh-shaped field (counted as a surface by
+            ``tests/unit/network/test_reason_surfaces.py``) and change the wire
+            type of a non-string detail for no reader's benefit.
             """
             answer: dict[str, Any] = {"ok": True, "detail": detail}
             if expansion_note is not None:
@@ -8245,7 +8254,7 @@ def build_app(daemon: MobileDaemon):
             # both are additive fields, so a client built before them reads
             # ``detail`` exactly as it always did.
             return JSONResponse({"ok": True, "detail": detail, "tone": tone, "refused": refused})
-        return JSONResponse(receipt(str(reply.get("detail", ""))))
+        return JSONResponse(receipt(reply.get("detail", "")))
 
     async def api_operator_challenge(request: Request) -> Response:
         """Mint a per-action operator challenge for THIS session's live connection.
