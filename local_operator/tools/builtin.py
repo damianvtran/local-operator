@@ -49,6 +49,7 @@ import fnmatch
 import heapq
 import json
 import logging
+import math
 import mimetypes
 import os
 import re
@@ -20843,6 +20844,21 @@ _RECORD_ACTIONS = frozenset({"record_start", "record_stop"})
 #: `extension_update_notified` stays off the protocol).
 _APPROVED_RECORDINGS: dict[str, str] = {}
 
+#: Refusal reasons that PROVE the host holds no recording for this surface, so
+#: the approved target may be forgotten. Deliberately a whitelist: `record_active`
+#: means a recording IS live, and a busy lane, a timeout or a reason this build
+#: does not know all leave a possible capture running whose path the later stop
+#: must still be checked against (review round 2, F1).
+_RECORD_ABSENT_REASONS = frozenset(
+    {
+        "record_not_active",
+        "record_path",
+        "record_unsupported",
+        "record_av1_unavailable",
+        "record_failed",
+    }
+)
+
 #: Style property names ``styles`` accepts as caller-requested extras. The
 #: charset is the CSS ident set that matters here: letters, digits, dashes and
 #: underscores — ``_`` is an ident character (``--brand_color`` is a legal
@@ -21907,6 +21923,16 @@ def _validate_record_fields(action: str, params: BrowserParams) -> str:
             "next reader cannot play"
         )
     if params.timeout_s is not None:
+        if not math.isfinite(float(params.timeout_s)):
+            # NaN and the infinities pass every range comparison (`nan <= 1` is
+            # False and `inf > 600` is True only by luck of ordering), and
+            # `int(nan)` raises — so they are refused as their own case before
+            # any integer test (review round 2, F2).
+            return (
+                "'timeout_s' for 'record_start' must be a finite whole number of "
+                f"seconds (1 to {_files.RECORD_MAX_DURATION_S}, default "
+                f"{_files.RECORD_DEFAULT_DURATION_S}); got {params.timeout_s!r}"
+            )
         if float(params.timeout_s) != int(params.timeout_s):
             # The HOST takes whole seconds (`Number.isInteger` in its
             # `durationOf`), and refuses a fraction only AFTER the approval
@@ -23645,6 +23671,14 @@ async def _bridge_call(
         # recovery, handle-drop) instead of substring-matching the human
         # diagnostic, which broke silently on any rewording (finding m4).
         problem.details = {"error_code": exc.code.value}
+        # The host's own REASON travels too. Callers that must decide whether a
+        # host still holds state — the recording approval above all — cannot do
+        # it from the code alone (`busy` covers `record_active` and
+        # `record_limit`), and substring-matching the rendered sentence is the
+        # failure mode the typed code exists to remove (review round 2, F1).
+        reason = exc.data.get("reason")
+        if isinstance(reason, str) and reason:
+            problem.details["reason"] = reason
         # A failed new allocation may also fail rollback. Keep its private
         # capability on the host, not in model-visible diagnostics.
         if exc.data.get("cleanup_pending") and isinstance(exc.data.get("tab"), str):
@@ -24836,10 +24870,28 @@ def _drop_closed_surface(problem: ToolResult, state: BrowserSurfaceProtocol) -> 
     here because both recording calls return their problem BEFORE that shared
     tail: a closed tab left pinned would make every later command, including
     the recovery verb, target state the host has already dropped.
+
+    The approved recording goes with it (review round 2, F3): the handle names
+    the tab, and a recording approved for a tab that no longer exists can never
+    be the one a later stop answers for.
     """
     if (problem.details or {}).get("error_code") == "tab_closed":
+        _APPROVED_RECORDINGS.pop(state.surface_id, None)
         state.surface_id = ""
     return problem
+
+
+def _host_holds_no_recording(problem: ToolResult) -> bool:
+    """Whether a refusal proves the host has NOTHING recording for this surface.
+
+    Anything else — `record_active` above all — leaves a live capture, and
+    forgetting its approved path would let a later stop certify whatever file
+    the host happened to name (review round 2, F1).
+    """
+    details = problem.details or {}
+    if details.get("error_code") == "tab_closed":
+        return True
+    return str(details.get("reason") or "") in _RECORD_ABSENT_REASONS
 
 
 def _recording_target_refusal(target: Path) -> str:
@@ -25055,11 +25107,17 @@ def _recording_landed(
         duration_ms = raw_duration
     length = f"{duration_ms / 1000:.1f} s" if duration_ms is not None else "an unrecorded length"
     stopped = " It auto-stopped at the time limit." if bool(result.get("auto_stopped")) else ""
+    # Said in the RECEIPT, not only in the docstring: after a restart this call
+    # checked the file's shape and size, not that it is the destination the user
+    # approved, and the model must know which guarantee it actually has
+    # (review round 2, F4).
+    unverified = " (approval not re-verified after restart)" if approved is None else ""
     return _text(
         tool_call_id,
         "browser",
-        f"Recording saved to {target} ({size} bytes, {length}).{stopped} MP4 with an AV1 "
-        "track: it plays in QuickTime/AVFoundation; Chrome's <video> will not play it.",
+        f"Recording saved to {target} ({size} bytes, {length}).{stopped}{unverified} "
+        "MP4 with an AV1 track: it plays in QuickTime/AVFoundation; Chrome's <video> "
+        "will not play it.",
         details={"path": str(target), "bytes": size},
     )
 
@@ -25118,9 +25176,13 @@ async def _browser_record(
             tool_call_id, action, wire, surface=state.surface_id, client=client
         )
         if problem is not None:
-            # No capture exists, so any target remembered for this surface is
-            # not this call's and must not survive to a later stop.
-            _APPROVED_RECORDINGS.pop(state.surface_id, None)
+            # Forget the approved target only when no capture can be running.
+            # `record_active` is the case that matters: a same-owner second
+            # start is refused BECAUSE the first recording is still live, and
+            # dropping the approval there let the eventual stop certify any
+            # file the host named (review round 2, F1).
+            if _host_holds_no_recording(problem):
+                _APPROVED_RECORDINGS.pop(state.surface_id, None)
             return _drop_closed_surface(problem, state)
         assert result is not None
         if not bool(result.get("recording", True)):
@@ -25157,9 +25219,11 @@ async def _browser_record(
         tool_call_id, action, wire, surface=state.surface_id, client=client
     )
     if problem is not None:
-        # A refusal means the host has no recording to finalise, so the memory is
-        # stale whatever the reason was.
-        _APPROVED_RECORDINGS.pop(state.surface_id, None)
+        # A stop refused on a TRANSIENT failure (bridge timeout, lane busy, an
+        # unexplained internal) may still have the recording running, so the
+        # approval survives; only the reasons that prove absence drop it.
+        if _host_holds_no_recording(problem):
+            _APPROVED_RECORDINGS.pop(state.surface_id, None)
         return _drop_closed_surface(problem, state)
     assert result is not None
     approved = _APPROVED_RECORDINGS.pop(state.surface_id, None)

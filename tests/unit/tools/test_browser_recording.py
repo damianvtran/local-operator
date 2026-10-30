@@ -11,6 +11,7 @@ composed and policed in Python (D3/D4), the approval names the real destination
 from __future__ import annotations
 
 import asyncio
+import math
 import re
 from pathlib import Path
 from typing import Any
@@ -297,6 +298,24 @@ def test_validation_accepts_an_integral_float_length() -> None:
     # `timeout_s=30.0` is a JSON number a caller can reasonably send; it is not a
     # fraction, so it must not be refused (the wire carries 30, an integer).
     assert builtin._validate_browser_args("record_start", _params(timeout_s=30.0)) == ""
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_validation_refuses_a_non_finite_length(value: float) -> None:
+    """NaN/inf pass every range test and blow up `int()`; refuse them first (F2)."""
+    problem = builtin._validate_browser_args("record_start", _params(timeout_s=value))
+    assert "finite" in problem
+
+
+def test_a_non_finite_length_arrives_through_json() -> None:
+    """The wire accepts bare `NaN`/`Infinity`, so the shape is reachable (F2)."""
+    params = builtin.BrowserParams.model_validate_json(
+        '{"action": "record_start", "timeout_s": NaN}'
+    )
+    value = params.timeout_s
+    assert value is not None
+    assert math.isnan(value)
+    assert "finite" in builtin._validate_browser_args("record_start", params)
 
 
 @pytest.mark.parametrize("name", ["clip.mkv", "clip", "clip.mp4.part", "clip.MPEG4"])
@@ -687,6 +706,7 @@ def test_a_closed_tab_drops_the_pinned_surface(
 
     monkeypatch.setattr(builtin, "_bridge_call", fake_bridge)
     state = _surface()
+    builtin._APPROVED_RECORDINGS[state.surface_id] = "/tmp/approved.mp4"
     result = asyncio.run(
         builtin._browser_record(
             "call",
@@ -699,6 +719,8 @@ def test_a_closed_tab_drops_the_pinned_surface(
     )
     assert result.is_error
     assert state.surface_id == ""
+    # F3: the approval names a file on a tab that no longer exists, so it goes too.
+    assert not builtin._APPROVED_RECORDINGS
 
 
 # ---------------------------------------------------------------------------
@@ -773,6 +795,131 @@ def test_stop_without_a_remembered_approval_still_checks_the_file(
     )
     assert result.is_error
     assert "mp4" in result.text.lower()
+
+
+def test_a_receipt_without_an_approval_says_it_was_not_re_verified(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """After a restart the shape is verified and the approval is not (R2-F4)."""
+    target = tmp_path / "clip.mp4"
+    target.write_bytes(MP4_HEAD)
+    result, _ = _call(
+        "record_stop",
+        tmp_path,
+        monkeypatch,
+        reply={"path": str(target), "bytes": len(MP4_HEAD), "duration_ms": 1000},
+    )
+    assert not result.is_error
+    assert "(approval not re-verified after restart)" in result.text
+
+
+def test_a_refused_second_start_keeps_the_live_recordings_approval(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`record_active` proves a capture is LIVE, so its approval must survive.
+
+    Dropping it there left the later stop with nothing to compare, so it
+    certified whatever absolute `.mp4` the host named (review round 2, F1).
+    """
+    approved = tmp_path / "approved.mp4"
+    other = tmp_path / "other.mp4"
+    state = _surface()
+    starts = 0
+
+    async def fake_bridge(tool_call_id, action_name, wire, *, surface="", client=None):
+        nonlocal starts
+        if action_name == "record_start":
+            starts += 1
+            if starts == 1:
+                return {"recording": True, "path": wire["path"]}, None
+            problem = builtin._error(tool_call_id, "browser", "already recording")
+            problem.details = {"error_code": "busy", "reason": "record_active"}
+            return None, problem
+        other.write_bytes(MP4_HEAD)
+        return {"path": str(other), "bytes": len(MP4_HEAD), "duration_ms": 1}, None
+
+    monkeypatch.setattr(builtin, "_bridge_call", fake_bridge)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "cfg"))
+    ctx = _ctx(tmp_path)
+    first = asyncio.run(
+        builtin._browser_record(
+            "call",
+            state,
+            "record_start",
+            _params("record_start", path=str(approved)),
+            ctx,
+            client=_AdvertisedHost(),
+        )
+    )
+    second = asyncio.run(
+        builtin._browser_record(
+            "call",
+            state,
+            "record_start",
+            _params("record_start", path=str(approved)),
+            ctx,
+            client=_AdvertisedHost(),
+        )
+    )
+    assert not first.is_error
+    assert second.is_error
+    assert builtin._APPROVED_RECORDINGS[state.surface_id] == str(approved)
+    stop = asyncio.run(
+        builtin._browser_record(
+            "call", state, "record_stop", _params("record_stop"), ctx, client=_AdvertisedHost()
+        )
+    )
+    assert stop.is_error
+    assert str(other) in stop.text
+    assert str(approved) in stop.text
+
+
+def test_a_transient_stop_error_keeps_the_approval(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A timeout or busy lane does not prove the encoder stopped (R2-F1)."""
+    target = tmp_path / "clip.mp4"
+    state = _surface()
+    stops = 0
+
+    async def fake_bridge(tool_call_id, action_name, wire, *, surface="", client=None):
+        nonlocal stops
+        if action_name == "record_start":
+            return {"recording": True, "path": wire["path"]}, None
+        stops += 1
+        if stops == 1:
+            problem = builtin._error(tool_call_id, "browser", "the bridge timed out")
+            problem.details = {"error_code": "internal"}
+            return None, problem
+        target.write_bytes(MP4_HEAD)
+        return {"path": str(target), "bytes": len(MP4_HEAD), "duration_ms": 1}, None
+
+    monkeypatch.setattr(builtin, "_bridge_call", fake_bridge)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "cfg"))
+    ctx = _ctx(tmp_path)
+    asyncio.run(
+        builtin._browser_record(
+            "call",
+            state,
+            "record_start",
+            _params("record_start", path=str(target)),
+            ctx,
+            client=_AdvertisedHost(),
+        )
+    )
+    failed = asyncio.run(
+        builtin._browser_record(
+            "call", state, "record_stop", _params("record_stop"), ctx, client=_AdvertisedHost()
+        )
+    )
+    assert failed.is_error
+    assert builtin._APPROVED_RECORDINGS[state.surface_id] == str(target)
+    retried = asyncio.run(
+        builtin._browser_record(
+            "call", state, "record_stop", _params("record_stop"), ctx, client=_AdvertisedHost()
+        )
+    )
+    assert not retried.is_error
 
 
 def _wire_error(code: ErrorCode, reason: str, **data: Any) -> BridgeError:
