@@ -576,7 +576,24 @@ async def test_a_composer_failure_costs_the_row_and_not_the_park(
 
     # THE PARK IS INTACT, which is the point: the operator can still decide.
     await handle.approval_answer(pending.request_id, True, False)
-    await asyncio.gather(parked, return_exceptions=True)
+    # THE ANSWER ARRIVES, not an exception. A ``gather(..., return_exceptions=True)``
+    # sat here and swallowed exactly the signal that separates the guarded shape
+    # from the unguarded one: with the raise outside the ``try`` the task fails
+    # with the ``ImportError``, so the turn dies on a card the operator already
+    # answered — the park is lost in the one way the docstring forbids (review
+    # round 2, M1). ``wait_for`` is the bound; ``shield`` keeps the task itself
+    # inspectable rather than cancelling it out from under the gate.
+    assert (
+        await asyncio.wait_for(asyncio.shield(parked), 2) is True
+    ), "the gate did not return the answer: the composer failure reached the park"
+    # THE CARD IS CLEARED, and only the gate's own ``finally`` clears it
+    # (``pop_pending`` after the wait). An unguarded raise never reaches that
+    # finally, so the projection kept a phantom pending card that is on screen,
+    # never settles, and blocks the next answer — the visible half of the same
+    # bug, which no assertion above can see.
+    assert (
+        handle._fold.projection.pending is None
+    ), "the answered card is still pending: the park never reached its finally"
     await handle.dispose()
 
 
