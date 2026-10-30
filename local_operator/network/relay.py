@@ -14704,12 +14704,26 @@ def _unit_config_root() -> Path | None:
     # longer reads -- the marker would exist, nothing would act on it, and a stop
     # the operator asked for would be reported as a crash. findall over the same
     # anchored pattern, then take [-1].
-    found = re.findall(
-        rf'^Environment="{re.escape(CONFIG_DIR_ENV)}=((?:[^"\\]|\\.)*)"\s*$', text, re.M
+    #
+    # A LATER LINE THE PATTERN CANNOT READ IS A REFUSAL, NOT A FALLBACK (review r1,
+    # MINOR-1): systemd also accepts an unquoted ``Environment=NAME=value``, which is
+    # the shape an operator hand-editing a unit is most likely to write, and it is
+    # invisible to the anchored quoted pattern. Returning an EARLIER root then would
+    # be the same "marker in a root the relay never reads" failure this function
+    # exists to avoid -- so any line after the last match that names the variable
+    # makes the answer unknown, and the docstring's "no marker at all rather than one
+    # in a root no supervised relay reads" is what the caller already handles.
+    pattern = re.compile(
+        rf'^Environment="{re.escape(CONFIG_DIR_ENV)}=((?:[^"\\]|\\.)*)"\s*$', re.M
     )
-    if not found:
+    matched: list[re.Match[str]] = list(pattern.finditer(text))
+    if not matched:
         return None
-    value = re.sub(r"\\(.)", r"\1", found[-1]).replace("%%", "%")
+    last = matched[-1]
+    tail = text[last.end() :]
+    if any(CONFIG_DIR_ENV in line for line in tail.splitlines()):
+        return None
+    value = re.sub(r"\\(.)", r"\1", last.group(1)).replace("%%", "%")
     return Path(value) if value else None
 
 

@@ -1938,6 +1938,27 @@ def test_a_unit_that_pins_the_config_twice_resolves_to_the_last_line(
     assert relay._unit_config_root() == last  # noqa: SLF001
 
 
+def test_a_later_pin_the_pattern_cannot_read_refuses_rather_than_falling_back(
+    linux_host: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An unquoted later ``Environment=`` line is valid systemd the reader cannot parse.
+
+    Returning the earlier root would be the same "marker in a root the relay never
+    reads" failure this reader exists to avoid, so the answer becomes unknown and the
+    caller writes no marker at all (review r1, MINOR-1).
+    """
+    config = tmp_path / "cfg"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "override"))
+    unit = _write_unit_pinning(linux_host, config)
+    unit.write_text(
+        unit.read_text(encoding="utf-8")
+        + f"Environment={relay.CONFIG_DIR_ENV}={tmp_path / 'unparseable'}\n",
+        encoding="utf-8",
+    )
+
+    assert relay._unit_config_root() is None  # noqa: SLF001
+
+
 def test_one_pin_still_resolves_to_that_pin(
     linux_host: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
