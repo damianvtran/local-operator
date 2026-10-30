@@ -42,6 +42,7 @@ import copy
 import logging
 import os
 import signal
+import time
 from pathlib import Path
 from typing import Any
 
@@ -77,6 +78,129 @@ STOP_CANCEL_S = 5.0
 _STOP_SIGNALS = tuple(
     sig for sig in (getattr(signal, "SIGTERM", None), getattr(signal, "SIGHUP", None)) if sig
 )
+
+#: How often a RUNNING connector compares its OWN build with the install pointer.
+#:
+#: WHY THIS EXISTS AT ALL. A connector is always-on (``KeepAlive: true``), so it
+#: outlives every update that moved ``current`` under it: an update flips the
+#: pointer, the running process keeps serving the generation it was exec'd from,
+#: and nothing in the process asks whether that is still the build anyone
+#: intended. Measured 2026-10-30: pid 48311, generation 20261023T142851Z-0.86.1,
+#: held ``~/.local-operator/team_bridge/connector.lock`` for seven days while the
+#: supervised job was refused 2,826 times — nothing inbound was admitted for
+#: days, and the machine looked like a network problem.
+#:
+#: A minute is the loop's own backoff order, and it bounds how long a stale
+#: process can hold the account's singleton after a flip.
+SELF_CHECK_INTERVAL_S = 60.0
+
+#: How long this process must have been UP before its own answer may stop it.
+#:
+#: THE FLAP GUARD, and the reason there is no check before the lock. A connector
+#: started DURING a flip can read a pointer that moved a moment after its own
+#: exec — the ordinary mixed-generation window of a few seconds — and stopping on
+#: that read would turn a working connector into a restart loop (launchd's
+#: ``ThrottleInterval`` would pace it, not prevent it). Five minutes is well past
+#: any flip and cheap to wait for an always-on process.
+SELF_CHECK_MIN_UPTIME_S = 300.0
+
+#: ``time.monotonic()`` at import — a process start for every way this module is
+#: run (``python -m``, a launched binary). A test shrinks the uptime gate by
+#: patching this, not by sleeping.
+_PROCESS_STARTED_S = time.monotonic()
+
+#: The value ``XPC_SERVICE_NAME`` carries in a process launchd did NOT start:
+#: macOS puts this in every interactive shell's environment, so "the variable is
+#: set" alone would read a terminal-started connector as supervised.
+_INTERACTIVE_SHELL_XPC = "0"
+
+
+def _is_supervised() -> bool:
+    """Whether a service manager owns this process's lifetime.
+
+    THE EXIT IS ONLY SAFE WITH A SUPERVISOR. A self-check that sets ``stop``
+    ends the process; under launchd (``KeepAlive: true``) or a systemd user unit
+    (``Restart=always``) that is a restart onto the current generation, which is
+    the whole point. In a terminal it is a connector that silently vanished.
+
+    Each marker is the supervisor's OWN, not an inference:
+
+    * macOS: launchd stamps ``XPC_SERVICE_NAME`` with the job's label on every
+      process it spawns. The interactive-shell value (``0``) means no job, so a
+      foreground run is excluded rather than trusted.
+    * Linux: systemd sets ``INVOCATION_ID`` per unit invocation; nothing else on
+      the host sets it.
+    * Windows: never. There are no generations there (the layout is POSIX-only),
+      so the question cannot arise; answering ``False`` keeps the check inert.
+    """
+
+    from local_operator.procstate import is_windows
+
+    if is_windows():
+        return False
+    if os.environ.get("INVOCATION_ID"):
+        return True
+    name = os.environ.get("XPC_SERVICE_NAME", "")
+    return bool(name) and name != _INTERACTIVE_SHELL_XPC
+
+
+def _own_generation_is_stale() -> bool | None:
+    """This process's own staleness, through the ONE comparison the product has.
+
+    Deliberately ``update.generation_staleness_of_process`` rather than a second
+    comparator: the installer repair, the surfaces and this process must not
+    drift about what "older" means. TRI-STATE, and only ``True`` acts — ``None``
+    (no generation in this argv, or an unreadable pointer) and ``False`` both
+    mean "no move".
+    """
+
+    from local_operator.update import generation_staleness_of_process
+
+    return generation_staleness_of_process(os.getpid())
+
+
+async def _watch_own_generation(stop: asyncio.Event) -> None:
+    """Stop a supervised connector that is provably serving a superseded build.
+
+    Sets the SAME ``stop`` the signal handlers set, so the graceful path in
+    ``_supervise`` runs unchanged: no new iteration, the in-flight one finishes
+    inside ``STOP_GRACE_S``, the lock and the credential store close in
+    ``_main_async``'s ``finally``, and the process exits 0 — which under
+    ``KeepAlive`` is a restart, not a crash.
+
+    THE PROBE FORKS ``ps``, so it runs in the default executor: a read that
+    blocked the loop for tens of milliseconds every minute would delay every
+    poll, pause and claim the loop is holding. Uptime is checked BEFORE the probe
+    for the same reason it exists at all (see ``SELF_CHECK_MIN_UPTIME_S``).
+
+    Unsupervised, it warns ONCE and keeps running: the line is what tells an
+    operator their foreground connector is on an old build, and repeating it
+    every minute would bury everything else in the log.
+    """
+
+    loop = asyncio.get_running_loop()
+    supervised = _is_supervised()
+    warned = False
+    while True:
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=SELF_CHECK_INTERVAL_S)
+            return
+        except TimeoutError:
+            pass
+        if time.monotonic() - _PROCESS_STARTED_S < SELF_CHECK_MIN_UPTIME_S:
+            continue
+        if await loop.run_in_executor(None, _own_generation_is_stale) is not True:
+            continue
+        if supervised:
+            # One content-free line, in this file's vocabulary: the stage that
+            # decided and the closed code that says why.
+            logger.info("bridge connector stopping: stage=stop code=stale_generation")
+            stop.set()
+            return
+        if not warned:
+            warned = True
+            logger.warning("bridge connector stale generation: stage=run code=stale_generation")
+
 
 #: One rotating file is bounded at (BACKUP_COUNT + 1) x MAX_BYTES = 1.5 MiB.
 _LOG_MAX_BYTES = 256 * 1024
@@ -314,11 +438,14 @@ async def _supervise(args: argparse.Namespace) -> int:
     installed = _install_stop_handlers(loop, stop)
     work = asyncio.create_task(_main_async(args, stop))
     stopped = asyncio.create_task(stop.wait())
+    watch = asyncio.create_task(_watch_own_generation(stop))
     try:
         await asyncio.wait({work, stopped}, return_when=asyncio.FIRST_COMPLETED)
         if work.done():
             return work.result()
-        logger.info("bridge connector stopping: stage=stop code=signal")
+        if not watch.done():
+            # The stop came from a signal; the self-check logs its own reason.
+            logger.info("bridge connector stopping: stage=stop code=signal")
         await asyncio.wait({work}, timeout=STOP_GRACE_S)
         if not work.done():
             work.cancel()
@@ -342,6 +469,12 @@ async def _supervise(args: argparse.Namespace) -> int:
         return 0
     finally:
         stopped.cancel()
+        watch.cancel()
+        if watch.done() and not watch.cancelled():
+            # Retrieved rather than propagated: a self-check must never turn a
+            # clean stop into a failure. Without this, asyncio would print the
+            # task's exception as an unhandled task error instead.
+            watch.exception()
         for sig in installed:
             loop.remove_signal_handler(sig)
 
