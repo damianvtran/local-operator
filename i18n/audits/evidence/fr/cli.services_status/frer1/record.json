@@ -41,6 +41,7 @@
     "nit": 0
   },
   "limitations": [
+    "Width scoring method is stated in the field, not inferred: the scored key set is the fr keys declaring maxCells in the en sidecar, minus keys matching /\\{\\w+\\s*,/ (ICU type-tagged, whose raw source is not a rendered width); simple {name} placeholders ARE scored. audit_checks.py prints budgeted / placeholder-bearing / excluded / scored counts on every run, so the number is reproducible from the committed script.",
     "This bundle documents an INDEPENDENT evidence-recovery audit by the local-operator qa-tester role. It does not reconstruct, replay or endorse the audit the ledger note cites. The ledger rows stay `passed`; this audit supplies the missing committed evidence and changes no copy and no ledger field.",
     "The ledger row carries only `source_sha256`; it has NO target-hash field and its note quotes no SHA-256 at all, so the audited French bytes were never bound by that row. This audit records the target hash it actually read (23422bc3…) but cannot claim the row vouched for those bytes.",
     "No lost scratchpad, screenshot, rendered frame, geometry file or prior audit trajectory was recovered or inferred. The only facts asserted are ones recomputed from the committed bytes at da6d1b92665f4a43188385bedd42c5df00616709.",
@@ -50,6 +51,7 @@
     "Repo-wide width totals are deliberately NOT asserted: the count depends on the substitution values chosen for ICU placeholders. The five relay.chrome cells are exact because those keys carry no placeholders."
   ],
   "artifacts": [
+    "audit_checks.py",
     "audit.log",
     "findings.json",
     "receipt.json",
