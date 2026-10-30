@@ -197,12 +197,24 @@ describe("the skill tray", () => {
 		const field = mount();
 		type(field, "please $res now", 10);
 		await waitFor(() => expect(tray()).toBeTruthy());
-		fireEvent.pointerDown(within(tray() as HTMLElement).getByText("$research"));
+		const row = within(tray() as HTMLElement).getByText("$research");
+		fireEvent.pointerDown(row, { pointerId: 1, clientX: 12, clientY: 400 });
+		fireEvent.pointerUp(row, { pointerId: 1, clientX: 12, clientY: 400 });
 
 		expect(field.value).toBe("please $research now");
 		expect(document.activeElement).toBe(field);
 		expect(field.selectionStart).toBe(17);
 		expect(field.selectionEnd).toBe(17);
+	});
+
+	it("does not pick when the finger is dragging the list to scroll", async () => {
+		const field = mount();
+		type(field, "please $res now", 10);
+		await waitFor(() => expect(tray()).toBeTruthy());
+		const row = within(tray() as HTMLElement).getByText("$research");
+		fireEvent.pointerDown(row, { pointerId: 2, clientX: 12, clientY: 500 });
+		fireEvent.pointerUp(row, { pointerId: 2, clientX: 12, clientY: 460 });
+		expect(field.value).toBe("please $res now");
 	});
 
 	it("hardware Enter still SENDS while the tray is open", async () => {

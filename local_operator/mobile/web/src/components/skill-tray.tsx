@@ -32,6 +32,7 @@
  * Latin technical token and keeps `dir="ltr"` under the RTL document; the tag
  * and description follow the document's direction.
  */
+import { useRef } from "react";
 import type { SkillEntry } from "../types";
 import { messageRuntime } from "../store";
 
@@ -45,6 +46,14 @@ export function SkillTray({
 	    caret. Called from `onPointerDown`, so it runs before focus could move. */
 	onPick: (name: string) => void;
 }) {
+	/* A tap picks; a DRAG does not. The tray is a scroller on a short column
+	   (45vh), and picking on touch-down made a scroll gesture start by inserting
+	   a name into the draft — every drag over a row fired the pick before the
+	   browser knew it was a scroll. Pointer-down still runs (that is where focus
+	   is kept in the field); the pick waits for the release and requires the
+	   finger to have stayed within a tap's slop. A scroll that begins fires
+	   pointercancel, so it picks nothing at all. */
+	const start = useRef<{ id: number; x: number; y: number } | null>(null);
 	if (rows.length === 0) return null;
 	return (
 		<ul
@@ -64,9 +73,21 @@ export function SkillTray({
 						   `detail` and are already handled. */
 						onPointerDown={(event) => {
 							event.preventDefault();
+							start.current = { id: event.pointerId, x: event.clientX, y: event.clientY };
+						}}
+						onPointerUp={(event) => {
+							const origin = start.current;
+							start.current = null;
+							if (!origin || origin.id !== event.pointerId) return;
+							if (Math.hypot(event.clientX - origin.x, event.clientY - origin.y) > 8) return;
 							onPick(row.name);
 						}}
+						onPointerCancel={() => {
+							start.current = null;
+						}}
 						onClick={(event) => {
+							/* Only a KEYBOARD-generated activation has detail 0; a pointer
+							   click (detail >= 1) was already decided by the release. */
 							if (event.detail === 0) onPick(row.name);
 						}}
 						className="flex min-h-11 w-full select-none items-center gap-2 rounded-sm px-3 text-start active:bg-surface"
