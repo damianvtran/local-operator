@@ -426,6 +426,17 @@ def _argv_for(params: NetworkParams) -> tuple[list[str], str]:
     action = params.action
     network = params.network.strip()
 
+    if params.all and action != "show":
+        # REFUSED rather than sent (agent review round 3, MINOR-2): `all` is read only
+        # by the `show` branch, so beside any other action the CLI accepts `--all` and
+        # silently drops it — the class this file already refuses for `all_peers`
+        # ("a flag that is accepted and then quietly dropped is the same class of
+        # untruth"). One sentence now, instead of an agent believing it widened a
+        # listing that it did not widen.
+        return [], (
+            f"action='{action}' ignores 'all': it only widens 'show' to devices that "
+            "were removed from the network. Drop it, or use action='show'."
+        )
     if action == "status":
         argv = ["network", "status"]
     elif action == "ls":

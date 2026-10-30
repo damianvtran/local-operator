@@ -1401,6 +1401,53 @@ def test_the_peers_digest_carries_the_build_suffix(
     assert "reachable   quiet" in lines, lines
 
 
+def test_all_outside_show_is_refused_rather_than_silently_dropped() -> None:
+    """Review round 3, MINOR-2: a flag accepted and dropped is the class this file refuses."""
+    result = _call("status", all=True)
+    assert result.is_error
+    assert "only widens 'show'" in _text(result)
+
+
+def test_the_all_flag_reaches_the_renderer_through_the_tool_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The join between the flag and the renderer, which nothing else pins.
+
+    Review round 3, MINOR-1: `_argv_for` was tested and `_render` was tested, but
+    nothing drove `all=True` through `execute_network` — so deleting
+    `show_removed=params.all` at the successful call site would have left every cell
+    green while both arms went byte-identical again. That is the exact failure QA
+    round 2 caught in behaviour; this pins it in a test.
+    """
+    payload = {
+        "ok": True,
+        "name": "devmesh",
+        "network_id": "n_" + "a" * 22,
+        "epoch": 2,
+        "role": "admin",
+        "trust": "active",
+        "members_detail": [
+            {"device_id": "d_1", "name": "laptop", "active": True},
+            {"device_id": "d_2", "name": "cloud-node-1", "active": False},
+        ],
+        "membership": {"state": "active", "sentence": "this device is an active member"},
+    }
+
+    async def fake_cli(argv: list[str], timeout: float) -> tuple[int, str, str]:
+        assert argv[:3] == ["network", "show", "devmesh"]
+        return 0, json.dumps(payload), ""
+
+    monkeypatch.setattr(net_tool, "_run_cli", fake_cli)
+
+    hidden = _text(_call("show", network="devmesh"))
+    shown = _text(_call("show", network="devmesh", all=True))
+
+    assert "cloud-node-1" not in hidden
+    assert "hidden" in hidden
+    assert "cloud-node-1" in shown, "all=true must reach the renderer, not just argv"
+    assert "hidden" not in shown
+
+
 def test_the_agent_can_actually_reach_the_full_membership_record() -> None:
     """The digest points at a way to see removed devices, so that way must exist.
 
