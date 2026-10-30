@@ -14,6 +14,10 @@ export const ENFORCED = ["src/i18n/runtime.ts", "src/i18n/wire-cache.ts", "src/s
  *  raises advisory). Extraction therefore INCREASED the number this gate
  *  reports, which is the one behaviour a ratchet must never have. */
 export const GENERATED_SOURCES = new Set(["src/i18n/bundled.gen.ts"]);
+/** The per-locale owned-copy chunks generated BESIDE it (`bundled.<locale>.gen.ts`).
+ *  Same argument as GENERATED_SOURCES: their values ARE the extracted English
+ *  sentences in another language, so counting them double counts the catalogue. */
+export const GENERATED_PATTERN = /^src\/i18n\/bundled\.[A-Za-z0-9-]+\.gen\.ts$/;
 export const NONTRANSLATABLE = [{
 	path: "src/i18n/wire-cache.ts", sink: "new:Error", text: "catalogue response limit",
 	reason: "Internal payload bound caught by loader; never surfaced as user copy.",
@@ -113,7 +117,7 @@ export function checkTree(root, baseline) {
 	const failures = []; let advisory = 0; const seen = new Set();
 	for (const path of files(join(root, "src"))) {
 		const name = relative(root, path).replaceAll("\\", "/");
-		if (GENERATED_SOURCES.has(name)) continue;
+		if (GENERATED_SOURCES.has(name) || GENERATED_PATTERN.test(name)) continue;
 		seen.add(name);
 		const actual = fingerprints(scanSource(readFileSync(path, "utf8"), name));
 		if (!ENFORCED.includes(name)) { advisory += Object.values(actual).reduce((a, b) => a + b, 0); continue; }

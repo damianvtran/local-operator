@@ -53,7 +53,7 @@ export function createMessageRuntime(
 	const wires = new Map<string, Map<string, Catalogue>>();
 	const formats = new Map<string, IntlMessageFormat>();
 
-	function register(target: Map<string, Map<string, Catalogue>>, namespace: string, locale: string, messages: Record<string, string>): boolean {
+	function register(target: Map<string, Map<string, Catalogue>>, namespace: string, locale: string, messages: Record<string, string>, notify = true): boolean {
 		if (!isResolvedLocale(locale) || !validMap(namespace, messages)) return false;
 		let locales = target.get(namespace);
 		if (!locales) { locales = new Map(); target.set(namespace, locales); }
@@ -62,11 +62,27 @@ export function createMessageRuntime(
 		// Locale tags are a fixed eight-value contract; bound served namespace
 		// registries as well so callers cannot grow memory by arbitrary names.
 		if (target === wires && target.size > 16) target.delete(target.keys().next().value!);
-		changed(); // same-locale content changes must repaint React too
+		// `notify` false only inside a batch: one repaint per incoming map, not one
+		// per namespace (a locale chunk carries all twelve).
+		if (notify) changed();
 		return true;
 	}
 	function registerBundle(namespace: string, locale: string, messages: Record<string, string>): boolean {
 		return namespace.startsWith("relay.") && register(bundles, namespace, locale, messages);
+	}
+	/** Register a whole owned-copy map (a locale chunk) with ONE notification.
+	 *
+	 *  The Map dimension is the namespace because `uiLocaleFor` asks per namespace
+	 *  whether the locale is complete; the notification is the store's single
+	 *  channel, so twelve namespaces must still means ONE repaint and one
+	 *  `publishLocaleSnapshot`, not twelve paints of the same flip. */
+	function registerBundles(entries: Iterable<[string, string, Record<string, string>]>): boolean {
+		let changedAny = false;
+		for (const [namespace, locale, messages] of entries) {
+			if (namespace.startsWith("relay.")) changedAny = register(bundles, namespace, locale, messages, false) || changedAny;
+		}
+		if (changedAny) changed();
+		return changedAny;
 	}
 	function registerWire(namespace: string, locale: string, messages: Record<string, string>): boolean {
 		return namespace.startsWith("wire.") && register(wires, namespace, locale, messages);
@@ -94,6 +110,10 @@ export function createMessageRuntime(
 	function sourceFor(code: string): { source: string; locale: string } | null {
 		const context = readContext();
 		const target = code.startsWith("wire.") ? wires : bundles;
+		// A `wire.*` identity is the SERVER's sentence, so it follows the resolved
+		// backend locale even while our own copy is still English; owned `relay.*`
+		// copy follows `uiLocale`, the language actually on screen. That split is
+		// why a wire sentence can be French under an `lang="en"` page.
 		const requested = code.startsWith("wire.") ? context.backendLocale : context.uiLocale;
 		for (const locale of [...new Set([requested, "en"])]) {
 			if (!locale) continue;
@@ -131,5 +151,5 @@ export function createMessageRuntime(
 		const rendered = render(code, params);
 		return rendered ? { ...rendered, direction: directionFor(rendered.locale) } : { text, locale: null, direction: null };
 	}
-	return { t, renderEnvelope, registerBundle, registerWire, unregisterWire, uiLocaleFor };
+	return { t, renderEnvelope, registerBundle, registerBundles, registerWire, unregisterWire, uiLocaleFor };
 }

@@ -4012,7 +4012,11 @@ class DesktopSessionBridge:
             "has_newer": page.has_newer,
         }
         answer = await self._with_peer_cycle_records(answer, [page])
-        return self._journal_page(answer, [page], order_ids or []) if journal_order else answer
+        return (
+            await self._journal_order_page(answer, [page], order_ids or [])
+            if journal_order
+            else answer
+        )
 
     async def _open_frame_history(
         self,
@@ -4131,7 +4135,11 @@ class DesktopSessionBridge:
             answer = await self._with_peer_cycle_records(answer, [page])
             if journal_order and facts is not None and index_read_model.apply_order(answer, facts):
                 return answer
-            return self._journal_page(answer, [page], order_ids or []) if journal_order else answer
+            return (
+                await self._journal_order_page(answer, [page], order_ids or [])
+                if journal_order
+                else answer
+            )
 
         collected: list[dict[str, Any]] = []
         order_pages: list[Any] = []
@@ -4313,7 +4321,11 @@ class DesktopSessionBridge:
         answer = await self._with_peer_cycle_records(answer, order_pages)
         if journal_order and facts is not None and index_read_model.apply_order(answer, facts):
             return answer
-        return self._journal_page(answer, order_pages, order_ids or []) if journal_order else answer
+        return (
+            await self._journal_order_page(answer, order_pages, order_ids or [])
+            if journal_order
+            else answer
+        )
 
     @staticmethod
     def _wire_rows(entries: Any) -> list[dict[str, Any]]:
@@ -4470,8 +4482,95 @@ class DesktopSessionBridge:
 
         return apply_journal_order(self.root, self.session_id, answer, source, ids)
 
-    def _journal_page(
+    async def _journal_order_page(
         self, answer: dict[str, Any], pages: list[Any], ids: list[str]
+    ) -> dict[str, Any]:
+        """Answer ``journal_order`` from the cheapest source that can prove it.
+
+        THREE SOURCES, IN ORDER, and the order is the contract:
+
+        1. the RESIDENT index — the derivation authority, two stats, and the only
+           source that costs nothing when the process already holds this journal;
+        2. the PERSISTED companion — the projection of that same derivation, read
+           in the caller's worker hop. Only opened once (1) has declined, so a
+           process that already holds the index never pays for it;
+        3. today's policy — a background correction and ``building``/``unavailable``
+           — through :meth:`_journal_page`, which owns that answer.
+
+        WARMTH IS THE WHOLE POINT. Before this, source (2) did not exist for this
+        flag: ``journal_order=1`` without ``open_frame=1`` reached the resident
+        join alone, so a renderer's FIRST paint on a session the process had not
+        indexed answered ``building`` and reconciled a moment later — the
+        after-paint change the capability exists to remove. Serving it from the
+        companion is what makes the answer final on the first frame.
+
+        A COMPANION ANSWER ALSO ARMS THE RESIDENT SCAN, and that is not bookkeeping.
+        Source (3) started one as a side effect: a page that answered ``building``
+        began the correction, so from the NEXT read on the resident join answered
+        and the companion was never opened again. A page answered from (2) never
+        enters that branch, so without this the poll loop opens the companion on
+        every request forever — measured on a 36.5 MB journal, 25 identical reads:
+        25/25 companion opens and no resident index ever, against 1/25 and a
+        resident index from poll 1 once the scan is armed, which is what base
+        converges onto. Same singleflight, not awaited, and only when nothing is
+        resident: no scan is added to this request's latency and none is started
+        twice.
+        """
+        ids = list(dict.fromkeys(ids))
+        source = index_read_model.page_source(pages)
+        if self._apply_journal_order(answer, source, ids):
+            return answer
+        projected = await asyncio.to_thread(
+            index_read_model.order_facts,
+            self.root,
+            self.session_id,
+            collected_ids=[row["id"] for row in answer["entries"]],
+            order_ids=ids,
+            source=source,
+        )
+        if projected.state == "ready" and index_read_model.apply_order(answer, projected.value):
+            self._warm_resident_scan()
+            return answer
+        # A missing, stale, corrupt or unsupported projection is NOT an error: the
+        # policy below is exactly what an absent companion answered before this
+        # existed, so an older store degrades to today's behaviour.
+        return self._journal_page(answer, pages, ids)
+
+    def _warm_resident_scan(self) -> None:
+        """Arm the resident index a companion answer skipped, and never wait on it.
+
+        THE SAME SINGLEFLIGHT the ``building`` branch calls from inside
+        :meth:`_journal_page` (``_order_correction``): a refresh already in flight
+        is joined rather than started again, and one that has already landed is
+        left alone — ``fresh_resident`` answers that from the cache's own entry,
+        so the ordinary case costs a dict lookup and no stats. Nothing is awaited:
+        this request's page is already complete, and the point of arming the scan
+        is the NEXT request, which then answers from the resident join instead of
+        reopening the companion.
+
+        THE TASK'S FAILURE IS RETRIEVED, not swallowed. This caller owns no await
+        on it — that is the whole point — and ``start_refresh``'s own wrapper
+        logs and RE-RAISES, so an unobserved failure surfaces as a second,
+        misleading traceback at GC (``Task exception was never retrieved``) long
+        after the page that armed it. The same guard sits at this file's other
+        no-wait sites (the attention refresh and the peer display's index warm);
+        the ``except`` below covers only a SYNCHRONOUS refusal to start.
+        """
+        from local_operator.session import transcript_index
+
+        try:
+            if transcript_index.fresh_resident(self.root, self.session_id) is not None:
+                return
+            task, _started = transcript_index.start_refresh(self.root, self.session_id)
+            task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
+        except Exception:  # noqa: BLE001 — an optimisation, never the answer
+            logger.debug("journal order: resident warm could not start", exc_info=True)
+
+    def _journal_page(
+        self,
+        answer: dict[str, Any],
+        pages: list[Any],
+        ids: list[str],
     ) -> dict[str, Any]:
         """Opt-in source facts, from a single verified page/index view only.
 
@@ -4480,6 +4579,11 @@ class DesktopSessionBridge:
         Extra ids name already-loaded rows outside this page, never a new read
         service; their count/string bounds cap the response and source remains
         THIS session. Missing ids are explicitly unknown.
+
+        THE COMPANION IS NOT TRIED HERE. It is
+        :meth:`_journal_order_page`'s own door, because that method must also arm
+        the resident scan once a projection has served the page. This one keeps
+        its own policy for what a page with no provable source answers.
         """
         from local_operator.session import transcript_index
 

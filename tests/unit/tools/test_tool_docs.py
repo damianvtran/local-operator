@@ -499,7 +499,7 @@ MEASURED_TOKENS: dict[str, int] = {
     # without a guide lookup. Re-measured deliberately via this test's print.
     "memory": 109,
     "monitor": 353,
-    "network": 870,
+    "network": 894,
     # NEW (quiet-turn S0a, docs/design/quiet-turns.md §4): the ``no_reply``
     # doc — the argumentless call's description plus the "when NOT to call
     # it" notes. Re-measured via this test's own print, and it is the ONLY

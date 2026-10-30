@@ -244,6 +244,14 @@ class NetworkParams(BaseModel):
         ),
     )
     all_peers: bool = Field(default=False, description="For sessions: list every device.")
+    # REVIEW ROUND 2, MAJOR-1: the digest tells the reader removed devices are hidden
+    # and to look with `--all` — a flag this surface could not spell, because `show`'s
+    # argv here is fixed. A pointer to an escape hatch the reader cannot reach is
+    # worse than no pointer, so the escape hatch is now part of the tool surface.
+    all: bool = Field(
+        default=False,
+        description="For show: also list devices that were removed from this network.",
+    )
     create: bool = Field(default=False, description="For sessions: create a session on `peer`.")
     prompt: str = Field(default="", description="For create: the new session's first turn.")
     engage: str = Field(default="", description="For sessions: a session id on `peer` to warm up.")
@@ -418,6 +426,17 @@ def _argv_for(params: NetworkParams) -> tuple[list[str], str]:
     action = params.action
     network = params.network.strip()
 
+    if params.all and action != "show":
+        # REFUSED rather than sent (agent review round 3, MINOR-2): `all` is read only
+        # by the `show` branch, so beside any other action the CLI accepts `--all` and
+        # silently drops it — the class this file already refuses for `all_peers`
+        # ("a flag that is accepted and then quietly dropped is the same class of
+        # untruth"). One sentence now, instead of an agent believing it widened a
+        # listing that it did not widen.
+        return [], (
+            f"action='{action}' ignores 'all': it only widens 'show' to devices that "
+            "were removed from the network. Drop it, or use action='show'."
+        )
     if action == "status":
         argv = ["network", "status"]
     elif action == "ls":
@@ -426,6 +445,8 @@ def _argv_for(params: NetworkParams) -> tuple[list[str], str]:
         if not network:
             return [], "action='show' needs 'network' (a name or id)."
         argv = ["network", "show", network]
+        if params.all:
+            argv += ["--all"]
     elif action == "peers":
         argv = ["network", "peers"]
     elif action == "doctor":
@@ -968,7 +989,7 @@ def _pilot_receipt_lines(verb: str, payload: dict[str, Any]) -> list[str]:
     return lines
 
 
-def _render(action: str, payload: dict[str, Any]) -> list[str]:
+def _render(action: str, payload: dict[str, Any], *, show_removed: bool = False) -> list[str]:
     """The human-readable digest of one parsed payload.
 
     Deliberately a summary: the parsed fields ride in ``details`` (which never
@@ -1037,12 +1058,28 @@ def _render(action: str, payload: dict[str, Any]) -> list[str]:
         # member table looks perfectly healthy, and the sentence is the only thing on
         # this surface that says otherwise (QA round 3, Q-R3-2).
         lines.extend(membership_lines(payload))
+        # A DEPARTED DEVICE IS A RECORD, NOT A MEMBER (operator decision 2026-10-29 —
+        # the same rule the CLI's `show` table now follows): tombstone rows used to sit
+        # under the "members" heading here too, so a reader — an agent reading its own
+        # digest — counted devices that had left. They are counted out loud rather than
+        # dropped, because an agent must be able to tell that the list it is reading is
+        # not the whole record; `show --all` and `--json` still return every one.
+        departed = 0
         for member in payload.get("members_detail") or []:
+            if not member.get("active") and not show_removed:
+                departed += 1
+                continue
             mark = "active" if member.get("active") else "REMOVED"
             suspect = "  [suspect]" if member.get("suspect") else ""
             lines.append(
                 f"  {mark:7} {member.get('device_id')}  {member.get('name')}  "
                 f"{member.get('role')}  {', '.join(member.get('capabilities') or [])}{suspect}"
+            )
+        if departed:
+            plural = "" if departed == 1 else "s"
+            lines.append(
+                f"  {departed} removed device{plural} hidden; set all=true for the full "
+                "membership record"
             )
         for invite in payload.get("invites") or []:
             lines.append(
@@ -1515,7 +1552,7 @@ async def execute_network(
             # dropping exactly the rows the hint says to read, on the one path
             # they exist for. The rows read through the same renderer the
             # healthy path uses; the raw payload still rides ``details``.
-            body = "\n".join(_render(params.action, scrubbed))
+            body = "\n".join(_render(params.action, scrubbed, show_removed=params.all))
             text, spill = spill_truncate(body, _TOOL, context)
             return _error(tool_call_id, _TOOL, text, details=spill or {"network": scrubbed})
         if params.action == "sessions" and str(scrubbed.get("verb") or "") in (
@@ -1530,7 +1567,7 @@ async def execute_network(
             # generic branch below would keep only ``code: message`` and drop the
             # outcome — and, for a finished send, the owner's reply. Rendering the
             # receipt keeps them; the error result still marks the non-completion.
-            body = "\n".join(_render(params.action, scrubbed))
+            body = "\n".join(_render(params.action, scrubbed, show_removed=params.all))
             text, spill = spill_truncate(body, _TOOL, context)
             return _error(tool_call_id, _TOOL, text, details=spill or {"network": scrubbed})
         # ``code`` + ``message`` IS THE REFUSAL FAMILY'S SHAPE, so it is read
@@ -1549,7 +1586,7 @@ async def execute_network(
             (f"{reason}: {message}" if reason else message) + (f"\n{hint}" if hint else ""),
         )
 
-    body = "\n".join(_render(params.action, scrubbed))
+    body = "\n".join(_render(params.action, scrubbed, show_removed=params.all))
     text, spill = spill_truncate(body, _TOOL, context)
     return _text(tool_call_id, _TOOL, text, details=spill or {"network": scrubbed})
 

@@ -113,6 +113,19 @@ def _attach_rows(history: Sequence[AgentMessage]) -> list[TranscriptEntry]:
     return list(fold.projection.transcript)
 
 
+def _live_rows(history: Sequence[Message]) -> list[TranscriptEntry]:
+    """The live fold's rows: what a running session paints before any repaint.
+
+    ``absorb_user_event`` is the live user-turn path. The histories these
+    helpers are handed carry only user messages, which is all a live fold
+    needs to paint the row under test.
+    """
+    fold = ProjectionFold(SessionProjection(session_id="s", pid=1))
+    for message in history:
+        fold.absorb_user_event(message)
+    return list(fold.projection.transcript)
+
+
 def _shape(rows: list[TranscriptEntry]) -> list[tuple[Any, ...]]:
     """The comparable shape of a row list: everything a reader would notice."""
     return [
@@ -1240,6 +1253,43 @@ def test_both_surfaces_strip_the_skill_block() -> None:
     assert "<operator-skills>" not in row
     # The token SURVIVES: it is what the operator typed.
     assert "$research" in row
+
+
+def test_the_live_fold_paints_the_same_skill_row_as_replay() -> None:
+    """SKM-D2: a `$skill` payload's LIVE row must equal its replay rows.
+
+    ``absorb_user_event`` appended ``message.text`` verbatim while both replay
+    folds went through ``user_row_text``, so a TUI-typed invocation painted the
+    whole SKILL.md body on an attached phone until the next full repaint — a
+    session titled after the skill body, then fixed one scroll gesture later.
+    """
+    typed = "run $research fix it"
+    history = [Message.user(_skill_payload(typed, [("research", "SKILL_BODY_MARKER")]), id="sk1")]
+
+    live = _live_rows(history)
+
+    assert [row.text for row in live] == [typed]
+    assert _shape(live) == _shape(_page_rows(history)) == _shape(_attach_rows(history))
+
+
+def test_the_live_steer_echo_paints_the_same_body_as_replay() -> None:
+    """The echo a phone steer paints (``note_user_message``) is matched to its
+    own later event by id, and that event must not repaint the payload beside
+    it. Row KIND legitimately differs — the optimistic row is the steer
+    boundary, the historical one a plain user row — so this compares text.
+    """
+    typed = "queue $research for later"
+    text = _skill_payload(typed, [("research", "SKILL_BODY_MARKER")])
+
+    fold = ProjectionFold(SessionProjection(session_id="s", pid=1))
+    fold.note_user_message(text, steer=True, message_id="cmd-s1")
+    assert fold.absorb_user_event(Message.user(text, id="cmd-s1")) is False
+
+    live = list(fold.projection.transcript)
+    replay = _page_rows([Message.user(text, id="cmd-s1")])
+
+    assert [row.text for row in live] == [typed]
+    assert [row.text for row in live] == [row.text for row in replay]
 
 
 def test_a_skill_block_and_a_reference_block_both_go() -> None:
