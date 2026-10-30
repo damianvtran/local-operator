@@ -4,7 +4,7 @@
   "locale": "fr",
   "namespace": "cli.services_status",
   "audit_date": "2026-10-29",
-  "packaged_at_utc": "2026-10-30T03:47:13Z",
+  "packaged_at_utc": "2026-10-30T04:42:12Z",
   "key_count": 14,
   "auditor": {
     "agent": "qa-tester (independent audit lane; did not translate or edit any copy)",
@@ -18,7 +18,7 @@
     "en": "ae14884d1c5a795724b95b29f8abe620975e96cc895384923788faa1b22611df",
     "context": "c97ca657d79107dc4e9c8e2b070754832a8b4ae78c35776f300da49ffe464a0f",
     "target": "23422bc3f65261cc4bc05511089d311b0dc5c16591a6e2c44c2483088eb68a90",
-    "style_guide": "ae1519ab7617d19aa826918d607de1d018595094166edbc18aa58f6a8f0a4226",
+    "style_guide": "5315e1ac10c2ce57aac631ba653d08de680ee70c9a022ed3a8345ce2f9902ee7",
     "glossary": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8"
   },
   "input_paths": {
@@ -31,23 +31,26 @@
   "current_bytes_match_audited_hashes": true,
   "source_sha256": "ae14884d1c5a795724b95b29f8abe620975e96cc895384923788faa1b22611df",
   "target_sha256": "23422bc3f65261cc4bc05511089d311b0dc5c16591a6e2c44c2483088eb68a90",
-  "current_report_verdict": "PASS",
+  "current_report_verdict": "PASS for copy correctness; 0 new blocker/major; 2 previously-accepted minors carried forward unverified",
   "ledger_status": "passed",
   "unresolved_blocker_major": 0,
   "finding_counts": {
     "blocker": 0,
     "major": 0,
-    "minor": 0,
+    "minor": 2,
     "nit": 0
   },
   "limitations": [
     "This bundle documents an INDEPENDENT evidence-recovery audit by the local-operator qa-tester role. It does not reconstruct, replay or endorse the audit the ledger note cites. The ledger rows stay `passed`; this audit supplies the missing committed evidence and changes no copy and no ledger field.",
+    "The ledger row carries only `source_sha256`; it has NO target-hash field and its note quotes no SHA-256 at all, so the audited French bytes were never bound by that row. This audit records the target hash it actually read (23422bc3…) but cannot claim the row vouched for those bytes.",
     "No lost scratchpad, screenshot, rendered frame, geometry file or prior audit trajectory was recovered or inferred. The only facts asserted are ones recomputed from the committed bytes at da6d1b92665f4a43188385bedd42c5df00616709.",
     "Independent LLM review, not native-speaker certification. The operator waived human/native-speaker sign-off for all locales; it is not a merge gate here.",
     "Scalar text evidence only: catalogue values, ICU branch rendering and rich.cells.cell_len. No relay app, phone, browser, terminal or device geometry was exercised, so this is not rendered-layout proof.",
-    "The sanctioned read_public_copy route was unavailable to this session: it resolves against the session workspace (/Users/damian) and refused with \"the workspace is not a git checkout\". No lop exec child session was opened. Judgement came from direct reads of the committed files in a throwaway worktree; no routed receipt exists for this audit and none is claimed."
+    "The sanctioned read_public_copy route was unavailable to this session: it resolves against the session working root (/Users/damian) and refused with \"the working root is not a git checkout\". No lop exec child session was opened. Judgement came from direct reads of the committed files in a throwaway worktree; no routed receipt exists for this audit and none is claimed.",
+    "Repo-wide width totals are deliberately NOT asserted: the count depends on the substitution values chosen for ICU placeholders. The five relay.chrome cells are exact because those keys carry no placeholders."
   ],
   "artifacts": [
+    "audit.log",
     "findings.json",
     "receipt.json",
     "record.json",
@@ -58,7 +61,7 @@
     "mechanism": "python + rich.cells + local_operator.i18n.runtime.render_message",
     "sanctioned_reader_receipts": [],
     "sanctioned_route_verified": "none",
-    "sanctioned_route_verified_reason": "read_public_copy refused: the workspace is not a git checkout",
+    "sanctioned_route_verified_reason": "read_public_copy refused: the working root is not a git checkout",
     "receipts_obtained_after_judgement": false
   }
 }

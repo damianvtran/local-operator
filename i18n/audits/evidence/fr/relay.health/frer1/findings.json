@@ -9,6 +9,7 @@
     "minor": 0,
     "nit": 0
   },
+  "counts_note": "counts.minor counts every accepted minor this bundle stands behind: 0 newly found (declared maxCells) + 0 carried forward from the ledger row and NOT re-derived by this audit. Carried-forward entries are marked carried_forward: true.",
   "unresolved_blocker_major": 0,
   "findings": [],
   "adjudication": [],

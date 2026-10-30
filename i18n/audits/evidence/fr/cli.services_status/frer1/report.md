@@ -1,7 +1,8 @@
 # fr / cli.services_status — independent evidence-recovery audit (frer1)
 
 14 keys, all 14 audited against the committed en source and the en context
-sidecar. Verdict: **PASS**, 0 findings.
+sidecar. Verdict: **PASS** for copy correctness. **0 new findings**, plus **2
+accepted minors carried forward** from the ledger row and not re-derived here.
 
 ## What was judged
 
@@ -27,25 +28,45 @@ sidecar. Verdict: **PASS**, 0 findings.
   `;` in prose and none inside a code span; no U+00A0; U+2019 apostrophes and
   no ASCII apostrophe. This reproduces the "13 typography sites" claim in the
   ledger note exactly.
-- **Width.** All 14 keys render inside their declared `maxCells` (measured
-  with `rich.cells.cell_len` over substituted placeholders), so the two
-  accepted overruns the ledger records (`serve_linger_required`,
-  `unsupervised_unknown` against the 80/78 status budget) are measured
-  against the status-row budget rather than `maxCells` — consistent with the
-  recorded exception in the style guide.
+
+## Findings: 2 accepted minors, carried forward
+
+Neither is re-derived by this audit. No key in this namespace declares
+`maxCells`, so the declared-budget sweep cannot see them; the ledger row
+measured them against the 80/78-column status-row budget and recorded the
+exception in `i18n/style-guides/fr.md`.
+
+| Key | fr cells | budget | status |
+|---|---|---|---|
+| `serve_linger_required` | 102 | 80 | accepted by the row, recorded in the style guide |
+| `unsupervised_unknown` | 92 | 78 | accepted by the row, recorded in the style guide |
+
+Both are marked `carried_forward: true` in `findings.json` with
+`source: ledger row … carried forward unverified`. `counts.minor: 2` therefore
+reconciles with `auditor.findings: 2` on the ledger row, and `findings.json`
+carries a `counts_note` spelling out the split (0 new + 2 carried).
+
+## Target-hash binding (R-4)
+
+The ledger row for `cli.services_status` carries **only** `source_sha256`
+(`ae14884d…`) and its note quotes no SHA-256 at all. The audited French bytes
+were therefore **never bound by that row**: there is no target hash to compare
+against. This bundle records the target hash it actually read (`23422bc3…`),
+so the bytes are bound from today forward — but that is this audit's record,
+not the row's.
 
 ## Structure note (not a defect)
 
 The fr file stores its keys alphabetically while en stores them in insertion
 order. The gate compares key SETS (`scripts/i18n/check.py` iterates
-`sorted(set(...) & set(...))`), so order is not enforced, and this namespace
-is the only one of 69 fr namespaces that differs — the same sorted ordering
+`sorted(set(...) & set(...))`), so order is not enforced, and this namespace is
+the only one of 69 fr namespaces that differs — the same sorted ordering
 appears in es and zh-CN for this namespace. Recorded as an observation only.
 
 ## Limitations
 
 - Independent LLM review, not native-speaker certification.
-- Scalar text and ICU rendering only: no rendered frame, no terminal or
-  device geometry.
+- Scalar text and ICU rendering only: no rendered frame, no terminal or device
+  geometry.
 - The bundle records THIS audit. It does not reconstruct the audit the ledger
   note cites.

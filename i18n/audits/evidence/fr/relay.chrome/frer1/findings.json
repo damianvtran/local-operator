@@ -9,6 +9,7 @@
     "minor": 5,
     "nit": 0
   },
+  "counts_note": "counts.minor counts every accepted minor this bundle stands behind: 5 newly found (declared maxCells) + 0 carried forward from the ledger row and NOT re-derived by this audit. Carried-forward entries are marked carried_forward: true.",
   "unresolved_blocker_major": 0,
   "findings": [
     {
@@ -18,9 +19,9 @@
       "category": "layout (fr length over declared maxCells)",
       "en": "Close search",
       "current": "Fermer la recherche",
-      "problem": "19 cells against a 16-cell maxCells budget (en: 12). The role is a search field close button ACCESSIBLE NAME, so the string is spoken by the screen reader and never laid out: no truncation or overflow is reachable from this key. Recorded because the declared budget is exceeded, not because it renders wrong.",
-      "proposed": "unchanged — keep the descriptive accessible name; either record the overrun for this a11y-only key or drop its maxCells, since a spoken name has no cell budget",
-      "source": "qa-tester mechanical width sweep against en context maxCells",
+      "problem": "19 cells against a 16-cell maxCells budget (en: 12). The role is a search field close button ACCESSIBLE NAME, so the string is spoken and never laid out: no truncation or overflow is reachable from this key. Recorded because the declared budget is exceeded, not because it renders wrong.",
+      "proposed": "unchanged — keep the descriptive accessible name; recorded as an accessibility-only exception",
+      "source": "qa-tester width sweep; exact (key has no placeholders)",
       "disposition": "accepted"
     },
     {
@@ -30,9 +31,9 @@
       "category": "layout (fr length over declared maxCells)",
       "en": "Mark all read",
       "current": "Tout marquer comme lu",
-      "problem": "21 cells against a 20-cell maxCells budget (en: 13), a visible header action. One cell over. « Tout marquer comme lu » is the standard French label; the shorter « Tout marquer lu » loses the standard « comme » and was not adopted.",
-      "proposed": "unchanged — record as a width exception in i18n/style-guides/fr.md",
-      "source": "qa-tester mechanical width sweep against en context maxCells",
+      "problem": "21 cells against a 20-cell budget (en: 13), a visible header action. One cell over. « Tout marquer comme lu » is the standard French label; « Tout marquer lu » loses the standard « comme ».",
+      "proposed": "unchanged — recorded as a width exception",
+      "source": "qa-tester width sweep; exact (key has no placeholders)",
       "disposition": "accepted"
     },
     {
@@ -42,9 +43,9 @@
       "category": "layout (fr length over declared maxCells)",
       "en": "Unpin",
       "current": "Désépingler",
-      "problem": "11 cells against a 10-cell maxCells budget (en: 5), used as a row action sheet item and a swipe action. One cell over. French has no shorter synonym: « Détacher » is a different operation and « Épingler » is the opposite action.",
-      "proposed": "unchanged — record as a width exception in i18n/style-guides/fr.md",
-      "source": "qa-tester mechanical width sweep against en context maxCells",
+      "problem": "11 cells against a 10-cell budget (en: 5), a row action sheet item and swipe action. One cell over. French has no shorter synonym: « Détacher » is a different operation and « Épingler » is the opposite action.",
+      "proposed": "unchanged — recorded as a width exception",
+      "source": "qa-tester width sweep; exact (key has no placeholders)",
       "disposition": "accepted"
     },
     {
@@ -54,9 +55,9 @@
       "category": "layout (fr length over declared maxCells)",
       "en": "Saving…",
       "current": "Enregistrement…",
-      "problem": "15 cells against a 12-cell maxCells budget (en: 7), the busy state of a row action. Three cells over. The namespace already renders every busy state as a French action-noun + ellipsis (Marquage…, Démarrage…, Reprise…, Connexion…), so « Enregistrement… » is the register-correct form; « Sauvegarde… » would fit but means backup, not save.",
-      "proposed": "unchanged — record as a width exception in i18n/style-guides/fr.md",
-      "source": "qa-tester mechanical width sweep against en context maxCells",
+      "problem": "15 cells against a 12-cell budget (en: 7), a visible busy state. Three over. The namespace renders every busy state as a French action-noun + ellipsis (Marquage…, Démarrage…, Reprise…, Connexion…), so « Enregistrement… » is register-correct; « Sauvegarde… » would fit but means backup.",
+      "proposed": "unchanged — recorded as a width exception",
+      "source": "qa-tester width sweep; exact (key has no placeholders)",
       "disposition": "accepted"
     },
     {
@@ -66,9 +67,9 @@
       "category": "layout (fr length over declared maxCells)",
       "en": "Loading conversation…",
       "current": "Chargement de la conversation…",
-      "problem": "30 cells against a 28-cell maxCells budget (en: 21), a visible conversation loading state. Two cells over. Dropping « de la conversation » would fit the budget but stops naming what is loading.",
-      "proposed": "unchanged — record as a width exception in i18n/style-guides/fr.md",
-      "source": "qa-tester mechanical width sweep against en context maxCells",
+      "problem": "30 cells against a 28-cell budget (en: 21), a visible loading state. Two over. Dropping « de la conversation » would fit but stops naming what is loading.",
+      "proposed": "unchanged — recorded as a width exception",
+      "source": "qa-tester width sweep; exact (key has no placeholders)",
       "disposition": "accepted"
     }
   ],
