@@ -4618,3 +4618,163 @@ def test_an_amber_send_promotes_its_receipt_line_into_the_expansion() -> None:
     )
     other.toggle_expanded()
     assert other._promoted_lead() == "", "the receipt shape is the other half of the test"
+
+
+# -- Team Bridge (`bridge`) rows ----------------------------------------------
+#
+# The generic scan painted `bcv_b0044d… 3` under a wrench for every bridge call.
+# The row now reads from `harness/rows.py::bridge_row` + `harness/bridge_copy.py`
+# (pinned in tests/unit/harness/test_bridge_rows.py); these tests pin what the
+# CARD does with them: icon, category, the call-start vs settled summary, the
+# outcome in the status cap, and the expansion's order.
+
+_BRIDGE_CHANNEL = "bcv_b0044d9e1a2f"
+
+
+def _bridge_post_receipt() -> dict[str, Any]:
+    return {
+        "ok": True,
+        "state": "sent",
+        "conversation_id": _BRIDGE_CHANNEL,
+        "message_id": "bcmsg_01",
+        "seq": 42,
+        "destination_type": "conversation",
+        "content": f"posted to {_BRIDGE_CHANNEL}: message bcmsg_01 at seq 42",
+    }
+
+
+def test_the_bridge_glyph_is_the_conversation_not_the_wrench(monkeypatch) -> None:
+    assert NERD_TOOL_ICONS["bridge"] == "\uf086"
+    assert PLAIN_TOOL_ICONS["bridge"] == "\u2194"
+    assert NERD_TOOL_ICONS["bridge"] not in {NERD_ICON_DEFAULT, NERD_TOOL_ICONS["send"]}
+    assert PLAIN_TOOL_ICONS["bridge"] not in {
+        PLAIN_ICON_DEFAULT,
+        PLAIN_TOOL_ICONS["send"],
+        PLAIN_TOOL_ICONS["peer"],
+    }
+    monkeypatch.setattr(glyph_mod, "settings_get", lambda key, default=None: True)
+    assert tool_icon("bridge") == "\uf086"
+    monkeypatch.setattr(glyph_mod, "settings_get", lambda key, default=None: False)
+    assert tool_icon("bridge") == "\u2194"
+    assert _category_element("bridge") == "tool.row.name_meta"
+
+
+def test_bridge_row_never_paints_the_conversation_id() -> None:
+    args = {"op": "channel_post", "channel_id": _BRIDGE_CHANNEL, "body": "Ship it", "limit": 3}
+    card = ToolCard("b1", "bridge", args)
+    running = card._build_row(100).plain
+    assert "Posting in a conversation · Ship it" in running
+    assert "bcv_" not in running
+    card.mark_done("posted", _bridge_post_receipt())
+    settled = card._build_row(100).plain
+    assert "Posted in a conversation · Ship it" in settled
+    assert "bcv_" not in settled and ICON_SUCCESS in settled
+
+
+def test_bridge_dm_settles_to_the_label_from_the_receipt() -> None:
+    card = ToolCard("b2", "bridge", {"op": "dm", "account_id": "acc_9", "body": "review?"})
+    assert "Messaging a DM · review?" in card._build_row(100).plain
+    card.mark_done(
+        "dm",
+        {
+            "ok": True,
+            "state": "sent",
+            "destination_type": "conversation_dm",
+            "content": f"direct message to Ana Ruiz in {_BRIDGE_CHANNEL}: message bcmsg_2",
+        },
+    )
+    assert "Messaged Ana Ruiz · review?" in card._build_row(100).plain
+
+
+def test_an_inbox_only_send_wears_the_warning_word_not_plain_success() -> None:
+    card = ToolCard("b3", "bridge", {"op": "send", "to": "acc_7", "text": "ping"})
+    card.mark_done("{}", {"ok": True, "state": "sent", "destination_type": "peer_inbox"})
+    runs = card._status_runs(cap=60)
+    texts = [text for text, _style in runs]
+    assert texts[0] == "not posted to a conversation "
+    assert texts[1] == f"{ICON_SUCCESS} "
+    warn = bindings.style("tool.status.partial_glyph")
+    assert runs[0][1] == warn and runs[1][1] == warn
+    # The word survives whole at an ordinary width (the cap grows to fit it).
+    assert "not posted to a conversation" in card._build_row(100).plain
+
+
+def test_a_refused_bridge_call_names_the_code_in_the_error_cap() -> None:
+    card = ToolCard("b4", "bridge", {"op": "channel_post", "name": "general", "body": "hi"})
+    refusal = {"ok": False, "code": "not_permitted", "error": "writes are off"}
+    card.mark_failed("writes are off", "writes are off", refusal)
+    row = card._build_row(100).plain
+    assert "Couldn't post in #general · hi" in row
+    assert "refused · not_permitted" in row and ICON_ERROR in row
+
+
+def test_a_bridge_error_without_details_does_not_claim_the_post() -> None:
+    card = ToolCard("b5", "bridge", {"op": "channel_post", "name": "general", "body": "hi"})
+    card.mark_failed("boom", "boom", None)
+    row = card._build_row(100).plain
+    assert "Couldn't post in #general" in row and "Posted in" not in row
+
+
+def test_bridge_expansion_order_headline_body_outcome_then_details() -> None:
+    args: dict[str, object] = {
+        "op": "channel_post",
+        "channel_id": _BRIDGE_CHANNEL,
+        "name": "general",
+        "body": "**v2**",
+    }
+    card = ToolCard("b6", "bridge", args)
+    card.mark_done("posted", _bridge_post_receipt())
+    card._expanded = True
+    lines = [line.strip() for line in card._build_content(100).plain.splitlines()[1:]]
+    assert lines[0] == "Posted in #general"
+    assert lines[1] == "v2", "the body is rendered markdown, not raw asterisks"
+    assert lines[2] == "Posted at seq 42"
+    assert lines[3] == "details"
+    assert lines[4] == f"conversation_id: {_BRIDGE_CHANNEL}"
+    # Ids appear only below the details label.
+    assert all("bcv_" not in line for line in lines[:4])
+
+
+def test_a_bridge_history_read_counts_its_messages() -> None:
+    from local_operator.harness.message_types import BRIDGE_UNTRUSTED_CLAUSE
+
+    card = ToolCard("b7", "bridge", {"op": "channel_history", "name": "general", "limit": 3})
+    content = f'{BRIDGE_UNTRUSTED_CLAUSE}\n\n{{"messages": [{{}}, {{}}, {{}}]}}'
+    card.mark_done(content, {"ok": True, "state": "ok", "content": content})
+    assert "Read #general (3 messages)" in card._build_row(100).plain
+
+
+def test_bridge_and_send_rows_condense_into_one_quiet_group() -> None:
+    """Bridge rows join tool groups like `send` and never split one.
+
+    Anchored on peer receipts, the shape `test_quiet_group_fold.py` uses: a
+    run of tool rows alone is not a quiet group (measured: three settled
+    `bash` cards plan to `[]` as well), so the discriminating question is
+    whether the bridge rows sit INSIDE one span rather than cutting it.
+    """
+    from local_operator.tui.quiet_groups import group_splitter_of
+    from local_operator.tui.widgets.transcript import (
+        PeerMessageBlock,
+        quiet_group_plan,
+        quiet_group_record_of,
+    )
+
+    sender = {"pid": 7, "conversation_name": "peer-a"}
+
+    bridge = ToolCard("q1", "bridge", {"op": "channel_post", "name": "general", "body": "a"})
+    send = ToolCard("q2", "send", {"target": "peer", "message": "b"})
+    bridge2 = ToolCard("q3", "bridge", {"op": "dm", "body": "c"})
+    for card in (bridge, send, bridge2):
+        card.mark_done("ok", {"ok": True})
+    record = quiet_group_record_of(bridge)
+    assert record.kind == "tool" and group_splitter_of(record) is False
+    run = [
+        PeerMessageBlock("one", sender),
+        bridge,
+        send,
+        bridge2,
+        PeerMessageBlock("two", sender),
+    ]
+    (planned,) = quiet_group_plan(run, head_cut=False)
+    assert planned.span == (0, 4)
+    assert planned.group.actions == 3

@@ -4778,3 +4778,83 @@ def test_the_projection_wire_carries_the_supplement_map_loosely() -> None:
 
     older = _projection_from_json({k: v for k, v in wire.items() if k != "supplements"}, record)
     assert older.supplements == {}
+
+
+def test_bridge_rows_are_the_shared_decision_at_start_and_settle() -> None:
+    """The phone's bridge summary is the TUI's words (`harness/bridge_copy.py`).
+
+    The generic tail painted `op=channel_post channel_id=bcv_…`; the row now
+    leads with the verb and the target, and the settle repaints it from the
+    result's details on BOTH paths — the live fold and the history fold — so a
+    watched call and its replay agree. The outcome word rides the line's end
+    because the phone cell has no status cap.
+    """
+    args = {"op": "send", "to": "acc_7", "text": "ping"}
+    assert _summarize_args("bridge", args) == "Sending to a teammate · ping"
+    details = {"ok": True, "state": "sent", "destination_type": "peer_inbox"}
+    settled = "Sent to a teammate · ping · not posted to a conversation"
+
+    fold = make_fold()
+    fold.fold_event(ToolExecutionStartEvent(tool_call_id="b1", tool_name="bridge", args=args))
+    row = fold.projection.transcript[-1]
+    assert row.summary == "Sending to a teammate · ping"
+    fold.fold_event(
+        ToolExecutionEndEvent(
+            tool_call_id="b1",
+            tool_name="bridge",
+            result=ToolResult(
+                tool_call_id="b1",
+                tool_name="bridge",
+                content=[TextContent(text="{}")],
+                details=details,
+            ),
+        )
+    )
+    assert row.summary == settled
+
+    from local_operator.mobile.projection import fold_messages_to_entries
+
+    history: list[AgentMessage] = [
+        Message(
+            role="assistant",
+            content=[TextContent(text="")],
+            tool_calls=[ToolCall(id="b2", name="bridge", arguments=args)],
+            stop_reason="toolUse",
+        ),
+        Message.tool_result(
+            ToolResult(
+                tool_call_id="b2",
+                tool_name="bridge",
+                content=[TextContent(text="{}")],
+                details=details,
+            )
+        ),
+    ]
+    (entry,) = [e for e in fold_messages_to_entries(history) if e.kind == "tool"]
+    assert entry.summary == settled
+
+    refused = {"ok": False, "code": "not_permitted", "error": "writes are off"}
+    fold.fold_event(
+        ToolExecutionStartEvent(
+            tool_call_id="b3",
+            tool_name="bridge",
+            args={"op": "channel_post", "channel_id": "bcv_b0044d9e1a2f", "body": "hi"},
+        )
+    )
+    row = fold.projection.transcript[-1]
+    assert "bcv_" not in row.summary
+    fold.fold_event(
+        ToolExecutionEndEvent(
+            tool_call_id="b3",
+            tool_name="bridge",
+            result=ToolResult(
+                tool_call_id="b3",
+                tool_name="bridge",
+                content=[TextContent(text="writes are off")],
+                details=refused,
+                is_error=True,
+            ),
+        )
+    )
+    assert row.tool_state == "failed"
+    assert row.summary == "Couldn't post in a conversation · hi · refused · not_permitted"
