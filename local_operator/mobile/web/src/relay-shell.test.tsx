@@ -23,8 +23,9 @@
  */
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { messageRuntime, retainConfigStream, useLocaleSnapshot } from "./store";
 import { BUNDLED_OWNED } from "./i18n/bundled.gen";
+import { RESOLVED_LOCALES } from "./i18n/runtime";
+import { messageRuntime, retainConfigStream, useLocaleSnapshot } from "./store";
 import { FetchStreamFixture as Stream, settleStream } from "./sse-test-fixture";
 
 /** The exact copy the shell hardcoded BEFORE this slice (the identity target). */
@@ -67,12 +68,30 @@ describe("relay.shell extraction", () => {
 
 	it("follows the actual owned-copy language, not the backend preference", () => {
 		// The contract from #2297: lang/dir describe the ACTUAL rendered owned-copy
-		// language (uiLocale), not the backend preference. French has no owned
-		// relay bundle, so it still paints EN/LTR; Urdu's audited relay bundle is
-		// shipped, so an Urdu backend paints ur/RTL.
-		expect(messageRuntime.uiLocaleFor("fr")).toBe("en");
+		// language (uiLocale), not the backend preference. Both directions are
+		// pinned here: a locale the relay ships paints its own language, and a
+		// SUPPORTED locale it does not ship paints the WHOLE English bundle instead
+		// of claiming copy nobody translated — the half that goes red if the store
+		// ever follows the backend preference blindly.
+		//
+		// The unshipped locale is DERIVED from the generated manifest rather than
+		// named, because the shipped set moves while a branch is open: vi shipped
+		// with #3163 and the catalogue waves for es (#3164) and hi (#3166) are
+		// still in flight. A fixed name would turn this test red the day one of
+		// them lands and invite someone to flip it to the shipped language,
+		// deleting the assertion it exists to make. Measured on this tree, the
+		// shipped set is en/fr/ru/vi/ur/zh-CN, so the pick is es.
+		const unshipped = RESOLVED_LOCALES.find(
+			locale => locale !== "en" && !Object.values(BUNDLED_OWNED).some(bundle => locale in bundle),
+		);
+		expect(unshipped).toBeDefined();
+		expect(messageRuntime.uiLocaleFor("fr")).toBe("fr");
 		expect(messageRuntime.uiLocaleFor("ur")).toBe("ur");
+		expect(messageRuntime.uiLocaleFor(unshipped!)).toBe("en");
 		const { result, unmount } = renderHook(() => useLocaleSnapshot());
+		// No config frame is applied in this fixture, so the snapshot is the boot
+		// state and says nothing about either preference.
+		expect(result.current.backendLocale).toBeNull();
 		expect(result.current.uiLocale).toBe("en");
 		expect(result.current.direction).toBe("ltr");
 		unmount();
