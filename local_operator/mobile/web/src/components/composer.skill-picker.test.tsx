@@ -16,7 +16,10 @@
 //    draft clears;
 //  - a fresh send asks for expansion (`expand_skills`) only when it carries `$`;
 //  - the tray is CAPPED IN COLUMN UNITS, dismisses on an outside tap, a blur or
-//    Escape, stays shut on a restored draft, and opens mid-composition;
+//    Escape, stays shut on a restored draft, opens mid-composition, and yields
+//    two rows only for a BLOCKING question (not an ask's dock mirror);
+//  - the rows' keyboard route is ArrowDown/ArrowUp from the field (sequential
+//    focus cannot reach them), with Enter/Space native and Escape back out;
 //  - a catalogue name the `$` grammar cannot express is never offered.
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { useState } from "react";
@@ -24,7 +27,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { Composer, isSlashDraft } from "./composer";
 import { HttpError } from "../api";
 import type { CommandReceipt } from "../api";
-import type { SessionProjection, SkillEntry } from "../types";
+import type { PendingAsk, SessionProjection, SkillEntry } from "../types";
 
 // Sorted by name, as `GET /api/skills` answers: the composer never re-sorts.
 // `ux spaced` is the case the mention grammar cannot express (UX review U3):
@@ -86,7 +89,10 @@ vi.mock("../store", async (importOriginal) => {
 	};
 });
 
-function projection(pending: SessionProjection["pending"] = null): SessionProjection {
+function projection(
+	pending: SessionProjection["pending"] = null,
+	asks?: SessionProjection["asks"],
+): SessionProjection {
 	return {
 		session_id: "s1",
 		pid: 1,
@@ -109,6 +115,7 @@ function projection(pending: SessionProjection["pending"] = null): SessionProjec
 		subagents: [],
 		pending,
 		pending_count: pending === null ? 0 : 1,
+		asks,
 		usage: {},
 		version: 1,
 	} as unknown as SessionProjection;
@@ -117,15 +124,17 @@ function projection(pending: SessionProjection["pending"] = null): SessionProjec
 function TestComposer({
 	pid = "p1",
 	pending = null,
+	asks,
 }: {
 	pid?: string;
 	pending?: SessionProjection["pending"];
+	asks?: SessionProjection["asks"];
 }) {
 	return (
 		<Composer
 			ended={false}
 			pid={pid}
-			projection={projection(pending)}
+			projection={projection(pending, asks)}
 			onOpenModels={() => {}}
 			onReturnToModels={() => {}}
 			onOpenEffort={() => {}}
@@ -135,8 +144,12 @@ function TestComposer({
 	);
 }
 
-function mount(pid = "p1", pending: SessionProjection["pending"] = null) {
-	render(<TestComposer pid={pid} pending={pending} />);
+function mount(
+	pid = "p1",
+	pending: SessionProjection["pending"] = null,
+	asks?: SessionProjection["asks"],
+) {
+	render(<TestComposer pid={pid} pending={pending} asks={asks} />);
 	return screen.getByPlaceholderText("Ask anything…") as HTMLTextAreaElement;
 }
 
@@ -171,6 +184,28 @@ const ASK: SessionProjection["pending"] = {
 	secret: false,
 	question_index: 0,
 	question_total: 1,
+};
+
+/** The queued ask whose `kind: "ask"` pending above is the dock's mirror —
+    what a runtime that publishes `asks` sends (m8/U8). */
+const QUEUED: PendingAsk = {
+	ask_id: "ask-1",
+	created_at: 1,
+	expires_at: 1_800_000_000,
+	timeout_s: 900,
+	urgent: false,
+	status: "open",
+	delivered: false,
+	questions: [
+		{
+			id: "q1",
+			question: "Which database should the migration target?",
+			options: [{ label: "sqlite", description: "" }],
+			multi: false,
+			secret: false,
+			persist: false,
+		},
+	],
 };
 
 afterEach(() => {
@@ -394,6 +429,20 @@ describe("the skill tray", () => {
 		expect(within(tray() as HTMLElement).getAllByRole("button")).toHaveLength(3);
 	});
 
+	it("keeps the 45 % cap for an ask's dock MIRROR — no card, no shrink (m8/U8)", async () => {
+		/* A runtime that publishes `asks` mirrors its queued ask into `pending`.
+		   The mirror draws the one-line dock, not a card, so it must not shrink
+		   the tray. `blockingPending` is the repo's one derivation of "a card is
+		   on screen" (lib/asks.ts); the raw `pending` would take the cap and
+		   leave an empty slot for a card that is not there. */
+		const field = mount("p1", ASK, [QUEUED]);
+		type(field, "$", 1);
+		await waitFor(() => expect(tray()).toBeTruthy());
+		expect((tray() as HTMLElement).style.maxHeight).toBe(
+			"calc(var(--lo-vvh, 100dvh) * 0.45)",
+		);
+	});
+
 	it("opens mid-composition — Android composes every Latin word (M1)", async () => {
 		const field = mount();
 		/* Gboard reports a composition for `$res` as it is typed. The dropped guard
@@ -488,23 +537,98 @@ describe("the skill tray", () => {
 		await waitFor(() => expect(tray()).toBeTruthy());
 	});
 
-	it("stays open when focus moves into a row, and the row still picks (U7)", async () => {
+	/* The keyboard's route into the rows (U7/M3). The old test handed
+	   `fireEvent.blur` a `relatedTarget` the browser never supplies from that
+	   key, so it pinned the handler and not the route: DOM order puts the tray
+	   before the card's attach/mic controls, and neither Tab nor Shift+Tab can
+	   reach a row. These drive the keys a real keyboard sends, in the order it
+	   sends them, and fail if the arrow handler is removed. */
+	it("ArrowDown enters the list at the first row, and ArrowDown/ArrowUp walk it (U7)", async () => {
 		const field = mount();
-		type(field, "$res", 4);
+		field.focus();
+		type(field, "$", 1);
 		await waitFor(() => expect(tray()).toBeTruthy());
-		const row = within(tray() as HTMLElement).getByText("$research").closest("button") as HTMLButtonElement;
+		const rows = within(tray() as HTMLElement).getAllByRole("button") as HTMLButtonElement[];
+		expect(rows).toHaveLength(3);
 
-		/* Shift+Tab from the field lands on the last row. The blur that precedes
-		   it used to remove the target before the browser could focus it, so
-		   focus fell through to the attach control and the row's keyboard path
-		   was advertised but unreachable. */
-		fireEvent.blur(field, { relatedTarget: row });
-		await Promise.resolve();
+		/* `dispatchEvent` returns false exactly when `preventDefault` ran — the
+		   caret must not move while the list takes the key. */
+		expect(fireEvent.keyDown(field, { key: "ArrowDown" })).toBe(false);
+		await waitFor(() => expect(document.activeElement).toBe(rows[0]));
+		/* Focus moved INTO the list, which is not a dismissal (the blur guard). */
 		expect(tray()).toBeTruthy();
 
-		/* A keyboard activation (no pointer detail) is the row's third path. */
-		fireEvent.click(row, { detail: 0 });
-		await waitFor(() => expect(field.value).toBe("$research "));
+		fireEvent.keyDown(rows[0], { key: "ArrowDown" });
+		await waitFor(() => expect(document.activeElement).toBe(rows[1]));
+		fireEvent.keyDown(rows[1], { key: "ArrowUp" });
+		await waitFor(() => expect(document.activeElement).toBe(rows[0]));
+
+		/* A focused button's Enter/Space is its NATIVE activation; the click it
+		   produces has `detail === 0`, which is the row's keyboard path. */
+		fireEvent.click(rows[0], { detail: 0 });
+		await waitFor(() => expect(field.value).toBe("$pathfinder "));
+		expect(tray()).toBeNull();
+	});
+
+	it("ArrowUp enters at the last row, and Escape returns to the field (U7)", async () => {
+		const field = mount();
+		field.focus();
+		type(field, "$", 1);
+		await waitFor(() => expect(tray()).toBeTruthy());
+		const rows = within(tray() as HTMLElement).getAllByRole("button") as HTMLButtonElement[];
+
+		fireEvent.keyDown(field, { key: "ArrowUp" });
+		await waitFor(() => expect(document.activeElement).toBe(rows[2]));
+		expect(tray()).toBeTruthy();
+
+		/* The field's own handler cannot see a key pressed on a row, so the list
+		   would otherwise have no keyboard exit once focus is inside it. */
+		fireEvent.keyDown(rows[2], { key: "Escape" });
+		await waitFor(() => expect(tray()).toBeNull());
+		expect(document.activeElement).toBe(field);
+		expect(field.value).toBe("$");
+	});
+
+	it("closes when focus leaves a row for a control outside the tray (U7)", async () => {
+		const field = mount();
+		field.focus();
+		type(field, "$", 1);
+		await waitFor(() => expect(tray()).toBeTruthy());
+		const row = within(tray() as HTMLElement).getAllByRole("button")[0] as HTMLButtonElement;
+
+		fireEvent.keyDown(field, { key: "ArrowDown" });
+		await waitFor(() => expect(document.activeElement).toBe(row));
+
+		/* Tab out of the list is a real focus move to the card's next control;
+		   happy-dom does not synthesise the Tab, so the move itself is made. */
+		(screen.getByLabelText("attach image") as HTMLButtonElement).focus();
+		await waitFor(() => expect(tray()).toBeNull());
+	});
+
+	it("does not take the arrows when the tray is closed or an IME is composing (M3)", async () => {
+		const field = mount();
+		field.focus();
+		type(field, "$res", 4);
+		await waitFor(() => expect(tray()).toBeTruthy());
+		fireEvent.keyDown(field, { key: "Escape" });
+		await waitFor(() => expect(tray()).toBeNull());
+
+		/* A closed tray leaves the arrows to the caret. */
+		expect(fireEvent.keyDown(field, { key: "ArrowDown" })).toBe(true);
+		expect(document.activeElement).toBe(field);
+
+		/* An IME owns the arrows while it composes — they pick candidates. */
+		type(field, "$", 1);
+		await waitFor(() => expect(tray()).toBeTruthy());
+		fireEvent.compositionStart(field);
+		expect(fireEvent.keyDown(field, { key: "ArrowDown", isComposing: true })).toBe(true);
+		expect(document.activeElement).toBe(field);
+		expect(tray()).toBeTruthy();
+
+		/* A modified arrow is a text gesture (selection, word/paragraph move),
+		   not list navigation. */
+		expect(fireEvent.keyDown(field, { key: "ArrowDown", shiftKey: true })).toBe(true);
+		expect(document.activeElement).toBe(field);
 	});
 
 	it("closes once focus leaves the tray for something outside it (U7)", async () => {
@@ -514,24 +638,6 @@ describe("the skill tray", () => {
 
 		fireEvent.focusIn(document.body);
 		await waitFor(() => expect(tray()).toBeNull());
-	});
-
-	it("Escape from a focused row closes the list and returns to the field (U7)", async () => {
-		const field = mount();
-		type(field, "$res", 4);
-		await waitFor(() => expect(tray()).toBeTruthy());
-		const row = within(tray() as HTMLElement).getByText("$research").closest("button") as HTMLButtonElement;
-
-		fireEvent.blur(field, { relatedTarget: row });
-		await Promise.resolve();
-		expect(tray()).toBeTruthy();
-
-		/* The field's own handler cannot see a key pressed on a row, so the list
-		   would otherwise have no keyboard exit once focus is inside it. */
-		fireEvent.keyDown(row, { key: "Escape" });
-		await waitFor(() => expect(tray()).toBeNull());
-		expect(document.activeElement).toBe(field);
-		expect(field.value).toBe("$res");
 	});
 
 	it("a restored draft stays closed until the user edits it (U2)", async () => {

@@ -12,10 +12,12 @@
  * the compatibility click never reaches the row), and the pick itself fires on
  * the pointer RELEASE so a drag that scrolls the list cannot insert a name. The
  * component installs no key handler at all — hardware Enter still sends the
- * message, exactly as it does with the tray closed — and the rows' own
- * activation path is a browser keyboard gesture, so a `Tab` into the list is
- * allowed to land there (UX round 2 U7: the field's blur no longer closes the
- * tray when focus is on its way into it).
+ * message, exactly as it does with the tray closed, and a row's own activation
+ * path is a real button's native Enter/Space. The KEYBOARD's route into the
+ * rows is the composer's (ArrowDown/ArrowUp from the field, which focus a row;
+ * the same keys then walk the list): sequential focus cannot supply it, because
+ * the tray precedes the composer card in DOM order and the field's neighbours
+ * are the card's own attach/mic controls (UX round 3 U7, agent review M3).
  *
  * PLACEMENT AND RHYTHM. `docs/design/mobile-relay-guidelines.md` puts
  * everything stacked between the transcript and the composer inside the one

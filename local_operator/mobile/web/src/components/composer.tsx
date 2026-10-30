@@ -9,6 +9,7 @@
  * command) and a stop button appears beside it.
  */
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import { useFootFit } from "../lib/use-foot-fit";
 import { getCommands, getSkills, HttpError, sendCommand, transcribeAudio } from "../api";
 import {
@@ -40,6 +41,7 @@ import { WorkingDirectoryChip } from "./directory-sheet";
 import { SkillTray } from "./skill-tray";
 import { cn } from "../lib/cn";
 import { isolate, textDirection } from "../lib/bidi";
+import { blockingPending } from "../lib/asks";
 import {
 	isLeadingSkillToken,
 	skillMatches,
@@ -727,6 +729,9 @@ export function Composer({
 	const [dragOver, setDragOver] = useState(false);
 	const textareaRef = useRef<HTMLTextAreaElement>(null);
 	const fileInputRef = useRef<HTMLInputElement>(null);
+	/* The composer's own wrapper, which holds the tray AND the card: the arrow
+	   keys are routed here so the tray stays a pure list (see `trayRows`). */
+	const trayRootRef = useRef<HTMLDivElement>(null);
 
 	/* THE MOVE'S LOCAL BRIDGE (see ``directory-sheet.tsx``). The directory route
 	   answers only once the successor runtime is ready, and the successor's
@@ -950,6 +955,14 @@ export function Composer({
 		: [];
 	const skillTrayOpen = !disabled && skillRows.length > 0;
 
+	/** The tray's row buttons, in DOM order — the destination of the arrow
+	    keys. A query rather than row state: the tray owns which rows exist, and
+	    a pick unmounts the list, so there is no stable index to hold. */
+	const trayRows = () =>
+		Array.from(
+			trayRootRef.current?.querySelectorAll<HTMLButtonElement>("[data-skill-tray] button") ?? [],
+		);
+
 	/** Close the tray, recording the parse it was closed at, so the selection
 	    report the SAME gesture also produces is not mistaken for a new one. */
 	const dismissSkillTray = () => {
@@ -993,12 +1006,16 @@ export function Composer({
 		/* An Escape pressed while a ROW has focus closes the list too, and puts
 		   the caret back where it came from: the field's own handler cannot see
 		   the key, and a list that the keyboard can enter but not leave would be
-		   a trap (U7). `preventDefault` keeps the browser's own Escape (stop the
-		   page load, close a native popup) from racing a gesture the app is
-		   already handling. */
+		   a trap (U7). The listener is scoped to the tray's own rows (agent
+		   review m9): an Escape aimed at anything else belongs to that thing,
+		   not to a list the user is not in. `preventDefault` keeps the browser's
+		   own Escape (stop the page load, close a native popup) from racing a
+		   gesture the app is already handling. */
 		const onKeyDown = (event: KeyboardEvent) => {
 			if (event.key !== "Escape") return;
-			if (event.target === textareaRef.current) return;
+			const target = event.target;
+			if (!(target instanceof Element)) return;
+			if (!target.closest("[data-skill-tray]")) return;
 			event.preventDefault();
 			dismissSkillTray();
 			textareaRef.current?.focus();
@@ -1604,13 +1621,38 @@ export function Composer({
 		setCaretTick((tick) => tick + 1);
 	};
 
+	/* Arrow keys BETWEEN the rows (UX round 3 U7, agent review M3), handled at
+	   the composer so `SkillTray` stays a pure list. A row is a real button:
+	   Enter and Space are its NATIVE activation and arrive in `onClick` with
+	   `detail === 0`, so no key is duplicated here. ArrowUp at the first row
+	   goes back to the field — the list must not be a keyboard dead end. */
+	const onTrayKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+		if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+		if (event.nativeEvent.isComposing) return;
+		/* Only a BARE arrow: with Shift it extends a selection, and with
+		   Alt/Ctrl/Meta it moves by word or paragraph — gestures the field (or
+		   the row) still owns. */
+		if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+		const target = event.target;
+		if (!(target instanceof Element)) return;
+		const row = target.closest("[data-skill-tray] button");
+		if (!row) return;
+		const rows = trayRows();
+		const at = rows.indexOf(row as HTMLButtonElement);
+		if (at < 0) return;
+		event.preventDefault();
+		const next = event.key === "ArrowDown" ? rows[at + 1] : rows[at - 1];
+		if (next) next.focus();
+		else if (event.key === "ArrowUp") textareaRef.current?.focus();
+	};
+
 	/* `display: contents` is load-bearing, not decoration: the tray has to be a
 	   SIBLING of the composer card (a picker above the field) while this
 	   component stays one element in its parent's flex column, and re-indenting
 	   the whole card behind a fragment would bury every future diff. The wrapper
 	   itself paints nothing and has no layout box. */
 	return (
-		<div className="contents">
+		<div className="contents" ref={trayRootRef} onKeyDown={onTrayKeyDown}>
 			{/* The `$skill` list, in the above-composer region with the slot's own
 			    numbers (see skill-tray.tsx for why it is not inside the slot's
 			    scroller). Rendered by the composer because the draft, the caret and
@@ -1619,8 +1661,11 @@ export function Composer({
 				<SkillTray
 					rows={skillRows}
 					onPick={onSkillPick}
-					/* A waiting question outranks the list (design D5). */
-					questionPending={projection.pending != null}
+					/* A waiting question outranks the list (design D5) — the
+					   BLOCKING one, not the raw `pending`: on a runtime that publishes
+					   `asks`, a `kind: "ask"` pending is the dock's one-line mirror and
+					   draws no card, so it must not shrink the tray (m8/U8). */
+					questionPending={blockingPending(projection.pending, projection.asks) != null}
 				/>
 			) : null}
 			<div className={COMPOSER_SHELL}>
@@ -1864,14 +1909,17 @@ export function Composer({
 							setCaret(e.currentTarget.selectionStart);
 						}}
 						onBlur={(e) => {
-							/* Focus moving INTO the list is not a dismissal (UX round 2
-							   U7). The rows are buttons with a keyboard path, and closing
-							   on the way there removed the target before the browser could
-							   focus it — Shift+Tab landed on the attach control instead,
-							   so the path was advertised and unreachable. React's `onBlur`
-							   is the bubbling `focusout`, so `relatedTarget` is the control
-							   about to receive focus. Anything else — the keyboard going
-							   away, another control, the page — still closes it (U1). */
+							/* Focus moving INTO the list is not a dismissal (U7). The
+							   keyboard's route there is the arrow keys just above, which
+							   call `row.focus()`: that focus move blurs this field with the
+							   row as `relatedTarget`, and closing here would unmount the
+							   target before the browser could focus it. Sequential focus
+							   cannot enter the list at all — the tray precedes the card's
+							   attach/mic in DOM order — which is why the arrow route exists
+							   (agent review M3). React's `onBlur` is the bubbling
+							   `focusout`, so `relatedTarget` is the control about to
+							   receive focus. Anything else — the keyboard going away,
+							   another control, the page — still closes it (U1). */
 							const next = e.relatedTarget;
 							if (next instanceof Element && next.closest("[data-skill-tray]")) return;
 							dismissSkillTray();
@@ -1905,6 +1953,30 @@ export function Composer({
 							if (e.key === "Escape" && skillTrayOpen) {
 								dismissSkillTray();
 								return;
+							}
+							/* THE KEYBOARD'S ROUTE INTO THE LIST (U7/M3). DOM order puts
+							   the tray before the card's attach/mic controls, so neither
+							   Tab nor Shift+Tab can reach a row — the field's blur closes
+							   the tray on the way out. ArrowDown enters at the first row
+							   and ArrowUp at the last, as a combobox does; the wrapper's
+							   handler then walks the rows. `preventDefault` keeps the
+							   caret where it is, and composition owns every key while an
+							   IME is composing (the arrows pick candidates there). */
+							if (
+								(e.key === "ArrowDown" || e.key === "ArrowUp") &&
+								skillTrayOpen &&
+								!e.nativeEvent.isComposing &&
+								!e.altKey &&
+								!e.ctrlKey &&
+								!e.metaKey &&
+								!e.shiftKey
+							) {
+								const rows = trayRows();
+								if (rows.length > 0) {
+									e.preventDefault();
+									(e.key === "ArrowDown" ? rows[0] : rows[rows.length - 1]).focus();
+									return;
+								}
 							}
 							if (e.key === "Enter" && !e.shiftKey) {
 								e.preventDefault();
