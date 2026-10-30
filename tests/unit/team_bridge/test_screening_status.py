@@ -103,10 +103,32 @@ def _receipt(
 
 
 def _add_failure_class(root: Path) -> None:
-    """The sibling change's nullable column, added the way a migration would."""
+    """Ensure the nullable ``failure_class`` column exists.
+
+    Conditional because the schema now creates it on a fresh store (PR #3194),
+    while an upgraded store gains it through the additive ALTER this mirrors.
+    """
 
     with sqlite3.connect(state_db_path(root)) as conn:
-        conn.execute("ALTER TABLE screening_holds ADD COLUMN failure_class TEXT")
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(screening_holds)")}
+        if "failure_class" not in columns:
+            conn.execute("ALTER TABLE screening_holds ADD COLUMN failure_class TEXT")
+
+
+def _legacy_holds_table(root: Path) -> None:
+    """Rebuild ``screening_holds`` in its shape from BEFORE ``failure_class``.
+
+    A fresh store now carries the column, so a store that predates it has to
+    be built explicitly to keep the legacy-reader case covered.
+    """
+
+    with sqlite3.connect(state_db_path(root)) as conn:
+        conn.execute("DROP TABLE screening_holds")
+        conn.execute(
+            "CREATE TABLE screening_holds (owner_key TEXT NOT NULL, message_id TEXT NOT NULL, "
+            "hold_code TEXT NOT NULL, retry_at REAL, created_at REAL NOT NULL, "
+            "PRIMARY KEY (owner_key, message_id))"
+        )
 
 
 def test_hold_key_helper_parses_composite_and_passes_bare_through() -> None:
@@ -233,15 +255,19 @@ def test_rejects_aggregate_by_category_within_24h_only(tmp_path) -> None:
 
 def test_store_without_failure_class_column_works(tmp_path) -> None:
     store, owner = _setup(tmp_path)
-    with sqlite3.connect(state_db_path(tmp_path)) as conn:
-        columns = {row[1] for row in conn.execute("PRAGMA table_info(screening_holds)")}
-    assert "failure_class" not in columns
-    store.persist_hold(owner, _composite("bcmsg_a1"), "provider_error")
+    _legacy_holds_table(tmp_path)
+    # Seeded raw: a store writer would add the column, and this case is the
+    # reader facing a table that has never had one.
+    _raw_hold(tmp_path, _composite("bcmsg_a1"), "provider_error", created_at=time.time())
 
     status = store.screening_status_readonly(owner)
     assert status is not None
     assert status["held"]["count"] == 1
     assert status["held"]["dominant_failure_class"] is None
+    # The read-only reader never migrates: the table is still the legacy shape.
+    with sqlite3.connect(state_db_path(tmp_path)) as conn:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(screening_holds)")}
+    assert "failure_class" not in columns
 
 
 def test_dominant_failure_class_read_when_column_exists(tmp_path) -> None:

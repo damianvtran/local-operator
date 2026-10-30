@@ -31,20 +31,28 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import inspect
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable, Sequence
+from typing import Any, AsyncIterator, Callable, Mapping, Sequence
 
+from local_operator.team_bridge.store import (
+    SCREENING_FAILURE_CLASSES as _STORE_FAILURE_CLASSES,
+)
 from local_operator.team_bridge.store import Store, StoreRefused
 from local_operator.team_bridge.types import OwnerSnapshot
 
 __all__ = [
     "DefaultSelection",
+    "SCREENING_FAILURE_CLASSES",
+    "ScreenChainRunner",
     "ScreenModelRunner",
     "ScreeningWireGuard",
     "make_screening_runner",
     "resolve_default_selection",
+    "resolve_screening_chain",
+    "screening_failure_class",
 ]
 
 #: Output ceiling for one screening reply: the frozen grammar is two short
@@ -226,6 +234,241 @@ def resolve_default_selection(config_dir: Path) -> DefaultSelection | None:
         return None
 
 
+def _retry_values(config_dir: Path, settings: Any) -> Any:
+    """The harness settings whose ``retry`` block governs the screening chain.
+
+    WHY THE DISK READ: the production connector calls the screening cycle with
+    ``settings=None`` (``connector/__main__.py`` hands ``run_forever`` none), so
+    a chain read only from the argument would be empty live and screening
+    would stay single-shot — the exact outage this exists to end. A caller
+    that DOES pass a mapping carrying ``retry`` (tests, an embedding host) is
+    authoritative; otherwise the operator's config on disk is read fresh, the
+    same never-writing reader the connector's own fence uses.
+    """
+
+    if isinstance(settings, Mapping) and "retry" in settings:
+        return settings
+    try:
+        from local_operator.config import read_config_values
+
+        return read_config_values(config_dir) or {}
+    except Exception:  # noqa: BLE001 — an unreadable config means "no chain"
+        return {}
+
+
+def resolve_screening_chain(config_dir: Path, settings: Any = None) -> list[DefaultSelection]:
+    """The ordered screening hops: the configured default, then its fallbacks.
+
+    WHY THIS EXISTS: a screening request is ``isolated=True`` and the failover
+    layer turns retry OFF for isolated requests (``providers/failover.py``,
+    the ``if request.isolated`` arm of the stream), so the session-level
+    fallback chain never runs for screening. One flaky default then parked
+    every inbound message behind the breaker while the operator's configured
+    ``retry.fallbackChains`` sat unused. The chain is walked HERE instead,
+    one isolated attempt per hop, leaving failover's decorative-errand
+    semantics untouched for every other isolated caller.
+
+    Element 0 is always :func:`resolve_default_selection` (empty list when
+    there is no usable default). Further hops come from the SAME chain
+    resolution failover uses (``resolve_chain`` + ``expand_fallback_targets``)
+    and only when ``retry.enabled`` and ``retry.modelFallback`` both hold.
+    CONSTRAINTS: each hop approves ONLY its own resolved (provider, model)
+    tuple — approval never leaks across hops, so a foreign provider serving
+    another hop's model id is still refused; a hop whose spec cannot be built
+    is skipped; duplicates (by tuple) are dropped keeping first order. A
+    target's per-entry ``effort`` is not carried: screening is a fixed,
+    bounded two-line grammar and builds its spec exactly as the default does.
+    """
+
+    primary = resolve_default_selection(config_dir)
+    if primary is None:
+        return []
+    hops = [primary]
+    try:
+        from local_operator.model.configure import build_model_spec
+        from local_operator.providers.failover import (
+            RetrySettings,
+            expand_fallback_targets,
+            parse_selector,
+            resolve_chain,
+        )
+
+        retry = RetrySettings.from_settings(_retry_values(config_dir, settings))
+        if not (retry.enabled and retry.model_fallback):
+            return hops
+        primary_selector = f"{primary.provider}/{primary.model_id}"
+        chain = resolve_chain(primary_selector, retry.fallback_chains)
+        targets = expand_fallback_targets(primary_selector, chain) if chain else []
+    except Exception:  # noqa: BLE001 — no readable chain degrades to the default alone
+        return hops
+    seen = {(primary.provider, primary.model_id)}
+    for target in targets:
+        provider, model_id = parse_selector(target.selector)
+        try:
+            spec = build_model_spec(provider, model_id)
+        except Exception:  # noqa: BLE001 — an unbuildable hop is skipped, not fatal
+            continue
+        resolved = str(getattr(spec, "model_id", "") or "")
+        if not provider or not resolved or (provider, resolved) in seen:
+            continue
+        seen.add((provider, resolved))
+        hops.append(
+            DefaultSelection(
+                provider=provider,
+                model_id=resolved,
+                spec=spec,
+                approved_identities=frozenset({resolved}),
+            )
+        )
+    return hops
+
+
+#: The CLOSED vocabulary of ``screening_holds.failure_class`` — owned by the
+#: store, which clamps every write to it (anything else becomes ``other``).
+SCREENING_FAILURE_CLASSES = _STORE_FAILURE_CLASSES
+
+
+#: HTTP statuses that mean "this route is unavailable right now", which no
+#: submission can produce: gateway/overload responses. 500 is deliberately
+#: absent — providers report an output-side content filter as a 5xx, and a
+#: body crafted to trip it must not buy a different screener (S-1).
+_ADVANCE_STATUSES = frozenset({502, 503, 504, 529})
+#: Rate limit / out of quota. Floodable in principle, but bounded by the
+#: per-account HTTP budget and accepted by the operator (PR #3194 decisions).
+_QUOTA_STATUSES = frozenset({429})
+#: The provider rejected OUR credential, never the content. 401 ONLY: a 403 is
+#: how OpenRouter reports moderation flags, guardrail blocks,
+#: ``content_policy_violation`` and ``refusal`` (its documented error codes),
+#: and failover's ``_classify_fields`` labels every marker-less 403
+#: ``kind="auth"`` — so neither the status nor the kind can separate a bad
+#: credential from a content verdict. A 403 HOLDS (PR #3194 review M2 / S-5).
+_AUTH_STATUSES = frozenset({401})
+#: Content-verdict wording a provider can relay on an otherwise-advancing
+#: gateway status — Alibaba's "Output data may contain inappropriate content"
+#: arrives as a relayed 502 (``failover.py`` ``is_input_refusal`` docstring).
+#: Matched case-insensitively on the RAW message. ONE-WAY by construction: it
+#: can only turn an advance into a hold, never the reverse, so a provider
+#: phrasing an outage this way costs a held message, not a weaker screener.
+_CONTENT_VERDICT_MARKERS = (
+    "inappropriate content",
+    "moderation",
+    "flagged",
+    "content_policy",
+    "content policy",
+    "guardrail",
+)
+
+#: Typed flag the guard sets on a scrubbed wire failure. ``True`` only when
+#: the RAW failure was on the allow-list below; the walk reads nothing else.
+_ADVANCE_ATTR = "tb_screen_advance"
+
+
+def _sender_cannot_cause(failure: BaseException) -> bool:
+    """Whether the next hop may screen after THIS raw failure (S-1/S-2).
+
+    WHY AN ALLOW-LIST: the threat is a sender who controls the body and
+    attachments. Any failure their bytes can provoke — a content-filter 400,
+    a 413 / bad-image 400, an output-filter 5xx, a length or refusal stop —
+    must HOLD, because falling over would let crafted content buy a weaker
+    screener, and the first provider refusing the input is itself evidence.
+    Only failures of the ROUTE advance: our credential rejected (401, or an
+    OAuth refresh that failed — never 403, see ``_AUTH_STATUSES``), quota
+    (429), a timeout, a gateway/overload status (502/503/504/529) whose raw
+    text names no content verdict, or a transport error our own client raised
+    before the body was sent.
+
+    MUST be evaluated on the RAW exception, before ``_scrub_wire_failure``
+    erases everything but typed fields; it reads types, ``status``, typed
+    flags and, one-way and hold-only, the content-verdict markers on an
+    advancing gateway status; no other prose. The guard's own fail-closed refusals
+    (owner moved, policy stale, budget exhausted, route changed) are built
+    AFTER this point and never carry the flag, so they stop the walk.
+    """
+
+    if isinstance(failure, (asyncio.TimeoutError, TimeoutError)):
+        return True
+    try:
+        import httpx
+
+        if isinstance(failure, httpx.TimeoutException):
+            return True
+        if isinstance(failure, (httpx.ConnectError, httpx.ConnectTimeout)):
+            return True  # raised before any request byte reached the provider
+    except ImportError:  # pragma: no cover - httpx is a hard dependency
+        pass
+    try:
+        from local_operator.providers.auth_store import AuthStoreError
+
+        if isinstance(failure, AuthStoreError):
+            return True  # credential resolution / OAuth refresh failed
+    except ImportError:  # pragma: no cover
+        pass
+    from local_operator.providers.failover import ProviderError
+
+    if not isinstance(failure, ProviderError):
+        return False
+    if getattr(failure, "fail_closed", False) and not getattr(failure, "request_sent", True):
+        return False  # a local refusal before any send: never provider weather
+    status = getattr(failure, "status", None)
+    kind = getattr(failure, "kind", None)
+    if isinstance(status, int) and status:
+        if status in _AUTH_STATUSES or status in _QUOTA_STATUSES:
+            return True
+        if status not in _ADVANCE_STATUSES:
+            return False
+        raw = str(getattr(failure, "message", "") or "").lower()
+        return not any(marker in raw for marker in _CONTENT_VERDICT_MARKERS)
+    # No status: a status-less ``kind`` is classified from PROVIDER TEXT (an
+    # in-band error chunk on a 200 stream), which a crafted body can steer — so
+    # it never advances on its own. Only typed provenance does: a failure OUR
+    # client observed (``transport``, set solely by ``wrap_transport_error``)
+    # that is a timeout or a connect error. (``auth_error`` is NOT read: the
+    # clients set it for 401 AND 403, and a 403 can be a content verdict.)
+    if not getattr(failure, "transport", False):
+        return False
+    if kind == "timeout":
+        return True
+    try:
+        import httpx
+
+        return isinstance(failure.__cause__, httpx.ConnectError)
+    except ImportError:  # pragma: no cover
+        return False
+
+
+def screening_failure_class(failure: BaseException) -> str:
+    """Map a dispatch failure to :data:`SCREENING_FAILURE_CLASSES` (never prose).
+
+    ``chain_exhausted`` wins: the chain runner tags the last failure of a
+    multi-hop walk, and "every configured route failed" is the fact the
+    operator acts on, not the last hop's own kind. ``identity_refused`` is
+    part of the shared vocabulary (PR #3189 reads it) but an unevidenced
+    identity is a ``("", None)`` RETURN, not an exception, so it is held as
+    ``model_identity_unknown`` and never reaches this mapping today.
+    """
+
+    if getattr(failure, "tb_chain_exhausted", False):
+        return "chain_exhausted"
+    if isinstance(failure, _ScreeningStreamRefused):
+        return "stream_refused"
+    if isinstance(failure, (asyncio.TimeoutError, TimeoutError)):
+        return "timeout"
+    from local_operator.providers.failover import ProviderError
+
+    if isinstance(failure, ProviderError):
+        kind = getattr(failure, "kind", None)
+        status = getattr(failure, "status", None)
+        if kind == "auth" or getattr(failure, "auth_error", False):
+            return "auth_unusable"
+        if kind == "quota":
+            return "quota"
+        if kind == "timeout":
+            return "timeout"
+        if kind == "transient" or (isinstance(status, int) and 500 <= status <= 599):
+            return "provider_5xx"
+    return "other"
+
+
 def _running_loop() -> bool:
     """Whether THIS thread already has an event loop running (never nest one)."""
 
@@ -300,6 +543,9 @@ def _scrub_wire_failure(failure: BaseException) -> BaseException:
         )
     scrub.__cause__ = None
     scrub.__context__ = None
+    # The ONE fact the chain walk needs, decided on the raw failure before its
+    # evidence is erased (S-1): a typed boolean, never prose.
+    setattr(scrub, _ADVANCE_ATTR, _sender_cannot_cause(failure))
     return scrub
 
 
@@ -734,6 +980,13 @@ class ScreenModelRunner:
             isolated=True,
             purpose="team_bridge_screen",
             max_tokens=_SCREEN_MAX_TOKENS,
+            # A verdict should be a function of the bytes, not of sampling
+            # noise: identical submissions were measured flipping 2 of 4
+            # verdicts at the model's default temperature. Safe on every hop:
+            # ``providers.clients._sampling_params`` omits the key for a model
+            # whose spec rejects sampling params. top_p is deliberately left
+            # to the vendor default.
+            temperature=0.0,
         )
         stream_fn = self._stream_fn
         if stream_fn is None and self._ensure_fn is not None:
@@ -815,6 +1068,169 @@ class ScreenModelRunner:
         ):
             return "", None
         return "".join(parts), mid
+
+
+class ScreenChainRunner:
+    """Walk the screening hops in order: one isolated attempt per hop.
+
+    WHY: failover disables retry for ``isolated=True`` requests, so the
+    operator's fallback chain never served screening (see
+    :func:`resolve_screening_chain`). This runner is the chain walk, kept in
+    the team-bridge boundary so failover's isolated semantics stay unchanged.
+
+    CONTRACT (same public shape as :class:`ScreenModelRunner`: ``acall``,
+    ``bind_job``, ``aclose`` and a sync ``__call__``):
+
+    * Each hop's runner is built LAZILY through ``factory(hop)`` — production
+      passes ``make_screening_runner(..., selection=hop)`` — so every hop gets
+      a FRESH wire guard and dedicated client: per-send charging, the route
+      check and the hop's own (provider, model) tuple check all still apply.
+    * Advance ONLY on a failure a sender cannot cause (:func:`_sender_cannot_cause`:
+      credential unusable, quota, timeout, 502/503/504/529, a pre-send
+      transport error), or on the unevidenced ``("", None)`` signal (serving
+      identity is request-local provenance, not something a body controls).
+      EVERYTHING ELSE STOPS AND HOLDS (S-1/S-2): any other 4xx (content-filter
+      400, 413), any other 5xx, every :class:`_ScreeningStreamRefused`
+      (refusal, length, tool use, over-cap, missing end/stop, error, aborted,
+      images_unsupported), the guard's own fail-closed refusals, and local
+      defects. A sender-triggerable failure must never buy a weaker screener.
+      A return carrying a model identity STOPS the walk whatever its text: a
+      model HOLD is a verdict, not a failure.
+    * Every hop failing re-raises the LAST exception, tagged
+      ``tb_chain_exhausted`` when more than one hop ran, so the pipeline
+      records exactly ONE breaker failure and ONE ``provider_error`` hold.
+      When no hop raised (all returned ``("", None)``) the signal is returned
+      as-is, which is the single-hop behaviour this replaced.
+    * Cancellation and other ``BaseException`` control flow are never caught.
+    """
+
+    def __init__(
+        self,
+        hops: Sequence[DefaultSelection],
+        factory: Callable[[DefaultSelection], Any],
+    ) -> None:
+        self._hops = list(hops)
+        self._factory = factory
+        self._built: list[Any] = []
+        self._job: AdmissionJob | None = None
+
+    @property
+    def hops(self) -> list[DefaultSelection]:
+        return list(self._hops)
+
+    def bind_job(self, job: AdmissionJob) -> None:
+        """Bind the minted job to every hop built so far and every later one."""
+
+        self._job = job
+        for runner in self._built:
+            bind = getattr(runner, "bind_job", None)
+            if callable(bind):
+                bind(job)
+
+    def __call__(
+        self,
+        prompt: str,
+        *,
+        default_model: str,
+        images: "Sequence[tuple[bytes, str]] | None" = None,
+    ) -> tuple[str, str | None]:
+        # Same sync-facade rule as ScreenModelRunner: never nest a loop.
+        if not self._hops or self._hops[0].default_model != default_model:
+            return "", None
+        if _running_loop():
+            return "", None
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(
+                self.acall(prompt, default_model=default_model, images=images)
+            )
+        finally:
+            loop.close()
+
+    def _build(self, hop: DefaultSelection) -> Any:
+        runner = self._factory(hop)
+        if runner is None:
+            return None
+        self._built.append(runner)
+        if self._job is not None:
+            bind = getattr(runner, "bind_job", None)
+            if callable(bind):
+                bind(self._job)
+        return runner
+
+    async def acall(
+        self,
+        prompt: str,
+        *,
+        default_model: str,
+        images: "Sequence[tuple[bytes, str]] | None" = None,
+    ) -> tuple[str, str | None]:
+        # The pipeline screens under hop 0 (the published default); a chain
+        # built for a different default cannot evidence identity.
+        if not self._hops or self._hops[0].default_model != default_model:
+            return "", None
+        last_failure: BaseException | None = None
+        attempts = 0
+        unevidenced: tuple[str, str | None] = ("", None)
+        for hop in self._hops:
+            runner = self._build(hop)
+            if runner is None:
+                continue
+            attempts += 1
+            try:
+                # Each hop is asked under ITS OWN model id: the hop runner's
+                # identity gate compares against its own selection. Invoked
+                # through the pipeline's own runner contract, so a hop that
+                # is a plain synchronous callable (an injected factory) is
+                # driven exactly as the pipeline drives a bare runner.
+                from local_operator.team_bridge.screening import (
+                    _invoke_runner,
+                    _maybe_await,
+                )
+
+                reply, actual = await _maybe_await(
+                    _invoke_runner(
+                        runner,
+                        prompt,
+                        hop.model_id,
+                        images=list(images) if images is not None else None,
+                    )
+                )
+            except _ScreeningStreamRefused:
+                raise
+            except Exception as failure:  # noqa: BLE001 — classified below; control flow propagates
+                # A wire failure was classified on its RAW form by the guard
+                # before scrubbing; a failure raised outside the guard (the
+                # credential cascade, a local defect) is still raw here.
+                advance = getattr(failure, _ADVANCE_ATTR, None)
+                if advance is None:
+                    advance = _sender_cannot_cause(failure)
+                if not advance:
+                    raise
+                last_failure = failure
+                continue
+            if actual is not None:
+                return reply, actual
+            unevidenced = (reply, actual)
+        if last_failure is None:
+            return unevidenced
+        if attempts > 1:
+            # Typed attribute, not prose: screening_failure_class reads it.
+            setattr(last_failure, "tb_chain_exhausted", True)
+        raise last_failure
+
+    async def aclose(self) -> None:
+        """Close every hop runner that was built (each close is idempotent)."""
+
+        for runner in self._built:
+            close = getattr(runner, "aclose", None)
+            if callable(close):
+                try:
+                    result = close()
+                    if inspect.isawaitable(result):
+                        await result
+                except Exception:  # noqa: BLE001 — teardown, never fatal
+                    pass
 
 
 _GUARDED_CLIENT_CLS: Any = None

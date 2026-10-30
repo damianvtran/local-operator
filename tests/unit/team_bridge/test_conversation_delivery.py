@@ -1441,7 +1441,8 @@ def test_alias_retry_consumes_only_that_hold_not_canonical_or_sibling(tmp_path, 
             (sibling, time.time() + 3600),
         ):
             conn.execute(
-                "INSERT INTO screening_holds VALUES (?,?,?,?,?)",
+                "INSERT INTO screening_holds (owner_key, message_id, hold_code, "
+                "retry_at, created_at) VALUES (?,?,?,?,?)",
                 (key, raw, "screening_hold", deadline, 12),
             )
     loop_mod._RETRY_ATTEMPTS.clear()

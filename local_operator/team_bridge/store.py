@@ -55,6 +55,7 @@ __all__ = [
     "ACK_CONFLICT",
     "CONNECTOR_CLAIM_TOKEN_PREFIX",
     "SCHEMA_VERSION",
+    "SCREENING_FAILURE_CLASSES",
     "Store",
     "StoreRefused",
     "state_db_path",
@@ -332,6 +333,7 @@ CREATE TABLE IF NOT EXISTS screening_holds (
     hold_code TEXT NOT NULL,
     retry_at REAL,
     created_at REAL NOT NULL,
+    failure_class TEXT,
     PRIMARY KEY (owner_key, message_id)
 );
 CREATE TABLE IF NOT EXISTS screening_schedule (
@@ -347,7 +349,8 @@ CREATE TABLE IF NOT EXISTS screening_policy (
     default_model TEXT,
     revision TEXT NOT NULL,
     epoch INTEGER NOT NULL,
-    accepted_at REAL NOT NULL
+    accepted_at REAL NOT NULL,
+    approved_serving TEXT
 );
 CREATE TABLE IF NOT EXISTS screening_breaker (
     account_scope TEXT PRIMARY KEY,
@@ -902,6 +905,55 @@ def _receipt_int(value: Any, default: int) -> int | None:
         return None
 
 
+def policy_serving_models(policy: Mapping[str, Any]) -> frozenset[str]:
+    """The model ids whose verdict the published policy accepts as its own.
+
+    WHY: screening walks the operator's fallback chain (one isolated attempt
+    per hop), so an allow can legitimately be served by a hop other than the
+    published ``default_model``. Every receipt fence used to require
+    ``receipt.model == default_model``, which turned a fallback hop's allow
+    into ``receipt_stale`` / ``stale_proof`` / ``policy_drift`` downstream
+    (PR #3194 review B1/S-3) after the hop had already been billed.
+
+    ``approved_serving`` is the JSON list of ``[provider, model]`` pairs the
+    trusted publisher wrote for the WHOLE chain; it is bound into the
+    admission revision, so a chain edit advances revision and epoch. The
+    fence compares MODEL ids because a receipt records only its model; the
+    provider half was already enforced per hop by that hop's runner (the
+    tuple check), before any receipt could exist.
+
+    FAIL CLOSED, never wider: a legacy row (column absent or NULL) and a
+    damaged value both mean ``{default_model}`` only — exactly the authority
+    every row had before this column existed.
+    """
+
+    default = policy.get("default_model")
+    models = {default} if isinstance(default, str) and default else set()
+    raw = policy.get("approved_serving")
+    if isinstance(raw, str) and raw:
+        try:
+            pairs = json.loads(raw)
+        except ValueError:
+            pairs = None
+        if isinstance(pairs, list) and all(
+            isinstance(pair, list)
+            and len(pair) == 2
+            and all(isinstance(part, str) and part for part in pair)
+            for pair in pairs
+        ):
+            models.update(pair[1] for pair in pairs)
+    return frozenset(models)
+
+
+_POLICY_FIELDS = ("version", "template_sha256", "default_model", "revision", "epoch")
+
+
+def serialize_serving(pairs: "Sequence[tuple[str, str]] | None") -> str | None:
+    """The ONE stored form of ``approved_serving`` (publisher and republish check)."""
+
+    return json.dumps(sorted([str(p), str(m)] for p, m in set(pairs))) if pairs else None
+
+
 def receipt_authority(
     owner: OwnerSnapshot, policy: Mapping[str, Any], receipt: Mapping[str, Any]
 ) -> tuple[dict[str, Any] | None, str | None, str]:
@@ -938,7 +990,7 @@ def receipt_authority(
 
     if (
         policy.get("template_sha256") != receipt.get("template_sha256")
-        or policy.get("default_model") != receipt.get("model")
+        or receipt.get("model") not in policy_serving_models(policy)
         or policy.get("revision") != receipt.get("admission_revision")
     ):
         return None, RECEIPT_STALE, ""
@@ -1294,10 +1346,41 @@ BODY_RESERVATION_STATES = ("pending", "claimed", "completed", "retired")
 #: re-written for the same message keeps the row's FIRST ``created_at`` — the
 #: age the owner sees is how long the message has waited, not how long since
 #: its latest reason. Relies on the table's (owner_key, message_id) key.
+#: The CLOSED vocabulary of ``screening_holds.failure_class`` (read by the
+#: receiver status line, PR #3189). Owned HERE because the store is the boundary
+#: that must guarantee it: every writer clamps through
+#: :func:`_closed_failure_class`, so a future producer cannot widen the column
+#: with free text. ``model_boundary`` re-exports it for its classifier.
+SCREENING_FAILURE_CLASSES = (
+    "auth_unusable",
+    "quota",
+    "timeout",
+    "provider_5xx",
+    "stream_refused",
+    "identity_refused",
+    "chain_exhausted",
+    "other",
+)
+
+
+def _closed_failure_class(value: Any) -> str | None:
+    """``None`` stays ``None`` (no class); anything outside the set is ``other``."""
+
+    if value is None:
+        return None
+    return value if value in SCREENING_FAILURE_CLASSES else "other"
+
+
 _HOLD_UPSERT = (
     "ON CONFLICT(owner_key, message_id) DO UPDATE SET "
     "hold_code = excluded.hold_code, retry_at = excluded.retry_at"
 )
+
+#: The SCREENING-OUTCOME hold upsert: as :data:`_HOLD_UPSERT`, plus the
+#: ``failure_class`` column, so a re-hold for a new reason never keeps the
+#: previous outcome's class (a later ``model_hold`` clears a stale
+#: ``chain_exhausted``). Only the writers that own the column use it.
+_HOLD_UPSERT_CLASSED = _HOLD_UPSERT + ", failure_class = excluded.failure_class"
 
 #: What a replay owes for an admission's card (PR #3063 reviews M5/m11/m15).
 #: ``owed``: the reservation is still ``pending`` and no card was recorded —
@@ -2550,6 +2633,43 @@ class Store:
         if "card_posted_at" not in columns:
             conn.execute("ALTER TABLE body_reservations ADD COLUMN card_posted_at REAL")
 
+    @staticmethod
+    def _ensure_policy_serving_column(conn: sqlite3.Connection) -> None:
+        """Add ``approved_serving`` to a ``screening_policy`` that predates it.
+
+        Same additive, nullable, no-stamp rule as
+        :meth:`_ensure_hold_failure_class_column`: an older binary never names
+        it, and a NULL reads as ``{default_model}`` only
+        (:func:`policy_serving_models`), so a legacy row keeps exactly the
+        authority it had. Not in ``_V3_COLUMNS``: its absence is not damage.
+        """
+
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(screening_policy)")}
+        if "approved_serving" not in columns:
+            conn.execute("ALTER TABLE screening_policy ADD COLUMN approved_serving TEXT")
+
+    @staticmethod
+    def _ensure_hold_failure_class_column(conn: sqlite3.Connection) -> None:
+        """Add ``failure_class`` to a ``screening_holds`` that predates it.
+
+        WHY: a ``provider_error`` hold said nothing about WHICH failure parked
+        the message (auth, quota, 5xx, an exhausted fallback chain), so the
+        receiver status could not tell the operator what to fix. The column
+        holds a closed class from ``model_boundary.SCREENING_FAILURE_CLASSES``
+        — never provider prose. The receiver status (PR #3189) reads it by
+        this exact name, only when present.
+
+        ADDITIVE AND NULLABLE, so no schema stamp moves (the same rule as
+        :meth:`_ensure_card_posted_column`): an older binary sharing this
+        state file never names the column and keeps opening it, and every
+        pre-upgrade row reads NULL — "class unknown". It is NOT in
+        ``_V3_COLUMNS``: a table without it is not damaged.
+        """
+
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(screening_holds)")}
+        if "failure_class" not in columns:
+            conn.execute("ALTER TABLE screening_holds ADD COLUMN failure_class TEXT")
+
     def body_card_status(
         self, owner: OwnerSnapshot, conversation_id: str, message_id: str
     ) -> str | None:
@@ -3028,9 +3148,12 @@ class Store:
             # writer that commits mid-snapshot would otherwise be half-visible).
             conn.execute("BEGIN")
             key = _owner_key(owner)
+            # ``*`` rather than a column list: this read-only connection may
+            # face a store that predates ``approved_serving`` (a reader never
+            # ALTERs), and ``receipt_authority`` reads it with ``.get`` so an
+            # absent column means ``{default_model}`` only.
             policy_row = conn.execute(
-                "SELECT version, template_sha256, default_model, revision, epoch "
-                "FROM screening_policy WHERE owner_key = ?",
+                "SELECT * FROM screening_policy WHERE owner_key = ?",
                 (key,),
             ).fetchone()
             policy = dict(policy_row) if policy_row is not None else None
@@ -3879,8 +4002,14 @@ class Store:
         revision: str,
         expected_epoch: int | None = None,
         create_only: bool = False,
+        approved_serving: "Sequence[tuple[str, str]] | None" = None,
     ) -> int:
         """Publish the current accepted policy; return its durable epoch.
+
+        ``approved_serving`` is the full screening chain's ``(provider,
+        model)`` set (see :func:`policy_serving_models`); stored sorted as
+        JSON, ``None`` stores NULL (= ``{default_model}`` only). It is part
+        of what "unchanged" means, so a chain edit is a real publication.
 
         TRUSTED PUBLISHER entry point (a live configuration source), NOT a
         screening caller: the pipeline never publishes from its caller
@@ -3898,14 +4027,16 @@ class Store:
         bridge-screen-v1/v2 today; the floor row is what a future version bumps).
         """
 
+        serving = serialize_serving(approved_serving)
         with self._connect() as conn:
             self._init(conn)
             self._begin_write(conn)
             self._require_live(conn, owner)
+            self._ensure_policy_serving_column(conn)
             key = _owner_key(owner)
             row = conn.execute(
-                "SELECT version, template_sha256, default_model, revision, epoch "
-                "FROM screening_policy WHERE owner_key = ?",
+                "SELECT version, template_sha256, default_model, revision, epoch, "
+                "approved_serving FROM screening_policy WHERE owner_key = ?",
                 (key,),
             ).fetchone()
             if row is not None and create_only:
@@ -3934,8 +4065,8 @@ class Store:
                 conn.execute(
                     "INSERT INTO screening_policy "
                     "(owner_key, version, template_sha256, default_model, revision, epoch, "
-                    "accepted_at) VALUES (?,?,?,?,?,1,?)",
-                    (key, version, template_sha256, default_model, revision, time.time()),
+                    "accepted_at, approved_serving) VALUES (?,?,?,?,?,1,?,?)",
+                    (key, version, template_sha256, default_model, revision, time.time(), serving),
                 )
                 return 1
             if expected_epoch is not None and int(row["epoch"]) != expected_epoch:
@@ -3948,13 +4079,14 @@ class Store:
                 and row["template_sha256"] == template_sha256
                 and row["default_model"] == default_model
                 and row["revision"] == revision
+                and row["approved_serving"] == serving
             )
             if unchanged:
                 return int(row["epoch"])
             conn.execute(
                 "UPDATE screening_policy SET version = ?, template_sha256 = ?, "
-                "default_model = ?, revision = ?, epoch = ?, accepted_at = ? "
-                "WHERE owner_key = ?",
+                "default_model = ?, revision = ?, epoch = ?, accepted_at = ?, "
+                "approved_serving = ? WHERE owner_key = ?",
                 (
                     version,
                     template_sha256,
@@ -3962,6 +4094,7 @@ class Store:
                     revision,
                     int(row["epoch"]) + 1,
                     time.time(),
+                    serving,
                     key,
                 ),
             )
@@ -3973,12 +4106,19 @@ class Store:
         try:
             with self._connect() as conn:
                 self._init(conn)
+                # ``*``: ``approved_serving`` is absent on a legacy table (only a
+                # publish ALTERs), and the republish check must SEE a damaged one.
                 row = conn.execute(
-                    "SELECT version, template_sha256, default_model, revision, epoch "
-                    "FROM screening_policy WHERE owner_key = ?",
+                    "SELECT * FROM screening_policy WHERE owner_key = ?",
                     (_owner_key(owner),),
                 ).fetchone()
-                return dict(row) if row is not None else None
+                if row is None:
+                    return None
+                policy = {k: row[k] for k in _POLICY_FIELDS}
+                policy["approved_serving"] = (
+                    row["approved_serving"] if "approved_serving" in row.keys() else None
+                )
+                return policy
         except sqlite3.Error:
             return None
 
@@ -4103,23 +4243,27 @@ class Store:
             self._begin_write(conn)
             self._require_live(conn, owner)
             policy = conn.execute(
-                "SELECT template_sha256, default_model, revision, epoch FROM screening_policy "
-                "WHERE owner_key = ?",
+                "SELECT * FROM screening_policy WHERE owner_key = ?",
                 (key,),
             ).fetchone()
             if policy is None:
                 return False
+            # Membership in the published serving set, not equality with the
+            # default: a fallback hop's allow is this policy's own verdict.
+            models = sorted(policy_serving_models(dict(policy)))
+            if not models:
+                return False
             moved = conn.execute(
                 "UPDATE screening_receipts SET policy_epoch = ? WHERE owner_key = ? "
                 "AND message_id = ? AND verdict = 'allow' AND template_sha256 = ? "
-                "AND model = ? AND admission_revision = ? AND creator_generation = ? "
-                "AND policy_epoch < ?",
+                f"AND model IN ({','.join('?' * len(models))}) AND admission_revision = ? "
+                "AND creator_generation = ? AND policy_epoch < ?",
                 (
                     int(policy["epoch"]),
                     key,
                     str(message_id),
                     policy["template_sha256"],
-                    policy["default_model"],
+                    *models,
                     policy["revision"],
                     owner.enrollment_generation,
                     int(policy["epoch"]),
@@ -4213,15 +4357,14 @@ class Store:
             if receipt is None:
                 raise StoreRefused("no_receipt", "no screening receipt for this message")
             policy = conn.execute(
-                "SELECT template_sha256, default_model, revision, epoch FROM screening_policy "
-                "WHERE owner_key = ?",
+                "SELECT * FROM screening_policy WHERE owner_key = ?",
                 (key,),
             ).fetchone()
             if policy is None:
                 raise StoreRefused("no_policy", "no published screening policy")
             if (
                 policy["template_sha256"] != receipt["template_sha256"]
-                or policy["default_model"] != receipt["model"]
+                or receipt["model"] not in policy_serving_models(dict(policy))
                 or policy["revision"] != receipt["admission_revision"]
                 or int(policy["epoch"]) != int(receipt["policy_epoch"])
                 or int(receipt["creator_generation"]) != owner.enrollment_generation
@@ -4498,13 +4641,12 @@ class Store:
             ):
                 return ("proof_drift", "the stored screening proof changed")
             policy = conn.execute(
-                "SELECT template_sha256, default_model, revision, epoch FROM screening_policy "
-                "WHERE owner_key = ?",
+                "SELECT * FROM screening_policy WHERE owner_key = ?",
                 (key,),
             ).fetchone()
             if policy is None or (
                 policy["template_sha256"] != receipt["template_sha256"]
-                or policy["default_model"] != receipt["model"]
+                or receipt["model"] not in policy_serving_models(dict(policy))
                 or policy["revision"] != receipt["admission_revision"]
                 or int(policy["epoch"]) != int(receipt["policy_epoch"])
             ):
@@ -4740,9 +4882,10 @@ class Store:
                 key = _owner_key(owner)
                 if self._live_generation(conn, owner) != owner.enrollment_generation:
                     return None
+                # ``*``: receipt_authority reads ``approved_serving`` (absent on
+                # a legacy row) with ``.get``.
                 policy = conn.execute(
-                    "SELECT version, template_sha256, default_model, revision, epoch "
-                    "FROM screening_policy WHERE owner_key = ?",
+                    "SELECT * FROM screening_policy WHERE owner_key = ?",
                     (key,),
                 ).fetchone()
                 if policy is None:
@@ -4801,8 +4944,12 @@ class Store:
         verify: Any = None,
         admission_revision: str | None = None,
         turn: str | None = None,
+        failure_class: str | None = None,
     ) -> None:
         """Commit ONE logical outcome, fenced on every binding that matters.
+
+        ``failure_class`` rides a HOLD only (the pipeline sets it on the
+        ``provider_error`` path); every other hold writes NULL into it.
 
         Inside ONE write transaction: live-owner/generation (native fence,
         H2 discipline), the attempt belongs to THIS owner AND message AND
@@ -5065,10 +5212,19 @@ class Store:
                 # Upsert, never REPLACE (PR #3063 review m10): a re-drive held
                 # again for a NEW reason must keep the row's ``created_at``,
                 # or the owner-visible hold age resets on every pass.
+                self._ensure_hold_failure_class_column(conn)
                 conn.execute(
-                    "INSERT INTO screening_holds (owner_key, message_id, "
-                    "hold_code, retry_at, created_at) VALUES (?,?,?,?,?) " + _HOLD_UPSERT,
-                    (key, message_id, hold_code, retry_at, time.time()),
+                    "INSERT INTO screening_holds (owner_key, message_id, hold_code, "
+                    "retry_at, created_at, failure_class) VALUES (?,?,?,?,?,?) "
+                    + _HOLD_UPSERT_CLASSED,
+                    (
+                        key,
+                        message_id,
+                        hold_code,
+                        retry_at,
+                        time.time(),
+                        _closed_failure_class(failure_class),
+                    ),
                 )
 
     def screen_schedule(self, owner: OwnerSnapshot) -> dict[str, Any] | None:
@@ -5238,8 +5394,12 @@ class Store:
         *,
         retry_at: float | None = None,
         keep_existing: bool = False,
+        failure_class: str | None = None,
     ) -> None:
         """Durably quarantine a VALID-LIVE-OWNER early refusal (H3-Q8).
+
+        ``failure_class`` is set only by the screening pipeline's
+        ``provider_error`` fallback write; any other caller writes NULL.
 
         Early holds (no usable default, template floor mismatch, budget
         exhaustion) happen before any attempt row exists; their per-item
@@ -5259,21 +5419,25 @@ class Store:
         # code and schedule move IN PLACE. INSERT OR REPLACE deleted and
         # re-inserted the row, so every re-hold reset the visible hold age.
         on_conflict = (
-            "ON CONFLICT(owner_key, message_id) DO NOTHING" if keep_existing else _HOLD_UPSERT
+            "ON CONFLICT(owner_key, message_id) DO NOTHING"
+            if keep_existing
+            else _HOLD_UPSERT_CLASSED
         )
         with self._connect() as conn:
             self._init(conn)
             self._begin_write(conn)
             self._require_live(conn, owner)
+            self._ensure_hold_failure_class_column(conn)
             conn.execute(
                 "INSERT INTO screening_holds (owner_key, message_id, hold_code, "
-                "retry_at, created_at) VALUES (?,?,?,?,?) " + on_conflict,
+                "retry_at, created_at, failure_class) VALUES (?,?,?,?,?,?) " + on_conflict,
                 (
                     _owner_key(owner),
                     _contentless_delivery_key(message_id),
                     hold_code,
                     retry_at,
                     time.time(),
+                    _closed_failure_class(failure_class),
                 ),
             )
 
@@ -5404,10 +5568,15 @@ class Store:
             self._begin_write(conn)
             self._require_live(conn, owner)
             if hold_code:
+                # A re-code to a DIFFERENT reason drops the old failure class:
+                # the class describes the provider failure that parked the
+                # row, and must never be reported against another reason.
+                self._ensure_hold_failure_class_column(conn)
                 updated = conn.execute(
-                    "UPDATE screening_holds SET retry_at = ?, hold_code = ? "
+                    "UPDATE screening_holds SET retry_at = ?, hold_code = ?, "
+                    "failure_class = CASE WHEN hold_code = ? THEN failure_class ELSE NULL END "
                     "WHERE owner_key = ? AND message_id = ?",
-                    (float(retry_at), str(hold_code), *key),
+                    (float(retry_at), str(hold_code), str(hold_code), *key),
                 )
             else:
                 updated = conn.execute(
