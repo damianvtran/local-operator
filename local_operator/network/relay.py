@@ -14713,9 +14713,7 @@ def _unit_config_root() -> Path | None:
     # exists to avoid -- so any line after the last match that names the variable
     # makes the answer unknown, and the docstring's "no marker at all rather than one
     # in a root no supervised relay reads" is what the caller already handles.
-    pattern = re.compile(
-        rf'^Environment="{re.escape(CONFIG_DIR_ENV)}=((?:[^"\\]|\\.)*)"\s*$', re.M
-    )
+    pattern = re.compile(rf'^Environment="{re.escape(CONFIG_DIR_ENV)}=((?:[^"\\]|\\.)*)"\s*$', re.M)
     matched: list[re.Match[str]] = list(pattern.finditer(text))
     if not matched:
         return None
