@@ -10,7 +10,8 @@
 import { useState, type ReactNode } from "react";
 import { cn } from "../lib/cn";
 import { formatElapsed } from "../lib/format";
-import type { TranscriptEntry } from "../types";
+import type { BridgeRowCopy, BridgeRowFacts, TranscriptEntry } from "../types";
+import { Markdown } from "./markdown";
 
 const GLYPH: Record<TranscriptEntry["tool_state"], string> = {
 	composing: "⟳",
@@ -77,6 +78,213 @@ function DiffBlock({ diff }: { diff: string | string[] }) {
     block is dropped and only the diff (+ any output) shows. */
 const DIFF_FIRST_TOOLS = new Set(["write", "edit", "apply_patch", "patch"]);
 
+/**
+ * THE TEAM BRIDGE ROW. One wire name (`bridge`) covers posting to a channel,
+ * a DM, a mailbox send and a dozen reads, and the generic row painted all of
+ * them as `bridge  op=channel_post` with an args dump whose most visible token
+ * was a `bcv_…` conversation id. The facts here are composed server-side by the
+ * shared `harness/rows.py::bridge_row` (the same decision the desktop and TUI
+ * draw, lane c733bb5b44de) and ride `details.bridge_row`; this file only paints
+ * them, so the three surfaces cannot disagree about what a call did.
+ *
+ * The OUTCOME is the part that matters most and is easiest to get wrong: an
+ * `inbox_only` send was accepted into a peer's inbox and is NOT in any
+ * conversation, so it must never read as a success (operator report
+ * 2026-10-28: agents and people both mistook a pair send for a DM). It takes
+ * warning ink, a refusal takes danger ink with its typed code, and the two
+ * "not yet" states stay quiet words.
+ */
+const BRIDGE_TOOL = "bridge";
+
+/* Opaque Team Bridge ids. The headline never prints one: a person reads a
+   channel name, not `bcv_01J…`. The server already composes a label; this is
+   the renderer's own floor for a summary or label that still carries one. */
+const BRIDGE_ID = /\b(?:bcv|bcmsg|acc|ep)_[A-Za-z0-9]+\b/g;
+
+function scrubBridgeIds(text: string): string {
+	return text.replace(BRIDGE_ID, "…").replace(/\s{2,}/g, " ").trim();
+}
+
+/** lucide icons (ISC), inlined the way `ui/chrome-icon.tsx` inlines its
+    glyphs: the SPA ships no icon dependency, and three small icons are not a
+    reason to add one. Paths copied from lucide-react 0.507.0, the version the
+    desktop renders, so the two surfaces draw the same marks. */
+const LUCIDE: Record<"messages-square" | "message-square-off" | "hourglass", string[]> = {
+	"messages-square": [
+		"M14 9a2 2 0 0 1-2 2H6l-4 4V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2z",
+		"M18 9h2a2 2 0 0 1 2 2v11l-4-4h-6a2 2 0 0 1-2-2v-1",
+	],
+	/* Delivery marks, mirroring the desktop row (local-operator-ui #1529):
+	   inbox-only = a message that did not reach a conversation; awaiting
+	   acceptance = waiting on the other side. */
+	"message-square-off": [
+		"M21 15V5a2 2 0 0 0-2-2H9",
+		"m2 2 20 20",
+		"M3.6 3.6c-.4.3-.6.8-.6 1.4v16l4-4h10",
+	],
+	hourglass: [
+		"M5 22h14",
+		"M5 2h14",
+		"M17 22v-4.172a2 2 0 0 0-.586-1.414L12 12l-4.414 4.414A2 2 0 0 0 7 17.828V22",
+		"M7 2v4.172a2 2 0 0 0 .586 1.414L12 12l4.414-4.414A2 2 0 0 0 17 6.172V2",
+	],
+};
+
+function LucideIcon({ name, size = 14 }: { name: keyof typeof LUCIDE; size?: number }) {
+	return (
+		<svg
+			data-icon={name}
+			width={size}
+			height={size}
+			viewBox="0 0 24 24"
+			fill="none"
+			stroke="currentColor"
+			strokeWidth="2"
+			strokeLinecap="round"
+			strokeLinejoin="round"
+			aria-hidden="true"
+			focusable="false"
+			className="pointer-events-none shrink-0"
+		>
+			{LUCIDE[name].map((d) => (
+				<path key={d} d={d} />
+			))}
+		</svg>
+	);
+}
+
+function bridgeFacts(entry: TranscriptEntry): BridgeRowFacts | null {
+	if (entry.tool_name.toLowerCase() !== BRIDGE_TOOL) return null;
+	const facts = entry.details.bridge_row;
+	return facts && typeof facts === "object" ? facts : null;
+}
+
+/**
+ * The bridge row's WORDS come rendered from the daemon (`details.bridge_copy`,
+ * `harness/bridge_copy.py` over `wire.tool_rows.bridge`): the same strings the
+ * TUI card paints, in the daemon's locale. The relay mints no copy of its own
+ * for this row - a second translation of one decision is the drift class the
+ * shared copy exists to remove. Absent copy (an older daemon, or details shed
+ * under frame pressure) paints no chip and no sentence rather than English
+ * guessed here.
+ */
+function bridgeCopy(entry: TranscriptEntry): BridgeRowCopy {
+	const copy = entry.details.bridge_copy;
+	return copy && typeof copy === "object" ? copy : {};
+}
+
+type OutcomeTone = "warning" | "danger" | "muted";
+
+/* Ink per outcome. `inbox_only` is warning, never success: the send was
+   accepted into a peer inbox and appears in NO conversation. */
+const OUTCOME_TONE: Record<NonNullable<BridgeRowFacts["outcome"]>, OutcomeTone> = {
+	inbox_only: "warning",
+	refused: "danger",
+	failed: "danger",
+	unconfirmed: "muted",
+	awaiting_acceptance: "muted",
+};
+
+const OUTCOME_MARK: Partial<Record<NonNullable<BridgeRowFacts["outcome"]>, keyof typeof LUCIDE>> = {
+	inbox_only: "message-square-off",
+	awaiting_acceptance: "hourglass",
+};
+
+/** The chip's word, ink and mark, or null for a plain landed call (no chip:
+    an ordinary post is the row's ✓ glyph, not a second success badge). */
+function bridgeOutcome(
+	facts: BridgeRowFacts | null,
+	copy: BridgeRowCopy,
+): { text: string; tone: OutcomeTone; mark?: keyof typeof LUCIDE } | null {
+	const outcome = facts?.outcome;
+	if (!outcome || !Object.hasOwn(OUTCOME_TONE, outcome)) return null;
+	const text = copy.outcome ? scrubBridgeIds(copy.outcome) : "";
+	if (!text) return null;
+	return { text, tone: OUTCOME_TONE[outcome], mark: OUTCOME_MARK[outcome] };
+}
+
+/** The row's summary, id-free, without the outcome tail the chip shows.
+
+    The daemon's one-line summary (`bridge_row_line`) ends with ` · <outcome>`
+    because the TUI-shaped single cell has no status cap. The phone row DOES
+    (the chip), so leaving the tail would print the caveat twice - and the
+    copy in the summary is the one that truncates away first at 320px. */
+function bridgeSummary(summary: string, outcome: { text: string } | null): string {
+	const text = scrubBridgeIds(summary);
+	if (!outcome) return text;
+	const tail = ` · ${outcome.text}`;
+	return text.endsWith(tail) ? text.slice(0, -tail.length) : text;
+}
+
+const OUTCOME_INK: Record<OutcomeTone, string> = {
+	warning: "text-warning",
+	danger: "text-danger",
+	muted: "text-ink-dim",
+};
+
+/* Args the bridge expansion already says in words (the body as markdown, the
+   op and target in the headline) - the generic args block keeps only what is
+   left, so the expansion does not repeat itself and no raw id leads it. */
+const BRIDGE_SPOKEN_ARGS = new Set([
+	"body",
+	"text",
+	"op",
+	"endpoint_id",
+	"conversation_id",
+	"channel_id",
+	"message_id",
+	"recipient",
+	"to",
+]);
+
+function bridgeBody(entry: TranscriptEntry): string {
+	const args = entry.details.args;
+	if (!args || typeof args !== "object") return "";
+	const body = args.body ?? args.text;
+	return typeof body === "string" ? body : "";
+}
+
+function bridgeRestArgs(entry: TranscriptEntry): Record<string, unknown> | null {
+	const args = entry.details.args;
+	if (!args || typeof args !== "object") return null;
+	const rest = Object.fromEntries(
+		Object.entries(args).filter(([k]) => !BRIDGE_SPOKEN_ARGS.has(k)),
+	);
+	return Object.keys(rest).length > 0 ? rest : null;
+}
+
+/** Headline (who/where, in words), the markdown body, then the outcome as the
+    daemon's full sentence in the chip's ink. */
+function BridgeExpansion({ entry, facts }: { entry: TranscriptEntry; facts: BridgeRowFacts | null }) {
+	const copy = bridgeCopy(entry);
+	const body = bridgeBody(entry);
+	const headline = copy.headline ? scrubBridgeIds(copy.headline) : "";
+	const sentence = copy.outcome_sentence ? scrubBridgeIds(copy.outcome_sentence) : "";
+	const tone = facts?.outcome && Object.hasOwn(OUTCOME_TONE, facts.outcome) ? OUTCOME_TONE[facts.outcome] : null;
+	return (
+		<div className="flex min-w-0 flex-col gap-1.5">
+			{headline ? (
+				<p data-bridge-headline className="min-w-0 break-words text-body-sm text-ink-muted">
+					{headline}
+				</p>
+			) : null}
+			{body ? (
+				<div className="min-w-0 break-words rounded-sm bg-sunken p-2 text-body-sm text-ink">
+					<Markdown text={body} />
+				</div>
+			) : null}
+			{sentence ? (
+				<p
+					data-bridge-outcome-sentence
+					className={cn("min-w-0 break-words text-body-sm", tone ? OUTCOME_INK[tone] : "text-ink-dim")}
+				>
+					{sentence}
+				</p>
+			) : null}
+		</div>
+	);
+}
+
 export function ToolRow({
 	entry,
 	children,
@@ -119,12 +327,19 @@ export function ToolRow({
 	const isDiffFirst =
 		DIFF_FIRST_TOOLS.has(entry.tool_name.toLowerCase()) &&
 		entry.details.diff != null;
+	const bridge = entry.tool_name.toLowerCase() === BRIDGE_TOOL;
+	const facts = bridgeFacts(entry);
+	const outcome = bridge ? bridgeOutcome(facts, bridgeCopy(entry)) : null;
+	/* The bridge row swaps the full args dict for the args it does not already
+	   say in words; every other tool keeps its args block exactly as before. */
+	const shownArgs = bridge ? bridgeRestArgs(entry) : entry.details.args;
 	const hasDetails =
+		(bridge && (facts != null || bridgeBody(entry) !== "")) ||
 		entry.intent ||
 		entry.details.output ||
 		entry.details.diff ||
 		entry.error ||
-		(!isDiffFirst && entry.details.args);
+		(!isDiffFirst && shownArgs);
 
 	return (
 		<div
@@ -166,12 +381,49 @@ export function ToolRow({
 				 * reader the number is short (design round 1 D1). ``min-w-0 truncate``
 				 * lets the name share the squeeze and ellipsize honestly; the clock
 				 * span below keeps ``shrink-0``, so it always fits. */}
+				{bridge ? (
+					<span className="shrink-0 text-ink-dim">
+						<LucideIcon name="messages-square" />
+					</span>
+				) : null}
 				<span dir="ltr" className="min-w-0 shrink truncate text-body-sm text-ink-muted">
 					{entry.tool_name}
 				</span>
-				<span className="min-w-0 flex-1 truncate text-body-sm text-ink-dim">
-					{entry.summary}
+				{/* A bridge row with an outcome chip holds a floor for the summary
+				   (it names the op and who), so at 320px the chip and the name
+				   share the squeeze instead of crushing the summary to one glyph
+				   ("bridge o." measured before this floor). */}
+				<span
+					className={cn(
+						"min-w-0 flex-1 truncate text-body-sm text-ink-dim",
+						bridge && outcome && "min-w-[4.5rem]",
+					)}
+				>
+					{bridge ? bridgeSummary(entry.summary, outcome) : entry.summary}
 				</span>
+				{outcome ? (
+					/* The outcome chip may truncate (its whole sentence is in the
+					   expansion's Outcome row); it shrinks AFTER the flex-1 summary
+					   has given up to its floor, so a long summary cannot squeeze an
+					   `inbox_only` caveat to nothing - the caveat is the reason the
+					   chip exists. */
+					<span
+						data-bridge-outcome={facts?.outcome ?? undefined}
+						className={cn(
+							"min-w-0 max-w-[55%] shrink truncate rounded-sm px-1 text-mono-sm",
+							outcome.tone === "warning" && "bg-warning-wash text-warning",
+							outcome.tone === "danger" && "bg-danger-wash text-danger",
+							outcome.tone === "muted" && "text-ink-dim",
+						)}
+					>
+						{outcome.mark ? (
+							<span className="me-0.5 inline-block align-[-2px]">
+								<LucideIcon name={outcome.mark} size={12} />
+							</span>
+						) : null}
+						{outcome.text}
+					</span>
+				) : null}
 				{entry.diff_added > 0 || entry.diff_removed > 0 ? (
 					<span className="shrink-0 font-mono text-mono-sm">
 						{entry.diff_added > 0 ? (
@@ -213,14 +465,15 @@ export function ToolRow({
 							{entry.error}
 						</p>
 					) : null}
-					{entry.details.args && !isDiffFirst ? (
+					{bridge ? <BridgeExpansion entry={entry} facts={facts} /> : null}
+					{shownArgs && !isDiffFirst ? (
 						/* Hidden for write/edit: their args ARE the content the diff
 						   already shows, so the payload would be redundant (the
 						   TUI expands these to the diff alone). max-h + scroll:
 						   an UNBOUNDED args block renders its full height and
 						   fills the screen with the sunken ground. */
 						<div dir="ltr" className="lo-scroll max-h-40 overflow-y-auto rounded-sm bg-sunken p-2">
-							{toLines(entry.details.args).map((line, i) => {
+							{toLines(shownArgs).map((line, i) => {
 								const sep = line.indexOf(":");
 								return (
 									<div

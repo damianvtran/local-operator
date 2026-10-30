@@ -119,6 +119,43 @@ export interface TranscriptEntryDetails {
 	   reads). `text` is the notice verbatim for both kinds. */
 	waited_s?: number;
 	urgent?: boolean;
+	/* A `bridge` (Team Bridge) tool row's facts, composed server-side by the
+	   shared `harness/rows.py::bridge_row` so the phone, desktop and TUI say the
+	   same thing about one call. Absent on a frame whose details were shed;
+	   the row then falls back to its summary alone. */
+	bridge_row?: BridgeRowFacts;
+	/* The bridge row's WORDS, rendered by the daemon from the shared
+	   `wire.tool_rows.bridge` copy (`harness/bridge_copy.py`), so the phone
+	   paints the TUI's strings in the daemon's locale. */
+	bridge_copy?: BridgeRowCopy;
+}
+
+/** Display-ready bridge strings; every value is text, never an id. */
+export interface BridgeRowCopy {
+	/** The chip word (`not posted to a conversation`, `refused · not_member`); "" when plain. */
+	outcome?: string;
+	/** The expansion's who/where line (`Direct message to Priya Shah`). */
+	headline?: string;
+	/** The expansion's full outcome sentence. */
+	outcome_sentence?: string;
+}
+
+/** The shared bridge-row contract (`harness/rows.py::bridge_row`). Every field
+    is display-ready: `target.label` is a name, never a `bcv_`/`ep_` id. */
+export interface BridgeRowFacts {
+	op?: string;
+	action?: string;
+	target?: {
+		kind?: "channel" | "dm" | "person" | "message" | "directory" | "none";
+		label?: string;
+	};
+	preview?: string;
+	count?: number | null;
+	emoji?: string | null;
+	/** null = an ordinary landed call; everything else is a caveat the row
+	    must state (an inbox-only send is NOT a conversation post). */
+	outcome?: null | "inbox_only" | "refused" | "failed" | "unconfirmed" | "awaiting_acceptance";
+	code?: string | null;
 }
 
 export interface PeerSender {

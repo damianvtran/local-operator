@@ -430,6 +430,26 @@ def _settled_bridge_summary(
     )
 
 
+def _bridge_copy(
+    row: Mapping[str, Any], args: Mapping[str, Any], details: Mapping[str, Any] | None
+) -> dict[str, str]:
+    """The phone's bridge strings: chip word, expansion headline and sentence.
+
+    ``outcome`` is the short word the row's chip shows (``None`` → "" for a
+    plain landed call); ``outcome_sentence`` the expanded card's full sentence.
+    Every value is rendered text, never an id (``bridge_expanded`` keeps ids in
+    ``internals``, which is not carried).
+    """
+    from local_operator.harness.bridge_copy import bridge_expanded, outcome_word
+
+    expanded = bridge_expanded(row, args, details)
+    return {
+        "outcome": outcome_word(row) or "",
+        "headline": str(expanded.get("headline") or ""),
+        "outcome_sentence": str(expanded.get("outcome") or ""),
+    }
+
+
 def _summarize_args(tool_name: str, args: dict[str, Any]) -> str:
     """The one-line summary the collapsed row shows.
 
@@ -612,7 +632,11 @@ def _video_refs_for_content(content: list[Any] | None) -> list[dict[str, Any]]:
 
 
 def _tool_row_details(
-    args: dict[str, Any], output: str, result_details: dict[str, Any] | None
+    args: dict[str, Any],
+    output: str,
+    result_details: dict[str, Any] | None,
+    *,
+    tool_name: str = "",
 ) -> dict[str, Any]:
     """The expand-on-tap payload for a settled tool row.
 
@@ -624,6 +648,14 @@ def _tool_row_details(
     details: dict[str, Any] = {}
     if args:
         details["args"] = {k: _compact(str(v), TOOL_ARGS_CHARS) for k, v in args.items()}
+        if tool_name == "bridge":
+            # The phone renders a bridge message's body as MARKDOWN, and
+            # ``_compact`` flattens every newline - a list or a paragraph break
+            # became one run-on line. Same character cap, line structure kept.
+            for key in ("body", "text"):
+                value = args.get(key)
+                if isinstance(value, str):
+                    details["args"][key] = _compact_multiline(value, TOOL_ARGS_CHARS)
     if output:
         details["output"] = output[-TOOL_OUTPUT_TAIL_CHARS:]
     if result_details:
@@ -646,6 +678,27 @@ def _tool_row_details(
         for key in LIVE_IMAGE_DETAIL_KEYS:
             if key in result_details:
                 details[key] = result_details[key]
+    if tool_name == "bridge":
+        # The Team Bridge row's FACTS, decided once in ``harness/rows.py`` so
+        # the phone, desktop and TUI agree on what a call did. The generic
+        # args view cannot say it: an inbox-only ``send`` looks like any
+        # landed call, and the most visible token in the args is a ``bcv_``
+        # id. Computed from the UNCAPPED args and the full result details
+        # (not the ``TOOL_ARGS_CHARS``-compacted copy above), because the
+        # outcome reads result fields the compacted args never had. Small and
+        # id-free by contract, so it is cheap to re-send on every repaint; a
+        # frame-pressure tier that sheds ``details`` sheds it too, and the row
+        # falls back to its summary alone.
+        row = bridge_row(args, result_details)
+        details["bridge_row"] = row
+        # The WORDS ride beside the tokens, rendered here by the same
+        # ``harness/bridge_copy.py`` the TUI card and this module's summary
+        # call (``wire.tool_rows.bridge``, the daemon's locale). The phone
+        # paints them verbatim instead of minting a parallel ``relay.*`` copy
+        # of one decision: three surfaces, one translation. ``internals`` stay
+        # behind - the expansion's generic args block already holds what the
+        # operator debugging a call needs, and ids must not lead anything.
+        details["bridge_copy"] = _bridge_copy(row, args, result_details)
     return details
 
 
@@ -1983,6 +2036,7 @@ def fold_messages_to_entries(
                     # reading for.
                     "" if receipt else result_text,
                     result_details if isinstance(result_details, dict) else None,
+                    tool_name=entry.tool_name,
                 )
                 # Output-artifact media rides the row as REFERENCES (index +
                 # mime), the same lazy contract user attachments use: bytes
@@ -2041,7 +2095,9 @@ def _peer_cycle_child_row(child: dict[str, Any]) -> TranscriptEntry:
 
     result = ToolResult.model_validate(child["result"])
     arguments = child["arguments"]
-    details = _tool_row_details(arguments, result.text, result.details)
+    details = _tool_row_details(
+        arguments, result.text, result.details, tool_name=child["tool_name"]
+    )
     details["args"] = {key: str(value) for key, value in arguments.items()}
     details["output"] = result.text
     return TranscriptEntry(
@@ -2791,7 +2847,10 @@ class ProjectionFold:
             if video_refs:
                 row.videos = video_refs
             row.details = self._tool_details(
-                self._tool_args.pop(event.tool_call_id, {}), result.text, result.details
+                self._tool_args.pop(event.tool_call_id, {}),
+                result.text,
+                result.details,
+                tool_name=row.tool_name,
             )
         elif isinstance(event, NoticeEvent):
             # ``kind`` rides into ``details`` as the phone's ``severity``. This
@@ -4184,7 +4243,12 @@ class ProjectionFold:
             ]
 
     def _tool_details(
-        self, args: dict[str, Any], output: str, result_details: dict[str, Any] | None
+        self,
+        args: dict[str, Any],
+        output: str,
+        result_details: dict[str, Any] | None,
+        *,
+        tool_name: str = "",
     ) -> dict[str, Any]:
         """The live path's expand payload — one implementation with replay's.
 
@@ -4192,7 +4256,7 @@ class ProjectionFold:
         for the same call expand to the same thing; the caps here are the
         wire budget's and must not drift between the two paths.
         """
-        return _tool_row_details(args, output, result_details)
+        return _tool_row_details(args, output, result_details, tool_name=tool_name)
 
     def _append(self, entry: TranscriptEntry) -> None:
         self.projection.transcript.append(entry)

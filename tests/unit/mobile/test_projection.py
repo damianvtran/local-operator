@@ -44,6 +44,7 @@ from local_operator.mobile.projection import (
     _diff_counts,
     _image_refs,
     _summarize_args,
+    fold_messages_to_entries,
     monotonic_from_epoch,
 )
 from local_operator.mobile.types import (
@@ -4858,3 +4859,155 @@ def test_bridge_rows_are_the_shared_decision_at_start_and_settle() -> None:
     )
     assert row.tool_state == "failed"
     assert row.summary == "Couldn't post in a conversation · hi · refused · not_permitted"
+
+
+# --- the Team Bridge row's facts ---------------------------------------------
+#
+# The phone renders a ``bridge`` row from ``details["bridge_row"]``, the shared
+# ``harness/rows.py::bridge_row`` decision. These pin that the projection
+# carries it on BOTH paint paths (live settle and history replay), that the
+# outcome the phone must not paint as success arrives, and that no opaque
+# Team Bridge id rides any field of it.
+
+_BRIDGE_ID_PREFIXES = ("bcv_", "bcmsg_", "acc_", "ep_")
+
+
+def _no_bridge_ids(value: Any) -> None:
+    text = json.dumps(value)
+    for prefix in _BRIDGE_ID_PREFIXES:
+        assert prefix not in text, f"{prefix} leaked into bridge_row: {text}"
+
+
+def _settle_bridge(args: dict[str, Any], details: dict[str, Any], *, error: bool = False) -> Any:
+    fold = make_fold()
+    fold.fold_event(ToolExecutionStartEvent(tool_call_id="b1", tool_name="bridge", args=args))
+    fold.fold_event(
+        ToolExecutionEndEvent(
+            tool_call_id="b1",
+            tool_name="bridge",
+            result=ToolResult(
+                tool_call_id="b1",
+                content=[TextContent(text="ok")],
+                details=details,
+                is_error=error,
+            ),
+        )
+    )
+    return fold.projection.transcript[-1]
+
+
+def test_bridge_peer_inbox_send_projects_inbox_only() -> None:
+    row = _settle_bridge(
+        {"op": "send", "recipient": "acc_01J9PRIYA", "body": "Can you take the cut?"},
+        {
+            "ok": True,
+            "message_id": "bcmsg_01J9X",
+            "state": "sent",
+            "destination_type": "peer_inbox",
+        },
+    )
+    facts = row.details["bridge_row"]
+    assert facts["op"] == "send"
+    assert facts["outcome"] == "inbox_only"
+    _no_bridge_ids(facts)
+    # The WORDS ride beside the tokens, rendered from the shared copy, so the
+    # phone paints the TUI's strings and mints none of its own.
+    copy = row.details["bridge_copy"]
+    assert copy["outcome"] == "not posted to a conversation"
+    assert copy["outcome_sentence"].startswith("Accepted into their inbox")
+    _no_bridge_ids(copy)
+
+
+def test_bridge_refusal_projects_refused_with_its_code() -> None:
+    row = _settle_bridge(
+        {
+            "op": "channel_post",
+            "endpoint_id": "ep_01J9",
+            "conversation_id": "bcv_01J9",
+            "body": "hi",
+        },
+        {"ok": False, "code": "not_member", "error": "not a member of bcv_01J9"},
+        error=True,
+    )
+    facts = row.details["bridge_row"]
+    assert (facts["outcome"], facts["code"]) == ("refused", "not_member")
+    _no_bridge_ids(facts)
+    assert row.details["bridge_copy"]["outcome"] == "refused · not_member"
+
+
+def test_bridge_dm_target_is_a_label_never_an_id() -> None:
+    row = _settle_bridge(
+        {"op": "dm", "endpoint_id": "ep_01J9", "recipient": "acc_01J9PRIYA", "body": "hey"},
+        {"ok": True, "content": "direct message to Priya Shah in bcv_01J9ABCDEF"},
+    )
+    facts = row.details["bridge_row"]
+    assert facts["target"]["kind"] == "dm"
+    assert facts["target"]["label"] == "Priya Shah"
+    _no_bridge_ids(facts)
+    assert row.details["bridge_copy"]["headline"] == "Direct message to Priya Shah"
+    _no_bridge_ids(row.details["bridge_copy"])
+
+
+def test_bridge_row_rides_the_replay_paint_too() -> None:
+    """A reconnect must expand to what the live row did: history replay
+    builds the details through the same function, so the facts agree."""
+    args = {"op": "send", "recipient": "acc_01J9PRIYA", "body": "ping"}
+    details = {"ok": True, "destination_type": "peer_inbox"}
+    live = _settle_bridge(args, details)
+    entries = fold_messages_to_entries(
+        [
+            Message.user("tell priya"),
+            Message(
+                role="assistant",
+                content=[TextContent(text="")],
+                tool_calls=[ToolCall(id="b1", name="bridge", arguments=args)],
+            ),
+            Message(
+                role="tool",
+                content=[TextContent(text="ok")],
+                tool_call_id="b1",
+                tool_name="bridge",
+                provider_payload={"details": details},
+            ),
+        ]
+    )
+    replayed = next(e for e in entries if e.kind == "tool")
+    assert replayed.details["bridge_row"] == live.details["bridge_row"]
+    assert replayed.details["bridge_copy"] == live.details["bridge_copy"]
+    assert replayed.details["bridge_row"]["outcome"] == "inbox_only"
+
+
+def test_non_bridge_rows_carry_no_bridge_facts() -> None:
+    fold = make_fold()
+    fold.fold_event(
+        ToolExecutionStartEvent(tool_call_id="t1", tool_name="bash", args={"command": "ls"})
+    )
+    fold.fold_event(
+        ToolExecutionEndEvent(
+            tool_call_id="t1",
+            tool_name="bash",
+            result=ToolResult(tool_call_id="t1", content=[TextContent(text="a")], details={}),
+        )
+    )
+    assert "bridge_row" not in fold.projection.transcript[-1].details
+    assert "bridge_copy" not in fold.projection.transcript[-1].details
+
+
+def test_bridge_body_keeps_its_lines_for_the_markdown_render() -> None:
+    """The phone renders the body as markdown; a flattened body loses lists
+    and paragraphs. Other tools' args stay one-line compacted."""
+    body = "**Heads up**\n\n- one\n- two"
+    row = _settle_bridge({"op": "dm", "recipient": "acc_X", "body": body}, {"ok": True})
+    assert row.details["args"]["body"] == body
+    fold = make_fold()
+    fold.fold_event(
+        ToolExecutionStartEvent(tool_call_id="t9", tool_name="bash", args={"command": "a\nb"})
+    )
+    fold.fold_event(
+        ToolExecutionEndEvent(
+            tool_call_id="t9",
+            tool_name="bash",
+            result=ToolResult(tool_call_id="t9", content=[TextContent(text="")], details={}),
+        )
+    )
+    assert fold.projection.transcript[-1].details["args"]["command"] == "a b"
