@@ -1,0 +1,148 @@
+{
+  "instance": "848874ddfe7a-slash3-fr",
+  "locale": "fr",
+  "scope": "wire.slash",
+  "scope_path": "local_operator/i18n/catalogues/fr/wire.slash.json",
+  "keys_in_scope": [
+    "wire.slash.approvals"
+  ],
+  "tree": "/Users/damian/lo-core-fix",
+  "tree_head": "7159e2a30927831f5dfb88f84c588eac07770e5d",
+  "tree_dirty": true,
+  "dirty_files": [
+    "es",
+    "fr",
+    "hi",
+    "ru",
+    "ur",
+    "vi",
+    "zh-CN"
+  ],
+  "audit_date": "2026-10-29",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "848874ddfe7a",
+    "model": "radient/auto",
+    "actual_model_source": "fallback chain under provider quota: session opened on anthropic/claude-sonnet-5-5, switched to openai/gpt-6-astra, then kimi/k3.1-pro, then radient/auto before the first source read; recorded so the model is not overstated",
+    "independent_from_translator_session": true,
+    "independent_from_previous_audit": true,
+    "independence_note": "Translator: session 53ebb4e7a4a0 (slash-fix3/fr.md). Previous audit: session b682afa67e4b (slash-audit2/fr). I am neither; I wrote no value in this file and read both notes only as claim lists."
+  },
+  "input_sha256": {
+    "en": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
+    "context": "32b3475a5808048a6eeaae462fee0feb55405fca77026e41b9609a516d74a215",
+    "target": "bb580c5bc5a2b2d91b03b97b92be5341db0c731feaf7ea592f08b70d3520983e"
+  },
+  "previous_audit_sha256": {
+    "en": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
+    "context": "32b3475a5808048a6eeaae462fee0feb55405fca77026e41b9609a516d74a215",
+    "target": "e5b19e5efd76f2c8d3c9d7d51804557d7fa156da9e241c65357b343b012ea944"
+  },
+  "drift": {
+    "en_unchanged": true,
+    "context_unchanged": true,
+    "target_changed": true,
+    "keys_changed_since_previous_audit": [
+      "wire.slash.approvals"
+    ],
+    "method": "Byte reconstruction: substituted ONLY the approvals JSON literal back to the audit-2 value (R2-1 'current') inside the current file bytes and hashed the result; it equalled the previous audit's recorded target hash exactly (e5b19e5e…), so every other byte is unchanged.",
+    "reconstructed_sha256": "e5b19e5efd76f2c8d3c9d7d51804557d7fa156da9e241c65357b343b012ea944",
+    "unexpected_drift": []
+  },
+  "checks": {
+    "show": "'Voir' carries the bare-command report path; app.py _cmd_approvals docstring: 'Bare ``/approvals`` reports, which is also how a user who cannot remember what they pressed finds out' (app.py:30663).",
+    "set": "'régler' carries the ask|auto setter branches in the same handler (ask/on/prompt vs auto/off/yolo).",
+    "mode_noun_phrase": "'le mode d’approbation des outils' matches the catalogue's settled noun phrase: wire.settings.tool_approval_mode.label 'Mode d’approbation des outils', relay.asks.gate.notice_auto 'le mode d’approbation de cette session'.",
+    "scope": "'de cette session' = 'for this session' — the session-vs-saved distinction the handler's own docstring draws.",
+    "placeholders": "EN has none; FR introduces none. No braces, no markup, no backticks.",
+    "native_french": "Infinitive-for-action, sentence case, no pronoun, no 'Veuillez'; same frame as the sibling wire.slash.effort 'Voir ou régler l’effort (shift+tab alterne)'. Reads as product copy, not a calque.",
+    "typography": "U+2019 apostrophe; no U+202F needed (no : ; ! ? and no code span); no double space; no trailing period.",
+    "width": "64 cells (rich.cells.cell_len); see R3-1."
+  },
+  "counts": {
+    "BLOCKER": 0,
+    "MAJOR": 0,
+    "MINOR": 1,
+    "NIT": 0
+  },
+  "verdict": "pass",
+  "namespaces": {
+    "wire.slash": {
+      "status": "pass",
+      "keys_audited": 52,
+      "keys_changed_in_delta": 1,
+      "sha256": {
+        "en": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
+        "target": "bb580c5bc5a2b2d91b03b97b92be5341db0c731feaf7ea592f08b70d3520983e"
+      },
+      "findings": [
+        {
+          "id": "R3-1",
+          "key": "wire.slash.approvals",
+          "english": "Show or set tool approval mode for this session",
+          "current": "Voir ou régler le mode d’approbation des outils de cette session",
+          "severity": "MINOR",
+          "category": "fit",
+          "problem": "Correct and complete, but 64 cells — 17 more than EN — so the picker's ellipsized description column crops its tail before EN's does. Measured on the real widget: at a 100/110-column terminal (picker width 73, description budget 56) the row paints 'Voir ou régler le mode d’approbation des outils de cett…'; EN at the same width paints whole. Both verbs and the object ('des outils') survive every width measured, and /help wraps (overflow='fold') rather than cutting, so the claim a user needs is never lost — only the final word, at widths where EN loses nothing.",
+          "evidence": {
+            "fr_painted": {
+              "60": "Voir ou régler le mode d’approbation d…",
+              "80": "Voir ou régler le mode d’approbation des outils de cette s…",
+              "100": "Voir ou régler le mode d’approbation des outils de cett…",
+              "110": "Voir ou régler le mode d’approbation des outils de cett…",
+              "120": "Voir ou régler le mode d’approbation des outils de cette sessi…",
+              "150": "Voir ou régler le mode d’approbation des outils de cette session"
+            },
+            "en_painted": {
+              "60": "Show or set tool approval mode for thi…",
+              "80": "Show or set tool approval mode for this session",
+              "100": "Show or set tool approval mode for this session",
+              "150": "Show or set tool approval mode for this session"
+            },
+            "picker_width_by_terminal": {
+              "60": 56,
+              "80": 76,
+              "100": 73,
+              "110": 73,
+              "120": 80,
+              "150": 98
+            },
+            "help_surface": "app.py _help_block: Table.grid, second column ratio=1, overflow='fold' — wraps, never cuts",
+            "catalogue_context": "EN has 8 keys > 55 cells (max 74, wire.slash.fork); fr's only other long value is wire.slash.project at 66 (unchanged since round 2, observation O4)"
+          },
+          "suggestion": "Optional, not required: 'Voir ou régler l’approbation des outils de cette session' (56 cells) paints whole from 80 columns up — matching EN's own threshold — at the cost of the word 'mode'. Keep the current wording if the noun phrase matching wire.settings.tool_approval_mode.label matters more than the last word of the row."
+        }
+      ]
+    }
+  },
+  "method": {
+    "scope": "Single-key confirmation as instructed: wire.slash.approvals judged against the EN source in this tree; the other 51 keys checked only for drift, parity, tokens and typography, not re-litigated.",
+    "widths": "rich.cells.cell_len, and the widget's own render_rows measured at the widths the running app gives the picker",
+    "semantics": "claims checked against app.py's handler docstring and the fr catalogue's settled phrases in this tree",
+    "validator": "scripts/i18n/check.py is a repo-wide multi-minute run and was not executed for this single-key pass; mechanical checking used the repo's own catalogues.load_catalogue plus explicit key-set/token/typography sweeps, both logged in audit.log. No validator output is claimed."
+  },
+  "artifacts": {
+    "log": {
+      "path": "slash-fix3/fr-audit/audit.log",
+      "note": "commands actually run, with their output"
+    },
+    "fit_script": {
+      "path": "slash-fix3/fr-audit/fit.py",
+      "note": "render_rows at chosen widths (en control + fr)"
+    },
+    "painted_script": {
+      "path": "slash-fix3/fr-audit/painted.py",
+      "note": "real app via run_test: picker width per terminal size"
+    },
+    "paint2_script": {
+      "path": "slash-fix3/fr-audit/paint2.py",
+      "note": "render_rows at the measured picker widths; EN reproduces the live app exactly"
+    }
+  },
+  "audit_notes_not_execution_log": false,
+  "execution_log": "slash-fix3/fr-audit/audit.log — every command in it was run in this session",
+  "ledger_row": {
+    "written": false,
+    "reason": "The operator scoped this run to writing this receipt and verdict.txt in session scratch; no repo, ledger or evidence-bundle edit was made. The audit-ledger row and i18n/audits/evidence bundle remain to be recorded by the implementing session."
+  }
+}

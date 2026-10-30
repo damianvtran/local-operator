@@ -41,9 +41,10 @@ from local_operator.tui import app as app_mod
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets import status_line as status_line_mod
 from local_operator.tui.widgets import welcome as welcome_mod
+from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.settings_view import SettingsView
 from local_operator.tui.widgets.transcript import NoticeBlock
-from tests.unit.tui.test_app_pilot import FakeSession, _factory
+from tests.unit.tui.test_app_pilot import FakeSession, _factory, _set_editor_line
 
 
 @pytest.fixture(autouse=True)
@@ -345,3 +346,43 @@ async def test_the_app_paints_the_swapped_words_through_the_welcome_module(
     # And the class itself: no from-imported copies survive on the app module.
     assert not hasattr(app_mod, "MODEL_PENDING")
     assert not hasattr(app_mod, "MODEL_SETUP")
+
+
+@pytest.mark.asyncio
+async def test_a_language_move_reaches_a_mounted_picker(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The picker follows ``/language`` only because the app RE-HANDS its rows.
+
+    ``CommandPicker.set_commands`` stores a ``list(...)`` COPY, and the painted
+    rows are a second copy derived only by ``sync()``: the registry's in-place
+    refresher reaches neither, so a mounted picker painted the boot language
+    until the next keystroke (QA round 1, Q1). This drives the real app with the
+    list ALREADY OPEN — one ``_set_editor_line`` before the move and none after
+    — so it fails if ``self._refresh_offered_commands()`` leaves ``_apply_language``
+    (nothing is re-handed) AND if ``Editor.set_commands`` stops re-deriving the
+    open list (the copy is re-handed but not repainted). It deliberately reads
+    the SHIPPED French copy, so the asserted row is the production sentence and
+    not a fixture marker.
+    """
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir()
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(config_dir))
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(110, 34)) as pilot:
+        await _boot(pilot, app)
+        editor = app.query_one(Editor)
+        _set_editor_line(editor, "/")
+        await pilot.pause()
+        picker = editor.picker
+        # The boot rows are the English ones this process started in, painted.
+        at_boot = [row.plain for row in picker.render_rows(picker.size.width or 100)]
+        assert any("List all commands" in row for row in at_boot), at_boot
+
+        app._apply_language("fr")
+        await pilot.pause()
+        # No keystroke, no re-sync: the list is already on screen, and the move
+        # must repaint it in place.
+        painted = [row.plain for row in picker.render_rows(picker.size.width or 100)]
+    assert any("Lister toutes les commandes" in row for row in painted), painted
+    assert not any("List all commands" in row for row in painted), painted

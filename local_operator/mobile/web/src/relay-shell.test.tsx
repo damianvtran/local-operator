@@ -23,9 +23,15 @@
  */
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+<<<<<<< HEAD
 import { messageRuntime, retainConfigStream, useLocaleSnapshot } from "./store";
 import { BUNDLED_CHUNKS, BUNDLED_OWNED } from "./i18n/bundled.gen";
 import { directionFor } from "./i18n/runtime";
+=======
+import { BUNDLED_OWNED } from "./i18n/bundled.gen";
+import { RESOLVED_LOCALES } from "./i18n/runtime";
+import { messageRuntime, retainConfigStream, useLocaleSnapshot } from "./store";
+>>>>>>> origin/main
 import { FetchStreamFixture as Stream, settleStream } from "./sse-test-fixture";
 
 /** The exact copy the shell hardcoded BEFORE this slice (the identity target). */
@@ -68,13 +74,42 @@ describe("relay.shell extraction", () => {
 
 	it("follows the actual owned-copy language, not the backend preference", () => {
 		// The contract from #2297: lang/dir describe the ACTUAL rendered owned-copy
+<<<<<<< HEAD
 		// language (uiLocale), not the backend preference. French has no emitted
 		// owned chunk yet, so a French backend paints EN/LTR. A locale that DOES
 		// ship one arrives with its chunk on the config frame — the lazy path is
 		// relay-shell's "loads a shipped locale's chunk" test, asserted there so
 		// this one does not depend on whether that chunk has already been loaded.
 		expect(messageRuntime.uiLocaleFor("fr")).toBe("en");
+=======
+		// language (uiLocale), not the backend preference. Both directions are
+		// pinned here: a locale the relay ships paints its own language, and a
+		// SUPPORTED locale it does not ship paints the WHOLE English bundle instead
+		// of claiming copy nobody translated — the half that goes red if the store
+		// ever follows the backend preference blindly.
+		//
+		// The unshipped locale is DERIVED from the generated manifest rather than
+		// named, because the shipped set moves while a branch is open: vi shipped
+		// with #3163 and the catalogue waves for es (#3164) and hi (#3166) are
+		// still in flight. A fixed name would turn this test red the day one of
+		// them lands and invite someone to flip it to the shipped language,
+		// deleting the assertion it exists to make. Measured on this tree, the
+		// shipped set is en/fr/ru/vi/ur/zh-CN, so the pick is es.
+		const unshipped = RESOLVED_LOCALES.find(
+			locale => locale !== "en" && !Object.values(BUNDLED_OWNED).some(bundle => locale in bundle),
+		);
+		expect(messageRuntime.uiLocaleFor("fr")).toBe("fr");
+		expect(messageRuntime.uiLocaleFor("ur")).toBe("ur");
+		// The fallback arm exists only while some supported locale still lacks a
+		// relay catalogue. es (#3164) and hi (#3166) are the last two, so once they
+		// land there is no gap left to assert: the arm is skipped, never asserted,
+		// because a green suite must not depend on a locale being untranslated.
+		if (unshipped !== undefined) expect(messageRuntime.uiLocaleFor(unshipped)).toBe("en");
+>>>>>>> origin/main
 		const { result, unmount } = renderHook(() => useLocaleSnapshot());
+		// No config frame is applied in this fixture, so the snapshot is the boot
+		// state and says nothing about either preference.
+		expect(result.current.backendLocale).toBeNull();
 		expect(result.current.uiLocale).toBe("en");
 		expect(result.current.direction).toBe("ltr");
 		unmount();

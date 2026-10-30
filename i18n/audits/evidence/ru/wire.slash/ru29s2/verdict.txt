@@ -1,0 +1,2 @@
+PASS
+Previous MAJORs M1/M2/M3 are fixed on the bytes; residual defects are MINOR/NIT (m3 sidebar still open, /model ellipsis introduced, /agent addressee lost, 6 values over the 51-cell picker column).

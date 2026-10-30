@@ -1,0 +1,46 @@
+$ cd /Users/damian/lo-i18n-base
+## branch
+feat/i18n-core-fr-backfill
+
+## key parity + ICU integrity + fr plural rendering
+$ /Users/damian/local-operator/.venv/bin/python /Users/damian/.local-operator/sessions/ab2610514b4d/scratchpad/fr_parity_one.py relay.library
+namespace=relay.library en_keys=1 fr_keys=1
+key_order_equal=True
+extra_in_fr=[]
+missing_in_fr=[]
+PLURAL_SELECTORS_DIFFER relay.library.count: en=(('one', 'other'),) fr=(('one', 'many', 'other'),)
+argument_mismatches=0
+fr_cldr_categories=('many', 'one', 'other')
+plural_keys=1
+  key=relay.library.count
+    en = '{count, plural, one {# asset} other {# assets}}'
+    fr = '{count, plural, one {# \xe9l\xe9ment} many {# d\u2019\xe9l\xe9ments} other {# \xe9l\xe9ments}}'
+    fr count=       0 category=one    rendered='0 \xe9l\xe9ment'
+    fr count=       1 category=one    rendered='1 \xe9l\xe9ment'
+    fr count=       2 category=other  rendered='2 \xe9l\xe9ments'
+    fr count= 1500000 category=other  rendered='1\u202f500\u202f000 \xe9l\xe9ments'
+    fr count= 1000000 category=many   rendered='1\u202f000\u202f000 d\u2019\xe9l\xe9ments'
+    fr count= 2000000 category=many   rendered='2\u202f000\u202f000 d\u2019\xe9l\xe9ments'
+
+## typography + codepoint inventory (masking attestation)
+$ /Users/damian/local-operator/.venv/bin/python /Users/damian/.local-operator/sessions/ab2610514b4d/scratchpad/fr_typo_one.py relay.library
+namespace=relay.library values=1
+typography_issues=0
+non_ascii_inventory=U+00E9(LATIN SMALL LETTER E WITH ACUTE)x6, U+2019(RIGHT SINGLE QUOTATION MARK)x1
+equals_sign_in_any_value=False
+U+FFFD_in_any_value=False
+U+202F_total=0
+U+2019_total=1
+
+## repository gate, read-only
+$ /Users/damian/local-operator/.venv/bin/python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+
+## input hashes
+en      ad478c433a4db3e725994766c724a2e8e92176f015f8283e71dc13b87185466a
+context 877b88290cf14602e63b2bb1c58719fac96a20ae53ff04b147e21de23df93c54
+fr      ab64d2fb171c78e79ac689d49da261474e4eaf687cbfbf113d28345234302ea2
+
+## disclosure - one transient negative control
+While testing whether the repo gate rejects a plural category outside fr's [many, one, other], fr/relay.library.json was temporarily rewritten with an illegal `few` arm and then restored with `cp` from a copy taken before the write. The restored file is byte-identical to the copy (sha256 ab64d2fb171c78e79ac689d49da261474e4eaf687cbfbf113d28345234302ea2, the same hash this audit records as its target input). The gate run above ran after restoration. Disclosed because the audit brief forbids modifying catalogues; there is no net change. The negative control itself was never completed - that invocation used a mis-typed interpreter path and exited 127 - so it is reported as attempted and abandoned, not as evidence.
+
