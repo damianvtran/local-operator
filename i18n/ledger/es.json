@@ -2067,6 +2067,26 @@
       },
       "status": "passed",
       "note": "Skill picker copy (SKM-D6 + round-1 remediation U6): the namespace now carries four keys — relay.skills.tray.label, relay.skills.tray.hidden, relay.skills.skipped and the new relay.skills.too_large. The three existing keys are byte-identical to the bytes audited in the earlier round; the new key is the 422 `skills_too_large` refusal, which replaces a generic retry line with the cause (the skills together exceed the relay's body budget) and the remedy (remove one, send again). Independent audit this round via the codex CLI/MCP (separate agent and model from the translator, read-only on the checkout, gpt-5.6-sol, session 01a18ddc-d8ec-75a2-916d-049305cbbc6c): PASS for all seven locales, 0 findings, with a byte check (no BOM, no trailing space, no ICU braces, NFC). Terms follow the glossary's skill row (compétence, habilidad, 技能, навык, कौशल, مہارت, kỹ năng); register follows each style guide (tú / vous / 你 / вы / आप / آپ / bạn)."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "97aa224ed22d209a8eb84860bea6694f5c47fc531887d80270cbb1eee71e74fe",
+      "translator": {
+        "agent": "coder (radientdev) — PR #3189 implementer",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-30"
+      },
+      "auditor": {
+        "agent": "translation-auditor (radientdev, i18n-audit-3189), independent of the translator",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback)",
+        "date": "2026-10-30",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent audit of PR #3189 (team-bridge screening status line) at source_sha256 97aa224ed22d209a8eb84860bea6694f5c47fc531887d80270cbb1eee71e74fe (verified with catalogues.catalogue_sha256 and a raw sha256 of en/cli.team_bridge.json). Copy change: 8 keys added (status.screening, screening_healthy, screening_held, screening_held_class, screening_held_none, screening_breaker, screening_rejected, screening_rejected_none); 0 deleted, 0 updated. The whole carried namespace (53 keys) was read against the English source. Mechanical checks: key parity 53/53; every placeholder and select arm survives in all locales (2226 sentinel renders through messages.render, 0 lost or extra); plural arms rendered at counts 0/1/2/3/5/11/21/22/1000000; no Cf/bidi control characters; NFC. Translator and auditor are distinct agents in separate contexts; both run the same model family (disclosed). es: clean, 0 findings. CLDR one/many/other present; tú register is not exercised (no address in these keys); disyuntor/retenido/rechazado consistent across the fragments. Unresolved blocker/major: 0."
     }
   ]
 }

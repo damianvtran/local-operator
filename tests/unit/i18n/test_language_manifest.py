@@ -813,6 +813,7 @@ def _git_env(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
     env = {
         "PATH": os.environ["PATH"],
         "HOME": os.environ.get("HOME", "/tmp"),
+        "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_CONFIG_SYSTEM": "/dev/null",
         "GIT_CONFIG_GLOBAL": "/dev/null",
         "GIT_AUTHOR_NAME": "i18n test",

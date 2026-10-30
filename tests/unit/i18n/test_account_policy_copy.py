@@ -7,10 +7,21 @@ token. Which half applies is DERIVED from the catalogue files, because the
 enumerated form of this test went stale three times as relay catalogues landed
 (fr, then ru, then vi): "which locales are missing copy today" is a snapshot of
 the tree, not a property of the system.
+
+The two halves are pinned in different places for exactly that reason. CARRYING
+stays on the real corpus: the wave that lands a catalogue moves it with no edit
+here. FALLBACK moved to a synthetic catalogue root once this wave closed the
+corpus — with `relay.account_policy` in all seven shipped locales there is no
+real locale left without it, so the real corpus can no longer show the state and
+iterating it would compare nothing. `locale_coverage.require_nonempty` fails
+that half on purpose rather than letting it pass vacuously; the fix it prescribes
+is the synthetic root below, never a restored locale list.
 """
 
 import json
 from pathlib import Path
+
+import pytest
 
 from local_operator import settings_io
 from local_operator.i18n import catalogues, messages
@@ -60,11 +71,14 @@ def test_registry_uses_new_child_source_and_stable_machine_enum_ids():
 
 
 def test_account_policy_copy_follows_the_catalogue_tree():
-    # Anti-vacuity, from the SHIPPED ledger (`render` coerces an unshipped locale to
-    # `en`, so only shipped locales can show either half) and derived, so a wave
-    # moves the answer here instead of editing a list. FAIL, never skip: an empty
-    # half means the contract is no longer exercised by real data, and a skip reads
-    # as green on every later run — which is how this test rotted three times.
+    # The CARRYING half, on the real corpus: a locale that holds the catalogue
+    # must render its own copy — non-blank, and never the English source. Derived
+    # from the tree, so a wave moves the answer here instead of editing a list.
+    # The anti-vacuity guard runs on the carrying set only (it is still non-empty:
+    # a namespace with no carrying locale is a corpus-wide regression). The other
+    # direction — a locale WITHOUT the catalogue renders the English source — is
+    # pinned in the synthetic-root test below, because the real corpus no longer
+    # contains a locale that lacks `relay.account_policy`.
     for namespace, _code, _english in TARGET_MESSAGES:
         locale_coverage.require_nonempty(
             locale_coverage.carrying(namespace),
@@ -72,14 +86,6 @@ def test_account_policy_copy_follows_the_catalogue_tree():
             detail=(
                 "no shipped locale carries it "
                 f"(absent={list(locale_coverage.absent(namespace))})"
-            ),
-        )
-        locale_coverage.require_nonempty(
-            locale_coverage.absent(namespace),
-            subject=f"{namespace} fallback",
-            detail=(
-                "every shipped locale carries it "
-                f"(carries={list(locale_coverage.carrying(namespace))})"
             ),
         )
     for locale in _supported_non_source_locales():
@@ -96,11 +102,66 @@ def test_account_policy_copy_follows_the_catalogue_tree():
                     "value is a copy defect, not a fallback."
                 )
             else:
+                # Still worth asserting where a real absence exists (six shipped
+                # locales lack `wire.settings.account_policy`), but this branch is
+                # opportunistic — the guaranteed discriminator for the fallback
+                # direction is the synthetic root below.
                 assert rendered == english, (
                     f"{locale} has no {namespace} catalogue carrying {code}, so the English "
                     f"source is the only correct render; got {rendered!r}. A rendered key "
                     "token means the resolver missed the fallback."
                 )
+
+
+def test_fallback_renders_the_english_source_where_the_catalogue_is_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A locale without the namespace renders the exact English source.
+
+    Synthetic by necessity: this contract is evidence only while some locale
+    genuinely LACKS the namespace, and the `hi` wave left every shipped locale
+    carrying `relay.account_policy`. A root built here produces the absence — and
+    the presence beside it — by construction, so the assertion can still fail.
+
+    Both directions run against the SAME swapped root on purpose: a resolver that
+    read the shipped corpus anyway could not satisfy the carrying assertion (it
+    would return the real translation, not the marker) while faking the fallback
+    one, so a swap that silently does not take cannot make this test green.
+    """
+    carried, lacking = "fr", "vi"
+    # `resolve.eligible_locale` coerces an UNshipped locale to `en`, which would
+    # turn the fallback assertion into English compared with itself.
+    for locale in (carried, lacking):
+        assert locale in locale_coverage.targets(), (
+            f"{locale} must be a shipped locale: an unshipped one is coerced to `en`, and the "
+            "fallback comparison would then be English against itself"
+        )
+    root = tmp_path / "catalogues"
+    (root / "en").mkdir(parents=True)
+    (root / carried).mkdir(parents=True)
+    marker = {}
+    for namespace, code, english in TARGET_MESSAGES:
+        marker[namespace] = f"Synthetic {namespace} copy"
+        (root / "en" / f"{namespace}.json").write_text(
+            json.dumps({code: english}), encoding="utf-8"
+        )
+        (root / carried / f"{namespace}.json").write_text(
+            json.dumps({code: marker[namespace]}), encoding="utf-8"
+        )
+    monkeypatch.setattr(catalogues, "_CATALOGUES", root)
+
+    for namespace, code, english in TARGET_MESSAGES:
+        assert messages.render(code, {}, locale=carried) == marker[namespace], (
+            f"{carried} carries {namespace} in the synthetic root, so its own copy must render; "
+            "an English render here means the root swap did not take and the fallback "
+            "assertion below would be comparing English with itself"
+        )
+        rendered = messages.render(code, {}, locale=lacking)
+        assert rendered == english, (
+            f"{lacking} has no {namespace} catalogue, so the English source is the only "
+            f"correct render; got {rendered!r}"
+        )
+        assert rendered != code, "a rendered key token means the resolver missed the fallback"
 
 
 def test_spanish_carries_the_policy_label_in_its_own_copy():

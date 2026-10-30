@@ -217,6 +217,14 @@ def test_wave3_hindi_carries_its_namespace_snapshot_with_parity(i18n_check) -> N
     # the other seven locales; it sorts after `relay.chrome`. Carrying it
     # pins key/placeholder parity here, while shipping still waits on its
     # independent audit row, exactly as each namespace above did.
+    # The relay catalogue translation wave adds the four namespaces hi had never
+    # carried — `relay.account_policy` (13 keys, en from #2453),
+    # `relay.library` (1, a64e332b996), `relay.session` (17, #2329) and
+    # `relay.shell` (44, ec55a9f2bd9): account-routing settings, the library
+    # count, the session list/view and the shell chrome. Each has been in en
+    # since its own extraction slice but went untranslated here, and each joins
+    # on the same terms as everything above: its own passed independent audit
+    # row against the current en bytes (i18n/ledger/hi.json).
     locale = "hi"
     namespaces = (
         "cli.exec_remote_help",
@@ -230,6 +238,7 @@ def test_wave3_hindi_carries_its_namespace_snapshot_with_parity(i18n_check) -> N
         # ships cross-platform, so Hindi carries it like the rest. It sorts
         # after cli.services_status.
         "cli.team_bridge",
+        "relay.account_policy",
         "relay.approvals",
         "relay.ask",
         "relay.asks",
@@ -241,11 +250,19 @@ def test_wave3_hindi_carries_its_namespace_snapshot_with_parity(i18n_check) -> N
         # doubly audited ledger row; it keeps relay.chrome's English bytes
         # frozen, and sorts between relay.chrome and relay.session.tags.
         "relay.health",
+        # The library page's pluralized count; it sorts between the relay
+        # health dot and the notifications inbox.
+        "relay.library",
         "relay.notifications",
+        # `relay.session` is the session list/view copy — a DISTINCT namespace
+        # from `relay.session.tags` below, not a parent of it.
+        "relay.session",
         "relay.session.tags",
+        # The team bridge's shell setting (main #3189).
+        "relay.shell",
         # The composer's `$skill` picker (SKM-D6): 3 keys, carried in every
         # locale only with a fresh, independently audited ledger row at the
-        # current en bytes. Sorts between relay.session.tags and relay.transcript.
+        # current en bytes. Sorts between relay.shell and relay.transcript.
         "relay.skills",
         # Audited relay condensation copy adds 19 keys; keep this census exact.
         "relay.transcript",

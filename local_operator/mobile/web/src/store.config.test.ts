@@ -9,9 +9,9 @@
  */
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { BUNDLED_OWNED } from "./i18n/bundled.gen";
+import { BUNDLED_CHUNKS, BUNDLED_OWNED } from "./i18n/bundled.gen";
 import { RESOLVED_LOCALES } from "./i18n/runtime";
-import { initializeLocaleMetadata, messageRuntime, retainConfigStream, useLanguage, useLocaleSnapshot } from "./store";
+import { initializeLocaleMetadata, localeBundleLoader, messageRuntime, retainConfigStream, useLanguage, useLocaleSnapshot } from "./store";
 
 import { FetchStreamFixture as Stream, settleStream } from "./sse-test-fixture";
 
@@ -73,6 +73,25 @@ describe("retainConfigStream", () => {
 	it("follows the shipped fr bundle, falls back to English for an unshipped locale (when one exists), and publishes same-locale registration", async () => {
 		vi.useFakeTimers(); Stream.instances = [];
 		vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(configOk()).mockImplementation(Stream.fetch));
+		// Hold the French chunk open for the whole test: the frame only STARTS the
+		// request, and this stub is what that request waits on. Racing the real
+		// chunk — the manifest's own lazy loader for the generated French bundle —
+		// made the frame-time assertion below a scheduling coin-flip (measured 4/4
+		// cold three-file runs and 2/10 single-test repeats red): a chunk that
+		// settles before the assertion reads the store has already flipped the
+		// surface to French, which is the store behaving correctly read back as a
+		// failure. `BUNDLED_CHUNKS` is the seam the loader reads at call time
+		// (`start` does `manifest[locale]`), and the one
+		// `store.locale-bootstrap.test.ts` already patches to hold a chunk open.
+		// The module is therefore reached only THROUGH the manifest here: spelling
+		// its path as a quoted relative specifier in prose fails the packaging guard,
+		// whose import scanner reads comments too
+		// (`tests/unit/mobile/test_web_package_data.py`).
+		const manifest = BUNDLED_CHUNKS as Record<string, () => Promise<{ readonly BUNDLED_LOCALE: typeof BUNDLED_OWNED }>>;
+		const realFr = manifest["fr"];
+		let releaseFr!: () => void;
+		const frHeld = new Promise<void>(resolve => { releaseFr = resolve; });
+		manifest["fr"] = async () => { await frHeld; return realFr(); };
 		initializeLocaleMetadata();
 		const languageHook = renderHook(() => useLanguage());
 		const snapshotHook = renderHook(() => useLocaleSnapshot());
@@ -80,22 +99,40 @@ describe("retainConfigStream", () => {
 		// product, but with no owned relay catalogue, so its preference may not
 		// claim copy nobody translated. It is DERIVED from the generated manifest
 		// rather than named, because the shipped set moves while a branch is open:
-		// vi shipped with #3163 while es (#3164) and hi (#3166) waves are still in
-		// flight, and a hardcoded locale goes red the day one of them lands and
-		// invites a "fix" that deletes this assertion. Measured on this tree:
-		// shipped en/fr/ru/vi/ur/zh-CN, so the pick is es.
+		// vi shipped with #3163, es with #3172, and the hi catalogue (#3166) is still
+		// in flight, and a hardcoded locale goes red the day one of them lands and
+		// invites a "fix" that deletes this assertion. Shipped-ness is read from
+		// `BUNDLED_CHUNKS`, never `BUNDLED_OWNED`: the eager map is English only, so
+		// asking it would call every locale unshipped and pick one that has copy.
 		const unshipped = RESOLVED_LOCALES.find(
-			locale => locale !== "en" && !Object.values(BUNDLED_OWNED).some(bundle => locale in bundle),
+			locale => locale !== "en" && !(locale in BUNDLED_CHUNKS),
 		);
+		// Before any frame opens the request, a SHIPPED locale owns no registered copy
+		// and is therefore English: read straight off the registry, so no async path
+		// can have moved it. (The frame-time half below is the same claim seen through
+		// the store; the unshipped arm pins it for a locale no chunk can ever cover.)
+		expect(messageRuntime.uiLocaleFor("fr")).toBe("en");
 		const close = retainConfigStream();
 		try {
 			await settleStream(); expect(Stream.instances).toHaveLength(1);
 			const source = Stream.instances[0];
 			await act(async () => { source.emit("config", JSON.stringify({ language: "fr" })); await settleStream(); });
 			expect(languageHook.result.current).toBe("fr");
-			// #3131 ships fr's owned relay bundles, so a fr backend preference paints
-			// French copy: uiLocale follows an owned copy that exists rather than the
-			// preference alone.
+			// A frame publishes the PREFERENCE at once and only STARTS the locale's
+			// chunk request (`BUNDLED_CHUNKS`), so the surface is still the whole English
+			// bundle here: uiLocale follows copy that has actually been registered, never
+			// the preference alone.
+			expect(snapshotHook.result.current).toMatchObject({ backendLocale: "fr", uiLocale: "en", direction: "ltr" });
+			expect(document.documentElement.lang).toBe("en"); expect(document.documentElement.dir).toBe("ltr");
+			// The other half of the same contract: once the chunk lands — awaited through
+			// the store's own loader, the door the frame already opened — French copy
+			// exists and the UI and the document both move to it. Asserting only one of
+			// these halves goes green on a store that never follows the copy OR on one
+			// that claims a language nobody has.
+			releaseFr();
+			// `ensure` joins the request the frame already started (the held stub), so
+			// the flip below is still observed through the store's own loader.
+			await act(async () => { await localeBundleLoader.ensure("fr"); });
 			expect(snapshotHook.result.current).toMatchObject({ backendLocale: "fr", uiLocale: "fr", direction: "ltr" });
 			expect(document.documentElement.lang).toBe("fr"); expect(document.documentElement.dir).toBe("ltr");
 			const previous = snapshotHook.result.current;
@@ -116,7 +153,12 @@ describe("retainConfigStream", () => {
 				expect(snapshotHook.result.current).toMatchObject({ backendLocale: unshipped, uiLocale: "en", direction: "ltr" });
 				expect(document.documentElement.lang).toBe("en"); expect(document.documentElement.dir).toBe("ltr");
 			}
-		} finally { close(); languageHook.unmount(); snapshotHook.unmount(); }
+		} finally {
+			close(); languageHook.unmount(); snapshotHook.unmount();
+			// Restore even when an assertion above failed: a stub left behind would hold
+			// the next test's French chunk open for ever.
+			manifest["fr"] = realFr;
+		}
 		const offline = renderHook(() => useLocaleSnapshot());
 		// After the stream closes the preference survives; the copy it selects does
 		// not, because that locale owns none. With no unshipped locale left the last
@@ -269,8 +311,11 @@ describe("resolveInitialLocale", () => {
 		expect(fetchMock).toHaveBeenCalledTimes(1);
 		expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/config/events");
 		const { result, unmount } = renderHook(() => fresh.useLocaleSnapshot());
-		expect(result.current.uiLocale).toBe("ur");
-		expect(result.current.direction).toBe("rtl");
+		// The baseline frame names the backend locale AND its chunk is awaited
+		// inside the bootstrap budget, so the snapshot the first paint reads is
+		// already Urdu: an English frame here is the round-2 regression
+		// (`store.locale-bootstrap.test.ts` pins both sides of the budget).
+		expect(result.current).toMatchObject({ backendLocale: "ur", uiLocale: "ur", direction: "rtl" });
 		expect(document.documentElement.lang).toBe("ur");
 		expect(document.documentElement.dir).toBe("rtl");
 		unmount();

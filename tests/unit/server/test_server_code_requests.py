@@ -420,14 +420,16 @@ async def test_the_scan_uses_the_sessions_recorded_cwd(desktop):
     # 2. The session's own working directory names the host as a remote.
     # A REAL checkout: ``git -C <dir> config`` refuses a hand-written ``.git/config``
     # ("not a git repository"), which is exactly the read host identification makes.
-    # ``GIT_CONFIG_SYSTEM=/dev/null`` is hygiene for the whole fleet: the system gitconfig
-    # installs the osxkeychain credential helper, and no test on this machine should give
-    # a helper a reason to run.
+    # ``GIT_CONFIG_NOSYSTEM=1`` and ``GIT_CONFIG_SYSTEM=/dev/null`` are hygiene for the
+    # whole fleet: the system gitconfig installs the osxkeychain credential helper, and no
+    # test on this machine should give a helper a reason to run. Both are needed on macOS,
+    # where Apple Git reads a second system file that ``GIT_CONFIG_SYSTEM`` leaves alone.
     project = root / "checkouts" / "acme-api"
     project.mkdir(parents=True)
     git_env = {
         "PATH": os.environ.get("PATH", ""),
         "HOME": str(root),
+        "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_CONFIG_SYSTEM": "/dev/null",
         "GIT_TERMINAL_PROMPT": "0",
     }

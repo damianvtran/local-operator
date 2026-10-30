@@ -3,9 +3,11 @@ rebase; every other shape is a convergence review.
 
 Each case builds a tiny scratch repository and drives the script as a
 subprocess, exactly as its Run line documents. Git runs with
-``GIT_CONFIG_SYSTEM=/dev/null GIT_TERMINAL_PROMPT=0`` (AGENTS.md keychain rule:
-this machine's system gitconfig carries the osxkeychain helper) and a fixed
-identity, so no credential prompt and no ambient config can reach the result.
+``GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null GIT_TERMINAL_PROMPT=0``
+(AGENTS.md keychain rule: this machine's system gitconfig carries the
+osxkeychain helper, and Apple Git's second system file carries it too, so
+``GIT_CONFIG_SYSTEM`` on its own does not remove it) and a fixed identity, so no
+credential prompt and no ambient config can reach the result.
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ SCRIPT = REPO_ROOT / "scripts" / "rebase_proof.py"
 def _env() -> dict[str, str]:
     env = {k: v for k, v in os.environ.items() if not k.startswith(("GIT_", "CMUX_"))}
     env.update(
+        GIT_CONFIG_NOSYSTEM="1",
         GIT_CONFIG_SYSTEM="/dev/null",
         GIT_CONFIG_GLOBAL="/dev/null",
         GIT_TERMINAL_PROMPT="0",

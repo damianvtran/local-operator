@@ -652,6 +652,7 @@ async def status(
     # which must never ride ``lop serve``'s boot path (module docstring).
     from local_operator.team_bridge.read_context import READ_AVAILABILITY
     from local_operator.team_bridge.settings import TeamBridgeSettings
+    from local_operator.team_bridge.store import read_screening_status
 
     check = await get_status_discipline(config_manager.config_dir).check(boundary)
     # The local keys come from the DIRECTORY-scoped process watcher's last-good
@@ -774,6 +775,12 @@ async def status(
         #: when nothing waits, so an older renderer that ignores the key loses
         #: nothing.
         "delivery_hold": _delivery_hold(config_manager),
+        #: Screening's held / breaker / rejected counts — the same answer
+        #: ``lop team-bridge receiver status --json`` carries under
+        #: ``screening`` (``Store.screening_status_readonly``). Counts, codes,
+        #: categories and ages only; ``None`` when not enrolled or unreadable.
+        #: Additive: an older renderer that ignores the key loses nothing.
+        "screening_summary": read_screening_status(config_manager.config_dir),
         # The receiver's SERVICE state, distinct from enrolment, on every
         # platform (launchd, systemd --user, Task Scheduler): ``loaded`` the
         # supervisor holds it; ``installed`` registered but not running;

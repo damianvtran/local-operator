@@ -433,12 +433,15 @@ def _git_env(tmp_path: Path) -> dict[str, str]:
 
     A redirected HOME with the system gitconfig in play makes git ask macOS
     Keychain Services for a login keychain (the credential helper), which pops a
-    system dialog at the operator's desk; GIT_CONFIG_SYSTEM=/dev/null plus
-    GIT_TERMINAL_PROMPT=0 removes that path entirely.
+    system dialog at the operator's desk. ``GIT_CONFIG_SYSTEM=/dev/null`` alone
+    does NOT stop that on macOS: Apple Git reads a second system file
+    (``/Library/Developer/CommandLineTools/usr/share/git-core/gitconfig``) that
+    carries the same helper, and only ``GIT_CONFIG_NOSYSTEM=1`` removes it.
     """
     return {
         **os.environ,
         "HOME": str(tmp_path),
+        "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_CONFIG_SYSTEM": os.devnull,
         "GIT_CONFIG_GLOBAL": os.devnull,
         "GIT_TERMINAL_PROMPT": "0",
@@ -571,7 +574,12 @@ def test_rebased_branch_rows_are_folded_not_lost(tmp_path: Path) -> None:
     work = tmp_path / "tree"
     (work / "i18n" / "ledger").mkdir(parents=True)
     _stage_scripts(work)
-    env = {**os.environ, "GIT_CONFIG_SYSTEM": os.devnull, "GIT_TERMINAL_PROMPT": "0"}
+    env = {
+        **os.environ,
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_SYSTEM": os.devnull,
+        "GIT_TERMINAL_PROMPT": "0",
+    }
     shard = [_row("fr", "wire.exec", "a" * 64, "pre-existing fr row")]
     (work / "i18n" / "ledger" / "fr.json").write_text(
         json.dumps({"schema": 1, "locale": "fr", "entries": shard}, indent=2) + "\n",

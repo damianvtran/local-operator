@@ -3684,18 +3684,20 @@ def fresh_resident(config_dir: str | Path, session_id: str) -> TranscriptIndex |
     file and never waits: the caller decides what to do with ``None`` (the open
     frame starts a refresh and answers without facts — see ``open_frame``).
 
-    Synchronous on purpose. Its two ``stat`` calls are microseconds, and the
-    page builder's callers invoke it through ``asyncio.to_thread``, so there is no
-    event loop to block — and keeping it sync is what lets it share the
-    revalidation rule with the async callers instead of re-implementing it around
-    ``await``.
+    Synchronous on purpose. Its two ``stat`` calls — paid only on the resident
+    branch — are microseconds, and the page builder's callers invoke it through
+    ``asyncio.to_thread``, so there is no event loop to block — and keeping it
+    sync is what lets it share the revalidation rule with the async callers
+    instead of re-implementing it around ``await``.
 
     ONE CALLER IS ON THE EVENT LOOP, AND THAT IS BOUNDED. The desktop bridge's
     ``_warm_resident_scan`` asks this on the request's own thread to decide
-    whether a background scan is owed at all; answering that is the same two
-    stats, tens of microseconds, and skipping it would mean arming a scan the
-    cache is about to make pointless. Every other caller is still a worker, so
-    the pair stays inside a frame's noise rather than on a paint path's budget.
+    whether a background scan is owed at all; answering that costs a bare
+    ``_RESIDENT.get()`` and no ``stat`` at all when nothing is resident, and the
+    two stats above — tens of microseconds — when something is. Skipping the ask
+    would mean arming a scan the cache is about to make pointless. Every other
+    caller is still a worker, so the pair stays inside a frame's noise rather
+    than on a paint path's budget.
     """
     key = _key(config_dir, session_id)
     index = _RESIDENT.get(key)
