@@ -3563,17 +3563,35 @@ from its own disk. Missing information does not erase previously proven facts.
 index is the derivation authority and costs two stats, so it answers first. The
 persisted read-model companion beside it — the same derivation's projection, read
 in the caller's worker hop — answers when no resident index holds this journal's
-witness, which is what makes `journal_order=1` without `open_frame=1` `ready` on a
-process that has just started; the open-frame page already had this projection
-for its runs, and this is the same door for the page that serves none. The
-background correction behind `building` is unchanged, and is still what a genuine
-cold store answers. A companion that is missing, stale, corrupt or built by an
-older schema is not an error — it degrades to exactly the answer an absent
+witness — **on this plane**: the peer-owner plane still answers from its resident
+index alone (`relay.RelayServer._stored_journal_order`), so a companion-warm
+owner can answer `ready` to its own desktop and `building` to a peer viewer in
+the same instant (§"Complete peer-source contract") — which is what makes
+`journal_order=1` without `open_frame=1` `ready` on a process that has just
+started; the open-frame page already had this projection for its runs, and this
+is the same door for the page that serves none. The background correction behind
+`building` is unchanged, and is still what a genuine cold store answers. A companion that is missing, stale, corrupt or built
+by an older schema is not an error — it degrades to exactly the answer an absent
 companion gave before. The ordinals and the opener closure are the resident
 join's own helpers, so the two paths cannot disagree: measured on a 36.5 MB
 journal with the companion warm and the process fresh, base answered `building`
 with 0 ordinals in 79.1 ms and the projection answers `ready` with every served
 row carrying `journal_seq` in 12.2 ms.
+
+**KNOWN LIMITATION, recorded not fixed: the open-frame door still reopens the
+companion on every poll.** The renderer's own first paint and poll loop is
+`?open_frame=1&journal_order=1`, and that route never arms the resident warm this
+section describes. Measured against a warm companion: 25 frame polls opened it
+**50 times (2 per poll)** and left **no resident index** (`refreshes started: 0`,
+`resident present from poll: None`) — identical on that change's base and head,
+so this is pre-existing (#3111), not a regression. It is structural rather than a
+missed call site: `_frame_source → index_read_model.summary` predates the
+companion answer, and those reads return from the caller's own `facts` inside
+`_open_frame_history` (`local_operator/server/utils/desktop_sessions.py:4322`)
+before `_journal_order_page` and its warm are ever reached. The answer stays
+correct — `runs_state` and `journal_order_state` are both `ready` and the payload
+is unchanged — so what remains is the per-poll cost the history door no longer
+pays.
 
 `order_ids` is an optional, bounded lookup on these existing requests: at most
 512 entry IDs, each 1..128 characters. It has no effect without the declaration.
