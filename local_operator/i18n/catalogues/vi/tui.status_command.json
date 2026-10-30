@@ -1,0 +1,3 @@
+{
+  "tui.status_command.failed": "Lệnh trạng thái thất bại ({error}); dải giữ kết quả gần nhất. Kiểm tra display.composer.command."
+}
