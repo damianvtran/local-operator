@@ -25,7 +25,7 @@ import { act, renderHook } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { BUNDLED_CHUNKS, BUNDLED_OWNED } from "./i18n/bundled.gen";
 import { directionFor, RESOLVED_LOCALES } from "./i18n/runtime";
-import { messageRuntime, retainConfigStream, useLocaleSnapshot } from "./store";
+import { localeBundleLoader, messageRuntime, retainConfigStream, useLocaleSnapshot } from "./store";
 import { FetchStreamFixture as Stream, settleStream } from "./sse-test-fixture";
 
 /** The exact copy the shell hardcoded BEFORE this slice (the identity target). */
@@ -136,16 +136,15 @@ describe("relay.shell extraction", () => {
 	});
 
 	it("switches the real document en→fr→en for a locale whose owned copy is synthetic", async () => {
-		// These values are fixtures, not translations. French DOES ship a copy now
-		// (`BUNDLED_CHUNKS` → bundled.fr.gen), so the frame below really does start
-		// the store's chunk request; a real import cannot resolve while vitest holds
-		// fake timers and nothing has imported that module yet, so the fixture is
-		// what the assertions see. That keeps this test on the wiring — gate, config
-		// event, document props — while the real dynamic path is the next test, which
-		// pre-warms the module so its import settles in microtasks. Constraint, not
-		// accident: if this test ever pre-loads its locale's chunk or drops the fake
-		// timers, the emitted copy replaces the fixture and the assertions below must
-		// move to a locale with no chunk.
+		// French ships a real chunk (`BUNDLED_CHUNKS` → bundled.fr.gen), so the store
+		// registers real French for `fr` as soon as the loader resolves it — and the
+		// frame below asks for it. Settle that load BEFORE the fake timers and register
+		// the fixture on top, so what these assertions read is the fixture by
+		// construction: the frame then joins the settled promise instead of racing a
+		// live import. Measured before this: with fr shipping, the real copy landed
+		// inside the frame and `t("relay.shell.list.empty")` came back
+		// "aucune session en cours" on some runs and the fixture string on others.
+		await localeBundleLoader.ensure("fr");
 		/* The config channel is a FETCH-streamed SSE reader, not an EventSource:
 		   the tunnel's 60 s lease rotation needs the fetch lifecycle. Drive the
 		   same fixture the rest of the config tests use — one probing response
