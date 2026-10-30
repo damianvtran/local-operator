@@ -1416,6 +1416,127 @@ async def test_anthropic_drops_a_bucket_that_reported_no_number() -> None:
     assert [limit.id for limit in report.limits] == ["anthropic:7d"]
 
 
+def _verified_ultra_body(*, five_hour: Any = "idle", session: bool = True) -> dict[str, Any]:
+    """A verified-Ultra ``/api/oauth/usage`` body, synthetic values on the live shape.
+
+    Measured 2026-10-30 on verified Ultra accounts after Anthropic removed their
+    five-hour window (support.claude.com/en/articles/17728952): the server did
+    NOT drop the key — ``five_hour`` is a 0.0 bucket with every other field
+    null, and ``limits[]`` still opens with an inactive 0%/no-reset
+    ``session`` entry. ``five_hour="idle"`` reproduces that; pass ``None`` for
+    an explicit null, or ``"absent"`` to omit the key.
+    """
+    body: dict[str, Any] = {
+        "seven_day": {"utilization": 100.0, "resets_at": "2027-01-15T08:00:00+00:00"},
+        "limits": [
+            {
+                "kind": "weekly_all",
+                "group": "g",
+                "percent": 100,
+                "severity": "critical",
+                "resets_at": "2027-01-15T08:00:00+00:00",
+                "scope": None,
+                "is_active": True,
+            },
+            {
+                "kind": "weekly_scoped",
+                "group": "g",
+                "percent": 3,
+                "severity": "normal",
+                "resets_at": "2027-01-15T08:00:00+00:00",
+                "scope": {"model": {"display_name": "Fable"}},
+                "is_active": False,
+            },
+        ],
+    }
+    if session:
+        body["limits"].insert(
+            0,
+            {
+                "kind": "session",
+                "group": "g",
+                "percent": 0,
+                "severity": "normal",
+                "resets_at": None,
+                "scope": None,
+                "is_active": False,
+            },
+        )
+    if five_hour == "idle":
+        body["five_hour"] = {
+            "utilization": 0.0,
+            "resets_at": None,
+            "limit_dollars": None,
+            "used_dollars": None,
+            "remaining_dollars": None,
+            "locked_reason": None,
+        }
+    elif five_hour != "absent":
+        body["five_hour"] = five_hour
+    return body
+
+
+async def _anthropic_ids(payload: dict[str, Any]) -> list[str]:
+    client = _client_for(payload)
+    async with client:
+        report = await fetch_usage(client, "anthropic", access_token="tok")
+    assert report is not None
+    return [limit.id for limit in report.limits]
+
+
+@pytest.mark.asyncio
+async def test_anthropic_verified_ultra_idle_bucket_is_not_a_five_hour_row() -> None:
+    """The live verified-Ultra shape: an idle bucket AND an idle ``session``
+    entry. Rendering either as "5 hour 0%" shows a window the account does not
+    have — and the fallback must not resurrect what the bucket check dropped."""
+    assert await _anthropic_ids(_verified_ultra_body()) == ["anthropic:7d", "anthropic:7d:fable"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("five_hour", [None, "absent"])
+async def test_anthropic_null_or_absent_five_hour_gives_no_row(five_hour: Any) -> None:
+    """``five_hour: null`` with no ``session`` entry, and no key at all, are
+    both "no window" — locked so a future fallback cannot invent one."""
+    body = _verified_ultra_body(five_hour=five_hour, session=False)
+    assert await _anthropic_ids(body) == ["anthropic:7d", "anthropic:7d:fable"]
+
+
+@pytest.mark.asyncio
+async def test_anthropic_a_running_five_hour_window_is_still_reported() -> None:
+    """Unverified Ultra and Max keep a real window (16% with a reset, measured
+    live on the one account that still had one). The idle filter must not
+    touch it — from the bucket, or from the ``session`` fallback alone."""
+    reset = "2026-10-30T20:00:00+00:00"
+    from_bucket = _verified_ultra_body(five_hour={"utilization": 16.0, "resets_at": reset})
+    from_bucket["limits"][0].update(percent=16, resets_at=reset, is_active=False)
+    client = _client_for(from_bucket)
+    async with client:
+        report = await fetch_usage(client, "anthropic", access_token="tok")
+    assert report is not None
+    five = next(limit for limit in report.limits if limit.id == "anthropic:5h")
+    assert five.amount.fraction() == pytest.approx(0.16)
+    assert five.resets_at_ms is not None
+
+    from_session = _verified_ultra_body(five_hour=None)
+    from_session["limits"][0].update(percent=16, resets_at=reset)
+    client = _client_for(from_session)
+    async with client:
+        report = await fetch_usage(client, "anthropic", access_token="tok")
+    assert report is not None
+    five = next(limit for limit in report.limits if limit.id == "anthropic:5h")
+    assert five.amount.fraction() == pytest.approx(0.16)
+    assert five.resets_at_ms is not None
+
+
+@pytest.mark.asyncio
+async def test_anthropic_non_zero_five_hour_without_a_reset_is_kept() -> None:
+    """Only zero-AND-no-reset is idle: non-zero utilization is real usage even
+    when the endpoint omits the reset."""
+    body = _verified_ultra_body(five_hour={"utilization": 10.0, "resets_at": None})
+    ids = await _anthropic_ids(body)
+    assert ids[0] == "anthropic:5h"
+
+
 #: A real ``/backend-api/wham/usage`` body for a ChatGPT Pro account, matching
 #: the live response verified on 2026-08-08 (windows nested under ``rate_limit``,
 #: per-model caps under ``additional_rate_limits``).
