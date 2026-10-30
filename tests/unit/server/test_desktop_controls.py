@@ -694,6 +694,35 @@ async def test_settings_census_typed_writes_reset_and_secret_exclusion(desktop):
     assert fresh.config.values["private_secret"] == "never-serialize-me"
 
 
+async def test_settings_list_carries_the_registrys_search_vocabulary(desktop):
+    """``synonyms`` on the wire: present on every row, authored where curated.
+
+    Additive and optional by design - the desktop app and this server release
+    independently, so the field has to be a default ``[]`` that an older app
+    ignores and a newer app tolerates missing (the app's search falls back to
+    the visible copy). That is why this asserts on the FIELD and on the rows
+    the registry AUTHORED, never on an exact row key-set: the census test above
+    already owns "every setting is listed", and a row being added or retired
+    must not turn this projection test red.
+    """
+    client, app = desktop
+    _show_dynamic_sections(app)
+    rows = (await client.get("/v1/settings")).json()["result"]["settings"]
+    authored = {s.key: list(s.synonyms) for s in settings_io.SETTINGS if s.synonyms}
+    assert authored, "the registry authored no search vocabulary"
+
+    by_key = {row["key"]: row for row in rows}
+    for key, expected in authored.items():
+        assert by_key[key]["synonyms"] == expected, key
+
+    # The default half of the contract: a row the registry did not author comes
+    # back as an empty list, not null and not absent.
+    unauthored = [row for row in rows if row["key"] not in authored]
+    assert unauthored
+    assert all(row["synonyms"] == [] for row in unauthored)
+    assert all("synonyms" in row for row in rows)
+
+
 async def test_settings_refusals_use_the_envelope(desktop, monkeypatch):
     """The configuration surface's refusals carry the RFC §2.6 envelope.
 
