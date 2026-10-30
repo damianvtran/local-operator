@@ -14,6 +14,7 @@ on refusal) and assert what the check stores.
 from __future__ import annotations
 
 import json
+import socket
 import threading
 import time
 from collections.abc import Iterator
@@ -187,7 +188,9 @@ def test_the_most_specific_cause_anywhere_in_the_chain_wins():
     import requests
     import urllib3
 
-    deepest = urllib3.exceptions.ReadTimeoutError(None, "/v1/teams", "read timed out")
+    deepest = urllib3.exceptions.ReadTimeoutError(
+        urllib3.HTTPConnectionPool("127.0.0.1"), "/v1/teams", "read timed out"
+    )
     middle = requests.exceptions.ConnectionError("pool internals")
     middle.__cause__ = deepest
     error = _api_error(None, "Could not pull the team from the Radient Agent Hub", middle)
@@ -225,6 +228,14 @@ def test_control_characters_in_a_hub_body_never_reach_the_report():
 
     assert not set(detail) & {"\x1b", "\x00", "\r", "\n", "\x7f"}
     assert "boom" in detail and "end" in detail
+
+
+def test_a_control_character_becomes_a_space_not_a_deletion():
+    # Round-2 R2-2: a ``None`` translation DELETED the character, so
+    # "Team\nlookup" read "Teamlookup".
+    _reason, detail = chk._failure_reason(_api_error(500, "line one\nline two\tend"))
+
+    assert detail == "the hub returned an error (HTTP 500: line one line two end)"
 
 
 def test_a_4xx_is_still_a_refusal():
@@ -268,3 +279,65 @@ def test_the_warning_names_the_item_that_failed(caplog):
     (line,) = [r.getMessage() for r in caplog.records]
     assert "team" in line and HUB_ID in line
     assert "pool internals" not in line
+
+
+def test_a_hub_supplied_id_cannot_forge_a_log_line(caplog):
+    # Round-2 R2-3: the team arm's id comes from the hub document, not a UUID
+    # this side minted; a newline or escape in it must not reach the log.
+    import requests
+
+    error = _api_error(None, "x", requests.exceptions.ConnectionError("pool internals"))
+
+    with caplog.at_level("WARNING", logger=chk.logger.name):
+        chk._failure_reason(error, kind="team", hub_id="x\nFAKE LOG\x1b[2J" + "y" * 300)
+
+    (line,) = [r.getMessage() for r in caplog.records]
+    assert "\n" not in line and "\x1b" not in line
+    assert "team x FAKE LOG [2J" in line
+    assert "y" * 200 not in line
+
+
+def _closed_port() -> int:
+    # Bind then close: nothing listens on the port, so a connect is refused.
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+@pytest.fixture
+def _no_proxy_env(monkeypatch):
+    for name in (
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
+@pytest.mark.usefixtures("_no_proxy_env")
+def test_a_refused_connection_says_the_connection_failed(tmp_path):
+    # Round-2 R2-1: urllib3's own ``TimeoutError`` is the base of
+    # ``NewConnectionError``; matched by name it made a refused port read "the
+    # request timed out". Real socket, real client, no mocked class tree.
+    result = _check(tmp_path, f"http://127.0.0.1:{_closed_port()}")
+
+    assert result.reason == "hub-error"
+    assert result.detail.startswith("could not reach the hub: the connection failed (")
+
+
+@pytest.mark.usefixtures("_no_proxy_env")
+def test_a_dead_proxy_says_the_proxy_refused():
+    import requests
+
+    dead = f"http://127.0.0.1:{_closed_port()}"
+    with pytest.raises(requests.exceptions.RequestException) as caught:
+        # ``.invalid`` never resolves; the proxy is dialled first and refuses.
+        requests.get("http://hub.invalid/v1/teams", proxies={"http": dead}, timeout=5)
+    error = _api_error(None, "Could not pull the team from the Radient Agent Hub", caught.value)
+
+    _reason, detail = chk._failure_reason(error)
+
+    assert detail.startswith("could not reach the hub: the proxy refused the connection (")

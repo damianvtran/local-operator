@@ -22,6 +22,7 @@ check. See :func:`check_hub_skills`.
 
 from __future__ import annotations
 
+import builtins
 import logging
 import os
 from dataclasses import dataclass
@@ -186,6 +187,23 @@ def _cause_chain(error: BaseException) -> list[BaseException]:
     return chain
 
 
+def _class_names(exc: BaseException) -> set[str]:
+    """Names of ``exc``'s classes, with ``TimeoutError`` meaning only the builtin.
+
+    urllib3 defines its OWN ``urllib3.exceptions.TimeoutError``, the base of
+    ``ConnectTimeoutError`` and therefore of ``NewConnectionError`` -- which is
+    what a refused port, a DNS failure or a dead proxy raises. Matching that by
+    name sent every one of them to "the request timed out" (round-2 R2-1), so
+    the name counts only for ``builtins.TimeoutError`` (``socket.timeout``).
+    """
+
+    return {
+        cls.__name__
+        for cls in type(exc).__mro__
+        if cls.__name__ != "TimeoutError" or cls is builtins.TimeoutError
+    }
+
+
 def _transport_phrase(error: BaseException) -> tuple[str, str] | None:
     """``(phrase, exception class)`` for a request that never got a response.
 
@@ -195,7 +213,7 @@ def _transport_phrase(error: BaseException) -> tuple[str, str] | None:
     visited first.
     """
 
-    chain = [(exc, {cls.__name__ for cls in type(exc).__mro__}) for exc in _cause_chain(error)]
+    chain = [(exc, _class_names(exc)) for exc in _cause_chain(error)]
     for candidates, phrase in _TRANSPORT_PHRASES:
         for exc, names in chain:
             if names.intersection(candidates):
@@ -205,8 +223,9 @@ def _transport_phrase(error: BaseException) -> tuple[str, str] | None:
 
 #: C0 controls and DEL. A hub body is untrusted text that ends up in a person's
 #: terminal via the live report: an ANSI escape, CR (line overwrite), LF or NUL
-#: must not survive into it.
-_CONTROL_CHARS = dict.fromkeys([*range(0x20), 0x7F])
+#: must not survive into it. Each becomes a SPACE, not a deletion, so
+#: ``"line one\nline two"`` stays two words apart.
+_CONTROL_CHARS = dict.fromkeys([*range(0x20), 0x7F], " ")
 
 
 def _plain(text: str) -> str:
@@ -232,12 +251,14 @@ def _failure_reason(
     message when there WAS a response. The class name goes to the log, never
     the raw transport text (it carries URLs and pool internals, not prose).
 
-    ``kind`` and ``hub_id`` (``agent``/``team``/``skill`` and a UUID) are the
-    only identity the log line carries, so one dead hub does not log N
-    identical lines; both are non-secret.
+    ``kind`` and ``hub_id`` (``agent``/``team``/``skill`` and the hub-supplied
+    id) are the only identity the log line carries, so one dead hub does not
+    log N identical lines; both are non-secret. The id comes from a hub
+    document and is not guaranteed to be a UUID, so it is control-stripped and
+    truncated before it reaches the log (a newline would forge a log line).
     """
 
-    subject = " ".join(part for part in (kind, hub_id) if part) or "unknown item"
+    subject = _plain(" ".join(part for part in (kind, hub_id) if part))[:128] or "unknown item"
     status = _status_of(error)
     text = _plain(str(error))
     if status == 404 or "404" in text[:200] and "Not Found" in text:
