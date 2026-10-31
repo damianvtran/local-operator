@@ -4288,8 +4288,8 @@ def _refuse_signal(
     logger.warning(
         "session runtime: %s REFUSED (pid %d, session %s): no stop marker covers this "
         "run, so this runtime keeps serving its turn. A sanctioned stop stages a marker "
-        "first (the stop ladder does); SIGKILL is unrefusable. Arrival recorded in the "
-        "signal receipt's refusals list.",
+        "first (the stop ladder does); SIGKILL is unrefusable. Arrival recorded in this "
+        "session's refusal record.",
         sig.name,
         os.getpid(),
         session_id or "<unknown>",
