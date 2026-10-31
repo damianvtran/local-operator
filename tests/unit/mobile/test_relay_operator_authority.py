@@ -492,9 +492,7 @@ def test_the_route_table_names_the_paths_this_build_actually_serves(
         for method in (getattr(route, "methods", None) or set())
     }
     assert avatar_methods <= {"GET", "HEAD"}, avatar_methods
-    assert not [
-        path for path in paths if path.startswith("/v1/") and path != avatar_path
-    ], paths
+    assert not [path for path in paths if path.startswith("/v1/") and path != avatar_path], paths
 
 
 def test_the_portal_and_the_relay_agree_about_the_namespace() -> None:

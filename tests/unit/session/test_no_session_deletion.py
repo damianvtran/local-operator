@@ -1407,7 +1407,8 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     (
         "local_operator/agents.py::AgentRegistry.set_agent_avatar",
         "<path>.unlink",
-        "rollback drops only the new agents/<id>/avatar.png|jpg FILE after a failed agent.yml write",
+        "rollback drops only the new agents/<id>/avatar.png|jpg FILE after a failed "
+        "agent.yml write",
     ),
     (
         "local_operator/agents.py::AgentRegistry.clear_agent_avatar",
