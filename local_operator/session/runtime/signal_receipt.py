@@ -15,11 +15,19 @@ WHAT IT CAN AND CANNOT SAY (stated here once, repeated in ``docs/EXEC.md``):
 
 * signal name and number, arrival time, whether work was in flight, what the
   handler did, and the receiver's own identity: YES.
-* the SENDER's pid or uid: NO, on macOS. The stdlib exposes no siginfo
-  (``signal.sigwaitinfo`` is absent) and asyncio's ``add_signal_handler``
-  discards it, so the receipt says ``sender: unavailable`` rather than guessing.
-  The only path that NAMES a caller is a covering stop marker, and that comes from
-  the acting party's own attestation, not from this module observing anything.
+* the SENDER's pid and uid: YES, where ``local_operator.siginfo`` could arm its
+  one-shot ``SA_SIGINFO`` sensor over the handler that owns the signal (Darwin,
+  today). The stdlib exposes no siginfo of its own (``signal.sigwaitinfo`` is
+  absent on this host) and asyncio's ``add_signal_handler`` discards it, which is
+  why the capture needed a module of its own rather than a flag; where it is not
+  armed, or the platform cannot capture, the receipt still says
+  ``sender: unavailable`` and claims nothing. The 2026-10-30 21:57 wave — twelve
+  exec workers, five runtimes and two daemons signalled inside 1.33 s — is the
+  reason that distinction is worth a whole module: every one of those rows said
+  ``no-siginfo``, so the sender was unnameable and the incident unfalsifiable.
+  The ``sender`` dict carries ``state``/``reason`` on both arms, plus ``pid``,
+  ``uid`` and ``code`` when captured, and a pid of ``0`` there means the KERNEL
+  delivered it (no sending process), never "process zero".
 * SIGKILL, a crash or a power loss: NOTHING. The target is not executing. Those
   stay on the acting party's marker (SIGKILL rung) or on no evidence at all.
 
@@ -85,11 +93,35 @@ _RUN_KEY_TOLERANCE_S = 1.0
 #: What the receipt says about the sender, and why. ``could_be`` is kill(2)'s
 #: permission rule (same uid, or root) — a true, INFERRED fact, labelled as such
 #: by its key — never an observation of who signalled.
+#:
+#: THIS IS THE NOT-CAPTURED SHAPE, and it stays BYTE-IDENTICAL to what every
+#: receipt written before ``local_operator.siginfo`` existed says: readers and
+#: tests downstream of a persist-and-render chain already key off exactly these
+#: three fields, so the sender that could not be named keeps its old spelling
+#: rather than acquiring a new one.
 SENDER_UNAVAILABLE: dict[str, str] = {
     "state": "unavailable",
     "reason": "no-siginfo",
     "could_be": "same-uid-or-root",
 }
+
+#: The sender the KERNEL filled in: ``siginfo_t.si_pid`` is 0, which means "no
+#: sending process" (measured on this host: a ``setitimer`` SIGALRM arrives with
+#: ``si_pid 0, si_uid 0, si_code 0``), NOT "process zero". Kept distinct from
+#: :data:`SENDER_UNAVAILABLE` because the two are different facts — one is "the
+#: capture never happened", this one is "the capture happened and named no
+#: process" — and rendered the same way, because neither names a party.
+SENDER_KERNEL: dict[str, str] = {
+    "state": "unavailable",
+    "reason": "kernel-originated",
+}
+
+#: The sender that WAS named. ``pid``/``uid`` are ``si_pid``/``si_uid`` as the
+#: kernel handed them over, and ``code`` is ``si_code`` verbatim — recorded, not
+#: interpreted, because its meaning depends on the origin (``kill(2)`` and a
+#: kernel timer both measured ``0`` on Darwin). ``reason`` stays on this arm so a
+#: reader that only looks at ``reason`` never has to special-case the shape.
+SENDER_SIGINFO_REASON = "siginfo"
 
 #: ``stop_class`` vocabulary shared by the exec ledger and the readers.
 CLASS_DELIBERATE = "deliberate"
@@ -186,6 +218,54 @@ def marker_covers_signal(
         return False
 
 
+def sender_facts(number: int) -> dict[str, Any]:
+    """What the receipt can say about WHO sent signal ``number``. Never raises.
+
+    THE ONE PLACE THE CAPTURE IS TURNED INTO THE PERSISTED SHAPE, shared by both
+    writers this receipt has (the runtime's signal callback and the exec worker)
+    so the two cannot describe one delivery differently.
+
+    Three arms, and the difference between the last two is the point:
+
+    * nothing captured -> :data:`SENDER_UNAVAILABLE`, byte-identical to every
+      receipt written before the capture existed (an unwritten fact, not a gap
+      anybody can widen later);
+    * captured with ``si_pid == 0`` -> :data:`SENDER_KERNEL`: the kernel
+      delivered it and no process did, so there is nobody to name;
+    * captured with a positive ``si_pid`` -> the named arm, carrying the pid, the
+      uid and the raw ``si_code``.
+
+    An implausible capture (a negative pid, a value that is not an int at all)
+    falls back to :data:`SENDER_UNAVAILABLE` rather than persisting a guess: the
+    wrong pid in an incident report is worse than the old "unavailable".
+    """
+    try:
+        from local_operator import siginfo
+
+        facts = siginfo.take(number)
+    except Exception:  # noqa: BLE001 — an instrument must never fail a signal path
+        return dict(SENDER_UNAVAILABLE)
+    if not isinstance(facts, dict):
+        return dict(SENDER_UNAVAILABLE)
+    pid = facts.get("pid")
+    if not isinstance(pid, int) or isinstance(pid, bool):
+        return dict(SENDER_UNAVAILABLE)
+    if pid == 0:
+        return dict(SENDER_KERNEL)
+    if pid < 0:
+        return dict(SENDER_UNAVAILABLE)
+    uid = facts.get("uid")
+    code = facts.get("code")
+    known: dict[str, Any] = {
+        "state": "known",
+        "reason": SENDER_SIGINFO_REASON,
+        "pid": int(pid),
+        "uid": int(uid) if isinstance(uid, int) and not isinstance(uid, bool) else None,
+        "code": int(code) if isinstance(code, int) and not isinstance(code, bool) else None,
+    }
+    return known
+
+
 def build_signal(
     name: str,
     number: int,
@@ -198,6 +278,11 @@ def build_signal(
 ) -> dict[str, Any]:
     """One signal entry. ``covered`` is the pairing verdict, decided by the caller
     from :func:`marker_covers_signal`; ``marker`` is snapshotted only when covered.
+
+    The sender is read from the capture AT THIS INSTANT (:func:`sender_facts`),
+    not passed in: the capture is the arrival's own evidence and it is already
+    stored by the time any Python-level handler runs (``siginfo`` restores the
+    disposition and re-raises, so the platform's delivery is what gets here).
     """
     entry: dict[str, Any] = {
         "name": name,
@@ -205,7 +290,7 @@ def build_signal(
         "at": at,
         "in_flight": in_flight,
         "action": action,
-        "sender": dict(SENDER_UNAVAILABLE),
+        "sender": sender_facts(number),
         "stop_marker": marker_subset(marker) if covered else None,
         "sanction": "marker" if covered else "none",
     }
@@ -257,8 +342,32 @@ def merge_into(
     return receipt
 
 
+def _named_sender_text(sender: object) -> str:
+    """``"pid 7 (uid 0)"`` for a sender that names a process, ``""`` otherwise.
+
+    ONE IMPLEMENTATION, in ``incidents`` — the module that already renders this
+    receipt's sentences (:func:`incidents.render_named_sender`) — so the log line
+    and the transcript cannot disagree about whether a party was named. The
+    import is local because ``incidents`` is the heavier module and this function
+    runs on the exit path; ``cut_off_verdict`` imports it the same way and for the
+    same reason.
+    """
+    try:
+        from local_operator.incidents import render_named_sender
+
+        return render_named_sender(sender)
+    except Exception:  # noqa: BLE001 — a log suffix must never fail an exit path
+        return ""
+
+
 def describe(receipt: dict[str, Any] | None) -> str:
-    """One line naming the LATEST signal and its pairing, for a log line. Never raises."""
+    """One line naming the LATEST signal, its pairing and its sender, for a log line.
+
+    ``sender=`` stays the word ``unavailable`` where nothing was captured, so a
+    log reader's existing grep keeps working, and becomes ``pid N (uid U)`` when
+    the capture named a party — the same two facts the rendered sentence carries.
+    Never raises.
+    """
     try:
         if not receipt:
             return ""
@@ -271,7 +380,8 @@ def describe(receipt: dict[str, Any] | None) -> str:
             if (receipt.get("count") or 1) > 1
             else ""
         )
-        return f"{last.get('name')} at {when}, sanction={sanction}, sender=unavailable{extra}"
+        who = _named_sender_text(last.get("sender")) or "unavailable"
+        return f"{last.get('name')} at {when}, sanction={sanction}, sender={who}{extra}"
     except Exception:  # noqa: BLE001 — a log suffix must never fail an exit path
         return ""
 
@@ -435,9 +545,12 @@ def cut_off_verdict(
       records positive evidence of it and nothing changes from before);
     * covering involuntary marker -> ``runtime-killed`` naming the recorded actor;
     * no covering marker -> ``runtime-shutdown`` ("terminated while this turn was
-      running") with the unidentified-sender sentence. The CAUSE TOKENS are the
-      existing ones — a new token would ripple across every surface that switches
-      on the taxonomy — so only the detail carries the new fact.
+      running") with the sender sentence: the unidentified one where nothing was
+      captured (byte-identical to what this arm always said), or the named one
+      ("from pid N (uid U)") where ``local_operator.siginfo`` captured the
+      delivery. The CAUSE TOKENS are the existing ones — a new token would ripple
+      across every surface that switches on the taxonomy — so only the detail
+      carries the new fact.
 
     LATEST SIGNAL WINS, and the rule is stated here because three callers share
     this function: the runtime's signal path, the boot-time reader and the exec
@@ -477,5 +590,10 @@ def cut_off_verdict(
             at=entry.get("at"),
             count=int(count or 1),
             spawn_chain=entry.get("spawn_chain"),
+            # The receipt's own captured sender, passed through verbatim: the
+            # renderer decides whether it can name a party (see
+            # ``incidents.render_signal_receipt_detail``), and a receipt written
+            # before the capture existed simply has the unavailable shape.
+            sender=entry.get("sender"),
         ),
     )

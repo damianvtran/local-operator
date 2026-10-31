@@ -2291,6 +2291,7 @@ def test_a_sigterm_batch_with_no_marker_yields_n_unattributed_interrupted_rows(
     """
     import signal as signal_module
 
+    from local_operator import siginfo
     from local_operator.session.runtime import stop_ledger
 
     workers = _spawn_batch(tmp_path, 3)
@@ -2309,7 +2310,21 @@ def test_a_sigterm_batch_with_no_marker_yields_n_unattributed_interrupted_rows(
         arrivals = [r for r in mine if "signal" in r]
         assert len(arrivals) == 1 and "status" not in arrivals[0], mine
         assert arrivals[0]["signal"]["number"] == 15
-        assert arrivals[0]["signal"]["sender"]["state"] == "unavailable"
+        # THE SENDER IS NAMED WHERE THE PLATFORM CAN CAPTURE IT (2026-10-30). This
+        # row used to be pinned to ``unavailable`` because that was the only thing
+        # the product could say; twelve such rows are what the 2026-10-30 21:57
+        # fleet kill left behind. ``siginfo`` now arms a one-shot SA_SIGINFO
+        # sensor in the worker, so the sender here is THIS process — the test sent
+        # the SIGTERM — and that is the assertion that makes this cell a
+        # real-path proof of the change rather than a shape check. On a platform
+        # that cannot capture, the old sentence is still the whole truth.
+        sender = arrivals[0]["signal"]["sender"]
+        if siginfo.supported():
+            assert sender["state"] == "known", sender
+            assert sender["pid"] == os.getpid(), sender
+            assert sender["uid"] == os.getuid(), sender
+        else:
+            assert sender["state"] == "unavailable", sender
         final = exec_mode.job_status(job_id, reconcile=False)
         assert final["status"] == "interrupted", final
         assert final["stop_class"] == "unattributed-signal", final
@@ -2549,3 +2564,65 @@ def test_read_job_records_since_reads_only_appended_bytes(
 def test_read_job_records_since_never_raises_on_a_missing_ledger(tmp_path: Path) -> None:
     """A waiter on a root that has no ledger keeps polling, not crashing."""
     assert exec_mode.read_job_records_since(tmp_path / "nope.jsonl", 0) == (0, [])
+
+
+def test_the_arrival_row_carries_the_sender_the_capture_recorded(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The exec arrival row names the signaller when the capture has one (2026-10-30).
+
+    TWELVE of these rows are what the 2026-10-30 21:57 fleet kill left behind, and
+    every one of them said ``sender: unavailable``, which is precisely why the
+    sender stayed unnameable. The row is the exec worker's receipt — it has no
+    turn journal — so the capture has to reach it through ``signal_receipt`` and
+    land in the ledger, not merely in the returned dict.
+
+    The capture is injected through ``siginfo.take`` (the module's public claim)
+    rather than by signalling this process: the real-delivery path is covered end
+    to end in ``tests/unit/test_siginfo.py``, and a unit test here must not send
+    SIGTERM to a pytest worker.
+    """
+    from local_operator import siginfo
+
+    logs = _redirect_logs_dir(monkeypatch, tmp_path)
+    directory = tmp_path / "sessions" / "signalled"
+    directory.mkdir(parents=True)
+
+    class _Session:
+        session_id = "sender000001"
+
+        class _T:
+            # Annotated so a double can carry the real attribute the worker reads;
+            # a bare class body infers ``None`` and the assignment is a type error.
+            directory: Any = None
+
+        _transcript = _T()
+        _transcript.directory = directory
+
+    monkeypatch.setattr(
+        siginfo,
+        "take",
+        lambda number: {"signo": int(number), "pid": 66213, "uid": 501, "code": 0},
+    )
+
+    sessions: list[Any] = [_Session()]
+    facts: dict[str, Any] = {}
+    exec_worker._record_arrival(sessions, "sender-job", facts)
+
+    entry = facts["signal"]
+    assert entry["sender"] == {
+        "state": "known",
+        "reason": "siginfo",
+        "pid": 66213,
+        "uid": 501,
+        "code": 0,
+    }, entry["sender"]
+
+    rows = [
+        json.loads(line)
+        for line in (logs / exec_mode.JOBS_FILE).read_text().splitlines()
+        if line.strip()
+    ]
+    arrival = [row for row in rows if row.get("id") == "sender-job" and "signal" in row]
+    assert arrival, rows
+    assert arrival[-1]["signal"]["sender"]["pid"] == 66213

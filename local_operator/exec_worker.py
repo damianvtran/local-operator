@@ -265,6 +265,33 @@ def _install_sigterm_handler(
         # Non-POSIX or pre-loop environments: fall back to a plain handler
         # that cannot schedule into the loop.
         signal.signal(signal.SIGTERM, lambda *_: sys.exit(EXIT_INTERRUPTED))
+    # AFTER THE HANDLER, ALWAYS: both branches above reach ``sigaction``
+    # themselves, so arming first would let this worker's own install replace the
+    # sensor and the receipt would say ``sender: unavailable`` for the life of
+    # the process (``siginfo.arm``'s docstring states the order; this is one of
+    # its two callers).
+    _arm_sender_capture()
+
+
+def _arm_sender_capture() -> None:
+    """Arm ``siginfo``'s one-shot sender sensor over the SIGTERM handler. Never raises.
+
+    WHY THE EXEC WORKER NEEDS ITS OWN CALL: it installs SIGTERM directly rather
+    than through ``procstate.install_loop_signal_handlers`` (the runtime's path),
+    and twelve of these workers were in the 2026-10-30 21:57 fleet kill — every
+    one of their arrival rows said ``no-siginfo``. With the sensor armed, the
+    row the worker appends to ``exec-jobs.jsonl`` at arrival names the pid that
+    sent the signal.
+
+    BEST-EFFORT AND NON-RAISING, on the same rule as the handler above: a
+    capture that cannot be armed costs a fact, never a worker.
+    """
+    try:
+        from local_operator import siginfo
+
+        siginfo.arm(signal.SIGTERM)
+    except Exception:  # noqa: BLE001 — an instrument must never fail a worker boot
+        logging.getLogger(__name__).debug("could not arm the sender capture", exc_info=True)
 
 
 def _install_sighup_ignore(loop: asyncio.AbstractEventLoop) -> None:
