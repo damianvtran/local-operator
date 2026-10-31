@@ -2737,17 +2737,10 @@ class StatusLine:
             # `muted`, not `fg` (design round 1, T-4): with no icon and no
             # leading seam, ink is what separates it from the left group's `fg`
             # model label when only the minimum gap stands between them. A
-            # STALE reading (the last good line kept through a failure) takes
-            # `dim`, the band's last-known ink, so a held value never reads as
-            # a fresh one.
-            # Stale is ALSO italic (design round 2, T-11): hue alone measured
-            # 1.21:1 against the fresh ink on some themes and is byte-identical
-            # under NO_COLOR, and weight/slant survive both.
-            ink = (
-                dim + Style(italic=True)
-                if self._custom_stale
-                else Style(color=theme_mod.semantic_color("muted"))
-            )
+            # Held data remains actionable, so retain the legible fresh ink:
+            # dim fails contrast on the band's actual dark and light surfaces.
+            # Italic distinguishes stale without relying on colour or NO_COLOR.
+            ink = Style(color=theme_mod.semantic_color("muted"), italic=self._custom_stale)
             text = truncate_cells(self._custom, custom_cap) if custom_cap else self._custom
             parts.append(("", text, ink))
         if "context" not in dropped:

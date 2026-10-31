@@ -234,6 +234,28 @@ async def test_the_status_command_paints_live_and_clears_when_removed(
 
 
 @pytest.mark.asyncio
+async def test_replacing_a_failing_command_drops_the_old_reading(monkeypatch, tmp_path) -> None:
+    """A different command cannot inherit a prior account's last-good value."""
+    app = _boot(monkeypatch, tmp_path)
+    async with app.run_test(size=(140, 24)) as pilot:
+        await _adopted(app, pilot)
+        _write_elsewhere(tmp_path, "display.composer.command", "echo old-account")
+        process_watcher(tmp_path).poll_now()
+        await _band_shows(app, pilot, "old-account")
+        _write_here(tmp_path, "display.composer.command_interval", 3600)
+        assert "old-account" in _painted_band(app)  # interval is not command identity
+        _write_elsewhere(tmp_path, "display.composer.command", "/no/such/new-account-status")
+        process_watcher(tmp_path).poll_now()
+        await _band_shows(app, pilot, "old-account", present=False)
+        for _ in range(100):
+            await pilot.pause()
+            if app._status_command_failures:
+                break
+        assert app._status_command_failures == 1
+        assert "old-account" not in _painted_band(app)
+
+
+@pytest.mark.asyncio
 async def test_an_unrelated_composer_edit_does_not_rearm_the_command(monkeypatch, tmp_path) -> None:
     """Every ``display.composer.*`` edit lands in the same apply; only a change
     to the command or its interval may reset the cadence or fork a shell."""

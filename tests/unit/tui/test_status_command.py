@@ -100,6 +100,28 @@ def test_a_hung_script_times_out_and_its_process_group_is_reaped(tmp_path) -> No
         raise AssertionError("the script's background child survived the timeout")
 
 
+def test_timeout_reaps_pipe_holder_after_shell_exits(tmp_path) -> None:
+    """The session leader can exit before its background child closes stdout."""
+    pidfile = tmp_path / "orphan.pid"
+    outcome = _outcome(f"sleep 30 & echo $! > {pidfile}", timeout=0.5)
+    pid = int(pidfile.read_text().strip())
+    try:
+        assert outcome == sc.Outcome(error="timed out after 0.5s")
+        for _ in range(50):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.05)
+        else:
+            raise AssertionError("pipe-holding child survived its shell and timeout")
+    finally:
+        try:
+            os.kill(pid, 9)
+        except ProcessLookupError:
+            pass
+
+
 def test_cancellation_reaps_the_child(tmp_path) -> None:
     """An exclusive worker cancelled by the next tick must not leak its shell."""
     pidfile = tmp_path / "child.pid"

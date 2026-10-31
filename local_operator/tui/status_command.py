@@ -299,7 +299,9 @@ async def _reap(process: asyncio.subprocess.Process) -> None:
     worker stays cancelled.
     """
     try:
-        os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+        # start_new_session makes the child's PID its group ID even after the
+        # shell exits; getpgid(pid) would miss pipe-holding descendants then.
+        os.killpg(process.pid, signal.SIGKILL)
     except (ProcessLookupError, PermissionError, OSError):
         try:
             process.kill()

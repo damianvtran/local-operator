@@ -47597,8 +47597,8 @@ class OperatorApp(App[None]):
         Idempotent like its caller: an unchanged ``(command, interval)`` pair
         leaves the running timer alone, so the repaint every unrelated
         ``display.composer.*`` edit triggers does not also reset the cadence
-        or fork a shell. A changed pair stops the old timer, clears a stale
-        segment when the command was removed, and runs the new command at once
+        or fork a shell. A changed pair stops the old timer, clears a reading
+        when the command identity changes, and runs the new command at once
         — waiting a full interval to see whether an edit worked is how a user
         concludes it did not.
         """
@@ -47609,7 +47609,12 @@ class OperatorApp(App[None]):
         armed = (command, interval) if command else None
         if armed == self._status_command_armed:
             return
+        previous_command = self._status_command_armed[0] if self._status_command_armed else ""
         self._status_command_armed = armed
+        # A reading belongs to its command, not the band: retaining it for a
+        # different account or script misrepresents the replacement's state.
+        if command != previous_command and self._status is not None:
+            self._status.update(custom="", custom_stale=False)
         self._status_command_failures = 0
         self._status_command_successes = 0
         self._status_command_notified = False

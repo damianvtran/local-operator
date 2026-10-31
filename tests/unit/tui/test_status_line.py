@@ -2672,7 +2672,8 @@ def test_a_stale_reading_takes_the_last_known_ink() -> None:
     status.update(custom_stale=True)
     stale = style_of("acct 42%")
     assert fresh != stale
-    assert stale == Style(color=theme_mod.semantic_color("dim"), italic=True)
+    assert stale == Style(color=theme_mod.semantic_color("muted"), italic=True)
+    assert fresh.color == stale.color and not fresh.italic
 
 
 def test_the_custom_rung_is_in_every_ladder_and_bounded() -> None:
