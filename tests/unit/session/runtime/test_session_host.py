@@ -206,7 +206,7 @@ def _assert_engage_refuses_without_forking(
         f"local={forks.local}"
     )
     # Typed, and carrying NO user-facing sentence: the cause is host plumbing, and the
-    # surfaces already render their own localised generic line for an un-vetted
+    # surfaces already render their own generic line for an un-vetted
     # startup failure (so no catalogue key exists for it).
     assert isinstance(raised.value, SessionHostStartupError)
     assert raised.value.actionable == ""

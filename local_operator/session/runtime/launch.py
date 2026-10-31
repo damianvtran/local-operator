@@ -639,7 +639,7 @@ def _spawn_runtime_hosted(
         # ``_spawn_runtime_local``. It deliberately carries NO ``actionable``
         # sentence: the cause is host plumbing for the log, and every surface
         # already turns an un-vetted ``RuntimeStartupError`` into its own
-        # localised generic "runtime unavailable" line (``attached._ensure_bound``,
+        # generic "runtime unavailable" line (``attached._ensure_bound``,
         # ``relay``'s runtime-start reason), so there is no new user copy to key.
         handoff.close()
         capture.unlink(missing_ok=True)
@@ -1045,9 +1045,10 @@ class SessionHostStartupError(RuntimeStartupError):
     is the vetted, user-facing sentence a surface may echo; the cause here
     (no supervisor on this platform, the host did not answer, the host declined) is
     infrastructure detail for the log, and the surfaces already say something
-    localised and generic for an un-vetted startup failure. A dedicated catalogue
-    sentence would be seven translations of a message the person cannot act on any
-    differently. ``code`` (``unsupported`` / ``unavailable`` / ``refused``) is for
+    generic for an un-vetted startup failure (``attached._unavailable_reason``, which
+    is itself still an unkeyed English literal today -- a pre-existing gap this
+    slice neither widens nor closes). A dedicated catalogue sentence would be seven
+    translations of a message the person cannot act on any differently. ``code`` (``unsupported`` / ``unavailable`` / ``refused``) is for
     tests and logs. Being a subclass, every existing handler of
     ``RuntimeStartupError`` (fail-fast, no respawn) treats it as before.
     """
