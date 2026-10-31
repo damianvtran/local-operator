@@ -153,6 +153,39 @@ async def test_actual_body_dispatch_binds_destination_and_resets(
 
 
 @pytest.mark.asyncio
+async def test_missing_rendered_text_cannot_carry_admitted_proof(tmp_path):
+    from local_operator.team_bridge.card_projection import (
+        carry_presented_body,
+        presented_bridge_ref,
+    )
+
+    config = tmp_path / "config"
+    config.mkdir()
+    store = _store(config)
+    _reserve(store, config_dir=config)
+    runtime = BridgeRuntime(
+        ControlledHub(), config, TENANT, _owner(), SESSION_ID, admission="admitted"
+    )
+    session = _session(tmp_path, CapturingStream([]), runtime)
+    try:
+        turn = await _claim(session, config)
+        session._pending_body_turn = turn
+        sources = turn.transform([])
+        genuine = session._render_history(sources)
+        assert presented_bridge_ref(genuine) is not None
+        for content in ([], "", None):
+            # A renderer with no text must not propagate the genuine source's
+            # in-memory admission capability into an incomplete provider row.
+            missing = Message.model_construct(role="user", content=content)
+            for source in sources:
+                carry_presented_body(source, missing)
+            assert not hasattr(missing, "_bridge_presented_body")
+            assert presented_bridge_ref([missing]) is None
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("ending", ["cancel", "failure"])
 async def test_actual_dispatch_latch_clears_on_abnormal_run_exit(tmp_path, ending, caplog):
     config = tmp_path / "config"
