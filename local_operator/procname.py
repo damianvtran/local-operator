@@ -312,6 +312,11 @@ LABEL_EXEC = "{brand} [exec] job={job}"
 LABEL_MOBILE = "{brand} [mobile daemon] port={port}"
 LABEL_BROWSER = "{brand} [browser bridge] port={port}"
 LABEL_WAKES = "{brand} [wakes]"
+#: The session host (``session/runtime/host``): the launchd-owned parent every
+#: host-spawned session runtime descends from. Its own row, not ``[wakes]``'s,
+#: because an operator reading ``ps`` after a quit has to be able to tell "the
+#: runtimes' parent" from "the wake supervisor" at a glance.
+LABEL_SESSION_HOST = "{brand} [session host]"
 LABEL_TUNNEL = "{brand} [tunnel]"
 LABEL_SERVE = "{brand} [serve] port={port}"
 #: The Team Bridge connector LaunchAgent: one per user, no per-instance field.

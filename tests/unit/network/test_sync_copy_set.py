@@ -292,6 +292,15 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``ENV_LEASE_PATH`` is the nonsecret environment-variable NAME for that exact "
         "lease path, not a pathname or a translated/copyable session entry",
     ),
+    "local_operator/session/runtime/session_host.py": (
+        3,
+        "``HOST_DIRNAME`` ('run/session-host'), ``SOCKET_NAME`` ('host.sock'), ``LOCK_NAME`` "
+        "('host.lock'): the session host's rendezvous under the DEVICE-LEVEL run root "
+        "(<config>/run/session-host/), beside run/mobile and run/host and never an entry of "
+        "a session directory. A live unix socket and an flock election belong to THIS "
+        "machine's launchd-owned process; a copy that carried them would hand a peer a "
+        "path to a host that does not exist there.",
+    ),
     # ---- this install's CONFIG, LOG and STORE surface (outside ``sessions/``) ----
     "local_operator/disk_pressure.py": (
         1,

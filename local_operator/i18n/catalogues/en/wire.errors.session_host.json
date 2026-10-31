@@ -1,0 +1,5 @@
+{
+  "wire.errors.session_host.unsupported": "This computer has no background service manager the session host can run under, so the session was not started. Nothing was changed.",
+  "wire.errors.session_host.unavailable": "The background session host did not answer, so the session was not started. Wait a moment and send the message again.",
+  "wire.errors.session_host.refused": "The background session host declined to start this session. Send the message again; if it keeps happening, check logs/session-host.log in your Local Operator folder."
+}
