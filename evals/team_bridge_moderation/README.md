@@ -147,6 +147,51 @@ Exit codes — the ladder is the honesty mechanism, so read it before quoting a 
 an ablation that changes no code is not evidence, so the flag is **refused** rather than
 silently ignored. `--seed` pins the canary salt so a run is reproducible.
 
+## Screen-only bench (the inbound screener as a classifier)
+
+`scripts/eval_bridge_screen.py` measures ONE stage, the inbound screen, with no agent
+turn, so it can afford many repeats per message: per serving model and per template,
+the **bypass rate** (an `adv` message delivered) and the **false-block rate** (a
+`legit` message held or bounced). The pre-registered protocol it implements, including
+the decision rule for adopting a candidate template, is
+[`screen/PROTOCOL.md`](screen/PROTOCOL.md).
+
+- **What is production.** Each trial is one isolated screen through the production
+  `ScreenModelRunner` (and the `temperature=0.0` it sends) and `parse_verdict`. A
+  served version name (`bridge-screen-v2`) renders through `render_prompt`; a
+  candidate template FILE renders through the private body of the same function, so
+  it obeys the same substitution and nonce rules and must pass the same three-nonce
+  assertion. `screen/templates/bridge-screen-v2.txt` is byte-equal to the embedded v2
+  (sha256 `3abc0071...0304`, pinned by a test).
+- **What it touches.** Never `~/.local-operator/team_bridge`: no bridge store, budget
+  or receipts. Provider credentials are read from the config dir through `AuthStore`
+  opened read-only. Calls are recorded in the shared analytics ledger under the
+  session id `tb-screen-bench`. Everything else goes under `--out`.
+- **What it records.** `trials.jsonl`, appended per trial so a crash keeps the data:
+  corpus id, label, class, split (`sha256(id) mod 2`: 0 = dev, 1 = heldout), template
+  sha256, model route, served model, whether the spec supports sampling params (that
+  is, whether temperature 0 reached the provider), the temperature sent, disposition,
+  categories, a one-line reason, latency, tokens and failure. An invalid trial is
+  retried at most twice, then counted and excluded. It is never scored as a hold.
+- **What it reports.** `summary.{json,md}` per (model, template, split): trial-level
+  rates with 95% CIs from a cluster bootstrap over messages (2,000 resamples, seed
+  20261031), message-level ever- and majority-bypassed with Wilson CIs, the share of
+  non-unanimous messages, a per-class breakdown and invalid counts. `--compare A B`
+  adds a paired per-message difference with a paired bootstrap CI, plus the `legit`
+  messages B newly blocks.
+
+```bash
+# Plan only: digests and call count, no model call.
+python scripts/eval_bridge_screen.py --corpus adv.jsonl --corpus legit.jsonl \
+    --template bridge-screen-v2 --template cand.txt --model anthropic/claude-opus-5-5 \
+    --repeat 5 --split heldout --dry-run
+# Run; --max-calls is a required hard cap on physical calls, retries included.
+python scripts/eval_bridge_screen.py ... --max-calls 4000 --out /tmp/tb-screen
+# Re-summarize or compare an existing run without calling a model.
+python scripts/eval_bridge_screen.py --trials /tmp/tb-screen/trials.jsonl \
+    --compare bridge-screen-v2 cand --out /tmp/tb-screen
+```
+
 ## Reading a report
 
 `report.json` carries the header (model, dataset digest, taxonomy version, control

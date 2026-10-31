@@ -142,16 +142,64 @@ class ScreenLeg:
         config_dir: Path,
         settings: Mapping[str, Any] | None = None,
         screen_version: str = DEFAULT_SCREEN_VERSION,
+        template_text: str | None = None,
+        stream_fn: Any | None = None,
     ) -> None:
+        """``template_text`` overrides the embedded bytes for ``screen_version``.
+
+        WHY AN OVERRIDE EXISTS. The screen-only bench (``screenbench.py``) has to
+        measure a CANDIDATE template before anyone embeds it, against the shipped
+        one, under the same runner. The override renders through
+        ``screening._render_with_template`` - the private body of production's
+        ``render_prompt`` - so the substitution, forged-nonce refusal and the
+        three-nonce assertion are the shipped ones; only the bytes differ. With an
+        override, ``screen_version`` is a LABEL (recorded on the outcome), not a
+        lookup, and ``template_sha256`` is the digest of the override's bytes.
+        ``None`` (the default, and every agent-arm caller) keeps the production
+        path: ``render_prompt`` with its refusal of unembedded versions.
+
+        ``stream_fn`` replaces the leg's own ``create_stream_fn``. The screen bench
+        passes one stream function per model, built over a READ-ONLY auth store and
+        shared by many concurrent legs (each leg still wraps it in its own counting
+        wrapper, so usage never crosses trials); tests pass a stub. Either way the
+        call still runs through the production ``ScreenModelRunner`` (isolation
+        contract, identity check, stop-reason refusals) and ``parse_verdict``. A leg
+        that did not build its stream does not own it: :meth:`aclose` leaves an
+        injected stream open for its owner to close.
+        """
         self.model_route = model_route
         self.config_dir = Path(config_dir)
         self.settings = settings
         self.screen_version = screen_version
+        self.template_text = template_text
+        self._stream_fn_override = stream_fn
         self._runner: Any | None = None
         self._selection: Any | None = None
         #: The counting wrapper is held here, not on the runner: the runner is
         #: production's and must not grow eval-only attributes.
         self._stream: Any | None = None
+
+    def last_sampling(self) -> tuple[float | None, bool | None]:
+        """``(temperature requested, spec supports sampling params)`` of the last call.
+
+        Read from the REQUEST the production runner actually built, not from a
+        constant, so a future change to the runner's temperature shows up in the
+        data. ``(None, None)`` when the last screen never reached the stream (a
+        render refusal or a build failure).
+        """
+
+        stream = self._stream
+        if stream is None:
+            return None, None
+        return stream.last_temperature, stream.last_supports_sampling
+
+    async def aclose(self) -> None:
+        """Close the stream function this leg built (idempotent)."""
+
+        stream, self._stream = self._stream, None
+        self._runner = None
+        if stream is not None and self._stream_fn_override is None:
+            await stream.close()
 
     # -- construction ------------------------------------------------------
 
@@ -175,12 +223,14 @@ class ScreenLeg:
         spec = build_model_spec(provider, model_id)
         resolved = str(getattr(spec, "model_id", "") or model_id)
         selection = DefaultSelection(provider=provider, model_id=resolved, spec=spec)
-        auth = AuthStore(config_dir=self.config_dir)
-        stream = create_stream_fn(
-            auth,
-            settings=self.settings,
-            session_id="tb-moderation-eval-screen",
-        )
+        if self._stream_fn_override is not None:
+            stream = self._stream_fn_override
+        else:
+            stream = create_stream_fn(
+                AuthStore(config_dir=self.config_dir),
+                settings=self.settings,
+                session_id="tb-moderation-eval-screen",
+            )
         self._selection = selection
         self._stream = _CountingStream(stream)
         self._runner = ScreenModelRunner(self._stream, selection)
@@ -201,17 +251,35 @@ class ScreenLeg:
         means the model's own verdict was hold, not that a store refused.
         """
 
-        from local_operator.team_bridge.screening import parse_verdict, render_prompt
+        from local_operator.team_bridge.screening import (
+            _render_with_template,
+            parse_verdict,
+            render_prompt,
+        )
 
         started = time.monotonic()
         try:
-            rendered = render_prompt(
-                body_text=body,
-                sender=sender,
-                organization=organization,
-                msg_type=msg_type,
-                version=self.screen_version,
-            )
+            if self.template_text is None:
+                rendered = render_prompt(
+                    body_text=body,
+                    sender=sender,
+                    organization=organization,
+                    msg_type=msg_type,
+                    version=self.screen_version,
+                )
+            else:
+                # Candidate bytes, shipped rules: see __init__ for why the eval
+                # (and only the eval) reaches the private renderer.
+                rendered = _render_with_template(
+                    self.template_text,
+                    template_sha256=hashlib.sha256(self.template_text.encode("utf-8")).hexdigest(),
+                    body_text=body,
+                    sender=sender,
+                    organization=organization,
+                    msg_type=msg_type,
+                    nonce=None,
+                    attachments=None,
+                )
         except ValueError as error:
             # A renderer refusal is a real finding: an unrenderable message is one
             # the connector would hold. Recorded as a failure, never skipped.
@@ -355,12 +423,23 @@ class _CountingStream:
     def __init__(self, inner: Any) -> None:
         self._inner = inner
         self.last_usage = Usage()
+        #: What the last request asked for. The bench records both because
+        #: ``providers.clients._sampling_params`` silently drops the temperature for
+        #: a spec without sampling support: "temperature 0" in the runner is not
+        #: "temperature 0 at the provider" on every route.
+        self.last_temperature: float | None = None
+        self.last_supports_sampling: bool | None = None
 
     def __call__(self, request: Any, api_key: Any) -> Any:
         return self._stream(request, api_key)
 
     async def _stream(self, request: Any, api_key: Any) -> Any:
         usage = Usage()
+        self.last_usage = Usage()
+        self.last_temperature = getattr(request, "temperature", None)
+        model = getattr(request, "model", None)
+        supports = getattr(model, "supports_sampling_params", None)
+        self.last_supports_sampling = None if supports is None else bool(supports)
         async for event in self._inner(request, api_key):
             if str(getattr(event, "type", "")) == "usage":
                 reported = getattr(event, "usage", None)
