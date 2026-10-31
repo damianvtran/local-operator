@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "audit_id": "cg1",
+  "locale": "hi",
+  "namespace": "wire.tunnel_setup",
+  "source_sha256": "3854be7dce54dd3aeb9564921ed6a50f0560b32c7ac40955d81be93acd7e2ac1",
+  "target_sha256": "e7be566c58d2f153083a1221115e6d30de6331573875760d204b805fc924c128",
+  "hashes": {
+    "audit.log": "462116c5c28c3c55d7b59b7f67a4886a7aeeb8ba02916a317473a8e112c01e7d",
+    "findings.json": "777051a2cade9d962d834923b9621ed82d0f7012638bef94a210124ff6c571cd",
+    "record.json": "a3ee7c31d2b1bf4ad2942bc4f87f18a42f9c7bdb3c9496e3e7d8000f13c00678",
+    "report.md": "ceaa4dd1a01d74498cd7c8039f06946a6d279ce2569f3511803b5b055b85145d"
+  }
+}

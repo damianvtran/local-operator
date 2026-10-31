@@ -1,0 +1,14 @@
+{
+  "cli.hub_shared_help.publish_yes": "पुष्टि प्रॉम्प्ट छोड़ें; अनसुलझे मान स्वीकार नहीं करता (उनके लिए --accept-unresolved उपयोग करें)",
+  "cli.hub_shared_help.publish_preview_only": "पूर्वावलोकन चलाएँ और प्रकाशित किए बिना diff छापें (किसी चीज़ को सामान्यीकृत करने पर exit 2)",
+  "cli.hub_shared_help.publish_json": "मशीन-पठनीय पूर्वावलोकन आउटपुट; इसमें संदर्भ मान और एक-बार का commit पिन होता है, इसलिए इसे संवेदनशील मानें",
+  "cli.hub_shared_help.publish_accept_unresolved": "पूर्वावलोकन जिन मानों को वर्गीकृत नहीं कर सका, उन सबको स्वीकार करें, और उन्हें जस का तस प्रकाशित करें",
+  "cli.hub_shared_help.publish_allow_internal_ops": "संगठन प्रकाशन के लिए आंतरिक-संचालन भत्ते पर सहमति दें (--org आवश्यक; सहमति टेक्स्ट इंटरैक्टिव रूप से दिखाता है)",
+  "cli.hub_shared_help.sync_check": "केवल बताएँ क्या उपलब्ध है; कुछ न बदलें",
+  "cli.hub_shared_help.sync_prefer": "टकराव सुलझाएँ: जिन खंडों में दोनों ने बदलाव किया, उनमें अपना पक्ष रखें या हब का लें",
+  "cli.hub_shared_help.sync_accept_unknown_baseline": "आधार रेखा अज्ञात होने पर लागू करें: हब के जोड़ लिए जाते हैं, आपका कुछ नहीं जाता",
+  "cli.hub_shared_help.sync_replace": "अपनी प्रति को हब की प्रति से बदलने के लिए DISCARD करें (जो छोड़ा उसे दोहराता है; --yes आवश्यक)",
+  "cli.hub_shared_help.sync_yes": "--replace की पुष्टि करें",
+  "cli.hub_shared_help.sync_dry_run": "दिखाएँ क्या बदलेगा; कोई एजेंट पंक्ति न लिखें",
+  "cli.hub_shared_help.sync_json": "रिपोर्ट JSON के रूप में उत्सर्जित करें"
+}

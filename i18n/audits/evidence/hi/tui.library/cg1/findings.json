@@ -1,0 +1,39 @@
+{
+  "locale": "hi",
+  "namespace": "tui.library",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 2
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 1,
+      "id": "HI-007",
+      "severity": "NIT",
+      "namespace": "tui.library",
+      "key": "tui.library.ask_prompt",
+      "english": "Tell me about this asset: {name} ({path}) — {kind}, from {session}. What is it, and how might I use it?",
+      "current": "मुझे इस संसाधन के बारे में बताएँ: {name} ({path}) — {kind}, {session} से। यह क्या है, और मैं इसका उपयोग कैसे कर सकता/सकती हूँ?",
+      "problem": "\"कर सकता/सकती हूँ\" slash form reads as a form field, not as a message the user sends; same in ask_prompt_digest.",
+      "suggested": "Gender-neutral rephrase: \"…यह क्या है, और इसका उपयोग कैसे किया जा सकता है?\"",
+      "disposition": "fixed (remediation core-fix, session 76bcbfdf629d)"
+    },
+    {
+      "round": 1,
+      "id": "HI-008",
+      "severity": "NIT",
+      "namespace": "tui.library",
+      "key": "tui.library.hint_move",
+      "english": "move",
+      "current": "हिलाएँ",
+      "problem": "\"हिलाएँ\" means jiggle/shake; the key hint is cursor movement between rows.",
+      "suggested": "\"चलें\" or \"ऊपर/नीचे\"",
+      "disposition": "fixed (remediation core-fix, session 76bcbfdf629d)"
+    }
+  ]
+}

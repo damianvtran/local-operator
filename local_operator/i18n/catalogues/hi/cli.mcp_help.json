@@ -1,0 +1,21 @@
+{
+  "cli.mcp_help.mcp": "MCP सर्वर प्रबंधित करें",
+  "cli.mcp_help.list": "कॉन्फ़िगर किए MCP सर्वर सूचीबद्ध करें (सभी स्रोत मिलाकर)",
+  "cli.mcp_help.add": "MCP सर्वर जोड़ें (stdio कमांड या http/sse URL)",
+  "cli.mcp_help.add_name": "सर्वर का नाम",
+  "cli.mcp_help.add_command": "सर्वर लॉन्च करने के लिए stdio कमांड",
+  "cli.mcp_help.add_arg": "stdio कमांड का आर्गुमेंट (दोहराया जा सकता है)",
+  "cli.mcp_help.add_env": "stdio सर्वर के लिए एनवायरनमेंट वेरिएबल KEY=VALUE (दोहराया जा सकता है)",
+  "cli.mcp_help.add_url": "HTTP/SSE सर्वर URL (--command का विकल्प)",
+  "cli.mcp_help.add_scope": "लिखने के लिए कॉन्फ़िग स्कोप (डिफ़ॉल्ट: ग्लोबल ~/.local-operator/mcp.json)",
+  "cli.mcp_help.add_oauth": "रिमोट HTTP सर्वर के लिए OAuth चालू करें",
+  "cli.mcp_help.remove_server": "किसी कॉन्फ़िग स्कोप से MCP सर्वर हटाएँ",
+  "cli.mcp_help.remove_name": "हटाए जाने वाले सर्वर का नाम",
+  "cli.mcp_help.remove_scope": "जिस कॉन्फ़िग स्कोप से हटाना है (डिफ़ॉल्ट: ग्लोबल)",
+  "cli.mcp_help.login": "OAuth-सक्षम एक MCP सर्वर को प्रमाणित करें",
+  "cli.mcp_help.login_name": "प्रमाणित किए जाने वाले सर्वर का नाम",
+  "cli.mcp_help.logout": "एक MCP सर्वर का संग्रहीत OAuth क्रेडेंशियल हटाएँ",
+  "cli.mcp_help.logout_name": "लॉग आउट किए जाने वाले सर्वर का नाम",
+  "cli.mcp_help.reauth": "एक OAuth MCP सर्वर से लॉग आउट करें और नया प्राधिकरण चलाएँ",
+  "cli.mcp_help.reauth_name": "फिर से प्रमाणित किए जाने वाले सर्वर का नाम"
+}

@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "audit_id": "cg1",
+  "locale": "hi",
+  "namespace": "wire.slash.library",
+  "source_sha256": "0f8615f2ed9ffaf3aeb0288a4ff4b8fc8becd46017a931db9d4b3d9ec32fce46",
+  "target_sha256": "cb26dd7987e6051cbe51a4f1418452122afc97d181c51c43ea5b1fa4a77a58ee",
+  "hashes": {
+    "audit.log": "df455023577f3a4b36f75c36455021cc57a413b08dae81591c9eb26183793c1f",
+    "findings.json": "b88a6900e1d69bce8fa5c94e46c0bdd3753214cd1f9ea8d962ef5b3e48ec4dcc",
+    "record.json": "e32fda84b37979f959657dd829f38dc2eca5d8872b8ea592955b4218e6bc61b1",
+    "report.md": "c85b84458726e6142cb6ac941075f7c591ec0069ed44914e3df85438aa2ece3f"
+  }
+}

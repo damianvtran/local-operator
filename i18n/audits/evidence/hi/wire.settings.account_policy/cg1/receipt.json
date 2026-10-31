@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "audit_id": "cg1",
+  "locale": "hi",
+  "namespace": "wire.settings.account_policy",
+  "source_sha256": "1ad13f8198e28cb19fe0ecb2a6ef9b2a6990bc0d047566b71f5dd5322f594b25",
+  "target_sha256": "ac1e8d8fa83f3f45b66f08d230d47818f18c4e991956cf96fe9e8f1a21afdddd",
+  "hashes": {
+    "audit.log": "e7c8c2a3403b9c936d047854790e0e2442d3be7f58ba60eee747c8f9b0db3fdd",
+    "findings.json": "b332e2770ab6371298aebd1651ee9f5f08e62d94c805e1cac45559ff5445e76e",
+    "record.json": "c8dcb97e993f8d378cc3a21a1be3ed0da45ccd2a96ddf7cc1cc8b9b4e74f30f0",
+    "report.md": "19f1a2b66d585c47ef701bddb89a45a74ef3c6339b5e339e4bb0264e187b937b"
+  }
+}

@@ -1,0 +1,51 @@
+{
+  "locale": "hi",
+  "namespace": "tui.projects",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 2,
+    "nit": 1
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 1,
+      "id": "HI-010",
+      "severity": "MINOR",
+      "namespace": "tui.projects",
+      "key": "tui.projects.refusal_done_gate",
+      "english": "cannot mark done while these milestones are open: {names}",
+      "current": "ये माइलस्टोन खुले रहते पूर्ण चिह्नित नहीं किया जा सकता: {names}",
+      "problem": "\"माइलस्टोन\" breaks the shipped hi term for milestone, \"पड़ाव\" (tui.projects_edit.*milestone*), so the same project view would name one thing two ways.",
+      "suggested": "\"ये पड़ाव खुले रहते पूर्ण चिह्नित नहीं किया जा सकता: {names}\"",
+      "disposition": "fixed (remediation core-fix, session 76bcbfdf629d)"
+    },
+    {
+      "round": 1,
+      "id": "HI-011",
+      "severity": "MINOR",
+      "namespace": "tui.projects",
+      "key": "tui.projects.send.binding_move",
+      "english": "Move",
+      "current": "हिलाएँ",
+      "problem": "\"हिलाएँ\" (shake/jiggle) for cursor-move hints; shipped tui.schedule.hint_move uses \"खिसकाएँ\". Also in send.legend, start.legend and tui.library.hint_move.",
+      "suggested": "\"खिसकाएँ\" (legends: \"↑↓ खिसकाएँ\")",
+      "disposition": "fixed (remediation core-fix, session 76bcbfdf629d)"
+    },
+    {
+      "round": 1,
+      "id": "HI-012",
+      "severity": "NIT",
+      "namespace": "tui.projects",
+      "key": "tui.projects.send.title",
+      "english": "send to",
+      "current": "इसे भेजें",
+      "problem": "Picker title \"send to\" rendered \"इसे भेजें\" (\"send this\"); the title names the recipient choice.",
+      "suggested": "\"किसे भेजें\" or \"भेजें: लक्ष्य\"",
+      "disposition": "fixed (remediation core-fix, session 76bcbfdf629d)"
+    }
+  ]
+}

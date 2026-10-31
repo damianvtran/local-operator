@@ -1,0 +1,27 @@
+{
+  "locale": "hi",
+  "namespace": "wire.settings.account_policy",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 1,
+    "nit": 0
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 1,
+      "id": "HI-028",
+      "severity": "MINOR",
+      "namespace": "wire.settings.account_policy",
+      "key": "wire.settings.account_policy.help",
+      "english": "Chooses eligible sibling accounts within the same provider and credential tier. A compatible, unexpired lease from a successful request takes priority for every policy; it does not guarantee a cache hit. Reset soonest prefers the nearest weekly refill, then the five-hour refill within one-minute ties. An explicit policy overrides the legacy usage-aware account pick setting.",
+      "current": "एक ही प्रदाता और क्रेडेंशियल स्तर के भीतर पात्र सहोदर खाते चुनता है। सफल अनुरोध से मिला संगत, समाप्त न हुआ लीज़ हर नीति में प्राथमिकता पाता है; यह कैश हिट की गारंटी नहीं देता। Reset soonest निकटतम साप्ताहिक रीफ़िल को पसंद करता है, फिर एक-मिनट की बराबरी में पाँच-घंटे का रीफ़िल। स्पष्ट नीति पुरानी usage-aware account pick सेटिंग को अधिलेखित करती है।",
+      "problem": "The help text refers to the policy by its English name \"Reset soonest\" (and \"usage-aware account pick\"), but the rendered choice label is \"जल्द रीसेट\" and the sibling legacy.help uses the Hindi labels. A Hindi user cannot match the help text to the option they see. The translator's note calls it a literal config value, but the visible label is translated.",
+      "suggested": "\"…जल्द रीसेट निकटतम साप्ताहिक रीफ़िल को पसंद करता है… स्पष्ट नीति पुरानी usage-aware चयन सेटिंग को अधिलेखित करती है।\" (match reset_soonest.label and legacy.label)",
+      "disposition": "fixed (remediation core-fix, session 76bcbfdf629d)"
+    }
+  ]
+}
