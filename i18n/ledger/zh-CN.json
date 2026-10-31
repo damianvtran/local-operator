@@ -2041,6 +2041,26 @@
       },
       "status": "passed",
       "note": "Independent audit of PR #3203 (Team Bridge tool row), new namespace, all 85 keys read against en + .context.json, glossary and zh-CN guide. Target sha256 after fixes f6e58cc76c47dcd71aa9cb1dc90e131395a10461f20338a5dade2edb9780575c. Mechanical: key parity 85/85; 109 sentinel renders through i18n.runtime.render_message (plural counts 0/1/2/3/5/11/21/22/1000000), 0 lost placeholders; =0 arm and other-only plural with 条/名 classifiers; no Cf/bidi, NFC, no BOM. 2 minor, both fixed: ZH-1 channel_thread settled/running/failed rendered as bare 已读取/正在读取/无法读取, dropping 'thread' and colliding with channel_history -> 已读取讨论串 etc. (讨论串 per target.thread and ui.teamBridge.replies.*); ZH-2 react/react_remove verbs and expanded.reacted/reaction_removed used 加表情/移除表情, drifting from the Team Bridge app's 表情回应 term -> 已添加表情回应/已移除表情回应 etc. Same fixes applied to the UI mirror keys (local-operator-ui#1529). 你 register not exercised; no pronoun drift. Unresolved blocker/major: 0."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.sessions",
+      "source_sha256": "ad2c68cbc8dc98f81875b0c1b3960be4cdfed27113bc326ae26045d93d75585a",
+      "translator": {
+        "agent": "coder (lopdev team) — PR #3102 i18n wave implementer",
+        "model": "radient/auto — actual; requested anthropic/claude-opus-5-5, moved by provider quota failures through openai/gpt-6-astra and kimi/k3.1-pro",
+        "date": "2026-10-30"
+      },
+      "auditor": {
+        "agent": "translation-auditor (round 1, distinct session) + translation-auditor (round 2, a different session again) — neither is the translator",
+        "model": "round 1 radient/auto · round 2 radient/alpha — actual models, not the requested anthropic/claude-opus-5-5; see note for the fallback chain",
+        "date": "2026-10-30",
+        "result": "passed",
+        "findings": 7,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Two independent audits, as safety copy requires (docs/I18N.md, Add or extend a locale, step 3): round 1 by translation-auditor on radient/auto at b3b1c2aec56 — 5 pass / 2 reject (fr + vi majors) with 6 minors and 5 nits, all answered in the PR's round-1 remediation comment, fr and vi fixed at 6f3b8e3, TA9 (quoting of {name}) fixed at 9d4bed5; round 2 by a different translation-auditor session on radient/alpha at 9d4bed55040 — 7 PASS / 0 REJECT, 0 blocker, 1 minor, 6 nit, safety-copy gate closed for these nine keys. Both rounds' actual models are the fallback chain, not the requested anthropic/claude-opus-5-5 (gpt-6-astra → kimi/k3.1-pro → radient/auto | radient/alpha). Accepted, non-gating dispositions deferred to the locale work: F1 (hi 'idle': wire.sessions says निष्क्रिय, relay.chrome.session.subtitle.idle ships आइडल — hi-guide call), F2/F3 ({seconds} unit: zh-CN 秒 and vi giây are the shipped conventions, this wave keeps s), F4 (fr stop_self_refused repeats 'cette'), F5 (hi approval-line tails), F6 ('hold window' mechanism word reads as data retention; needs a glossary row + seven guides), F7 (ru style guide records «в простой», copy ships «в простое»). Evidence: i18n/audits/evidence/zh-CN/wire.sessions/wsr2/. Unresolved blocker/major: 0. This row is fresh only at en source ad2c68cbc8dc98f81875b0c1b3960be4cdfed27113bc326ae26045d93d75585a; any English byte change lapses it."
     }
   ]
 }

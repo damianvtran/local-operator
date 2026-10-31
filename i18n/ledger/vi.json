@@ -1254,6 +1254,26 @@
       },
       "status": "passed",
       "note": "PR #3203 Team Bridge tool rows: all 85 keys of wire.tool_rows.bridge read against en + context sidecar, glossary and vi style guide, and against the desktop's ui.chat.canonical.tool_row.bridge.* vi copy (65 paired keys byte-identical after the fixes). Findings (both fixed in these bytes, same fix applied in the desktop catalogue; target hash is the fixed file): VI-B1 MINOR outcome.unconfirmed, expanded.unconfirmed, expanded.unconfirmed_bare 'chưa xác nhận gửi' reads as 'have not confirmed sending' (a pending confirm step), not 'delivery not confirmed' -> 'chưa xác nhận đã gửi' (20 cells, budget 32; outcome_short stays 'chưa xác nhận'). VI-B2 MINOR verb_*.ack_done 'trả lại' means 'return/give back' (reads as bouncing the message to its sender); the op releases this session's own claim -> 'Đã nhả'/'Đang nhả'/'Không thể nhả', the lock-release verb, pairing with claim 'nhận xử lý'. Recorded, not changed: target.dm 'một người' (zh-CN '对方' does the same; 'Đã nhắn cho một người' is idiomatic where 'một tin nhắn trực tiếp' would not take 'nhắn cho'); take_up 'mở' (fetch/open the body; 'nhận' is taken by claim); directory 'danh sách thành viên'; thread 'luồng' and reaction 'cảm xúc' match ui.teamBridge. Mechanical: key parity 85/85; ICU argument parity via runtime.message_arguments, 0 mismatches; 109 sentinel renders through local_operator.i18n.runtime with vi rules, 0 lost args; plurals other-only (+=0 kept) at 0/1/2/3/5/11/21/22/1e6 ('1.000.000 tin nhắn'); all maxCells keys within budget (rich cell_len); NFC, no Cf/bidi. bạn register not exercised; no pronoun drift. check.py --catalogues-only: 0 problems. Unresolved blocker/major: 0."
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.sessions",
+      "source_sha256": "ad2c68cbc8dc98f81875b0c1b3960be4cdfed27113bc326ae26045d93d75585a",
+      "translator": {
+        "agent": "coder (lopdev team) — PR #3102 i18n wave implementer",
+        "model": "radient/auto — actual; requested anthropic/claude-opus-5-5, moved by provider quota failures through openai/gpt-6-astra and kimi/k3.1-pro",
+        "date": "2026-10-30"
+      },
+      "auditor": {
+        "agent": "translation-auditor (round 1, distinct session) + translation-auditor (round 2, a different session again) — neither is the translator",
+        "model": "round 1 radient/auto · round 2 radient/alpha — actual models, not the requested anthropic/claude-opus-5-5; see note for the fallback chain",
+        "date": "2026-10-30",
+        "result": "passed",
+        "findings": 7,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Two independent audits, as safety copy requires (docs/I18N.md, Add or extend a locale, step 3): round 1 by translation-auditor on radient/auto at b3b1c2aec56 — 5 pass / 2 reject (fr + vi majors) with 6 minors and 5 nits, all answered in the PR's round-1 remediation comment, fr and vi fixed at 6f3b8e3, TA9 (quoting of {name}) fixed at 9d4bed5; round 2 by a different translation-auditor session on radient/alpha at 9d4bed55040 — 7 PASS / 0 REJECT, 0 blocker, 1 minor, 6 nit, safety-copy gate closed for these nine keys. Both rounds' actual models are the fallback chain, not the requested anthropic/claude-opus-5-5 (gpt-6-astra → kimi/k3.1-pro → radient/auto | radient/alpha). Accepted, non-gating dispositions deferred to the locale work: F1 (hi 'idle': wire.sessions says निष्क्रिय, relay.chrome.session.subtitle.idle ships आइडल — hi-guide call), F2/F3 ({seconds} unit: zh-CN 秒 and vi giây are the shipped conventions, this wave keeps s), F4 (fr stop_self_refused repeats 'cette'), F5 (hi approval-line tails), F6 ('hold window' mechanism word reads as data retention; needs a glossary row + seven guides), F7 (ru style guide records «в простой», copy ships «в простое»). Evidence: i18n/audits/evidence/vi/wire.sessions/wsr2/. Unresolved blocker/major: 0. This row is fresh only at en source ad2c68cbc8dc98f81875b0c1b3960be4cdfed27113bc326ae26045d93d75585a; any English byte change lapses it."
     }
   ]
 }
