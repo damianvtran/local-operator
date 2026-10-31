@@ -9478,7 +9478,10 @@ class RelayServer:
         frame_at = time.monotonic()
         # ONE STRIP PER ROW PER OPEN — the desktop twin's rule (``StripMemo``).
         # Every row is this read's own ``json.loads``, so nothing is shared.
-        strip_memo = StripMemo()
+        # ``supplements=False`` is spelled out for parity with the desktop twin:
+        # this read never paints supplements (``align_page``/``build_frame``
+        # below take their default), and a memo must match that value.
+        strip_memo = StripMemo(supplements=False)
         for attempt in range(OPEN_FRAME_MAX_RAW_PAGES):
             read_at = time.monotonic()
             try:

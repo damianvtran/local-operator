@@ -14,6 +14,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import pytest
+
 from local_operator.session import open_frame as of
 from local_operator.session.transcript_index import (
     Checkpoint,
@@ -546,8 +548,5 @@ def test_a_strip_memo_refuses_the_other_supplements_value() -> None:
     """The strip's answer depends on ``supplements``; a memo built for one value
     would serve its rows for the other, so the helpers refuse the mismatch."""
     memo = of.StripMemo(supplements=False)
-    try:
+    with pytest.raises(ValueError):
         of.paintable(_memo_rows(), supplements=True, memo=memo)
-    except ValueError:
-        return
-    raise AssertionError("a mismatched memo was accepted")

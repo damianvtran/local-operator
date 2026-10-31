@@ -410,9 +410,22 @@ class StripMemo:
 
     THE CONSTRAINTS that make memoising it safe, and that a change here must keep:
 
-    - SCOPED TO ONE REQUEST. The rows are that request's own ``_json_copy``
-      (never a shared page-cache object), and the memo dies with the request, so
-      a later journal state can never be answered from it.
+    - SCOPED TO ONE REQUEST. The memo dies with the request, so a later
+      journal state can never be answered from it.
+    - WHAT IS PER-REQUEST AND WHAT IS SHARED. On the desktop frame
+      (``DesktopSessionBridge._wire_rows(copy=False)``) only the OUTER row dict
+      is built per request: its ``payload`` IS the page cache's object, and
+      :func:`strip_entry` takes a one-level ``dict(payload)``, so every NESTED
+      value of a raw row or of a stripped result — content blocks,
+      ``details``, tool arguments, ``provider_payload`` members — is shared
+      with ``page_cache``. (The relay twin's rows are a fresh ``json.loads``
+      and share nothing.) THE CONSTRAINT: neither the rows passed in nor the
+      dicts this memo returns may be modified in place anywhere between
+      ``_wire_rows`` and ``DesktopSessionBridge._frame_answer``, which
+      deep-copies the served rows and is the first point a mutation is safe.
+      An in-place edit before that writes into the cache and is served to the
+      next open of the conversation. Guarded by
+      ``test_an_open_frame_leaves_the_page_cache_untouched``.
     - KEYED BY IDENTITY, HOLDING THE ROW. ``id()`` alone could be reused by a
       new object once the old one is freed, so each entry keeps its row alive
       and a hit also checks ``is``; an equal-but-distinct row is stripped anew.
@@ -422,7 +435,8 @@ class StripMemo:
     - A HIT RETURNS THE SAME DICT a miss returned. Every caller in this module
       only reads a stripped row (counts, sizes, the user-row test) or serves it
       as is, which is why sharing it cannot change a byte of the page; a caller
-      that MUTATES a stripped row must not take a memo.
+      that MUTATES a stripped row must not take a memo (and, per the rule above,
+      must not mutate it at all before ``_frame_answer``).
     """
 
     __slots__ = ("supplements", "_seen")

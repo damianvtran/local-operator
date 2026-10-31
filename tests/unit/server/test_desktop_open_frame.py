@@ -1081,6 +1081,59 @@ async def test_an_open_frame_never_aliases_the_cached_page(tmp_path: Path) -> No
         assert "edited" not in json.dumps(again)
 
 
+def _cached_rows_drifted_from_disk(directory: Path) -> tuple[int, list[str]]:
+    """(cached rows checked, ids whose cached payload no longer equals the journal).
+
+    THE JOURNAL ON DISK IS THE REFERENCE, not a snapshot taken mid-test: a
+    snapshot taken after the first open would already hold that open's edits and
+    compare equal to itself (the first draft of this guard did exactly that).
+    """
+    from local_operator.session.page_cache import page_cache
+
+    on_disk = {}
+    for line in (directory / TRANSCRIPT_FILENAME).read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            row = json.loads(line)
+            on_disk[row["id"]] = row["payload"]
+    checked, drifted = 0, []
+    for _key, (page, _size) in page_cache()._entries.items():
+        for entry in page.entries:
+            checked += 1
+            if entry.payload != on_disk.get(entry.id):
+                drifted.append(entry.id)
+    return checked, drifted
+
+
+@pytest.mark.asyncio
+async def test_an_open_frame_leaves_the_page_cache_untouched(tmp_path: Path) -> None:
+    """THE WINDOW ``StripMemo`` DOCUMENTS (openframe-cpu R2). Between
+    ``_wire_rows(copy=False)`` and ``_frame_answer``'s copy, a row's nested
+    payload values ARE the page cache's objects, so any in-place edit of a raw
+    or stripped row there writes into the cache and reaches the next open. After
+    tail, anchored and journal-order opens, every cached row must still equal its
+    journal line. Mutant: set ``entry["payload"]["content"][0]["text"] =
+    "edited"`` on the served rows inside ``build_frame`` (before the copy) ->
+    this test fails."""
+    from local_operator.session.page_cache import reset_page_cache
+
+    reset_page_cache()
+    async with _Harness(tmp_path) as harness:
+        harness.seed(turns=4)
+        await harness.warm()
+        async with harness.pool.session(harness.session_id, read=True) as bridge:
+            first = await bridge.history(limit=6, open_frame=True)
+            anchor = first["entries"][len(first["entries"]) // 2]["id"]
+            await bridge.history(limit=6, open_frame=True)
+            await bridge.history(limit=6, open_frame=True, around_id=anchor, before=2, after=2)
+            await bridge.history(limit=6, open_frame=True, journal_order=True, order_ids=[])
+        checked, drifted = _cached_rows_drifted_from_disk(
+            harness.root / "sessions" / harness.session_id
+        )
+    reset_page_cache()
+    assert checked > 0  # the opens went through the cache
+    assert drifted == []
+
+
 @pytest.mark.asyncio
 async def test_an_incrementally_refreshed_index_serves_the_full_rebuilds_frame(
     tmp_path: Path,
