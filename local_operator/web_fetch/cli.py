@@ -11,14 +11,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-
 from typing import TypeVar
 
 from local_operator.config import ConfigManager
 from local_operator.i18n.cli_help import help_text
 from local_operator.i18n.keys import cli_group_help as _gg
 from local_operator.paths import config_dir
-
 
 # argparse subparser actions are invariant: preserve the caller's parser subtype
 # while accepting both stock parsers in standalone callers and the keyed CLI.

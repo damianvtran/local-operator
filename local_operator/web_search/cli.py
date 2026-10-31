@@ -7,7 +7,6 @@ import asyncio
 import getpass
 import json
 from pathlib import Path
-
 from typing import TypeVar
 
 from local_operator.config import ConfigManager
