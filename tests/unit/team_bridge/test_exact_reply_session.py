@@ -40,6 +40,9 @@ class ControlledHub(FakeBridgeClient):
         self.sends = []
 
     async def conversation_send(self, conversation_id, **kwargs):
+        guard = kwargs.pop("pre_http_guard", None)
+        if guard is not None:
+            guard()
         self.sends.append((conversation_id, kwargs))
         return {"id": "bcmsg_result01", "seq": 4}
 

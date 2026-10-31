@@ -1861,10 +1861,8 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
             recipient_account_id = member.account_id
         # Member resolution awaited remote I/O after the early binding check.
         # Revocation during that wait must refuse before even spending budget.
-        # These synchronous checks and budget reservation have no intervening
-        # await. This is the tool's handoff boundary, not transport-wide atomic
-        # revocation: the client still awaits OAuth resolution/retries below,
-        # and this cannot retract bytes once handed to that transport.
+        # Keep this cheap early refusal, then repeat at each actual pre-HTTP
+        # boundary below: OAuth/refresh may await after the tool's handoff.
         fence = outbound_tool_fence(runtime)
         if fence is not None:
             return _error(fence["error"], code=fence["code"])
@@ -1877,17 +1875,41 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         # unresolvable call never spends budget) and BEFORE the wire write (a
         # concurrent post of the same endpoint sees the slot). Fail closed: a
         # guard that cannot read its state refuses rather than going silent.
-        try:
-            slot = reply_guard.reserve_post(
-                runtime.config_dir, endpoint_id=endpoint_id, conversation_id=channel_id
+        slot = None
+
+        class DispatchRefused(Exception):
+            def __init__(self, result: dict[str, Any]) -> None:
+                self.result = result
+
+        def pre_http_guard() -> None:
+            nonlocal slot
+            fence = outbound_tool_fence(runtime)
+            refusal = (
+                _error(fence["error"], code=fence["code"])
+                if fence is not None
+                else _validate_reply_destination(runtime, args)
             )
-        except reply_guard.ReplyGuardUnavailable:
-            return _error(
-                "the reply guard could not read its state; not posting",
-                code=reply_guard.CODE_UNAVAILABLE,
-            )
-        if isinstance(slot, reply_guard.Refusal):
-            return slot.as_result()
+            if refusal is not None:
+                raise DispatchRefused(refusal)
+            # Reserve only when the first physical attempt is authorized.
+            # Releasing an early slot would still consume the run counter;
+            # retries instead revalidate and reuse the same slot/client_ref.
+            if slot is None:
+                try:
+                    reserved = reply_guard.reserve_post(
+                        runtime.config_dir, endpoint_id=endpoint_id, conversation_id=channel_id
+                    )
+                except reply_guard.ReplyGuardUnavailable:
+                    raise DispatchRefused(
+                        _error(
+                            "the reply guard could not read its state; not posting",
+                            code=reply_guard.CODE_UNAVAILABLE,
+                        )
+                    ) from None
+                if isinstance(reserved, reply_guard.Refusal):
+                    raise DispatchRefused(reserved.as_result())
+                slot = reserved
+
         # ONE ref per CALL, minted before dispatch: the client's own 401 refresh
         # retry re-sends this exact body, so that retry is idempotent on the
         # server; a second tool call mints a second ref and is a second message.
@@ -1902,13 +1924,21 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
                 origin_session_id=runtime.session_id,
                 thread_root_id=thread_root_id or None,
                 mentions=mentions or None,
+                pre_http_guard=pre_http_guard,
             )
+        except DispatchRefused as failure:
+            if slot is not None:
+                reply_guard.release(
+                    runtime.config_dir, slot, endpoint_id=endpoint_id, conversation_id=channel_id
+                )
+            return failure.result
         except Exception as failure:
             # The hub did not take it: the budget slot goes back. (The run
             # counter does not — see ``reply_guard.release``.)
-            reply_guard.release(
-                runtime.config_dir, slot, endpoint_id=endpoint_id, conversation_id=channel_id
-            )
+            if slot is not None:
+                reply_guard.release(
+                    runtime.config_dir, slot, endpoint_id=endpoint_id, conversation_id=channel_id
+                )
             return _error(f"the post did not confirm: {_failure_text(failure)}", code="post_failed")
         # ONE receipt shape for every conversation write (main's `_post_receipt`,
         # shared with `dm`), EXTENDED with the resolved recipient rather than

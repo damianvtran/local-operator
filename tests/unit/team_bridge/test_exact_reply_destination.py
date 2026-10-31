@@ -114,6 +114,98 @@ async def test_named_reply_rechecks_authority_after_member_lookup(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ["initial", "refresh"])
+@pytest.mark.parametrize("revocation", [None, "move", "clear", "retire"])
+async def test_pre_http_reply_guard_after_oauth(bound_runtime, monkeypatch, boundary, revocation):
+    import httpx
+
+    from local_operator.team_bridge import client as client_mod
+    from tests.unit.team_bridge.test_client import FakeStore, _ok
+
+    runtime, _, store = bound_runtime
+    monkeypatch.setattr(client_mod, "org_oauth_destination_allowed", lambda base: True)
+    entered, resume = asyncio.Event(), asyncio.Event()
+    requests, reservations = [], []
+
+    def transport(request):
+        requests.append(request)
+        if boundary == "refresh" and len(requests) == 1:
+            return httpx.Response(401, json={"msg": "expired"})
+        return _ok({"id": "bcmsg_result001", "seq": 2})
+
+    client = client_mod.TeamBridgeClient(
+        None,
+        base_url="https://hub.example",
+        store=FakeStore(),
+        transport=httpx.MockTransport(transport),
+    )
+    runtime.client = client
+    access = await client.current_access()
+
+    async def paused(*args, **kwargs):
+        entered.set()
+        await resume.wait()
+        return access
+
+    if boundary == "initial":
+        monkeypatch.setattr(client, "current_access", paused)
+    else:
+        monkeypatch.setattr(client, "_refreshed_access", paused)
+    reserve = reply_guard.reserve_post
+
+    def spy(*args, **kwargs):
+        reservations.append(kwargs)
+        return reserve(*args, **kwargs)
+
+    monkeypatch.setattr(reply_guard, "reserve_post", spy)
+    task = asyncio.create_task(
+        execute_bridge(
+            runtime,
+            {
+                "op": "channel_post",
+                "channel_id": A,
+                "body": "bound reply",
+                "in_reply_to_message_id": MA,
+            },
+        )
+    )
+    try:
+        await asyncio.wait_for(entered.wait(), 10)
+        before = len(requests)
+        assert before == int(boundary == "refresh")
+        assert len(reservations) == before
+        if revocation in ("move", "clear"):
+            store.update_designated_session(runtime.owner, "s2" if revocation == "move" else None)
+        elif revocation == "retire":
+            assert store.retire_body_reservation(
+                runtime.owner,
+                conversation_id=A,
+                message_id=MA,
+                terminal_code="screening_rejected",
+                now=time.time(),
+            )
+        resume.set()
+        out = await asyncio.wait_for(task, 10)
+        if revocation is None:
+            assert out["ok"], out
+            assert len(requests) == before + 1
+            assert len(reservations) == 1
+            if boundary == "refresh":
+                assert requests[0].content == requests[1].content
+        else:
+            assert not out["ok"], (out, len(requests), len(reservations))
+            assert len(requests) == before
+            # An already emitted first 401 attempt legitimately reserved once;
+            # revoked refresh must not spend a second slot or emit another POST.
+            assert len(reservations) == int(boundary == "refresh")
+    finally:
+        resume.set()
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_bridge_input_cannot_omit_exact_binding(bound_runtime):
     runtime, client, _ = bound_runtime
     runtime.bridge_input_presented = True

@@ -1369,6 +1369,7 @@ class TeamBridgeClient:
         max_response_bytes: int | None = None,
         identity_response_only: bool = False,
         if_none_match: str | None = None,
+        pre_http_guard: Callable[[], None] | None = None,
         timeout: float = REQUEST_TIMEOUT_S,
         accept: str | None = None,
     ) -> httpx.Response:
@@ -1389,6 +1390,12 @@ class TeamBridgeClient:
             headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
             if if_none_match is not None:
                 headers["If-None-Match"] = if_none_match
+            # Per-call synchronous authority runs after client/OAuth awaits,
+            # at every attempt (including 401 refresh), before request initiation.
+            # No await may separate this guard from the request below. It cannot
+            # retract a request whose transport has already started.
+            if pre_http_guard is not None:
+                pre_http_guard()
             if max_response_bytes is not None:
                 # The attachment byte read: STREAM and stop at the bound, so an
                 # oversized (or endless) answer is refused after at most
@@ -1471,6 +1478,7 @@ class TeamBridgeClient:
         expected_account_id: str | None = None,
         empty_result: bool = False,
         content: bytes | None = None,
+        pre_http_guard: Callable[[], None] | None = None,
     ) -> dict[str, Any]:
         """One authenticated request: resolve, send, refresh-once-on-401, map refusals.
 
@@ -1491,6 +1499,7 @@ class TeamBridgeClient:
             access=access,
             content=content,
             expected_account_id=expected_account_id,
+            pre_http_guard=pre_http_guard,
         )
         if response.status_code >= 400:
             raise _refusal(response)
@@ -1517,6 +1526,7 @@ class TeamBridgeClient:
         max_response_bytes: int | None = None,
         expected_account_id: str | None = None,
         accept: str | None = None,
+        pre_http_guard: Callable[[], None] | None = None,
     ) -> httpx.Response:
         """Resolve, send, refresh-once-on-401: the response, refusals UNMAPPED.
 
@@ -1543,6 +1553,7 @@ class TeamBridgeClient:
                 content=content,
                 max_response_bytes=max_response_bytes,
                 accept=accept,
+                pre_http_guard=pre_http_guard,
             )
         except httpx.HTTPError as failure:
             raise BridgeUnreachable() from failure
@@ -1558,6 +1569,7 @@ class TeamBridgeClient:
                     content=content,
                     max_response_bytes=max_response_bytes,
                     accept=accept,
+                    pre_http_guard=pre_http_guard,
                 )
             except httpx.HTTPError as failure:
                 raise BridgeUnreachable() from failure
@@ -3107,6 +3119,7 @@ class TeamBridgeClient:
         mentions: Sequence[Mapping[str, Any]] | None = None,
         access: OAuthAccess | None = None,
         expected_account_id: str | None = None,
+        pre_http_guard: Callable[[], None] | None = None,
     ) -> dict[str, Any]:
         """Append one message. ``client_ref`` is required and idempotent.
 
@@ -3159,6 +3172,7 @@ class TeamBridgeClient:
             body=body,
             access=access,
             expected_account_id=expected_account_id,
+            pre_http_guard=pre_http_guard,
         )
 
     async def conversation_replies(
