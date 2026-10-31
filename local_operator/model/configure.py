@@ -7938,6 +7938,7 @@ class SessionStreamFn:
                     cache_read_tokens=int(usage.cache_read_tokens),
                     cache_write_tokens=int(usage.cache_write_tokens),
                     cache_write_1h_tokens=int(getattr(usage, "cache_write_1h_tokens", 0)),
+                    openai_long_context=bool(getattr(usage, "openai_long_context", False)),
                     reasoning_tokens=int(getattr(usage, "reasoning_tokens", 0)),
                     context_tokens=int(context_tokens or 0),
                     component_chars=component_chars,
@@ -8228,6 +8229,11 @@ def cost_for_usage(
     reported = _usage_cost(usage)
     if reported is not None:
         return reported
+    # Login flavours share their canonical provider's accounting, but retain
+    # unrelated aggregator identities so their pricing is never inferred here.
+    from local_operator.providers.registry import credential_provider_id
+
+    provider = credential_provider_id(provider)
     read = _usage_field(usage, "cache_read_tokens")
     written = _usage_field(usage, "cache_write_tokens")
     plain = _usage_field(usage, "input_tokens")
@@ -8236,10 +8242,14 @@ def cost_for_usage(
         # provider that reports more cached tokens than prompt tokens is
         # malformed rather than a reason to hand back a negative bill.
         plain = max(0, plain - read - written)
-    output = _usage_field(usage, "output_tokens")
+    output = float(_usage_field(usage, "output_tokens"))
     if (
         provider == "openai"
-        and _usage_field(usage, "input_tokens") > 272_000
+        and bool(
+            usage.get("openai_long_context", False)
+            if isinstance(usage, Mapping)
+            else getattr(usage, "openai_long_context", False)
+        )
         and _OPENAI_LONG_CONTEXT_MODELS.fullmatch(model_info.id)
     ):
         # The higher rates apply to the entire request, not just the excess.
