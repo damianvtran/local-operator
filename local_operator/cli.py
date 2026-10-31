@@ -1118,6 +1118,13 @@ def build_cli_parser() -> argparse.ArgumentParser:
 
     add_team_bridge_parser(subparsers, parent_parser, help_locale=help_locale)
 
+    # `lop disk reclaim` (issue #2676): the sanctioned disk-pressure front door.
+    # Stdlib-only registration for the same reason as `network`: the planner is
+    # imported by the handler, never while the parser is built.
+    from local_operator.disk_cli import add_parser as add_disk_parser
+
+    add_disk_parser(subparsers, parent_parser)
+
     # Operator authority (issue #1310, revision 2). Registration is stdlib-only
     # for the same reason `secret`'s is: `lop --version` must not load
     # Security.framework, the CNG stack or `cryptography`, and the verbs that do
@@ -17671,6 +17678,10 @@ def main() -> int:
             return send_command(args)
         elif args.subcommand == "model":
             return model_command(args)
+        elif args.subcommand == "disk":
+            from local_operator.disk_cli import main as disk_main
+
+            return disk_main(args)
         elif args.subcommand == "sessions":
             return sessions_command(args)
         elif args.subcommand == "stop":
