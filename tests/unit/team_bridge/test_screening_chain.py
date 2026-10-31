@@ -734,7 +734,12 @@ def test_answered_refusal_through_the_chain_never_advances_the_breaker(
     with a refusal (a hostile body provokes it) or a truncated reply. The walk
     stops on hop 0 (a weaker screener is never bought), the message holds under
     its answered code with the ``stream_refused`` class, and the account breaker
-    is untouched, however many times it happens."""
+    is untouched, however many times it happens.
+
+    Three things this loop now also proves: the ANSWER is content-addressed, so
+    four screens of one body cost exactly one send; the breaker is still
+    untouched; and every message keeps its own durable hold row.
+    """
 
     store, owner = _setup(tmp_path)
     _config(tmp_path, chain=["deepseek/deepseek-flash"])
@@ -744,7 +749,12 @@ def test_answered_refusal_through_the_chain_never_advances_the_breaker(
     for index in range(4):
         result = _cycle(tmp_path, owner, message_id=f"bmsg_probe{index}")
         assert result.disposition == "hold" and result.hold_code == hold_code
-    assert [s["model"] for s in wire.sends] == ["gpt-5.4"] * 4
+    # ONE send for four cycles of the same body: an answered refusal is a MODEL
+    # ANSWER, so it is cached under (body, template, model, revision, envelope)
+    # and re-read rather than re-drawn. The #3195 property (a refusal must not
+    # open the account breaker) used to be re-proved by drawing again each
+    # time; it is now proved against a single draw.
+    assert [s["model"] for s in wire.sends] == ["gpt-5.4"]
     assert store.screening_breaker_state(owner) is None
     assert set(_rows(tmp_path, "SELECT hold_code, failure_class FROM screening_holds")) == {
         (hold_code, "stream_refused")

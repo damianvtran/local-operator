@@ -342,6 +342,34 @@ CREATE TABLE IF NOT EXISTS screening_schedule (
     lease_holder TEXT,
     lease_expires REAL
 );
+-- The model-ANSWER cache: a content-addressed HOLD, keyed exactly as the
+-- verdict cache is (receipts are keyed per message, so a hold kept there would
+-- occupy the write-once receipt slot for that message and block a later
+-- admission under a republished template). A retry schedule re-screens the same
+-- body, and a stochastic screener draws a DIFFERENT answer on a re-draw, so the
+-- answer of a hold has to be readable without spending a second dispatch. Only
+-- a MODEL answer is ever written here; a route failure never is (a provider
+-- outage must recover through the retry schedule).
+CREATE TABLE IF NOT EXISTS screening_answer_holds (
+    owner_key TEXT NOT NULL,
+    body_sha256 TEXT NOT NULL,
+    template_sha256 TEXT NOT NULL,
+    model TEXT NOT NULL,
+    admission_revision TEXT NOT NULL,
+    envelope_digest TEXT NOT NULL,
+    hold_code TEXT NOT NULL,
+    prompt_version TEXT NOT NULL,
+    -- The closed failure class the receiver status shows for this hold
+    -- (``stream_refused`` for an answered refusal). Without it a replay would
+    -- have to re-derive a class from a failure it no longer has.
+    failure_class TEXT,
+    policy_epoch INTEGER NOT NULL,
+    creator_generation INTEGER NOT NULL,
+    created_at REAL NOT NULL,
+    PRIMARY KEY (
+        owner_key, body_sha256, template_sha256, model, admission_revision, envelope_digest
+    )
+);
 CREATE TABLE IF NOT EXISTS screening_policy (
     owner_key TEXT PRIMARY KEY,
     version TEXT NOT NULL,
@@ -486,6 +514,33 @@ _PRODUCER_DDL_STATEMENTS = (
     "fingerprint TEXT NOT NULL, phase TEXT NOT NULL, created_at REAL NOT NULL, "
     "UNIQUE (owner_key, message_id))",
 )
+
+
+_SCREENING_HOLD_ADDED = (
+    "CREATE TABLE IF NOT EXISTS screening_answer_holds ("
+    "owner_key TEXT NOT NULL, body_sha256 TEXT NOT NULL, template_sha256 TEXT NOT NULL, "
+    "model TEXT NOT NULL, admission_revision TEXT NOT NULL, envelope_digest TEXT NOT NULL, "
+    "hold_code TEXT NOT NULL, prompt_version TEXT NOT NULL, failure_class TEXT, "
+    "policy_epoch INTEGER NOT NULL, "
+    "creator_generation INTEGER NOT NULL, created_at REAL NOT NULL, "
+    "PRIMARY KEY (owner_key, body_sha256, template_sha256, model, "
+    "admission_revision, envelope_digest))",
+)
+
+
+def _ensure_answer_hold_table(conn: sqlite3.Connection) -> None:
+    """Create the answer cache on a store that predates it.
+
+    A stamped current-version store never re-runs schema DDL, so an existing
+    operator database would otherwise reach the cache path with no table. This
+    is purely ADDITIVE (``IF NOT EXISTS``): it holds no budget, receipt or
+    authority, so creating it empty cannot reset or launder anything — the only
+    consequence of a lost row is that the next screen draws again, which is the
+    behaviour every retry had before this table existed.
+    """
+
+    for statement in _SCREENING_HOLD_ADDED:
+        conn.execute(statement)
 
 
 def _ensure_producer_table(conn: sqlite3.Connection) -> None:
@@ -5074,6 +5129,156 @@ class Store:
             # engine-level failure) leaves the authority UNVERIFIED, which is
             # a refusal — never a silent "no row" that lets a stale caller
             # re-screen behind a concurrent authority change.
+            raise StoreRefused("state_busy", str(error)) from None
+        except StoreRefused:
+            raise
+
+    def consume_screening_answer_hold(
+        self,
+        owner: OwnerSnapshot,
+        *,
+        body_sha256: str,
+        template_sha256: str,
+        model: str,
+        admission_revision: str,
+        envelope_digest: str,
+    ) -> tuple[str, str | None] | None:
+        """The model ANSWER already cached for this screening tuple, or None.
+
+        Returns ``(hold_code, failure_class)``: the class rides along so a
+        replayed hold keeps the closed class the receiver status shows, rather
+        than re-deriving one from a provider failure that no longer exists.
+
+        Keyed exactly as ``consume_screening_receipt`` keys a verdict (body +
+        template + model + admission revision + envelope digest), so a re-screen
+        of an identical body under the same template/model/revision re-reads the
+        answer it already paid for instead of drawing a new one. The key carries
+        the template AND the revision, which is what makes a republish re-draw by
+        construction: a new template hash or revision simply does not match.
+
+        Authority is re-verified in the same linearized transaction a cached
+        verdict gets — live committed generation, the published policy row, and
+        the row's own epoch/generation — and any mismatch is a MISS, never a
+        stale answer replayed under someone else's authority.
+        """
+
+        try:
+            with self._connect() as conn:
+                self._init(conn)
+                self._begin_write(conn)
+                _ensure_answer_hold_table(conn)
+                key = _owner_key(owner)
+                if self._live_generation(conn, owner) != owner.enrollment_generation:
+                    return None
+                policy = conn.execute(
+                    "SELECT * FROM screening_policy WHERE owner_key = ?", (key,)
+                ).fetchone()
+                if policy is None:
+                    return None
+                row = conn.execute(
+                    "SELECT hold_code, failure_class, policy_epoch, creator_generation "
+                    "FROM screening_answer_holds WHERE owner_key = ? AND body_sha256 = ? "
+                    "AND template_sha256 = ? AND model = ? AND admission_revision = ? "
+                    "AND envelope_digest = ?",
+                    (key, body_sha256, template_sha256, model, admission_revision, envelope_digest),
+                ).fetchone()
+                if row is None:
+                    return None
+                if (
+                    policy["template_sha256"] != template_sha256
+                    or policy["default_model"] != model
+                    or policy["revision"] != admission_revision
+                    or int(policy["epoch"]) != int(row["policy_epoch"])
+                    or int(row["creator_generation"]) != owner.enrollment_generation
+                ):
+                    return None
+                # The CALLER decides whether this code is a model answer it may
+                # replay (``screening._ANSWER_HOLD_CODES``): classification lives
+                # in one place, so a row written by another build is re-screened
+                # rather than replayed as an answer it does not recognise.
+                code = row["hold_code"]
+                if not isinstance(code, str):
+                    return None
+                failure_class = row["failure_class"]
+                return (code, failure_class if isinstance(failure_class, str) else None)
+        except sqlite3.Error as error:
+            raise StoreRefused("state_busy", str(error)) from None
+        except StoreRefused:
+            raise
+
+    def record_screening_answer_hold(
+        self,
+        owner: OwnerSnapshot,
+        *,
+        body_sha256: str,
+        template_sha256: str,
+        model: str,
+        admission_revision: str,
+        envelope_digest: str,
+        hold_code: str,
+        prompt_version: str,
+        expected_epoch: int,
+        failure_class: str | None = None,
+    ) -> None:
+        """Cache ONE model-answer hold under the verdict cache's own key.
+
+        WRITE-ONCE per tuple: the first answered hold for a body is the one every
+        retry re-reads. A later draw must never rewrite the answer a message was
+        already parked on, or the cached outcome would depend on draw order — the
+        exact non-determinism this table exists to remove.
+
+        Never call this for a provider/route failure. A cached outage outcome
+        would keep the message held for as long as the key matched, which is the
+        opposite of what the retry schedule is for.
+
+        The caller treats this as best effort: the cache is a cost and
+        consistency guard for retries, never admission authority, so a refused
+        write must leave the (already committed) hold intact and the message
+        retriable.
+        """
+
+        try:
+            with self._connect() as conn:
+                self._init(conn)
+                self._begin_write(conn)
+                self._require_live(conn, owner)
+                _ensure_answer_hold_table(conn)
+                key = _owner_key(owner)
+                policy = conn.execute(
+                    "SELECT * FROM screening_policy WHERE owner_key = ?", (key,)
+                ).fetchone()
+                if policy is None:
+                    raise StoreRefused("policy_stale", "no published policy for the answer cache")
+                if int(policy["epoch"]) != expected_epoch:
+                    raise StoreRefused("policy_stale", "accepted policy changed during the run")
+                if (
+                    policy["template_sha256"] != template_sha256
+                    or policy["default_model"] != model
+                    or policy["revision"] != admission_revision
+                ):
+                    raise StoreRefused("policy_stale", "answer key is not the published policy's")
+                conn.execute(
+                    "INSERT INTO screening_answer_holds (owner_key, body_sha256, template_sha256, "
+                    "model, admission_revision, envelope_digest, hold_code, prompt_version, "
+                    "failure_class, policy_epoch, creator_generation, created_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?) "
+                    "ON CONFLICT DO NOTHING",
+                    (
+                        key,
+                        body_sha256,
+                        template_sha256,
+                        model,
+                        admission_revision,
+                        envelope_digest,
+                        hold_code,
+                        prompt_version,
+                        _closed_failure_class(failure_class),
+                        expected_epoch,
+                        owner.enrollment_generation,
+                        time.time(),
+                    ),
+                )
+        except sqlite3.Error as error:
             raise StoreRefused("state_busy", str(error)) from None
         except StoreRefused:
             raise

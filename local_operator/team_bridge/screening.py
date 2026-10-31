@@ -764,6 +764,75 @@ def _persist_hold(
         pass
 
 
+#: The hold codes that are a MODEL ANSWER: the screener actually read the body
+#: and said no (or answered nothing usable). ONLY these are cached, because
+#: only these describe the message. The draw is not deterministic — no
+#: temperature 0 is ever sent for the Claude 5+/o-series/GPT-5 families
+#: (``local_operator/model/configure.py``: ``_NO_SAMPLING_PARAMS`` matches
+#: ``claude-[a-z]+-(5-9...)``, ``o[1-9]`` and ``gpt-5``, and ``_OMIT_SAMPLING``
+#: sends neither key) — so a re-draw is a fresh sample. Re-screening a held body
+#: therefore used to mean "the first draw that says deliver wins", which is not
+#: a screening policy anyone chose: a false negative that repeats eventually
+#: admits, and the receipt commit deletes the hold rows that would have shown
+#: it. Caching the answer makes the outcome a function of the message, not of
+#: how many times the retry schedule happened to run.
+#:
+#: Everything else is deliberately NOT cacheable: ``provider_error``,
+#: ``breaker_open``, ``budget_exhausted``, ``retry_later``, ``policy_stale`` and
+#: every route-failure code describe the ROUTE, not the message, and the retry
+#: schedule exists so a provider outage recovers instead of pinning the message
+#: to a cached outage. Owner/identity/state codes are about THIS run's
+#: authority, so they must be re-derived, never replayed.
+#:
+#: ``bounce_without_category`` is also a model answer but a MALFORMED one: a
+#: re-draw can return a well-formed verdict, and parking it forever would be a
+#: new denial-of-service on a parse artefact. Left uncached (see the PR body).
+_ANSWER_HOLD_CACHEABLE = frozenset(
+    {"model_hold", "model_refused", "reply_truncated", "parse_failed"}
+)
+
+
+def _remember_answer_hold(
+    store: Store,
+    owner: OwnerSnapshot,
+    envelope: Envelope,
+    snapshot: PolicySnapshot,
+    hold_code: str,
+    epoch: int,
+    *,
+    failure_class: str | None = None,
+) -> None:
+    """Cache a MODEL-ANSWER hold so a retry re-reads it instead of re-drawing.
+
+    Best effort ON PURPOSE: the durable per-message hold is already committed,
+    and this cache is a cost/consistency guard for the retry schedule, never
+    admission authority. A refused write leaves the message exactly as a miss
+    leaves it — retriable — rather than turning a cache failure into a failed
+    hold.
+    """
+
+    if hold_code not in _ANSWER_HOLD_CACHEABLE or snapshot.default_model is None:
+        return
+    try:
+        store.record_screening_answer_hold(
+            owner,
+            body_sha256=envelope.body_sha256,
+            template_sha256=snapshot.template_sha256,
+            # The REQUESTED identity, which is the key a cached verdict is read
+            # under — so the answer stored here is exactly the one the next
+            # screen of this tuple looks for.
+            model=snapshot.default_model,
+            admission_revision=snapshot.admission_revision,
+            envelope_digest=envelope.envelope_digest,
+            hold_code=hold_code,
+            prompt_version=snapshot.screening_version,
+            expected_epoch=epoch,
+            failure_class=failure_class,
+        )
+    except StoreRefused:
+        pass
+
+
 #: Per-account dispatch locks, keyed by (state db path, HUB, account id) —
 #: the SAME account scope as the native turn and the aggregate budget, and
 #: held by LOOP lifetime (a WeakKeyDictionary keyed by the running loop): a
@@ -1101,6 +1170,35 @@ async def _screen_core(
                 attachments_hash=envelope.attachments_hash,
             )
 
+    # 6b. ANSWER cache: a re-screen of this exact tuple must re-read a MODEL
+    #     ANSWER, never draw a new one. Nothing is dispatched and nothing is
+    #     charged on this path; the per-message hold row is refreshed so the
+    #     receiver status and the hold's age behave exactly as before. Only a
+    #     code this build classifies as a model answer is replayed
+    #     (``_ANSWER_HOLD_CACHEABLE``); anything else falls through and retries.
+    if snapshot.default_model is not None:
+        try:
+            cached_answer = store.consume_screening_answer_hold(
+                owner,
+                body_sha256=envelope.body_sha256,
+                template_sha256=snapshot.template_sha256,
+                model=snapshot.default_model,
+                admission_revision=snapshot.admission_revision,
+                envelope_digest=envelope.envelope_digest,
+            )
+        except StoreRefused:
+            # An UNVERIFIED cache read is a miss, not an answer: the durable
+            # reservation below re-verifies owner, policy and turn before any
+            # spend, so a miss here can never launder a stale answer.
+            cached_answer = None
+        if cached_answer is not None and cached_answer[0] in _ANSWER_HOLD_CACHEABLE:
+            code, cached_class = cached_answer
+            # The class rides along so the receiver status shows the SAME closed
+            # failure class the first draw produced (``stream_refused`` for an
+            # answered refusal) instead of a blank one on every later pass.
+            _persist_hold(store, owner, message_id, code, failure_class=cached_class)
+            return ScreenResult("hold", hold_code=code)
+
     # 7. Account breaker: an open breaker is a hold with its own retry time,
     #    BEFORE any reservation (no spend while the route is known-broken).
     breaker = store.screening_breaker_state(owner)
@@ -1341,6 +1439,18 @@ async def _screen_core(
                 answered,
                 failure_class=screening_failure_class(failure),
             )
+            # An ANSWERED stream refusal (the model's own safety refusal, a reply
+            # truncated at the ceiling) is a model answer: cache it so the retry
+            # schedule re-reads it instead of re-drawing a different answer.
+            _remember_answer_hold(
+                store,
+                owner,
+                envelope,
+                snapshot,
+                answered,
+                epoch,
+                failure_class=screening_failure_class(failure),
+            )
             return ScreenResult("hold", hold_code=answered)
 
         failure_class = screening_failure_class(failure)
@@ -1393,10 +1503,12 @@ async def _screen_core(
     parsed = parse_verdict(reply)
     if parsed is None:
         _commit_hold(store, owner, message_id, attempt_id, fingerprint, epoch, "parse_failed")
+        _remember_answer_hold(store, owner, envelope, snapshot, "parse_failed", epoch)
         return ScreenResult("hold", hold_code="parse_failed")
     disposition, categories, reason, _verdict = parsed
     if disposition == "hold":
         _commit_hold(store, owner, message_id, attempt_id, fingerprint, epoch, "model_hold")
+        _remember_answer_hold(store, owner, envelope, snapshot, "model_hold", epoch)
         return ScreenResult("hold", hold_code="model_hold").set_private_reason(reason)
     if disposition == "bounce" and not categories:
         _commit_hold(
