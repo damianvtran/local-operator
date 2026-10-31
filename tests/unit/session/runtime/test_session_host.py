@@ -205,11 +205,9 @@ def _assert_engage_refuses_without_forking(
         f"a host-absent engage forked: Popen={forks.popen} disclaimed={forks.disclaimed} "
         f"local={forks.local}"
     )
-    # Typed, and carrying NO user-facing sentence: the cause is host plumbing, and the
-    # surfaces already render their own generic line for an un-vetted
-    # startup failure (so no catalogue key exists for it).
+    # The real facade may echo only vetted catalogue guidance, not host detail.
     assert isinstance(raised.value, SessionHostStartupError)
-    assert raised.value.actionable == ""
+    assert raised.value.actionable
     return raised.value
 
 
@@ -219,6 +217,9 @@ def host_route(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
 
     monkeypatch.setenv(session_host.SPAWN_AUTHORITY_ENV, "1")
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    # Locale auto-discovery may run macOS defaults; the fork tripwires below
+    # measure runtime spawning, not the OS's language query.
+    monkeypatch.setenv("LOP_LANG", "en")
     # Admission shells out to read memory; it is not what is under test and its
     # subprocess would make the zero-Popen assertion about the machine, not the code.
     monkeypatch.setattr(
@@ -1083,3 +1084,80 @@ def test_the_host_does_not_plant_an_inheritable_sighup_ignore(
     assert host_service.main([]) == 0
     assert registered[signal.SIGHUP] is not signal.SIG_IGN
     assert callable(registered[signal.SIGHUP])
+
+
+@pytest.mark.parametrize("code", ["unsupported", "refused"])
+@pytest.mark.asyncio
+async def test_terminal_host_refusal_is_truthful_at_the_cold_facade_boundary(
+    host_route: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, code: str
+) -> None:
+    """The real facade must not turn 'no runtime started' into 'reconnecting'."""
+    from local_operator.session.attached import AttachedSession
+    from local_operator.session.runtime.launch import ActionableConnectionError
+
+    forks = _arm_fork_counters(monkeypatch)
+
+    def refuse(*args: Any, **kwargs: Any) -> Any:
+        raise session_host.SessionHostUnavailable(code, "synthetic terminal refusal")
+
+    monkeypatch.setattr(session_host, "request_spawn", refuse)
+    facade = await AttachedSession.cold(
+        "boundary3222", config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=lambda: None
+    )
+    try:
+        with pytest.raises(ActionableConnectionError) as raised:
+            await facade._ensure_bound()
+        from local_operator.i18n.messages import render
+
+        assert str(raised.value) == render(f"wire.errors.session_host.{code}", {}, locale="en")
+        assert "not started" in str(raised.value)
+        assert "reconnecting" not in str(raised.value)
+        assert "synthetic terminal refusal" not in str(raised.value)
+        assert isinstance(raised.value.__cause__, SessionHostStartupError)
+        assert forks.total == 0
+    finally:
+        await facade.dispose()
+
+
+def test_an_install_lock_timeout_never_enters_a_second_installer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Two real election contenders; the first installer outlives the lock wait."""
+    entered = threading.Event()
+    release = threading.Event()
+    calls: list[str] = []
+    errors: list[BaseException] = []
+    monkeypatch.setattr(session_host, "INSTALL_LOCK_WAIT_S", 0.05)
+    monkeypatch.setattr(session_host, "ping", lambda *args, **kwargs: False)
+
+    def install(root: Path) -> host_install.HostInstallOutcome:
+        calls.append(threading.current_thread().name)
+        if len(calls) > 1:
+            return host_install.HostInstallOutcome(True)
+        entered.set()
+        assert release.wait(10), "test did not release its first installer"
+        return host_install.HostInstallOutcome(True)
+
+    monkeypatch.setattr(host_install, "ensure_host_installed", install)
+
+    def first_request() -> None:
+        try:
+            session_host.ensure_session_host(tmp_path)
+        except BaseException as error:
+            errors.append(error)
+
+    first = threading.Thread(target=first_request, name="first-own-request")
+    first.start()
+    try:
+        assert entered.wait(5)
+        # The test thread is the second request, with the first still holding
+        # the REAL flock. It must fail closed, not mutate launchd concurrently.
+        with pytest.raises(session_host.SessionHostUnavailable) as raised:
+            session_host.ensure_session_host(tmp_path)
+        assert raised.value.code == "unavailable"
+        assert calls == ["first-own-request"]
+    finally:
+        release.set()
+        first.join(10)
+    assert not first.is_alive()
+    assert not errors

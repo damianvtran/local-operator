@@ -63,6 +63,9 @@ def test_shipped_wire_namespaces_exist() -> None:
         "wire.errors.agent_avatar",
         "wire.errors.sdk_spec",
         "wire.errors.sdk_startup",
+        # Host-start refusals cross the real cold-facade boundary; they must
+        # not be mistaken for a runtime reconnecting (#3222 R2-1/Q1).
+        "wire.errors.session_host",
         "wire.errors.settings",
         "wire.exec",
         "wire.incidents",

@@ -339,13 +339,15 @@ def ensure_session_host(root: Path) -> None:
     # started -- tearing down the first's in-flight request with a spurious
     # "unavailable". Serialised, the later surface wakes to a host that answers and
     # returns without touching launchd. A lock that cannot be taken in time is not
-    # an error: the installer is idempotent, and the bounded connect that follows
-    # decides.
+    # permission to mutate launchd: only the lock holder may install. A timed-out
+    # contender may observe a now-ready host, otherwise it fails honestly.
     guard = _InstallGuard(Path(root))
     try:
         guard.acquire(INSTALL_LOCK_WAIT_S)
-        if guard.held and ping(root, timeout_s=1.0):
+        if ping(root, timeout_s=1.0):
             return
+        if not guard.held:
+            raise SessionHostUnavailable("unavailable", "session host install election timed out")
         outcome = host_install.ensure_host_installed(Path(root))
     finally:
         guard.release()

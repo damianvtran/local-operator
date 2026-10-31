@@ -636,11 +636,9 @@ def _spawn_runtime_hosted(
         # this arm does are clean up and raise: no capability copy is left in a
         # descriptor nobody will read, the capture file is not orphaned, and the
         # caller gets a typed ``SessionHostStartupError`` -- never a local
-        # ``_spawn_runtime_local``. It deliberately carries NO ``actionable``
-        # sentence: the cause is host plumbing for the log, and every surface
-        # already turns an un-vetted ``RuntimeStartupError`` into its own
-        # generic "runtime unavailable" line (``attached._ensure_bound``,
-        # ``relay``'s runtime-start reason), so there is no new user copy to key.
+        # ``_spawn_runtime_local``. Its keyed, localised ``actionable`` sentence
+        # tells the facade that no runtime started; an empty sentence would
+        # incorrectly turn this permanent refusal into "reconnecting".
         handoff.close()
         capture.unlink(missing_ok=True)
         logger.warning("engage: the session host could not start %s: %s", session_id, exc)
@@ -1039,25 +1037,28 @@ class RuntimeStartupError(RuntimeError):
 
 
 class SessionHostStartupError(RuntimeStartupError):
-    """The session host could not start a runtime; NOTHING was forked anywhere.
+    """A vetted, localised host refusal; never misreport it as reconnecting.
 
-    A ``RuntimeStartupError`` with an EMPTY ``actionable``, on purpose. That field
-    is the vetted, user-facing sentence a surface may echo; the cause here
-    (no supervisor on this platform, the host did not answer, the host declined) is
-    infrastructure detail for the log, and the surfaces already say something
-    generic for an un-vetted startup failure (``attached._unavailable_reason``, which
-    is itself still an unkeyed English literal today -- a pre-existing gap this
-    slice neither widens nor closes). A dedicated catalogue sentence would be seven
-    translations of a message the person cannot act on any differently.
-    ``code`` (``unsupported`` / ``unavailable`` / ``refused``) is for tests and logs.
-    Being a subclass, every existing handler of ``RuntimeStartupError`` (fail-fast,
-    no respawn) treats it as before.
+    AttachedSession forwards ``actionable`` verbatim, whereas an empty value
+    becomes its generic reconnecting state. No runtime exists after a terminal
+    host refusal, so that fallback is false (#3222 R2-1/Q1). Only catalogue
+    guidance is safe to echo: host ``detail`` can contain paths or internal
+    errors and stays in the diagnostic message, never in the surface sentence.
     """
 
     def __init__(self, session_id: str, code: str, detail: str = "") -> None:
+        from local_operator.i18n.keys import wire_errors_session_host as copy
+        from local_operator.i18n.messages import render
+        from local_operator.i18n.resolve import resolve_language
+
+        message = {
+            "unsupported": copy.unsupported,
+            "refused": copy.refused,
+        }.get(code, copy.unavailable)()
         super().__init__(
             f"could not start a runtime for session {session_id}: the session host is "
-            f"{code}" + (f" ({detail})" if detail else "")
+            f"{code}" + (f" ({detail})" if detail else ""),
+            actionable=render(message.code, message.params, locale=resolve_language()),
         )
         self.code = code
 
