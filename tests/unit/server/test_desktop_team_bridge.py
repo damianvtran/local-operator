@@ -26,6 +26,7 @@ import pytest
 import pytest_asyncio
 import yaml
 from fastapi import FastAPI
+from fastapi.routing import APIRoute
 from httpx import ASGITransport, AsyncClient
 
 from local_operator.config import ConfigManager
@@ -547,6 +548,25 @@ class FakeClient:
         )
         FakeClient.behavior["last_consent_endpoint"] = endpoint_id
         return self._answer("conversation_consent")
+
+    async def conversation_agent_notify(
+        self,
+        conversation_id: str,
+        endpoint_id: str,
+        *,
+        notify: str,
+        tenant_id=None,
+        access=None,
+        expected_account_id=None,
+    ):
+        FakeClient.behavior["last_agent_notify"] = {
+            "conversation_id": conversation_id,
+            "endpoint_id": endpoint_id,
+            "notify": notify,
+            "tenant_id": tenant_id,
+            "expected_account_id": expected_account_id,
+        }
+        return self._answer("conversation_agent_notify")
 
     async def owned_agent_invitations(
         self,
@@ -4267,3 +4287,131 @@ async def test_an_absent_delivery_states_field_stays_absent(api):
     )
     assert response.status_code == 200, response.text
     assert "delivery_states" not in response.json()["result"]["messages"][0]
+
+
+# --- agent-notify: the owner's per-conversation wake level for THEIR agent ---
+#
+# Wake contract (2026-10-30): agents now default to waking on every message,
+# so the owner needs "Every message / Only @-mentions / Never" per
+# conversation. The endpoint is ALWAYS the local enrolled one, never a body
+# field, and the receipt is checked against the owner before any network.
+
+AGENT_NOTIFY = "/v1/desktop/team-bridge/conversations/bcv_abcdefgh/agent-notify"
+
+
+@pytest.mark.parametrize("notify", ["all", "mention", "mute"])
+async def test_agent_notify_writes_the_local_agents_endpoint(api, notify):
+    client, root, _discipline = api
+    _enroll(root)
+    FakeClient.behavior["conversation_agent_notify"] = {
+        "id": "bcv_abcdefgh",
+        "members": [{"endpoint_id": "ep_1", "kind": "agent", "notify": notify}],
+    }
+    response = await client.put(
+        AGENT_NOTIFY,
+        json={"notify": notify, "tenant_id": "tnt_1", "expected_account_id": "acc_1"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["result"]["members"][0]["notify"] == notify
+    assert FakeClient.behavior["last_agent_notify"] == {
+        "conversation_id": "bcv_abcdefgh",
+        "endpoint_id": "ep_1",
+        "notify": notify,
+        "tenant_id": "tnt_1",
+        "expected_account_id": "acc_1",
+    }
+
+
+@pytest.mark.parametrize(
+    ("enroll", "body", "status", "code"),
+    [
+        # No enrolled agent on this machine: nothing to configure.
+        (
+            False,
+            {"notify": "all", "tenant_id": "tnt_1", "expected_account_id": "acc_1"},
+            409,
+            "not_enrolled",
+        ),
+        # A receipt captured for another account.
+        (
+            True,
+            {"notify": "all", "tenant_id": "tnt_1", "expected_account_id": "acc_2"},
+            409,
+            "owner_mismatch",
+        ),
+        # A tenant this machine did not enroll in.
+        (
+            True,
+            {"notify": "all", "tenant_id": "tnt_9", "expected_account_id": "acc_1"},
+            422,
+            "invalid_tenant",
+        ),
+    ],
+)
+async def test_agent_notify_refuses_before_any_network(api, enroll, body, status, code):
+    client, root, _discipline = api
+    if enroll:
+        _enroll(root)
+    response = await client.put(AGENT_NOTIFY, json=body)
+    assert response.status_code == status, response.text
+    assert response.json()["detail"]["code"] == code
+    assert "last_agent_notify" not in FakeClient.behavior
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"notify": "loud", "tenant_id": "tnt_1", "expected_account_id": "acc_1"},
+        {"notify": "all", "tenant_id": "tnt_1"},  # receipt is required
+        {"notify": "all", "expected_account_id": "acc_1"},  # tenant is required
+        # The endpoint is never the caller's to name.
+        {
+            "notify": "all",
+            "tenant_id": "tnt_1",
+            "expected_account_id": "acc_1",
+            "endpoint_id": "ep_x",
+        },
+    ],
+)
+async def test_agent_notify_rejects_a_malformed_body(api, body):
+    client, root, _discipline = api
+    _enroll(root)
+    response = await client.put(AGENT_NOTIFY, json=body)
+    assert response.status_code == 422, response.text
+    assert "last_agent_notify" not in FakeClient.behavior
+
+
+async def test_agent_notify_passes_a_hub_refusal_through(api):
+    client, root, _discipline = api
+    _enroll(root)
+    FakeClient.behavior["conversation_agent_notify"] = BridgeRefusal(
+        "not_found", "no such agent member", http_status=404
+    )
+    response = await client.put(
+        AGENT_NOTIFY,
+        json={"notify": "mention", "tenant_id": "tnt_1", "expected_account_id": "acc_1"},
+    )
+    assert response.status_code == 404
+    assert response.json()["detail"]["code"] == "not_found"
+
+
+async def test_agent_notify_is_advertised_with_its_required_receipt():
+    """The UI shows the wake-level control only when this flag is served; the
+    flag means "the route exists AND refuses an unguarded call", so it is
+    asserted beside the DTO's required receipt fields."""
+
+    from local_operator.server.features import static_feature_flags
+
+    assert static_feature_flags()["team_bridge_agent_notify"] == 1
+    fields = desktop_team_bridge.ConversationAgentNotifyIn.model_fields
+    assert fields["expected_account_id"].is_required()
+    assert fields["tenant_id"].is_required()
+    assert "endpoint_id" not in fields
+    # ``router.routes`` is typed as ``BaseRoute``, which has no ``path``; only
+    # APIRoute does (the same narrowing ``test_desktop_controls`` uses). The
+    # comprehension is filtered rather than ``# type: ignore``-d so CI's
+    # type-check stays honest about it (QA round 1, Q1).
+    paths = {
+        route.path for route in desktop_team_bridge.router.routes if isinstance(route, APIRoute)
+    }
+    assert "/v1/desktop/team-bridge/conversations/{conversation_id}/agent-notify" in paths

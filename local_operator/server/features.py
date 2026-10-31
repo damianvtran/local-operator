@@ -474,6 +474,16 @@ def static_feature_flags() -> dict[str, Any]:
         # hub's message read view does not return `mentions`, so this key
         # promises no readback highlight.
         "team_bridge_send_mentions": 1,
+        # The owner's per-conversation wake level for THEIR agent (wake
+        # contract, 2026-10-30): `PUT /v1/desktop/team-bridge/conversations/
+        # {id}/agent-notify` with `notify` all|mention|mute plus the required
+        # owner/tenant receipt. Agents now default to waking on every
+        # message, so the UI offers "Every message / @-mentions and its threads /
+        # Never (muted)" — `mention` means direct or channel @-mentions AND
+        # replies in threads the agent follows, not mentions alone (wake
+        # contract, Amendment A1). A renderer that does not see this flag shows
+        # no such control.
+        "team_bridge_agent_notify": 1,
         # The OWNER AUDIT ("{chief of staff}'s messages"): the read-only
         # `/v1/desktop/team-bridge/owner-audit/...` family over agent-server
         # #221, where the signed-in owner reads every conversation their own

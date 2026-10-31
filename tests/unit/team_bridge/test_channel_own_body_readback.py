@@ -33,6 +33,13 @@ THEM = "acc_other"
 
 
 @pytest.fixture(autouse=True)
+def _guard_state_isolated(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """``config_dir="."``: keep channel_post's reply-guard file out of the repo."""
+
+    monkeypatch.chdir(tmp_path)
+
+
+@pytest.fixture(autouse=True)
 def _gates_open(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(host_mod, "owner_fence_refusal", lambda runtime: None)
     monkeypatch.setattr(host_mod, "outbound_tool_fence", lambda runtime: None)

@@ -1089,3 +1089,50 @@ async def test_a_quiet_batch_whose_re_entry_errors_still_notifies(tmp_path: Path
     finally:
         builtin.TODO_STORE.pop(session_id, None)
         await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_bridge_card_wake_ending_in_no_reply_publishes_nothing(tmp_path: Path) -> None:
+    """Wake contract (2026-10-30): an agent member is woken for EVERY message
+    in its conversations, and an unmentioned card tells it to end with
+    ``no_reply`` when nothing is needed. That wake must raise no human
+    notification. It arrives exactly as the connector delivers it — a mailbox
+    peer delivery stamped ``team_bridge_message`` — so this pins that the
+    peer-family quiet rule covers the bridge kind end to end, not only the
+    formula."""
+
+    from local_operator.harness.message_types import TEAM_BRIDGE_MESSAGE_TYPE
+
+    stream = ScriptedStream(
+        [
+            [
+                StreamToolCallDelta(index=0, id="q1", name="no_reply", argument_delta="{}"),
+                StreamEndEvent(stop_reason="toolUse"),
+            ]
+        ]
+    )
+    session = _quiet_session(tmp_path, stream)
+    events: list[Any] = []
+    session.subscribe(events.append)
+    try:
+        await session.receive_peer_message(
+            "Channel message · #agents · from Ada (human, same tenant)\nmention: no\n"
+            "expect: weigh relevance; no_reply if nothing is needed",
+            mode="mailbox",
+            wake=True,
+            sender={"account_id": "acc_1", "source": TEAM_BRIDGE_MESSAGE_TYPE},
+            custom_type=TEAM_BRIDGE_MESSAGE_TYPE,
+        )
+        await wait_for(lambda: bool(stream.requests))
+        await wait_for(lambda: session._attention_run_settled)
+        await wait_for(lambda: not session.is_streaming and not session._turn_lock.locked())
+
+        assert session._run_input_types == {TEAM_BRIDGE_MESSAGE_TYPE}
+        ends = _ends(events)
+        assert len(ends) == 1
+        assert ends[0].notify is False
+        state = await session.refresh_attention()
+        assert state["completion_token"] is None, "no completion row, so no banner"
+        assert state["unseen"] is False
+    finally:
+        await session.dispose()

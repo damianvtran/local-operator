@@ -231,7 +231,16 @@ async def test_dm_resolves_a_current_agent_and_posts_as_runtime_identity(runtime
     assert post["actor_endpoint_id"] == "bep_1" and post["origin_session_id"] == "sess_1"
     assert post["client_ref"] and post["thread_root_id"] is None
     assert post["expected_account_id"] == "acc_1"
-    assert list(Path(runtime.config_dir).iterdir()) == []
+    # A dm is a WRITE that wakes the other agent like any conversation post, so it
+    # legitimately spends the reply guard — the config dir now holds exactly that
+    # guard's own state and nothing else (no pair-inbox row, no transcript, no
+    # session directory). The assertion that used to demand an EMPTY config dir
+    # predated the guard; it is narrowed rather than dropped so the protection it
+    # was providing is kept (QA round 2).
+    assert sorted(p.name for p in Path(runtime.config_dir).iterdir()) == ["team_bridge"]
+    assert sorted(p.name for p in (Path(runtime.config_dir) / "team_bridge").iterdir()) == [
+        "reply_guard.sqlite3"
+    ]
 
 
 @pytest.mark.asyncio

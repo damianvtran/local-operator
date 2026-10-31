@@ -108,6 +108,7 @@ AckTarget = Literal["read", "blocked"]
 
 _SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
 _CANONICAL_DECIMAL = re.compile(r"^(0|[1-9][0-9]*)$")
+
 #: The frozen server DTO's closed event-type set (bridge.go BridgeEventItem).
 _EVENT_TYPES = (
     "message_available",
@@ -1190,6 +1191,18 @@ def project_events_batch(result: Mapping[str, Any]) -> tuple[FeedSeq, tuple[str,
             kind = ids.get("sender_kind")
             if kind is not None and kind not in ("human", "agent"):
                 raise TeamBridgeTypeError(f"events[{index}].ids.sender_kind is invalid")
+            # Thread routing fact (``omitempty`` on the server): ``thread_root_id``
+            # was already on the wire (agent-server threads) but never carried
+            # into the ref, so a reply's card could not name its thread. An old
+            # hub omits it and the ref is the pre-contract shape.
+            thread_root_id = ids.get("thread_root_id") or ids.get("reply_to_message_id") or None
+            if thread_root_id is not None and not isinstance(thread_root_id, str):
+                raise TeamBridgeTypeError(f"events[{index}].ids.thread_root_id must be a string")
+            if thread_root_id is not None and kind is None:
+                # The ref grammar ties a thread root to a stated sender kind;
+                # a hub that sends one without the other gets the pre-thread
+                # card rather than an unencodable ref.
+                thread_root_id = None
             at = raw.get("at")
             if not isinstance(at, str) or not at:
                 raise TeamBridgeTypeError(f"events[{index}].at must be a non-empty string")
@@ -1200,6 +1213,7 @@ def project_events_batch(result: Mapping[str, Any]) -> tuple[FeedSeq, tuple[str,
                     conversation_seq=int(seq_text),
                     mention=mention,
                     sender_kind=kind,
+                    thread_root_id=thread_root_id,
                 )
                 .validated()
                 .encode()

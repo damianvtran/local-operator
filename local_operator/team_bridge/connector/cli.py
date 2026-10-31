@@ -192,6 +192,23 @@ def _screening_line(screening: dict[str, Any], *, now: float) -> Any:
     return _k.status_screening(held=held_text, breaker=breaker_text, rejected=rejected_text)
 
 
+def _woke_nobody(root: Path) -> dict[str, int]:
+    """Conversation arrivals that woke no session, per typed code (read-only).
+
+    The badge-only case (agent messages on, no designated session) woke nobody
+    and used to be invisible from the outside; the receiver counts it and this
+    is where an owner sees it. A machine that never recorded one answers with an
+    empty mapping rather than a zero it cannot know (review round 1, 7b).
+    """
+
+    from local_operator.team_bridge.wake_diagnostics import woke_nobody_counts
+
+    try:
+        return woke_nobody_counts(root)
+    except Exception:  # noqa: BLE001 — a status field never fails the command
+        return {}
+
+
 def _status(root: Path, *, as_json: bool) -> int:
     import os
 
@@ -203,6 +220,7 @@ def _status(root: Path, *, as_json: bool) -> int:
     enrolment = _enrolment_state(root)
     last = _last_check(root)
     screening = read_screening_status(root)
+    woke_nobody = _woke_nobody(root)
     log = install.log_path(root)
     journal = install.journal_hint()
     linger: bool | None = None
@@ -223,6 +241,12 @@ def _status(root: Path, *, as_json: bool) -> int:
                     "journal": journal,
                     "last_check": last,
                     "linger": linger,
+                    # Arrivals that woke NOBODY, per typed code. Empty means
+                    # none recorded (or a machine that never ran a receiver).
+                    # A machine key on purpose: the human line for this would
+                    # be new user-facing copy, which the i18n ledger gates on a
+                    # per-locale audit (see the PR's remediation note).
+                    "woke_nobody": woke_nobody,
                     "foreground_command": install.foreground_command(root),
                     # ``None`` when not enrolled or unreadable; see _screening.
                     "screening": screening,

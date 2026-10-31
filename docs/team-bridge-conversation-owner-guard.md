@@ -75,6 +75,7 @@ forgets it.
 | POST conversations/{id}/messages with `thread_root_id` (reply) | JSON object | `team_bridge_threads` |
 | PUT conversations/{id}/messages/{message}/reactions/{emoji} | JSON object | `team_bridge_reactions` |
 | DELETE conversations/{id}/messages/{message}/reactions/{emoji} | Query | `team_bridge_reactions` |
+| PUT conversations/{id}/agent-notify (owner's own agent wake level) | JSON object | `team_bridge_agent_notify` |
 
 An absent, blank, repeated or malformed `expected_account_id` or `tenant_id`
 on the replies read, a threaded send, or either reaction route is refused (422)
