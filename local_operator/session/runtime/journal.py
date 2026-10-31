@@ -983,8 +983,8 @@ class RunRecord:
         return abs(self.started_at - float(started_at)) < EXIT_RUN_KEY_TOLERANCE_S
 
 
-#: The adopted standby's resource snapshot at the instant it became a runtime,
-#: or ``None`` in a cold child. Set once by :func:`note_adoption`.
+#: The adopted standby's ``boot_cost.sample()`` at the instant it became a
+#: runtime, or ``None`` in a cold child. Set once by :func:`note_adoption`.
 #:
 #: WHY IT LIVES HERE: the adopting process re-executes ``process`` through
 #: ``runpy`` as a fresh ``__main__`` and runs ``standby`` as its own
@@ -999,20 +999,14 @@ def note_adoption() -> None:
     """Record that this process is a warm standby becoming a runtime NOW.
 
     Called by ``standby._commit_adoption`` before the environment swap. One
-    ``getrusage`` and one clock read, never raises: an instrument must not be the
-    reason an adoption fails.
+    ``getrusage`` and one ``proc_pid_rusage`` (macOS), never raises: an
+    instrument must not be the reason an adoption fails.
     """
     global _ADOPTION
     try:
-        import resource
+        from local_operator.session.runtime import boot_cost
 
-        usage = resource.getrusage(resource.RUSAGE_SELF)
-        _ADOPTION = {
-            "at": time.time(),
-            "cpu_s": usage.ru_utime + usage.ru_stime,
-            "voluntary": float(usage.ru_nvcsw),
-            "involuntary": float(usage.ru_nivcsw),
-        }
+        _ADOPTION = boot_cost.sample()
     except Exception:  # noqa: BLE001 — instrumentation, never an adoption gate
         logger.debug("could not snapshot the standby's resource usage", exc_info=True)
 

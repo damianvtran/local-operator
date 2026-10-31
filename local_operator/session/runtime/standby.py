@@ -2109,6 +2109,16 @@ def _warm() -> None:
         except Exception:  # noqa: BLE001 — a warm-up must never be the failure
             logger.debug("standby warm skipped %s", name, exc_info=True)
     try:
+        # The start record's instrument (``process._boot_cost``) resolves ctypes
+        # handles on first use (~1 ms median, up to ~7 ms on a loaded host);
+        # paying it here leaves ~0.04 ms on the adopted boot's critical path.
+        # Measured in #3226 round 1 (MINOR-2).
+        from local_operator.session.runtime import boot_cost
+
+        boot_cost.sample()
+    except Exception:  # noqa: BLE001
+        logger.debug("standby boot-cost warm skipped", exc_info=True)
+    try:
         from local_operator.compaction.tokens import warm_tokenizer
 
         warm_tokenizer()

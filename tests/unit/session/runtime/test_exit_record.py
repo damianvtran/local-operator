@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -524,36 +525,52 @@ def test_a_clean_exit_removes_its_run_record(tmp_path: Path) -> None:
 # and the measurement must never be the reason a run record is missing.
 
 
+_WINDOW_KEYS = {
+    "wall_s",
+    "cpu_s",
+    "waited_for_cpu_s",
+    "blocked_s",
+    "voluntary_switches",
+    "involuntary_switches",
+}
+
+
 def test_the_run_record_carries_this_boot_cost(tmp_path: Path, monkeypatch) -> None:
-    """``_note_run_start`` writes CPU, wall, switch counts, load and standby."""
+    """``_note_run_start`` writes the since-exec breakdown, load and ``standby: false``."""
     monkeypatch.setattr(journal, "_ADOPTION", None)
     directory = _session_dir(tmp_path)
     process._note_run_start(_Handle("abc123", directory), _Runtime("abc123", 42.0))
 
     raw = json.loads(journal.run_record_path(directory).read_text())
     boot = raw["boot"]
-    assert set(boot) == {
-        "cpu_s",
-        "wall_s",
-        "voluntary_switches",
-        "involuntary_switches",
-        "load_1m",
-        "standby",
-    }
+    assert set(boot) == _WINDOW_KEYS | {"window", "load_1m", "standby"}
+    assert boot["window"] == "since-exec"
     assert boot["standby"] is False, "a cold child says so explicitly"
     assert boot["cpu_s"] > 0
-    assert boot["wall_s"] is not None and boot["wall_s"] >= boot["cpu_s"] * 0.5
-    assert isinstance(boot["involuntary_switches"], int)
+    # Linux and macOS both supply the runnable time; anything else would leave
+    # these None, and a None here on CI's Ubuntu is the Linux reader failing.
+    assert boot["wall_s"] is not None and boot["wall_s"] > 0
+    assert boot["waited_for_cpu_s"] is not None and boot["waited_for_cpu_s"] >= 0
+    assert boot["blocked_s"] is not None and boot["blocked_s"] >= 0
     # The record's original keys are untouched: ``covers_run`` still keys on them.
     record = journal.read_run_record(directory)
     assert record is not None and record.covers_run(os.getpid(), 42.0)
     assert record.boot == boot
 
 
-def test_an_adopted_standby_reports_its_adoption_counters(tmp_path: Path, monkeypatch) -> None:
-    """After ``note_adoption`` the record says ``standby: true`` with the snapshot."""
-    monkeypatch.setattr(journal, "_ADOPTION", None)
-    journal.note_adoption()
+def test_an_adopted_standby_reports_only_its_own_boot(tmp_path: Path, monkeypatch) -> None:
+    """After adoption the headline covers adoption->record; the spare's life is separate.
+
+    MINOR-1 of #3226 review: the spare's whole lifetime (up to its idle window)
+    in the headline ``wall_s`` reads as starvation.
+    """
+    from local_operator.session.runtime import boot_cost
+
+    spare = boot_cost.sample()
+    assert spare is not None
+    # Pretend the spare was adopted after 600 s of idling.
+    spare = {**spare, "wall_s": (spare["wall_s"] or 0.0) - 600.0}
+    monkeypatch.setattr(journal, "_ADOPTION", spare)
     directory = _session_dir(tmp_path)
     process._note_run_start(_Handle("abc123", directory), _Runtime("abc123", 42.0))
 
@@ -561,10 +578,49 @@ def test_an_adopted_standby_reports_its_adoption_counters(tmp_path: Path, monkey
     assert record is not None and record.boot is not None
     boot = record.boot
     assert boot["standby"] is True
-    adopted = boot["at_adoption"]
-    assert adopted["cpu_s"] <= boot["cpu_s"]
-    assert adopted["involuntary_switches"] <= boot["involuntary_switches"]
-    assert adopted["seconds_ago"] >= 0
+    assert boot["window"] == "since-adoption"
+    assert boot["wall_s"] >= 600.0 - 1, "fixture sanity: the window starts at adoption"
+    assert set(boot["before_adoption"]) == _WINDOW_KEYS
+
+
+def test_note_adoption_snapshots_through_boot_cost(monkeypatch) -> None:
+    monkeypatch.setattr(journal, "_ADOPTION", None)
+    journal.note_adoption()
+    snap = journal.adoption_snapshot()
+    assert snap is not None and snap["cpu_s"] > 0
+
+
+def test_a_starved_window_and_a_blocked_window_split_differently() -> None:
+    """The split the record exists for, on synthetic counters (no clocks)."""
+    from local_operator.session.runtime import boot_cost
+
+    base = {"cpu_s": 1.0, "runnable_s": 1.1, "wall_s": 2.0}
+    base.update(voluntary_switches=0.0, involuntary_switches=0.0)
+    starved = boot_cost.window({**base, "cpu_s": 3.0, "runnable_s": 150.0, "wall_s": 152.0}, base)
+    blocked = boot_cost.window({**base, "cpu_s": 3.0, "runnable_s": 4.0, "wall_s": 152.0}, base)
+    assert starved["waited_for_cpu_s"] > 140 and starved["blocked_s"] < 3
+    assert blocked["blocked_s"] > 140 and blocked["waited_for_cpu_s"] < 2
+    # Clamping: clocks that disagree by a tick, or two threads' CPU exceeding
+    # wall, never yield a negative part.
+    skew = boot_cost.window({**base, "cpu_s": 1.0, "runnable_s": 0.9, "wall_s": 0.85})
+    assert skew["waited_for_cpu_s"] == 0.0 and skew["blocked_s"] == 0.0
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="rusage_info_v4 is a macOS struct")
+def test_the_darwin_struct_offsets_match_the_sdk_header() -> None:
+    """Offsets from a compiled ``offsetof`` probe against <sys/resource.h>.
+
+    A wrong pad reads a neighbouring counter as runnable time without error,
+    which is exactly the silent-wrong-reading failure this pin exists for.
+    """
+    from local_operator.session.runtime import boot_cost
+
+    resolved = boot_cost._darwin()
+    assert resolved
+    struct_type = resolved[1]
+    assert struct_type.ri_user_time.offset == 16
+    assert struct_type.ri_proc_start_abstime.offset == 80
+    assert struct_type.ri_runnable_time.offset == 288
 
 
 def test_an_unmeasurable_boot_still_writes_the_run_record(tmp_path: Path, monkeypatch) -> None:
@@ -575,6 +631,7 @@ def test_an_unmeasurable_boot_still_writes_the_run_record(tmp_path: Path, monkey
         raise OSError("no rusage here")
 
     monkeypatch.setattr(resource, "getrusage", boom)
+    monkeypatch.setattr(journal, "_ADOPTION", None)
     directory = _session_dir(tmp_path)
     process._note_run_start(_Handle("abc123", directory), _Runtime("abc123", 42.0))
 

@@ -1616,100 +1616,63 @@ def _note_exit_record(
         return False
 
 
-def _process_age_s() -> float | None:
-    """Seconds since the KERNEL started this process, or ``None`` if unknown.
-
-    The kernel's own start stamp, not a clock read at ``main()``: interpreter
-    start-up and the import graph (~1.1 s of CPU, measured in ``standby``'s
-    docstring) run before any Python line could take one, and on a starved host
-    that is where the wall goes. ``secrets.peer.process_info`` is the existing
-    stdlib-only reader (``sysctl(KERN_PROC_PID)`` on macOS, one-second
-    resolution; ``/proc/self/stat`` on Linux, clock ticks since boot, so it is
-    compared against ``CLOCK_BOOTTIME`` rather than the epoch). One syscall or
-    one procfs read; no subprocess.
-    """
-    from local_operator.secrets import peer
-
-    identity = peer.process_info(os.getpid())
-    if identity is None:
-        return None
-    if sys.platform == "darwin":
-        return max(0.0, time.time() - float(identity.start_time))
-    if sys.platform.startswith("linux"):
-        ticks = os.sysconf("SC_CLK_TCK")
-        return max(0.0, time.clock_gettime(time.CLOCK_BOOTTIME) - identity.start_time / ticks)
-    return None
-
-
 def _boot_cost() -> dict[str, Any] | None:
-    """What this boot cost THIS process, for the run record. ``None`` if unmeasurable.
+    """What getting to "addressable" cost THIS boot, for the run record.
 
-    WHY: the wake supervisor's log shows cold starts with a 5.8 s median but a
-    p99 of 161 s, and an attribution of every stage on the path found ~2-4 s of
-    CPU. Wall alone cannot say whether a 150 s boot did 150 s of work or waited
-    148 s for a core; these fields can, read together:
+    WHY: a cold start's wall can be 150 s while its stages attribute to ~2-4 s of
+    CPU; this says where the rest went. ``session.runtime.boot_cost`` owns the
+    sources and the reasoning; the fields, as a person debugging a slow boot reads
+    them:
 
-    * ``cpu_s`` — user+system CPU this process has used since exec, from
-      ``getrusage(RUSAGE_SELF)``. Chosen over ``time.process_time()`` because the
-      switch counters below come from the same call, so all three are one
-      consistent snapshot. They measure the same thing (process-wide, all
-      threads, monotonic; verified equal to 4 decimals on this Mac); what they
-      both EXCLUDE is reaped children (``RUSAGE_CHILDREN``), which is correct
-      here: this asks what the runtime itself burned, not its tools.
-    * ``wall_s`` — kernel start to now (:func:`_process_age_s`). ``wall_s`` far
-      above ``cpu_s`` is a process that was runnable-but-waiting or blocked;
-      the switch counts say which.
-    * ``voluntary_switches`` / ``involuntary_switches`` — ``ru_nvcsw`` /
-      ``ru_nivcsw``. On Linux involuntary means preempted while runnable, so a
-      starved boot reads involuntary >> voluntary. MACOS CAVEAT, measured on
-      this host: XNU also books some blocking waits as involuntary (200 x
-      ``time.sleep(1ms)`` -> +207 involuntary, +0 voluntary), so on macOS read
-      involuntary switches PER CPU-SECOND together with ``wall_s``/``cpu_s``,
-      not the raw ratio alone.
-    * ``load_1m`` — the host's 1-minute load at the same instant, so a person
-      reading one record can see how crowded the scheduler was.
-    * ``standby`` — whether this process was a pre-warmed spare adopted by a
-      console (``session.runtime.standby``) rather than a cold spawn. When true,
-      ``at_adoption`` holds the same counters at the moment of adoption, so the
-      boot's own share is the difference and the warm's share is not charged
-      to it.
+    * ``window`` — what the numbers below cover: ``"since-exec"`` for a cold
+      spawn (process start, including interpreter start-up and imports, to this
+      record), ``"since-adoption"`` for an adopted standby (the instant the spare
+      became this session's runtime, to this record). An adopted spare may have
+      idled for up to its 900 s idle window first; that is never charged here.
+    * ``wall_s`` — elapsed time over the window.
+    * ``cpu_s`` — CPU this process spent over the window.
+    * ``waited_for_cpu_s`` — ready to run but not on a core: starvation.
+    * ``blocked_s`` — not ready to run at all: waiting on I/O, a lock, a timer,
+      a socket or another process.
+      For a boot doing its work on one thread the three add up to ``wall_s``;
+      CPU and ready time are summed over threads, so parallel threads can push
+      ``cpu_s`` past ``wall_s`` (``boot_cost.window`` says why that is allowed).
+    * ``voluntary_switches`` / ``involuntary_switches`` — raw ``getrusage``
+      counts over the window. Evidence only: on macOS blocking waits are booked as
+      involuntary too, so their ratio does NOT distinguish starved from blocked.
+    * ``load_1m`` — the host's 1-minute load at this instant.
+    * ``standby`` — ``true`` when a pre-warmed spare (``session.runtime.standby``)
+      was adopted, ``false`` for a cold spawn. When true, ``before_adoption``
+      holds the same breakdown for the spare's own life (exec to adoption: its
+      warm-up plus however long it idled), so the warm is visible but separate.
 
-    COST, measured: two ``getrusage`` (~0.7 us each), one ``getloadavg`` and one
-    kernel start-time read (~120 us on macOS); no lock, no file scan, no
-    subprocess. Never raises — the caller writes the record without it.
+    COST, measured on this Mac (macOS 27, arm64, load 28-31; #3226 round 1): ~6 us
+    per call steady state. The FIRST call in a cold child is ~1 ms (median of 9,
+    range 0.4-6.9 ms: building the ctypes struct and resolving ``proc_pid_rusage``);
+    after the standby warm-up's own ``boot_cost.sample()`` it is ~0.04 ms. Not
+    counted here: importing ``journal`` (5-22 ms on a loaded host), which this
+    call site already paid before ``boot`` existed. No subprocess, lock or
+    directory walk on macOS (Linux lists ``/proc/self/task``). Never raises — the record is written without it.
     """
     try:
-        import resource
+        from local_operator.session.runtime import boot_cost, journal
 
-        from local_operator.session.runtime import journal
-
-        usage = resource.getrusage(resource.RUSAGE_SELF)
+        now = boot_cost.sample()
+        if now is None:
+            return None
+        adopted = journal.adoption_snapshot()
         cost: dict[str, Any] = {
-            "cpu_s": round(usage.ru_utime + usage.ru_stime, 3),
-            "wall_s": None,
-            "voluntary_switches": int(usage.ru_nvcsw),
-            "involuntary_switches": int(usage.ru_nivcsw),
+            "window": "since-adoption" if adopted is not None else "since-exec",
+            **boot_cost.window(now, adopted),
             "load_1m": None,
-            "standby": False,
+            "standby": adopted is not None,
         }
-        try:
-            age = _process_age_s()
-            cost["wall_s"] = round(age, 3) if age is not None else None
-        except Exception:  # noqa: BLE001 — one missing fact, not a missing record
-            pass
         try:
             cost["load_1m"] = round(os.getloadavg()[0], 2)
         except OSError:
             pass
-        adopted = journal.adoption_snapshot()
         if adopted is not None:
-            cost["standby"] = True
-            cost["at_adoption"] = {
-                "seconds_ago": round(max(0.0, time.time() - adopted["at"]), 3),
-                "cpu_s": round(adopted["cpu_s"], 3),
-                "voluntary_switches": int(adopted["voluntary"]),
-                "involuntary_switches": int(adopted["involuntary"]),
-            }
+            cost["before_adoption"] = boot_cost.window(adopted)
         return cost
     except Exception:  # noqa: BLE001 — boot must not fail over an instrument
         logger.debug("session runtime: could not measure its boot cost", exc_info=True)
