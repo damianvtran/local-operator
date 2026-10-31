@@ -54,9 +54,7 @@ from pathlib import Path
 from typing import Any, Mapping, Protocol
 
 from local_operator.team_bridge.cos_name import (
-    AVATAR_MAX_BYTES,
     SHA256_HEX,
-    PublishedAgent,
     published_agent,
 )
 
@@ -197,31 +195,6 @@ def _hub_avatar(endpoint: Mapping[str, Any]) -> tuple[bool, str | None, str | No
     )
 
 
-def _avatar_bytes(agent: PublishedAgent) -> tuple[bytes, str] | None:
-    """The bytes to publish and their digest, or ``None`` when it is not a picture.
-
-    The digest is ALWAYS computed from the bytes being sent, never taken from
-    ``agent.yml``. The recorded value is a claim about a file that may have been
-    edited since, and the hub dedupes on exactly this header: a stale digest for
-    new bytes earns a 204 "bytes I already hold", so the hub keeps the old
-    picture, keeps echoing the old digest, and every later boundary compares
-    equal and plans ``keep`` — a replaced photo that never publishes and never
-    repairs (review R1-F3). A same-size edit is the case only this rule catches.
-    At most one MiB, already in memory, so the hash costs nothing that matters.
-    """
-
-    path = agent.avatar_path
-    if path is None:
-        return None
-    try:
-        data = path.read_bytes()
-    except OSError:
-        return None
-    if not data or len(data) > AVATAR_MAX_BYTES:
-        return None
-    return data, hashlib.sha256(data).hexdigest()
-
-
 def plan_avatar(
     status: Any,
     tenant_id: str,
@@ -269,12 +242,14 @@ def plan_avatar(
         hub_hash=hub_hash,
         hub_sha256=hub_sha,
     )
-    if agent.avatar_path is None:
+    if agent.avatar_data is None:
         return agent_facts.replaced(DELETE if holds_one else NONE)
-    resolved = _avatar_bytes(agent)
-    if resolved is None:
-        return agent_facts
-    data, digest = resolved
+    # The digest describes the bytes being sent, never ``agent.yml``'s claim: the
+    # store already refused any file that does not hash to its block (R3-F2), and
+    # the hub dedupes on exactly this header, so it is recomputed here from the
+    # same bytes rather than trusted across a hop (R1-F3).
+    data = agent.avatar_data
+    digest = hashlib.sha256(data).hexdigest()
     planned = AvatarPlan(
         action=NONE,
         endpoint_id=endpoint_id,
