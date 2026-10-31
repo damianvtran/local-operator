@@ -261,6 +261,13 @@ _WALK_DEPTH_CAP = 2
 # top-arm raise (32,872 -> 33,364), whose child arm carries neither tool and
 # moves only by the shared ``system.md`` paragraph.
 MEASURED_TOKENS: dict[str, int] = {
+    # RE-MEASURED (agent pictures, local-operator #1533 branch): 1364 -> 1408
+    # (+44) on the clean arm and 1393 -> 1437 on the tier arm. The delta is the
+    # one bullet telling the model how to set an agent's profile picture, which
+    # is a `bash` + CLI capability by the footprint ladder rather than a schema
+    # field (a field would ride every request for a write almost nobody makes).
+    # Deliberately SHORT: an earlier draft of the same sentence cost 83, and the
+    # `--help` text carries the flag detail instead. No other entry moved.
     # RE-MEASURED (LOH-9 S3): 1044 -> 1056. The delta is the one-clause
     # fork exception on the ephemeral bullet ("a fork starts with a copy of
     # this conversation's roles"), added because the guides and the two
@@ -285,7 +292,7 @@ MEASURED_TOKENS: dict[str, int] = {
     # account). Worded to cost no more than the old text: the child-kind
     # context budget had 2 billed tokens of headroom. The ``team`` entry moves by
     # the same -1 for its twin field; the same printed table measured both.
-    "agent": 1364,
+    "agent": 1408,
     # RE-MEASURED (ask/notify dedupe, asks/dedupe.py): 1079 -> 1078. The
     # restraint now says "decide, never for FYI" and "asking notifies: never
     # also `notify` it"; trims elsewhere in the same paragraph pay for it so
@@ -648,7 +655,7 @@ MEASURED_TOKENS: dict[str, int] = {
 #: takes because both arms render the completed notes; ``task`` stays 764.
 #: RE-MEASURED (F0, #3054): agent 1394 -> 1393, the same -1 ``scope``-default
 #: wording as the canonical arm; ``task`` stays 764.
-TIER_ARM_TOKENS: dict[str, int] = {"agent": 1393, "task": 764}
+TIER_ARM_TOKENS: dict[str, int] = {"agent": 1437, "task": 764}
 
 
 async def _noop_execute(*_args: Any, **_kwargs: Any) -> ToolResult:

@@ -21,6 +21,13 @@ export const BUNDLED_LOCALE: Readonly<Record<string, Readonly<Record<string,
       "relay.account_policy.unavailable": "Los ajustes de enrutamiento de cuentas no est\u00e1n disponibles en este rel\u00e9. Actualiza Local Operator en esta m\u00e1quina.",
     },
   },
+  "relay.agent_avatar": {
+    "es": {
+      "relay.agent_avatar.alt": "Imagen de {name}",
+      "relay.agent_avatar.change": "Cambiar la imagen de {name}",
+      "relay.agent_avatar.desktop_hint": "Cambia esta imagen en la aplicaci\u00f3n de escritorio",
+    },
+  },
   "relay.approvals": {
     "es": {
       "relay.approvals.card.notice_session_auto": "esta sesi\u00f3n ahora es auto",

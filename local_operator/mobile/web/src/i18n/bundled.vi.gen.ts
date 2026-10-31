@@ -21,6 +21,13 @@ export const BUNDLED_LOCALE: Readonly<Record<string, Readonly<Record<string,
       "relay.account_policy.unavailable": "C\u00e0i \u0111\u1eb7t \u0111\u1ecbnh tuy\u1ebfn t\u00e0i kho\u1ea3n kh\u00f4ng kh\u1ea3 d\u1ee5ng tr\u00ean m\u00e1y ch\u1ee7 chuy\u1ec3n ti\u1ebfp n\u00e0y. H\u00e3y c\u1eadp nh\u1eadt Local Operator tr\u00ean m\u00e1y t\u00ednh n\u00e0y.",
     },
   },
+  "relay.agent_avatar": {
+    "vi": {
+      "relay.agent_avatar.alt": "\u1ea2nh c\u1ee7a {name}",
+      "relay.agent_avatar.change": "\u0110\u1ed5i \u1ea3nh c\u1ee7a {name}",
+      "relay.agent_avatar.desktop_hint": "H\u00e3y \u0111\u1ed5i \u1ea3nh n\u00e0y trong \u1ee9ng d\u1ee5ng m\u00e1y t\u00ednh",
+    },
+  },
   "relay.approvals": {
     "vi": {
       "relay.approvals.card.notice_session_auto": "phi\u00ean n\u00e0y gi\u1edd l\u00e0 auto",

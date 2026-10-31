@@ -241,6 +241,10 @@ OWNED_SPA_NAMESPACES = (
     # could not attach (SKM-D6). Its own namespace for the same frozen-bytes
     # reason: relay.chrome carries the composer chrome and must not stale.
     "relay.skills",
+    # Agent profile pictures on the phone (chat header + list rows): the alt
+    # text, the header control's label and the "change it on the desktop" hint.
+    # Its own namespace for the frozen-bytes reason above.
+    "relay.agent_avatar",
 )
 
 GENERATED_HEADER = (

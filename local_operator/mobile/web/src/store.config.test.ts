@@ -46,9 +46,11 @@ describe("retainConfigStream", () => {
 		// relay.notifications is the phone inbox's own (#/notifications).
 		// relay.skills is the composer's `$skill` picker (SKM-D6): its tray
 		// labels and the one skipped-skill notice.
+		// relay.agent_avatar is the agent picture's alt/label/desktop hint.
 		const ownedNamespaces = Object.keys(BUNDLED_OWNED).sort();
 		expect(ownedNamespaces).toEqual([
 			"relay.account_policy",
+			"relay.agent_avatar",
 			"relay.approvals",
 			"relay.ask",
 			"relay.asks",

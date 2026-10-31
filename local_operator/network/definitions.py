@@ -1152,6 +1152,10 @@ def _apply_agent_locked(
                 # is never on the wire, and an empty one re-derives in
                 # ``save_agent``.
                 label=local_label,
+                # The picture is local-only for ``label``'s reason (never on the
+                # wire), so a mirror update keeps the row's OWN picture -- a peer
+                # cannot set, replace or clear it. None for a fresh install.
+                avatar=getattr(local, "avatar", None),
                 created_date=_parse_iso(row.get("created_date")),
                 version=str(getattr(local, "version", "") or _local_version()),
                 hosting=str(fields.get("hosting") or ""),

@@ -1253,6 +1253,66 @@
       },
       "status": "passed",
       "note": "Independent ru audit of PR #3203 (Team Bridge tool rows) at source_sha256 58e76cb3bf5872c644ad83502f9efd0e5ca304d738cfe5f430c6a04ca192ef1c (catalogues.catalogue_sha256 = raw sha256 of en/wire.tool_rows.bridge.json); target catalogue_sha256 of the auditor-fixed ru bytes = 30f76a743fbb05175982637d0ee72af8557d3abc1754589d1a7d3a5dd62dceee. All 85 keys read against en + .context.json and the composer (harness/bridge_copy.py). Mechanical: key parity 85/85; ICU argument sets identical; 127 sentinel renders through the ICU runtime (messages._runtime.render_message, locale ru) at counts 0/1/2/3/4/5/11/12/14/21/22/25/101/111/1000000, 0 lost/extra; plurals one/few/many/other on count.members and count.messages (1 участник, 2 участника, 5/11 участников, 21 участник, 22 участника; =0 'нет сообщений' kept); NFC; no Cf/bidi controls; all 8 maxCells met (outcome ≤27/32, outcome_short ≤14/14). Findings, all fixed by the auditor (0 blocker, 0 major, 4 minor, 1 nit): RU-C1 MINOR verb_*.react / react_remove 'Поставил реакцию в' + fallback 'разговор' / '#name' composed a wrong case and no preposition fits both a channel and a DM name ('в Дане'); now colon-introduced 'Поставил реакцию:' / 'Убрал реакцию:', the same pattern the translators already used for dm/send/reply. RU-C2 MINOR verb_*.channel_thread 'Прочитал ветку в' + 'разговор' = accusative after locative 'в' ('ветку в разговор'); now 'Прочитал ветку:'. RU-C3 MINOR verb_*.take_up 'Принял' collided with 'принять/принятия' = owner acceptance on the awaiting_acceptance rows of this namespace, and take_up is a FETCH (tool.py); now 'Получил/Получает/Не удалось получить'. RU-C4 MINOR verb_*.ack_working 'Забрал' (= took away/collected) misstates a working-claim ack; now 'Взял в работу/Берёт в работу/Не удалось взять в работу' (Освободил for ack_done kept). RU-C5 MINOR outcome_short.inbox_only 'не опубликовано' / outcome_short.unconfirmed 'не подтверждено' — the short forms were the full forms' tails and dropped the distinguishing half; 'не в разговоре' (14/14) keeps 'not in a conversation', 'под вопросом' (12/14) keeps 'may or may not have landed' without saying failed. RU-N1 NIT expanded.details 'Детали' → 'Подробности', the heading the ru catalogues use for a details disclosure (ui.agents.skills.detail.section.details, ui.chat.run_details). Accepted as is: 'Опубликовал в' + 'разговор' (accusative after 'в' reads as motion into; idiomatic for posting); 'ветке {label}' (prepositional after 'в', composes 'Опубликовал в ветке #general'); 'личное сообщение' for DM; masculine past-tense agent verbs (agent as subject, consistent across the namespace). Every ru verb, outcome and fallback value is byte-identical to its ui.chat.canonical.tool_row.bridge twin in local-operator-ui#1529 (65 pairs). Translator provenance from the manager brief (round 1 radient/auto fallback, delta round 2 anthropic/claude-opus-5-5); translator and auditor share the Claude model family (disclosed). Not verified: native-speaker naturalness, a rendered frame at narrow width. Unresolved blocker/major: 0."
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.errors.agent_avatar",
+      "source_sha256": "8bae15be1b460c96a9834816d9f5f40f2a409ae174c884ab905dc4d1587afacc",
+      "translator": {
+        "agent": "coder (lopdev implementer of feat/agent-avatar-core; core-avatar session 799ad130e6c0) — author of the translations and of the round-2 remediation",
+        "model": "radient/auto",
+        "date": "2026-10-30"
+      },
+      "auditor": {
+        "agent": "reviewer (independent i18n-auditor, lopdev session 941823209281, label i18n-audit-core) — auditor is independent of the translator: separate session, separate context, and it did not author or edit any copy",
+        "model": "radient/auto (actual model of the run; provider fallback chain anthropic/claude-opus-5-5 -> openai/gpt-6-astra -> kimi/k3.1-pro -> radient/auto, disclosed rather than pinned)",
+        "date": "2026-10-30",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent i18n audit of the agent-avatar wave (wire.errors.agent_avatar) at en source_sha256 8bae15be1b460c96a9834816d9f5f40f2a409ae174c884ab905dc4d1587afacc, round 2 at head 1fb179bafd1. Auditor is independent of the translator. Independent audit, round 2 at head 1fb179bafd1 (en source_sha256 verified with catalogues.catalogue_sha256). Mechanical, re-derived this round: key parity vs en (7/7 wire.errors.agent_avatar, 11/11 cli.agents_picture, 3/3 relay.agent_avatar); placeholder name+kind identical to en and every message rendered through local_operator.i18n.runtime.render_message with sentinel arguments (0 lost, 0 added); no value byte-identical to en, so no key is left in English; no ICU plural/select, and none is required (the only counts are {bytes}, where a stored picture can never be 0 or 1 bytes, and the fixed {limit_mib}=10 / {limit_mp}=40 caps), so every locale's CLDR category set is satisfied vacuously; NFC, no BOM, no trailing space, no Cf/bidi control characters (per-string RTL isolation stays the render layer's job, per the ur guide). Locale verdict: 2 MINOR. (1) 'extra' rendered дополнением where the glossary keeps it Latin and ru's shipped copy reads установлен extra [fetch]. (2) desktop_hint width belongs to the relay namespace and is recorded there. Sentence grammar, ё usage and МБ abbreviation are correct; no ё/е inconsistency in these strings. Non-gating. Round-2 scope: the remediation diff 8f64c072385..1fb179bafd1 (hi/ur cli.agents_picture remove.none, vi cli.agents_picture and vi wire.errors.agent_avatar agent term) plus its direct neighbours; the copy this row covers was re-read at the current bytes and the unchanged namespaces it borders keep their byte-identical audit. Translator and auditor are distinct agents in separate sessions; both ran the radient/auto route after provider quota fallbacks (disclosed, not pinned). Unresolved blocker/major: 0."
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.agents_picture",
+      "source_sha256": "389d0125d15d11c2ea9aecceb53aec81be87e82ef3f1d249916677576bf80fc5",
+      "translator": {
+        "agent": "coder (lopdev implementer of feat/agent-avatar-core; core-avatar session 799ad130e6c0) — author of the translations and of the round-2 remediation",
+        "model": "radient/auto",
+        "date": "2026-10-30"
+      },
+      "auditor": {
+        "agent": "reviewer (independent i18n-auditor, lopdev session 941823209281, label i18n-audit-core) — auditor is independent of the translator: separate session, separate context, and it did not author or edit any copy",
+        "model": "radient/auto (actual model of the run; provider fallback chain anthropic/claude-opus-5-5 -> openai/gpt-6-astra -> kimi/k3.1-pro -> radient/auto, disclosed rather than pinned)",
+        "date": "2026-10-30",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent i18n audit of the agent-avatar wave (cli.agents_picture) at en source_sha256 389d0125d15d11c2ea9aecceb53aec81be87e82ef3f1d249916677576bf80fc5, round 2 at head 1fb179bafd1. Auditor is independent of the translator. Independent audit, round 2 at head 1fb179bafd1 (en source_sha256 verified with catalogues.catalogue_sha256). Mechanical, re-derived this round: key parity vs en (7/7 wire.errors.agent_avatar, 11/11 cli.agents_picture, 3/3 relay.agent_avatar); placeholder name+kind identical to en and every message rendered through local_operator.i18n.runtime.render_message with sentinel arguments (0 lost, 0 added); no value byte-identical to en, so no key is left in English; no ICU plural/select, and none is required (the only counts are {bytes}, where a stored picture can never be 0 or 1 bytes, and the fixed {limit_mib}=10 / {limit_mp}=40 caps), so every locale's CLDR category set is satisfied vacuously; NFC, no BOM, no trailing space, no Cf/bidi control characters (per-string RTL isolation stays the render layer's job, per the ur guide). Locale verdict: 1 MINOR. set.done reads ({mime}, байт: {bytes}), which reverses the corpus convention '{max_bytes} байт' and reads as a debug label; recommend ({mime}, {bytes} байт). Placeholders, 'у агента {agent}' construction and the genitive plural in '2048 байт' are correct. Non-gating. Round-2 scope: the remediation diff 8f64c072385..1fb179bafd1 (hi/ur cli.agents_picture remove.none, vi cli.agents_picture and vi wire.errors.agent_avatar agent term) plus its direct neighbours; the copy this row covers was re-read at the current bytes and the unchanged namespaces it borders keep their byte-identical audit. Translator and auditor are distinct agents in separate sessions; both ran the radient/auto route after provider quota fallbacks (disclosed, not pinned). Unresolved blocker/major: 0."
+    },
+    {
+      "locale": "ru",
+      "namespace": "relay.agent_avatar",
+      "source_sha256": "6f48f15eeebb9e81bb36f607188f4e517b906149015f076eaaed93d5d00810fe",
+      "translator": {
+        "agent": "coder (lopdev implementer of feat/agent-avatar-core; core-avatar session 799ad130e6c0) — author of the translations and of the round-2 remediation",
+        "model": "radient/auto",
+        "date": "2026-10-30"
+      },
+      "auditor": {
+        "agent": "reviewer (independent i18n-auditor, lopdev session 941823209281, label i18n-audit-core) — auditor is independent of the translator: separate session, separate context, and it did not author or edit any copy",
+        "model": "radient/auto (actual model of the run; provider fallback chain anthropic/claude-opus-5-5 -> openai/gpt-6-astra -> kimi/k3.1-pro -> radient/auto, disclosed rather than pinned)",
+        "date": "2026-10-30",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent i18n audit of the agent-avatar wave (relay.agent_avatar) at en source_sha256 6f48f15eeebb9e81bb36f607188f4e517b906149015f076eaaed93d5d00810fe, round 2 at head 1fb179bafd1. Auditor is independent of the translator. Independent audit, round 2 at head 1fb179bafd1 (en source_sha256 verified with catalogues.catalogue_sha256). Mechanical, re-derived this round: key parity vs en (7/7 wire.errors.agent_avatar, 11/11 cli.agents_picture, 3/3 relay.agent_avatar); placeholder name+kind identical to en and every message rendered through local_operator.i18n.runtime.render_message with sentinel arguments (0 lost, 0 added); no value byte-identical to en, so no key is left in English; no ICU plural/select, and none is required (the only counts are {bytes}, where a stored picture can never be 0 or 1 bytes, and the fixed {limit_mib}=10 / {limit_mp}=40 caps), so every locale's CLDR category set is satisfied vacuously; NFC, no BOM, no trailing space, no Cf/bidi control characters (per-string RTL isolation stays the render layer's job, per the ur guide). Locale verdict: 1 MINOR (fit). desktop_hint 54 cells against declared maxCells 48 (en 38; the largest overrun in the wave — 6 cells); alt 19 and change 28 fit. Needs a short wording or a recorded exception. The 'Изображение: {name}' label colon follows the corpus's existing label:value habit (Полоса: контекст), so it is not a finding. Round-2 scope: the remediation diff 8f64c072385..1fb179bafd1 (hi/ur cli.agents_picture remove.none, vi cli.agents_picture and vi wire.errors.agent_avatar agent term) plus its direct neighbours; the copy this row covers was re-read at the current bytes and the unchanged namespaces it borders keep their byte-identical audit. Translator and auditor are distinct agents in separate sessions; both ran the radient/auto route after provider quota fallbacks (disclosed, not pinned). Unresolved blocker/major: 0."
     }
   ]
 }

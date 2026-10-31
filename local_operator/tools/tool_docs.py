@@ -212,7 +212,10 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             "``/agent promote <name>`` verb, which the user must run "
             "themselves; there is no retry through this tool. An account name "
             "collision is refused: pass ``confirm_replace`` only when the user "
-            "asked to overwrite it."
+            "asked to overwrite it.\n"
+            "- PICTURES: set/remove/show through ``bash`` "
+            "(``lop agents picture <verb> --help``); the server re-crops and strips "
+            "metadata. Refusals exit 1 with a reason word."
         ),
     ),
     # -- team ---------------------------------------------------------------

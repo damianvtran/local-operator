@@ -7986,6 +7986,7 @@ class RelayServer:
                     # ``_row_binding``): the origin's sidebar paints a team
                     # badge from it exactly as it does for a local row.
                     "binding": self._row_binding(record.session_id),
+                    **self._row_avatar(record.session_id),
                 }
             )
         for row in self._stored_rows():
@@ -8008,6 +8009,20 @@ class RelayServer:
         for row in self._mesh_hosted_rows(seen):
             rows.append(row)
         return rows
+
+    def _row_avatar(self, session_id: str) -> dict[str, str | None]:
+        """``agent_id``/``avatar_sha256`` for an outbound peer row (additive).
+
+        The same resolver the local listing uses (``agent_avatar.session_row_fields``,
+        memoised per store), so a peer's row names its agent the way that device's
+        own sidebar would. The id is THIS device's registry id: an origin cannot
+        fetch the bytes through the mesh today, so it draws the glyph -- the pair
+        is carried so a later picture channel needs no row-shape change. Team
+        Bridge/notification avatar fields are a separate lane and untouched here.
+        """
+        from local_operator.agent_avatar import session_row_fields
+
+        return session_row_fields(self.root, session_id)
 
     def _row_binding(self, session_id: str) -> dict[str, str | None]:
         """The agent/team this session is attached to, for its listing row.
@@ -8112,6 +8127,7 @@ class RelayServer:
                     "origin": dict(stamp.origin) if stamp.origin else None,
                     "archived": None,
                     "binding": self._row_binding(entry.name),
+                    **self._row_avatar(entry.name),
                 }
             )
         return rows
@@ -8221,6 +8237,7 @@ class RelayServer:
                     "origin": (dict(stamp.origin) if stamp is not None and stamp.origin else None),
                     "archived": None,
                     "binding": self._row_binding(session_id),
+                    **self._row_avatar(session_id),
                 }
             )
         return rows

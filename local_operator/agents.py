@@ -234,6 +234,28 @@ def is_conforming_agent_id(agent_id: str) -> bool:
     return True
 
 
+class AgentAvatarMeta(BaseModel):
+    """The ``avatar`` block in ``agent.yml``: what the stored picture file is.
+
+    THE AUTHORITY for "does this agent have a picture": the file beside
+    ``agent.yml`` is served only when this block names it, so a stray file left by
+    an interrupted write is never shown. ``sha256`` is the digest of the stored
+    file's bytes (the HTTP ETag and the ``?v=`` cache key every client builds).
+    Field names are a frozen cross-repo contract; see
+    :mod:`local_operator.agent_avatar`.
+    """
+
+    sha256: str
+    mime: str
+    bytes: int
+    updated_at: datetime
+    #: The stored basename (``avatar.png`` / ``avatar.jpg``): part of the frozen
+    #: cross-repo block the hub lane reads. Optional ONLY for a legacy block
+    #: written before the field existed; ``agent_avatar.stored_name`` falls back
+    #: by mime and treats any other value as "no picture". Writers always set it.
+    filename: Optional[str] = None
+
+
 class AgentData(BaseModel):
     """
     Pydantic model representing an agent's metadata.
@@ -269,6 +291,20 @@ class AgentData(BaseModel):
     # field that every existing construction site must spell would touch ~100
     # call sites across the tree.
     label: str = ""
+    #: The agent's profile picture metadata, or ``None`` when it has none (see
+    #: :class:`AgentAvatarMeta` and :mod:`local_operator.agent_avatar`). Written
+    #: ONLY through ``AgentRegistry.set_agent_avatar``/``clear_agent_avatar``,
+    #: never through ``update_agent``, so an edit form cannot forge a block that
+    #: names no file.
+    #:
+    #: LOCAL-ONLY, like ``label``: absent from the hub publish document
+    #: (``instruction_set_fields`` never reads it) and from the mesh definitions
+    #: wire (``network.definitions.AGENT_DEFINITION_FIELDS`` is an allow-list, so
+    #: it stays off by default -- adding it would re-shape every mirror's recorded
+    #: digest, and a picture is bytes the wire does not carry anyway). The hub
+    #: publish of pictures is the sibling lane's explicit, separate upload.
+    #: A plain default for ``label``'s pyright reason.
+    avatar: Optional[AgentAvatarMeta] = None
     created_date: datetime = Field(..., description="The date when the agent was created")
     version: str = Field(..., description="The version of the agent")
     security_prompt: str = Field(
@@ -820,6 +856,12 @@ class AgentRegistry:
         "current_plan.txt",
         "instruction_details.txt",
         "system_prompt.md",
+        # A picture exists only for an agent (``set_agent_avatar`` refuses an
+        # unknown id), so a directory holding one with ``agent.yml`` gone is a
+        # definition that failed to read, not an empty directory.
+        "avatar.png",
+        "avatar.jpg",
+        "avatar.jpeg",
     )
 
     @classmethod
@@ -1138,7 +1180,13 @@ class AgentRegistry:
         with self._definition_lock:
             # Refresh under the lock so the precondition judges the row that will
             # actually be replaced, then re-check existence against that read.
-            self._refresh_if_needed()
+            # FORCED, not interval-gated: this path re-dumps the WHOLE in-memory
+            # row, so a row older than another process's write erases it. The
+            # picture CLI (and an agent's ``bash``) writes ``avatar`` from another
+            # process; a server PATCH inside the 3 s refresh window dropped the
+            # block and orphaned ``avatar.png``. Reading the disk under the lock
+            # is what makes the read-modify-write atomic.
+            self._refresh_agents_metadata()
             if agent_id not in self._agents:
                 raise KeyError(f"Agent with id {agent_id} not found")
             if precondition is not None:
@@ -1147,6 +1195,7 @@ class AgentRegistry:
 
     def _update_agent_locked(self, agent_id: str, updated_metadata: AgentEditFields) -> AgentData:
         """Body of :meth:`update_agent`; the caller holds ``_definition_lock``."""
+        # The caller (``update_agent``) force-refreshed under the lock.
         if agent_id not in self._agents:
             raise KeyError(f"Agent with id {agent_id} not found")
 
@@ -1296,6 +1345,96 @@ class AgentRegistry:
 
         return current_metadata_obj
 
+    def set_agent_avatar(self, agent_id: str, data: bytes) -> AgentAvatarMeta:
+        """Normalise ``data`` into the agent's stored picture and record it.
+
+        The ONE write path for pictures (route, CLI and agent tool all call it), so
+        the gate, the re-encode and the metadata cannot differ by surface. Raises
+        ``KeyError`` for an unknown agent and ``agent_avatar.AvatarError`` (with a
+        reason word) for a refused image; on either nothing is written.
+
+        Order: normalise (pure) -> write the new file -> write ``agent.yml`` ->
+        remove the stale sibling -> notify. The file lands before the metadata
+        that names it, and the old sibling goes only after the metadata no longer
+        names it, so a crash at ANY point reads as either the old picture or the
+        new one (a PNG->JPEG flip used to leave metadata naming a deleted PNG).
+        A crash between file and yml leaves an unreferenced file the next write
+        replaces; same-name replacement leaves the OLD sha naming NEW bytes, which
+        ``agent_avatar.read`` refuses (digest mismatch) rather than mis-serves.
+        Under ``_definition_lock``, refreshed from disk first, so neither a
+        concurrent ``update_agent`` here nor another process's edit is lost.
+        """
+        from local_operator import agent_avatar
+
+        normalised = agent_avatar.normalise(data)
+        with self._definition_lock:
+            # Forced refresh under the lock (see ``_update_agent_locked``): this
+            # dumps the whole row, and a stale one would overwrite every other
+            # field another process just edited.
+            self._refresh_agents_metadata()
+            if agent_id not in self._agents:
+                raise KeyError(f"Agent with id {agent_id} not found")
+            agent_dir = self.agents_dir / agent_id
+            meta = AgentAvatarMeta.model_validate(agent_avatar.store(agent_dir, normalised))
+            row = self._agents[agent_id]
+            previous = row.avatar
+            row.avatar = meta
+            try:
+                _write_text_atomically(
+                    agent_dir / "agent.yml",
+                    yaml.dump(row.model_dump(), default_flow_style=False),
+                )
+            except BaseException:
+                # The yml still names the OLD picture: put the row back and drop
+                # the new file unless it is the very file the old block names
+                # (same basename => it replaced the old bytes already, which the
+                # old sha will now reject as not_found rather than serve).
+                row.avatar = previous
+                if previous is None or agent_avatar.stored_name(previous) != normalised.name:
+                    (agent_dir / normalised.name).unlink(missing_ok=True)
+                raise
+            # The stale sibling goes only AFTER agent.yml names the new file.
+            agent_avatar.remove_siblings(agent_dir, keep=normalised.name)
+        agent_avatar.emit(agent_id, agent_dir, meta)
+        return meta
+
+    def clear_agent_avatar(self, agent_id: str) -> bool:
+        """Remove the agent's picture; ``True`` when there was one to remove.
+
+        Metadata first, then the files: the reverse order would leave a window in
+        which ``agent.yml`` names a file that is already gone (a 404 for a row that
+        claims a picture). Idempotent: clearing an agent with no picture still
+        sweeps any stray file and reports ``False`` without notifying.
+        """
+        from local_operator import agent_avatar
+
+        with self._definition_lock:
+            self._refresh_agents_metadata()  # forced: see ``_update_agent_locked``
+            if agent_id not in self._agents:
+                raise KeyError(f"Agent with id {agent_id} not found")
+            agent_dir = self.agents_dir / agent_id
+            row = self._agents[agent_id]
+            had = row.avatar is not None
+            if had:
+                row.avatar = None
+                _write_text_atomically(
+                    agent_dir / "agent.yml",
+                    yaml.dump(row.model_dump(), default_flow_style=False),
+                )
+            agent_avatar.remove(agent_dir)
+        if had:
+            agent_avatar.emit(agent_id, agent_dir, None)
+        return had
+
+    def agent_avatar_path(self, agent_id: str) -> Optional[Path]:
+        """The stored picture file the agent's metadata names, or ``None``."""
+        from local_operator import agent_avatar
+
+        row = self.get_agent(agent_id)
+        if row.avatar is None:
+            return None
+        return agent_avatar.stored_path(self.agents_dir / agent_id, row.avatar)
+
     def delete_agent(self, agent_id: str) -> None:
         """
         Delete an agent and its associated files.
@@ -1385,12 +1524,24 @@ class AgentRegistry:
             # Copy all files from source directory to target directory
             for source_file in source_dir.iterdir():
                 if source_file.is_file() and source_file.name != "agent.yml":
+                    # A killed picture write's staging file holds photo bytes and
+                    # belongs to no agent; the real picture (avatar.png/.jpg) is
+                    # copied on purpose, and its block carried below.
+                    if source_file.name.startswith(".avatar."):
+                        continue
                     # For JSONL files, only copy if they have content
                     if source_file.suffix == ".jsonl" and source_file.stat().st_size == 0:
                         continue
 
                     target_file = target_dir / source_file.name
                     shutil.copy2(source_file, target_file)
+
+            # The picture FILE came across in the loop above; its metadata block
+            # (the authority) did not, because ``create_agent`` builds a fresh row.
+            # Carry it, or the clone holds an orphan file and shows no picture.
+            if original_agent.avatar is not None:
+                new_agent.avatar = original_agent.avatar.model_copy()
+                new_agent = self.save_agent(new_agent)
 
             return new_agent
         except Exception as e:
@@ -2540,6 +2691,9 @@ class AgentRegistry:
                 # profiles must not leave partially imported metadata behind.
                 try:
                     imported_agent = AgentData.model_validate(agent_data)
+                    # No cloud->local picture write, ever (agent_avatar contract):
+                    # an archive's avatar block is dropped with its skipped file.
+                    imported_agent.avatar = None
                 except ValidationError as exc:
                     raise ValueError("Invalid agent metadata in agent.yml") from exc
 
@@ -2585,7 +2739,7 @@ class AgentRegistry:
                     extracted_agent_dir = agent_yml_path.parent
                     for item in extracted_agent_dir.iterdir():
                         if item.is_file():
-                            if item.name in self._EXPORT_SKIP_NAMES:
+                            if self._is_skipped_from_archive(item.name):
                                 logging.info(
                                     "Skipping imported %s (agent: %s)",
                                     item.name,
@@ -2849,8 +3003,31 @@ class AgentRegistry:
             "context.pkl",
             "current_plan.txt",
             "instruction_details.txt",
+            # Pictures never travel in an archive, in EITHER direction: export
+            # feeds the hub publish path (a picture's publish is the sibling
+            # lane's explicit upload), and import is a cloud->local write, which
+            # the avatar contract forbids outright (see ``agent_avatar``).
+            "avatar.png",
+            "avatar.jpg",
+            # Spelled out too: nothing in this tree writes it, but a hand-placed
+            # or future-renamed sibling must not leak a person's photograph into
+            # an archive either. The hub lane's contract names all three.
+            "avatar.jpeg",
         }
     )
+
+    @classmethod
+    def _is_skipped_from_archive(cls, name: str) -> bool:
+        """Should ``name`` stay out of an export, an import copy and a clone?
+
+        Case-insensitive: APFS/NTFS fold ``avatar.png`` and ``Avatar.PNG`` into
+        one name, so an imported ``Avatar.PNG`` re-exported through the exact-match
+        set. Also catches the picture's staging temp (``.avatar.png.<pid>.<hex>.tmp``,
+        left behind by a SIGKILL between write and rename, where the ``finally``
+        cannot run): it holds a person's photo bytes under a name no set lists.
+        """
+        lowered = name.lower()
+        return lowered in cls._EXPORT_SKIP_NAMES or lowered.startswith(".avatar.")
 
     @contextmanager
     def exported_agent_archive(self, agent_id: str) -> Iterator[Tuple[Path, str]]:
@@ -2970,7 +3147,7 @@ class AgentRegistry:
                 for item in agent_dir.iterdir():
                     if not item.is_file():
                         continue
-                    if item.name in self._EXPORT_SKIP_NAMES:
+                    if self._is_skipped_from_archive(item.name):
                         continue
                     if item.name == "agent.yml":
                         # last_message is a slice of the conversation and
@@ -2979,6 +3156,9 @@ class AgentRegistry:
                         payload = yaml.safe_load(item.read_text(encoding="utf-8")) or {}
                         if isinstance(payload, dict):
                             payload["last_message"] = ""
+                            # The picture file is skipped above, so its metadata
+                            # must go too or the archive names a missing file.
+                            payload.pop("avatar", None)
                         zip_file.writestr(
                             "agent.yml",
                             yaml.safe_dump(payload, default_flow_style=False),

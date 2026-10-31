@@ -517,6 +517,12 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help=_ag.pull_org().envelope(locale=help_locale)["text"],
     )
     # Sync command
+    # Picture command: profile pictures (``lop agents picture set|remove|show``).
+    from local_operator import cli_agent_picture  # small; keyed copy lives there
+
+    cli_agent_picture.add_parser(
+        agents_subparsers, parent_parser=parent_parser, help_locale=help_locale
+    )
     sync_parser = agents_subparsers.add_parser(
         "sync",
         help=_ag.sync().envelope(locale=help_locale)["text"],
@@ -17400,6 +17406,10 @@ def main() -> int:
                 return agents_create_command(args.name, agent_registry)
             elif args.agents_command == "delete":
                 return agents_delete_command(args, agent_registry, base_dir)
+            elif args.agents_command == "picture":
+                from local_operator import cli_agent_picture
+
+                return cli_agent_picture.run(args, agent_registry)
             elif args.agents_command == "push":
                 # Push agent to Radient
                 if getattr(args, "org", None) is not None:

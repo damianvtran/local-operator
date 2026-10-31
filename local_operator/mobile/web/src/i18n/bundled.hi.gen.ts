@@ -21,6 +21,13 @@ export const BUNDLED_LOCALE: Readonly<Record<string, Readonly<Record<string,
       "relay.account_policy.unavailable": "\u0907\u0938 \u0930\u093f\u0932\u0947 \u092a\u0930 \u0916\u093e\u0924\u093e \u0930\u0942\u091f\u093f\u0902\u0917 \u0938\u0947\u091f\u093f\u0902\u0917 \u0909\u092a\u0932\u092c\u094d\u0927 \u0928\u0939\u0940\u0902 \u0939\u0948\u0964 \u0907\u0938 \u0915\u0902\u092a\u094d\u092f\u0942\u091f\u0930 \u092a\u0930 Local Operator \u0905\u092a\u0921\u0947\u091f \u0915\u0930\u0947\u0902\u0964",
     },
   },
+  "relay.agent_avatar": {
+    "hi": {
+      "relay.agent_avatar.alt": "{name} \u0915\u0940 \u0924\u0938\u094d\u0935\u0940\u0930",
+      "relay.agent_avatar.change": "{name} \u0915\u0940 \u0924\u0938\u094d\u0935\u0940\u0930 \u092c\u0926\u0932\u0947\u0902",
+      "relay.agent_avatar.desktop_hint": "\u092f\u0939 \u0924\u0938\u094d\u0935\u0940\u0930 \u0921\u0947\u0938\u094d\u0915\u091f\u0949\u092a \u0910\u092a \u092e\u0947\u0902 \u092c\u0926\u0932\u0947\u0902",
+    },
+  },
   "relay.approvals": {
     "hi": {
       "relay.approvals.card.notice_session_auto": "\u092f\u0939 \u0938\u0924\u094d\u0930 \u0905\u092c auto \u0939\u0948",

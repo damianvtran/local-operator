@@ -1,0 +1,13 @@
+{
+  "cli.agents_picture.error.no_agent": "{agent} नाम या ID वाला कोई एजेंट नहीं है।",
+  "cli.agents_picture.error.read_file": "{path} पढ़ी नहीं जा सकी: {error}",
+  "cli.agents_picture.help.agent": "एजेंट का नाम या ID",
+  "cli.agents_picture.help.file": "PNG, JPEG, WebP, GIF या HEIC इमेज का पाथ",
+  "cli.agents_picture.help.group": "किसी एजेंट की प्रोफ़ाइल तस्वीर सेट करें, हटाएँ या दिखाएँ",
+  "cli.agents_picture.help.remove": "एजेंट की तस्वीर हटाएँ",
+  "cli.agents_picture.help.set": "इमेज फ़ाइल से एजेंट की तस्वीर सेट करें",
+  "cli.agents_picture.help.show": "एजेंट की तस्वीर का मेटाडेटा JSON में दिखाएँ",
+  "cli.agents_picture.remove.done": "{agent} की तस्वीर हटा दी गई।",
+  "cli.agents_picture.remove.none": "{agent} के पास हटाने के लिए कोई तस्वीर नहीं है।",
+  "cli.agents_picture.set.done": "{agent} की तस्वीर सेट हो गई ({mime}, {bytes} बाइट)।"
+}

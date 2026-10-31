@@ -15,6 +15,9 @@ export type MessageParams = {
   "relay.account_policy.scope": undefined;
   "relay.account_policy.title": undefined;
   "relay.account_policy.unavailable": undefined;
+  "relay.agent_avatar.alt": { "name": string };
+  "relay.agent_avatar.change": { "name": string };
+  "relay.agent_avatar.desktop_hint": undefined;
   "relay.approvals.card.notice_session_auto": undefined;
   "relay.approvals.card.request_needs_answer": undefined;
   "relay.approvals.card.set_auto_all": undefined;
@@ -413,6 +416,13 @@ export type MessageParams = {
   "wire.console.title": undefined;
   "wire.console.user_reserved.help": undefined;
   "wire.console.user_reserved.label": undefined;
+  "wire.errors.agent_avatar.empty_body": undefined;
+  "wire.errors.agent_avatar.imaging_unavailable": undefined;
+  "wire.errors.agent_avatar.not_found": undefined;
+  "wire.errors.agent_avatar.too_large": { "limit_mib": string };
+  "wire.errors.agent_avatar.too_many_pixels": { "limit_mp": string };
+  "wire.errors.agent_avatar.undecodable": undefined;
+  "wire.errors.agent_avatar.unsupported_type": undefined;
   "wire.errors.agents.agent_not_found": undefined;
   "wire.errors.agents.agent_not_found_id": { "agent_id": string };
   "wire.errors.agents.agent_not_found_wrapped": { "error": string };

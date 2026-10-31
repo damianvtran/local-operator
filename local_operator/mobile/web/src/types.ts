@@ -786,6 +786,12 @@ export interface SessionSummary {
 	    operator's own conversation. Additive and defaulted: an older daemon
 	    omits it, and a reader must treat absence as "no opener". */
 	opened_by?: SessionOpenedBy | null;
+	/** The bound agent's registry id and its profile picture's sha256 (core
+	    `agent_avatar` contract); the picture is `/v1/agents/{agent_id}/avatar?v=
+	    <avatar_sha256>` on this relay. Both null on an unbound or pictureless
+	    row; absent on an older daemon. Either missing means "draw the glyph". */
+	agent_id?: string | null;
+	avatar_sha256?: string | null;
 	todos_open: number;
 	mtime: number;
 	/** Immutable conversation birth; absent on older daemons, never activity. */

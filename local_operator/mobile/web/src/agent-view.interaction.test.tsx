@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./app";
 import { AgentConversation, AgentUnavailable } from "./screens/agent-view";
 import * as api from "./api";
@@ -19,6 +19,13 @@ vi.mock("./api", async (importOriginal) => ({
 	imageUrl: vi.fn(() => ""),
 	sendCommand: vi.fn(async () => ({ ok: true, detail: "steering queued" })),
 	markSessionSeen: vi.fn(async () => ({ ok: true })),
+	/* A DIRECTORIES STUB, so the sheet this screen can mount never dials the
+	   dev server: without it the App's mount path reached a real `fetch` on
+	   `/api/directories` (and the config stream's `/api/config/events`) in this
+	   suite, which is a network round trip inside a unit test — noise on stderr
+	   and, on a machine that happens to have port 3000 open, a different code
+	   path. Measured: 116 + 38 unstubbed fetches over one run before this. */
+	getDirectories: vi.fn(async () => ({ home: "", recent: [], tmp: "" })),
 }));
 
 function entry(id: string, kind: TranscriptEntry["kind"], text: string): TranscriptEntry {
@@ -58,6 +65,14 @@ function fixture(): { detail: SubagentDetail; projection: SessionProjection } {
 	} satisfies SessionProjection;
 	return { detail, projection };
 }
+
+beforeEach(() => {
+	/* The config stream is the store's own doorbell and it fetches
+	   `/api/config/events` to probe for endpoint presence — one stat-shaped
+	   read per subscribe, never something this screen's behaviour depends on.
+	   Stubbed here for the reason above: a unit test must not open sockets. */
+	vi.spyOn(store, "retainConfigStream").mockReturnValue(() => undefined);
+});
 
 afterEach(() => {
 	cleanup();

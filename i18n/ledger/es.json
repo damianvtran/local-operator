@@ -2280,6 +2280,66 @@
       },
       "status": "passed",
       "note": "PR #3203 Team Bridge tool rows: all 85 keys of wire.tool_rows.bridge read against en + context sidecar, glossary and es style guide, and against the desktop's ui.chat.canonical.tool_row.bridge.* es copy. Findings (all fixed in these bytes; target hash is the fixed file): ES-B1 MINOR verb_settled/running/failed.channel_thread 'Leído en'/'Leyendo en'/'No se pudo leer en' dropped 'thread' and rendered identically to channel_history -> 'Leído el hilo en'/'Leyendo el hilo en'/'No se pudo leer el hilo en'. ES-B2 MINOR outcome.inbox_only 'sin publicar en ninguna conversación' was 36 cells against maxCells 32 -> 'sin publicar en conversaciones' (30). ES-B3 NIT verb_settled.react 'Reaccionado en' (absolute participle of an intransitive verb, a calque) -> 'Reacción añadida en', matching expanded.reacted and verb_settled.react_remove. Recorded, not changed: claim -> 'reclamar' follows the shipped es desktop-claim copy; 'Usó Team Bridge' keeps the preterite (participle 'Usado Team Bridge' reads worse). Mechanical: key parity and order 85/85; ICU argument parity; 103 sentinel renders through local_operator.i18n.runtime with es rules, 0 lost/extra args or stray braces; plural arms one/many/other (+=0) rendered at 0/1/2/5/21/1e6/1.5e6 ('1.000.000 de miembros', '1.500.000 miembros'); every maxCells key within budget (rich cell_len); NFC, no Cf/bidi, no BOM. tú register not exercised except expanded.inbox_only 'Usa', consistent. Unresolved blocker/major: 0."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.errors.agent_avatar",
+      "source_sha256": "8bae15be1b460c96a9834816d9f5f40f2a409ae174c884ab905dc4d1587afacc",
+      "translator": {
+        "agent": "coder (lopdev implementer of feat/agent-avatar-core; core-avatar session 799ad130e6c0) — author of the translations and of the round-2 remediation",
+        "model": "radient/auto",
+        "date": "2026-10-30"
+      },
+      "auditor": {
+        "agent": "reviewer (independent i18n-auditor, lopdev session 941823209281, label i18n-audit-core) — auditor is independent of the translator: separate session, separate context, and it did not author or edit any copy",
+        "model": "radient/auto (actual model of the run; provider fallback chain anthropic/claude-opus-5-5 -> openai/gpt-6-astra -> kimi/k3.1-pro -> radient/auto, disclosed rather than pinned)",
+        "date": "2026-10-30",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent i18n audit of the agent-avatar wave (wire.errors.agent_avatar) at en source_sha256 8bae15be1b460c96a9834816d9f5f40f2a409ae174c884ab905dc4d1587afacc, round 2 at head 1fb179bafd1. Auditor is independent of the translator. Independent audit, round 2 at head 1fb179bafd1 (en source_sha256 verified with catalogues.catalogue_sha256). Mechanical, re-derived this round: key parity vs en (7/7 wire.errors.agent_avatar, 11/11 cli.agents_picture, 3/3 relay.agent_avatar); placeholder name+kind identical to en and every message rendered through local_operator.i18n.runtime.render_message with sentinel arguments (0 lost, 0 added); no value byte-identical to en, so no key is left in English; no ICU plural/select, and none is required (the only counts are {bytes}, where a stored picture can never be 0 or 1 bytes, and the fixed {limit_mib}=10 / {limit_mp}=40 caps), so every locale's CLDR category set is satisfied vacuously; NFC, no BOM, no trailing space, no Cf/bidi control characters (per-string RTL isolation stays the render layer's job, per the ur guide). Locale verdict: clean. 0 findings. 'imagen' is the picture term across all three namespaces; 'el extra images' keeps the pip extra Latin. tú register consistent ('Envía', 'Elige', 'Reinstala'); 'compatibilidad ... instalada' agreement correct. Round-2 scope: the remediation diff 8f64c072385..1fb179bafd1 (hi/ur cli.agents_picture remove.none, vi cli.agents_picture and vi wire.errors.agent_avatar agent term) plus its direct neighbours; the copy this row covers was re-read at the current bytes and the unchanged namespaces it borders keep their byte-identical audit. Translator and auditor are distinct agents in separate sessions; both ran the radient/auto route after provider quota fallbacks (disclosed, not pinned). Unresolved blocker/major: 0."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.agents_picture",
+      "source_sha256": "389d0125d15d11c2ea9aecceb53aec81be87e82ef3f1d249916677576bf80fc5",
+      "translator": {
+        "agent": "coder (lopdev implementer of feat/agent-avatar-core; core-avatar session 799ad130e6c0) — author of the translations and of the round-2 remediation",
+        "model": "radient/auto",
+        "date": "2026-10-30"
+      },
+      "auditor": {
+        "agent": "reviewer (independent i18n-auditor, lopdev session 941823209281, label i18n-audit-core) — auditor is independent of the translator: separate session, separate context, and it did not author or edit any copy",
+        "model": "radient/auto (actual model of the run; provider fallback chain anthropic/claude-opus-5-5 -> openai/gpt-6-astra -> kimi/k3.1-pro -> radient/auto, disclosed rather than pinned)",
+        "date": "2026-10-30",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent i18n audit of the agent-avatar wave (cli.agents_picture) at en source_sha256 389d0125d15d11c2ea9aecceb53aec81be87e82ef3f1d249916677576bf80fc5, round 2 at head 1fb179bafd1. Auditor is independent of the translator. Independent audit, round 2 at head 1fb179bafd1 (en source_sha256 verified with catalogues.catalogue_sha256). Mechanical, re-derived this round: key parity vs en (7/7 wire.errors.agent_avatar, 11/11 cli.agents_picture, 3/3 relay.agent_avatar); placeholder name+kind identical to en and every message rendered through local_operator.i18n.runtime.render_message with sentinel arguments (0 lost, 0 added); no value byte-identical to en, so no key is left in English; no ICU plural/select, and none is required (the only counts are {bytes}, where a stored picture can never be 0 or 1 bytes, and the fixed {limit_mib}=10 / {limit_mp}=40 caps), so every locale's CLDR category set is satisfied vacuously; NFC, no BOM, no trailing space, no Cf/bidi control characters (per-string RTL isolation stays the render layer's job, per the ur guide). Locale verdict: clean. 0 findings. 'imagen de perfil', 'bytes', Latin format names; infinitive labels match es UI convention. Round-2 scope: the remediation diff 8f64c072385..1fb179bafd1 (hi/ur cli.agents_picture remove.none, vi cli.agents_picture and vi wire.errors.agent_avatar agent term) plus its direct neighbours; the copy this row covers was re-read at the current bytes and the unchanged namespaces it borders keep their byte-identical audit. Translator and auditor are distinct agents in separate sessions; both ran the radient/auto route after provider quota fallbacks (disclosed, not pinned). Unresolved blocker/major: 0."
+    },
+    {
+      "locale": "es",
+      "namespace": "relay.agent_avatar",
+      "source_sha256": "6f48f15eeebb9e81bb36f607188f4e517b906149015f076eaaed93d5d00810fe",
+      "translator": {
+        "agent": "coder (lopdev implementer of feat/agent-avatar-core; core-avatar session 799ad130e6c0) — author of the translations and of the round-2 remediation",
+        "model": "radient/auto",
+        "date": "2026-10-30"
+      },
+      "auditor": {
+        "agent": "reviewer (independent i18n-auditor, lopdev session 941823209281, label i18n-audit-core) — auditor is independent of the translator: separate session, separate context, and it did not author or edit any copy",
+        "model": "radient/auto (actual model of the run; provider fallback chain anthropic/claude-opus-5-5 -> openai/gpt-6-astra -> kimi/k3.1-pro -> radient/auto, disclosed rather than pinned)",
+        "date": "2026-10-30",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent i18n audit of the agent-avatar wave (relay.agent_avatar) at en source_sha256 6f48f15eeebb9e81bb36f607188f4e517b906149015f076eaaed93d5d00810fe, round 2 at head 1fb179bafd1. Auditor is independent of the translator. Independent audit, round 2 at head 1fb179bafd1 (en source_sha256 verified with catalogues.catalogue_sha256). Mechanical, re-derived this round: key parity vs en (7/7 wire.errors.agent_avatar, 11/11 cli.agents_picture, 3/3 relay.agent_avatar); placeholder name+kind identical to en and every message rendered through local_operator.i18n.runtime.render_message with sentinel arguments (0 lost, 0 added); no value byte-identical to en, so no key is left in English; no ICU plural/select, and none is required (the only counts are {bytes}, where a stored picture can never be 0 or 1 bytes, and the fixed {limit_mib}=10 / {limit_mp}=40 caps), so every locale's CLDR category set is satisfied vacuously; NFC, no BOM, no trailing space, no Cf/bidi control characters (per-string RTL isolation stays the render layer's job, per the ur guide). Locale verdict: 1 MINOR (fit). desktop_hint 49 cells against declared maxCells 48 (en 38); alt 16 and change 27 fit. Same disposition as fr: recorded exception over truncation. Non-gating. Round-2 scope: the remediation diff 8f64c072385..1fb179bafd1 (hi/ur cli.agents_picture remove.none, vi cli.agents_picture and vi wire.errors.agent_avatar agent term) plus its direct neighbours; the copy this row covers was re-read at the current bytes and the unchanged namespaces it borders keep their byte-identical audit. Translator and auditor are distinct agents in separate sessions; both ran the radient/auto route after provider quota fallbacks (disclosed, not pinned). Unresolved blocker/major: 0."
     }
   ]
 }
