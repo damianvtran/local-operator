@@ -1,0 +1,39 @@
+{
+  "locale": "hi",
+  "namespace": "tui.app",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 1,
+    "minor": 1,
+    "nit": 0
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 1,
+      "id": "HI-017",
+      "severity": "MAJOR",
+      "namespace": "tui.app",
+      "key": "tui.app.aida.extras_used",
+      "english": "extra check-ins used today: {used} of {maximum}",
+      "current": "आज उपयोग हुए अतिरिक्त चेक-इन: {used} में से {maximum}",
+      "problem": "Order reversed. In Hindi \"X में से Y\" means \"Y of X\", so \"{used} में से {maximum}\" renders 1-used-of-3 as \"1 में से 3\" (3 of 1). The user reads the quota the wrong way round. The value calls it used-out-of-max, but the numbers say the opposite.",
+      "suggested": "\"आज उपयोग हुए अतिरिक्त चेक-इन: {maximum} में से {used}\"",
+      "disposition": "fixed (remediation core-fix, session 76bcbfdf629d)"
+    },
+    {
+      "round": 1,
+      "id": "HI-018",
+      "severity": "MINOR",
+      "namespace": "tui.app",
+      "key": "tui.app.help.title_note_more",
+      "english": "or set `LOCAL_OPERATOR_NO_TERMINAL_TITLE=1`; legend: `lo ›` idle, `lo ⣾` running, `lo !` waiting for approval",
+      "current": "या `LOCAL_OPERATOR_NO_TERMINAL_TITLE=1` सेट करें; संकेत: `lo ›` निष्क्रिय, `lo ⣾` चल रहा है, `lo !` अनुमोदन की प्रतीक्षा",
+      "problem": "\"waiting for approval\" rendered \"अनुमोदन की प्रतीक्षा\"; glossary/hi guide fix approval → स्वीकृति.",
+      "suggested": "\"…`lo !` स्वीकृति की प्रतीक्षा\"",
+      "disposition": "fixed (remediation core-fix, session 76bcbfdf629d)"
+    }
+  ]
+}

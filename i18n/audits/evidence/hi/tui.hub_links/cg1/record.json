@@ -1,0 +1,133 @@
+{
+  "schema": 1,
+  "audit_id": "cg1",
+  "locale": "hi",
+  "namespace": "tui.hub_links",
+  "audit_date": "2026-10-31",
+  "packaged_at_utc": "2026-10-31T12:41:38Z",
+  "key_count": 56,
+  "auditor": {
+    "agent": "i18n-auditor subagents, one fresh session per round; none translated or edited any value they judged",
+    "sessions": {
+      "round_1": "68a6549527ad",
+      "round_2": "e9c85b728add",
+      "argument_order_targeted_audit": "d8fb2395abc5"
+    },
+    "model": "anthropic/claude-opus-5-5, as reported by each session's selected_model and model_id in its transcript; no provider fallback observed",
+    "independence": "Each round's auditor session differs from the translator lane (f0a2d7ee0d2e, anthropic/claude-sonnet-5-5), from the remediation translator session(s), and from the previous round's auditor. Translators and auditors share the Claude model family (disclosed)."
+  },
+  "translator": {
+    "lane": "f0a2d7ee0d2e on anthropic/claude-sonnet-5-5 (task subagent of manager session 3ef6295a5545, parent-selected, no fallback recorded)",
+    "remediation_sessions": [
+      {
+        "round": 1,
+        "session": "76bcbfdf629d",
+        "model": "anthropic/claude-opus-5-5",
+        "changes": "core-fix/hi/changes.jsonl"
+      },
+      {
+        "round": "post-audit ICU argument-order rephrase",
+        "session": "539fc5515ce6",
+        "model": "anthropic/claude-opus-5-5",
+        "changes": "core-argorder/hi/changes.jsonl"
+      }
+    ]
+  },
+  "source_audit_revision": "origin/main as read by each auditor through git show/cat-file on the audit day; the exact commit was not recorded by the sessions",
+  "packaging_base_revision": "137984daf98e6491dfd97cb6812d51c1a98abe6c",
+  "input_hashes": {
+    "en": "7fbe6713f8ac8f312884476c498c3b74e76c5f0853bdd027f25fc47d489311bb",
+    "context": "9b81676163337d8a93e38138909dbd4801f8edd8416075c6efb994f9870c682e",
+    "target": "963b12d02f85edd1f20bd07e7d850469ebd407b2e33223bdb02e3e1adbfa70e7",
+    "style_guide": "82292dc8d13fcc93dc752457719264aed3cc20bb65ecfaba0f0e5a31f4cb40d5",
+    "glossary": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8",
+    "audited_patch_file": "279fd635cb1dfdf399a6768082431bde44fb0ef30a9b2815415792b587d98bb0"
+  },
+  "input_paths": {
+    "en": "local_operator/i18n/catalogues/en/tui.hub_links.json",
+    "context": "local_operator/i18n/catalogues/en/tui.hub_links.context.json",
+    "target": "local_operator/i18n/catalogues/hi/tui.hub_links.json",
+    "style_guide": "i18n/style-guides/hi.md",
+    "glossary": "i18n/glossary.md"
+  },
+  "audited_patch_values_equal_catalogue_values": true,
+  "source_sha256": "7fbe6713f8ac8f312884476c498c3b74e76c5f0853bdd027f25fc47d489311bb",
+  "target_sha256": "963b12d02f85edd1f20bd07e7d850469ebd407b2e33223bdb02e3e1adbfa70e7",
+  "current_report_verdict": "PASS (locale-wide, round 2): BLOCKER 0 · MAJOR 0 · MINOR 1 · NIT 3 (96 changed keys judged; 0 declined; 28/28 round-1 findings addressed); this namespace: 0 finding(s) over 2 round(s), final round 0 blocker / 0 major / 0 minor / 0 nit",
+  "ledger_status": "passed",
+  "unresolved_blocker_major": 0,
+  "finding_counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 0
+  },
+  "rounds": [
+    {
+      "round": 1,
+      "auditor_session": "68a6549527ad",
+      "counts": {
+        "blocker": 0,
+        "major": 0,
+        "minor": 0,
+        "nit": 0
+      }
+    },
+    {
+      "round": 2,
+      "auditor_session": "e9c85b728add",
+      "counts": {
+        "blocker": 0,
+        "major": 0,
+        "minor": 0,
+        "nit": 0
+      }
+    }
+  ],
+  "rephrased_after_locale_audit": [
+    "tui.hub_links.mark.available",
+    "tui.hub_links.mark.retry",
+    "tui.hub_links.policy.save_failed"
+  ],
+  "argument_order_audit": {
+    "session": "d8fb2395abc5",
+    "model": "anthropic/claude-opus-5-5",
+    "verdict": [
+      "PASS",
+      "keys_read=10 blocker=0 major=0 minor=1 nit=2"
+    ],
+    "keys_in_this_namespace": [
+      "tui.hub_links.mark.available",
+      "tui.hub_links.mark.retry",
+      "tui.hub_links.policy.save_failed"
+    ],
+    "findings_in_this_namespace": [
+      {
+        "id": "HI-ARG-01",
+        "severity": "MINOR",
+        "namespace": "tui.hub_links",
+        "key": "tui.hub_links.mark.retry",
+        "english": "Retry {direction} for {item} at {source}",
+        "current": "{direction} को {item} के लिए {source} पर फिर आज़माएँ",
+        "problem": "Meaning correct (retry {direction} for {item} at {source}), but '{direction} को … फिर आज़माएँ' marks the action as an object with को, which reads stilted; a native reader expects '{direction} फिर आज़माएँ' without को.",
+        "suggested": "{direction}: {item} के लिए {source} पर फिर आज़माएँ"
+      }
+    ],
+    "scope": "only the keys listed in core-argorder/<locale>/changes.jsonl"
+  },
+  "limitations": [
+    "Independent LLM review, not native-speaker certification. Open native-speaker review items are listed in the PR body (ambiguous.txt).",
+    "Scalar text evidence only (values, ICU argument/plural structure, terminal-cell counts computed by the auditors' own scripts). No terminal, RTL or device frame was rendered, so this is not rendered-layout proof.",
+    "The audit sessions were read-only and ran no repo validator; scripts/i18n/check.py, generate.py --check and the i18n tests were run later by the applier against these exact bytes (see the PR).",
+    "The sessions recorded their work in findings.jsonl, progress.log and summary.md rather than a shell log; audit.log here carries those records verbatim plus the applier's computed hashes, and no command output is invented.",
+    "Ledger rows were authored by script per docs/I18N.md because core has no ledger writer; hashes are computed from file bytes.",
+    "3 key(s) in this namespace were rephrased by session 539fc5515ce6 after the locale-wide audit passed, to satisfy the ICU argument-order rule in scripts/i18n/check.py; they were audited afterwards by a separate targeted session d8fb2395abc5 (PASS, keys_read=10 blocker=0 major=0 minor=1 nit=2), which read those keys only, not the namespace: tui.hub_links.mark.available, tui.hub_links.mark.retry, tui.hub_links.policy.save_failed"
+  ],
+  "artifacts": [
+    "audit.log",
+    "findings.json",
+    "receipt.json",
+    "record.json",
+    "report.md"
+  ]
+}

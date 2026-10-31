@@ -1,0 +1,11 @@
+{
+  "wire.settings.hub_defaults.agents.help": "बंद करने पर सभी एजेंट/कौशल लिंक के अपडेट रुकते हैं; चालू करने पर नए सब्सक्राइब होते हैं।",
+  "wire.settings.hub_defaults.agents.label": "एजेंट/कौशल लिंक स्वतः अपडेट करें",
+  "wire.settings.hub_defaults.agents.off.description": "सभी एजेंट और कौशल लिंक के अपडेट रोकें",
+  "wire.settings.hub_defaults.agents.on.description": "नए एजेंट और कौशल लिंक सब्सक्राइब करें",
+  "wire.settings.hub_defaults.model_default.note": "हब merge आपका मौजूदा डिफ़ॉल्ट मॉडल उपयोग करते हैं। पुराना हब मॉडल ओवरराइड अनदेखा किया जाता है।",
+  "wire.settings.hub_defaults.teams.help": "नए टीम लिंक का डिफ़ॉल्ट; मौजूदा लिंक अपनी नीतियाँ रखते हैं।",
+  "wire.settings.hub_defaults.teams.label": "नए टीम लिंक सब्सक्राइब करें",
+  "wire.settings.hub_defaults.teams.off.description": "नए टीम लिंक के आवक अपडेट रोकें",
+  "wire.settings.hub_defaults.teams.on.description": "नए टीम लिंक सब्सक्राइब करें"
+}

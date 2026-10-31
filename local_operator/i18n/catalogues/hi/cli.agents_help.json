@@ -1,0 +1,23 @@
+{
+  "cli.agents_help.agents": "एजेंट प्रबंधित करें",
+  "cli.agents_help.list": "सभी एजेंट सूचीबद्ध करें",
+  "cli.agents_help.list_page": "दिखाया जाने वाला पेज नंबर (डिफ़ॉल्ट: 1)",
+  "cli.agents_help.list_perpage": "प्रति पेज एजेंटों की संख्या (डिफ़ॉल्ट: 10)",
+  "cli.agents_help.create": "नया एजेंट बनाएँ",
+  "cli.agents_help.create_name": "बनाए जाने वाले एजेंट का नाम",
+  "cli.agents_help.delete": "एजेंट हटाएँ (स्थानीय नाम से या Radient ID से)",
+  "cli.agents_help.delete_name": "स्थानीय रूप से हटाए जाने वाले एजेंट का नाम",
+  "cli.agents_help.delete_id": "Radient से हटाए जाने वाले एजेंट की ID",
+  "cli.agents_help.delete_org": "सार्वजनिक हब के बजाय इस संगठन के कार्यक्षेत्र से एजेंट हटाएँ (Agent Hub संगठन साझाकरण; `lop login radient` आवश्यक)",
+  "cli.agents_help.push": "Radient पर एजेंट push (अपलोड) करें; `--org` और `--hub-id` पूर्वावलोकन/पुष्टि प्रवाह से push करते हैं (एग्ज़िट कोड: 0 प्रकाशित, 1 त्रुटि, 2 केवल पूर्वावलोकन (बदलाव लंबित), 3 अस्वीकृत, 130 रद्द)",
+  "cli.agents_help.push_name": "Radient पर push किए जाने वाले एजेंट का नाम",
+  "cli.agents_help.push_id": "Radient पर push किए जाने वाले एजेंट की ID (स्पष्ट अधिलेखन)",
+  "cli.agents_help.push_org": "सार्वजनिक हब के बजाय इस संगठन के कार्यक्षेत्र में प्रकाशित करें (Agent Hub संगठन साझाकरण; `lop login radient` आवश्यक)",
+  "cli.agents_help.push_hub_id": "स्थानीय एजेंट से इस हब लिस्टिंग को दोबारा प्रकाशित (अधिलेखित) करें (पहले व्यक्तिगत संदर्भ जाँचता है); --name आवश्यक (--id स्थानीय id है)",
+  "cli.agents_help.pull": "Radient से एजेंट pull (डाउनलोड) करें",
+  "cli.agents_help.pull_id": "Radient से pull किए जाने वाले एजेंट की ID",
+  "cli.agents_help.pull_org": "सार्वजनिक हब के बजाय इस संगठन के कार्यक्षेत्र से pull करें (Agent Hub संगठन साझाकरण; `lop login radient` आवश्यक)",
+  "cli.agents_help.sync": "इंस्टॉल किए स्टार्टर और हब से pull किए एजेंट को उनके नवीनतम टेक्स्ट तक अपडेट करें",
+  "cli.agents_help.sync_name": "केवल इस नाम वाली इंस्टॉल प्रोफ़ाइल सिंक करें",
+  "cli.agents_help.sync_all": "हर इंस्टॉल स्टार्टर और हब से pull किया एजेंट सिंक करें (--name न होने पर डिफ़ॉल्ट)"
+}

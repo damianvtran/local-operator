@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "audit_id": "cg1",
+  "locale": "hi",
+  "namespace": "cli.teams_help",
+  "source_sha256": "400637df631f938b7c144cf500a64bd5976f3157b25944d4ea3b701d79c69738",
+  "target_sha256": "f0735748fd5a2eb3a6f300b0be875b09359dbe4f0196000deb8e4dd9dc834d94",
+  "hashes": {
+    "audit.log": "9139294176272d553506f118b739807a7fb16458d79aa562c114d68dde7d565f",
+    "findings.json": "f3fcf369ac42bbdac8cd0ad47d7c09010762b251e60c1f1a336303bea1296ad6",
+    "record.json": "2a788117e85d23f24d1e8bbdb5e9b65f2904f2e2a0eaee307efb9bc7a29e66f2",
+    "report.md": "6c874a601a6ea5f1a701848741e832b69fc8af698b6cf118db2516a62bf99722"
+  }
+}

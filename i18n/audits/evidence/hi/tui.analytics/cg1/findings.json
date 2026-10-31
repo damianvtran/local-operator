@@ -1,0 +1,27 @@
+{
+  "locale": "hi",
+  "namespace": "tui.analytics",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 1,
+    "nit": 0
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 1,
+      "id": "HI-009",
+      "severity": "MINOR",
+      "namespace": "tui.analytics",
+      "key": "tui.analytics.search.by_provider",
+      "english": "By provider",
+      "current": "प्रदाता के अनुसार",
+      "problem": "Systemic term drift: the patch set renders \"provider\" as \"प्रदाता\" (21 values across tui.analytics, tui.app, cli.login*/logout/global_help, wire.errors.auth/media, wire.settings.account_policy), while every shipped hi catalogue uses \"प्रोवाइडर\" (41 values, e.g. wire.settings). One concept would have two names in the same product.",
+      "suggested": "\"प्रोवाइडर के अनुसार\" here and in table.by_provider; replace प्रदाता→प्रोवाइडर (with inflection) in all 21 values",
+      "disposition": "fixed (remediation core-fix, session 76bcbfdf629d)"
+    }
+  ]
+}
