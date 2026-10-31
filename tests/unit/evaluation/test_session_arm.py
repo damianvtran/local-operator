@@ -1803,6 +1803,7 @@ class TestEpisodeSessionSurface:
             spec = validate_episode_session_spec(spec=spec, command=command)
             expected = {decl.tool_name}
             if command:
+                assert decl.command_tool_name is not None
                 expected.add(decl.command_tool_name)
             async with sdk.open_session(spec, roots=scratch) as session:
                 deadline = time.monotonic() + 25.0
@@ -1816,6 +1817,7 @@ class TestEpisodeSessionSurface:
                 # The DECLARED surface, resolved: the members the flow needs
                 # are live, and nothing outside the declaration leaked in.
                 assert {"task", "team", "hub", "jobs", "wait", "bash"} <= set(names), names
+                assert spec.tools is not None
                 assert set(names) <= set(spec.tools), names
                 assert ("mcp__episode_actions_run_command" in names) is command
         finally:
@@ -5444,6 +5446,7 @@ class TestCommandInventory:
         command = "mcp__episode_actions_run_command"
         assert enabled.tools == (*EPISODE_TOOL_SURFACE, command)
         assert enabled.approvals.tools == enabled.tools
+        assert spec.tools is not None
         assert command not in spec.tools
 
 
@@ -5779,12 +5782,18 @@ async def test_mcp_cancellation_seals_unknown_even_after_late_success(
         call = tool.execute("cancel-test", {"command": "late success"}, None, None, ToolContext())
     else:
         call = handler(
-            None,
+            cast(Any, None),
             types.CallToolRequestParams(
                 name=COMMAND_TOOL_NAME, arguments={"command": "late success"}
             ),
         )
-    task = asyncio.create_task(call)
+
+    # Both MCP entry points promise Awaitable, not necessarily Coroutine;
+    # adapt them without changing when cancellation reaches the operation.
+    async def invoke() -> Any:
+        return await call
+
+    task = asyncio.create_task(invoke())
     try:
         await admitted.wait()
         task.cancel()

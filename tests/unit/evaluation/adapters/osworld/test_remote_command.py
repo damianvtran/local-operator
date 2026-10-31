@@ -5,12 +5,12 @@ from __future__ import annotations
 import json
 import subprocess
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
-from lop_osworld_v2_adapter.providers.aws import AwsProvider
+from lop_osworld_v2_adapter.providers.aws import AwsProvider, _Clients
 
-from local_operator.evaluation.adapters.api import RunCommandParams
+from local_operator.evaluation.adapters.api import EvaluationAdapter, RunCommandParams
 
 
 def _params(command: str, **overrides: Any) -> RunCommandParams:
@@ -45,7 +45,12 @@ def _provider(post: Any = None) -> AwsProvider:
             "returncode": completed.returncode,
         }
 
-    provider._clients = SimpleNamespace(http_post_json=post or execute)
+    provider._clients = _Clients(
+        ec2=None,
+        scheduler=None,
+        http_get=lambda _url, _timeout: 200,
+        http_post_json=post or execute,
+    )
     return provider
 
 
@@ -73,7 +78,8 @@ async def test_keyed_worker_replay_runs_the_shell_exactly_once() -> None:
         calls.append(params.command)
         return await provider.run_command(params)
 
-    worker._adapter = SimpleNamespace(run_command=run)
+    # Only run_command is reachable in this RUNNING-state transport fixture.
+    worker._adapter = cast(EvaluationAdapter, SimpleNamespace(run_command=run))
     task = asyncio.create_task(worker.run())
     writer, reader = IncrementalWriter(writes), IncrementalReader(response_read)
     params = _params("printf once").model_dump(mode="json")
@@ -94,6 +100,7 @@ async def test_keyed_worker_replay_runs_the_shell_exactly_once() -> None:
         assert calls == ["printf once"]
         assert replies[0].error is None
         assert replies[0].result == replies[1].result
+        assert replies[0].result is not None
         assert replies[0].result["stdout"] == "once"
     finally:
         os.close(writes)
@@ -105,6 +112,7 @@ async def test_keyed_worker_replay_runs_the_shell_exactly_once() -> None:
 @pytest.mark.asyncio
 async def test_supervised_command_transport_failure_poisoned_without_retry(tmp_path: Any) -> None:
     from local_operator.evaluation.adapters.supervisor import (
+        AdapterSupervisor,
         HostVerifier,
         VerifiedAdapterSession,
     )
@@ -116,7 +124,8 @@ async def test_supervised_command_transport_failure_poisoned_without_retry(tmp_p
     verifier = HostVerifier("task", "episode_001", tmp_path)
     verifier.accept_initial(observation("task", "episode_001", 0))
     raw = RawSupervisor([ConnectionError("lost command reply")])
-    session = VerifiedAdapterSession(raw, verifier)
+    # The fixture supplies only the raw-call and termination transport seam.
+    session = VerifiedAdapterSession(cast(AdapterSupervisor, raw), verifier)
     with pytest.raises(ConnectionError, match="lost command reply"):
         await session.run_command(_params("true"), timeout=5)
     assert raw.calls == ["run_command"]
