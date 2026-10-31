@@ -28,9 +28,9 @@ from local_operator.team_bridge.cos_name import (
 )
 from tests.unit.team_bridge.test_client import FakeRow, FakeStore, _make_client, _ok
 from tests.unit.team_bridge.test_cos_name import (  # noqa: F401 — autouse fixture
-    _destination_open,
     _aida_lives_in,
     _designate,
+    _destination_open,
     _enrolled_aida,
 )
 from tests.unit.team_bridge.test_discipline import (
@@ -132,6 +132,8 @@ async def test_a_legacy_block_without_a_filename_falls_back_to_its_mime(tmp_path
         pytest.param("/etc/passwd", id="absolute"),
         pytest.param("nested/avatar.png", id="separator"),
         pytest.param("..", id="dotdot"),
+        pytest.param(".", id="dot"),
+        pytest.param("./../avatar.png", id="dot-slash-traversal"),
     ],
 )
 async def test_a_name_outside_the_agents_own_directory_is_a_doubt(tmp_path: Path, filename: str):
@@ -180,13 +182,61 @@ async def test_an_oversized_file_is_a_doubt(tmp_path: Path):
     assert agent is not None and agent.avatar_broken is True
 
 
-async def test_no_avatar_block_is_a_deliberate_clear(tmp_path: Path):
+async def test_no_avatar_block_is_a_deliberate_clear(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Only once the store PRESERVES the block: absence is then the user's choice."""
+
+    _preserves_avatar(monkeypatch)
     _enrolled(tmp_path)
     _agent(tmp_path, block=None)
 
     agent = published_agent(tmp_path)
 
     assert agent is not None and agent.avatar_path is None and agent.avatar_broken is False
+
+
+async def test_an_absent_block_is_a_doubt_while_the_store_would_erase_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """R1-F4: the DELETE arm must not depend on an invariant this tree lacks.
+
+    Both ``agents.py`` writers serialise ``AgentData.model_dump()`` and pydantic
+    drops an undeclared key, so while ``avatar`` is not a field an ordinary save
+    (a rename, a settings edit) removes the block. Reading that absence as "the
+    user cleared it" would delete the teammate-visible copy at the next boundary
+    and the resolver could never re-publish it.
+    """
+
+    from local_operator.agents import AgentData
+
+    if "avatar" in AgentData.model_fields:  # pragma: no cover - the paired PR
+        pytest.skip("avatar is already a first-class AgentData field")
+
+    _preserves_avatar(monkeypatch, yes=False)
+    _enrolled(tmp_path)
+    _agent(tmp_path, block=None)
+
+    agent = published_agent(tmp_path)
+
+    assert agent is not None and agent.avatar_path is None and agent.avatar_broken is True
+
+
+async def test_the_agent_store_can_preserve_the_avatar_block():
+    """CROSS-PR GATE (R1-F4a): the DELETE arm's premise, asserted, not assumed.
+
+    Deliberately RED until the local-storage lane lands ``AgentData.avatar``.
+    Both writers round-trip through ``model_dump()``, so without the field the
+    block cannot survive an ordinary save; the arm that clears the hub copy on
+    absence is only sound once this passes. Do not merge this PR before it.
+    """
+
+    from local_operator.agents import AgentData
+
+    assert "avatar" in AgentData.model_fields, (
+        "AgentData has no `avatar` field: an ordinary registry save DROPS the "
+        "block, so 'no block' cannot mean 'the user cleared it'"
+    )
 
 
 async def test_no_agent_definition_behind_her_publishes_nothing(tmp_path: Path):
@@ -229,6 +279,20 @@ def _avatar_client(handler: Any) -> Any:
         transport=httpx.MockTransport(handler),
         store=AvatarStore(rows=[FakeRow(1, data={"account_id": "acc_1", "access": "token-1"})]),
     )
+
+
+def _preserves_avatar(monkeypatch: pytest.MonkeyPatch, *, yes: bool = True) -> None:
+    """Declare whether ``AgentData`` carries the avatar field.
+
+    The DELETE arm needs the store to preserve the block: until ``avatar`` is a
+    first-class ``AgentData`` field, an absent block means "the registry erased
+    it", not "the user cleared it" (review R1-F4). A delete-arm test therefore
+    states the world it is testing, and the protection has its own test below.
+    """
+
+    from local_operator.team_bridge import cos_name
+
+    monkeypatch.setattr(cos_name, "_AVATAR_FIELD", yes)
 
 
 # -- one reconcile -----------------------------------------------------------
@@ -306,7 +370,8 @@ async def test_the_same_digest_writes_nothing(tmp_path: Path):
     assert client.puts == [] and client.deletes == []
 
 
-async def test_no_local_picture_clears_a_hub_copy(tmp_path: Path):
+async def test_no_local_picture_clears_a_hub_copy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    _preserves_avatar(monkeypatch)
     _enrolled(tmp_path)
     _agent(tmp_path, block=None)
     client = FakeClient(_status(hub_sha=PNG_SHA).payload)
@@ -316,7 +381,10 @@ async def test_no_local_picture_clears_a_hub_copy(tmp_path: Path):
     assert client.deletes == ["bep_1"] and client.puts == []
 
 
-async def test_no_local_picture_and_nothing_at_the_hub_writes_nothing(tmp_path: Path):
+async def test_no_local_picture_and_nothing_at_the_hub_writes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _preserves_avatar(monkeypatch)
     _enrolled(tmp_path)
     _agent(tmp_path, block=None)
     client = FakeClient({})
@@ -334,7 +402,9 @@ async def test_no_local_picture_and_nothing_at_the_hub_writes_nothing(tmp_path: 
         pytest.param("no-cos", id="no-designated-chief-of-staff"),
     ],
 )
-async def test_a_doubt_never_deletes_the_hub_copy(tmp_path: Path, setup: str):
+async def test_a_doubt_never_deletes_the_hub_copy(
+    tmp_path: Path, setup: str, monkeypatch: pytest.MonkeyPatch
+):
     """The single most expensive mistake here: a doubt read as a clear."""
 
     if setup == "broken":
@@ -345,6 +415,7 @@ async def test_a_doubt_never_deletes_the_hub_copy(tmp_path: Path, setup: str):
     else:
         # No Aida state at all: nothing designates a chief of staff, so this
         # machine has no opinion about the hub's copy.
+        _preserves_avatar(monkeypatch)
         _agent(tmp_path, block=None)
     client = FakeClient(_status(hub_sha=PNG_SHA).payload)
 
@@ -677,3 +748,251 @@ async def test_a_stale_picture_version_is_a_refusal_not_a_fresh_image():
         )
 
     assert info.value.code == "not_found"
+
+
+# -- round 1 remediation: the cases the review measured ----------------------
+
+
+async def test_a_same_size_hand_edit_publishes_its_true_digest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """R1-F3: the size-matching edit is the one only "always hash" catches.
+
+    The block still records the OLD digest and the OLD length, and the file has
+    been replaced by bytes of the SAME length. Sending the recorded digest would
+    earn a 204 "bytes I already hold", so the hub would keep the old picture and
+    echo the old digest — a replaced photo that never publishes and never
+    repairs.
+    """
+
+    _preserves_avatar(monkeypatch)
+    _enrolled(tmp_path)
+    edited = bytes([PNG[0] ^ 0xFF]) + PNG[1:]  # same length, different bytes
+    assert len(edited) == len(PNG) and edited != PNG
+    _agent(tmp_path, block=_png_block(), files={"avatar.png": PNG})
+    (tmp_path / "agents" / "aida" / "avatar.png").write_bytes(edited)
+    client = FakeClient(_endpoint_payload("active"))
+
+    await avatar_publish.reconcile(
+        client,
+        SimpleNamespace(payload=_endpoint_payload("active"), account_id="acc_1"),
+        "tnt_1",
+        tmp_path,
+    )
+
+    assert client.puts == [("bep_1", edited, hashlib.sha256(edited).hexdigest())]
+
+
+async def test_a_paused_endpoint_is_never_published_or_cleared(tmp_path: Path):
+    """R1-F6: the state guard must stop the picture path on its own.
+
+    The name path is stopped by its echo comparison before the state is
+    consulted; the picture has no echo to short-circuit, so only the guard in
+    ``_owned_endpoint`` stands between a paused endpoint and a write that would
+    resume it.
+    """
+
+    _enrolled(tmp_path)
+    _agent(tmp_path, block=_png_block(), files={"avatar.png": PNG})
+    status = _endpoint_payload("paused")
+    status["tenants"][0]["endpoint"]["avatar"] = {
+        "hash": "0123456789abcdef",
+        "source_sha256": "0" * 64,
+    }
+    seen: list[httpx.Request] = []
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return _ok(status)
+
+    await _discipline(_Counter(responder), tmp_path).check(Boundary.APP_START)
+
+    assert [r.method for r in seen] == ["GET"]
+
+
+async def test_a_duplicated_tenant_row_is_a_doubt_not_a_first_match(tmp_path: Path):
+    """R1-S3: ambiguity resolves to NO write, on both addressing paths."""
+
+    _enrolled(tmp_path)
+    _agent(tmp_path, block=_png_block(), files={"avatar.png": PNG})
+    payload = _endpoint_payload("active")
+    first = dict(payload["tenants"][0])
+    first["endpoint"] = {"id": "ep_NOT_MINE", "label": "Org", "state": "active"}
+    payload["tenants"] = [first, payload["tenants"][0]]
+    client = FakeClient(payload)
+
+    await avatar_publish.reconcile(
+        client, SimpleNamespace(payload=payload, account_id="acc_1"), "tnt_1", tmp_path
+    )
+
+    assert client.puts == [] and client.deletes == []
+
+
+async def test_the_plan_only_addresses_the_endpoint_the_guard_validated(tmp_path: Path):
+    _enrolled(tmp_path)
+    _agent(tmp_path, block=_png_block(), files={"avatar.png": PNG})
+    payload = _endpoint_payload("active")
+    # The guard approved `bep_1`; a plan asked for anything else refuses.
+
+    plan = avatar_publish.plan_avatar(
+        SimpleNamespace(payload=payload, account_id="acc_1"), "tnt_1", tmp_path, "ep_OTHER"
+    )
+
+    assert plan.action == avatar_publish.NONE and plan.endpoint_id is None
+
+
+async def test_a_bounded_multipart_publish_still_carries_its_body():
+    """R1-S1: the measured trap — `files` + `max_response_bytes` sent no body."""
+
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return _ok({"endpoint_id": "bep_1", "hash": "0123456789abcdef"})
+
+    client = _make_client(handler)
+    await client.put_endpoint_avatar("bep_1", PNG, PNG_SHA, expected_account_id="acc_1")
+
+    assert len(seen) == 1
+    assert b'name="file"' in seen[0].content and PNG in seen[0].content
+    assert seen[0].headers["content-length"] == str(len(seen[0].content))
+
+
+async def test_an_oversized_publish_answer_is_refused_while_it_streams():
+    """R1-S1/F7: the bound is applied at DISPATCH, not after parsing."""
+
+    client = _make_client(
+        lambda request: httpx.Response(
+            200, content=b'{"msg": "ok", "result": "' + b"x" * (70 * 1024) + b'"}'
+        )
+    )
+
+    with pytest.raises(BridgeRefusal) as info:
+        await client.put_endpoint_avatar("bep_1", PNG, PNG_SHA, expected_account_id="acc_1")
+
+    assert info.value.code == "bridge_invalid_response"
+
+
+async def test_the_explicit_paths_read_the_status_with_the_access_they_pin(tmp_path: Path):
+    """R1-S4: one identity for the read and the write, or the pin proves nothing."""
+
+    plan_payload = _endpoint_payload("active")
+    plan_payload["tenants"][0]["endpoint"]["avatar"] = {
+        "hash": "0123456789abcdef",
+        "source_sha256": "0" * 64,
+    }
+
+    class Pinning(FakeClient):
+        def __init__(self) -> None:
+            super().__init__(plan_payload)
+            self.status_access: list[Any] = []
+            self.pinned: list[Any] = []
+
+        async def status(self, *, access: Any = None) -> dict[str, Any]:
+            self.status_access.append(access)
+            return self.payload
+
+        async def put_endpoint_avatar(
+            self,
+            endpoint_id: str,
+            data: bytes,
+            source_sha256: str,
+            *,
+            expected_account_id: Any = None,
+        ) -> dict[str, Any]:
+            self.pinned.append(expected_account_id)
+            return {}
+
+    client = Pinning()
+    access = await client.current_access()
+    root = tmp_path / "preset"
+    _enrolled(root)
+    _agent(root, block=_png_block(), files={"avatar.png": PNG})
+
+    await avatar_publish.publish_agent_avatar(
+        client, "tnt_1", root, access=access, status=plan_payload
+    )
+
+    assert client.status_access == [] and client.pinned == ["acc_1"]
+
+
+async def test_the_plan_repr_never_carries_the_picture_bytes_or_a_path(tmp_path: Path):
+    """R1-S5: a repr is one exception away from a log."""
+
+    _enrolled(tmp_path)
+    _agent(tmp_path, block=_png_block(), files={"avatar.png": b"\x89PNG\r\n\x1a\nSECRETPIXELS"})
+    agent = published_agent(tmp_path)
+    assert agent is not None
+
+    plan = avatar_publish.plan_avatar(
+        SimpleNamespace(payload=_endpoint_payload("active"), account_id="acc_1"), "tnt_1", tmp_path
+    )
+
+    assert "SECRETPIXELS" not in repr(agent)
+    assert str(tmp_path) not in repr(agent)
+    assert "SECRETPIXELS" not in repr(plan)
+
+
+async def test_an_account_and_an_agent_with_the_same_id_never_share_cached_bytes():
+    """R1-F9: the two reads must key the cache apart, or one answers the other."""
+
+    from local_operator.team_bridge import avatar_cache
+
+    avatar_cache.AVATAR_CACHE._entries.clear()
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        body = (
+            b"\x89PNG\r\n\x1a\naccount"
+            if "/accounts/" in request.url.path
+            else b"\x89PNG\r\n\x1a\nagent"
+        )
+        return httpx.Response(
+            200, content=body, headers={"content-type": "image/png", "etag": f'"{len(calls):016d}"'}
+        )
+
+    client = _avatar_client(handler)
+    account_body, _ = await client.fetch_avatar(
+        "acc_2", v="0123456789abcdef", size=64, expected_account_id="acc_1"
+    )
+    agent_body, _ = await client.fetch_endpoint_avatar(
+        "bep_1", v="0123456789abcdef", size=64, expected_account_id="acc_1"
+    )
+
+    assert account_body != agent_body
+    keys = list(avatar_cache.AVATAR_CACHE._entries)
+    assert len(keys) == 2
+    assert {key[2] for key in keys} == {"acc_2", "endpoint:bep_1"}
+
+
+async def test_a_dot_slash_prefixed_name_is_the_same_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """R1-F10: ``./avatar.png`` names THIS file; the prefix is normalised away."""
+
+    _enrolled(tmp_path)
+    _agent(tmp_path, block=_png_block(filename="./avatar.png"), files={"avatar.png": PNG})
+
+    agent = published_agent(tmp_path)
+
+    assert agent is not None and agent.avatar_path is not None
+    assert agent.avatar_path.name == "avatar.png" and agent.avatar_broken is False
+
+
+def test_a_nul_in_the_stored_name_is_refused(tmp_path: Path):
+    """R1-F10: a NUL truncates the name for any C-level caller downstream.
+
+    Asserted at the resolver, not through ``agent.yml``: a NUL cannot survive
+    being written to a YAML scalar, so the block could never carry one — the
+    guard exists for every other route into this function.
+    """
+
+    from local_operator.team_bridge.cos_name import _resolve_avatar
+
+    agent_dir = tmp_path / "agents" / "aida"
+    agent_dir.mkdir(parents=True)
+    (agent_dir / "avatar.png").write_bytes(PNG)
+
+    assert _resolve_avatar(agent_dir, "avatar\x00.png") is None
+    assert _resolve_avatar(agent_dir, "avatar.png") is not None

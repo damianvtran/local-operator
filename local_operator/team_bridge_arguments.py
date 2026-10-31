@@ -72,3 +72,40 @@ def add_parser(
         child.add_argument("--json", action="store_true", help=text(_k.help_json()))
     logs = verbs.add_parser("logs", help=text(_k.help_logs()))
     logs.add_argument("--lines", type=int, default=DEFAULT_LOG_LINES, help=text(_k.help_lines()))
+    # The agent-picture surface, registered on THIS group rather than as a second
+    # top-level parser: argparse refuses a duplicate subparser name, and a
+    # duplicate here took the whole `lop` binary down (review R1-1). The verbs
+    # live in `team_bridge/cli.py` and are imported only on dispatch.
+    #
+    # Help strings are the one exception to the keyed-copy rule in this file,
+    # stated plainly with the pragma the i18n ratchet expects: the extraction
+    # tranche for these strings is not opened here, and inventing eight
+    # translations without the independent audit the contract requires would be
+    # worse than shipping English. `scripts/i18n/check.py` reads the pragma.
+    avatar = group_actions.add_parser(
+        "avatar",  # i18n: ignore CLI command name
+        # i18n: ignore developer CLI help pending the CLI copy-extraction tranche
+        help="The chief of staff's picture as teammates see it on the bridge",
+    )
+    avatar_actions = avatar.add_subparsers(dest="avatar_command", required=True)
+    for name, blurb in (
+        ("status", "What the hub holds and what this machine would publish"),
+        ("publish", "Publish this machine's picture now, whatever the hub holds"),
+        ("clear", "Remove the hub's copy; local agent files are untouched"),
+    ):
+        child = avatar_actions.add_parser(
+            name,  # i18n: ignore CLI command name
+            help=blurb,  # i18n: ignore developer CLI help (see the pragma above)
+        )
+        child.add_argument(
+            "--json",
+            action="store_true",
+            # i18n: ignore developer CLI flag help (see the pragma above)
+            help="Print the operation's answer as JSON",
+        )
+        child.add_argument(
+            "--tenant",
+            default=None,
+            # i18n: ignore developer CLI flag help (see the pragma above)
+            help="Organization id; defaults to the one this machine selected",
+        )
