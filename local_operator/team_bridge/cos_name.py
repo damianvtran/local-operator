@@ -332,8 +332,16 @@ def _avatar_of(agent_dir: Path, block: object) -> dict[str, Any]:
     a DOUBT and :attr:`PublishedAgent.avatar_broken` says so.
     """
 
-    if not isinstance(block, Mapping):
+    if block is None:
         return {} if _avatar_survives_registry() else {"avatar_broken": True}
+    # PRESENT but not a mapping (``avatar: garbage``, ``[]``, ``0``, ``false``,
+    # ``''``) is a malformed block, not an absent one. ``_aida_definition`` reads
+    # raw YAML and bypasses ``AgentData``, so the store's own validation never
+    # saw it; reading it as "no block" planned a DELETE of the teammate-visible
+    # copy from one stray character in a hand edit (security review R3-S4). A
+    # doubt publishes nothing and deletes nothing.
+    if not isinstance(block, Mapping):
+        return {"avatar_broken": True}
     data = _stored_avatar_bytes(agent_dir, block)
     if data is None:
         return {"avatar_broken": True}
@@ -358,6 +366,15 @@ def _stored_avatar_bytes(agent_dir: Path, block: Mapping[str, Any]) -> bytes | N
 
     The bytes it returns are the ones published: re-opening a path after the
     store vetted it would reopen the window the store closed.
+
+    What this does NOT establish: the digest check is INTEGRITY (the file is the
+    one the block describes), not AUTHENTICITY. Whoever can write ``agent.yml``
+    can write a block and a file that agree with each other, so the digest stops
+    an accident or a stale record, not a hostile pair (security review R3-S3,
+    accepted residual). The control for that is on the hub: it sniffs the
+    upload's real type and re-encodes it server-side, so the published picture is
+    a freshly encoded image and never the uploaded bytes verbatim — a text file
+    renamed ``avatar.png`` and given a matching digest is refused there.
     """
 
     from local_operator import agent_avatar

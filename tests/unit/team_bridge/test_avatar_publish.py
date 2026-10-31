@@ -1109,20 +1109,62 @@ async def test_the_explicit_paths_read_the_status_with_the_access_they_pin(tmp_p
 
 
 async def test_the_plan_repr_never_carries_the_picture_bytes_or_a_path(tmp_path: Path):
-    """R1-S5: a repr is one exception away from a log."""
+    """R1-S5: a repr is one exception away from a log.
 
+    The block MUST carry the matching digest: with a wrong one the store refuses
+    the file, ``avatar_data`` and ``plan.data`` are ``None``, and the assertions
+    below pass whatever the dataclass does (security review R3-S2). The two
+    preconditions pin that this cell is looking at real bytes.
+    """
+
+    pixels = b"\x89PNG\r\n\x1a\nSECRETPIXELS"
+    digest = hashlib.sha256(pixels).hexdigest()
     _enrolled(tmp_path)
-    _agent(tmp_path, block=_png_block(), files={"avatar.png": b"\x89PNG\r\n\x1a\nSECRETPIXELS"})
+    _agent(
+        tmp_path,
+        block=_png_block(sha=digest, size=len(pixels)),
+        files={"avatar.png": pixels},
+    )
     agent = published_agent(tmp_path)
-    assert agent is not None
+    assert agent is not None and agent.avatar_data == pixels
 
     plan = avatar_publish.plan_avatar(
         SimpleNamespace(payload=_endpoint_payload("active"), account_id="acc_1"), "tnt_1", tmp_path
     )
+    assert plan.data == pixels
 
     assert "SECRETPIXELS" not in repr(agent)
     assert str(tmp_path) not in repr(agent)
     assert "SECRETPIXELS" not in repr(plan)
+    assert "SECRETPIXELS" not in str(plan) and "SECRETPIXELS" not in f"{agent!r}"
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        pytest.param("garbage", id="string"),
+        pytest.param("[]", id="empty-list"),
+        pytest.param("[1, 2]", id="list"),
+        pytest.param("0", id="zero"),
+        pytest.param("false", id="false"),
+        pytest.param("''", id="empty-string"),
+    ],
+)
+async def test_a_malformed_avatar_value_is_a_doubt_and_never_a_delete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, raw: str
+):
+    """R3-S4: present-but-not-a-mapping once read as "no block" and DELETEd the hub copy."""
+
+    _preserves_avatar(monkeypatch)  # the store DOES keep a block: absence would be a clear
+    _enrolled(tmp_path)
+    _agent(tmp_path, block=f"avatar: {raw}\n", files={"avatar.png": PNG})
+
+    agent = published_agent(tmp_path)
+    assert agent is not None and agent.avatar_data is None and agent.avatar_broken is True
+
+    # Through the real boundary, against a hub that DOES hold a picture.
+    seen = await _boundary_requests(tmp_path)
+    assert [r.method for r in seen if r.url.path.endswith("/avatar")] == []
 
 
 async def test_an_account_and_an_agent_with_the_same_id_never_share_cached_bytes():
