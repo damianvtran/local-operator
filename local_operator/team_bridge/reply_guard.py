@@ -91,6 +91,7 @@ CREATE TABLE IF NOT EXISTS triggers (
     at REAL NOT NULL,
     sender_kind TEXT NOT NULL,
     mention INTEGER NOT NULL,
+    directed INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (endpoint_id, conversation_id)
 );
 CREATE TABLE IF NOT EXISTS posts (
@@ -130,6 +131,11 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
     columns = {row[1] for row in conn.execute("PRAGMA table_info(posts)")}
     if "human_prompted" not in columns:
         conn.execute("ALTER TABLE posts ADD COLUMN human_prompted INTEGER NOT NULL DEFAULT 0")
+    trigger_columns = {row[1] for row in conn.execute("PRAGMA table_info(triggers)")}
+    if "directed" not in trigger_columns:
+        # A row written before the bit existed falls back to its ``mention``
+        # column (see ``record_trigger``): the pre-existing exemption, unchanged.
+        conn.execute("ALTER TABLE triggers ADD COLUMN directed INTEGER NOT NULL DEFAULT 0")
 
 
 @dataclass(frozen=True)
@@ -194,28 +200,43 @@ def record_trigger(
     conversation_id: str,
     sender_kind: str,
     mention: bool,
+    directed: bool | None = None,
     now: float | None = None,
 ) -> None:
     """Record what last woke ``endpoint_id`` in ``conversation_id``.
 
     Called by the connector for every admitted message it hands to the agent
-    (coalesced or not, oldest → newest, so the newest wins). A HUMAN mention
-    resets the agent-to-agent run and lifts a cool-down. Never raises: a
-    trigger that cannot be recorded leaves the previous one, and the post side
-    still fails closed on its own.
+    (coalesced or not, oldest → newest, so the newest wins). A HUMAN message that
+    was DIRECTED at this agent resets the agent-to-agent run and lifts a
+    cool-down: ``directed`` is the card's own predicate (an @-mention, or a reply
+    in a thread the agent follows), so a person answering in a followed thread
+    counts exactly like a mention (E2E round 1, Q-1). ``directed=None`` keeps the
+    mention-only rule for a caller that predates the bit. Never raises: a trigger
+    that cannot be recorded leaves the previous one, and the post side still
+    fails closed on its own.
     """
 
     now = time.time() if now is None else now
     kind = sender_kind if sender_kind in ("human", "agent") else "unknown"
     try:
         with _connect(config_dir) as conn:
+            addressed = mention if directed is None else directed
             conn.execute(
-                "INSERT INTO triggers (endpoint_id, conversation_id, at, sender_kind, mention) "
-                "VALUES (?, ?, ?, ?, ?) ON CONFLICT(endpoint_id, conversation_id) DO UPDATE SET "
-                "at = excluded.at, sender_kind = excluded.sender_kind, mention = excluded.mention",
-                (endpoint_id, conversation_id, now, kind, 1 if mention else 0),
+                "INSERT INTO triggers "
+                "(endpoint_id, conversation_id, at, sender_kind, mention, directed) "
+                "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(endpoint_id, conversation_id) DO UPDATE SET "
+                "at = excluded.at, sender_kind = excluded.sender_kind, "
+                "mention = excluded.mention, directed = excluded.directed",
+                (
+                    endpoint_id,
+                    conversation_id,
+                    now,
+                    kind,
+                    1 if mention else 0,
+                    1 if addressed else 0,
+                ),
             )
-            if kind == "human" and mention:
+            if kind == "human" and addressed:
                 conn.execute(
                     "INSERT INTO runs (endpoint_id, conversation_id, consecutive, cooldown_until) "
                     "VALUES (?, ?, 0, 0) ON CONFLICT(endpoint_id, conversation_id) DO UPDATE SET "

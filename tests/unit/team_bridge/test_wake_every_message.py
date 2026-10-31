@@ -41,6 +41,7 @@ from local_operator.team_bridge.connector import loop as loop_mod
 from local_operator.team_bridge.connector.conversation import (
     ConversationCardMetadata,
     build_conversation_card,
+    card_directed,
 )
 from local_operator.team_bridge.screening import ScreenResult
 from local_operator.team_bridge.tool import BridgeRuntime, execute_bridge
@@ -475,6 +476,8 @@ class Msg:
     agent_run: int = 0
     #: The conversation kind the row carries (``dm`` for the 1:1 lane).
     kind: str = "channel"
+    #: The server's own follower bit for a thread reply; ``None`` = not stated.
+    thread_follower: bool | None = None
 
     @property
     def sender_kind(self) -> str:
@@ -564,6 +567,10 @@ class Wire:
                 "Ada" if msg.sender_endpoint is None else f"{msg.sender_endpoint}-agent"
             ),
             "sender_kind": msg.sender_kind,
+            # The live row's own routing facts (agent-server #255). Absent for an
+            # older hub; the card falls back to the pre-#255 derivation then.
+            "conversation_kind": msg.kind,
+            **({"thread_follower": msg.thread_follower} if msg.thread_follower is not None else {}),
         }
 
     async def conversation_admit(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
@@ -1233,3 +1240,185 @@ def test_a_buffered_handoff_is_never_terminal_for_the_row() -> None:
     assert card_is_buffered(None) is False
     assert card_is_buffered("delivered and woke the session") is False
     assert card_is_buffered({"action": "delivered"}.get("detail")) is False
+
+
+# -- the server's follower bit decides directedness (E2E round 1, Q-1) --------
+
+
+def test_a_followed_thread_reply_is_directed():
+    lines = _card(thread_root_id=ROOT, thread_follower=True).splitlines()
+    assert "mention: no" in lines
+    assert "directed: thread" in lines
+    assert "expect: reply" in lines
+
+
+def test_a_thread_reply_the_agent_does_not_follow_is_ambient():
+    """The server says NO: the reply fanned out to a non-follower.
+
+    This is Q-1: the card used to call any non-mention row with a thread root
+    "directed", so an agent was told to reply to a thread it never joined.
+    """
+
+    card = _card(thread_root_id=ROOT, thread_follower=False)
+    lines = card.splitlines()
+    assert "mention: no" in lines
+    assert not any(line.startswith("directed:") for line in lines)
+    assert "expect: weigh relevance; no_reply if nothing is needed" in lines
+    assert "expect: reply" not in lines
+
+
+def test_without_the_bit_the_thread_root_keeps_its_old_meaning():
+    """An older server: non-mention thread rows reached followers only."""
+
+    lines = _card(thread_root_id=ROOT).splitlines()
+    assert "directed: thread" in lines and "expect: reply" in lines
+    assert "thread_root_id: %s (reply to)" % ROOT in lines
+
+
+def test_a_mention_outranks_the_follower_bit():
+    """Being named is being named, whatever the thread says."""
+
+    lines = _card(mention=True, thread_root_id=ROOT, thread_follower=False).splitlines()
+    assert "mention: yes" in lines and "expect: reply" in lines
+
+
+def test_the_live_row_carries_the_bit_and_the_kind_onto_the_card() -> None:
+    """The facts come off the LIVE read, not the durable ref (round 1, m3)."""
+
+    from local_operator.team_bridge.connector.conversation import _card_metadata
+
+    owner = _owner("a", 1)
+    ref = ConversationFeedRef(
+        conversation_id=CONV,
+        message_id="bcmsg_m1",
+        conversation_seq=4,
+        mention=False,
+        sender_kind="agent",
+        thread_root_id=ROOT,
+    ).validated()
+    display = {
+        "conversation_name": "#agents",
+        "sender_label": "Ada",
+        "sender_kind": "human",
+        "thread_follower": False,
+        "conversation_kind": "group",
+    }
+    metadata = _card_metadata(owner, ref, display)
+    assert metadata.thread_follower is False
+    assert metadata.conversation_kind == "group"
+    assert card_directed(metadata) == "none"
+    # And the ref itself still carries neither (the downgrade rule).
+    assert not hasattr(ref, "thread_follower")
+
+
+@pytest.mark.parametrize(
+    "display",
+    [
+        {"thread_follower": "yes"},
+        {"thread_follower": 1},
+        {"conversation_kind": "room"},
+        {"conversation_kind": 7},
+    ],
+)
+def test_a_malformed_live_routing_fact_is_refused(display: dict[str, Any]) -> None:
+    from local_operator.team_bridge.connector.conversation import _card_metadata
+
+    ref = ConversationFeedRef(
+        conversation_id=CONV,
+        message_id="bcmsg_m1",
+        conversation_seq=4,
+        mention=False,
+        sender_kind="human",
+    ).validated()
+    with pytest.raises(ValueError):
+        _card_metadata(_owner("a", 1), ref, {"sender_kind": "human", **display})
+
+
+# -- a 1:1 DM card names its sender, not a raw id (E2E round 1, Q-2) ----------
+
+
+def test_a_dm_card_reads_as_a_direct_message():
+    card = _card(conversation_kind="dm", conversation_label="", conversation_id="bcv_abc12345")
+    header = card.splitlines()[0]
+    assert header == "Direct message · from Ada (human, same tenant)"
+    # The id still appears where it is USEFUL (the route line the agent posts
+    # with); what Q-2 removes is the id standing in as the conversation's NAME.
+    assert "conversation_id: bcv_abc12345" in card
+
+
+def test_a_dm_thread_reply_still_says_thread_reply():
+    card = _card(conversation_kind="dm", conversation_label="", thread_root_id=ROOT)
+    assert card.splitlines()[0] == "Thread reply · from Ada (human, same tenant)"
+
+
+def test_a_channel_card_keeps_its_name_label():
+    card = _card(conversation_kind="channel")
+    assert card.splitlines()[0] == "Channel message · #agents · from Ada (human, same tenant)"
+
+
+def test_without_a_kind_on_the_wire_the_label_is_unchanged():
+    """An older server sends no kind: the pre-Q-2 text is kept verbatim."""
+
+    card = _card(conversation_label="", conversation_id="bcv_wakeall01")
+    assert card.splitlines()[0] == "Channel message · bcv_wakeall01 · from Ada (human, same tenant)"
+
+
+def test_a_dm_conversation_reaches_the_card_as_a_direct_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Through the REAL iteration: the live row's kind is what the card reads."""
+
+    a, dirs, hub, wakes = _one_message_rig(tmp_path, monkeypatch)
+    hub.post(None, "hello in a dm", kind="dm")
+    _iterate(a, dirs["a"])
+    assert len(wakes) == 1
+    assert wakes[0]["card"].splitlines()[0] == "Direct message · from Ada (human, same tenant)"
+
+
+def _three_agent_turns(tmp_path: Path, now: float) -> None:
+    """Drive the guard to a cool-down: three consecutive agent-to-agent turns."""
+
+    for index in range(reply_guard.COOLDOWN_AFTER):
+        _trigger(tmp_path, "agent", now + index)
+        _reserve(tmp_path, now + index)
+    assert isinstance(_reserve(tmp_path, now + 4), reply_guard.Refusal)
+
+
+def test_a_human_reply_in_a_followed_thread_lifts_the_cool_down(tmp_path: Path) -> None:
+    """The guard's reset uses the card's own predicate (E2E round 1, Q-1).
+
+    A person replying IN the thread this agent follows is addressing it, so the
+    cool-down lifts exactly as a mention does — and the proof is the next
+    agent-to-agent post, not the human's own turn (which m2 exempts anyway).
+    """
+
+    now = 1_000_000.0
+    _three_agent_turns(tmp_path, now)
+    reply_guard.record_trigger(
+        tmp_path,
+        endpoint_id="bep_a",
+        conversation_id=CONV,
+        sender_kind="human",
+        mention=False,
+        directed=True,
+        now=now + 5,
+    )
+    _trigger(tmp_path, "agent", now + 6)
+    assert isinstance(_reserve(tmp_path, now + 6), reply_guard.Reservation)
+
+
+def test_an_ambient_human_line_does_not_lift_the_cool_down(tmp_path: Path) -> None:
+    now = 1_000_000.0
+    _three_agent_turns(tmp_path, now)
+    reply_guard.record_trigger(
+        tmp_path,
+        endpoint_id="bep_a",
+        conversation_id=CONV,
+        sender_kind="human",
+        mention=False,
+        directed=False,
+        now=now + 5,
+    )
+    # The answer TO that line is exempt (m2), but the line unlocked nothing:
+    _trigger(tmp_path, "agent", now + 6)
+    assert isinstance(_reserve(tmp_path, now + 6), reply_guard.Refusal)

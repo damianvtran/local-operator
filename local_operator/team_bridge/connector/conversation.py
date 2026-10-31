@@ -92,24 +92,46 @@ class ConversationCardMetadata:
     #: names, oldest → newest; empty for a single-message card. ``message_id`` is
     #: always the NEWEST of them, so reply routing keeps binding to one id.
     coalesced_message_ids: tuple[str, ...] = ()
+    #: The server's own ``thread_follower`` bit for THIS row, read from the live
+    #: conversation row (agent-server #255). ``None`` = absent, i.e. an older
+    #: server where a non-mention thread row reached followers only. It is
+    #: deliberately NOT part of the durable ref: the ref is read by the previous
+    #: release too (review round 1, m3), and this fact is only needed while the
+    #: card is being rendered (E2E round 1, Q-1).
+    thread_follower: bool | None = None
+    #: ``dm`` | ``group`` | ``channel`` from the live row, ``None`` when the wire
+    #: does not say. Used for the card's own label, never persisted.
+    conversation_kind: str | None = None
 
 
 def card_directed(metadata: ConversationCardMetadata) -> str:
     """``mention`` | ``thread`` | ``none`` — how this wake reached the agent.
 
-    THE ONE predicate the card's ``directed:`` line and its ``expect:`` line
-    share, so "was this addressed to me" cannot drift inside one card.
+    THE ONE predicate the card's ``directed:`` line, its ``expect:`` line and
+    the reply guard's trigger record share, so "was this addressed to me" cannot
+    drift between what the agent is told and what the guard counts.
 
-    Derived, never carried: the hub wakes a member for a thread reply only when
-    that member follows the thread, so a non-mention row that names a thread
-    root IS a directed wake. Keeping the two runner-up facts (a follower bit, a
-    conversation kind) out of the durable ref is deliberate — the ref is read by
-    the previous release too, and its shape must stay the one that release
-    already parses (review round 1, m3).
+    THE SERVER'S ``thread_follower`` BIT DECIDES WHEN IT IS PRESENT (E2E round 1,
+    Q-1). A thread reply can reach a member that never joined the thread — the
+    hub fans out non-mention thread rows to members whose policy is ``all``
+    unless the recipient is a follower — so "has a thread root" is NOT evidence
+    of being addressed:
+
+    * ``True``  → ``thread``: the recipient follows that thread.
+    * ``False`` → ``none``: an ambient reply it merely happens to see.
+    * absent    → the pre-#255 derivation: a non-mention thread row reached
+      followers only, so the root is the fact.
+
+    A mention still wins in every case: being named is being named. The bit is
+    read from the live row and never carried in the durable ref, whose shape must
+    stay what the previous release parses.
     """
 
     if metadata.mention:
         return "mention"
+    if metadata.thread_follower is False:
+        # Explicitly not a follower: the hub is telling us this row is ambient.
+        return "none"
     if metadata.thread_root_id:
         return "thread"
     return "none"
@@ -130,8 +152,18 @@ def build_conversation_card(metadata: ConversationCardMetadata) -> str:
     label = _one_line(metadata.conversation_label) or metadata.conversation_id
     sender = _one_line(metadata.sender_label) or "unknown"
     kind = "Thread reply" if metadata.thread_root_id else "Channel message"
+    # A 1:1 DM has no conversation NAME: printing the raw ``bcv_`` id as if it
+    # were one reads like a channel (E2E round 1, Q-2). The live row's
+    # conversation kind is the only thing that can say so; when the wire does not
+    # carry it, the pre-existing label text is kept verbatim.
+    if metadata.conversation_kind == "dm" and not metadata.thread_root_id:
+        header = f"Direct message · from {sender} ({metadata.sender_kind}, same tenant)"
+    elif metadata.conversation_kind == "dm":
+        header = f"{kind} · from {sender} ({metadata.sender_kind}, same tenant)"
+    else:
+        header = f"{kind} · {label} · from {sender} ({metadata.sender_kind}, same tenant)"
     lines = [
-        f"{kind} · {label} · " f"from {sender} ({metadata.sender_kind}, same tenant)",
+        header,
         # ONE home for the untrusted clause: the shipped constant, verbatim.
         BRIDGE_UNTRUSTED_CLAUSE,
         "",
@@ -439,6 +471,15 @@ def _card_metadata(
     name, sender, kind = labels
     if kind not in ("", "human", "agent"):
         raise ValueError("invalid conversation sender kind")
+    # The two routing facts the card needs come from THIS read, never from the
+    # durable ref: a value of the wrong shape is a malformed row (refused like
+    # every other display field), an absent one is an older server.
+    follower = display.get("thread_follower")
+    if follower is not None and not isinstance(follower, bool):
+        raise ValueError("invalid conversation thread_follower")
+    conversation_kind = display.get("conversation_kind") or None
+    if conversation_kind is not None and conversation_kind not in ("dm", "group", "channel"):
+        raise ValueError("invalid conversation kind")
     return ConversationCardMetadata(
         conversation_id=ref.conversation_id,
         tenant_id=owner.tenant_id,
@@ -449,6 +490,8 @@ def _card_metadata(
         message_id=ref.message_id,
         conversation_seq=ref.conversation_seq,
         thread_root_id=ref.thread_root_id,
+        thread_follower=follower,
+        conversation_kind=conversation_kind,
     )
 
 
@@ -603,6 +646,11 @@ async def _hand_off_card(
         conversation_id=ref.conversation_id,
         sender_kind=metadata.sender_kind,
         mention=metadata.mention,
+        # The guard's "a person asked ME" exemption is the card's own
+        # directedness predicate (E2E round 1, Q-1): a reply in a thread this
+        # agent follows is addressed to it, so a human posting there is asking it
+        # directly even without an @-mention.
+        directed=card_directed(metadata) in ("mention", "thread"),
     )
     coalescer = active_coalescer()
     if coalescer is None:
