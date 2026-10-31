@@ -14,10 +14,11 @@ THE STAGES ARE THE RECONCILIATION AXIS, and there are four:
   caller asked to move back to where the session already is, which is this
   module's CANCEL: it is the only request that can undo a queued one without
   minting a third destination (UX round 1, U4).
-* ``expired``    — still ``queued`` past :data:`QUEUED_MOVE_TTL_S`. A bounded
+* ``expired``    — HELD for longer than :data:`QUEUED_MOVE_TTL_S`. A bounded
   life is what keeps an intent whose successor never came from blocking the
   session forever: without it, every boot would re-consume a request nothing
-  satisfies (UX round 1, U4; agent review round 1, B2).
+  satisfies (UX round 1, U4; agent review round 1, B2). The clock is the HOLD's
+  (``blocked_at``), never the request's: see :func:`hold_lapsed`.
 
 NOTHING HERE RETIRES A RUNTIME. This module owns the DOCUMENT; the runtime that
 consumes it (``session/runtime/server._apply_queued_cwd_move``) owns the
@@ -72,7 +73,14 @@ STAGE_SUPERSEDED = "superseded"
 STAGE_EXPIRED = "expired"
 STAGES = frozenset({STAGE_QUEUED, STAGE_COMMITTED, STAGE_SUPERSEDED, STAGE_EXPIRED})
 
-#: How long a ``queued`` intent may stay unobserved before it expires.
+#: How long a ``queued`` intent may stay HELD before it expires.
+#:
+#: MEASURED FROM THE START OF THE HOLD, not from the request (UX round 2, U10).
+#: A move is asked for inside a turn, and an agent turn that runs past half an
+#: hour is ordinary here: aged from ``created_at``, the request expired before the
+#: first idle point it could ever have acted at (reproduced: busy -> expired ->
+#: idle, with nobody told). A runtime that is merely busy is not holding anything,
+#: so the clock only runs while a consumer has said WHY it cannot act.
 #:
 #: BOUNDED ON PURPOSE. A queued intent is consumed by a runtime repeating "is
 #: the successor here yet", and a request no successor ever satisfies would
@@ -329,27 +337,37 @@ def _with_stage(intent: MoveIntent, stage: str, **overrides: Any) -> MoveIntent:
     return MoveIntent(**fields)
 
 
+def hold_lapsed(intent: MoveIntent, *, now: float | None = None) -> bool:
+    """Whether a ``queued`` intent has been HELD for longer than the TTL.
+
+    Only a recorded hold ages (``blocked_at``, set by :func:`mark_blocked` when
+    the hold BEGINS and kept while it continues): a request that nobody has
+    looked at yet, or one waiting on an ordinary busy turn, has not been refused
+    anything and must not run out of time (UX round 2, U10). A marker with no
+    ``blocked_at`` — every pre-hold document, and a hand-written one — therefore
+    never lapses on a guess.
+    """
+    if intent.stage != STAGE_QUEUED or not intent.blocked_reason or intent.blocked_at <= 0:
+        return False
+    instant = time.time() if now is None else now
+    return instant - intent.blocked_at >= QUEUED_MOVE_TTL_S
+
+
 def expire_stale_intent(
     root: Path, session_id: str, *, now: float | None = None
 ) -> MoveIntent | None:
-    """Flip a ``queued`` intent that outlived its TTL to ``expired``.
+    """Flip a ``queued`` intent whose hold outlived its TTL to ``expired``.
 
-    CALLED ON BOTH PATHS THAT RE-READ AN INTENT — the boot reconcile and the
-    runtime's consumer — because a bounded life only bounds anything if every
-    reader applies it. An intent younger than the TTL, or one already past
-    ``queued``, is returned untouched; ``None`` is still "no intent" rather than
-    an error, for the same reason :func:`read_move_intent` documents.
+    APPLIED BY EVERY READER THAT REPORTS THE STAGE — the runtime's consumer and
+    ``sessions(op='info')`` (agent review round 2, m-e: ``info`` used to read the
+    raw marker, so a lapsed request still showed as queued until a runtime
+    ticked). A bounded life only bounds anything if every reader applies it. An
+    intent whose hold has not lapsed, or one already past ``queued``, is returned
+    untouched; ``None`` is still "no intent" rather than an error, for the same
+    reason :func:`read_move_intent` documents.
     """
     intent = read_move_intent(root, session_id)
-    if intent is None or intent.stage != STAGE_QUEUED:
-        return intent
-    instant = time.time() if now is None else now
-    # A marker with no ``created_at`` (a hand-written or truncated document)
-    # cannot be aged, and expiring it on a guess would discard a request that may
-    # be a second old. Left ``queued``: it is bounded by the same check next tick.
-    if intent.created_at <= 0:
-        return intent
-    if instant - intent.created_at < QUEUED_MOVE_TTL_S:
+    if intent is None or not hold_lapsed(intent, now=now):
         return intent
     expired = _with_stage(intent, STAGE_EXPIRED)
     _write(root, expired)
@@ -366,18 +384,26 @@ def mark_blocked(
     session stays busy. ``""`` clears the record (the hold ended) for the same
     reason the file name says nothing about it: the stage is the state, this is
     the explanation attached to it.
+
+    ``blocked_at`` IS THE TTL's CLOCK (:func:`hold_lapsed`), so it is stamped when
+    a hold BEGINS and kept when one hold reason gives way to another — a request
+    that went from "nobody can follow it" to "its directory is gone" has been
+    held the whole time, and resetting the clock on every change of wording
+    would let a request that can never happen live forever. Clearing the hold
+    resets it.
     """
     intent = read_move_intent(root, session_id)
     if intent is None or intent.stage != STAGE_QUEUED:
         return intent
     if intent.blocked_reason == reason and (reason == "" or intent.blocked_at > 0):
         return intent
-    updated = _with_stage(
-        intent,
-        STAGE_QUEUED,
-        blocked_reason=reason,
-        blocked_at=(time.time() if now is None else now) if reason else 0.0,
-    )
+    if not reason:
+        started = 0.0
+    elif intent.blocked_reason and intent.blocked_at > 0:
+        started = intent.blocked_at
+    else:
+        started = time.time() if now is None else now
+    updated = _with_stage(intent, STAGE_QUEUED, blocked_reason=reason, blocked_at=started)
     _write(root, updated)
     return updated
 

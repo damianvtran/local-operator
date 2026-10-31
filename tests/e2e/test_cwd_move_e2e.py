@@ -312,6 +312,19 @@ def test_a_crash_between_the_request_and_the_boot_is_settled_by_where_it_really_
             what="the wrong-directory successor to record why it is holding the move",
         )
         assert wrong.poll() is None, "a runtime that cannot guarantee a successor keeps serving"
+        # AND IT SAYS SO (UX round 2, U10): the hold is journalled into the
+        # conversation by the real runtime, so the agent reads it at its next turn
+        # and a later open replays it — reason and next step, not a bare code.
+        transcript = config_dir / "sessions" / SESSION_ID / "transcript.jsonl"
+        _wait_until(
+            lambda: (
+                True
+                if "nothing attached can follow it" in transcript.read_text(encoding="utf-8")
+                else None
+            ),
+            timeout=30,
+            what="the hold to be journalled for the agent",
+        )
         assert (
             _stage(config_dir) == cwd_move.STAGE_QUEUED
         ), "a boot elsewhere is not a confirmation, and not a failure either"
@@ -333,3 +346,97 @@ def test_a_crash_between_the_request_and_the_boot_is_settled_by_where_it_really_
         )
     finally:
         _reap(right)
+
+
+@pytest.mark.asyncio
+async def test_the_real_lop_topology_moves_end_to_end(
+    headless_tui_env: Path, tmp_path: Path, operator_cap: bytes
+) -> None:
+    """The plain-`lop` shape, driven by a REAL tool call inside a REAL turn.
+
+    Regression guard for UX round 2, U9. A `lop` terminal never owns its session —
+    ``cli.viewer_factory`` only returns an ``AttachedSession`` — so the topology to
+    pin is a runtime over ``ServingSessionHandle`` (which carries ``may_refresh``
+    and ``begin_retire``) and a viewer that declares ``cwd_adoption``. The agent
+    calls ``sessions(op='move')`` mid-turn; the result must promise the idle point
+    (the host CAN act), and when the turn ends the runtime must retire with the
+    destination on the frame and the viewer must stage it for its successor's
+    spawn. The spawn-and-commit half is the two subprocess cells above.
+    """
+    import asyncio
+    from types import SimpleNamespace
+
+    from local_operator.session.attached import AttachedSession
+    from local_operator.session.runtime.server import RuntimeServer
+    from local_operator.session.runtime.serving import ServingSessionHandle
+    from local_operator.tools.builtin import build_sessions_tool
+    from tests.e2e.harness import (
+        ScriptedStream,
+        build_session,
+        seed_transcript,
+        text_turn,
+        tool_call_turn,
+        user_message,
+    )
+    from tests.e2e.test_fork_e2e import _never_take_over
+    from tests.e2e.watchdog import bounded
+
+    config = headless_tui_env
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    source.mkdir()
+    destination.mkdir()
+    directory = config / "sessions" / SESSION_ID
+    await seed_transcript(directory, [user_message("seed")])
+    sessions_tool = build_sessions_tool(SimpleNamespace(subagent_launcher=object()))
+    assert sessions_tool is not None
+    stream = ScriptedStream(
+        [
+            tool_call_turn(
+                text="Moving",
+                tool_name="sessions",
+                tool_call_id="move-1",
+                arguments={"op": "move", "cwd": "../destination"},
+            ),
+            text_turn("Queued the move"),
+        ]
+    )
+    owner = build_session(directory, stream, tools=[sessions_tool], cwd=source)
+    handle = ServingSessionHandle(owner, asyncio.get_running_loop(), cwd=str(source))
+    server = RuntimeServer(handle, kind="daemon", operator_cap=operator_cap)
+    await server.start_in_process()
+    viewer = None
+    try:
+        with bounded(60, "a real-topology cwd move retires toward the destination"):
+            viewer = await AttachedSession.connect(
+                server._record,
+                owner.session_id,
+                config_dir=config,
+                takeover_factory=_never_take_over,
+            )
+            assert server._cwd_move_predicted_hold() == "", "the viewer can follow"
+            await owner.prompt("move this session to ../destination")
+            for _ in range(200):
+                if server._queued_move_stage == "retiring" and viewer.pending_move_cwd:
+                    break
+                await asyncio.sleep(0.1)
+            # The result the MODEL read, from the transcript the session wrote.
+            results = [
+                str(getattr(block, "text", "") or "")
+                for message in owner.history()
+                if getattr(message, "tool_call_id", None) == "move-1"
+                for block in getattr(message, "content", [])
+            ]
+            assert results, "the tool ran"
+            assert results[0].startswith("queued: "), results[0]
+            assert "next idle point" in results[0], "the host can act, so this is true"
+            assert server._queued_move_stage == "retiring"
+            assert viewer.pending_move_cwd == str(destination.resolve())
+            stored = cwd_move.read_move_intent(config, SESSION_ID)
+            assert stored is not None and stored.stage == cwd_move.STAGE_QUEUED
+            assert stored.blocked_reason == "", "never held"
+    finally:
+        if viewer is not None:
+            await viewer.dispose()
+        await server.aclose()
+        await owner.dispose()

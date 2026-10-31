@@ -1289,6 +1289,12 @@ _SYNC_LOCAL_OPS = frozenset(
 #: to the session loop.
 QUEUED_MOVE_TICK_S = 0.5
 
+#: The mesh watcher's stages that mean a move is IN FLIGHT in this runtime. Every
+#: other value it leaves behind (``cancelled``, a terminal record phase) is a
+#: stand-down kept only for the relay's ``queue_move`` reply, and must not block a
+#: later cwd move (agent review round 2, R2-M1).
+_MOVE_IN_FLIGHT_STAGES = frozenset({"finishing", "paused", "retiring"})
+
 #: Default for ``network.move.attach_window_s``: how long a queued move holds
 #: for attached clients to convert to remote viewers or detach cleanly before
 #: the retirement commits. Matches the existing handoff announcements' window
@@ -1333,21 +1339,33 @@ def _queued_move_window_s(root: Path) -> float:
 _HOSTED_RUNTIMES: "weakref.WeakValueDictionary[str, RuntimeServer]" = weakref.WeakValueDictionary()
 
 
-def notify_move_queued(session_id: str, root: Path) -> bool:
-    """Wake this process's runtime for ``session_id``, if it hosts one.
+#: What :func:`notify_move_queued` answers when the woken runtime can act on the
+#: move at its next idle point (any other non-empty answer is a hold reason).
+CWD_MOVE_READY = "ready"
 
-    Returns whether a runtime was told. FALSE IS A NORMAL ANSWER, not an error: a
-    tool call can run in a process that hosts no runtime for its session (a plain
-    ``exec`` worker, an embedder driving tools off the runtime), and there the
-    durable marker is still exactly what a later boot consumes. The caller reports
-    which half happened rather than promising a move nobody is watching.
+
+def notify_move_queued(session_id: str, root: Path) -> str:
+    """Wake this process's runtime for ``session_id``, and say what it can do.
+
+    Returns ``""`` when no runtime here was told, :data:`CWD_MOVE_READY` when the
+    woken runtime can carry the move out at its next idle point, and otherwise
+    the HOLD REASON it will record (``host_cannot_restart``, ``no_capable_viewer``).
+    The caller words its promise from this answer: "at the next idle point" was
+    printed whenever a runtime merely EXISTED, so a host that could never act — or
+    one with nobody attached to follow the move — told the model a restart was
+    coming that never came (UX round 2, U9; agent review round 2, m-b).
+
+    ``""`` IS A NORMAL ANSWER, not an error: a tool call can run in a process that
+    hosts no runtime for its session (a plain ``exec`` worker, an embedder driving
+    tools off the runtime), and there the durable marker is still exactly what a
+    later boot consumes.
 
     ``root`` is compared REALPATH-ED against each hosted runtime's config root: a
     tool in one config tree must never wake a runtime in another, which is how an
     isolated test or a second store would otherwise cross-talk.
     """
     if not session_id:
-        return False
+        return ""
     wanted = os.path.realpath(str(root))
     for hosted_id, server in list(_HOSTED_RUNTIMES.items()):
         if hosted_id != session_id or server._closed.is_set():
@@ -1355,8 +1373,8 @@ def notify_move_queued(session_id: str, root: Path) -> bool:
         if os.path.realpath(str(getattr(server, "_config_root", "") or "")) != wanted:
             continue
         server._ensure_queued_move_watcher()
-        return True
-    return False
+        return server._cwd_move_predicted_hold() or CWD_MOVE_READY
+    return ""
 
 
 def _running_loop() -> asyncio.AbstractEventLoop | None:
@@ -2770,11 +2788,13 @@ class RuntimeServer:
         #: The watcher's last stage ("", "finishing", "paused", "retiring") —
         #: what the relay's delivery polls see in the ``queue_move`` reply.
         self._queued_move_stage = ""
-        #: The reason this runtime is currently HOLDING a queued cwd intent for
-        #: (``""`` when it is not). Runtime memory only: it exists to stop the
-        #: twice-a-second watcher rewriting the marker and re-logging the same
-        #: hold, while the marker itself is the durable half of the same fact.
-        self._cwd_move_blocked_reason = ""
+        #: The request id of the cwd intent this runtime last saw ``queued``, so
+        #: an expiry is announced for a request THIS process was holding and
+        #: never for a days-old marker a boot happens to read. The hold itself is
+        #: read from the marker, which is per request by construction — a memo
+        #: here once carried one request's hold onto the next (agent review
+        #: round 2, m-a).
+        self._cwd_move_watched_request = ""
         #: The one watcher task, started on the first ``queue_move`` op.
         self._queued_move_task: asyncio.Task[None] | None = None
         self._thread: threading.Thread | None = None
@@ -7525,58 +7545,102 @@ class RuntimeServer:
         is skipped: no ``move_pending`` frame, no ``to_device``/``to_name``, no
         ``to=`` on the announce -- the frame carries ``cwd`` and no peer.
 
-        THE GATE IS ``may_refresh``, the one predicate that already answers "is
-        this runtime doing nothing it would lose" (a live turn, a parked gate, a
-        goal loop, subagents, background jobs, and the wake window), plus the
-        move state's own latches. Anything short of idle leaves the intent
-        ``queued`` for the next tick; nothing is cut over mid-turn.
+        THE CHECKS RUN IN THIS ORDER, and the order is the point:
 
-        AND ONE PRECONDITION BEFORE THE LATCH: A SUCCESSOR HAS TO EXIST. Retiring
-        toward a destination no attached viewer will adopt leaves this session
-        alive in the SOURCE with the intent still ``queued`` — the next boot reads
-        it, retires again, and the session never opens (agent review round 1, B2).
-        So the guarantee is checked FIRST, and when it does not hold the intent is
-        left ``queued`` with the reason recorded on it (visible in `sessions
-        info`, in this runtime's log and in the tool result the model reports),
-        rather than the runtime killing itself on an unfalsifiable hope.
+        1. CAPABILITY. A host whose handle has no ``may_refresh``/``begin_retire``
+           (an embedder's in-process ``kind="tui"`` registrant) can never restart
+           the session anywhere, so it holds with ``host_cannot_restart``. It runs
+           FIRST because the successor check below would otherwise record the
+           misleading ``no_capable_viewer`` for a host that has no viewer path at
+           all, and the return used to be silent (UX round 2, U9).
+        2. THE BOUNDARY, ``may_refresh`` — the one predicate that already answers
+           "is this runtime doing nothing it would lose" (a live turn, a parked
+           gate, a goal loop, subagents, background jobs, the wake window). Busy
+           is not a hold and records nothing, and it comes BEFORE the two holds
+           below so they — and the TTL, which is the HOLD's clock — only ever
+           start at an idle point: a move queued inside a long turn can no longer
+           expire before the first moment it could have happened (UX round 2,
+           U10, reproduced as busy -> expired -> idle).
+        3. THE DESTINATION STILL EXISTS. It was checked at enqueue, but a turn can
+           delete it afterwards, and retiring toward it booted a successor in a
+           directory that was gone (QA round 2, Q2; agent review round 2, m-d).
+        4. A SUCCESSOR HAS TO EXIST. Retiring toward a destination no attached
+           viewer will adopt leaves the session alive in the SOURCE with the intent
+           still ``queued``, and the next boot retires again (agent review round 1,
+           B2). The guarantee is EVENTUAL, not eager: a parked viewer adopts the
+           destination on its next use, which is what the help says too. A hold
+           whose condition is gone (a viewer attached, the directory came back) is
+           cleared here, which also stops its clock.
+        5. THE LATCH, which re-checks idleness in the same synchronous step.
+
+        Every hold is recorded on the marker, logged, and ANNOUNCED — painted for
+        the user and journalled for the agent's next turn — once per reason per
+        request; an expiry is announced the same way rather than deleting the move
+        in silence (UX round 2, U10).
 
         Returns ``"retiring"`` when it latched and announced, ``"waiting"`` when
-        an intent exists but the runtime is not at a boundary, ``""`` when there
-        is nothing to do.
+        an intent exists but cannot be acted on yet, ``""`` when there is nothing
+        to do.
         """
-        if self._queued_move is not None or self._queued_move_stage or self._retirement_committed:
+        # ONLY AN IN-FLIGHT MESH MOVE BLOCKS: a stood-down one leaves the stage at
+        # ``cancelled`` (or a terminal record phase) for the relay's ``queue_move``
+        # reply to read, and treating that as in-flight made every later cwd move
+        # in this runtime a silent no-op (agent review round 2, R2-M1).
+        if (
+            self._queued_move is not None
+            or self._queued_move_stage in _MOVE_IN_FLIGHT_STAGES
+            or self._retirement_committed
+        ):
             return ""
         from pathlib import Path
 
         from local_operator.session import cwd_move
 
         root = Path(getattr(self, "_config_root", None) or config_dir())
-        # A BOUNDED LIFE, APPLIED BY EVERY READER: an intent whose successor never
-        # came expires here rather than blocking the session for the rest of its
-        # life (UX round 1, U4). ``None`` is still "nothing to do".
         intent = cwd_move.expire_stale_intent(root, self._record.session_id)
-        if intent is None or intent.stage != cwd_move.STAGE_QUEUED:
+        if intent is None:
             return ""
-        if not self._cwd_move_successor_guaranteed():
-            self._note_cwd_move_blocked(root, cwd_move, "no_capable_viewer")
+        if intent.stage != cwd_move.STAGE_QUEUED:
+            if intent.stage == cwd_move.STAGE_EXPIRED and (
+                intent.request_id == self._cwd_move_watched_request
+            ):
+                self._cwd_move_watched_request = ""
+                await self._announce_cwd_move_expired(intent)
+            return ""
+        self._cwd_move_watched_request = intent.request_id
+        hold = self._cwd_move_predicted_hold(check_successor=False)
+        if hold:
+            await self._note_cwd_move_blocked(root, cwd_move, intent, hold)
             return "waiting"
         probe = getattr(self._handle, "may_refresh", None)
         latch = getattr(self._handle, "begin_retire", None)
         if not callable(probe) or not callable(latch):
-            return ""
+            return ""  # unreachable: the capability check above holds instead
         try:
             reason = str(await self._handle_call_on_session_loop(probe) or "")
         except Exception:  # noqa: BLE001 -- an unreadable probe keeps the runtime
-            self._note_cwd_move_blocked(root, cwd_move, "boundary_unreadable")
+            await self._note_cwd_move_blocked(root, cwd_move, intent, "boundary_unreadable")
             return "waiting"
         if reason:
-            # BUSY IS NOT A HOLD WORTH RECORDING: it is the ordinary case for a
-            # move this turn just queued, and it clears itself within a tick.
-            self._clear_cwd_move_blocked(root, cwd_move)
             return "waiting"
+        try:
+            cwd_move.resolve_destination(
+                intent.destination_cwd, effective_cwd=intent.destination_cwd
+            )
+        except cwd_move.CwdMoveRefused:
+            await self._note_cwd_move_blocked(root, cwd_move, intent, "destination_unavailable")
+            return "waiting"
+        if not self._cwd_move_successor_guaranteed():
+            await self._note_cwd_move_blocked(root, cwd_move, intent, "no_capable_viewer")
+            return "waiting"
+        if intent.blocked_reason:
+            # The hold's condition is gone (a capable viewer attached, the
+            # directory came back): clear it, which also stops its TTL clock.
+            cwd_move.mark_blocked(root, self._record.session_id, "")
         accepted = await self._handle_call_on_session_loop(lambda: latch("cwd-move", "cwd move"))
         if not accepted:
-            self._note_cwd_move_blocked(root, cwd_move, "latch_refused")
+            # Work arrived between the probe and the latch: the next tick retries.
+            # Not recorded as a hold — it is the busy case observed one step late.
             return "waiting"
         self._queued_move_stage = "retiring"
         await self.announce_retiring("cwd-move", cwd=intent.destination_cwd)
@@ -7584,6 +7648,23 @@ class RuntimeServer:
         if callable(request_stop):
             await self._handle_call_on_session_loop(request_stop)
         return "retiring"
+
+    def _cwd_move_predicted_hold(self, *, check_successor: bool = True) -> str:
+        """The hold this runtime would record for a cwd move right now, or ``""``.
+
+        The two STRUCTURAL reasons only — what the host is and who is attached —
+        because those are what a tool call can be told the moment it queues
+        (:func:`notify_move_queued`); busy and a vanished destination are facts of
+        the idle point and are checked there. Capability first, for the reason
+        :meth:`_apply_queued_cwd_move` gives.
+        """
+        if not callable(getattr(self._handle, "may_refresh", None)) or not callable(
+            getattr(self._handle, "begin_retire", None)
+        ):
+            return "host_cannot_restart"
+        if check_successor and not self._cwd_move_successor_guaranteed():
+            return "no_capable_viewer"
+        return ""
 
     def _cwd_move_successor_guaranteed(self) -> bool:
         """Whether some live viewer will adopt the destination and re-engage.
@@ -7596,6 +7677,11 @@ class RuntimeServer:
         a phone viewer and a headless runtime are all honestly "nobody can take
         this" instead of a guess about what another process does on disconnect.
 
+        EVENTUAL, NOT EAGER (agent review round 2, m-c): a viewer that is parked
+        (a sidebar facade with no refresh callback) adopts the destination on its
+        next engage rather than at once, so the session may sit cold in between.
+        It still converges on the destination and never loops.
+
         NO VIEWER IS THE NORMAL HEADLESS CASE, and it is a correct HOLD rather
         than a failure: a runtime with nobody attached has nobody to re-engage it,
         so a queued move waits for the next open — which is exactly what a durable
@@ -7606,35 +7692,83 @@ class RuntimeServer:
                 return True
         return False
 
-    def _note_cwd_move_blocked(self, root: Path, cwd_move: Any, reason: str) -> None:
-        """Record and report a hold, ONCE PER REASON, without writing per tick.
+    async def _note_cwd_move_blocked(
+        self, root: Path, cwd_move: Any, intent: Any, reason: str
+    ) -> None:
+        """Record, log and ANNOUNCE a hold, once per reason per request.
 
-        The marker write is what a later reader sees (``sessions(op='info')``, the
-        tool result, the next boot); the log line is this process's record of the
-        same fact. Both are suppressed while the reason is unchanged — the watcher
-        ticks twice a second and a repeated line at that cadence is noise, not
-        evidence.
+        THE MARKER IS THE MEMO. The consumer re-reads the intent every tick, so
+        "already recorded" is ``intent.blocked_reason == reason`` on the request
+        in hand — a new request starts with no reason and is announced afresh,
+        which a runtime-wide memo got wrong (agent review round 2, m-a). The
+        watcher ticks twice a second; nothing here runs again until the reason
+        changes.
         """
-        if self._cwd_move_blocked_reason == reason:
+        if intent.blocked_reason == reason:
             return
-        intent = cwd_move.mark_blocked(root, self._record.session_id, reason)
-        if intent is None:
+        updated = cwd_move.mark_blocked(root, self._record.session_id, reason)
+        if updated is None:
             return
-        self._cwd_move_blocked_reason = reason
         logger.warning(
             "queued move: holding session %s in %s; moving to %s is blocked (%s)",
             self._record.session_id,
-            intent.source_cwd or "?",
-            intent.destination_cwd,
+            updated.source_cwd or "?",
+            updated.destination_cwd,
             reason,
         )
+        from local_operator.tools.builtin import sessions_move_hold_sentence
 
-    def _clear_cwd_move_blocked(self, root: Path, cwd_move: Any) -> None:
-        """Drop a recorded hold once it no longer applies (no-op if none)."""
-        if not self._cwd_move_blocked_reason:
-            return
-        self._cwd_move_blocked_reason = ""
-        cwd_move.mark_blocked(root, self._record.session_id, "")
+        await self._announce_cwd_move(
+            sessions_move_hold_sentence(reason, updated.destination_cwd),
+            f"cwd move held ({reason}): {updated.destination_cwd}",
+        )
+
+    async def _announce_cwd_move_expired(self, intent: Any) -> None:
+        """Say a held move ran out of time, instead of deleting it silently."""
+        logger.warning(
+            "queued move: the move of session %s to %s expired without happening",
+            self._record.session_id,
+            intent.destination_cwd,
+        )
+        from local_operator.tools.builtin import sessions_move_expiry_sentence
+
+        await self._announce_cwd_move(
+            sessions_move_expiry_sentence(intent.destination_cwd, intent.source_cwd),
+            f"cwd move expired: {intent.destination_cwd}",
+        )
+
+    async def _announce_cwd_move(self, text: str, raw: str) -> None:
+        """Tell the USER now and the AGENT at its next turn. Never raises.
+
+        THE SAME PAIR ``note_update_failed`` uses, for the same reason: a hold
+        nobody hears about is the silent failure the hold exists to prevent.
+        ``queue_notice`` paints on every attached viewer (after the running
+        turn's answer when one is running), and ``journal_incident`` lands in the
+        live context — parked to the next boundary mid-turn — and the transcript,
+        so the next open replays it when nobody was watching. Both run on the
+        SESSION's loop through the ordinary hop.
+        """
+        session = getattr(self._handle, "_session", None)
+        if callable(session) and not hasattr(session, "journal_incident"):
+            # ``TuiSessionHandle._session`` is an accessor, not the session.
+            try:
+                session = session()
+            except Exception:  # noqa: BLE001 -- no session means nobody to tell
+                session = None
+        notice = getattr(session, "queue_notice", None)
+        if callable(notice):
+            try:
+                await self._handle_call_on_session_loop(notice, text, "warning")
+            except Exception:  # noqa: BLE001 -- a notice never breaks the runtime
+                logger.debug("queued move: could not paint the notice", exc_info=True)
+        journal = getattr(session, "journal_incident", None)
+        if callable(journal):
+            try:
+                await self._handle_call_on_session_loop(
+                    journal, raw, rendered=f"[session incident] {text}"
+                )
+            except Exception:  # noqa: BLE001 -- the log line above is the record
+                logger.debug("queued move: could not journal the notice", exc_info=True)
 
     async def _queued_move_watch(self) -> None:
         """Watch for the queued move's safe point; then pause, announce, retire.

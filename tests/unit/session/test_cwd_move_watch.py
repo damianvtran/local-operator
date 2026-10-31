@@ -65,11 +65,13 @@ class _Server:
     # GATE's inputs this fake is about, so it answers "a successor is guaranteed"
     # unless a case says otherwise.
     _cwd_move_successor_guaranteed = RuntimeServer._cwd_move_successor_guaranteed
-    # The hold recorder and its clearer ride along: the gate's outcome IS the
-    # record it leaves, so a fake that gated without recording would test half
-    # of the behaviour.
+    # The hold recorder and the capability check ride along: the gate's outcome
+    # IS the record it leaves, so a fake that gated without recording would test
+    # half of the behaviour. The announce is spied (``held`` below) — the paint
+    # and the journal it drives are pinned on the real server.
     _note_cwd_move_blocked = RuntimeServer._note_cwd_move_blocked
-    _clear_cwd_move_blocked = RuntimeServer._clear_cwd_move_blocked
+    _cwd_move_predicted_hold = RuntimeServer._cwd_move_predicted_hold
+    _announce_cwd_move_expired = RuntimeServer._announce_cwd_move_expired
 
     def __init__(self, handle: _Handle, root: Path) -> None:
         self._handle = handle
@@ -78,7 +80,7 @@ class _Server:
         self._queued_move: dict[str, Any] | None = None
         self._queued_move_stage = ""
         self._retirement_committed = False
-        self._cwd_move_blocked_reason = ""
+        self._cwd_move_watched_request = ""
         #: One attached viewer that declares cwd adoption — the successor the
         #: gate requires. The fake never sends a frame, so a stand-in is enough
         #: here; the real-server cells below register a real connection.
@@ -88,8 +90,13 @@ class _Server:
     async def _handle_call_on_session_loop(self, fn: Any, *args: Any, **kwargs: Any) -> Any:
         return fn(*args, **kwargs)
 
+        self.held: list[str] = []
+
     async def announce_retiring(self, reason: str, **kwargs: Any) -> None:
         self.announced.append((reason, kwargs))
+
+    async def _announce_cwd_move(self, text: str, raw: str) -> None:
+        self.held.append(text)
 
 
 def _queue(root: Path) -> cwd_move.MoveIntent:
@@ -272,9 +279,9 @@ async def test_a_move_queued_while_the_session_runs_is_consumed_at_the_next_boun
     assert announced == []
     stored = cwd_move.read_move_intent(tmp_path, OWN)
     assert stored is not None and stored.stage == cwd_move.STAGE_QUEUED
-    assert server._queued_move_task is not None and not server._queued_move_task.done(), (
-        "a queued intent keeps the consumer polling until it can act"
-    )
+    assert (
+        server._queued_move_task is not None and not server._queued_move_task.done()
+    ), "a queued intent keeps the consumer polling until it can act"
     # 4. The turn ends: the move happens with no further wake of any kind.
     handle.busy = ""
     for _ in range(60):
@@ -329,24 +336,34 @@ async def test_a_runtime_that_cannot_guarantee_a_successor_holds_the_intent(
 def test_a_queued_intent_expires_instead_of_blocking_the_session_forever(
     tmp_path: Path,
 ) -> None:
-    """A BOUNDED LIFE FOR AN UNANSWERED REQUEST (UX round 1, U4).
+    """A BOUNDED LIFE FOR AN UNANSWERED REQUEST (UX round 1, U4) — HELD time only.
 
-    The hold above is correct while a successor might still come; it must not be
+    The hold is correct while a successor might still come; it must not be
     permanent. Past the TTL the intent is ``expired`` — a terminal stage, so no
-    later boot re-consumes it and the session opens normally.
+    later boot re-consumes it and the session opens normally. The clock is the
+    HOLD's (UX round 2, U10): a request nobody has refused yet — the one a long
+    turn is still running around — never lapses, however old it is.
     """
     destination = tmp_path / "dest"
     destination.mkdir()
     intent = cwd_move.enqueue_self_move(
         tmp_path, OWN, requested_cwd=str(destination), effective_cwd=str(tmp_path), owner_pid=1
     )
-    # Young: untouched.
-    fresh = cwd_move.expire_stale_intent(tmp_path, OWN, now=intent.created_at + 1)
-    assert fresh is not None and fresh.stage == cwd_move.STAGE_QUEUED
-    # Past the bound: expired, and every later read agrees.
-    aged = cwd_move.expire_stale_intent(
-        tmp_path, OWN, now=intent.created_at + cwd_move.QUEUED_MOVE_TTL_S + 1
-    )
+    ttl = cwd_move.QUEUED_MOVE_TTL_S
+    # Unheld and ancient: untouched — the TTL does not run during a busy turn.
+    old = cwd_move.expire_stale_intent(tmp_path, OWN, now=intent.created_at + 10 * ttl)
+    assert old is not None and old.stage == cwd_move.STAGE_QUEUED
+    # The hold begins much later; its clock starts THEN, not at the request.
+    held_at = intent.created_at + 5 * ttl
+    cwd_move.mark_blocked(tmp_path, OWN, "no_capable_viewer", now=held_at)
+    young = cwd_move.expire_stale_intent(tmp_path, OWN, now=held_at + ttl - 1)
+    assert young is not None and young.stage == cwd_move.STAGE_QUEUED
+    # A change of hold reason keeps the clock: it has been held the whole time.
+    cwd_move.mark_blocked(tmp_path, OWN, "destination_unavailable", now=held_at + 60)
+    rebadged = cwd_move.read_move_intent(tmp_path, OWN)
+    assert rebadged is not None and rebadged.blocked_at == held_at
+    # Past the bound from the hold's start: expired, and every later read agrees.
+    aged = cwd_move.expire_stale_intent(tmp_path, OWN, now=held_at + ttl + 1)
     assert aged is not None and aged.stage == cwd_move.STAGE_EXPIRED
     settled = cwd_move.read_move_intent(tmp_path, OWN)
     assert settled is not None and settled.stage == cwd_move.STAGE_EXPIRED
@@ -369,6 +386,7 @@ def test_a_symlinked_current_directory_is_not_a_move(tmp_path: Path) -> None:
         )
     assert refused.value.code == "sessions_move_destination_is_current"
     assert cwd_move.read_move_intent(tmp_path, OWN) is None, "and nothing was written"
+
 
 # ---------------------------------------------------------------------------
 # THE WATCHER ITSELF. Everything above drives one method against a fake server;
@@ -545,3 +563,222 @@ async def test_the_real_watcher_consumes_a_cwd_intent_with_no_mesh_move(tmp_path
     # THE CONFIRMATION IS THE SUCCESSOR'S, still: this runtime only leaves.
     stored = cwd_move.read_move_intent(tmp_path, OWN)
     assert stored is not None and stored.stage == cwd_move.STAGE_QUEUED
+
+
+# ---------------------------------------------------------------------------
+# ROUND 2: the holds are ordered, announced, per request, and bounded by the
+# hold's own clock; a stood-down mesh move no longer blocks a cwd move.
+# ---------------------------------------------------------------------------
+
+
+class _Announcing(_RealHandle):
+    """A ``_RealHandle`` whose session records what the runtime told it.
+
+    ``queue_notice`` is the user's half (painted on every viewer) and
+    ``journal_incident`` the agent's (live context + transcript), the pair
+    ``RuntimeServer._announce_cwd_move`` drives through the ordinary hop.
+    """
+
+    def __init__(self, session_id: str, cwd: str) -> None:
+        super().__init__(session_id, cwd)
+        painted: list[str] = []
+        journalled: list[str] = []
+        self.painted, self.journalled = painted, journalled
+
+        class _Session:
+            async def queue_notice(self, text: str, kind: str = "info") -> None:
+                painted.append(text)
+
+            async def journal_incident(self, raw: str, *, rendered: str = "", **_: Any) -> None:
+                journalled.append(rendered)
+
+        self._session = _Session()
+
+
+def _announcing_server(
+    tmp_path: Path, *, viewer: bool = True
+) -> tuple[RuntimeServer, _Announcing, list[tuple[str, dict[str, Any]]]]:
+    server, _plain, announced = _real_server(tmp_path, viewer=viewer)
+    handle = _Announcing(OWN, str(tmp_path))
+    server._handle = handle  # type: ignore[assignment]
+    return server, handle, announced
+
+
+async def _until(predicate: Any, *, ticks: int = 80) -> None:
+    for _ in range(ticks):
+        if predicate():
+            return
+        await asyncio.sleep(0.05)
+
+
+@pytest.mark.asyncio
+async def test_a_stood_down_mesh_move_does_not_block_a_later_cwd_move(tmp_path: Path) -> None:
+    """R2-M1: mesh cancel -> cwd move -> retire, in one runtime.
+
+    A mesh move whose record is gone stands down with ``_queued_move_stage``
+    left at ``cancelled`` (the relay's ``queue_move`` reply reads it). The cwd
+    gate used to treat ANY non-empty stage as in flight, so every later cwd move
+    returned at once and the watcher exited — while the tool said "next idle
+    point". Driven through the real mesh stand-down, not a hand-set field.
+    """
+    server, handle, announced = _real_server(tmp_path)
+    server._queued_move = {"to_device": "peer-1", "at": 1.0, "to_name": "peer-1"}
+    await asyncio.wait_for(server._queued_move_watch(), timeout=5)
+    assert server._queued_move is None and server._queued_move_stage == "cancelled"
+
+    destination = tmp_path / "dest"
+    destination.mkdir()
+    intent = cwd_move.enqueue_self_move(
+        tmp_path, OWN, requested_cwd=str(destination), effective_cwd=str(tmp_path), owner_pid=1
+    )
+    from local_operator.session.runtime.server import CWD_MOVE_READY, notify_move_queued
+
+    assert notify_move_queued(OWN, tmp_path) == CWD_MOVE_READY
+    await _until(lambda: handle.calls)
+    assert handle.calls == ["begin_retire:cwd-move", "request_stop"]
+    assert announced == [("cwd-move", {"cwd": intent.destination_cwd})]
+
+
+@pytest.mark.asyncio
+async def test_a_host_that_cannot_restart_holds_with_its_own_reason_and_says_so(
+    tmp_path: Path,
+) -> None:
+    """U9's real defect: an incapable host is a HOLD with a true reason, said aloud.
+
+    The production class is ``TuiSessionHandle`` — the in-process registrant an
+    embedder (not plain ``lop``, whose TUI is always a viewer) builds over a
+    ``Session`` it owns; it publishes no retire latch. Before this the gate
+    recorded ``no_capable_viewer`` (the successor check ran first) and then
+    returned silently, and the tool promised "the next idle point". Now the
+    capability is judged FIRST — with no viewer attached too, so the order is
+    what the reason proves — the tool is told the hold up front, and the user
+    and the agent are both told why.
+    """
+    from local_operator.mobile.tui_handle import TuiSessionHandle
+    from local_operator.session.runtime.server import notify_move_queued
+
+    assert not hasattr(TuiSessionHandle, "begin_retire"), "the class this cell models"
+    server, handle, announced = _announcing_server(tmp_path, viewer=False)
+    # The incapable host: the latch and the probe are simply absent.
+    type(handle).begin_retire = None  # type: ignore[assignment,misc]
+    try:
+        destination = tmp_path / "dest"
+        destination.mkdir()
+        cwd_move.enqueue_self_move(
+            tmp_path, OWN, requested_cwd=str(destination), effective_cwd=str(tmp_path), owner_pid=1
+        )
+        assert notify_move_queued(OWN, tmp_path) == "host_cannot_restart"
+        await _until(lambda: handle.painted)
+        stored = cwd_move.read_move_intent(tmp_path, OWN)
+        assert stored is not None and stored.stage == cwd_move.STAGE_QUEUED
+        assert stored.blocked_reason == "host_cannot_restart", "not no_capable_viewer"
+        assert announced == [] and handle.calls == []
+        assert len(handle.painted) == 1 and "cannot restart it" in handle.painted[0]
+        assert handle.journalled == [f"[session incident] {handle.painted[0]}"]
+        # Once per reason: further ticks add nothing.
+        await asyncio.sleep(0.6)
+        assert len(handle.painted) == 1
+    finally:
+        del type(handle).begin_retire
+        server._closed.set()
+
+
+@pytest.mark.asyncio
+async def test_a_move_queued_in_a_long_turn_cannot_expire_before_its_idle_point(
+    tmp_path: Path,
+) -> None:
+    """U10, reproduced as busy -> expired -> idle before the fix.
+
+    The request is 31 minutes old when the turn ends; it must still be acted
+    on. Then, with nobody able to follow it, the HOLD starts its own clock, is
+    announced, and on lapsing is announced again as an expiry rather than
+    deleted in silence.
+    """
+    server, handle, announced = _announcing_server(tmp_path, viewer=False)
+    destination = tmp_path / "dest"
+    destination.mkdir()
+    intent = cwd_move.enqueue_self_move(
+        tmp_path, OWN, requested_cwd=str(destination), effective_cwd=str(tmp_path), owner_pid=1
+    )
+    # Backdate the request past the TTL, as a 31-minute turn would leave it.
+    cwd_move._write(
+        tmp_path,
+        cwd_move._with_stage(intent, cwd_move.STAGE_QUEUED, created_at=intent.created_at - 31 * 60),
+    )
+    handle.busy = "active turn"
+    assert await server._apply_queued_cwd_move() == "waiting"
+    still = cwd_move.read_move_intent(tmp_path, OWN)
+    assert still is not None and still.stage == cwd_move.STAGE_QUEUED, "busy is not expiry"
+    assert still.blocked_reason == "" and handle.painted == [], "busy is not a hold"
+    # The turn ends with nobody able to follow: the hold begins NOW, announced.
+    handle.busy = ""
+    assert await server._apply_queued_cwd_move() == "waiting"
+    held = cwd_move.read_move_intent(tmp_path, OWN)
+    assert held is not None and held.blocked_reason == "no_capable_viewer"
+    assert held.blocked_at > held.created_at + 30 * 60, "the clock is the hold's"
+    assert len(handle.painted) == 1 and "nothing attached can follow it" in handle.painted[0]
+    assert "cwd='.'" in handle.painted[0], "the next step is named"
+    # The hold lapses: announced, not silently deleted.
+    cwd_move._write(
+        tmp_path,
+        cwd_move._with_stage(held, cwd_move.STAGE_QUEUED, blocked_at=held.blocked_at - 31 * 60),
+    )
+    assert await server._apply_queued_cwd_move() == ""
+    lapsed = cwd_move.read_move_intent(tmp_path, OWN)
+    assert lapsed is not None and lapsed.stage == cwd_move.STAGE_EXPIRED
+    assert len(handle.painted) == 2 and "expired without happening" in handle.painted[1]
+    assert handle.journalled[-1] == f"[session incident] {handle.painted[1]}"
+    # Announced ONCE: the next read is a settled marker this runtime already told.
+    assert await server._apply_queued_cwd_move() == ""
+    assert len(handle.painted) == 2
+    assert handle.calls == [] and announced == []
+
+
+@pytest.mark.asyncio
+async def test_a_destination_deleted_after_the_request_is_held_not_retired_toward(
+    tmp_path: Path,
+) -> None:
+    """Q2 / m-d: re-check the destination at the idle point, before the latch."""
+    server, handle, announced = _announcing_server(tmp_path)
+    destination = tmp_path / "vanishing"
+    destination.mkdir()
+    cwd_move.enqueue_self_move(
+        tmp_path, OWN, requested_cwd=str(destination), effective_cwd=str(tmp_path), owner_pid=1
+    )
+    destination.rmdir()  # the same turn's `rmdir`
+    assert await server._apply_queued_cwd_move() == "waiting"
+    stored = cwd_move.read_move_intent(tmp_path, OWN)
+    assert stored is not None and stored.blocked_reason == "destination_unavailable"
+    assert handle.calls == [] and announced == [], "no successor booted in a missing directory"
+    assert "is gone" in handle.painted[0]
+    # Recreated: the hold clears and the move proceeds.
+    destination.mkdir()
+    assert await server._apply_queued_cwd_move() == "retiring"
+    assert handle.calls == ["begin_retire:cwd-move", "request_stop"]
+
+
+@pytest.mark.asyncio
+async def test_a_new_request_under_the_same_hold_is_recorded_and_announced_again(
+    tmp_path: Path,
+) -> None:
+    """m-a: A held, A cancelled, B queued under the same hold -> B shows the hold."""
+    server, handle, _announced = _announcing_server(tmp_path, viewer=False)
+    first, second = tmp_path / "a", tmp_path / "b"
+    first.mkdir()
+    second.mkdir()
+    cwd_move.enqueue_self_move(
+        tmp_path, OWN, requested_cwd=str(first), effective_cwd=str(tmp_path), owner_pid=1
+    )
+    assert await server._apply_queued_cwd_move() == "waiting"
+    cwd_move.enqueue_self_move(
+        tmp_path, OWN, requested_cwd=str(tmp_path), effective_cwd=str(tmp_path), owner_pid=1
+    )
+    assert await server._apply_queued_cwd_move() == ""
+    b = cwd_move.enqueue_self_move(
+        tmp_path, OWN, requested_cwd=str(second), effective_cwd=str(tmp_path), owner_pid=1
+    )
+    assert await server._apply_queued_cwd_move() == "waiting"
+    stored = cwd_move.read_move_intent(tmp_path, OWN)
+    assert stored is not None and stored.request_id == b.request_id
+    assert stored.blocked_reason == "no_capable_viewer"
+    assert len(handle.painted) == 2 and second.name in handle.painted[1]

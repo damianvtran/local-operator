@@ -8,6 +8,7 @@ slice 2 and is deliberately absent here.
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Any
 
@@ -272,7 +273,10 @@ def test_info_reports_a_queued_move_and_why_it_is_held(tmp_path: Path) -> None:
     line, so an intent that is deliberately not being acted on cannot be mistaken
     for one that simply has not happened yet.
     """
-    from local_operator.tools.builtin import _sessions_info_body, _sessions_pending_move_fields
+    from local_operator.tools.builtin import (
+        _sessions_info_body,
+        _sessions_pending_move_fields,
+    )
 
     destination = tmp_path / "elsewhere"
     destination.mkdir()
@@ -289,8 +293,126 @@ def test_info_reports_a_queued_move_and_why_it_is_held(tmp_path: Path) -> None:
     # A hold is reported as a hold.
     cwd_move.mark_blocked(tmp_path, OWN, "no_capable_viewer")
     held = _sessions_pending_move_fields(context, OWN, is_own=True)
-    assert "currently held (no_capable_viewer)" in _sessions_info_body(
+    held_body = _sessions_info_body(
         {"session_id": OWN, "state": "ready"}, held, context, is_own=True
+    )
+    # ...in WORDS with a next step, never a bare code (UX round 2, U10), and
+    # never as "at the next idle point".
+    assert "queued but held" in held_body
+    assert "nothing attached can follow it" in held_body and "cwd='.'" in held_body
+    assert "no_capable_viewer" not in held_body and "next idle point" not in held_body
+    # A CANCEL reads as one (UX round 2, U14), and a lapsed request is reported as
+    # expired by info ITSELF, not only once a runtime ticks (agent review m-e).
+    cwd_move.enqueue_self_move(
+        tmp_path, OWN, requested_cwd=str(tmp_path), effective_cwd=str(tmp_path), owner_pid=1
+    )
+    cancelled = _sessions_info_body(
+        {"session_id": OWN, "state": "ready"},
+        _sessions_pending_move_fields(context, OWN, is_own=True),
+        context,
+        is_own=True,
+    )
+    assert "was cancelled" in cancelled and "superseded" not in cancelled
+    cwd_move.enqueue_self_move(
+        tmp_path, OWN, requested_cwd=str(destination), effective_cwd=str(tmp_path), owner_pid=1
+    )
+    cwd_move.mark_blocked(
+        tmp_path, OWN, "no_capable_viewer", now=time.time() - cwd_move.QUEUED_MOVE_TTL_S - 1
+    )
+    lapsed = _sessions_pending_move_fields(context, OWN, is_own=True)
+    assert lapsed["move_stage"] == cwd_move.STAGE_EXPIRED
+    assert "expired without happening" in _sessions_info_body(
+        {"session_id": OWN, "state": "ready"}, lapsed, context, is_own=True
     )
     # Another session's marker is not this caller's to report.
     assert _sessions_pending_move_fields(context, "other", is_own=False) == {}
+
+
+def test_the_approval_card_names_the_directory_the_move_really_uses(tmp_path: Path) -> None:
+    """R2-M2: symlinks are followed BEFORE ``..``, as ``Path.resolve`` does.
+
+    cwd ``a/link`` -> ``x/y`` and ``cwd='../dest'`` with BOTH ``a/dest`` and
+    ``x/dest`` existing: the card said ``a/dest`` while the op moved to
+    ``x/dest``, so the operator approved one existing directory and got another.
+    """
+    from local_operator.tools.builtin import _describe_sessions_approval
+
+    (tmp_path / "a" / "dest").mkdir(parents=True)
+    (tmp_path / "x" / "y").mkdir(parents=True)
+    (tmp_path / "x" / "dest").mkdir()
+    link = tmp_path / "a" / "link"
+    link.symlink_to(tmp_path / "x" / "y")
+    used = cwd_move.resolve_destination("../dest", effective_cwd=str(link))
+    assert used == str((tmp_path / "x" / "dest").resolve())
+    card = _describe_sessions_approval({"op": "move", "cwd": "../dest"}, str(link))
+    assert card.startswith(f"move this session to {used} (now in "), card
+    assert str(tmp_path.resolve() / "a" / "dest") not in card
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("readiness", "recorded", "promised"),
+    [
+        ("ready", "", True),
+        ("no_capable_viewer", "", False),
+        ("host_cannot_restart", "", False),
+        # Q3 / m-b: a REPEAT call while a hold is already on the marker.
+        ("ready", "no_capable_viewer", False),
+        ("", "no_capable_viewer", False),
+    ],
+    ids=["can-act", "nobody-can-follow", "host-cannot-restart", "repeat-ready", "repeat-unhosted"],
+)
+async def test_the_result_promises_the_idle_point_only_when_the_runtime_can_act(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    readiness: str,
+    recorded: str,
+    promised: bool,
+) -> None:
+    """U9's real defect, m-b and Q3: "next idle point" is said only when it is true.
+
+    ``notify_move_queued`` reports what the hosting runtime can do; a predicted
+    hold, or one already recorded on the marker, is reported as a hold with its
+    reason and next step instead.
+    """
+    import local_operator.session.runtime.server as server_module
+
+    monkeypatch.setattr(server_module, "notify_move_queued", lambda *_: readiness)
+    destination = tmp_path / "elsewhere"
+    destination.mkdir()
+    if recorded:
+        cwd_move.enqueue_self_move(
+            tmp_path, OWN, requested_cwd=str(destination), effective_cwd=str(tmp_path), owner_pid=1
+        )
+        cwd_move.mark_blocked(tmp_path, OWN, recorded)
+    result = await _move(_ctx(tmp_path), cwd=str(destination))
+    assert not result.is_error, result.text
+    assert ("next idle point" in result.text) is promised, result.text
+    if not promised:
+        assert result.text.startswith("queued but held: "), result.text
+        assert "cwd='.'" in result.text, "the way out is named"
+        assert (result.details or {})["held"] in {readiness, recorded}
+
+
+@pytest.mark.asyncio
+async def test_both_directories_in_the_result_are_spelled_one_way(tmp_path: Path) -> None:
+    """U13: the source was printed as given and the destination realpath-ed."""
+    real = tmp_path / "src"
+    real.mkdir()
+    link = tmp_path / "src-link"
+    link.symlink_to(real)
+    destination = tmp_path / "dest"
+    destination.mkdir()
+    result = await _move(_ctx(link), cwd="../dest")
+    assert not result.is_error, result.text
+    assert str(link) not in result.text, result.text
+    assert f"from {real.resolve()} to {destination.resolve()}" in result.text
+
+
+def test_the_tool_row_tells_a_move_from_a_cancel() -> None:
+    """U11: the pending row said only ``move`` for both."""
+    from local_operator.harness.rows import sessions_row_summary
+
+    assert sessions_row_summary({"op": "move", "cwd": "~/work/dest"}) == "move · ~/work/dest"
+    assert sessions_row_summary({"op": "move", "cwd": "."}) == "move · ."
+    assert sessions_row_summary({"op": "move"}) == "move · ?"

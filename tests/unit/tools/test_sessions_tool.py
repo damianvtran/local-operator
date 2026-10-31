@@ -878,14 +878,16 @@ def test_describe_approval_sentences_are_pinned() -> None:
     # A MOVE IS DECIDED BY ITS TWO DIRECTORIES (agent review round 1, M1; UX round
     # 1, U2). Both are named, and a RELATIVE destination is resolved against the
     # session's own directory — the reading the op itself will use — because
-    # "../dest" cannot be judged otherwise.
+    # "../dest" cannot be judged otherwise. The destination LEADS so a narrow card
+    # cuts the source, not the decision (UX round 2, U12). These ``~/work`` paths
+    # do not exist, and ``realpath`` leaves a missing path's spelling alone.
     assert _describe_sessions_approval({"op": "move", "cwd": "~/work/dest"}, "~/work/src") == (
-        "move this session from ~/work/src to ~/work/dest: it restarts there once "
-        "the current turn ends"
+        "move this session to ~/work/dest (now in ~/work/src): it restarts there "
+        "once the current turn ends"
     )
     assert _describe_sessions_approval({"op": "move", "cwd": "../dest"}, "~/work/src") == (
-        "move this session from ~/work/src to ~/work/dest: it restarts there once "
-        "the current turn ends"
+        "move this session to ~/work/dest (now in ~/work/src): it restarts there "
+        "once the current turn ends"
     )
     assert _describe_sessions_approval({"op": "move"}, "~/work/src") == (
         "move this session (now in ~/work/src): no destination was given"

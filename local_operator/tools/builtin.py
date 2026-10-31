@@ -16732,9 +16732,11 @@ _SESSIONS_OP_DOCS: dict[str, _SessionsOpDoc] = {
     "move": _SessionsOpDoc(
         summary="move THIS session's own working directory: the move is queued and"
         " takes effect at the next idle point after the current turn — the session"
-        " restarts there — so until then the working directory is unchanged. It is a"
-        " write-tier op, so it is approved like one where approval is required."
-        " Naming the current directory cancels a queued move.",
+        " restarts there — so until then the working directory is unchanged. It needs"
+        " a viewer that can follow it (the desktop app or a `lop` terminal); a parked"
+        " one follows on its next use, and without one the move is held, says why,"
+        " and expires. It is a write-tier op, so it is approved like one where"
+        " approval is required. Naming the current directory cancels a queued move.",
         example="sessions(op='move', cwd='~/work/project'); back: cwd='.'",
         refusals=(
             "`cwd` alone: a move acts on THIS runtime, so a `session`, `pid`,"
@@ -17204,13 +17206,17 @@ def _describe_sessions_approval(args: dict[str, Any], cwd: str) -> str:
         # resolves against), so showing the raw argument alone leaves a reader
         # unable to tell "." from "../other"; the source is the second half of
         # the same fact (agent review round 1, M1; UX round 1, U2).
+        #
+        # THE DESTINATION LEADS (UX round 2, U12): at narrow widths the card is
+        # cut from the right, and the destination is the one thing being decided,
+        # so it is the half that must survive the cut.
         destination = _sessions_move_destination_label(args, cwd)
         source = _approval_directory_label(cwd) or "its current directory"
         if not destination:
             return f"move this session (now in {source}): no destination was given"
         return (
-            f"move this session from {source} to {destination}: it restarts there once "
-            "the current turn ends"
+            f"move this session to {destination} (now in {source}): it restarts there "
+            "once the current turn ends"
         )
     if op == "stop":
         if peer:
@@ -17278,10 +17284,14 @@ def _sessions_move_destination_label(args: Mapping[str, Any], cwd: str) -> str:
     """The destination a ``move`` call will really use, for the approval card.
 
     RESOLVED THE WAY THE OP RESOLVES IT — ``~`` expanded, a relative path joined
-    to the session's own directory — but NOT stat-ed: the card is composed before
-    the call runs, and a describer that failed on a missing directory would leave
-    the operator approving the opaque word "move" again. Normalised only, so the
-    path reads as the one the op will act on.
+    to the session's own directory, then SYMLINKS FOLLOWED BEFORE ``..``. The op
+    uses ``Path.resolve``; collapsing ``..`` textually instead named a different
+    existing directory than the one the move went to (cwd ``a/link`` -> ``x/y``
+    plus ``../dest``: the card said ``a/dest``, the move used ``x/dest`` — agent
+    review round 2, R2-M2). ``os.path.realpath`` is the non-strict twin: it never
+    raises on a missing path, because the card is composed before the call runs
+    and a describer that failed would leave the operator approving the opaque
+    word "move" again.
     """
     requested = str(args.get("cwd") or "").strip()
     if not requested:
@@ -17294,7 +17304,7 @@ def _sessions_move_destination_label(args: Mapping[str, Any], cwd: str) -> str:
         if not os.path.isabs(base):
             base = os.path.dirname(base)
         candidate = os.path.join(base or os.getcwd(), candidate)
-    return _approval_directory_label(os.path.normpath(candidate))
+    return _approval_directory_label(os.path.realpath(candidate))
 
 
 def _sessions_address_label(args: Mapping[str, Any]) -> str:
@@ -18091,7 +18101,9 @@ def _sessions_pending_move_fields(
 
     session_dir_value = str(getattr(context, "session_dir", "") or "")
     root = Path(session_dir_value).parent.parent if session_dir_value else config_dir()
-    intent = cwd_move.read_move_intent(root, session_id)
+    # THE SAME BOUNDED LIFE THE CONSUMER APPLIES (agent review round 2, m-e): a
+    # raw read reported a lapsed request as still queued until a runtime ticked.
+    intent = cwd_move.expire_stale_intent(root, session_id)
     if intent is None:
         return {}
     return {
@@ -18165,15 +18177,27 @@ def _sessions_move_state_sentence(extras: Mapping[str, Any]) -> str:
     source = str(extras.get("move_source") or "")
     blocked = str(extras.get("move_blocked") or "")
     if stage == "queued":
-        sentence = (
+        if blocked:
+            # A HOLD IS NOT "AT THE NEXT IDLE POINT": it says why, and what to do
+            # (UX round 2, U10; the U5 convention every refusal follows).
+            return (
+                f"a move to {destination} is queued but held; the working directory is "
+                f"still {source}. {sessions_move_hold_sentence(blocked, destination)}"
+            )
+        return (
             f"a move from {source} to {destination} is queued: it happens at the next idle "
             f"point, when this session restarts there, and the working directory is still {source}"
         )
-        if blocked:
-            sentence += f" — currently held ({blocked}) rather than acted on"
-        return sentence
     if stage == "committed":
         return f"this session moved from {source} to {destination}"
+    if stage == "expired":
+        return sessions_move_expiry_sentence(destination, source)
+    if stage == "superseded":
+        # The user's word for a withdrawn request (UX round 2, U14). A request
+        # replaced by a NEWER destination is also ``superseded``, but then the
+        # marker holds the newer one, so this sentence is only ever read for a
+        # request nothing replaced.
+        return f"the move to {destination} was cancelled; this session stays in {source}"
     return f"the last move request to {destination} ended as {stage}"
 
 
@@ -20402,6 +20426,57 @@ _SESSIONS_MOVE_REMEDIES: dict[str, str] = {
 }
 
 
+#: Why a queued move is HELD, and what to do about it — one sentence per hold
+#: code the runtime records (``RuntimeServer._apply_queued_cwd_move``).
+#:
+#: THE SAME CONVENTION AS :data:`_SESSIONS_MOVE_REMEDIES`: a bare code in ``info``
+#: told nobody anything (UX round 2, U10). Read by three surfaces — the tool
+#: result, ``info``, and the runtime's hold notice (painted for the user and
+#: journalled for the agent) — so they cannot word one hold three ways. English,
+#: because the same string is the model-facing incident (AGENTS.md
+#: "Internationalization": model-facing prompts stay English by design).
+_SESSIONS_MOVE_HOLDS: dict[str, str] = {
+    "no_capable_viewer": "nothing attached can follow it to the new directory — open this "
+    "session in the desktop app or a `lop` terminal and it moves once a turn ends",
+    "host_cannot_restart": "the program hosting this session cannot restart it in another "
+    "directory — open the session from a `lop` terminal or the desktop app, which run it "
+    "in a runtime that can move",
+    "destination_unavailable": "that directory is gone or can no longer be entered — "
+    "recreate it, or move somewhere else",
+    "boundary_unreadable": "this runtime could not tell whether it is idle — it retries "
+    "on its own; if it persists, reopen the session",
+}
+
+
+def sessions_move_hold_sentence(reason: str, destination: str) -> str:
+    """The user- and model-facing account of a held move (see ``_SESSIONS_MOVE_HOLDS``).
+
+    Names the destination, the reason in plain words, and both ways out —
+    resolve the reason, or cancel by naming the current directory — and that the
+    request lapses if the hold persists, so a hold is never a silent wait.
+    """
+    why = _SESSIONS_MOVE_HOLDS.get(reason, f"the runtime is holding it ({reason})")
+    minutes = int(_cwd_move_ttl_s() // 60)
+    return (
+        f"Your move to {_approval_directory_label(destination)} is waiting: {why}. "
+        f"Cancel it with cwd='.'; it expires if still held after {minutes} minutes."
+    )
+
+
+def sessions_move_expiry_sentence(destination: str, source: str) -> str:
+    """The account of a move that lapsed — announced, never deleted in silence."""
+    return (
+        f"The move to {_approval_directory_label(destination)} expired without happening; "
+        f"this session stays in {_approval_directory_label(source)}. Ask again to retry."
+    )
+
+
+def _cwd_move_ttl_s() -> float:
+    from local_operator.session.cwd_move import QUEUED_MOVE_TTL_S
+
+    return QUEUED_MOVE_TTL_S
+
+
 async def _sessions_move(
     tool_call_id: str, params: SessionsParams, context: "ToolContext | None"
 ) -> ToolResult:
@@ -20428,7 +20503,7 @@ async def _sessions_move(
     """
     from local_operator.paths import config_dir
     from local_operator.session import cwd_move
-    from local_operator.session.runtime.server import notify_move_queued
+    from local_operator.session.runtime.server import CWD_MOVE_READY, notify_move_queued
 
     def refuse(code: str, **fields: Any) -> ToolResult:
         # EVERY REFUSAL CARRIES ITS REMEDY. The code alone told a model nothing
@@ -20467,6 +20542,9 @@ async def _sessions_move(
         )
     except cwd_move.CwdMoveRefused as refused:
         return refuse(refused.code, **refused.fields)
+    # Realpath-ed like the destination already is, so a ``/var`` vs
+    # ``/private/var`` spelling does not read as two different trees (U13).
+    source_label = os.path.realpath(effective_cwd)
     if intent.stage == cwd_move.STAGE_SUPERSEDED:
         # THE CANCEL RECEIPT. Naming the withdrawn destination and where the
         # session stays is the whole answer a caller needs; there is nothing
@@ -20475,31 +20553,46 @@ async def _sessions_move(
             tool_call_id,
             "sessions",
             f"cancelled: the queued move is withdrawn — this session stays in "
-            f"{intent.source_cwd} (request {intent.request_id})",
+            f"{_approval_directory_label(source_label)} (request {intent.request_id})",
             details={"op": "move", **intent.as_fields(effective_cwd=effective_cwd)},
         )
-    # THE WAKE IS REPORTED, not assumed: a runtime this process hosts picks the
-    # request up at the next idle point, and a process that hosts none says so
-    # rather than promising a move nothing is watching.
-    armed = notify_move_queued(own_session_id, root)
-    when = (
-        "at the next idle point after this turn, when the session restarts there"
-        if armed
-        else "the next time this session opens (no runtime in this process is watching it now)"
-    )
+    # THE PROMISE IS WORDED FROM WHAT THE RUNTIME CAN DO, not from whether one
+    # exists (UX round 2, U9; agent review round 2, m-b; QA round 2, Q3). "At the
+    # next idle point" is said only when the hosting runtime can carry the move
+    # out; a hold — predicted now, or already recorded on a repeat call — is
+    # reported as a hold with its reason and next step; and a process hosting no
+    # runtime says the move waits for the next open.
+    readiness = notify_move_queued(own_session_id, root)
+    hold = intent.blocked_reason or (readiness if readiness != CWD_MOVE_READY else "")
+    if hold:
+        head = "queued but held"
+        when = sessions_move_hold_sentence(hold, intent.destination_cwd)
+    elif readiness:
+        head = "queued"
+        when = "It happens at the next idle point after this turn, when the session restarts there."
+    else:
+        head = "queued"
+        when = (
+            "It happens the next time this session opens (no runtime in this process is "
+            "watching it now)."
+        )
+    destination = _approval_directory_label(intent.destination_cwd)
     # The effective cwd is the context's, read back rather than assumed: this call
     # must not (and cannot) mutate it, so the field proves the intent is queued and
-    # not applied.
+    # not applied. Both directories go through the SAME resolve-and-label as the
+    # approval card, so one tree is not spelled two ways (UX round 2, U13).
     return _text(
         tool_call_id,
         "sessions",
-        f"queued: move this session from {intent.source_cwd} to {intent.destination_cwd} {when}. "
-        f"Its working directory is still {effective_cwd} until then; nothing runs in "
-        f"{intent.destination_cwd} yet (request {intent.request_id})",
+        f"{head}: move this session from {_approval_directory_label(source_label)} to "
+        f"{destination}. {when} Its working directory is still "
+        f"{_approval_directory_label(source_label)} until then; nothing runs in {destination} "
+        f"yet (request {intent.request_id})",
         details={
             "op": "move",
             **intent.as_fields(effective_cwd=effective_cwd),
-            "watcher_armed": armed,
+            "watcher_armed": bool(readiness),
+            "held": hold,
         },
     )
 

@@ -1939,6 +1939,12 @@ def sessions_row_summary(args: Mapping[str, object]) -> str:
             if window:
                 parts.append(window)
         return " · ".join(parts)
+    if op == "move":
+        # THE DESTINATION IS THE DISCRIMINATOR (UX round 2, U11): a move and a
+        # cancel (``cwd='.'``) painted the same bare ``move``. The raw argument,
+        # not a resolved path — the row is drawn before the call runs, and
+        # whether ``.`` cancels depends on a queued intent only the call reads.
+        return " · ".join([op, _sessions_scalar(args.get("cwd")) or "?"])
     if op == "list":
         parts = [op]
         if args.get("include_stored") is True:
