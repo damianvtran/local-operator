@@ -734,6 +734,7 @@ INVOLUNTARY_MECHANISM_LABELS: dict[str, str] = {
     "generation-prune": "its install generation was pruned",
     "in-place-install": "its install was being replaced in place",
     "reclaim": "it was reclaimed as an unreachable runtime",
+    "wake-sweep": "wake delivery for its store was going away",
 }
 
 

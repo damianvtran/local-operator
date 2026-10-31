@@ -283,7 +283,12 @@ def resume_server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
                 and generation
                 and _owner_is_dead(state["pid"], generation) is False
             ):
-                os.kill(state["pid"], signal.SIGTERM)
+                # SIGKILL, not SIGTERM: since the victim-side sanction gate a bare
+                # SIGTERM is REFUSED, so a teardown that sent one would leak the worker
+                # past the test. This is teardown of a worker THIS fixture started under
+                # its private config; SIGKILL is the unrefusable rung and loses nothing
+                # the test still reads.
+                os.kill(state["pid"], signal.SIGKILL)
         server.shutdown()
         server.server_close()
         serving.join(timeout=5)
@@ -607,4 +612,9 @@ async def test_sessions_resume_from_another_session_gets_the_same_surface(
                 and generation
                 and _owner_is_dead(state["pid"], generation) is False
             ):
-                os.kill(state["pid"], signal.SIGTERM)
+                # SIGKILL, not SIGTERM: since the victim-side sanction gate a bare
+                # SIGTERM is REFUSED, so a teardown that sent one would leak the worker
+                # past the test. This is teardown of a worker THIS fixture started under
+                # its private config; SIGKILL is the unrefusable rung and loses nothing
+                # the test still reads.
+                os.kill(state["pid"], signal.SIGKILL)

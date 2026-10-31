@@ -401,6 +401,21 @@ def test_a_detached_runtime_survives_a_terminal_hangup(
         # other half of the guarantee: a runtime that ignored everything would
         # pass (b) and be unfixable, so the clean logged exit is asserted, not
         # merely the death.
+        #
+        # THE STOP IS STAGED FIRST, because since the victim-side sanction gate
+        # (docs/design-surface-independence.md §7 at ``3ba837e6d9e``) a SIGTERM
+        # nothing sanctioned is REFUSED — a runtime that obeyed it would be the
+        # regression, not this cell. Staging the marker is what the stop ladder does
+        # before its SIGTERM rung, so what this asserts is unchanged in meaning: the
+        # sanctioned kill switch reaches the runtime's own clean exit and says so.
+        # An UNSTAGED signal remains mortal through SIGKILL, which no handler can
+        # catch and which every ladder keeps as its last rung.
+        from local_operator.session.runtime import control, registry
+
+        registry.write_stop_marker(
+            config_dir / "sessions" / _SESSION_ID,
+            control._stop_marker_payload(record, "sigterm", command="test: sanctioned kill switch"),
+        )
         os.kill(pid, signal.SIGTERM)
         try:
             child.wait(timeout=_WAIT_S)

@@ -1790,3 +1790,104 @@ def test_a_dry_run_stages_nothing_even_when_it_would_signal(tmp_path: Path) -> N
             now=now,
         )
     assert registry.read_stop_marker(conversation) is None
+
+
+# ---------------------------------------------------------------------------
+# The marker's run key is the runtime's PUBLISHED start, never ``now - etime``
+# ---------------------------------------------------------------------------
+#
+# Review round 1 (R-1) and QA round 1 (Q1) on the sanction gate: ``ps`` counts a
+# runtime's age from ``exec`` while the runtime stamps its own record 1.2-3 s later,
+# and the victim pairs a marker only inside 1.0 s, so an etime-derived key made this
+# sweep's SIGTERM refused essentially always (0 of 21 live runtimes inside the
+# tolerance). These cells pin the source of the key; the real-process cell lives in
+# ``tests/e2e/test_signal_drain_e2e.py``.
+
+
+def _publish_run_record(root: Path, session: str, pid: int, started_at: float) -> None:
+    from local_operator.session.runtime import journal
+
+    directory = session_dir(root, session)
+    directory.mkdir(parents=True, exist_ok=True)
+    assert journal.write_run_record(
+        session, conversation_dir=directory, pid=pid, started_at=started_at
+    )
+
+
+def _sweep_and_capture_marker(tmp_path: Path) -> dict[str, object] | None:
+    conversation = session_dir(tmp_path, "s1")
+    seen: list[dict[str, object] | None] = []
+    sightings = Sightings()
+    for now in (NOW, NOW + CONFIRM_S):
+        reclaim_runtimes(
+            tmp_path,
+            apply=True,
+            sightings=sightings,
+            processes=[proc()],
+            env_of=_session_env(tmp_path),
+            row_of=lambda pid: reread(pid, root=tmp_path),
+            fleet=fleet(tmp_path),
+            kill=lambda pid, sig: seen.append(registry.read_stop_marker(conversation)),
+            now=now,
+        )
+    assert len(seen) == 1
+    return seen[0]
+
+
+def test_the_marker_carries_the_runtimes_published_start_not_the_census_age(
+    tmp_path: Path,
+) -> None:
+    """The key is the runtime's own ``runtime-run.json`` start, to the bit.
+
+    The census age (3600 s here) would put the key an hour away from anything the
+    runtime stamped; the published start is what the victim compares, so the marker
+    must carry it EXACTLY, and be well inside the victim's 1.0 s tolerance of it.
+    """
+    from local_operator.session.runtime import signal_receipt
+
+    published = 1_799_990_123.456
+    _publish_run_record(tmp_path, "s1", 4242, published)
+    marker = _sweep_and_capture_marker(tmp_path)
+    assert marker is not None
+    assert marker["started_at"] == published, "the key was derived, not read"
+    assert signal_receipt.marker_covers_signal(
+        marker,
+        session_id="s1",
+        pid=4242,
+        started_at=published,
+        at=float(marker["at"]),  # type: ignore[arg-type]
+    ), "the victim would refuse the marker this sweep staged"
+
+
+def test_a_run_record_for_another_pid_is_not_this_candidates_key(tmp_path: Path) -> None:
+    """A LATER run owns the file: it says nothing about the process being signalled."""
+    _publish_run_record(tmp_path, "s1", 9999, 1_799_990_000.0)
+    marker = _sweep_and_capture_marker(tmp_path)
+    assert marker is not None
+    assert marker["started_at"] is None, "another run's start was borrowed"
+
+
+def test_a_candidate_with_no_published_start_is_still_signalled_and_says_so(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Never skipped, never reported as keyed: the stop goes out, the gap is loud.
+
+    Skipping would leave the orphan this sweep exists to end; an unstamped marker is
+    still paired by session + pid + staging window (``marker_covers_signal`` skips
+    the start comparison when a side has no stamp).
+    """
+    from local_operator.session.runtime import signal_receipt
+
+    (session_dir(tmp_path, "s1")).mkdir(parents=True, exist_ok=True)
+    caplog.set_level(logging.WARNING, logger=reclaim.__name__)
+    marker = _sweep_and_capture_marker(tmp_path)
+    assert marker is not None, "the unstamped candidate was not signalled"
+    assert marker["started_at"] is None
+    assert any("no published start" in r.getMessage() for r in caplog.records)
+    assert signal_receipt.marker_covers_signal(
+        marker,
+        session_id="s1",
+        pid=4242,
+        started_at=1_799_990_123.456,
+        at=float(marker["at"]),  # type: ignore[arg-type]
+    )

@@ -60,6 +60,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
 from local_operator.session.approval_policy import OVERRIDE_FILENAME
+from local_operator.session.runtime.artefact_names import SIGNAL_REFUSALS_NAME
 
 if TYPE_CHECKING:
     from local_operator.network.relay import RelayServer
@@ -171,6 +172,15 @@ COPY_SET_NAMES: tuple[str, ...] = (
     # session exactly as the marker does — and on a destination where no such
     # run exists the reader refuses it (``signal_receipt.covers_run``).
     "runtime-signal.json",
+    # THE RUNTIME'S OWN REFUSAL RECORD (``registry.SIGNAL_REFUSALS_NAME``): the same
+    # class of artefact as the receipt above, and it MUST be listed here for a reason
+    # this file already records once — ``assert_complete`` refuses a move whose source
+    # directory holds a name neither list accounts for, so an unlisted refusals file
+    # would make a session that refused one signal permanently unmovable until someone
+    # deleted the evidence. It travels with the session for the receipt's reason: it is
+    # evidence ABOUT a past run, keyed to that run's pid, and a destination that has no
+    # such run simply has nothing to pair it with.
+    SIGNAL_REFUSALS_NAME,
     # THE RUNTIME'S OWN EXIT RECORD (``journal.EXIT_RECORD_NAME``): the durable
     # "when did it stop, why, and did anybody ask" of the last departure. It is
     # evidence ABOUT a past run like the two rows above it, and it must travel
