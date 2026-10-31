@@ -1,11 +1,11 @@
 {
   "wire.sessions.approval_stop_local": "若{address}空闲则停止：释放会话租约，绝不发送信号；正在工作时拒绝",
   "wire.sessions.approval_stop_peer": "{address}在{peer}上无法停止：此构建一律拒绝，不会发送任何内容",
-  "wire.sessions.stop_pending": "{name}已接受停止，但{seconds} s后仍未退出。没有发送任何信号——重试前先查看会话列表。",
-  "wire.sessions.stop_refused_busy": "{name}正在工作（一个轮次、一项审批、一个子智能体或一个任务），因此没有停止任何内容，也没有发送任何信号。等它空闲后再重试。",
-  "wire.sessions.stop_refused_old_owner": "{name}运行的是较旧的构建，无法保证只在空闲时停止，因此没有停止任何内容，也没有发送任何信号。重试不会改变这一点——让操作员停止它。",
-  "wire.sessions.stop_refused_unanswered": "{name}没有应答，无法确认只在空闲时停止，也没有发送任何信号。先查看会话列表——它可能已经不在了。",
-  "wire.sessions.stop_refused_wake": "{name}处于空闲状态，但定时唤醒落在保留窗口内，因此没有停止任何内容，也没有发送任何信号。等该唤醒触发后再重试。",
+  "wire.sessions.stop_pending": "“{name}”已接受停止，但{seconds} s后仍未退出。没有发送任何信号——重试前先查看会话列表。",
+  "wire.sessions.stop_refused_busy": "“{name}”正在工作（一个轮次、一项审批、一个子智能体或一个任务），因此没有停止任何内容，也没有发送任何信号。等它空闲后再重试。",
+  "wire.sessions.stop_refused_old_owner": "“{name}”运行的是较旧的构建，无法保证只在空闲时停止，因此没有停止任何内容，也没有发送任何信号。重试不会改变这一点——让操作员停止它。",
+  "wire.sessions.stop_refused_unanswered": "“{name}”没有应答，无法确认只在空闲时停止，也没有发送任何信号。先查看会话列表——它可能已经不在了。",
+  "wire.sessions.stop_refused_wake": "“{name}”处于空闲状态，但定时唤醒落在保留窗口内，因此没有停止任何内容，也没有发送任何信号。等该唤醒触发后再重试。",
   "wire.sessions.stop_remote_refused": "其他设备上的会话无法从此处用此构建停止：无法保证只在空闲时退出且不发送信号，因此没有发送任何内容。操作员可以在该设备上停止它。",
   "wire.sessions.stop_self_refused": "该目标就是当前会话，会话无法停止自身。换一个会话来停止它。"
 }
