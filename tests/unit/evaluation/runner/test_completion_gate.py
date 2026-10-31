@@ -28,7 +28,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
-from typing import Any, AsyncIterator, Iterator, Sequence
+from typing import Any, AsyncIterator, Iterator, Literal, Sequence
 
 import pytest
 
@@ -525,7 +525,11 @@ async def test_the_runner_challenge_costs_no_step_so_a_one_step_budget_still_dec
 
 
 @pytest.mark.parametrize("status", ["failed", "infeasible"])
-def test_the_premature_challenge_is_neutral_and_names_both_replies(status: str) -> None:
+def test_the_premature_challenge_is_neutral_and_names_both_replies(
+    # ``FinishAction.status`` is a Literal, so the parametrized value has to be
+    # narrowed statically; the ids above are the same two members.
+    status: Literal["failed", "infeasible"],
+) -> None:
     """Restates the task and that nothing ran; never asserts feasibility."""
 
     observation = Observation(
