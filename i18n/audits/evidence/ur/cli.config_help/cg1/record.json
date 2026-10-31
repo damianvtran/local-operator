@@ -1,0 +1,102 @@
+{
+  "schema": 1,
+  "audit_id": "cg1",
+  "locale": "ur",
+  "namespace": "cli.config_help",
+  "audit_date": "2026-10-31",
+  "packaged_at_utc": "2026-10-31T12:43:48Z",
+  "key_count": 9,
+  "auditor": {
+    "agent": "i18n-auditor subagents, one fresh session per round; none translated or edited any value they judged",
+    "sessions": {
+      "round_1": "dab7435f3cd0",
+      "round_2": "1a185836d3d9"
+    },
+    "model": "anthropic/claude-opus-5-5, as reported by each session's selected_model and model_id in its transcript; no provider fallback observed",
+    "independence": "Each round's auditor session differs from the translator lane (9d815def2d34, anthropic/claude-sonnet-5-5), from the remediation translator session(s), and from the previous round's auditor. Translators and auditors share the Claude model family (disclosed)."
+  },
+  "translator": {
+    "lane": "9d815def2d34 on anthropic/claude-sonnet-5-5 (task subagent of manager session 3ef6295a5545, parent-selected, no fallback recorded)",
+    "remediation_sessions": [
+      {
+        "round": 1,
+        "session": "be04c022ebd4",
+        "model": "anthropic/claude-opus-5-5",
+        "changes": "core-fix/ur/changes.jsonl"
+      },
+      {
+        "round": "post-audit ICU argument-order rephrase",
+        "session": "48d0ad39b53c",
+        "model": "anthropic/claude-opus-5-5",
+        "changes": "core-argorder/ur/changes.jsonl"
+      }
+    ]
+  },
+  "source_audit_revision": "origin/main as read by each auditor through git show/cat-file on the audit day; the exact commit was not recorded by the sessions",
+  "packaging_base_revision": "137984daf98e6491dfd97cb6812d51c1a98abe6c",
+  "input_hashes": {
+    "en": "97f625f6c6e26f8723e471569a0227f8e4da18518f2ab50e444fe93345ab2c8c",
+    "context": "f1bc05e555bc66b4690ffc87eac141afed72d5e211ca634a94aa2c846eb71c3b",
+    "target": "66e8bb1aa9a6d8a27bd2e5a31dc36bd1aae27f11a0deb8b189548da48b30a673",
+    "style_guide": "c0eecf7f7b5e89956b7de9ab7a9eb647ff1a7ef701ccf2a7f0264d5eea15ca60",
+    "glossary": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8",
+    "audited_patch_file": "30bc4651a8bf2697949cecf4513fabfa0cecebf65497c5ee0405a5d3781f3707"
+  },
+  "input_paths": {
+    "en": "local_operator/i18n/catalogues/en/cli.config_help.json",
+    "context": "local_operator/i18n/catalogues/en/cli.config_help.context.json",
+    "target": "local_operator/i18n/catalogues/ur/cli.config_help.json",
+    "style_guide": "i18n/style-guides/ur.md",
+    "glossary": "i18n/glossary.md"
+  },
+  "audited_patch_values_equal_catalogue_values": true,
+  "source_sha256": "97f625f6c6e26f8723e471569a0227f8e4da18518f2ab50e444fe93345ab2c8c",
+  "target_sha256": "66e8bb1aa9a6d8a27bd2e5a31dc36bd1aae27f11a0deb8b189548da48b30a673",
+  "current_report_verdict": "PASS (locale-wide, round 2): BLOCKER 0 · MAJOR 0 · MINOR 2 · NIT 3; this namespace: 0 finding(s) over 2 round(s), final round 0 blocker / 0 major / 0 minor / 0 nit",
+  "ledger_status": "passed",
+  "unresolved_blocker_major": 0,
+  "finding_counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 0
+  },
+  "rounds": [
+    {
+      "round": 1,
+      "auditor_session": "dab7435f3cd0",
+      "counts": {
+        "blocker": 0,
+        "major": 0,
+        "minor": 0,
+        "nit": 0
+      }
+    },
+    {
+      "round": 2,
+      "auditor_session": "1a185836d3d9",
+      "counts": {
+        "blocker": 0,
+        "major": 0,
+        "minor": 0,
+        "nit": 0
+      }
+    }
+  ],
+  "rephrased_after_locale_audit": [],
+  "argument_order_audit": null,
+  "limitations": [
+    "Independent LLM review, not native-speaker certification. Open native-speaker review items are listed in the PR body (ambiguous.txt).",
+    "Scalar text evidence only (values, ICU argument/plural structure, terminal-cell counts computed by the auditors' own scripts). No terminal, RTL or device frame was rendered, so this is not rendered-layout proof.",
+    "The audit sessions were read-only and ran no repo validator; scripts/i18n/check.py, generate.py --check and the i18n tests were run later by the applier against these exact bytes (see the PR).",
+    "The sessions recorded their work in findings.jsonl, progress.log and summary.md rather than a shell log; audit.log here carries those records verbatim plus the applier's computed hashes, and no command output is invented.",
+    "Ledger rows were authored by script per docs/I18N.md because core has no ledger writer; hashes are computed from file bytes."
+  ],
+  "artifacts": [
+    "audit.log",
+    "findings.json",
+    "receipt.json",
+    "record.json",
+    "report.md"
+  ]
+}

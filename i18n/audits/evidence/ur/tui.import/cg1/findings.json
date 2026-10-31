@@ -1,0 +1,27 @@
+{
+  "locale": "ur",
+  "namespace": "tui.import",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 1,
+    "nit": 0
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 1,
+      "id": "UR-014",
+      "severity": "MINOR",
+      "namespace": "tui.import",
+      "key": "tui.import.empty_header",
+      "english": "No sessions to import",
+      "current": "درآمد کے لیے کوئی سیشن نہیں",
+      "problem": "Mixed terminology: empty_header/empty_sessions use «درآمد» while the other 30+ keys in this namespace use «امپورٹ». One concept, one word on one screen.",
+      "suggested": "امپورٹ کے لیے کوئی سیشن نہیں · empty_sessions: … امپورٹ کرنے کو کچھ نہیں۔",
+      "disposition": "fixed (remediation core-fix, session be04c022ebd4)"
+    }
+  ]
+}

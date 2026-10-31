@@ -1,0 +1,27 @@
+{
+  "locale": "ur",
+  "namespace": "tui.hub_links",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 1,
+    "minor": 0,
+    "nit": 0
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 1,
+      "id": "UR-009",
+      "severity": "MAJOR",
+      "namespace": "tui.hub_links",
+      "key": "tui.hub_links.policy.auto_push.help",
+      "english": "Publish local changes to {source} automatically when safe.",
+      "current": "محفوظ ہونے پر مقامی تبدیلیاں خودکار طور پر {source} پر شائع کریں۔",
+      "problem": "«محفوظ ہونے پر» is ambiguous between 'when safe' and 'when saved' — and this locale uses «محفوظ کریں» for Save (style guide), with tui.hub_links.policy.saving «محفوظ ہو رہا ہے…» on the same screen. A user can read it as 'publish local changes automatically whenever they are saved', broadening an auto-publish consent string.",
+      "suggested": "جب ایسا کرنا بے خطر ہو تو مقامی تبدیلیاں خودکار طور پر {source} پر شائع کریں۔ (or: جب شائع کرنا محفوظ ہو، …)",
+      "disposition": "fixed (remediation core-fix, session be04c022ebd4)"
+    }
+  ]
+}
