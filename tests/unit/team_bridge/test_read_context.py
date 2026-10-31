@@ -804,3 +804,135 @@ def test_the_wire_tripwire_is_armed_here_on_every_named_arm(
     _expect_trip()
     with pytest.raises(AssertionError, match=f"GUARD TRIPPED: {trip}"):
         operate(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# #3199 item 2: a held CONVERSATION message must read as held.
+#
+# The connector writes a conversation hold under the canonical feed ref
+# (``message_available:conversation_id=<bcv>/<bcmsg>/…``) while every read
+# surface asks by the bare ``bcmsg_`` id, so the proof snapshot used to answer
+# ``hold: None`` and the row read ``unreviewed`` with no content and no sign it
+# was held. These cells pin the cross-keyspace lookup and the guarantees it must
+# not loosen: no receipt-derived state (M-12a), pair ids unchanged, zero writes.
+# ---------------------------------------------------------------------------
+
+_CONV = "bcv_b0044d87aa11"
+_CONV_MSG = "bcmsg_held1"
+
+
+def _conversation_ref(message_id: str = _CONV_MSG, seq: int = 7) -> str:
+    return f"message_available:conversation_id={_CONV}/{message_id}/{seq}/0/human"
+
+
+def _hold_state(root: Path, owner: OwnerSnapshot, message_id: str) -> Mapping[str, Any]:
+    from local_operator.team_bridge.read_context import _screening_state
+
+    proof = Store(root).content_proof_readonly(owner, [message_id])
+    return _screening_state(proof[message_id]["hold"])
+
+
+def _store_image(root: Path) -> dict[str, int]:
+    with sqlite3.connect(state_db_path(root)) as conn:
+        tables = [
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name"
+            )
+        ]
+        return {
+            table: conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0] for table in tables
+        }
+
+
+def test_a_conversation_hold_under_its_feed_ref_reads_as_held(tmp_path: Path) -> None:
+    owner = _enroll(tmp_path, enabled=True)
+    # The connector's real write path: the composite key, canonicalised on write.
+    Store(tmp_path).persist_hold(
+        owner, _conversation_ref(), "budget_exhausted", retry_at=1_700_000_123.5
+    )
+    # Another conversation message's hold, and a ref whose thread_root merely
+    # NAMES the asked id, must not be mistaken for it.
+    Store(tmp_path).persist_hold(owner, _conversation_ref("bcmsg_other", 8), "breaker_open")
+
+    assert _hold_state(tmp_path, owner, _CONV_MSG) == {
+        "state": "held",
+        "hold_code": "budget_exhausted",
+        "retry_at": 1_700_000_123.5,
+    }
+    assert Store(tmp_path).screening_hold(owner, _CONV_MSG) is not None
+    assert Store(tmp_path).screening_hold_readonly(owner, _CONV_MSG) is not None
+    assert _hold_state(tmp_path, owner, "bcmsg_absent")["state"] == "unreviewed"
+
+
+def test_a_thread_root_tag_naming_the_id_is_not_its_hold(tmp_path: Path) -> None:
+    owner = _enroll(tmp_path, enabled=True)
+    reply = f"{_conversation_ref('bcmsg_reply', 9)}/thread_root={_CONV_MSG}"
+    Store(tmp_path).persist_hold(owner, reply, "breaker_open")
+
+    assert _hold_state(tmp_path, owner, _CONV_MSG)["state"] == "unreviewed"
+    assert _hold_state(tmp_path, owner, "bcmsg_reply")["hold_code"] == "breaker_open"
+
+
+def test_a_conversation_hold_code_outside_the_vocabulary_reads_unknown_hold(
+    tmp_path: Path,
+) -> None:
+    owner = _enroll(tmp_path, enabled=True)
+    Store(tmp_path).persist_hold(owner, _conversation_ref(), "provider said: rude words")
+
+    assert _hold_state(tmp_path, owner, _CONV_MSG) == {
+        "state": "held",
+        "hold_code": "unknown_hold",
+        "retry_at": None,
+    }
+
+
+def test_no_hold_row_still_reads_unreviewed(tmp_path: Path) -> None:
+    owner = _enroll(tmp_path, enabled=True)
+
+    assert _hold_state(tmp_path, owner, _CONV_MSG) == {
+        "state": "unreviewed",
+        "hold_code": None,
+        "retry_at": None,
+    }
+
+
+def test_a_reject_receipt_without_a_hold_row_still_reads_unreviewed(tmp_path: Path) -> None:
+    """M-12a negative control: the receipt is never consulted for this state."""
+
+    owner = _enroll(tmp_path, enabled=True)
+    item = _wire_item(message_id=_CONV_MSG)
+    _plant_proof(tmp_path, owner, item, verdict="reject")
+    proof = Store(tmp_path).content_proof_readonly(owner, [_CONV_MSG])[_CONV_MSG]
+    assert proof["receipt"] is not None and proof["receipt"]["verdict"] == "reject"
+
+    assert _hold_state(tmp_path, owner, _CONV_MSG) == {
+        "state": "unreviewed",
+        "hold_code": None,
+        "retry_at": None,
+    }
+
+
+def test_a_pair_id_resolves_its_own_hold_without_canonicalisation(tmp_path: Path) -> None:
+    owner = _enroll(tmp_path, enabled=True)
+    Store(tmp_path).persist_hold(owner, "bmsg_1", "breaker_open", retry_at=5.0)
+    # A composite whose segment happens to spell the pair id must not match it.
+    Store(tmp_path).persist_hold(owner, _conversation_ref("bcmsg_1", 3), "budget_exhausted")
+
+    assert _hold_state(tmp_path, owner, "bmsg_1") == {
+        "state": "held",
+        "hold_code": "breaker_open",
+        "retry_at": 5.0,
+    }
+    assert _hold_state(tmp_path, owner, "bmsg_2")["state"] == "unreviewed"
+
+
+def test_the_cross_keyspace_hold_read_writes_nothing(tmp_path: Path) -> None:
+    owner = _enroll(tmp_path, enabled=True)
+    Store(tmp_path).persist_hold(owner, _conversation_ref(), "budget_exhausted")
+    before = _store_image(tmp_path)
+
+    Store(tmp_path).content_proof_readonly(owner, [_CONV_MSG, "bcmsg_absent", "bmsg_1"])
+    Store(tmp_path).screening_hold_readonly(owner, _CONV_MSG)
+
+    assert _store_image(tmp_path) == before
