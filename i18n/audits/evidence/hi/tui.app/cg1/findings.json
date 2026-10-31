@@ -35,5 +35,6 @@
       "suggested": "\"…`lo !` स्वीकृति की प्रतीक्षा\"",
       "disposition": "fixed (remediation core-fix, session 76bcbfdf629d)"
     }
-  ]
+  ],
+  "counts_scope": "counts, result and gate_status describe locale-wide rounds 1-2 as recorded in the ledger; findings with round \"targeted-argorder\" come from session d8fb2395abc5 (read only the rephrased keys) and are not in those counts"
 }

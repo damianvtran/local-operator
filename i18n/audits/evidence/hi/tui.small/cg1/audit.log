@@ -76,6 +76,24 @@ read glossary.md + style-guides/hi.md (origin/main)
 ru wire.settings.hub_defaults.agents.help: 60 cells / limit 72 (earlier 76 figure stale)
 wrote findings.jsonl, verdict.txt, summary.md
 
+## targeted argument-order audit: audit dir core-argaudit/hi, auditor session d8fb2395abc5
+verdict.txt:
+PASS
+keys_read=10 blocker=0 major=0 minor=1 nit=2
+findings.jsonl:
+{"id": "HI-ARG-01", "severity": "MINOR", "namespace": "tui.hub_links", "key": "tui.hub_links.mark.retry", "english": "Retry {direction} for {item} at {source}", "current": "{direction} को {item} के लिए {source} पर फिर आज़माएँ", "problem": "Meaning correct (retry {direction} for {item} at {source}), but '{direction} को … फिर आज़माएँ' marks the action as an object with को, which reads stilted; a native reader expects '{direction} फिर आज़माएँ' without को.", "suggested": "{direction}: {item} के लिए {source} पर फिर आज़माएँ"}
+{"id": "HI-ARG-02", "severity": "NIT", "namespace": "tui.analytics", "key": "tui.analytics.search.summary_free_paid", "english": "{free} of {priced} priced free · {money} paid", "current": "{free} मुफ़्त (कुल {priced} मूल्य-वाले) · {money} भुगतान", "problem": "Meaning preserved (free out of priced; money paid). 'मूल्य-वाले' is hyphenated and stiff; 'कीमत वाले' is more natural.", "suggested": "{free} मुफ़्त (कुल {priced} कीमत वाले) · {money} भुगतान"}
+{"id": "HI-ARG-03", "severity": "NIT", "namespace": "tui.analytics", "key": "tui.analytics.rate.legend", "english": "decode rate over {shown, number} of {total, number} calls", "current": "decode दर {shown, number} कॉल पर (कुल {total, number})", "problem": "Meaning preserved (decode rate over {shown} of {total} calls). '(कुल {total})' is fine, but '(कुल {total} में से)' says outright that {shown} is a subset and keeps the argument order.", "suggested": "decode दर {shown, number} कॉल पर (कुल {total, number} में से)"}
+summary.md:
+# Independent audit: hi core, argument-order rephrases
+
+- Auditor: agent `i18n-auditor` (Local Operator session d8fb2395abc5), actual model `anthropic/claude-opus-5-5`. I did not translate these values. Read-only: no edits, builds or tests.
+- Scope: every key in `core-argorder/hi/changes.jsonl`. **10 of 10 read.** I judged each AFTER value fresh against English from `origin/main` (en catalogues), the hi style guide and `i18n/glossary.md`.
+- Checks: the current patch value equals AFTER for all 10 keys (two keys, `tui.library.building` and `wire.errors.agents.variable_not_found`, sit in namespaces `tui.library` and `wire.errors.agents`). Placeholder names, kinds and order match English for all 10, checked by script. The plural in `monitors_need_attention` has `one` and `other`, which covers every hi CLDR category. The `''` ICU escapes are kept. The NBSPs in `extras_used` are kept. No bidi controls, which is not applicable to hi anyway.
+- Meaning: no inversions. Every "X of Y" now reads as "X (कुल/सीमा Y)", so the subset or used count comes first and the total or limit sits in parentheses. This holds for used-of-maximum (`extras_used`, सीमा), shown-of-total, scanned-of-total, and free-of-priced, where money is still the paid amount.
+- Findings: 0 BLOCKER, 0 MAJOR, 1 MINOR (stilted को in `hub_links.mark.retry`), 2 NIT. See findings.jsonl.
+- Verdict: **PASS**.
+
 ## applier-computed (apply_locale.py, run against the worktree at 137984daf98e6491dfd97cb6812d51c1a98abe6c)
 keys merged for this namespace: 137
 sha256 en  local_operator/i18n/catalogues/en/tui.small.json = 16d49c4ba2a514bbde7da494443abade26a3b28c0389e6bca124d00aa7d0ed75

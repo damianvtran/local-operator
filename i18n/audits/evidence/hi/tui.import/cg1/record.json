@@ -40,14 +40,15 @@
     "target": "ade0ed26368a31530337eab1b45bde90f6b97259a929389b3a2f969946d30506",
     "style_guide": "82292dc8d13fcc93dc752457719264aed3cc20bb65ecfaba0f0e5a31f4cb40d5",
     "glossary": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8",
-    "audited_patch_file": "8c0754f9daee87a84033747ca2b0a2f4afeaf2083d8b57312427f0e08a209ec3"
+    "audited_input_manifest": "71dfe5b553eed45d23cee6927e95fb967f3bdea8a3e3e172626778775abece27"
   },
   "input_paths": {
     "en": "local_operator/i18n/catalogues/en/tui.import.json",
     "context": null,
     "target": "local_operator/i18n/catalogues/hi/tui.import.json",
     "style_guide": "i18n/style-guides/hi.md",
-    "glossary": "i18n/glossary.md"
+    "glossary": "i18n/glossary.md",
+    "audited_input_manifest": "i18n/audits/evidence/hi/_input/cg1.json"
   },
   "audited_patch_values_equal_catalogue_values": true,
   "source_sha256": "932e0f87210ff80950346c684afb000907610c9ff35388125977182120b136c2",
@@ -98,5 +99,6 @@
     "receipt.json",
     "record.json",
     "report.md"
-  ]
+  ],
+  "audited_input_binding": "Bound by the committed per-key manifest in input_paths.audited_input_manifest (file sha256 in input_hashes); tests/unit/i18n/test_audit_input_manifests.py recomputes every entry from the shipped catalogue. The former out-of-tree scratchpad file hash was dropped because no reader could re-hash it."
 }
