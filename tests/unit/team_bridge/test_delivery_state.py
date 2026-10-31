@@ -668,3 +668,42 @@ def test_a_slow_hub_costs_the_drain_at_most_the_short_cap(tmp_path, monkeypatch)
     assert _time.monotonic() - started < 5
     assert out["outcomes"][0]["action"] == "hold"
     assert len(published) == 1
+
+
+def test_a_coalesced_card_publishes_no_state_because_delivered_rides_the_admit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3201 x #3198: the coalescer must not re-publish a state it does not own.
+
+    Contract v1 as #3198 implements it: the connector writes ``held`` (PUT
+    delivery-state) for a message it is HOLDING, while ``delivered`` and
+    ``refused`` ride the ADMIT, write-once with the verdict. A card that the
+    wake coalescer buffered and flushed is therefore already covered by its
+    admit — and the ``already_posted`` group even more so, because its admit
+    happened on an earlier pass. Publishing anything at flush time would either
+    duplicate the admit's verdict or claim a delivery that this process did not
+    make.
+
+    Structural half of the same fact: ``flush_due`` receives no hub client at
+    all — only a ``deliver`` callback — so the coalescer CANNOT publish. This
+    cell pins the observable side: one admit, no state write, and the admit
+    carrying no refusal class.
+    """
+
+    a, config_dir, server, published, admit_kwargs = _rig(tmp_path, monkeypatch)
+    _wire_rig(monkeypatch, server, {"a": (a, config_dir)})
+
+    summary = asyncio.run(
+        loop_mod.run_iteration(
+            a,
+            config_dir=config_dir,
+            access=SimpleNamespace(credential_id=a.credential_id),
+            auth_store=None,
+        )
+    )
+    # The card went out in this iteration (the coalescer flushes a quiet
+    # conversation at the end of it), and it is a WAVE, not a hold.
+    assert [wake["action"] for wake in summary["coalesced_wakes"]] == ["delivered"]
+    assert published == [], "a delivered wake writes no delivery state; its admit did"
+    assert len(admit_kwargs) == 1, "exactly one admit carries this message's verdict"
+    assert "refusal_class" not in admit_kwargs[0]

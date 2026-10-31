@@ -275,6 +275,14 @@ class WakeCoalescer:
                 # "acked to the caller, woken nobody, no outcome recorded" is
                 # indistinguishable from a lost card when a test or an owner
                 # reads the summary afterwards (CI shard 1 remediation).
+                #
+                # NO delivery state is published here, and none is owed: the
+                # contract (#3198) writes ``held`` from the hold paths and lets
+                # ``delivered``/``refused`` ride the ADMIT write-once with the
+                # verdict — an admit that already happened for every message in
+                # this group, since only an admitted message is ever buffered.
+                # A "delivered" write here would claim a wake this process did
+                # not make (the very thing the verdict says it did not).
                 del self._groups[key]
                 logger.info(
                     "bridge: coalesced group settled before its flush code=card_already_posted"
