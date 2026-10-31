@@ -17,10 +17,14 @@ THE FROZEN LOCAL CONTRACT (agreed with the UI and hub lanes; do not rename):
   then nothing ancillary survives (no EXIF, no GPS, no ICC, no text chunks). A
   phone photo carries the location it was taken at, and a picture that is later
   published to a hub or a peer must not carry it along.
-* ``agent.yml`` gains ``avatar: {sha256, mime, bytes, updated_at} | null``; the
-  ``sha256`` is the digest of the STORED file's bytes, so it doubles as the HTTP
+* ``agent.yml`` gains ``avatar: {sha256, mime, bytes, updated_at, filename} | null``;
+  the ``sha256`` is the digest of the STORED file's bytes, so it doubles as the HTTP
   ETag and as a cache-busting ``?v=`` query a client builds without asking.
-  ``agent.yml`` is the authority: a stray file with no metadata is not a picture.
+  ``filename`` is the stored basename (``avatar.png`` / ``avatar.jpg``); a legacy
+  block written before the field existed falls back by mime (see
+  :func:`stored_name`). ``agent.yml`` is the authority: a stray file with no
+  metadata is not a picture, and a block whose file is missing, is a symlink, or
+  hashes to something other than ``sha256`` reads as NO picture.
 * Input gate: PNG, JPEG, WebP, GIF (first frame) and HEIC (only when the
   ``images`` extra's pillow-heif loads). <= :data:`INPUT_MAX_BYTES` in and
   <= :data:`INPUT_MAX_PIXELS` decoded, identified by magic bytes, never by name.
@@ -45,6 +49,7 @@ import hashlib
 import io
 import logging
 import os
+import stat
 import threading
 import uuid
 from dataclasses import dataclass
@@ -225,6 +230,13 @@ def normalise(data: bytes) -> NormalisedAvatar:
         # Orientation into the PIXELS before any geometry, or a phone portrait
         # is cropped and stored sideways once the tag is dropped below.
         image = ImageOps.exif_transpose(image)
+        if image.mode in ("I", "I;16", "I;16L", "I;16B", "I;16N"):
+            # Pillow's 16-bit -> 8-bit ``convert`` CLAMPS (anything >= 255 is
+            # white), so a 16-bit greyscale PNG -- what scientific and some
+            # medical/scanner exports produce -- would saturate to a white disc.
+            # Scale the 16-bit range down to 8 first; ``point`` on a mode "I"/
+            # "I;16" image evaluates the callable per-value on the 16-bit data.
+            image = image.point(lambda value: value * (1 / 256)).convert("L")
         has_alpha = image.mode in ("RGBA", "LA", "PA") or (
             image.mode == "P" and "transparency" in image.info
         )
@@ -280,20 +292,28 @@ def _write_bytes_atomically(target: Path, data: bytes) -> None:
 def store(agent_dir: Path, avatar: NormalisedAvatar) -> dict[str, Any]:
     """Write the normalised file into ``agent_dir`` and return its metadata block.
 
-    The new file lands first, THEN the stale sibling goes: a reader in between
-    sees two files, and the metadata the caller writes next names the right one.
-    The reverse order would leave a window with no picture at all.
+    ONLY the new file is written here. The stale sibling is removed by the caller
+    AFTER ``agent.yml`` names the new file (:func:`remove_siblings`): deleting it
+    first left a PNG->JPEG flip that died in between with metadata naming a PNG
+    that no longer existed. In this order every interruption reads as either the
+    old picture (died before the yml write) or the new one (died after it, with a
+    stray sibling that is harmless because ``agent.yml`` is the authority).
     """
     _write_bytes_atomically(agent_dir / avatar.name, avatar.data)
-    for name in STORED_NAMES:
-        if name != avatar.name:
-            (agent_dir / name).unlink(missing_ok=True)
     return {
         "sha256": avatar.sha256,
         "mime": avatar.mime,
         "bytes": len(avatar.data),
         "updated_at": datetime.now(timezone.utc),
+        "filename": avatar.name,
     }
+
+
+def remove_siblings(agent_dir: Path, keep: str) -> None:
+    """Delete every stored picture file except ``keep`` (the committed one)."""
+    for name in STORED_NAMES:
+        if name != keep:
+            (agent_dir / name).unlink(missing_ok=True)
 
 
 def remove(agent_dir: Path) -> None:
@@ -302,29 +322,73 @@ def remove(agent_dir: Path) -> None:
         (agent_dir / name).unlink(missing_ok=True)
 
 
-def stored_path(agent_dir: Path, mime: Optional[str]) -> Optional[Path]:
-    """The stored file the metadata's ``mime`` names, if it is on disk."""
-    for name, name_mime in _MIME_BY_NAME.items():
-        if name_mime == mime:
-            path = agent_dir / name
-            return path if path.is_file() else None
-    return None
+def stored_name(meta: Any) -> Optional[str]:
+    """The stored basename the metadata block names, or ``None`` when it is unusable.
+
+    ``filename`` wins when present; a LEGACY block (written before the field
+    existed) falls back by mime. The name must be exactly one of
+    :data:`STORED_NAMES` and agree with ``mime`` -- ``agent.yml`` is writable by
+    the agent itself, so a ``../x`` or ``/etc/passwd`` filename (or a name that
+    contradicts the mime) is never joined onto a path: it reads as no picture.
+    """
+    mime = getattr(meta, "mime", None)
+    expected = next((n for n, m in _MIME_BY_NAME.items() if m == mime), None)
+    if expected is None:
+        return None
+    filename = getattr(meta, "filename", None)
+    if filename in (None, ""):
+        return expected
+    if not isinstance(filename, str) or filename != expected:
+        return None
+    return filename
+
+
+def stored_path(agent_dir: Path, meta: Any) -> Optional[Path]:
+    """The stored file ``meta`` names, if it is a REGULAR file on disk.
+
+    ``lstat``, not ``is_file``: a symlink planted as ``avatar.png`` would be
+    followed by ``is_file`` and served from outside the agent directory.
+    """
+    name = stored_name(meta)
+    if name is None:
+        return None
+    path = agent_dir / name
+    try:
+        return path if stat.S_ISREG(os.lstat(path).st_mode) else None
+    except (OSError, ValueError):
+        return None
 
 
 def read(agent_dir: Path, meta: Any) -> tuple[bytes, str, str]:
     """``(bytes, mime, sha256)`` for the stored picture, or ``AvatarError(not_found)``.
 
-    ``meta`` is the ``agent.yml`` block (the authority). The sha served is the
-    metadata's, which equals the file digest by construction of :func:`store`.
+    ``meta`` is the ``agent.yml`` block (the authority). The file is opened
+    WITHOUT following a symlink, and the bytes actually read are hashed: a file
+    that does not hash to ``meta.sha256`` (tampered, truncated, replaced behind
+    the metadata's back) is ``not_found`` rather than served under an ETag that is
+    not the digest of the body. The sha returned is therefore the body's own.
     """
     if meta is None:
         raise AvatarError(NOT_FOUND, "no picture set")
     mime = getattr(meta, "mime", None)
     sha = getattr(meta, "sha256", None)
-    path = stored_path(agent_dir, mime)
+    path = stored_path(agent_dir, meta)
     if path is None or not sha or not mime:
         raise AvatarError(NOT_FOUND, "picture file missing")
-    return path.read_bytes(), mime, sha
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+        with os.fdopen(fd, "rb") as handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                raise AvatarError(NOT_FOUND, "picture is not a regular file")
+            # Bounded: a stored picture is <= STORED_MAX_BYTES by construction, so
+            # a larger file is not ours and must not be read whole.
+            data = handle.read(STORED_MAX_BYTES + 1)
+    except OSError as exc:
+        raise AvatarError(NOT_FOUND, "picture file unreadable") from exc
+    if len(data) > STORED_MAX_BYTES or hashlib.sha256(data).hexdigest() != sha:
+        raise AvatarError(NOT_FOUND, "picture does not match its recorded digest")
+    return data, mime, sha
 
 
 def emit(agent_id: str, agent_dir: Path, meta: Any) -> None:
@@ -337,7 +401,7 @@ def emit(agent_id: str, agent_dir: Path, meta: Any) -> None:
         _notify(AvatarChange(agent_id, None, None, None))
         return
     mime = getattr(meta, "mime", None)
-    _notify(AvatarChange(agent_id, meta.sha256, mime, stored_path(agent_dir, mime)))
+    _notify(AvatarChange(agent_id, meta.sha256, mime, stored_path(agent_dir, meta)))
 
 
 # -- surface helpers -----------------------------------------------------------
@@ -402,6 +466,9 @@ def meta_json(meta: Any) -> Optional[dict[str, Any]]:
         "mime": meta.mime,
         "bytes": meta.bytes,
         "updated_at": updated.isoformat() if isinstance(updated, datetime) else updated,
+        # The EFFECTIVE name (a legacy block's mime fallback included), so a
+        # consumer never has to re-derive it; None only for an unusable block.
+        "filename": stored_name(meta),
     }
 
 
@@ -448,6 +515,37 @@ def _agents_fingerprint(agents_dir: Path) -> tuple[Any, ...]:
     return tuple(parts)
 
 
+class _BlockView:
+    """A raw ``agent.yml`` ``avatar`` mapping, read like an ``AgentAvatarMeta``.
+
+    The phone relay and the row index read ``agent.yml`` without constructing an
+    ``AgentRegistry`` (which mkdirs and migrates), so they hold a dict, not the
+    pydantic model; this gives :func:`stored_name` / :func:`read` the attribute
+    shape they take, with one reader of the filename rule instead of two.
+    """
+
+    def __init__(self, block: dict[str, Any]) -> None:
+        self.sha256 = block.get("sha256")
+        self.mime = block.get("mime")
+        self.filename = block.get("filename")
+
+
+def is_plain_agent_id(agent_id: Any) -> bool:
+    """Is ``agent_id`` safe to join under ``agents_dir`` as ONE path segment?
+
+    The shared id guard for every surface that takes an id from a URL. A NUL byte
+    is refused here because ``Path.read_text`` raises a bare ``ValueError`` on it
+    (a 500 on the relay route) rather than the ``OSError`` the callers expect.
+    """
+    return (
+        isinstance(agent_id, str)
+        and bool(agent_id)
+        and "\x00" not in agent_id
+        and agent_id not in (".", "..")
+        and Path(agent_id).name == agent_id
+    )
+
+
 def _build_index(agents_dir: Path) -> dict[str, AgentIdentity]:
     import yaml
 
@@ -470,6 +568,10 @@ def _build_index(agents_dir: Path) -> dict[str, AgentIdentity]:
             continue
         avatar = payload.get("avatar")
         sha = avatar.get("sha256") if isinstance(avatar, dict) else None
+        if isinstance(avatar, dict) and stored_name(_BlockView(avatar)) is None:
+            # A block naming a file we would never serve (hostile filename, or a
+            # name that contradicts its mime) advertises no picture on the rows.
+            sha = None
         # First row wins for a duplicated name, matching ``get_agent_by_name``'s
         # first-match rule closely enough for a picture (names are unique in
         # practice: the registry refuses a duplicate on create and rename).
@@ -574,22 +676,17 @@ def read_stored(config_root: Path, agent_id: str) -> tuple[bytes, str, str]:
     """
     import yaml
 
-    if not agent_id or agent_id in (".", "..") or Path(agent_id).name != agent_id:
+    if not is_plain_agent_id(agent_id):
         raise AvatarError(NOT_FOUND, "not an agent id")
     agent_dir = Path(config_root) / "agents" / agent_id
     try:
         payload = yaml.safe_load((agent_dir / "agent.yml").read_text("utf-8"))
-    except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
+    except (OSError, UnicodeDecodeError, yaml.YAMLError, ValueError) as exc:
         raise AvatarError(NOT_FOUND, "no such agent") from exc
     block = payload.get("avatar") if isinstance(payload, dict) else None
     if not isinstance(block, dict):
         raise AvatarError(NOT_FOUND, "no picture set")
-
-    class _Meta:
-        sha256 = block.get("sha256")
-        mime = block.get("mime")
-
-    return read(agent_dir, _Meta)
+    return read(agent_dir, _BlockView(block))
 
 
 def stored_sha(config_root: Path, agent_id: str) -> Optional[str]:
@@ -597,6 +694,8 @@ def stored_sha(config_root: Path, agent_id: str) -> Optional[str]:
 
     Lets a relay answer a revalidation (304) without reading the file.
     """
+    if not is_plain_agent_id(agent_id):
+        return None
     for identity in agent_index(Path(config_root)).values():
         if identity.agent_id == agent_id:
             return identity.avatar_sha256

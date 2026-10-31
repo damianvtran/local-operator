@@ -65,7 +65,7 @@ import {
 import { blockingPending, outstandingAsks } from "../lib/asks";
 import { askOpenPolicy, namesEveryOutstanding, readQueue } from "../lib/ask-open-policy";
 import type { SessionProjection } from "../types";
-import { AgentAvatar, agentAvatarUrl } from "../components/agent-avatar";
+import { AgentAvatar, useAgentAvatar } from "../components/agent-avatar";
 
 /** A field the keyboard types into. The phone's reading of "the user is typing" is
     FOCUS, not a draft sitting in storage (see the open-by-default block in
@@ -200,10 +200,10 @@ function Header({
 	const row = sessions.find((r) => r.session_id === sessionId);
 	const pinned = pinMarks.get(sessionId) ?? Boolean(row?.pinned);
 	/* The bound agent's picture (core `agent_avatar` contract), from the LIST row:
-	   the projection does not carry it, and the list row is already in memory. The
-	   alt text uses the conversation's name — the row carries no agent label. */
-	const avatarUrl = agentAvatarUrl(row?.agent_id, row?.avatar_sha256);
-	const agentName = projection.conversation_name || "untitled";
+	   the projection does not carry it, and the list row is already in memory.
+	   `avatar.url` goes null again if the image fails to load, which removes the
+	   button below -- a 404 leaves the header exactly as it is without a picture. */
+	const avatar = useAgentAvatar(row?.agent_id, row?.avatar_sha256);
 	const [avatarHint, setAvatarHint] = useState(false);
 	useEffect(() => {
 		if (!avatarHint) return;
@@ -260,14 +260,16 @@ function Header({
 			>
 				<span aria-hidden dir="ltr" className="lo-directional">‹</span>
 			</button>
-			{avatarUrl ? (
+			{avatar.url ? (
 				/* THE AGENT'S PICTURE, LEFT OF THE NAME (operator rule), for a session
 				   bound to an agent that has one; no picture, no control, and the
 				   header is exactly what it was. The phone has NO picture editor in
 				   this scope, so a tap or a long-press explains where to change it
 				   (the desktop app's Agents page) rather than opening anything. A
-				   real button, so it is focusable and announced; the label says what
-				   it is for in the same words as the desktop's pencil overlay. */
+				   real button, so it is focusable and announced. Its name is the
+				   hint it shows: the old "Change <whole conversation title>'s
+				   picture" promised an action the control does not take and read the
+				   entire title aloud (design review D2). */
 				<button
 					type="button"
 					onClick={showAvatarHint}
@@ -275,10 +277,10 @@ function Header({
 						event.preventDefault();
 						showAvatarHint();
 					}}
-					aria-label={messageRuntime.t("relay.agent_avatar.change", { name: agentName })}
+					aria-label={messageRuntime.t("relay.agent_avatar.desktop_hint")}
 					className={cn(HEADER_CONTROL, "-me-1 shrink-0")}
 				>
-					<AgentAvatar agentId={row?.agent_id} sha={row?.avatar_sha256} name={agentName} size={32} />
+					<AgentAvatar url={avatar.url} size={28} onFailed={avatar.onFailed} />
 				</button>
 			) : null}
 			<div className="min-w-0 flex-1">

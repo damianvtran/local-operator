@@ -6159,8 +6159,10 @@ def build_app(daemon: MobileDaemon):
         served here. Mounted at the SAME path as the core route on purpose: a
         client builds one URL shape (``/v1/agents/{id}/avatar?v=<sha>``) on every
         surface. Same semantics as core: strong ETag = metadata sha256,
-        ``Cache-Control: no-cache``, 304 on a matching ``If-None-Match`` (decided
-        from the memoised index, no file read), 404 when unset or unknown.
+        ``Cache-Control: private, no-cache`` (auth-gated, and the tunnel gateway is
+        a shared cache hop), 304 on a matching ``If-None-Match`` (decided from the
+        memoised index, no file read), 404 when unset or unknown. A symlinked or
+        digest-mismatched file is 404 too (``agent_avatar.read``).
 
         Behind relay auth; an unauthenticated read is a 401, never the login
         redirect the HTML pages get, because an ``<img>`` cannot follow a login.
@@ -6182,7 +6184,7 @@ def build_app(daemon: MobileDaemon):
         if known and etag_matches(request.headers.get("if-none-match", ""), known):
             return Response(
                 status_code=304,
-                headers={"ETag": agent_avatar.etag(known), "Cache-Control": "no-cache"},
+                headers={"ETag": agent_avatar.etag(known), "Cache-Control": "private, no-cache"},
             )
         try:
             data, mime, sha = await asyncio.to_thread(agent_avatar.read_stored, root, agent_id)
@@ -6191,7 +6193,7 @@ def build_app(daemon: MobileDaemon):
                 {"error": exc.reason, "code": exc.reason},
                 status_code=agent_avatar.HTTP_STATUS.get(exc.reason, 404),
             )
-        headers = {"ETag": agent_avatar.etag(sha), "Cache-Control": "no-cache"}
+        headers = {"ETag": agent_avatar.etag(sha), "Cache-Control": "private, no-cache"}
         if etag_matches(request.headers.get("if-none-match", ""), sha):
             return Response(status_code=304, headers=headers)
         return Response(content=data, media_type=mime, headers=headers)

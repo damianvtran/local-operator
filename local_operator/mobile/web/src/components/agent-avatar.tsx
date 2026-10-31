@@ -22,7 +22,6 @@
  */
 import { type ReactNode, useState } from "react";
 import { cn } from "../lib/cn";
-import { messageRuntime } from "../store";
 
 /** Which layout pairs the picture with the row's status mark. */
 export const STATUS_PLACEMENT: "badge" | "beside" = "badge";
@@ -36,66 +35,88 @@ export function agentAvatarUrl(
 	return `/v1/agents/${encodeURIComponent(agentId)}/avatar?v=${encodeURIComponent(sha)}`;
 }
 
+/**
+ * The picture a row/header should lay out for, or `null` once it failed to load.
+ *
+ * WHY THE LAYOUT OWNER HOLDS THIS, NOT THE `<img>`. A 404 (picture removed
+ * between frames, a stale sha, an expired cookie) must leave EXACTLY the
+ * no-picture layout: no 24px box, no 48px title indent, no invisible header
+ * button. The `<img>` alone cannot give that, because its fallback renders
+ * inside a wrapper whose size and indent the PARENT already decided from "a URL
+ * exists" (design review D1: a blank hole, a spinner stranded at an empty box's
+ * corner). So the parent asks this hook, passes `onFailed` down, and re-renders
+ * without the slot when the image reports an error. Keyed by URL, so the next
+ * sha retries; component-local, so a remount (or a reload) retries too.
+ */
+export function useAgentAvatar(
+	agentId: string | null | undefined,
+	sha: string | null | undefined,
+): { url: string | null; onFailed: () => void } {
+	const url = agentAvatarUrl(agentId, sha);
+	const [failed, setFailed] = useState<string | null>(null);
+	return { url: url && failed !== url ? url : null, onFailed: () => setFailed(url) };
+}
+
+/**
+ * The picture itself. DECORATIVE by default (`alt=""`): it always sits inside a
+ * control that already has a name (the row's button, the header title), and a
+ * non-empty alt made a screen reader say the conversation twice, the first time
+ * wrongly ("Inbox triage's picture working Inbox triage …" -- design review D2).
+ * A 1px `ring-control` edge keeps a near-white picture on the light canvas and a
+ * near-black one on the dark canvas from dissolving into it (1.09:1 / 1.01:1
+ * without it); it is the ring `BrandMark` already uses for the same reason.
+ */
 export function AgentAvatar({
-	agentId,
-	sha,
-	name,
+	url,
 	size,
-	fallback = null,
+	onFailed,
 	className,
 }: {
-	agentId?: string | null;
-	sha?: string | null;
-	/** The agent's display name, for the alt text. */
-	name: string;
+	url: string;
 	/** Edge in CSS px; the stored file is 512², so any phone density is sharp. */
 	size: number;
-	fallback?: ReactNode;
+	onFailed?: () => void;
 	className?: string;
 }) {
-	const url = agentAvatarUrl(agentId, sha);
-	/* A 404/401 (picture removed between frames, session cookie expired) falls
-	   back to the glyph instead of a broken-image icon. Keyed by URL so the next
-	   sha retries. */
-	const [failed, setFailed] = useState<string | null>(null);
-	if (!url || failed === url) return <>{fallback}</>;
 	return (
 		<img
 			src={url}
-			alt={messageRuntime.t("relay.agent_avatar.alt", { name })}
+			alt=""
 			width={size}
 			height={size}
 			style={{ width: size, height: size }}
-			className={cn("shrink-0 rounded-full object-cover bg-surface", className)}
+			className={cn("shrink-0 rounded-full object-cover bg-surface ring-1 ring-control", className)}
 			draggable={false}
-			onError={() => setFailed(url)}
+			onError={onFailed}
 			data-agent-avatar=""
 		/>
 	);
 }
 
 /**
- * The list row's leading slot when the row has a picture: the picture with the
- * status mark kept. Without a picture it returns `status` untouched, so every
+ * The list row's leading slot when the row has a (loadable) picture: the picture
+ * with the status mark kept. Without one it returns `status` untouched, so every
  * pictureless row's geometry is byte-for-byte what it was.
+ *
+ * SIZES MATCH THE NATIVE APP (local-operator-mobile#143, design-approved): a 24px
+ * picture, the 12px status mark on a 16px disc (a real 2px ring around it), the
+ * disc in the ROW's surface colour. `group-active:bg-surface` follows the pressed
+ * row (the card carries `group`), so the ring never reads as a patch on a
+ * pressed row (design review D3/N2).
  */
 export function AvatarWithStatus({
-	agentId,
-	sha,
-	name,
+	avatar,
 	status,
 	hasStatus,
 }: {
-	agentId?: string | null;
-	sha?: string | null;
-	name: string;
+	avatar: { url: string | null; onFailed: () => void };
 	/** The existing 12px status slot, unchanged. */
 	status: ReactNode;
 	/** Whether the slot currently shows a mark (idle rows show a transparent one). */
 	hasStatus: boolean;
 }) {
-	if (!agentAvatarUrl(agentId, sha)) return <>{status}</>;
-	const picture = <AgentAvatar agentId={agentId} sha={sha} name={name} size={24} />;
+	if (!avatar.url) return <>{status}</>;
+	const picture = <AgentAvatar url={avatar.url} size={24} onFailed={avatar.onFailed} />;
 	if (STATUS_PLACEMENT === "beside") {
 		return (
 			<span className="flex shrink-0 items-center gap-1.5">
@@ -108,10 +129,10 @@ export function AvatarWithStatus({
 		<span className="relative inline-flex size-6 shrink-0" data-avatar-status="badge">
 			{picture}
 			{hasStatus ? (
-				/* The badge: the ladder's own mark on a canvas-coloured disc at the
+				/* The badge: the ladder's own mark on a row-coloured disc at the
 				   end-bottom corner (logical inset, so RTL mirrors it). The disc is
 				   what keeps a red pulse or an accent dot readable over a busy photo. */
-				<span className="absolute -bottom-0.5 -end-0.5 flex size-3.5 items-center justify-center rounded-full bg-canvas">
+				<span className="absolute -bottom-0.5 -end-0.5 flex size-4 items-center justify-center rounded-full bg-canvas group-active:bg-surface">
 					{status}
 				</span>
 			) : null}

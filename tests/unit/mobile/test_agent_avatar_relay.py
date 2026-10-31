@@ -67,7 +67,7 @@ def test_relay_avatar_route_auth_etag_304_404(store) -> None:
     assert got.status_code == 200
     assert got.headers["content-type"] == "image/png"
     assert got.headers["etag"] == f'"{meta.sha256}"'
-    assert got.headers["cache-control"] == "no-cache"
+    assert got.headers["cache-control"] == "private, no-cache"
     assert hashlib.sha256(got.content).hexdigest() == meta.sha256
 
     cached = client.get(url, headers={"if-none-match": got.headers["etag"]})
@@ -78,3 +78,42 @@ def test_relay_avatar_route_auth_etag_304_404(store) -> None:
     AgentRegistry(config_dir=cfg, refresh_interval=0.0).clear_agent_avatar(agent.id)
     gone = client.get(url)
     assert gone.status_code == 404 and gone.json()["code"] == "not_found"
+
+
+def _login(cfg) -> TestClient:
+    client = TestClient(
+        build_app(MobileDaemon(port=0, password="fixture-password")), follow_redirects=False
+    )
+    assert client.post("/login", data={"password": "fixture-password"}).status_code == 303
+    return client
+
+
+def test_relay_route_answers_404_not_500_for_a_nul_in_the_id(store) -> None:
+    """QA Q1 / review R6: ``a%00b`` raised a bare ValueError out of ``read_text``."""
+    _cfg, agent, _meta = store
+    client = _login(_cfg)
+    for bad in ("a%00b", "..%00", f"{agent.id}%00"):
+        got = client.get(f"/v1/agents/{bad}/avatar")
+        assert got.status_code == 404, (bad, got.status_code)
+        assert got.json()["code"] == "not_found"
+
+
+def test_relay_route_refuses_a_symlinked_picture_and_tampered_bytes(store, tmp_path) -> None:
+    """Review R2 / QA Q2 on the phone route: nothing outside the agent dir is served."""
+    cfg, agent, meta = store
+    client = _login(cfg)
+    url = f"/v1/agents/{agent.id}/avatar"
+    path = cfg / "agents" / agent.id / "avatar.png"
+    good = path.read_bytes()
+    assert client.get(url).status_code == 200
+
+    path.write_bytes(good + b"appended")
+    assert client.get(url, headers={"if-none-match": '"stale"'}).status_code == 404
+    path.write_bytes(good)
+
+    outside = tmp_path / "outside.txt"
+    outside.write_bytes(b"TOPSECRET-FILE-CONTENT\n")
+    path.unlink()
+    path.symlink_to(outside)
+    got = client.get(url, headers={"if-none-match": '"stale"'})
+    assert got.status_code == 404 and b"TOPSECRET" not in got.content

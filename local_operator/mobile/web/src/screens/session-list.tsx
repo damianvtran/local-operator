@@ -81,7 +81,7 @@ import { getGroupTags, setGroupTags } from "../lib/session-group-pref";
 import { groupByPrimaryTag, hasGroupedRows } from "../lib/session-grouping";
 import type { SessionSummary, TagCatalogueEntry } from "../types";
 import { cn } from "../lib/cn";
-import { agentAvatarUrl, AvatarWithStatus } from "../components/agent-avatar";
+import { AvatarWithStatus, useAgentAvatar } from "../components/agent-avatar";
 
 /** What a successful bulk clear says it did — naming every bucket it missed.
 
@@ -344,6 +344,9 @@ function SessionCard({
 	/* The second line's cwd half, computed once so the D1 reservation below can
 	   test emptiness against exactly what is rendered. */
 	const cwdText = (home ? shortenHome(s.cwd, home) : s.cwd).split("/").filter(Boolean).at(-1) ?? "";
+	/* The bound agent's picture; `avatar.url` is null again if it failed to load,
+	   and the row then lays out exactly as a pictureless one. */
+	const avatar = useAgentAvatar(s.agent_id, s.avatar_sha256);
 	return (
 		<button
 			ref={ref}
@@ -382,7 +385,7 @@ function SessionCard({
 				}
 				navigate(`/s/${encodeURIComponent(s.session_id)}`);
 			}}
-			className="flex min-h-14 w-full flex-col justify-center gap-0.5 ps-4 pe-11 py-2 text-start select-none active:bg-surface"
+			className="group flex min-h-14 w-full flex-col justify-center gap-0.5 ps-4 pe-11 py-2 text-start select-none active:bg-surface"
 		>
 			<div className="flex items-center gap-2">
 				{/* ONE reserved indicator slot serving every state, so every title
@@ -416,9 +419,7 @@ function SessionCard({
 				    stay legible, so the picture never replaces the ladder. A row with
 				    no picture renders the slot exactly as before. */}
 				<AvatarWithStatus
-					agentId={s.agent_id}
-					sha={s.avatar_sha256}
-					name={s.conversation_name || "untitled"}
+					avatar={avatar}
 					hasStatus={decision || s.streaming || unread || delegating}
 					status={
 					<span
@@ -512,7 +513,7 @@ function SessionCard({
 			    blank second line had. A tagged row grows by exactly one line. */}
 			{/* The second line starts under the title: slot (12px) + gap = ps-5, or the
 			    24px picture + gap = ps-8 on a row that draws one. */}
-			<div className={cn("flex min-w-0 items-center gap-2 text-meta tabular-nums text-ink-dim", agentAvatarUrl(s.agent_id, s.avatar_sha256) ? "ps-8" : "ps-5")}>
+			<div className={cn("flex min-w-0 items-center gap-2 text-meta tabular-nums text-ink-dim", avatar.url ? "ps-8" : "ps-5")}>
 				<SessionTagLine tags={s.tags ?? []} primary={s.primary ?? null} className="max-w-[45%] shrink-0" />
 				<span className="min-w-0 truncate">{[
 					s.streaming ? messageRuntime.t("relay.chrome.session.subtitle.working_plain") : null,

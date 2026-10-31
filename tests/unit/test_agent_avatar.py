@@ -459,3 +459,259 @@ def test_import_drops_an_archives_picture_block(registry, agent, tmp_path):
     imported = registry.import_agent(archive)
     assert imported.agent.avatar is None
     assert not (registry.config_dir / "agents" / imported.agent.id / "avatar.png").exists()
+
+
+# -- round-1 remediation: contract filename, stale registries, hostile files -----
+
+
+def _yml(registry, agent_id) -> dict:
+    return yaml.safe_load((registry.agents_dir / agent_id / "agent.yml").read_text())
+
+
+def _rewrite_block(registry, agent_id, **changes) -> None:
+    """Edit the on-disk ``avatar`` block the way a hand edit or an agent could."""
+    path = registry.agents_dir / agent_id / "agent.yml"
+    payload = yaml.safe_load(path.read_text())
+    for key, value in changes.items():
+        if value is None:
+            payload["avatar"].pop(key, None)
+        else:
+            payload["avatar"][key] = value
+    path.write_text(yaml.safe_dump(payload))
+
+
+def test_writers_always_record_the_stored_filename(registry, agent, monkeypatch):
+    meta = registry.set_agent_avatar(agent.id, _png())
+    assert meta.filename == "avatar.png"
+    assert _yml(registry, agent.id)["avatar"]["filename"] == "avatar.png"
+    assert agent_avatar.meta_json(meta)["filename"] == "avatar.png"
+    monkeypatch.setattr(agent_avatar, "STORED_MAX_BYTES", 100)
+    flipped = registry.set_agent_avatar(agent.id, _png())
+    assert flipped.filename == "avatar.jpg" and flipped.mime == "image/jpeg"
+    assert _yml(registry, agent.id)["avatar"]["filename"] == "avatar.jpg"
+
+
+def test_a_legacy_block_without_filename_falls_back_by_mime(registry, agent):
+    meta = registry.set_agent_avatar(agent.id, _png())
+    _rewrite_block(registry, agent.id, filename=None)
+    fresh = AgentRegistry(config_dir=registry.config_dir, refresh_interval=0.0)
+    row = fresh.get_agent(agent.id)
+    assert row.avatar is not None and row.avatar.filename is None
+    data, mime, sha = agent_avatar.read(fresh.agents_dir / agent.id, row.avatar)
+    assert (mime, sha) == ("image/png", meta.sha256)
+    assert agent_avatar.read_stored(fresh.config_dir, agent.id)[2] == meta.sha256
+    # The listing wire form always reports the EFFECTIVE name.
+    assert agent_avatar.meta_json(row.avatar)["filename"] == "avatar.png"
+
+
+@pytest.mark.parametrize("hostile", ["../x", "/etc/passwd", "sub/avatar.png", "avatar.jpg", "x\0y"])
+def test_a_filename_that_is_not_the_plain_stored_name_reads_as_no_avatar(registry, agent, hostile):
+    registry.set_agent_avatar(agent.id, _png())
+    _rewrite_block(registry, agent.id, filename=hostile)
+    fresh = AgentRegistry(config_dir=registry.config_dir, refresh_interval=0.0)
+    with pytest.raises(agent_avatar.AvatarError) as caught:
+        agent_avatar.read(fresh.agents_dir / agent.id, fresh.get_agent(agent.id).avatar)
+    assert caught.value.reason == agent_avatar.NOT_FOUND
+    with pytest.raises(agent_avatar.AvatarError):
+        agent_avatar.read_stored(fresh.config_dir, agent.id)
+    assert fresh.agent_avatar_path(agent.id) is None
+    # ...and the row index advertises no picture for it either.
+    agent_avatar._index_cache.clear()
+    assert (
+        agent_avatar.session_agent_identity(
+            fresh.config_dir, "no-such-session", agent_name="picbot"
+        ).avatar_sha256
+        is None
+    )
+
+
+def test_a_symlink_swapped_in_for_the_picture_is_not_served(registry, agent, tmp_path):
+    registry.set_agent_avatar(agent.id, _png())
+    outside = tmp_path / "outside.txt"
+    outside.write_bytes(b"TOPSECRET-FILE-CONTENT\n")
+    target = registry.agents_dir / agent.id / "avatar.png"
+    target.unlink()
+    target.symlink_to(outside)
+    meta = registry.get_agent(agent.id).avatar
+    with pytest.raises(agent_avatar.AvatarError) as caught:
+        agent_avatar.read(registry.agents_dir / agent.id, meta)
+    assert caught.value.reason == agent_avatar.NOT_FOUND
+    with pytest.raises(agent_avatar.AvatarError):
+        agent_avatar.read_stored(registry.config_dir, agent.id)
+    assert registry.agent_avatar_path(agent.id) is None
+
+
+def test_bytes_that_no_longer_hash_to_the_recorded_sha_are_not_served(registry, agent):
+    registry.set_agent_avatar(agent.id, _png())
+    path = registry.agents_dir / agent.id / "avatar.png"
+    path.write_bytes(path.read_bytes() + b"appended")
+    with pytest.raises(agent_avatar.AvatarError) as caught:
+        agent_avatar.read(registry.agents_dir / agent.id, registry.get_agent(agent.id).avatar)
+    assert caught.value.reason == agent_avatar.NOT_FOUND
+    assert "digest" in caught.value.detail
+
+
+def test_served_sha_is_the_digest_of_the_bytes_returned(registry, agent):
+    registry.set_agent_avatar(agent.id, _png())
+    data, _mime, sha = agent_avatar.read(
+        registry.agents_dir / agent.id, registry.get_agent(agent.id).avatar
+    )
+    assert hashlib.sha256(data).hexdigest() == sha
+
+
+@pytest.mark.parametrize("bad", ["a\0b", "..\0", "\0", "ok\0"])
+def test_a_nul_in_an_id_is_not_found_not_a_valueerror(registry, agent, bad):
+    registry.set_agent_avatar(agent.id, _png())
+    assert agent_avatar.is_plain_agent_id(bad) is False
+    with pytest.raises(agent_avatar.AvatarError) as caught:
+        agent_avatar.read_stored(registry.config_dir, bad)
+    assert caught.value.reason == agent_avatar.NOT_FOUND
+    assert agent_avatar.stored_sha(registry.config_dir, bad) is None
+
+
+# R1: a registry holding a stale row must not erase a picture another process set.
+# ``refresh_interval=3.0`` is the server's real setting; every other test uses 0.0,
+# which refreshes on every call and so can never see this.
+
+
+def test_a_stale_registry_update_keeps_a_picture_another_process_set(tmp_path):
+    server = AgentRegistry(config_dir=tmp_path, refresh_interval=3.0)
+    agent = server.create_agent(AgentEditFields(name="racer"))
+    server.get_agent(agent.id)  # the server's row is now cached, with avatar=None
+    cli = AgentRegistry(config_dir=tmp_path, refresh_interval=0.0)
+    meta = cli.set_agent_avatar(agent.id, _png())
+    assert server._agents[agent.id].avatar is None  # the stale precondition holds
+
+    server.update_agent(agent.id, AgentEditFields(description="edited by the editor"))
+
+    after = AgentRegistry(config_dir=tmp_path, refresh_interval=0.0).get_agent(agent.id)
+    assert after.description == "edited by the editor"
+    assert after.avatar is not None and after.avatar.sha256 == meta.sha256
+    assert (tmp_path / "agents" / agent.id / "avatar.png").exists()
+
+
+def test_a_stale_registry_set_keeps_other_processes_edits(tmp_path):
+    server = AgentRegistry(config_dir=tmp_path, refresh_interval=3.0)
+    agent = server.create_agent(AgentEditFields(name="racer2"))
+    server.get_agent(agent.id)
+    AgentRegistry(config_dir=tmp_path, refresh_interval=0.0).update_agent(
+        agent.id, AgentEditFields(description="written by another process")
+    )
+
+    server.set_agent_avatar(agent.id, _png())
+
+    after = AgentRegistry(config_dir=tmp_path, refresh_interval=0.0).get_agent(agent.id)
+    assert after.description == "written by another process"
+    assert after.avatar is not None
+
+
+def test_a_stale_registry_clear_keeps_other_processes_edits(tmp_path):
+    server = AgentRegistry(config_dir=tmp_path, refresh_interval=3.0)
+    agent = server.create_agent(AgentEditFields(name="racer3"))
+    server.set_agent_avatar(agent.id, _png())
+    server.get_agent(agent.id)
+    AgentRegistry(config_dir=tmp_path, refresh_interval=0.0).update_agent(
+        agent.id, AgentEditFields(description="written by another process")
+    )
+
+    assert server.clear_agent_avatar(agent.id) is True
+
+    after = AgentRegistry(config_dir=tmp_path, refresh_interval=0.0).get_agent(agent.id)
+    assert after.description == "written by another process" and after.avatar is None
+
+
+# R3: every interruption of a mime flip reads as the old picture or the new one.
+
+
+def test_a_failed_yml_write_during_a_png_to_jpeg_flip_keeps_the_old_picture(
+    registry, agent, monkeypatch
+):
+    old = registry.set_agent_avatar(agent.id, _png())
+    monkeypatch.setattr(agent_avatar, "STORED_MAX_BYTES", 100)
+
+    def _boom(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("local_operator.agents._write_text_atomically", _boom)
+    with pytest.raises(OSError):
+        registry.set_agent_avatar(agent.id, _png())
+    monkeypatch.undo()
+
+    fresh = AgentRegistry(config_dir=registry.config_dir, refresh_interval=0.0)
+    row = fresh.get_agent(agent.id)
+    assert row.avatar is not None and row.avatar.sha256 == old.sha256
+    assert agent_avatar.read(fresh.agents_dir / agent.id, row.avatar)[2] == old.sha256
+    assert not (fresh.agents_dir / agent.id / "avatar.jpg").exists()  # no orphan
+
+
+def test_dying_after_the_yml_write_reads_as_the_new_picture(registry, agent, monkeypatch):
+    registry.set_agent_avatar(agent.id, _png())
+    monkeypatch.setattr(agent_avatar, "STORED_MAX_BYTES", 100)
+
+    def _die(*_args, **_kwargs):
+        raise KeyboardInterrupt  # the process dies before the sibling is removed
+
+    real_remove_siblings = agent_avatar.remove_siblings
+    monkeypatch.setattr(agent_avatar, "remove_siblings", _die)
+    with pytest.raises(KeyboardInterrupt):
+        registry.set_agent_avatar(agent.id, _png())
+    # Restore only the interrupted step; the 100-byte cap stays so the next
+    # write is again a JPEG and must sweep the stray PNG.
+    monkeypatch.setattr(agent_avatar, "remove_siblings", real_remove_siblings)
+
+    fresh = AgentRegistry(config_dir=registry.config_dir, refresh_interval=0.0)
+    row = fresh.get_agent(agent.id)
+    assert row.avatar is not None and row.avatar.filename == "avatar.jpg"
+    # ``read`` bounds itself by the REAL cap; the 100-byte test cap would reject
+    # any JPEG, so lift it for the read and restore it for the sweeping write.
+    monkeypatch.setattr(agent_avatar, "STORED_MAX_BYTES", 1024 * 1024)
+    data, mime, _sha = agent_avatar.read(fresh.agents_dir / agent.id, row.avatar)
+    monkeypatch.setattr(agent_avatar, "STORED_MAX_BYTES", 100)
+    assert mime == "image/jpeg" and data.startswith(b"\xff\xd8")
+    # The stray PNG is harmless (yml is the authority) and the next write sweeps it.
+    assert (fresh.agents_dir / agent.id / "avatar.png").exists()
+    fresh.set_agent_avatar(agent.id, _png())
+    assert sorted(
+        n
+        for n in (p.name for p in (fresh.agents_dir / agent.id).iterdir())
+        if n.startswith("avatar")
+    ) == ["avatar.jpg"]
+
+
+# R4: staging temps and case variants never ride an archive or a clone.
+
+
+def test_staging_temps_and_case_variants_stay_out_of_export_and_clone(registry, agent):
+    import zipfile
+
+    registry.set_agent_avatar(agent.id, _png())
+    agent_dir = registry.agents_dir / agent.id
+    (agent_dir / ".avatar.png.4242.deadbeef.tmp").write_bytes(b"photo bytes")
+    (agent_dir / "Avatar.PNG").write_bytes(b"photo bytes")
+
+    _temp_dir, zip_path, _name = registry.export_agent_archive(agent.id)
+    with zipfile.ZipFile(zip_path) as archive:
+        names = set(archive.namelist())
+    assert not [n for n in names if n.lower().startswith(("avatar", ".avatar"))], names
+
+    clone = registry.clone_agent(agent.id, "picbot-clone")
+    cloned = {p.name for p in (registry.agents_dir / clone.id).iterdir()}
+    assert ".avatar.png.4242.deadbeef.tmp" not in cloned
+    assert "avatar.png" in cloned  # the real picture is still carried on purpose
+
+
+# R5: 16-bit greyscale must scale, not saturate.
+
+
+def test_a_16_bit_greyscale_png_keeps_its_gradient():
+    gradient = Image.new("I;16", (256, 256))
+    gradient.putdata([x * 256 for _y in range(256) for x in range(256)])
+    out = io.BytesIO()
+    gradient.save(out, "PNG")
+    assert Image.open(io.BytesIO(out.getvalue())).mode.startswith("I")  # the control
+    image = Image.open(io.BytesIO(agent_avatar.normalise(out.getvalue()).data)).convert("L")
+    dark, mid, light = (image.getpixel((x, 256)) for x in (100, 256, 410))
+    # Output x maps to source x/2, whose 16-bit value scales to ~x/2 in 8 bits.
+    # The old clamp made every one of these 255.
+    assert dark < mid < light < 255, (dark, mid, light)
+    assert abs(dark - 50) <= 3 and abs(mid - 128) <= 3 and abs(light - 205) <= 3

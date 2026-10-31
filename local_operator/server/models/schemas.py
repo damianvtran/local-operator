@@ -154,6 +154,9 @@ class AgentAvatar(BaseModel):
     mime: str = Field(..., description="image/png, or image/jpeg for the over-cap fallback.")
     bytes: int = Field(..., description="Stored file size in bytes.")
     updated_at: datetime = Field(..., description="When the picture was last set (UTC).")
+    filename: Optional[str] = Field(
+        None, description="Stored basename: avatar.png, or avatar.jpg for the over-cap fallback."
+    )
 
 
 class Agent(BaseModel):

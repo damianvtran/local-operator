@@ -114,3 +114,26 @@ async def test_feature_flag_advertised(test_app_client):
     from local_operator.server.features import static_feature_flags
 
     assert static_feature_flags()["agent_avatar"] == 1
+
+
+@pytest.mark.asyncio
+async def test_core_route_refuses_a_symlinked_picture_and_a_nul_id(
+    test_app_client, agent_id, tmp_path
+):
+    """Review R2 on the core GET: a planted symlink is not served, ETag is the body's digest."""
+    registry = app.state.agent_registry
+    url = f"/v1/agents/{agent_id}/avatar"
+    put = await test_app_client.put(url, content=_png(), headers={"content-type": "image/png"})
+    assert put.status_code == 200 and put.json()["result"]["avatar"]["filename"] == "avatar.png"
+    got = await test_app_client.get(url, headers={"if-none-match": '"stale"'})
+    assert hashlib.sha256(got.content).hexdigest() == got.headers["etag"].strip('"')
+
+    outside = tmp_path / "outside.txt"
+    outside.write_bytes(b"TOPSECRET-FILE-CONTENT\n")
+    target = registry.agents_dir / agent_id / "avatar.png"
+    target.unlink()
+    target.symlink_to(outside)
+    planted = await test_app_client.get(url, headers={"if-none-match": '"stale"'})
+    assert planted.status_code == 404 and b"TOPSECRET" not in planted.content
+
+    assert (await test_app_client.get("/v1/agents/a%00b/avatar")).status_code == 404

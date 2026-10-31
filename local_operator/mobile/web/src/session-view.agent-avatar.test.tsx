@@ -105,9 +105,15 @@ describe("agent picture in the session header", () => {
 		slot = { projection: projection(), connected: true };
 		rows = [{ session_id: "s1", agent_id: "agent-9", avatar_sha256: "cafe" }];
 		render(<SessionScreen sessionId="s1" />);
-		const button = screen.getByRole("button", { name: "Change Toronto mayoral candidates's picture" });
+		/* The control's NAME is the hint it shows (never "Change <whole title>'s
+		   picture": it takes no such action), and the image is decorative (alt="")
+		   so the title is not read twice. 28px, the native app's size. */
+		const button = screen.getByRole("button", { name: "Change this picture in the desktop app" });
 		const img = button.querySelector("img")!;
 		expect(img.getAttribute("src")).toBe("/v1/agents/agent-9/avatar?v=cafe");
+		expect(img.getAttribute("alt")).toBe("");
+		expect(img.getAttribute("width")).toBe("28");
+		expect(img.className).toContain("ring-control");
 		// LEFT of the name: the picture's control precedes the title in the header.
 		const header = button.closest("header")!;
 		const title = within(header).getByText("Toronto mayoral candidates");
@@ -121,7 +127,7 @@ describe("agent picture in the session header", () => {
 		slot = { projection: projection(), connected: true };
 		rows = [{ session_id: "s1", agent_id: "agent-9", avatar_sha256: "cafe" }];
 		render(<SessionScreen sessionId="s1" />);
-		fireEvent.contextMenu(screen.getByRole("button", { name: /picture/ }));
+		fireEvent.contextMenu(screen.getByRole("button", { name: /desktop app/ }));
 		expect(await screen.findByText("Change this picture in the desktop app")).toBeTruthy();
 	});
 
@@ -129,7 +135,26 @@ describe("agent picture in the session header", () => {
 		slot = { projection: projection(), connected: true };
 		rows = [{ session_id: "s1", agent_id: "agent-9", avatar_sha256: null }];
 		render(<SessionScreen sessionId="s1" />);
-		expect(screen.queryByRole("button", { name: /picture/ })).toBeNull();
+		expect(screen.queryByRole("button", { name: /desktop app/ })).toBeNull();
 		expect(document.querySelector("header img")).toBeNull();
+	});
+
+	it("falls back to EXACTLY the no-picture header when the picture 404s (D1)", () => {
+		slot = { projection: projection(), connected: true };
+		rows = [{ session_id: "s1", agent_id: "agent-9", avatar_sha256: "cafe" }];
+		const { container } = render(<SessionScreen sessionId="s1" />);
+		const headerHtml = () => container.querySelector("header")!.innerHTML;
+		const img = document.querySelector("header img")!;
+		expect(img).not.toBeNull();
+		fireEvent.error(img);
+		// No image, no (invisible) 44px button that still opens a hint...
+		expect(document.querySelector("header img")).toBeNull();
+		expect(screen.queryByRole("button", { name: /desktop app/ })).toBeNull();
+		// ...and the header is byte-identical to one for a session with no picture.
+		const failed = headerHtml();
+		cleanup();
+		rows = [{ session_id: "s1", agent_id: "agent-9", avatar_sha256: null }];
+		const { container: plain } = render(<SessionScreen sessionId="s1" />);
+		expect(failed).toBe(plain.querySelector("header")!.innerHTML);
 	});
 });
