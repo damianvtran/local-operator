@@ -217,25 +217,22 @@ async def test_the_per_locale_bundle_serves_eager_wire_messages_and_a_deferred_m
             "wire.errors.desktop.runtime_unreachable"
         ]
     )
-    # The known-large namespace is described, never carried, in the eager map.
-    # (`wire.settings.account_policy` is a CHILD namespace with its own small
-    # file and its own keys, so compare against this namespace's own key set.)
-    settings_keys = catalogues.load_catalogue("en", "wire.settings")
-    assert not any(key in messages for key in settings_keys)
     assert result["namespaces"]["wire.errors.desktop"] == catalogues.catalogue_sha256(
         "en", "wire.errors.desktop"
     )
     deferred = {entry["namespace"]: entry for entry in result["deferred"]}
-    assert set(deferred) == {"wire.settings"}
-    assert deferred["wire.settings"]["content_sha256"] == catalogues.catalogue_sha256(
-        "en", "wire.settings"
-    )
-    assert deferred["wire.settings"]["keys"] == len(
-        catalogues.load_catalogue("en", "wire.settings")
-    )
-    assert deferred["wire.settings"]["bytes"] == len(
-        catalogues.catalogue_bytes("en", "wire.settings")
-    )
+    assert set(deferred) == set(catalogues.DEFERRED_NAMESPACES)
+    # EVERY deferred namespace is described and absent, not just the large one
+    # this test was written for: each carries its own hash/bytes/keys, and none
+    # of its keys may appear in the eager map. (A child namespace such as
+    # `wire.settings.account_policy` is NOT deferred and keeps its own keys, so
+    # each namespace is compared against its own catalogue.)
+    for namespace, entry in deferred.items():
+        keys = catalogues.load_catalogue("en", namespace)
+        assert not any(key in messages for key in keys), namespace
+        assert entry["content_sha256"] == catalogues.catalogue_sha256("en", namespace), namespace
+        assert entry["keys"] == len(keys), namespace
+        assert entry["bytes"] == len(catalogues.catalogue_bytes("en", namespace)), namespace
     assert response.headers["etag"] == f'"{result["content_sha256"]}"'
     assert response.headers["cache-control"] == "no-cache"
 

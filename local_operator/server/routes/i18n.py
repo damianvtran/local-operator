@@ -4,8 +4,10 @@
 ``GET /v1/i18n/catalogues/{locale}`` serves the per-locale eager bundle: every
 ``wire.*`` namespace that client fetches may consume at startup, flattened, with
 a bundle hash/ETag and a manifest of the namespaces deliberately deferred
-to the per-namespace route (``wire.settings`` today; the policy lives in
-``local_operator.i18n.catalogues.DEFERRED_NAMESPACES``).
+to the per-namespace route (the exact set is
+``local_operator.i18n.catalogues.DEFERRED_NAMESPACES``, with each entry's
+reason and verified render points in
+``local_operator/i18n/deferred_wire_inventory.json``).
 
 The served half of the hybrid delivery decision (RFC §2.1): core owns the
 ``wire.*`` namespaces and the backend serves them, gated by
