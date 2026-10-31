@@ -1609,7 +1609,7 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # writing config. Both spellings reach the same shared implementation.
     SlashCommand(
         "radient",
-        _tr(wire_radient_saver.command_radient_description()),
+        **_desc(wire_radient_saver.command_radient_description()),
         arguments=ArgumentMode.REQUIRED,
         # SUBCOMMAND, not ANY: the vocabulary is closed (`saver <word>`), and a
         # sentence typed after `/radient` must stay a message to the model
@@ -1622,7 +1622,7 @@ SLASH_COMMANDS: list[SlashCommand] = [
     ),
     SlashCommand(
         "saver",
-        _tr(wire_radient_saver.command_description()),
+        **_desc(wire_radient_saver.command_description()),
         arguments=ArgumentMode.OPTIONAL,
         argument_shape=ArgumentShape.WORD,
         desktop_destination="session.saver",
