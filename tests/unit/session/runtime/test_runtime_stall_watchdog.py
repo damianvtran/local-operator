@@ -3028,6 +3028,21 @@ def test_a_real_runtime_child_arms_its_bound_and_disarms_on_a_clean_stop(
         # so the runtime leaves at once and ``main``'s finally disarm writes the
         # clean-exit line over the header — the file stays, because existence was
         # never what made it evidence.
+        # THE STOP IS SANCTIONED, AND THAT IS NOW A PRECONDITION. Since the victim-side
+        # sanction gate (docs/design-surface-independence.md §7 at ``3ba837e6d9e``) a
+        # terminating signal nothing staged is REFUSED and the runtime keeps serving —
+        # so an unstaged ``terminate()`` here would measure the gate rather than the
+        # disarm this cell exists for. The marker is the shape ``control.stop_session``
+        # stages before its SIGTERM rung, keyed to the run the runtime published.
+        from local_operator.session.runtime import control, registry
+
+        session_record = _wait_for_record(config_dir, child=child)
+        registry.write_stop_marker(
+            config_dir / "sessions" / _SESSION_ID,
+            control._stop_marker_payload(
+                session_record, "sigterm", command="test: sanctioned clean stop"
+            ),
+        )
         child.terminate()
         deadline = time.monotonic() + 60.0
         while child.poll() is None and time.monotonic() < deadline:
