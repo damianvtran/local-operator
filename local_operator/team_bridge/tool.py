@@ -1429,9 +1429,15 @@ def _validate_reply_destination(
             designated_session=runtime.session_id,
         )
     except (StoreRefused, OSError, UnicodeDecodeError):
-        return _error("reply binding could not be verified; nothing was sent", code="reply_binding_unavailable")
+        return _error(
+            "reply binding could not be verified; nothing was sent",
+            code="reply_binding_unavailable",
+        )
     if row is None:
-        return _error("no unique current admitted reply binding; nothing was sent", code="reply_binding_unavailable")
+        return _error(
+            "no unique current admitted reply binding; nothing was sent",
+            code="reply_binding_unavailable",
+        )
     channel_id = args.get("channel_id", "")
     if not isinstance(channel_id, str):
         return _error("channel_post needs a conversation id (bcv_…)")
