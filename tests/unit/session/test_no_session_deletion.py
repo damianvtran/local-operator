@@ -1375,6 +1375,45 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "only the same-directory temp FILE this write created",
     ),
+    # -- agent pictures: agents/<id>/avatar.{png,jpg}, never sessions/ ---------
+    # ``agent_avatar`` owns two fixed basenames (``avatar.png`` / ``avatar.jpg``)
+    # joined onto an agent directory the REGISTRY resolved from a known agent id;
+    # no session id, no caller-supplied name and no directory is ever removed.
+    (
+        "local_operator/agent_avatar.py::_write_bytes_atomically",
+        "os.replace",
+        "temp FILE -> agents/<id>/avatar.png|jpg (os.replace onto a file); never sessions/",
+    ),
+    (
+        "local_operator/agent_avatar.py::_write_bytes_atomically",
+        "<path>.unlink",
+        "only the same-directory temp FILE this write created",
+    ),
+    (
+        "local_operator/agent_avatar.py::remove_siblings",
+        "<path>.unlink",
+        "the stale avatar.png|jpg FILE beside agent.yml (one of two fixed names); never sessions/",
+    ),
+    (
+        "local_operator/agent_avatar.py::remove",
+        "<path>.unlink",
+        "both fixed avatar.png|jpg FILEs in an agent dir, absent is fine; never sessions/",
+    ),
+    (
+        "local_operator/agent_avatar.py::subscribe._unsubscribe",
+        "<path>.remove",
+        "list.remove of a callback from the in-process subscriber list; not the filesystem",
+    ),
+    (
+        "local_operator/agents.py::AgentRegistry.set_agent_avatar",
+        "<path>.unlink",
+        "rollback drops only the new agents/<id>/avatar.png|jpg FILE after a failed agent.yml write",
+    ),
+    (
+        "local_operator/agents.py::AgentRegistry.clear_agent_avatar",
+        "<path>.remove",
+        "calls agent_avatar.remove, which unlinks the two fixed avatar FILEs in agents/<id>/",
+    ),
     (
         "local_operator/network/definitions.py::write_index",
         "os.replace",
