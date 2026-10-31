@@ -422,7 +422,12 @@ class Trial:
     #: without sampling support (QA r1 Q4: Opus reads 0.0 here and samples at its
     #: default), so ``temperature_reached_provider`` is the column to read.
     temperature_requested: float | None = None
-    temperature_reached_provider: float | None = None
+    #: Three states, kept apart on purpose (review r2 n1): a number = it reached the
+    #: provider; ``False`` = the spec DROPPED it (``supports_sampling_params`` is
+    #: False); ``None`` = UNKNOWN (the request never reached the stream, so support
+    #: was never observed). One null for both would read "dropped" when it meant
+    #: "never sent".
+    temperature_reached_provider: float | bool | None = None
     latency_s: float = 0.0
     input_tokens: int = 0
     output_tokens: int = 0
@@ -520,7 +525,9 @@ async def _run_trial(
         trial.served_model = outcome.model_identity
         trial.temperature_requested = temperature
         trial.supports_sampling_params = supports
-        trial.temperature_reached_provider = temperature if supports else None
+        trial.temperature_reached_provider = (
+            None if supports is None else (temperature if supports else False)
+        )
         trial.latency_s = round(float(outcome.latency_s), 4)
         trial.input_tokens = int(outcome.usage.input_tokens)
         trial.output_tokens = int(outcome.usage.output_tokens)
@@ -925,8 +932,9 @@ def _newly_blocked(
     candidate. Now invalid and not-run trials are treated alike and never counted:
 
     * newly blocked - the baseline delivered every one of at least
-      ``NEWLY_BLOCKED_MIN_BASELINE`` valid trials, and the candidate did not deliver
-      ``NEWLY_BLOCKED_MIN`` or more of its valid trials (or that share of them);
+      ``NEWLY_BLOCKED_MIN_BASELINE`` valid trials, and the candidate, with at least
+      as many valid trials, did not deliver ``NEWLY_BLOCKED_MIN`` or more of them
+      (or that share of them);
     * undecidable - the decision could flip on trials that are missing: the
       baseline has too few valid trials (but delivered all it has), or the
       candidate has missing trials that could still reach the threshold. Listed,
@@ -951,6 +959,10 @@ def _newly_blocked(
         if a.delivered < a.valid:
             continue  # the baseline already blocked it: not "newly" anything
         baseline_ok = a.valid >= NEWLY_BLOCKED_MIN_BASELINE
+        # QA r2 Q6: the share rule fired on 1 hold of 1 valid trial. A "newly
+        # blocked" claim needs the same evidence floor on BOTH arms; a thinner
+        # candidate that crosses the bar is undecidable, not flagged.
+        candidate_ok = b.valid >= NEWLY_BLOCKED_MIN_BASELINE
         blocks_now = _candidate_blocks(b)
         # Could the missing candidate trials, all non-delivered, cross the bar?
         worst = _Message(
@@ -960,7 +972,7 @@ def _newly_blocked(
             ["deliver"] * b.delivered + ["hold"] * (b.valid - b.delivered + b.missing),
         )
         could_block = _candidate_blocks(worst)
-        if baseline_ok and blocks_now:
+        if baseline_ok and candidate_ok and blocks_now:
             flagged.append(entry)
         elif (a.missing and not baseline_ok and could_block) or (
             baseline_ok and not blocks_now and b.missing and could_block
@@ -970,6 +982,9 @@ def _newly_blocked(
                 if not baseline_ok
                 else "candidate missing trials could reach the threshold"
             )
+            unknown.append(entry)
+        elif baseline_ok and blocks_now and not candidate_ok:
+            entry["why"] = "candidate has too few valid trials"
             unknown.append(entry)
     return flagged, unknown
 

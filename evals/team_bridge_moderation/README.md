@@ -173,12 +173,16 @@ the decision rule for adopting a candidate template, is
   corpus id, label, class, split (`sha256(id) mod 2`: 0 = dev, 1 = heldout), template
   sha256, model route, served model, whether the spec supports sampling params,
   `temperature_requested` (what the runner put on the request) and
-  `temperature_reached_provider` (null when the spec drops sampling params), disposition,
+  `temperature_reached_provider` (the number when it reached the provider, `false` when
+  the spec drops sampling params, `null` when unknown), disposition,
   categories, a one-line reason, latency, tokens and failure. An invalid trial is
   retried at most twice, then counted and excluded. It is never scored as a hold.
   Failures are closed tokens: `model_refused:<reason>` (the screener refused to
-  answer; production holds these), `provider:billing` (402), `provider:rate_limited`
-  (429) or `provider:other:<type>`. A run refuses an `--out` that already holds
+  answer; production holds these), `answered:<code>:<reason>` (the provider answered
+  but the reply cannot admit, e.g. `reply_truncated`), `provider:billing` (402),
+  `provider:rate_limited` (429), `provider:other:stream_<reason>` (the stream ended
+  badly) or `provider:other:<type>`. Only `model_refused` feeds the refused-as-held
+  sensitivity figure, following production's own hold codes. A run refuses an `--out` that already holds
   `trials.jsonl` unless `--resume` is given, which skips the trials already attempted.
 - **What it reports.** `summary.{json,md}` per (model, template, split): trial-level
   rates with 95% CIs from a cluster bootstrap over messages (2,000 resamples, seed
@@ -193,6 +197,21 @@ the decision rule for adopting a candidate template, is
 The sealed corpora registered in PROTOCOL.md amendment A1 live in
 [`screen/corpus/`](screen/corpus/) (`adv`, `legit`, and the `replay` variance probe);
 a test pins each file's sha256.
+
+**Candidate templates and results (2026-10-31).** Two candidates were measured against
+`bridge-screen-v2` under the protocol and both were **rejected**. They are kept in
+[`screen/templates/candidates/`](screen/templates/candidates/) only as a record, and
+neither is wired into production:
+
+| candidate | sha256 |
+| --- | --- |
+| `patch-c.txt` | `d5844d75f3c30ae0387528d16e2cf6cfdf1430694f49d430c2cb09be366a41f9` |
+| `variant-d.txt` | `37c37416936c2aa9d6bd6d83252bff164d810adc8ef4c708e92b66c3e2664681` |
+
+The raw per-run trials and summaries, plus the write-up for each arm (`baseline.md`,
+`patch-c.md`, `variant-d.md`), are in
+[`screen/results/2026-10-31/`](screen/results/2026-10-31/). A test checks that every
+committed `trials.jsonl` loads and names only committed templates.
 
 ```bash
 # Plan only: digests and call count, no model call.

@@ -415,13 +415,19 @@ class ScreenLeg:
 def _provider_failure(error: BaseException) -> str:
     """A closed failure token for an exception out of the screening dispatch.
 
-    WHY A REFUSAL IS NOT A PROVIDER FAULT. ``_ScreeningStreamRefused`` is the runner
-    refusing what came back - most often the model's own safety stop on a hostile
-    message, which production holds as ``model_refused`` (#3200). Reporting it as
-    ``provider:_ScreeningStreamRefused`` filed the screener's most interesting
-    behaviour under "outage". It becomes ``model_refused:<reason>``, keeping the
-    runner's own reason token (``refusal``, ``length``, ``tool_use``...), so a
-    reader can still tell a safety stop from a truncated reply.
+    WHY A MODEL REFUSAL IS NOT A PROVIDER FAULT. ``_ScreeningStreamRefused`` with
+    reason ``refusal`` is the model's own safety stop on a hostile message, which
+    production holds as ``model_refused`` (#3200); filing it under "outage" hid the
+    screener's most interesting behaviour. It becomes ``model_refused:<reason>``.
+
+    ONLY THAT ONE (review r2 m1). The runner raises the same exception for a stream
+    that ended in ``error``/``aborted``, ``missing_stop``/``missing_end``, and for
+    answered-but-inadmissible replies (``length`` -> ``reply_truncated``,
+    ``tool_use``/``over_cap`` -> ``parse_failed``). The classification follows
+    production's own map, ``answered_hold_code``: ``model_refused`` is a model
+    refusal; another answered code is ``answered:<code>``; ``None`` (the route
+    failed) is ``provider:other:stream_<reason>``. Only ``model_refused:`` feeds the
+    bench's refused-as-held sensitivity figure.
 
     WHY PROVIDER FAULTS GET A SUB-CLASS. A bench run on a depleted or throttled
     account reads as "every trial invalid" with no hint why (measured 2026-10-31:
@@ -433,7 +439,13 @@ def _provider_failure(error: BaseException) -> str:
     from local_operator.team_bridge.model_boundary import _ScreeningStreamRefused
 
     if isinstance(error, _ScreeningStreamRefused):
-        return f"model_refused:{error.reason or 'unknown'}"
+        code = error.answered_hold_code
+        reason = error.reason or "unknown"
+        if code == "model_refused":
+            return f"model_refused:{reason}"
+        if code is not None:
+            return f"answered:{code}:{reason}"
+        return f"provider:other:stream_{reason}"
     cursor: BaseException | None = error
     for _ in range(4):  # the status may sit on a wrapped cause
         if cursor is None:

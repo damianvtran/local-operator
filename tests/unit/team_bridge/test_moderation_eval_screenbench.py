@@ -441,11 +441,25 @@ def test_newly_blocked_lists_messages_the_gaps_make_undecidable() -> None:
     assert "Undecidable" in sb.markdown_compare(result)
 
 
-def test_newly_blocked_share_threshold_catches_few_valid_candidate_trials() -> None:
+def test_newly_blocked_share_threshold_catches_few_blocked_trials() -> None:
     trials = _mk("l1", "A", "a" * 64, ["deliver"] * 5)
-    trials += _mk("l1", "B", "b" * 64, ["hold", "deliver"])  # 1/2 = 50% >= 40%
+    trials += _mk("l1", "B", "b" * 64, ["hold", "deliver", "deliver"])  # 1/3 = 33% < 40%
+    trials += _mk("l2", "A", "a" * 64, ["deliver"] * 5)
+    trials += _mk("l2", "B", "b" * 64, ["hold", "deliver", "deliver", "hold"])  # 2 holds
     (row,) = [r for r in sb.compare(trials, "A", "B")["rows"] if r["split"] == "all"]
-    assert [e["corpus_id"] for e in row["newly_blocked"]] == ["l1"]
+    assert [e["corpus_id"] for e in row["newly_blocked"]] == ["l2"]
+
+
+def test_a_candidate_with_too_few_valid_trials_is_undecidable_not_flagged() -> None:
+    # QA r2 Q6: baseline 5/5 deliver, candidate 1 hold + 4 invalid. The share rule
+    # fired on 1/1; one valid trial is too thin for a "newly blocked" claim.
+    trials = _mk("m-open", "A", "a" * 64, ["deliver"] * 5)
+    trials += _mk("m-open", "B", "b" * 64, ["hold"] + ["invalid"] * 4)
+    (row,) = [r for r in sb.compare(trials, "A", "B")["rows"] if r["split"] == "all"]
+    assert row["newly_blocked"] == []
+    (entry,) = row["undecidable"]
+    assert entry["corpus_id"] == "m-open"
+    assert entry["why"] == "candidate has too few valid trials"
 
 
 @pytest.mark.asyncio
@@ -499,7 +513,7 @@ def test_a_trials_file_in_out_is_refused_before_any_store_is_opened(
 
 
 @pytest.mark.asyncio
-async def test_temperature_reached_provider_is_null_when_the_spec_drops_sampling(
+async def test_temperature_reached_provider_separates_dropped_from_unknown(
     tmp_path: Path,
 ) -> None:
     plan = _plan(tmp_path, [_row("l1", "legit")], repeat=1, max_calls=None)
@@ -520,8 +534,18 @@ async def test_temperature_reached_provider_is_null_when_the_spec_drops_sampling
 
     plan = _plan(tmp_path, [_row("l2", "legit")], repeat=1, max_calls=None)
     (trial,) = await sb.run_plan(plan, out_dir=tmp_path / "o2", leg_factory=factory)
-    assert trial.temperature_requested == 0.0 and trial.temperature_reached_provider is None
+    # Dropped is False, never null: null is reserved for "never observed".
+    assert trial.temperature_requested == 0.0 and trial.temperature_reached_provider is False
     assert no_sampling.supports_sampling_params is False
+
+    def unknown(model, template):
+        leg = _factory(stream, tmp_path)(model, template)
+        leg.last_sampling = lambda: (None, None)  # type: ignore[method-assign]
+        return leg
+
+    plan = _plan(tmp_path, [_row("l3", "legit")], repeat=1, max_calls=None)
+    (trial,) = await sb.run_plan(plan, out_dir=tmp_path / "o3", leg_factory=unknown)
+    assert trial.temperature_reached_provider is None
 
 
 def _refusing_stream(reason: str) -> Any:
@@ -624,3 +648,67 @@ def test_only_screening_and_the_eval_reference_the_private_renderer() -> None:
         and "_render_with_template" in path.read_text(encoding="utf-8", errors="replace")
     ]
     assert offenders == []
+
+
+@pytest.mark.parametrize(
+    ("reason", "token"),
+    [
+        ("refusal", "model_refused:refusal"),
+        ("length", "answered:reply_truncated:length"),
+        ("tool_use", "answered:parse_failed:tool_use"),
+        ("error", "provider:other:stream_error"),
+        ("aborted", "provider:other:stream_aborted"),
+        ("missing_end", "provider:other:stream_missing_end"),
+    ],
+)
+def test_only_a_model_refusal_is_classed_model_refused(reason: str, token: str) -> None:
+    """Review r2 m1: production's ``answered_hold_code`` decides, so a provider
+    ``error``/``aborted`` stop can never inflate the refused-as-held figure."""
+
+    from local_operator.evaluation.team_bridge_moderation.gates import _provider_failure
+    from local_operator.team_bridge.model_boundary import _ScreeningStreamRefused
+
+    assert _provider_failure(_ScreeningStreamRefused(reason)) == token
+
+
+def test_a_real_provider_error_402_is_billing() -> None:
+    """Review r2 n2: pin the attribute the classifier reads on the real class."""
+
+    from local_operator.evaluation.team_bridge_moderation.gates import _provider_failure
+    from local_operator.providers.failover import ProviderError
+
+    assert _provider_failure(ProviderError(402, "Insufficient Balance")) == ("provider:billing")
+
+
+# -- the committed 2026-10-31 results ---------------------------------------------
+
+RESULTS = REPO / "evals" / "team_bridge_moderation" / "screen" / "results" / "2026-10-31"
+CANDIDATES = TEMPLATES / "candidates"
+REJECTED = {
+    "patch-c.txt": "d5844d75f3c30ae0387528d16e2cf6cfdf1430694f49d430c2cb09be366a41f9",
+    "variant-d.txt": "37c37416936c2aa9d6bd6d83252bff164d810adc8ef4c708e92b66c3e2664681",
+}
+
+
+@pytest.mark.parametrize("name", sorted(REJECTED))
+def test_rejected_candidates_are_the_measured_bytes_and_not_embedded(name: str) -> None:
+    from local_operator.team_bridge.client import SCREENING_TEMPLATES
+
+    raw = (CANDIDATES / name).read_bytes()
+    assert hashlib.sha256(raw).hexdigest() == REJECTED[name]
+    # Kept as a record only: a rejected candidate must never become served bytes.
+    assert raw.decode("utf-8") not in SCREENING_TEMPLATES.values()
+
+
+def test_committed_results_load_and_name_only_committed_templates() -> None:
+    """The record is only a record if it can be re-summarised and every trial points
+    at bytes in this tree: the embedded v2 file or a committed candidate."""
+
+    committed = {V2_SHA, *REJECTED.values()}
+    runs = sorted(RESULTS.glob("*/trials.jsonl"))
+    assert len(runs) == 12
+    for path in runs:
+        trials = sb.load_trials([path])
+        assert trials, path
+        assert {t.template_sha256 for t in trials} <= committed, path
+        assert sb.summarize(trials)["groups"], path
