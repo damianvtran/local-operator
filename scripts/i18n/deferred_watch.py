@@ -86,14 +86,7 @@ def key_module(namespace: str) -> str:
 
 def _aliases(text: str, module: str) -> set[str]:
     """Local names a file binds to ``module`` (the module name itself or an alias)."""
-    names: set[str] = set()
-    for match in _KEYS_IMPORT.finditer(text):
-        listing = (match.group(1) or match.group(2)).replace("(", " ").replace(")", " ")
-        for part in listing.split(","):
-            fields = part.split()
-            if fields and fields[0] == module:
-                names.add(fields[2] if len(fields) == 3 and fields[1] == "as" else module)
-    return names
+    return set(_all_aliases(text, {module}))
 
 
 def _longer_key_modules(known: set[str], module: str) -> tuple[str, ...]:
@@ -210,15 +203,11 @@ def new_references(
 #: is fine too (the reference is then not a call and never reaches this check).
 RENDER_WRAPPERS = frozenset({"_t", "_tr", "_desc", "render", "describe", "tr"})
 
-_KEYS_IMPORT_ANY = re.compile(
-    r"^from\s+local_operator\.i18n\.keys\s+import\s+(?:\(([^)]*)\)|([^\n]+))", re.MULTILINE
-)
-
 
 def _all_aliases(text: str, modules: set[str]) -> dict[str, str]:
     """Local name -> key-module name, for imports of any of ``modules``."""
     found: dict[str, str] = {}
-    for match in _KEYS_IMPORT_ANY.finditer(text):
+    for match in _KEYS_IMPORT.finditer(text):
         listing = (match.group(1) or match.group(2)).replace("(", " ").replace(")", " ")
         for part in listing.split(","):
             fields = part.split()
