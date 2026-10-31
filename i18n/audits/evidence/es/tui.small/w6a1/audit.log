@@ -1,0 +1,175 @@
+audit.log — es/tui.small — audit id w6a1 — 2026-10-30
+Auditor: translation-auditor (lopdev team), independent of the translator;
+authored none of this copy and repaired none of it.
+Model ACTUALLY running: radient/auto (session header anthropic/claude-sonnet-5-5;
+provider-failure fallbacks openai/gpt-6-astra -> kimi/k3.1-pro -> radient/auto, quota).
+All commands below were RUN in this worktree; output is verbatim.
+
+## CMD  git rev-parse HEAD && git status --porcelain -- <target>
+$ git rev-parse HEAD
+b925c2e11be36653dfe88ac78f627bc2531427df
+$ git status --porcelain -- local_operator/i18n/catalogues/es/tui.small.json
+?? local_operator/i18n/catalogues/es/tui.small.json
+
+## CMD  shasum -a 256 of en / target / context
+16d49c4ba2a514bbde7da494443abade26a3b28c0389e6bca124d00aa7d0ed75  local_operator/i18n/catalogues/en/tui.small.json
+c48357ff20fcacfe996b687a2d035645639a8a6621d79ecf6b1436ca763ed145  local_operator/i18n/catalogues/es/tui.small.json
+1e3d6785f78126b8389b2acbcc081d5bf782fbaf744114e47611fbff3c45dde1  local_operator/i18n/catalogues/en/tui.small.context.json
+
+## CMD  repo validator (catalogue checks): python3 scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+
+## CMD  this bundle's checks: PYTHONPATH=$REPO /Users/damian/local-operator/.venv/bin/python i18n/audits/evidence/es/tui.small/w6a1/checks.py
+== es audit w6a1 :: namespace tui.small
+repo            /Users/damian/lo-i18n-es
+en              local_operator/i18n/catalogues/en/tui.small.json  sha256 16d49c4ba2a514bbde7da494443abade26a3b28c0389e6bca124d00aa7d0ed75  messages 137
+target          local_operator/i18n/catalogues/es/tui.small.json  sha256 c48357ff20fcacfe996b687a2d035645639a8a6621d79ecf6b1436ca763ed145  messages 137
+context         local_operator/i18n/catalogues/en/tui.small.context.json  sha256 1e3d6785f78126b8389b2acbcc081d5bf782fbaf744114e47611fbff3c45dde1  entries 137
+
+[PASS] C1 keys: 0 problem(s)
+[PASS] C2 arguments: 0 problem(s)
+[PASS] C3 plural categories: 0 problem(s)
+[PASS] C4 machine tokens: 0 problem(s)
+[PASS] C5 whitespace: 0 problem(s)
+[PASS] C6 maxCells: 0 problem(s)
+[PASS] C7 register/typography: 0 problem(s)
+[PASS] C8 english residue: 0 problem(s)
+
+maxCells budgets measured with rich.cells.cell_len (16 declared):
+       tui.small.spend.unpriced_cancelled_wide              budget  38  en  36  es  33
+       tui.small.spend.unpriced_cancelled                   budget  30  en  29  es  30
+       tui.small.spend.unpriced_failed_wide                 budget  30  en  27  es  28
+       tui.small.spend.unpriced_failed_mixed                budget  30  en  30  es  26
+       tui.small.spend.unpriced_ok                          budget  24  en  22  es  23
+       tui.small.spend.unpriced_partial                     budget  24  en  22  es  21
+       tui.small.spend.unpriced_failed_mixed_mid            budget  24  en  19  es  20
+       tui.small.spend.unpriced_cancelled_short             budget  24  en  20  es  20
+       tui.small.spend.unpriced_failed                      budget  24  en  19  es  17
+       tui.small.spend.unpriced_partial_short               budget  15  en  13  es  14
+       tui.small.spend.unpriced_cancelled_shortest          budget  12  en  12  es  12
+       tui.small.spend.unpriced_failed_mixed_short          budget  12  en  11  es  10
+       tui.small.spend.unpriced_ok_short                    budget  15  en  15  es  10
+       tui.small.spend.unpriced_partial_shortest            budget  12  en  12  es  10
+       tui.small.spend.no_charge                            budget   9  en   9  es   9
+       tui.small.spend.unpriced_failed_short                budget  24  en  10  es   9
+
+[PASS] C9 plural rendering (executed): 0 problem(s)
+        tui.small.draft.attachment_count [images=1] -> '(1 imagen)'
+        tui.small.draft.attachment_count [images=2] -> '(2 imágenes)'
+        tui.small.draft.attachment_count [images=1000000] -> '(1000000 de imágenes)'
+        tui.small.network_panel.member_count [count=0] -> '0 miembros'
+        tui.small.network_panel.member_count [count=1] -> '1 miembro'
+        tui.small.network_panel.member_count [count=2] -> '2 miembros'
+        tui.small.network_panel.member_count [count=1000000] -> '1000000 de miembros'
+        tui.small.copy_picker.more_lines [count=1] -> '… 1 línea más'
+        tui.small.copy_picker.more_lines [count=5] -> '… 5 líneas más'
+        tui.small.copy_picker.more_lines [count=1000000] -> '… 1000000 de líneas más'
+        tui.small.wake_panel.monitors_need_attention [count=1] -> '1 de 9 requiere atención'
+        tui.small.wake_panel.monitors_need_attention [count=3] -> '3 de 9 requieren atención'
+        tui.small.wake_panel.monitors_need_attention [count=1000000] -> '1000000 de 9 requieren atención'
+        tui.small.wake_panel.scheduled_count [count=1] -> '1 programado'
+        tui.small.wake_panel.scheduled_count [count=3] -> '3 programados'
+        tui.small.wake_panel.scheduled_count [count=1000000] -> '1000000 de programados'
+        tui.small.settings_view.hop_count [count=1] -> '  1 salto'
+        tui.small.settings_view.hop_count [count=3] -> '  3 saltos'
+        tui.small.settings_view.hop_count [count=1000000] -> '  1000000 de saltos'
+        tui.small.command_picker.entries [count=0] -> '0 entradas'
+        tui.small.command_picker.entries [count=1] -> '1 entrada'
+        tui.small.command_picker.entries [count=2] -> '2 entradas'
+        tui.small.command_picker.entries [count=1000000] -> '1000000 de entradas'
+
+negative controls (each must be CAUGHT):
+  [CAUGHT] NC1 drop a placeholder (tui.small.copy.code_count)
+           -> tui.small.copy.code_count: arguments () != en's (('shown', 'simple'),)
+  [CAUGHT] NC2 relabel a plural branch as few (tui.small.draft.attachment_count)
+           -> tui.small.draft.attachment_count: plural 'images' carries ['few', 'one', 'other'], es requires exactly ['many', 'one', 'other']
+  [CAUGHT] NC3 strip a backtick code span (tui.small.tool_card.search_fetch_hint)
+           -> tui.small.tool_card.search_fetch_hint: backtick code span [] != en's ['`read <url>`']
+  [CAUGHT] NC4 trim a load-bearing edge space (tui.small.approval.allow_verb)
+           -> tui.small.approval.allow_verb: edge whitespace/newlines (0, 0, 0) != en's (0, 1, 0) (en='allow ', es='permitir')
+  [CAUGHT] NC5 inflate a value past a 4-cell budget (tui.small.approval.allow_verb)
+           -> tui.small.approval.allow_verb: es 9 cells > maxCells 4 (en 6) — 'permitir '
+  [CAUGHT] NC6 use a forbidden glossary term
+           -> nc.key: contains 'demonio' — daemon stays English (es guide, W2 amendment)
+  [CAUGHT] NC7 leave English prose untranslated
+           -> nc.key: English word 'the' in 'Open the settings page'
+  [CAUGHT] NC8 drop a key from the target
+           -> missing key 'nc.other'
+  [CAUGHT] NC9 render a plural with no many arm at 10^6
+           -> nc.key: the 10^6 render '1.000.000 otros' lacks ' de ' — the `many` branch did not select
+
+checks.py: PASS (hard checks clean; controls all caught)
+exit=0
+
+## CMD  ledger state for this namespace (read-only; no ledger write was made)
+existing ledger rows for es/tui.small: 0
+
+## CMD  supplementary width measurements (rich.cells.cell_len)
+tui.small.network_panel.suspect_tag:
+    en  30 cells | es  50 cells
+    es = '  [sospechoso: puede que la clave se haya copiado]'
+tui.small.info_panel.deeper_below_depth:
+    en  40 cells | es  48 cells
+    es = '  +{deeper} más abajo (bajo profundidad {depth})'
+tui.small.spend.unpriced_partial:
+    en  22 cells | es  21 cells budget 24
+    es = 'peticiones sin precio'
+tui.small.spend.unpriced_partial_short:
+    en  13 cells | es  14 cells budget 15
+    es = 'precio parcial'
+tui.small.spend.unpriced_partial_shortest:
+    en  12 cells | es  10 cells budget 12
+    es = 'incompleto'
+tui.small.spend.unpriced_cancelled:
+    en  29 cells | es  30 cells budget 30
+    es = 'sin respuesta · puede cobrarse'
+tui.small.spend.unpriced_cancelled_shortest:
+    en  12 cells | es  12 cells budget 12
+    es = 'cobro dudoso'
+tui.small.copy.code_count:
+    en  12 cells | es  14 cells
+    es = '{shown} código'
+tui.small.copy.quote_count:
+    en  13 cells | es  12 cells
+    es = '{shown} cita'
+tui.small.aside.superseded:
+    en  12 cells | es  12 cells
+    es = '(sustituida)'
+tui.small.goal_panel.more_settled:
+    en  23 cells | es  26 cells
+    es = '… {hidden} finalizados más'
+
+candidate wordings, measured with the same measure:
+     51 cells  '  +{deeper} más abajo (bajo la profundidad {depth})'
+     45 cells  '  +{deeper} más abajo (por debajo de {depth})'
+     18 cells  'algunas sin precio'
+     35 cells  '  [sospechoso: clave quizá copiada]'
+     26 cells  '… {hidden} más finalizados'
+
+## NOTES (audit_notes_not_execution_log — reasoning, not command output)
+- checks.py produced three false positives on its first run against these same
+  bytes and each rule was tightened before the logged run: (1) an 'internal
+  double space' rule flagged the legitimate column padding after 'relé:' /
+  'instalado:' and the two-space row indent inside resume_hint, and the shared
+  design of 'search  /' — the rule now exempts runs after a colon, runs after a
+  newline, and runs the English value also carries; (2) the English-residue
+  word list contained 'no', which is also a Spanish word, so Spanish negations
+  tripped it; (3) controls that needed a feature this namespace does not carry
+  (a backtick span in tui.library) could not fire and now fall back to a minimal
+  synthetic fixture. The logged run is the post-fix run and all eight controls
+  fire.
+- TWO INDEPENDENT PASSES were made on the Spanish text: pass 1 read es against
+  en and the context sidecar key by key; pass 2 read the MESSAGE VALUES ALONE
+  (no English in view) in file order, looking only for what stumbles in
+  Spanish. The findings are the union of both; pass 2 added the wording notes
+  on 'bajo profundidad' and 'Tiempo más grueso' that pass 1 had accepted.
+- Meaning, register and terminology verdicts come from reading, not from the
+  script; the script only proves the mechanical floor and that its own checks
+  can fail.
+
+## CMD  bundle contents
+audit.log
+checks.py
+receipt.json
+record.json
+report.md

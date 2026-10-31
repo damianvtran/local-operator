@@ -1,0 +1,143 @@
+audit.log — es/tui.small — audit id w6a2 (round 2) — 2026-10-30
+Auditor: translation-auditor (lopdev team), independent of the translator;
+authored none of this copy, repaired none of it, edited nothing outside
+i18n/audits/evidence/es/.
+Model ACTUALLY running: radient/auto (session header anthropic/claude-sonnet-5-5;
+provider-quota fallbacks openai/gpt-6-astra -> kimi/k3.1-pro -> radient/auto).
+All commands below were RUN in this worktree; output is verbatim.
+
+## CMD  git rev-parse HEAD && git branch --show-current
+$ git rev-parse HEAD
+b925c2e11be36653dfe88ac78f627bc2531427df
+$ git branch --show-current
+feat/i18n-es-tui
+
+## CMD  git status --porcelain -- <target>
+$ git status --porcelain -- local_operator/i18n/catalogues/es/tui.small.json
+?? local_operator/i18n/catalogues/es/tui.small.json
+
+## CMD  shasum -a 256 of en / target / context
+16d49c4ba2a514bbde7da494443abade26a3b28c0389e6bca124d00aa7d0ed75  local_operator/i18n/catalogues/en/tui.small.json
+e374959d70bb379a37e3f02e8c69edeea168b7edbd11107e4131f41fe116b9af  local_operator/i18n/catalogues/es/tui.small.json
+1e3d6785f78126b8389b2acbcc081d5bf782fbaf744114e47611fbff3c45dde1  local_operator/i18n/catalogues/en/tui.small.context.json
+
+## CMD  repo validator (catalogue checks): python3 scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+
+## CMD  this bundle's checks: PYTHONPATH=$PWD /Users/damian/local-operator/.venv/bin/python i18n/audits/evidence/es/tui.small/w6a2/checks.py
+== es audit w6a2 :: namespace tui.small
+repo            /Users/damian/lo-i18n-es
+en              local_operator/i18n/catalogues/en/tui.small.json  sha256 16d49c4ba2a514bbde7da494443abade26a3b28c0389e6bca124d00aa7d0ed75  messages 137
+target          local_operator/i18n/catalogues/es/tui.small.json  sha256 e374959d70bb379a37e3f02e8c69edeea168b7edbd11107e4131f41fe116b9af  messages 137
+context         local_operator/i18n/catalogues/en/tui.small.context.json  sha256 1e3d6785f78126b8389b2acbcc081d5bf782fbaf744114e47611fbff3c45dde1  entries 137
+
+[PASS] C1 keys: 0 problem(s)
+[PASS] C2 arguments: 0 problem(s)
+[PASS] C3 plural categories: 0 problem(s)
+[PASS] C4 machine tokens: 0 problem(s)
+[PASS] C5 whitespace: 0 problem(s)
+[PASS] C6 maxCells: 0 problem(s)
+[PASS] C7 register/typography: 0 problem(s)
+[PASS] C8 english residue: 0 problem(s)
+[PASS] C10 remediation scope: 0 problem(s)
+[PASS] C11 changed-key widths: 0 problem(s)
+[PASS] C12 goal-panel pair: 0 problem(s)
+[PASS] C13 code_count constraint: 0 problem(s)
+
+maxCells budgets measured with rich.cells.cell_len (16 declared):
+       tui.small.spend.unpriced_cancelled_wide              budget  38  en  36  es  33
+       tui.small.spend.unpriced_cancelled                   budget  30  en  29  es  30
+       tui.small.spend.unpriced_failed_wide                 budget  30  en  27  es  28
+       tui.small.spend.unpriced_failed_mixed                budget  30  en  30  es  26
+       tui.small.spend.unpriced_ok                          budget  24  en  22  es  23
+       tui.small.spend.unpriced_failed_mixed_mid            budget  24  en  19  es  20
+       tui.small.spend.unpriced_cancelled_short             budget  24  en  20  es  20
+       tui.small.spend.unpriced_partial                     budget  24  en  22  es  18
+       tui.small.spend.unpriced_failed                      budget  24  en  19  es  17
+       tui.small.spend.unpriced_partial_short               budget  15  en  13  es  14
+       tui.small.spend.unpriced_cancelled_shortest          budget  12  en  12  es  12
+       tui.small.spend.unpriced_failed_mixed_short          budget  12  en  11  es  10
+       tui.small.spend.unpriced_ok_short                    budget  15  en  15  es  10
+       tui.small.spend.unpriced_partial_shortest            budget  12  en  12  es  10
+       tui.small.spend.no_charge                            budget   9  en   9  es   9
+       tui.small.spend.unpriced_failed_short                budget  24  en  10  es   9
+
+C11 changed-key widths, with placeholders substituted as the code supplies them:
+       tui.small.info_panel.deeper_below_depth              no budget  en  27  es  38  [deeper=3, depth=_MAX_TREE_DEPTH=3]
+       tui.small.info_panel.deeper_below_depth              no budget  en  30  es  41  [worst case: raw digits stay ungrouped (1200)]
+       tui.small.spend.unpriced_partial                     budget  24  en  22  es  18  [no arguments; maxCells 24]
+       tui.small.network_panel.suspect_tag                  no budget  en  30  es  35  [no arguments]
+       tui.small.goal_panel.more_settled                    no budget  en  16  es  19  [hidden=3]
+       tui.small.goal_panel.more_settled_indent             no budget  en  18  es  21  [hidden=3]
+
+C9 ship gate: resolve.eligible_locale('es') -> 'en' — the generated shipped.json in this working tree does not list es, so messages.render() would answer in ENGLISH. C9 therefore renders through the same catalogue lookup + ICU formatter render_record uses after the gate; the gate itself is a ledger state, not a property of these bytes.
+[PASS] C9 plural rendering (executed): 0 problem(s)
+        tui.small.draft.attachment_count [images=1] -> '(1 imagen)'
+        tui.small.draft.attachment_count [images=2] -> '(2 imágenes)'
+        tui.small.draft.attachment_count [images=1000000] -> '(1000000 de imágenes)'
+        tui.small.network_panel.member_count [count=0] -> '0 miembros'
+        tui.small.network_panel.member_count [count=1] -> '1 miembro'
+        tui.small.network_panel.member_count [count=2] -> '2 miembros'
+        tui.small.network_panel.member_count [count=1000000] -> '1000000 de miembros'
+        tui.small.copy_picker.more_lines [count=1] -> '… 1 línea más'
+        tui.small.copy_picker.more_lines [count=5] -> '… 5 líneas más'
+        tui.small.copy_picker.more_lines [count=1000000] -> '… 1000000 de líneas más'
+        tui.small.wake_panel.monitors_need_attention [count=1] -> '1 de 9 requiere atención'
+        tui.small.wake_panel.monitors_need_attention [count=3] -> '3 de 9 requieren atención'
+        tui.small.wake_panel.monitors_need_attention [count=1000000] -> '1000000 de 9 requieren atención'
+        tui.small.wake_panel.scheduled_count [count=1] -> '1 programado'
+        tui.small.wake_panel.scheduled_count [count=3] -> '3 programados'
+        tui.small.wake_panel.scheduled_count [count=1000000] -> '1000000 de programados'
+        tui.small.settings_view.hop_count [count=1] -> '  1 salto'
+        tui.small.settings_view.hop_count [count=3] -> '  3 saltos'
+        tui.small.settings_view.hop_count [count=1000000] -> '  1000000 de saltos'
+        tui.small.command_picker.entries [count=0] -> '0 entradas'
+        tui.small.command_picker.entries [count=1] -> '1 entrada'
+        tui.small.command_picker.entries [count=2] -> '2 entradas'
+        tui.small.command_picker.entries [count=1000000] -> '1000000 de entradas'
+
+negative controls (each must be CAUGHT):
+  [CAUGHT] NC1 drop a placeholder (tui.small.copy.code_count)
+           -> tui.small.copy.code_count: arguments () != en's (('shown', 'simple'),)
+  [CAUGHT] NC2 relabel a plural branch as few (tui.small.draft.attachment_count)
+           -> tui.small.draft.attachment_count: plural 'images' carries ['few', 'one', 'other'], es requires exactly ['many', 'one', 'other']
+  [CAUGHT] NC3 strip a backtick code span (tui.small.tool_card.search_fetch_hint)
+           -> tui.small.tool_card.search_fetch_hint: backtick code span [] != en's ['`read <url>`']
+  [CAUGHT] NC4 trim a load-bearing edge space (tui.small.approval.allow_verb)
+           -> tui.small.approval.allow_verb: edge whitespace/newlines (0, 0, 0) != en's (0, 1, 0) (en='allow ', es='permitir')
+  [CAUGHT] NC5 inflate a value past a 4-cell budget (tui.small.approval.allow_verb)
+           -> tui.small.approval.allow_verb: es 9 cells > maxCells 4 (en 6) — 'permitir '
+  [CAUGHT] NC6 use a forbidden glossary term
+           -> nc.key: contains 'demonio' — daemon stays English (es guide, W2 amendment)
+  [CAUGHT] NC7 leave English prose untranslated
+           -> nc.key: English word 'the' in 'Open the settings page'
+  [CAUGHT] NC8 drop a key from the target
+           -> missing key 'nc.other'
+  [CAUGHT] NC9 render a plural with no many arm at 10^6
+           -> nc.key: the 10^6 render '1.000.000 otros' lacks ' de ' — the `many` branch did not select
+
+round-2 negative controls (each must be CAUGHT):
+  [CAUGHT] C10 scope: one edit OUTSIDE the recorded delta
+           -> scope drift: reverting the recorded changes does not reproduce round-1 bytes (b8b5730ed0b6975f51fa5d5036e3ef4f45000f36cdec1d7543aacc5d4410bd7e != c48357ff20fcacfe996b687a2d035645639a8a6621d79ecf6b1436ca763ed145) — a value OUTSIDE the recorded delta changed
+  [CAUGHT] C10 scope: one recorded key left holding its round-1 value
+           -> tui.small.info_panel.deeper_below_depth: expected the remediated value '  +{deeper} más abajo (bajo la profundidad {depth})', found '  +{deeper} más abajo (bajo profundidad {depth})'
+  [CAUGHT] C2 arguments: the placeholder dropped from tui.small.info_panel.deeper_below_depth
+           -> tui.small.info_panel.deeper_below_depth: arguments () != en's (('deeper', 'simple'), ('depth', 'simple'))
+  [CAUGHT] C6 maxCells: a remediated key pushed over its declared budget
+           -> tui.small.spend.unpriced_partial: es 29 cells > maxCells 24 (en 22) — 'algunas peticiones sin precio'
+  [CAUGHT] C7 typography: ASCII ellipsis reintroduced in a remediated key
+           -> tui.small.info_panel.deeper_below_depth: ASCII ellipsis instead of … — '... +{deeper} más abajo (bajo la profundidad {depth})'
+  [CAUGHT] C12 pair: the overflow row loses agreement with its heading
+           -> tui.small.goal_panel.more_settled: does not end with the heading noun 'finalizados' — '… {hidden} más finalizado'
+
+checks.py: PASS (hard checks clean; controls all caught)
+EXIT=0
+
+## CMD  ship-gate state observed while running C9 (never modified by this audit)
+$ git status --porcelain -- local_operator/i18n/data/shipped.json
+ M local_operator/i18n/data/shipped.json
+$ git diff --stat -- local_operator/i18n/data/shipped.json
+ local_operator/i18n/data/shipped.json | 1 -
+ 1 file changed, 1 deletion(-)
+$ git show HEAD:local_operator/i18n/data/shipped.json | tr -d "\n "
+{"locales":["en","fr","es","zh-CN","ru","vi","ur","hi"],"schema":1}

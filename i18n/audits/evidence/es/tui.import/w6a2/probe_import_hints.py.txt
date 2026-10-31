@@ -1,0 +1,100 @@
+#!/usr/bin/env python3
+"""Measure the ASSEMBLED sessions-state hint row of the real import widget.
+
+Read-only rig. It mounts the production ``HarnessImportView`` in a headless
+Textual app with the two paddings the real stylesheet applies
+(``Screen { padding: 1 }``, ``.settings-view { padding: 1 1 1 1 }``), forces the
+``sessions`` state, and reads each painted ``HintButton``'s real rendered text
+plus the hint row's own box width.
+
+The widget's IO entry point (``_begin``) is replaced by a no-op so no service
+runs and nothing is read from or written to a real config directory.
+
+    PYTHONPATH=<worktree> python3 probe_import_hints.py
+"""
+
+from __future__ import annotations
+
+import asyncio
+import os
+import sys
+
+from rich.cells import cell_len
+
+from textual.app import App, ComposeResult
+
+from local_operator.i18n.text import set_active_locale
+from local_operator.tui.widgets.harness_import_view import HarnessImportView
+
+set_active_locale("es")
+
+
+class Probe(HarnessImportView):
+    """The production widget, minus the data load."""
+
+    def _begin(self) -> None:  # noqa: D401 - deliberate no-op for the rig
+        return
+
+
+class Harness(App):
+    def compose(self) -> ComposeResult:
+        yield Probe()
+
+
+async def measure(width: int, height: int):
+    app = Harness()
+    async with app.run_test(size=(width, height)) as pilot:
+        await pilot.pause()
+        view = app.query_one(Probe)
+        # The two paddings from local_operator.tcss, applied by hand because
+        # this rig does not load the app stylesheet.
+        app.screen.styles.padding = 1
+        view.styles.padding = 1
+        view._state = "sessions"
+        view._sessions = []
+        view._apply_layout()
+        view._paint()
+        await pilot.pause()
+        await pilot.pause()
+        parts, total = [], 0
+        for button in view._hint_order:
+            if not button.display:
+                continue
+            text = button.rendered()
+            w = cell_len(text)
+            total += w
+            parts.append((text, w))
+        return {
+            "terminal": (width, height),
+            "view_outer": view.size.width,
+            "view_content": view.content_size.width,
+            "hints_box": view._hints.size.width,
+            "row": "".join(t for t, _ in parts),
+            "row_cells": total,
+            "parts": parts,
+            "narrow": view._narrow,
+            "state": view._state,
+        }
+
+
+async def main() -> int:
+    import local_operator
+
+    print(f"package : {local_operator.__file__}")
+    from local_operator.i18n.text import active_locale
+
+    print(f"locale  : LOP_LANG={os.environ.get('LOP_LANG')} active={active_locale()}")
+    for width, height in [(80, 24), (79, 24), (78, 24), (77, 24), (76, 24), (75, 24), (74, 24), (60, 20)]:
+        got = await measure(width, height)
+        print(
+            f"{width}x{height}: state={got['state']} view_outer={got['view_outer']} "
+            f"view_content={got['view_content']} hints_box={got['hints_box']} "
+            f"narrow={got['narrow']} row={got['row_cells']} "
+            f"slack={got['hints_box'] - got['row_cells']:+d}"
+        )
+        print(f"    row  : {got['row']!r}")
+        print("    parts: " + " | ".join(f"{t!r}={w}" for t, w in got["parts"]))
+    return 0
+
+
+raise SystemExit(asyncio.run(main()))

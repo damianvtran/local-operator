@@ -1,0 +1,148 @@
+{
+  "schema": 1,
+  "audit_id": "w6a1",
+  "audit_round": 1,
+  "audit_kind": "independent_current_byte_namespace_audit",
+  "locale": "es",
+  "namespace": "tui.library",
+  "audit_date": "2026-10-30",
+  "audited_revision": "b925c2e11be36653dfe88ac78f627bc2531427df",
+  "audited_revision_note": "b925c2e11be36653dfe88ac78f627bc2531427df on branch feat/es-tui. The TARGET catalogue is UNTRACKED in the worktree (`?? local_operator/i18n/catalogues/es/tui.library.json`), so this audit binds to the on-disk sha256 in input_hashes, not to a commit; a later commit that lands different bytes is not covered by this verdict.",
+  "key_count": {
+    "en": 108,
+    "target": 108,
+    "context": null
+  },
+  "verdict": "passed",
+  "result": {
+    "mechanical_checks": "pass — 8/8 in checks.py; repo validator --catalogues-only reports 0 problem(s) tree-wide",
+    "findings_total": 2,
+    "blocker": 0,
+    "major": 0,
+    "minor": 1,
+    "nit": 1,
+    "note": "No blocker or major. Minors and nits are recorded for the wave's remediation round and do not gate the passed verdict; none of them changes a money claim, a destructive action or a placeholder."
+  },
+  "verdict_reason": "All 108 keys read twice. Asset/Librarian terminology is consistent with shipped copy (the asset plural is byte-identical to relay.library.count), the three prompt-shaped strings are faithful, and nothing misstates an action. The one minor is a 76-cell notice painted into a single-row status line exactly in the narrow regime that triggers it.",
+  "auditor": {
+    "agent": "translation-auditor (lopdev team), independent of the translator",
+    "session_or_instance": "b4822b7b44ff",
+    "model": "radient/auto",
+    "actual_model_source": "this session's own model-switch notices (header said anthropic/claude-sonnet-5-5 at turn start)",
+    "model_note": "FALLBACK, disclosed: the session's primary header is anthropic/claude-sonnet-5-5, but provider quota failures moved this run through openai/gpt-6-astra and kimi/k3.1-pro before radient/auto, and ALL work recorded in this bundle was performed under radient/auto. No primary-model audit claim is made.",
+    "date": "2026-10-30",
+    "independence": "I translated none of this copy and repaired none of it. I read the en source, the context sidecar and the render/consumer code directly, formed the verdict before seeing any other auditor's notes for these namespaces (no w6a1 bundle existed), and wrote only inside i18n/audits/evidence/es/. No catalogue, sidecar, ledger or allowance file was touched."
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.library.json",
+      "revision": "b925c2e11be36653dfe88ac78f627bc2531427df",
+      "sha256": "5a389b6a7d8de06621462f2685eff6dc95cd4cd6584d35dd6c26a0a19ad50b11"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/es/tui.library.json",
+      "sha256": "4b3e5982fdf26c71896579709f968dd25508f9fa48a1f942c0f616c0f4acbc62",
+      "tracked": false,
+      "note": "UNTRACKED working-tree bytes at the audited revision"
+    },
+    "context": {
+      "path": null,
+      "sha256": null,
+      "note": "this namespace has no English context sidecar (taken as given by the brief; not the translator's fault)"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/es/tui.library/w6a1/report.md",
+      "sha256": "159501cd830e785d6fb9f4d43ab9f8de1868a0a8af606bae99520461e147a23b"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.library/w6a1/audit.log",
+      "sha256": "fc601033a3bea9707e8d8b424d0fe92d602d9213c854dd99d8889d2200d21f13"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.library/w6a1/checks.py",
+      "sha256": "3161f166ce85788db00742560940f4aef2a7cb9d9e8f00df87db9edd3650e414"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.library/w6a1/receipt.json",
+      "sha256": "afb527eceef5bcebb8ee3cb35a548da045162a0c01ffc52e4095991bf8e348dc"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "blocker": 0,
+    "major": 0,
+    "minor": 1,
+    "nit": 1,
+    "rejected": 0,
+    "deferred": 0,
+    "findings_total": 2,
+    "finding_ids": [
+      "F1",
+      "F2"
+    ]
+  },
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "minor",
+      "key": "tui.library.rail_hidden",
+      "current": "Los filtros aparecen cuando el terminal tiene al menos {width} columnas de ancho.",
+      "proposed": "Los filtros aparecen a partir de {width} columnas.",
+      "reason": "76 cells at {width}=90 against en's 61. The string is painted into .library-view-status (height: 2, padding 1 0 0 0 — one content row, 1fr), and it is painted EXACTLY when the rail is hidden, i.e. below 90 columns. On a 61-75 column terminal the Spanish notice is clipped where the English still fits. The proposed wording is 50 cells and keeps the whole claim.",
+      "evidence": [
+        "measured with the width substituted: en 61 cells, es 76 cells",
+        "proposed 50 cells; alternative 'Los filtros aparecen desde {width} columnas de ancho.' = 53",
+        "local_operator.tui/local_operator.tcss .library-view-status: height 2, padding 1 0 0 0",
+        "trigger: library_view.action_focus_rail -> _notice(...) only when self._rail.display is False"
+      ],
+      "disposition": "open — carried by the wave's remediation round (does not gate)"
+    },
+    {
+      "id": "F2",
+      "severity": "nit",
+      "key": "tui.library.form_name_placeholder",
+      "current": "si no, el nombre del archivo",
+      "proposed": "si lo dejas vacío, se usa el nombre del archivo",
+      "reason": "For 'falls back to the file name'. As a field placeholder the current fragment begins mid-thought; a first-time reader must infer that the EMPTY field falls back. The proposed form states the condition (47 cells, no declared budget). Shorter variant if the field must stay tight: 'vacío = nombre del archivo' (24).",
+      "evidence": [
+        "current 28 cells (en 27)",
+        "proposed 47 cells"
+      ],
+      "disposition": "open — nit, no gate"
+    }
+  ],
+  "audit_notes_not_execution_log": [
+    "checks.py produced three false positives on its first run against these same bytes and each rule was tightened before the logged run; the logged run is the post-fix run and all eight controls fire. Two controls use synthetic fixtures here because the namespace carries no backtick span and no load-bearing edge space.",
+    "Two independent passes were made on the Spanish text: es against en key by key, then the Spanish values alone in file order.",
+    "No catalogue, sidecar, ledger or allowance file was modified by this audit; the ledger row below is a PROPOSAL because the brief forbids editing the ledger."
+  ],
+  "limitations": [
+    "No context sidecar exists for this namespace, so there are no per-key roles or maxCells: fit was judged from the render paths (library_view.py, local_operator.tcss), not from a rendered frame.",
+    "No rendered TUI frames captured (loaded host, heavy runs forbidden).",
+    "LLM semantic judgement; no native-speaker attestation.",
+    "The target file is untracked at the audited revision; this verdict binds the recorded sha256, not a commit."
+  ],
+  "proposed_ledger_row": {
+    "_status": "PROPOSAL ONLY — the brief forbids editing i18n/ledger/es.json; the wave appends this row.",
+    "_missing": [
+      "translator.agent",
+      "translator.model",
+      "translator.date"
+    ],
+    "locale": "es",
+    "namespace": "tui.library",
+    "source_sha256": "5a389b6a7d8de06621462f2685eff6dc95cd4cd6584d35dd6c26a0a19ad50b11",
+    "auditor": {
+      "agent": "translation-auditor (lopdev team), independent of the translator",
+      "model": "radient/auto",
+      "date": "2026-10-30",
+      "result": "passed",
+      "findings": 0
+    },
+    "status": "passed",
+    "note": "Independent audit w6a1 (radient/auto, fallback disclosed): 0 blocker, 0 major, 1 minor, 1 nit. Record: i18n/audits/evidence/es/tui.library/w6a1/record.json"
+  }
+}

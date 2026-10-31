@@ -75,6 +75,7 @@ class _Wire:
 
     def __init__(self, script: dict[str, Any]) -> None:
         # model_id -> ("fail", status) | ("reply", text) | ("reply_as", provider, text)
+        #           | ("end", stop_reason): a completed stream with that terminal
         self.script = script
         self.sends: list[dict[str, Any]] = []
         # Model ids the hop runner asked the GUARDED client for, and model ids
@@ -95,6 +96,8 @@ class _Wire:
             return httpx.Response(action[1], json={"error": VENDOR_CANARY})
         if action[0] == "reply_as":
             return httpx.Response(200, json={"text": action[2], "provider": action[1]})
+        if action[0] == "end":
+            return httpx.Response(200, json={"text": "", "stop_reason": action[1]})
         return httpx.Response(200, json={"text": action[1]})
 
 
@@ -176,8 +179,9 @@ def _install_wire(
                         update={"provider": body.get("provider", request.model.provider)}
                     )
                     yield StreamModelEvent(model=served)
-                    yield StreamTextDelta(delta=body["text"])
-                    yield StreamEndEvent(stop_reason="stop")
+                    if body["text"]:
+                        yield StreamTextDelta(delta=body["text"])
+                    yield StreamEndEvent(stop_reason=body.get("stop_reason", "stop"))
 
                 return gen()
 
@@ -718,6 +722,33 @@ def test_guard_refusal_stops_the_walk(tmp_path, monkeypatch) -> None:
     assert wire.sends == []
     holds = _rows(tmp_path, "SELECT failure_class FROM screening_holds")
     assert holds == [("other",)], "one hop tried, not a chain_exhausted walk"
+
+
+@pytest.mark.parametrize(
+    ("stop_reason", "hold_code"), [("refusal", "model_refused"), ("length", "reply_truncated")]
+)
+def test_answered_refusal_through_the_chain_never_advances_the_breaker(
+    tmp_path, monkeypatch, stop_reason: str, hold_code: str
+) -> None:
+    """#3195 through the SHIPPED chain composition: hop 0 completes its stream
+    with a refusal (a hostile body provokes it) or a truncated reply. The walk
+    stops on hop 0 (a weaker screener is never bought), the message holds under
+    its answered code with the ``stream_refused`` class, and the account breaker
+    is untouched, however many times it happens."""
+
+    store, owner = _setup(tmp_path)
+    _config(tmp_path, chain=["deepseek/deepseek-flash"])
+    wire = _Wire({"gpt-5.4": ("end", stop_reason), "deepseek-flash": ("reply", DELIVER)})
+    _install_wire(monkeypatch, wire)
+
+    for index in range(4):
+        result = _cycle(tmp_path, owner, message_id=f"bmsg_probe{index}")
+        assert result.disposition == "hold" and result.hold_code == hold_code
+    assert [s["model"] for s in wire.sends] == ["gpt-5.4"] * 4
+    assert store.screening_breaker_state(owner) is None
+    assert set(_rows(tmp_path, "SELECT hold_code, failure_class FROM screening_holds")) == {
+        (hold_code, "stream_refused")
+    }
 
 
 def test_stream_refusals_stop_the_walk_without_building_hop1() -> None:

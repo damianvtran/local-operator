@@ -4985,7 +4985,9 @@ class Store:
         """Commit ONE logical outcome, fenced on every binding that matters.
 
         ``failure_class`` rides a HOLD only (the pipeline sets it on the
-        ``provider_error`` path); every other hold writes NULL into it.
+        dispatch-failure paths: ``provider_error``, and the answered-refusal
+        holds ``model_refused``/``reply_truncated``/``parse_failed`` as
+        ``stream_refused``); every other hold writes NULL into it.
 
         Inside ONE write transaction: live-owner/generation (native fence,
         H2 discipline), the attempt belongs to THIS owner AND message AND

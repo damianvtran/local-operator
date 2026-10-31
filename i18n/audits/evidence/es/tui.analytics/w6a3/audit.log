@@ -1,0 +1,255 @@
+# audit.log — es tui.analytics round 3 (w6a3). Every block below is a command actually run in this session; output verbatim (the 'operator authority' banner and Python RuntimeWarnings are filtered).
+# date: 2026-10-30T21:25:51Z  cwd: /Users/damian/lo-i18n-es
+
+$ git rev-parse HEAD
+4912975a4b5dd0c2c6011dbfcb20188c50e44084
+[exit 0]
+
+$ git status --short -- local_operator/i18n/catalogues/es/tui.analytics.json
+ M local_operator/i18n/catalogues/es/tui.analytics.json
+[exit 0]
+
+$ git diff -- local_operator/i18n/catalogues/es/tui.analytics.json
+diff --git a/local_operator/i18n/catalogues/es/tui.analytics.json b/local_operator/i18n/catalogues/es/tui.analytics.json
+index 3626811df5c..750b6ae2a59 100644
+--- a/local_operator/i18n/catalogues/es/tui.analytics.json
++++ b/local_operator/i18n/catalogues/es/tui.analytics.json
+@@ -75,7 +75,7 @@
+   "tui.analytics.table.tok_s": "{value} tok/s",
+   "tui.analytics.table.tokens": "{value} tokens",
+   "tui.analytics.totals.billed_note": "{context} entrada · {output} salida",
+-  "tui.analytics.totals.cache_hit": "Tasa de aciertos de caché",
++  "tui.analytics.totals.cache_hit": "Aciertos de caché",
+   "tui.analytics.totals.cache_hit_note": "del contexto servido desde la caché",
+   "tui.analytics.totals.cache_read": "Lectura de caché",
+   "tui.analytics.totals.cache_read_note": "entrada servida desde la caché",
+@@ -88,7 +88,7 @@
+   "tui.analytics.totals.context_read": "Contexto leído",
+   "tui.analytics.totals.days_empty": "Días con uso",
+   "tui.analytics.totals.days_with_usage": "{count, plural, one {{shown} día} many {{shown} de días} other {{shown} días}} con uso",
+-  "tui.analytics.totals.decode": "Tasa de decodificación",
++  "tui.analytics.totals.decode": "Decodificación",
+   "tui.analytics.totals.decode_note": "velocidad de decodificación medida",
+   "tui.analytics.totals.fresh": "Nuevo (sin caché)",
+   "tui.analytics.totals.fresh_note": "entrada nueva, facturada a tarifa completa",
+[exit 0]
+
+$ shasum -a 256 local_operator/i18n/catalogues/es/tui.analytics.json local_operator/i18n/catalogues/en/tui.analytics.json local_operator/i18n/catalogues/en/tui.analytics.context.json
+0287f77ba86d6b7e1ea1e29107f7b3344932a338d5a3e70e4440c2b5397358b7  local_operator/i18n/catalogues/es/tui.analytics.json
+aa5221066aa84eedf0f924628d51bc8f08ccf5f26b5075638b9d40062f7b617e  local_operator/i18n/catalogues/en/tui.analytics.json
+04356facdf1802a34a4be9ab6d3255cc9e92826d2b4e9ae917c43f687a9325eb  local_operator/i18n/catalogues/en/tui.analytics.context.json
+[exit 0]
+
+$ .venv/bin/python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+[exit 0]
+
+$ env PYTHONPATH=$PWD AUDIT_REPO_ROOT=$PWD LOP_LANG=es .venv/bin/python i18n/audits/evidence/es/tui.analytics/w6a3/checks.py   (verbatim capture of the run that exited 0)
+=== 0. inputs (sha256 of the CURRENT bytes) ===
+target es  0287f77ba86d6b7e1ea1e29107f7b3344932a338d5a3e70e4440c2b5397358b7  local_operator/i18n/catalogues/es/tui.analytics.json
+en         aa5221066aa84eedf0f924628d51bc8f08ccf5f26b5075638b9d40062f7b617e  local_operator/i18n/catalogues/en/tui.analytics.json
+context    04356facdf1802a34a4be9ab6d3255cc9e92826d2b4e9ae917c43f687a9325eb  local_operator/i18n/catalogues/en/tui.analytics.context.json
+rich.cells.cell_len = rich.cells.cell_len
+
+=== 1. mechanical ===
+PASS  [keys] 98 keys, identical to en
+PASS  [placeholders] argument names identical on every key
+PASS  [cldr-es] every es plural has one/many/other
+PASS  [delta] tui.analytics.totals.cache_hit = 'Aciertos de caché' (expected 'Aciertos de caché'), 17 cells
+PASS  [delta] tui.analytics.totals.decode = 'Decodificación' (expected 'Decodificación'), 14 cells
+
+=== 2. totals label column (derived from analytics_panel.py) ===
+PASS  [column] kv() pads name to 22 cells (analytics_panel.py:kv); value starts at cell 24
+discovered 8 kv() label sites by AST: ['row_billed', 'context_read', 'fresh', 'cache_read', 'cache_write', 'output', 'cache_hit', 'decode']
+PASS  [kv-column] all 8 labels <= 21 cells (>= 1 blank cell before the value)
+PASS  [search-col] tui.analytics.search.row_total 11 cells vs 22
+PASS  [search-col] tui.analytics.search.row_session 11 cells vs 22
+
+=== 3. negative control A — restore the round-2 labels, the column check must FAIL ===
+TRIPPED (expected 2 problems): tui.analytics.totals.cache_hit: 25 cells ('Tasa de aciertos de caché') in a 22-cell column | tui.analytics.totals.decode: 22 cells ('Tasa de decodificación') in a 22-cell column
+
+=== 4. rendered Totals block (build_report), live bytes vs round-2 bytes ===
+   |  Total facturado       3.6M tokens  3.5M entrada · 120k salida
+   |  Contexto leído        3.5M         420k nuevos · 3M en caché · 80k escritos
+   |   ├ Nuevo (sin caché)  420k         entrada nueva, facturada a tarifa completa
+   |   ├ Lectura de caché   3M           entrada servida desde la caché
+   |   └ Escritura de caché 80k          entrada nueva escrita en la caché
+   |  Salida                120k         80k generación, 40k razonamiento
+   |  Aciertos de caché     86%          del contexto servido desde la caché
+   |  Decodificación        42 tok/s     velocidad de decodificación medida
+   |  Est. cost             $4.20        ≈ list price × tokens
+PASS  [rendered-gap] all 9 Totals rows keep a blank cell and start the value at cell 24
+PASS  [rendered-gap-en] English control: no fused row
+   NEG|  Tasa de aciertos de caché86%          del contexto servido desde la caché
+   NEG|  Tasa de decodificación42 tok/s     velocidad de decodificación medida
+TRIPPED rendered negative control: 2 fused row(s)
+
+=== 5. label + value + note as the user reads them ===
+  Aciertos de caché | 86%      | del contexto servido desde la caché
+  Decodificación    | 42 tok/s | velocidad de decodificación medida
+  rate.legend (still on screen under the tables): 'tasa de decodificación en {shown, number} de {total, number} llamadas'
+
+=== 6. class sweep ===
+catalogue string -> pad/justify/fixed-width sink (AST, taint through locals):
+   local_operator/tui/widgets/analytics_panel.py:_model_rate_section:fspec  <- ['~name_col']
+   local_operator/tui/widgets/analytics_panel.py:build_report:kv  <- ['tui_analytics.totals_cache_hit', 'tui_analytics.totals_cache_read', 'tui_analytics.totals_cache_write', 'tui_analytics.totals_context_read', 'tui_analytics.totals_decode', 'tui_analytics.totals_fresh', 'tui_analytics.totals_output', 'tui_analytics.totals_row_billed']
+   local_operator/tui/widgets/info_panel.py:_sessions_section:marked  <- ['~metas']
+PASS  [sweep-discovery] the only direct catalogue->pad sinks are analytics kv() (checked above) and info_panel marked() (a width LADDER, see 6e)
+library rail: CSS width 22 -> inner 20; label room 14 (rows with a count) / 18 (status rows) / 20 (UPPERCASE header)
+   board fresh 2h, 2 live: en='reported 2h ago · 2 live' es='informado hace 2h · 2 activas'
+   board stale 3d, 1 live: en='reported 3d ago (stale) · 1 li…' es='informado hace 3d (stale) · 1 …'
+goal_panel._GOAL_TAG_CELLS = 8; done_suffix en 8 cells, es 9 cells ('  — hecho')
+   goal row [en] content_width=40: 40 cells -> 1 painted line(s); last='icio de pagos a…  — done'
+   goal row [en] content_width=66: 66 cells -> 1 painted line(s); last='veedor y verifi…  — done'
+   goal row [en] content_width=76: 76 cells -> 1 painted line(s); last='erificar cada c…  — done'
+   goal row [es] content_width=40: 41 cells -> 2 painted line(s); last='hecho'
+   goal row [es] content_width=66: 67 cells -> 2 painted line(s); last='hecho'
+   goal row [es] content_width=76: 77 cells -> 2 painted line(s); last='hecho'
+analytics kv note column starts at cell 37 (2 + 22 + 11 + 2); the report body crops (ReportView) rather than grows
+   body width 66: rows wider than the body — en 2, es 7
+      es  77>66    Contexto leído        3.5M         420k nuevos · 3M en caché · 80k escritos
+      es  79>66     ├ Nuevo (sin caché)  420k         entrada nueva, facturada a tarifa completa
+      es  67>66     ├ Lectura de caché   3M           entrada servida desde la caché
+      es  70>66     └ Escritura de caché 80k          entrada nueva escrita en la caché
+      es  69>66    Salida                120k         80k generación, 40k razonamiento
+      es  72>66    Aciertos de caché     86%          del contexto servido desde la caché
+      es  71>66    Decodificación        42 tok/s     velocidad de decodificación medida
+   body width 75: rows wider than the body — en 0, es 2
+      es  77>75    Contexto leído        3.5M         420k nuevos · 3M en caché · 80k escritos
+      es  79>75     ├ Nuevo (sin caché)  420k         entrada nueva, facturada a tarifa completa
+   body width 102: rows wider than the body — en 0, es 0
+
+SWEEP TABLE (key | site | column | en cells | es cells | verdict)
+  | tui.analytics.totals.row_billed | analytics_panel.kv  `{name:<22}` | 22 | 12 | 15 | OK
+  | tui.analytics.totals.context_read | analytics_panel.kv  `{name:<22}` | 22 | 12 | 14 | OK
+  | tui.analytics.totals.fresh | analytics_panel.kv  `{name:<22}` | 22 | 19 | 20 | OK
+  | tui.analytics.totals.cache_read | analytics_panel.kv  `{name:<22}` | 22 | 13 | 19 | OK
+  | tui.analytics.totals.cache_write | analytics_panel.kv  `{name:<22}` | 22 | 14 | 21 | OK
+  | tui.analytics.totals.output | analytics_panel.kv  `{name:<22}` | 22 | 6 | 6 | OK
+  | tui.analytics.totals.cache_hit | analytics_panel.kv  `{name:<22}` | 22 | 14 | 17 | OK
+  | tui.analytics.totals.decode | analytics_panel.kv  `{name:<22}` | 22 | 11 | 14 | OK
+  | tui.analytics.search.row_total | analytics_panel search row  `{name:<22}` | 22 | 11 | 11 | OK
+  | tui.analytics.search.row_session | analytics_panel search row  `{name:<22}` | 22 | 12 | 11 | OK
+  | tui.library.category_all | library rail (CSS width:22, truncate_cells) | 14 | 3 | 5 | OK
+  | tui.library.category_code | library rail (CSS width:22, truncate_cells) | 14 | 4 | 6 | OK
+  | tui.library.category_document | library rail (CSS width:22, truncate_cells) | 14 | 9 | 10 | OK
+  | tui.library.category_image | library rail (CSS width:22, truncate_cells) | 14 | 6 | 8 | OK
+  | tui.library.category_other | library rail (CSS width:22, truncate_cells) | 14 | 5 | 5 | OK
+  | tui.library.category_presentation | library rail (CSS width:22, truncate_cells) | 14 | 13 | 14 | OK
+  | tui.library.category_sound | library rail (CSS width:22, truncate_cells) | 14 | 6 | 7 | OK
+  | tui.library.category_spreadsheet | library rail (CSS width:22, truncate_cells) | 14 | 12 | 16 | TRUNC(ellipsis)
+  | tui.library.category_video | library rail (CSS width:22, truncate_cells) | 14 | 5 | 5 | OK
+  | tui.library.sidebar_categories | library rail (CSS width:22, truncate_cells) | 20 | 10 | 10 | OK
+  | tui.library.sidebar_status | library rail (CSS width:22, truncate_cells) | 20 | 6 | 6 | OK
+  | tui.library.sidebar_tags | library rail (CSS width:22, truncate_cells) | 20 | 4 | 9 | OK
+  | tui.library.status_favorites | library rail (CSS width:22, truncate_cells) | 18 | 9 | 9 | OK
+  | tui.library.status_highlighted | library rail (CSS width:22, truncate_cells) | 18 | 11 | 10 | OK
+  | tui.library.status_unorganized | library rail (CSS width:22, truncate_cells) | 18 | 11 | 13 | OK
+  | tui.library.tag_category_custom | library rail (CSS width:22, truncate_cells) | 20 | 6 | 13 | OK
+  | tui.library.tag_category_format | library rail (CSS width:22, truncate_cells) | 20 | 6 | 7 | OK
+  | tui.library.tag_category_project | library rail (CSS width:22, truncate_cells) | 20 | 7 | 8 | OK
+  | tui.library.tag_category_source | library rail (CSS width:22, truncate_cells) | 20 | 6 | 6 | OK
+  | tui.library.tag_category_status | library rail (CSS width:22, truncate_cells) | 20 | 6 | 6 | OK
+  | tui.library.tag_category_topic | library rail (CSS width:22, truncate_cells) | 20 | 5 | 4 | OK
+  | tui.projects.render.no_estimate_or_dates | projects board card (BOARD_COLUMN_WIDTH=32, facts line (alone)) | 31 | 20 | 24 | OK
+  | tui.projects.render.no_progress | projects board card (BOARD_COLUMN_WIDTH=32, fresh line (alone)) | 31 | 11 | 11 | OK
+  | tui.projects.render.no_progress_recorded | projects board card (BOARD_COLUMN_WIDTH=32, detail line) | 31 | 20 | 23 | OK
+  | tui.projects.render.reported_ago + live_count | projects board card fresh line (fresh 2h, 2 live) [rendered] | 31 | 24 | 29 | OK
+  | tui.projects.render.reported_ago + live_count | projects board card fresh line (stale 3d, 1 live) [rendered] | 31 | 31+ | 31+ | TRUNC(ellipsis) 'informado hace 3d (stale) · 1 …'
+  | tui.small.goal_panel.done_suffix | goal_panel `_GOAL_TAG_CELLS` (clip budget for the `  — done` tag) | 8 | 8 | 9 | OVER
+  | tui.app.help.cmd_paste_note | app /help gutter name_width=20, ceiling 74 (composed) | 74 | 74 | 72 | OK
+  | tui.app.help.copy_note | app /help gutter name_width=20, ceiling 74 (composed) | 74 | 64 | 65 | OK
+  | tui.app.help.copy_note_more | app /help gutter name_width=20, ceiling 74 (composed) | 74 | 71 | 74 | OK
+  | tui.app.help.model_saved_note | app /help gutter name_width=20, ceiling 74 (composed) | 74 | 59 | 64 | OK
+  | tui.app.help.notify_note | app /help gutter name_width=20, ceiling 74 (composed) | 74 | 151 | 164 | OVER (en also wraps: parity)
+  | tui.app.help.notify_note_more | app /help gutter name_width=20, ceiling 74 (composed) | 74 | 145 | 178 | OVER (en also wraps: parity)
+  | tui.app.help.paste_note | app /help gutter name_width=20, ceiling 74 (composed) | 74 | 71 | 68 | OK
+  | tui.app.help.skill_note | app /help gutter name_width=20, ceiling 74 (composed) | 74 | 62 | 73 | OK
+  | tui.app.help.title_note | app /help gutter name_width=20, ceiling 74 (composed) | 74 | 110 | 128 | OVER (en also wraps: parity)
+  | tui.app.help.title_note_more | app /help gutter name_width=20, ceiling 74 (composed) | 74 | 129 | 141 | OVER (en also wraps: parity)
+  | tui.analytics.totals.fresh_note | analytics kv note, 80x24 body=66 -> note room 29 (crop, not grow) | 29 | 30 | 42 | CROP (en also)
+  | tui.analytics.totals.cache_read_note | analytics kv note, 80x24 body=66 -> note room 29 (crop, not grow) | 29 | 23 | 30 | CROP
+  | tui.analytics.totals.cache_write_note | analytics kv note, 80x24 body=66 -> note room 29 (crop, not grow) | 29 | 26 | 33 | CROP
+  | tui.analytics.totals.cache_hit_note | analytics kv note, 80x24 body=66 -> note room 29 (crop, not grow) | 29 | 28 | 35 | CROP
+  | tui.analytics.totals.decode_note | analytics kv note, 80x24 body=66 -> note room 29 (crop, not grow) | 29 | 21 | 34 | CROP
+  | tui.analytics.table.{tokens,tok_s,calls,cache,coverage} | analytics table builders: columns sized from data + cell_len(suffix) (`_row_overhead`) | derived | - | - | OK (tolerated)
+  | tui.usage.* | usage_panel `_measure_columns`: label/numbers/reset sized from the rows; bar takes the remainder | derived | - | - | OK (tolerated)
+  | tui.hub_links.policy.* | hub_links `_render_row`: name floor 12, policy wraps to line 2 below it | ladder | - | - | OK (tolerated)
+  | tui.import.* | harness_import_view: truncate_cells only; `[x]`/`[ ]` markers identical to en | truncate | - | - | OK (tolerated)
+  | tui.small.session_sidebar.* | session_sidebar `_footer_line`: first rung that fits, never cropped mid-word | ladder | - | - | OK (tolerated)
+  | tui.small.todo_panel.more_below | todo_panel `_expanded_footer`: measures the widest remainder with cell_len | derived | - | - | OK (tolerated)
+  | tui.small.info_panel.* | info_panel marked(): `_fit_pair` ladder (metas) — no fixed pad on the catalogue string | ladder | - | - | OK (tolerated)
+
+=== result ===
+negative control: static column check trips on round-2 labels: TRIPPED
+negative control: rendered frame fuses on round-2 labels and the check sees it: TRIPPED
+FINDING F1 goal_panel done_suffix 9 cells > _GOAL_TAG_CELLS 8: clipped goal row wraps, `hecho` orphaned on line 2
+target sha256 verified: 0287f77ba86d6b7e1ea1e29107f7b3344932a338d5a3e70e4440c2b5397358b7
+blocking failures: 0
+exit=0
+
+$ env LOP_LANG=es PROBE_LOCALE=es .venv/bin/python i18n/audits/evidence/es/tui.analytics/w6a3/probe_goal_wrap.py.txt (run as .py)
+en content_width=66 goal_row=66 cells painted_lines=1 last='▌ Migrar el servicio de pagos al nuevo proveedor y verifi…  — done'
+en content_width=76 goal_row=76 cells painted_lines=1 last='▌ Migrar el servicio de pagos al nuevo proveedor y verificar cada c…  — done'
+es content_width=66 goal_row=67 cells painted_lines=2 last='hecho'
+es content_width=76 goal_row=77 cells painted_lines=2 last='hecho'
+[exit 0]
+
+$ env LOP_LANG=es PROBE_LOCALE=es .venv/bin/python i18n/audits/evidence/es/tui.analytics/w6a3/probe_analytics_frame.py.txt (run as .py)
+es 80x24 body_width 66
+  PAINTED|       ▌ Totales   100 llamadas (2 fallidas) · medidas
+  PAINTED|         Total facturado       3.6M tokens  3.5M entrada · 120k salida
+  PAINTED|         Contexto leído        3.5M         420k nuevos · 3M en caché ·
+  PAINTED|          ├ Nuevo (sin caché)  420k         entrada nueva, facturada a t
+  PAINTED|          ├ Lectura de caché   3M           entrada servida desde la cac▁
+  PAINTED|          └ Escritura de caché 80k          entrada nueva escrita en la
+  PAINTED|         Salida                120k         80k generación, 40k razonami
+  PAINTED|         Aciertos de caché     86%          del contexto servido desde l
+  PAINTED|         Decodificación        42 tok/s     velocidad de decodificación
+[exit 0]
+
+$ env LOP_LANG=es PROBE_LOCALE=es .venv/bin/python i18n/audits/evidence/es/tui.analytics/w6a3/probe_goal_frame.py.txt (run as .py)
+ERR 
+[exit 0]
+
+$ env LOP_LANG=es PROBE_LOCALE=es .venv/bin/python i18n/audits/evidence/es/tui.analytics/w6a3/probe_library_rail.py.txt (run as .py)
+locale es rail.size.width 22 canvas 21
+'CATEGORÍAS' 10
+'• Todos           27' 20
+'  Imágenes         2' 20
+'  Sonidos          1' 20
+'  Documentos       2' 20
+'  Presentaciones   4' 20
+'  Vídeo            1' 20
+'  Hojas de cálc…   5' 20
+'  Código           3' 20
+'  Otros            9' 20
+'ESTADO' 6
+'  Destacados' 12
+'  Sin organizar' 15
+'  Favoritos' 11
+'ETIQUETAS' 9
+'TEMA' 4
+'  #q3              1' 20
+'PROYECTO' 8
+'  #deck            1' 20
+'' 0
+[exit 0]
+
+$ env LOP_LANG=es PROBE_LOCALE=es .venv/bin/python i18n/audits/evidence/es/tui.analytics/w6a3/probe_projects_card.py.txt (run as .py)
+fresh,2 live             'informado hace 2h · 2 activas' | facts: 'sin estimación ni fechas'
+stale,1 live             'informado hace 3d (stale) · 1 …' | facts: 'sin estimación ni fechas'
+fresh,12 live            'informado hace 2h · 12 activas' | facts: 'sin estimación ni fechas'
+fresh 99d? 10d,1 live    'informado hace 10d · 1 activas' | facts: 'sin estimación ni fechas'
+[exit 0]
+
+$ (re-run, load average was ~120 during the first attempt which printed 'ERR ' = its 40 s wait_for expired) env LOP_LANG=es .venv/bin/python probe_goal_frame.py.txt
+|       Goal — done
+|       ──────────────────────────────────────────────────────────────────────────────────────
+|       ▌ Migrar el servicio de pagos al nuevo proveedor y verificar cada cobro con e…  —
+|       hecho
+|       judge: done
+|       ✓ Migrar el servicio de pagos al nuevo proveedor y verificar…  done · 2026-10-30 21:33
+|       c dismiss · q close
+|              · goal done: Migrar el servicio de pagos al nuevo proveedor y verificar
+[exit 0]

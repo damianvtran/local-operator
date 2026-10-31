@@ -3196,8 +3196,8 @@ class FailoverRouteState:
     #: every message boundary regardless of ``primary_retry_at_ms`` — a
     #: cooldown sized to a 24h advertised reset would otherwise glue the
     #: session to a fallback for a day after the primary's 5-hour window
-    #: reopened. Transport pins keep the cooldown: their recovery is not
-    #: cheaply observable.
+    #: (where the account reports one) reopened. Transport pins keep the
+    #: cooldown: their recovery is not cheaply observable.
     quota_pinned: bool = False
     #: The selector a CHILD was launched on when the launch resolved an
     #: explicit model (a role tier, or a resumed child's recorded tier) —
