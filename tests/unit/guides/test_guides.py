@@ -534,7 +534,7 @@ def test_the_mesh_front_doors_are_in_the_sessions_and_peer_messaging_guides() ->
 
     The `sessions` guide must teach the remote ops — the union list with the
     holding device on each row, the no-mesh note, the tail-only peek and the
-    no-force stop — and peer-messaging must carry the `send` tool's `peer`
+    refused remote stop — and peer-messaging must carry the `send` tool's `peer`
     bullet and the loopback-only limit, so an agent reading the message
     protocol learns the mesh path exists instead of inventing one.
     """
@@ -546,7 +546,23 @@ def test_the_mesh_front_doors_are_in_the_sessions_and_peer_messaging_guides() ->
     assert "each remote row names the device that holds it" in flat
     assert "ONE note saying why no remote rows could be" in flat
     assert "`query`/`regex`/`digest` stay local" in flat
-    assert "`lop network sessions --stop <id> --force` is the escalation" in flat
+    # THE REMOTE STOP IS A REFUSAL, NOT AN ESCALATION. This cell used to require
+    # the sentence naming `lop network sessions --stop <id> --force`; the tool
+    # answers `stop` with a `peer` target by refusing outright — no idle-only,
+    # no-signal remote stop exists on the wire — so the guide now states the
+    # refusal and names the remedy (the operator, on that device). The `--force`
+    # line is an ABSENCE on purpose: an escalation named here again is exactly the
+    # drift this test exists to catch, and the tool has no such path to agree
+    # with.
+    assert "`stop` is ALWAYS REFUSED for a `peer` target" in flat
+    assert "nothing is sent and the operator stops it on that device" in flat
+    assert "--force" not in flat
+    # ...and the LOCAL front door states the same authority limit: it ends an idle
+    # session, never signals, and has no force option of its own — the escalation
+    # stays the operator's, in the CLI (`test_graceful_only_stop.py` proves the
+    # tool half of that sentence).
+    assert "`stop` ends an IDLE local session" in flat
+    assert "There is no force option" in flat
 
     messaging = resolver("guide://peer-messaging")
     assert messaging is not None
