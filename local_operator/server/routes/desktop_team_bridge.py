@@ -151,6 +151,12 @@ _ATTACHMENT_ID = re.compile(ATTACHMENT_ID_PATTERN)
 #: ``client.ATTACHMENT_MAX_BYTES`` / ``ATTACHMENT_MIME_TYPES`` by a test.
 _ATTACHMENT_MAX_BYTES = 5 * 1024 * 1024
 _ATTACHMENT_SERVABLE = {"image/png", "image/jpeg"}
+#: An agent endpoint id in a desktop PATH: the client's own grammar
+#: (``client._ENDPOINT_ID``; the hub mints ``bep_`` + 32 hex), spelled here for
+#: the same boot-path reason as ``_ACCOUNT_ID`` and pinned equal by
+#: ``test_endpoint_grammar_matches_the_client``. Checked before any I/O so a
+#: renderer-supplied id can never reshape the upstream path.
+_ENDPOINT_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
 #: ``attachment_ids`` on a send or schedule: the hub's per-message bound and id
 #: grammar, enforced before the request leaves the machine.
 _ATTACHMENT_IDS = Field(default=None, min_length=1, max_length=4)
@@ -2907,10 +2913,73 @@ async def get_account_avatar(
     )
 
 
+@router.get("/v1/desktop/team-bridge/endpoints/{endpoint_id}/avatar")
+async def get_endpoint_avatar(
+    endpoint_id: str,
+    request: Request,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> Response:
+    """Relay one AGENT's own published picture, versioned, never a URL.
+
+    Capability ``team_bridge_endpoint_avatar``. WHY A SECOND ROUTE rather than
+    a ``kind`` on ``/accounts/{id}/avatar``: an agent's directory row is its
+    owner's row, and keying an agent's picture by account is exactly how the
+    owner's face ended up on "Aida (Damian Tran)" (2026-10-30). The path names
+    the ENDPOINT, so this route cannot answer with an account picture at all.
+
+    Deliberately the account relay's twin: the same closed query (``v`` 16
+    lowercase hex, ``size`` 64|256, the mandatory viewer receipt), the same
+    login fence and conditional-reuse rules (``client._avatar_read``, shared),
+    the same 1 MiB bound, type allowlist and response headers. The hub decides
+    who may see it (owner, or an active co-member while the endpoint is
+    active/paused, tenant taken from the endpoint row); a stale ``v`` is its
+    404, relayed as-is. Only the hub's directory ``avatar_url`` supplies the
+    version, and the client keys its cache ``endpoint:<id>`` so no account
+    entity and no other endpoint's entity can answer under this id.
+    """
+    query = request.query_params
+    keys = {"v", "size", "expected_account_id"}
+    if set(query) != keys or any(len(query.getlist(key)) != 1 for key in keys):
+        _raise_read("invalid_request")
+    if (
+        _ENDPOINT_ID.fullmatch(endpoint_id) is None
+        or not is_account_id(query["expected_account_id"])
+        or re.fullmatch(r"[0-9a-f]{16}", query["v"]) is None
+        or query["size"] not in {"64", "256"}
+    ):
+        _raise_read("invalid_request")
+    data, mime = await _conversation_reply(
+        _conversation_client(config_manager).fetch_endpoint_avatar(
+            endpoint_id,
+            v=query["v"],
+            size=int(query["size"]),
+            expected_account_id=query["expected_account_id"],
+        )
+    )
+    # The client also admits WebP for this route; this relay serves only what
+    # the hub actually re-encodes to (PNG or JPEG, agent-server
+    # ``encodeAccountAvatar``) and what the renderer and the compositor decode.
+    if mime not in _ATTACHMENT_SERVABLE or len(data) > 1024 * 1024:
+        _raise_read("malformed_page")
+    return Response(
+        content=data,
+        media_type=mime,
+        headers={
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "default-src 'none'; sandbox",
+            "Cache-Control": "private, no-store",
+        },
+    )
+
+
 _NOTIFICATION_AVATAR_REQUIRED = frozenset(
     {"tenant_id", "kind", "theme", "size", "initials", "expected_account_id"}
 )
 _NOTIFICATION_AVATAR_PHOTO = frozenset({"v", "avatar_account_id"})
+#: The agent's OWN picture: ``v`` plus the endpoint it belongs to. A separate
+#: shape (not a value of ``avatar_account_id``) so a person can never be drawn
+#: from an endpoint and an agent never from an account.
+_NOTIFICATION_AVATAR_AGENT = frozenset({"v", "avatar_endpoint_id"})
 
 
 @router.get("/v1/desktop/team-bridge/accounts/{target_account_id}/notification-avatar")
@@ -2937,6 +3006,13 @@ async def get_notification_avatar(
     * ``v`` + ``avatar_account_id``: both or neither. With them, the photo is
       read through the same closed ``/avatar`` relay (person only); without, an
       initials placeholder is drawn and no network is touched.
+    * ``v`` + ``avatar_endpoint_id`` (``person_agent`` only, capability
+      ``team_bridge_endpoint_avatar``): the agent's OWN picture, read through
+      the closed endpoint relay and drawn under the badge and agent marker. A
+      failed or undecodable read draws the agent glyph instead (a banner never
+      waits on, or loses, a cosmetic picture); a changed login still refuses.
+      Exactly one of the two photo shapes; a ``person`` naming an endpoint is
+      refused.
 
     ``avatar_account_id`` must equal the path account, so an avatar naming
     any other account is refused rather than drawn under someone else's name.
@@ -2963,12 +3039,19 @@ async def get_notification_avatar(
 
     query = request.query_params
     names = set(query)
-    photo_names = names & _NOTIFICATION_AVATAR_PHOTO
+    picture_names = names - _NOTIFICATION_AVATAR_REQUIRED
+    photo_names = picture_names if picture_names == _NOTIFICATION_AVATAR_PHOTO else set()
+    agent_names = picture_names if picture_names == _NOTIFICATION_AVATAR_AGENT else set()
     if (
         not _NOTIFICATION_AVATAR_REQUIRED <= names
-        or names - _NOTIFICATION_AVATAR_REQUIRED - _NOTIFICATION_AVATAR_PHOTO
-        or photo_names not in (set(), set(_NOTIFICATION_AVATAR_PHOTO))
+        or (picture_names and not (photo_names or agent_names))
         or any(len(query.getlist(key)) != 1 for key in names)
+    ):
+        _raise_read("invalid_request")
+    if agent_names and (
+        query["kind"] != "person_agent"
+        or _ENDPOINT_ID.fullmatch(query["avatar_endpoint_id"]) is None
+        or re.fullmatch(r"[0-9a-f]{16}", query["v"]) is None
     ):
         _raise_read("invalid_request")
     if (
@@ -2995,6 +3078,7 @@ async def get_notification_avatar(
                 initials=query["initials"],
                 v=query["v"] if photo_names else None,
                 expected_account_id=query["expected_account_id"],
+                endpoint=(query["avatar_endpoint_id"], query["v"]) if agent_names else None,
             )
         )
     except na.RendererBusy:
