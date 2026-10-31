@@ -292,7 +292,10 @@ MEASURED_TOKENS: dict[str, int] = {
     # account). Worded to cost no more than the old text: the child-kind
     # context budget had 2 billed tokens of headroom. The ``team`` entry moves by
     # the same -1 for its twin field; the same printed table measured both.
-    "agent": 1408,
+    # RE-MEASURED (PR #3143, Radient Saver pins): 1408 -> 1441 (+33). The new
+    # optional ``saver`` param (on | off | inherit) and its one-line
+    # description; the ``team`` twin field moves +32 in the same printed table.
+    "agent": 1441,
     # RE-MEASURED (ask/notify dedupe, asks/dedupe.py): 1079 -> 1078. The
     # restraint now says "decide, never for FYI" and "asking notifies: never
     # also `notify` it"; trims elsewhere in the same paragraph pay for it so
@@ -636,7 +639,9 @@ MEASURED_TOKENS: dict[str, int] = {
     # the same printed table.
     # RE-MEASURED (F0, #3054): 1400 -> 1399 -- the ``scope`` default wording,
     # the same -1 as the agent twin.
-    "team": 1399,
+    # RE-MEASURED (PR #3143, Radient Saver pins): 1399 -> 1431 (+32), the
+    # per-slot ``saver`` member field; the same printed table as ``agent``.
+    "team": 1431,
     "team_delete": 86,
     "todo": 536,
     # NEW (video phase, 2026-10-10): the ``video_status`` doc — the cold-safe
@@ -679,7 +684,9 @@ MEASURED_TOKENS: dict[str, int] = {
 #: takes because both arms render the completed notes; ``task`` stays 764.
 #: RE-MEASURED (F0, #3054): agent 1394 -> 1393, the same -1 ``scope``-default
 #: wording as the canonical arm; ``task`` stays 764.
-TIER_ARM_TOKENS: dict[str, int] = {"agent": 1437, "task": 764}
+#: RE-MEASURED (PR #3143): agent 1437 -> 1470, the same +33 ``saver`` param
+#: as the canonical arm; ``task`` stays 764 (Saver is not a launch field).
+TIER_ARM_TOKENS: dict[str, int] = {"agent": 1470, "task": 764}
 
 
 async def _noop_execute(*_args: Any, **_kwargs: Any) -> ToolResult:
