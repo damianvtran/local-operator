@@ -2564,9 +2564,7 @@ def _worker_handler(
     loop = _Recorder()
     interrupted = asyncio.Event()
     sessions: list[Any] = [session]
-    exec_worker._install_sigterm_handler(
-        cast(Any, loop), sessions, interrupted, facts, job_id
-    )
+    exec_worker._install_sigterm_handler(cast(Any, loop), sessions, interrupted, facts, job_id)
     return session, loop.callbacks[exec_worker.signal.SIGTERM], interrupted
 
 
