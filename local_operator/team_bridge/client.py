@@ -3940,7 +3940,11 @@ class TeamBridgeClient:
 
         variant = na.Variant(kind=kind, theme=theme, size=size, initials=initials)
         photo: bytes | None = None
-        if v is not None:
+        # A person's agent is drawn as the agent glyph, never its owner's face
+        # (2026-10-30; ``notification_avatar`` module docstring). An older
+        # desktop still sends the owner's photo version for it: ignore it and
+        # touch no network, so the fix reaches released desktops too.
+        if v is not None and kind != "person_agent":
             # The raw entity keeps its own rules (revalidated per use, no-store
             # honoured) in ``fetch_avatar``; nothing derived from it is kept here.
             photo, _mime = await self.fetch_avatar(

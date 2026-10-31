@@ -2936,13 +2936,15 @@ async def get_notification_avatar(
       ``64|256``; ``initials`` 0-2 letters/digits (may be empty);
       ``expected_account_id`` the captured VIEWER receipt, as on ``/avatar``.
     * ``v`` + ``avatar_account_id``: both or neither. With them, the photo is
-      read through the same closed ``/avatar`` relay; without, an initials
-      placeholder is drawn and no network is touched.
+      read through the same closed ``/avatar`` relay (person only); without, an
+      initials placeholder is drawn and no network is touched.
 
-    ``avatar_account_id`` must equal the path account: the Team Bridge sender
-    contract pins a ``person_agent``'s avatar to its OWNER's account (which is
-    the path id), so an avatar naming any other account is refused rather than
-    drawn under someone else's name.
+    ``avatar_account_id`` must equal the path account, so an avatar naming
+    any other account is refused rather than drawn under someone else's name.
+    For ``person_agent`` the photo half is still validated but IGNORED: an
+    agent is drawn as the agent glyph and never as its owner's photo
+    (2026-10-30). Released desktops still send the owner's version for an
+    agent, and ignoring it fixes their banners without a desktop update.
 
     ``private, no-store``: core renders statelessly and keeps no composite. The
     desktop main process owns display retention (A0: in memory, <= 15 minutes,
