@@ -107,5 +107,6 @@
       "suggested": "optional: ' · कार्य सूची {open}/{total}' / '… {count} और कार्य-सूची आइटम' if space allows",
       "disposition": "open at PASS: minor/nit accepted, value unchanged"
     }
-  ]
+  ],
+  "counts_scope": "counts, result and gate_status describe locale-wide rounds 1-2 as recorded in the ledger; findings with round \"targeted-argorder\" come from session d8fb2395abc5 (read only the rephrased keys) and are not in those counts"
 }
