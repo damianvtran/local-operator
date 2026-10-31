@@ -4310,10 +4310,18 @@ async def _score(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "reports,retired",
-    [([None, None], False), ([0, 0], True), ([29000, 29000], False), ([0, None, 0], False)],
+    [
+        ([None, None], False),
+        ([0, 0], True),
+        ([29000, 29000], False),
+        ([0, None, 0], False),
+        ([0, "no_usage", 0], False),
+        ([0, "no_prompt", 0], False),
+        ([0, "short_prompt", 0], False),
+    ],
 )
 async def test_wire_cache_evidence_controls_affinity(
-    reports: list[int | None], retired: bool
+    reports: list[int | str | None], retired: bool
 ) -> None:
     """Exercise the real adapter and session wrapper, not just the score helper."""
     from local_operator.providers.clients import OpenAICompatClient
@@ -4323,13 +4331,16 @@ async def test_wire_cache_evidence_controls_affinity(
 
     def reply(request: httpx.Request) -> httpx.Response:
         reported = next(remaining)
-        usage: dict[str, Any] = {"prompt_tokens": 30000, "completion_tokens": 10}
-        if reported is not None:
+        usage: dict[str, Any] = {"completion_tokens": 10}
+        if reported != "no_prompt":
+            usage["prompt_tokens"] = 10 if reported == "short_prompt" else 30000
+        if isinstance(reported, int):
             usage["prompt_tokens_details"] = {"cached_tokens": reported}
         chunks = [
             {"provider": "SiliconFlow", "choices": [{"delta": {}, "finish_reason": "stop"}]},
-            {"choices": [], "usage": usage},
         ]
+        if reported != "no_usage":
+            chunks.append({"choices": [], "usage": usage})
         payload = "".join(f"data: {json.dumps(chunk)}\n\n" for chunk in chunks) + "data: [DONE]\n\n"
         return httpx.Response(200, text=payload, headers={"content-type": "text/event-stream"})
 

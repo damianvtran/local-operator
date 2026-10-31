@@ -4461,6 +4461,11 @@ class SessionStreamFn:
             return
         prompt_tokens = usage.input_tokens if usage else 0
         if prompt_tokens < self.PROVIDER_STRIKE_MIN_PROMPT_TOKENS:
+            # No receipt, missing prompt count, and a short prompt cannot tell
+            # whether this host would have reused the warm prefix. Such a turn
+            # interrupts consecutive misses just like an absent cache counter.
+            self._provider_strikes.get(model_id, {}).pop(served, None)
+            self._provider_strike_at.get(model_id, {}).pop(served, None)
             return
         # Unknown evidence cannot establish consecutive misses: the intervening
         # turn could have hit. Discard this host's pending strike without treating
