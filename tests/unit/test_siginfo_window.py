@@ -242,3 +242,64 @@ def test_a_burst_of_refused_signals_neither_hangs_nor_self_attributes(tmp_path: 
     assert seen["self"] == 0, f"a receipt named the runtime's own pid: {seen}"
     assert seen["named"] + seen["none"] == seen["arrivals"]
     assert seen["arrivals"] >= 200, f"too few deliveries reached the handler: {seen}"
+
+
+# The sensor's own re-raise must never be captured as a delivery from the process itself.
+_SELF_ATTRIBUTION = _HOOK + """
+import time
+saved_python = signal.getsignal(signal.SIGUSR2)
+in_hook = [False]
+
+class Interleave(Hooked):
+    # On the RESTORE the sensor performs (its first act after capturing), do what the
+    # loop thread's refusal path does concurrently: claim the capture and re-arm. The
+    # sensor's own re-raise then lands on a LIVE sensor.
+    def sigaction(self, sig, new, old):
+        rc = real.sigaction(sig, new, old)
+        if new is not None and not in_hook[0] and siginfo._FACTS.get(sig) is not None:
+            in_hook[0] = True            # ONE-SHOT: a single refusal's re-arm, as in production
+            siginfo._FACTS.pop(sig, None)            # the claim (``take``)
+            siginfo.rearm(sig)                       # the refusal's re-arm
+        return rc
+
+il = Interleave()
+siginfo._LIBC, siginfo._LIBC_TRIED = il, True
+assert siginfo.arm(SIG)
+print("ready", flush=True)
+time.sleep(1.5)
+print("facts", siginfo.take(SIG), "me", os.getpid(), "ran", ran)
+"""
+
+
+def test_the_sensors_own_reraise_is_never_captured_as_a_sender() -> None:
+    """A re-armed sensor sees the previous sensor's re-raise: it must not name US.
+
+    QA round 3 measured the runtime's OWN pid recorded as the sender (1-2 per 40-60
+    trials at 1-3 ms spacing): the sensor's ``_redeliver`` is an ``os.kill`` at its own
+    pid, and a sensor re-installed in the gap captures it as an ordinary delivery. The
+    parent sends the one real signal (so the true sender is the parent) and the child
+    forces that interleaving deterministically.
+    """
+    child = subprocess.Popen(
+        [sys.executable, "-c", textwrap.dedent(_SELF_ATTRIBUTION)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        env=_child_env(),
+        start_new_session=True,
+    )
+    try:
+        assert child.stdout is not None
+        assert child.stdout.readline().strip() == "ready"
+        os.kill(child.pid, signal.SIGUSR2)
+        out, _ = child.communicate(timeout=20)
+    finally:
+        if child.poll() is None:
+            os.killpg(child.pid, signal.SIGKILL)
+            child.wait()
+    line = [ln for ln in out.splitlines() if ln.startswith("facts")][-1]
+    assert "python handler ran" in line, line
+    # NOTHING may be left over: the one real signal was claimed by the product's handler
+    # path, and the sensor's own re-raise must not have been stored as a second capture
+    # (a later real signal would claim it and name this process, or pid 0, as its sender).
+    assert " None me " in line, f"the sensor's own re-raise was stored as a capture: {line}"

@@ -207,6 +207,24 @@ _SAVED: dict[int, Any] = {}
 #: memory on the next delivery.
 _CALLBACKS: dict[int, Any] = {}
 
+#: Re-raises a sensor has sent at ITS OWN pid and that have not yet been seen arrive,
+#: per signal. A sensor ends by restoring the product's action and re-raising; if a
+#: sensor was RE-INSTALLED before that re-raise is delivered (the sanction gate re-arms
+#: after every refusal), the re-raise lands on the new sensor and would be captured as
+#: an ordinary delivery whose sender is this process or pid 0 — a wrong pid in an
+#: incident report, which this module rates worse than "unavailable" (QA round 3
+#: measured it 1-2 times per 40-60 bursts). The sensor that finds a pending count
+#: consumes it and captures nothing. ``take`` clears the count: a delivery that
+#: reached the product's handler has no re-raise left to skip, so a quiet re-armed
+#: sensor can never swallow the NEXT real signal's sender.
+#:
+#: WHAT THIS CANNOT DO, stated because the mask is the reason it is a counter and not a
+#: flag: a signal is blocked while its own handler runs, so a same-thread re-raise is
+#: delivered only AFTER the sensor returned — an "in flight" marker would already be
+#: gone. A real second signal arriving inside the same instant as a re-armed sensor
+#: with a pending count is consumed instead of captured: a missing fact, never a wrong one.
+_SELF_RERAISES: dict[int, int] = {}
+
 #: ``libc``, resolved once. ``None`` means "no ctypes/libc on this host", which
 #: every caller treats as "cannot capture".
 _LIBC: Any | None = None
@@ -320,6 +338,7 @@ def take(sig: int) -> dict[str, int] | None:
     """
     try:
         facts = _FACTS.pop(int(sig), None)
+        _SELF_RERAISES.pop(int(sig), None)
     except Exception:  # noqa: BLE001
         return None
     if not isinstance(facts, dict):
@@ -376,15 +395,24 @@ def _handler(expected_signo: int) -> Any:
     """
 
     def sensor(signo: int, info: int, _ucontext: int) -> None:
+        number = int(signo)
         try:
-            facts = _read(info, expected_signo)
-            if facts is not None and int(signo) not in _FACTS:
-                _FACTS[int(signo)] = facts
+            pending = _SELF_RERAISES.get(number, 0)
+            if pending > 0:
+                # A predecessor sensor's own re-raise, not a delivery from anybody:
+                # consume it, capture nothing (see ``_SELF_RERAISES``). Restore and
+                # redeliver below still run, so the product's handler gets the signal.
+                _SELF_RERAISES[number] = pending - 1
+            else:
+                facts = _read(info, expected_signo)
+                if facts is not None and number not in _FACTS:
+                    _FACTS[number] = facts
+                _SELF_RERAISES[number] = 1
         except Exception:  # noqa: BLE001 — never propagate out of a signal frame
             pass
         finally:
-            _restore(int(signo))
-            _redeliver(int(signo))
+            _restore(number)
+            _redeliver(number)
 
     return _CALLBACK(sensor)
 
@@ -485,6 +513,7 @@ def arm(sig: int) -> bool:
                 _CALLBACKS.pop(number, None)
                 return False
             _FACTS.pop(number, None)
+            _SELF_RERAISES.pop(number, None)
             logger.debug("siginfo: sender sensor armed for signal %s", number)
             return True
         except Exception:  # noqa: BLE001 — arming must never fail a boot
@@ -520,6 +549,7 @@ def disarm(sig: int) -> bool:
         _CALLBACKS.pop(number, None)
         _SAVED.pop(number, None)
         _FACTS.pop(number, None)
+        _SELF_RERAISES.pop(number, None)
         return restored
 
 
