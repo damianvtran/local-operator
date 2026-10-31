@@ -1167,7 +1167,9 @@ def test_every_job_row_field_is_classified() -> None:
 @pytest.mark.parametrize("long_context", ["none", "priced", "unpriced"])
 @pytest.mark.parametrize("cache_reported", [None, True, False])
 def test_the_attach_frame_fits_for_a_session_that_ran_all_year(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cache_reported: bool | None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cache_reported: bool | None,
     long_context: str,
 ) -> None:
     """The full frame accommodates both live cache evidence and pricing tiers."""
