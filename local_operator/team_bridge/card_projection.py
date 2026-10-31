@@ -2,10 +2,10 @@
 
 The human journal may record a card before a turn can hydrate its body. A
 journal flush is only tool-pair-safe, not admission-safe. Therefore every model
-renderer substitutes a structural pending state unless the turn that owns the
-matching screened reservation has attached its frame to THIS request. Durable
-metadata is a locator, never an admission capability; the latter exists only in
-an ephemeral request copy and cannot survive transcript reconstruction.
+renderer substitutes one of two content-free status markers. Only the native
+ephemeral frame may carry screened source metadata and body together; journal
+envelopes have no byte-bound admission proof and NEVER render as model text.
+Live presentation capabilities cannot survive transcript reconstruction.
 """
 
 from __future__ import annotations
@@ -20,7 +20,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 PENDING_CARD = "[team_bridge: delivery_pending]"
-_CAPABILITY = "_bridge_card_admission"
+EARLIER_CARD = "[team_bridge: delivered earlier — open the conversation to re-read]"
+_HISTORY_STATE = "_bridge_card_history_state"
 
 
 def is_conversation_card(details: Mapping[str, Any]) -> bool:
@@ -51,141 +52,43 @@ def _identity(details: Mapping[str, Any]) -> tuple[str, str, tuple[str, ...]] | 
     return fields["tenant_id"], fields["conversation_id"], ids
 
 
-def _live_binding(runtime: Any) -> dict[str, Any] | None:
-    from .authority import authority_fence
-    from .store import Store, StoreRefused, _owner_key
+def _completed_before(details: Mapping[str, Any], runtime: Any) -> bool:
+    """Choose a content-free status, NEVER permission to render an envelope.
 
-    if runtime is None:
-        return None
-    try:
-        if runtime.tenant_id != runtime.owner.tenant_id or authority_fence(runtime) is not None:
-            return None
-        facts = Store(runtime.config_dir).per_call_admission_state(
-            runtime.owner, runtime.session_id
-        )
-        if not facts or not facts.get("designation_matches"):
-            return None
-        return {
-            "owner": _owner_key(runtime.owner),
-            "credential_id": runtime.owner.credential_id,
-            "generation": runtime.owner.enrollment_generation,
-            "policy_epoch": facts["policy_epoch"],
-            "consent_version": facts["consent_version"],
-        }
-    except (StoreRefused, AttributeError, KeyError, TypeError, ValueError):
-        return None
-
-
-def _row_matches(row: Mapping[str, Any], binding: Mapping[str, Any], runtime: Any) -> bool:
-    owner = runtime.owner
-    return all(
-        row.get(key) == expected
-        for key, expected in {
-            "owner_key": binding["owner"],
-            "tenant_id": owner.tenant_id,
-            "account_id": owner.account_id,
-            "endpoint_id": owner.endpoint_id,
-            "canonical_base_url": owner.canonical_base_url,
-            "credential_id": owner.credential_id,
-            "enrollment_generation": owner.enrollment_generation,
-            "policy_epoch": binding["policy_epoch"],
-            "consent_version": binding["consent_version"],
-            "designated_session": runtime.session_id,
-        }.items()
-    )
-
-
-def _historical_card_matches(details: Mapping[str, Any], runtime: Any, transcript: Any) -> bool:
-    """Prove prior ORDERING, not content: completed admission checked the bytes.
-
-    Bodies are never persisted. A render cannot re-prove their content digest;
-    it relies on the existing successful settlement contract and server-unique
-    message ids. Bare completed flags, foreign epochs and absent assistant
-    entries are insufficient. Each grouped id must independently qualify.
+    There is no persisted binding of envelope bytes to an admission. Completion
+    therefore supplies only a historical status hint; it cannot authorize text,
+    and neither a mislinked assistant entry nor substituted same-id bytes can
+    widen this projection. Every grouped id must independently be completed.
     """
     identity = _identity(details)
-    binding = _live_binding(runtime)
-    if identity is None or binding is None or identity[0] != runtime.tenant_id:
+    if runtime is None or identity is None:
         return False
     from .store import Store, StoreRefused
 
     try:
-        assistant_entries = {
-            entry.id: entry
-            for entry in transcript.entries()
-            if entry.type == "message" and entry.payload.get("role") == "assistant"
-        }
+        if identity[0] != runtime.tenant_id or runtime.tenant_id != runtime.owner.tenant_id:
+            return False
         for message_id in identity[2]:
             row = Store(runtime.config_dir).body_reservation(runtime.owner, identity[1], message_id)
-            if (
-                row is None
-                or not _row_matches(row, binding, runtime)
-                or row.get("conversation_id") != identity[1]
-                or row.get("message_id") != message_id
-                or row.get("state") != "completed"
-                or not row.get("completed_entry_id")
-                or row["completed_entry_id"] not in assistant_entries
-                or not (
-                    float(row["created_at"])
-                    <= assistant_entries[row["completed_entry_id"]].ts
-                    <= float(row["updated_at"])
-                )
-            ):
+            if row is None or row.get("state") != "completed":
                 return False
         return True
     except (StoreRefused, AttributeError, KeyError, TypeError, ValueError):
         return False
 
 
-def project_history(
-    messages: list[Any], *, runtime: Callable[[], Any], transcript: Any
-) -> list[Any]:
-    """Attach only ephemeral eligibility; revalidate even reused projections."""
-    projected = []
-    for message in messages:
-        details = getattr(message, "details", None)
-        if (
-            getattr(message, "custom_type", None) == "team_bridge_message"
-            and isinstance(details, Mapping)
-            and is_conversation_card(details)
-        ):
-            candidate = details.get(_CAPABILITY)
-            # The live transform already supplied its frame capability. A
-            # historical capability is never a cache: its predicate reads the
-            # CURRENT runtime, store and journal on each physical rendering.
-            if not isinstance(candidate, _Admission) or candidate.frame is None:
-                text = str(details.get("text") or "")
-                candidate = _Admission(
-                    None,
-                    text,
-                    lambda details=details: _historical_card_matches(
-                        details, runtime(), transcript
-                    ),
-                )
-                message = message.model_copy(
-                    update={"details": {**details, _CAPABILITY: candidate}}
-                )
-        projected.append(message)
-    return projected
-
-
 @dataclass(frozen=True)
-class _Admission:
-    frame: Any
-    text: str
-    valid: Callable[[], bool]
+class _HistoryState:
+    completed: Callable[[], bool]
 
 
-def admit_matching_cards(
-    messages: list[Any],
-    *,
-    frame: Any,
-    tenant_id: str,
-    conversation_id: str,
-    message_id: str,
-    valid: Callable[[], bool],
-) -> list[Any]:
-    """Authorize request copies only AFTER PendingTurn's per-call live check."""
+def project_history(messages: list[Any], *, runtime: Callable[[], Any]) -> list[Any]:
+    """Attach only a status reader; history never authorizes envelope bytes.
+
+    The native ephemeral frame already includes the screened source and body.
+    Raw journal cards remain markers even beside that frame: their bytes cannot
+    borrow its admission merely by naming the same server-generated ids.
+    """
     projected = []
     for message in messages:
         details = getattr(message, "details", None)
@@ -193,12 +96,9 @@ def admit_matching_cards(
             getattr(message, "custom_type", None) == "team_bridge_message"
             and isinstance(details, Mapping)
             and is_conversation_card(details)
-            and _identity(details) == (tenant_id, conversation_id, (message_id,))
         ):
-            text = str(details.get("text") or "")
-            message = message.model_copy(
-                update={"details": {**details, _CAPABILITY: _Admission(frame, text, valid)}}
-            )
+            state = _HistoryState(lambda details=details: _completed_before(details, runtime()))
+            message = message.model_copy(update={"details": {**details, _HISTORY_STATE: state}})
         projected.append(message)
     return projected
 
@@ -212,14 +112,9 @@ def model_card_text(message: Any, messages: list[Any]) -> str:
         if isinstance(frame, _FrameAdmission) and (frame.text != text or not frame.valid()):
             return PENDING_CARD
         return text
-    capability = details.get(_CAPABILITY)
-    if (
-        isinstance(capability, _Admission)
-        and capability.text == text
-        and (capability.frame is None or any(frame is capability.frame for frame in messages))
-        and capability.valid()
-    ):
-        return text
+    state = details.get(_HISTORY_STATE)
+    if isinstance(state, _HistoryState) and state.completed():
+        return EARLIER_CARD
     logger.info("bridge: card assembly pending code=delivery_pending")
     return PENDING_CARD
 

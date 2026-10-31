@@ -1674,7 +1674,7 @@ async def test_atomic_card_wake_at_a_running_tool_boundary(
     """
     from local_operator.harness.render import _default_convert_to_llm
     from local_operator.mobile import peer_send
-    from local_operator.team_bridge.card_projection import PENDING_CARD
+    from local_operator.team_bridge.card_projection import EARLIER_CARD, PENDING_CARD
     from local_operator.team_bridge.connector.conversation import (
         ConversationCardMetadata,
         _deliver_card,
@@ -1753,18 +1753,21 @@ async def test_atomic_card_wake_at_a_running_tool_boundary(
             ):
                 assert forbidden not in joined, joined
         admitted = "\n".join(stream.texts(2))
-        assert BODY in admitted and "mention: no" in admitted, admitted
+        assert BODY in admitted and HEADER_MARKER in admitted, admitted
+        assert PENDING_CARD in admitted and "sender-name-canary" not in admitted, admitted
         assert _row(config_dir)["state"] == "completed"
-        # The body is NOT stored, but subsequent turns retain the legitimate
-        # envelope as history after the successful admitted boundary.
+        # Accepted cost: neither body nor envelope survives as model history.
+        # A content-free status distinguishes prior admission from pending;
+        # re-reading uses the conversation read, never a cleared raw envelope.
         later = "\n".join(
             _message_texts(session._render_history(session._transcript.build_llm_history()))
         )
-        assert "mention: no" in later and PENDING_CARD not in later, later
+        assert EARLIER_CARD in later and PENDING_CARD not in later, later
+        assert "mention: no" not in later and "sender-name-canary" not in later, later
         assert BODY not in _transcript_text(tmp_path / "sess")
         print(
             f"atomic {sender_kind} thread={thread}: tool-boundary=pending; replay=pending; "
-            "body-turn=card+body; settled-history=card; body-persisted=no"
+            "body-turn=screened-source+body; settled-history=earlier-marker; body-persisted=no"
         )
     finally:
         await session.dispose()
