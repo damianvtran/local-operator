@@ -607,10 +607,12 @@ class FakeClient:
         agent_label=None,
         thread_root_id=None,
         attachment_ids=None,
+        mentions=None,
         access=None,
         expected_account_id=None,
     ):
         FakeClient.behavior["last_send_attachment_ids"] = attachment_ids
+        FakeClient.behavior["last_send_mentions"] = mentions
         FakeClient.behavior["last_send"] = {
             "conversation_id": conversation_id,
             "client_ref": client_ref,
@@ -3443,6 +3445,86 @@ async def test_conversation_send_without_a_thread_root_forwards_none(api):
     )
     assert response.status_code == 200, response.text
     assert FakeClient.behavior["last_send_thread_root_id"] is None
+
+
+async def test_conversation_send_forwards_structured_mentions(api):
+    client, _root, _d = api
+    FakeClient.behavior["conversation_send"] = {"id": "bcmsg_5", "seq": 5}
+    response = await client.post(
+        "/v1/desktop/team-bridge/conversations/bcv_abc12345/messages",
+        json={
+            "client_ref": "ref-5",
+            "body": "@Ada @Scout look",
+            "mentions": [
+                {"kind": "agent", "account_id": "acc_owner", "endpoint_id": "bep_scout"},
+                {"kind": "human", "account_id": "acc_ada"},
+            ],
+        },
+    )
+    assert response.status_code == 200, response.text
+    # A human row carries no endpoint_id key at all (not ``None``): the client
+    # re-validates each row and the hub decodes a closed shape.
+    assert FakeClient.behavior["last_send_mentions"] == [
+        {"kind": "agent", "account_id": "acc_owner", "endpoint_id": "bep_scout"},
+        {"kind": "human", "account_id": "acc_ada"},
+    ]
+
+
+@pytest.mark.parametrize("payload", [{}, {"mentions": []}])
+async def test_conversation_send_without_mentions_forwards_none(api, payload):
+    # ``None`` is what makes the client omit the key, keeping an undirected
+    # send byte-identical to the pre-mention wire (pinned on the client side by
+    # test_the_client_omits_mentions_entirely_when_there_are_none).
+    client, _root, _d = api
+    FakeClient.behavior["conversation_send"] = {"id": "bcmsg_6", "seq": 6}
+    response = await client.post(
+        "/v1/desktop/team-bridge/conversations/bcv_abc12345/messages",
+        json={"client_ref": "ref-6", "body": "hello", **payload},
+    )
+    assert response.status_code == 200, response.text
+    assert FakeClient.behavior["last_send_mentions"] is None
+
+
+@pytest.mark.parametrize(
+    "mentions",
+    [
+        [{"kind": "robot", "account_id": "acc_ada"}],
+        [{"kind": "channel"}],
+        [{"kind": "human", "account_id": "acc_ada", "label": "Ada"}],
+        [{"kind": "human", "account_id": ""}],
+        [{"kind": "human", "account_id": " acc_ada"}],
+        [{"kind": "agent", "account_id": "acc_o", "endpoint_id": ""}],
+        [{"account_id": "acc_ada"}],
+        [{"kind": "human", "account_id": "acc_ada"}, {"kind": "human", "account_id": "acc_ada"}],
+        [{"kind": "human", "account_id": f"acc_{i}"} for i in range(51)],
+    ],
+    ids=[
+        "bad-kind",
+        "channel-not-offered",
+        "extra-key",
+        "blank-id",
+        "padded-id",
+        "blank-endpoint",
+        "no-kind",
+        "duplicate",
+        "over-50",
+    ],
+)
+async def test_conversation_send_refuses_a_malformed_mention_before_io(api, mentions):
+    client, _root, _d = api
+    calls_before = FakeClient.calls
+    response = await client.post(
+        "/v1/desktop/team-bridge/conversations/bcv_abc12345/messages",
+        json={"client_ref": "ref-7", "body": "x", "mentions": mentions},
+    )
+    assert response.status_code == 422, response.text
+    assert FakeClient.calls == calls_before
+
+
+async def test_send_mentions_capability_is_advertised():
+    from local_operator.server.features import feature_flags
+
+    assert feature_flags()["team_bridge_send_mentions"] == 1
 
 
 async def test_conversation_send_refuses_a_malformed_thread_root_before_io(api):

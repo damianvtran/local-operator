@@ -465,6 +465,15 @@ def static_feature_flags() -> dict[str, Any]:
         # alone, because the UI's reaction hold was lifted on exactly that
         # condition. A renderer that does not see it shows no reaction controls.
         "team_bridge_reactions": 1,
+        # SEND MENTIONS: `mentions: [{kind, account_id, endpoint_id?}]` on the
+        # conversation send body (the @-mention autocomplete). Agents carry
+        # their `bep_` endpoint id, humans none; at most 50 distinct rows. The
+        # hub sets each named member's `mention` bit from it. The route's
+        # `_Strict` body refused the key before this, so a renderer that does
+        # not see this key must send none (it would be a 422). WRITE-only: the
+        # hub's message read view does not return `mentions`, so this key
+        # promises no readback highlight.
+        "team_bridge_send_mentions": 1,
         # The OWNER AUDIT ("{chief of staff}'s messages"): the read-only
         # `/v1/desktop/team-bridge/owner-audit/...` family over agent-server
         # #221, where the signed-in owner reads every conversation their own
