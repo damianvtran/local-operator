@@ -3830,6 +3830,16 @@ class TestAgentStopOutcome:
         return session.prompts[0][0]
 
     @pytest.mark.asyncio
+    async def test_the_driver_states_the_step_budget_from_the_config(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_scratch: Path
+    ) -> None:
+        # The REAL driver wiring (``run_session_arm`` builds the renderer, the
+        # bridge, and connects them): the first prompt states the configured
+        # ``max_steps`` (``build_config``'s 4) on the bridge's zero clocks.
+        first = await self._first_prompt(tmp_path, monkeypatch, short_scratch)
+        assert "Step budget: 0 of 4 steps used, 4 remaining." in first
+
+    @pytest.mark.asyncio
     async def test_the_first_prompt_states_the_machine_topology(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_scratch: Path
     ) -> None:
@@ -5165,3 +5175,74 @@ async def test_recovery_seam_forwards_fresh_explicitly_and_preserves_default(
     assert await recover(fresh=True) == live
     assert await recover() == live
     assert [params.fresh for params in calls] == [True, False]
+
+
+class TestStepBudgetPosition:
+    """The session arm states its step budget on the bridge's ENFORCED clocks.
+
+    The measured defect (``runner/step_budget.py``): a model shown no budget
+    stopped at 3-11 % of ``max_steps=500``. The session arm renders through the
+    runner's own ``_ContextBuilder`` (``ObservationRenderer``), so the line is
+    the runner arm's line; these tests pin that its numbers are the bridge's
+    and that the completion gate is untouched by it.
+    """
+
+    def _rendered_bridge(self, tmp_path: Path, *, max_steps: int = 5) -> ActionBridge:
+        renderer = ObservationRenderer(tmp_path / "artifacts")
+        bridge = _bridge(tmp_path, max_steps=max_steps)
+        bridge.render = renderer.render
+        renderer.step_position = bridge.step_position
+        # ``_bridge`` armed with the stub renderer; re-arm through the real one
+        # the way the driver does (renderer wired before ``arm``).
+        bridge._token = None
+        bridge.arm(_observation())
+        return bridge
+
+    @pytest.mark.asyncio
+    async def test_each_screen_states_the_enforced_position(self, tmp_path: Path) -> None:
+        bridge = self._rendered_bridge(tmp_path, max_steps=5)
+        assert "Step budget: 0 of 5 steps used, 5 remaining." in bridge.initial_blocks[0].text
+
+        result = await bridge.call({"actions": [{"kind": "wait", "duration_ms": 50}]})
+
+        text = result["content"][0].text
+        enforced = max(bridge.steps, bridge.attempted_groups)
+        assert enforced == 1
+        assert f"Step budget: {enforced} of 5 steps used, 4 remaining." in text
+        # The observation's own text still ends the message: the line never
+        # sits between the screen and the model.
+        assert text.endswith("screen B")
+
+    @pytest.mark.asyncio
+    async def test_the_line_follows_a_raised_cap(self, tmp_path: Path) -> None:
+        bridge = self._rendered_bridge(tmp_path, max_steps=5)
+        bridge.max_steps = 40
+        result = await bridge.call({"actions": [{"kind": "wait", "duration_ms": 50}]})
+        assert "Step budget: 1 of 40 steps used, 39 remaining." in result["content"][0].text
+
+    @pytest.mark.asyncio
+    async def test_the_completion_challenge_still_fires_and_restates_the_task(
+        self, tmp_path: Path
+    ) -> None:
+        bridge = self._rendered_bridge(tmp_path, max_steps=5)
+        reply = await bridge.call(
+            {"actions": [{"kind": "finish", "status": "done", "reason": "filled the form"}]}
+        )
+        assert reply["details"]["terminal"] == "completion-challenged"
+        challenge = reply["content"][0].text
+        assert "That declaration is a CLAIM" in challenge
+        assert "the task as stated" in challenge
+        # The challenge text itself is unchanged; the re-attached screen is the
+        # one already shown (budget line included), never a re-render.
+        assert "Step budget" not in challenge
+        accepted = await bridge.call(
+            {"actions": [{"kind": "finish", "status": "done", "reason": "filled the form"}]}
+        )
+        assert accepted["details"]["terminal"] == "finish"
+
+    def test_a_renderer_without_a_budget_is_unchanged(self, tmp_path: Path) -> None:
+        # No ``step_position`` wired: the content is the builder's base render.
+        renderer = ObservationRenderer(tmp_path / "artifacts")
+        text = renderer.render(_observation())[0].text
+        assert "Step budget" not in text
+        assert text.startswith("Task: task_001\nStep: 0\n")

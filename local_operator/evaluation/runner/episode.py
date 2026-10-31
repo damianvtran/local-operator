@@ -143,6 +143,7 @@ from local_operator.evaluation.runner.secrets import (
     SecretResolver,
     StaticSecretResolver,
 )
+from local_operator.evaluation.runner.step_budget import StepPosition
 
 # Cleanup kinds are a closed vocabulary in ``lifecycle.CleanupAction``. A worker
 # session is the one resource the parent always knows exists before the adapter
@@ -1166,6 +1167,18 @@ class EpisodeRunner:
                 self._truncated = True
                 self._truncation_reason = self._truncation_reason or "max-steps"
                 return
+            # The model is shown its position on the SAME counter the check
+            # above enforces, read here -- immediately before the decision --
+            # so a cap changed mid-run is stated as the value now in force.
+            # The builder renders each turn once, so a re-decide of this turn
+            # (a rejection, a challenge) cannot restate a different number.
+            self._turns[-1] = self._turns[-1].model_copy(
+                update={
+                    "step_budget": StepPosition(
+                        used=self._steps_taken, budget=self._config.max_steps
+                    )
+                }
+            )
             decision = await self._decide(current)
             batch = decision.action_batch
             # The tolerated sibling fields ride the turn, and the update always

@@ -169,6 +169,7 @@ from local_operator.evaluation.runner.provider_client import (
     build_completion_challenge,
 )
 from local_operator.evaluation.runner.public_reply import tolerated_fields_note
+from local_operator.evaluation.runner.step_budget import StepPosition
 from local_operator.harness.types import (
     AgentEndEvent,
     AgentEvent,
@@ -831,6 +832,12 @@ class ObservationRenderer:
             rebuild_every_frames=DEFAULT_REBUILD_EVERY_FRAMES,
         )
         self._turns: list[EpisodeTurn] = []
+        #: Where the step-budget position comes from, or ``None`` for no line.
+        #: Wired to :meth:`ActionBridge.step_position` by the driver AFTER the
+        #: bridge exists (the bridge is built around this renderer), so the
+        #: position is always the bridge's ENFORCED clocks, read at render
+        #: time -- never a count this renderer keeps.
+        self.step_position: Callable[[], StepPosition | None] | None = None
 
     def render_read_only(self, observation: Observation) -> list[Any]:
         """Render a capture without attributing unchanged pixels to an action."""
@@ -839,7 +846,8 @@ class ObservationRenderer:
     def render(self, observation: Observation, *, read_only: bool = False) -> list[Any]:
         """The observation's content blocks, in the builder's own rendering."""
 
-        self._turns.append(EpisodeTurn(observation=observation))
+        position = self.step_position() if self.step_position is not None else None
+        self._turns.append(EpisodeTurn(observation=observation, step_budget=position))
         self._builder.append_new_turns(self._turns, read_only=read_only)
         message = self._builder.messages[-1]
         return list(message.content)
@@ -1232,6 +1240,19 @@ class ActionBridge:
     @property
     def steps(self) -> int:
         return self._steps
+
+    def step_position(self) -> StepPosition:
+        """The budget position the model is shown, on the ENFORCED clocks.
+
+        ``max_steps`` is enforced on BOTH clocks (``call`` refuses at
+        ``_attempted_groups >= max_steps`` and at ``_steps >= max_steps``), so
+        the binding one -- the larger -- is what has been used: stating the
+        smaller would promise steps the bridge will refuse. Read live, so a
+        ``max_steps`` changed mid-run is stated as the value now enforced.
+        See ``runner.step_budget`` for why the model is told at all.
+        """
+
+        return StepPosition(used=max(self._steps, self._attempted_groups), budget=self.max_steps)
 
     @property
     def attempted_groups(self) -> int:
@@ -3259,6 +3280,10 @@ async def run_session_episode(
             progress_guards=progress_guards,
             progress_budget=spec.budget if progress_guards is not None else None,
         )
+        # Every observation the bridge renders from here on (observation zero
+        # in ``arm``, each executed result, each re-bind) states the step
+        # budget on the bridge's own enforced clocks.
+        renderer.step_position = bridge.step_position
         bridge.arm(observation)
         await bridge.start()
 
