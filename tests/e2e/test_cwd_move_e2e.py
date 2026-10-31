@@ -36,7 +36,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Callable, TypeVar
+from typing import Any, Callable, TypeVar
 
 import pytest
 
@@ -364,8 +364,8 @@ async def test_the_real_lop_topology_moves_end_to_end(
     spawn. The spawn-and-commit half is the two subprocess cells above.
     """
     import asyncio
-    from types import SimpleNamespace
 
+    from local_operator.harness.types import ToolContext
     from local_operator.session.attached import AttachedSession
     from local_operator.session.runtime.server import RuntimeServer
     from local_operator.session.runtime.serving import ServingSessionHandle
@@ -388,7 +388,11 @@ async def test_the_real_lop_topology_moves_end_to_end(
     destination.mkdir()
     directory = config / "sessions" / SESSION_ID
     await seed_transcript(directory, [user_message("seed")])
-    sessions_tool = build_sessions_tool(SimpleNamespace(subagent_launcher=object()))
+    # A REAL context, not a stand-in: the builder's gate is "a launcher exists",
+    # and a launcher that is never called keeps the cell about the move alone.
+    sessions_tool = build_sessions_tool(
+        ToolContext(cwd=str(source), subagent_launcher=lambda label, prompt, **kwargs: "")
+    )
     assert sessions_tool is not None
     stream = ScriptedStream(
         [
@@ -440,3 +444,105 @@ async def test_the_real_lop_topology_moves_end_to_end(
             await viewer.dispose()
         await server.aclose()
         await owner.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_embedded_hosts_hold_notice_is_written_on_the_apps_loop(
+    headless_tui_env: Path, tmp_path: Path
+) -> None:
+    """QA round 3, Q5: the hold announcement never writes from the registrant thread.
+
+    THE REAL EMBEDDED SHAPE, not a mock: an ``OperatorApp`` whose factory returns
+    a ``Session`` it OWNS adopts it and builds the production ``TuiSessionHandle``
+    plus ``RuntimeServer(kind="tui")`` on the ``lop-mobile-registrant`` thread.
+    That handle has no retire latch, so a move holds as ``host_cannot_restart``
+    and is announced. The handle publishes no ``session_loop`` either, so the
+    runtime's generic hop used to run ``journal_incident`` INLINE on the
+    registrant's loop, where it took the transcript's app-loop lock and — 1 run in
+    5 — failed the session's own turn persistence ("bound to a different event
+    loop"). The spy calls through and records WHERE each call ran; the second turn
+    proves the transcript still persists after the announcement.
+    """
+    import asyncio
+    import threading
+
+    from local_operator.harness.types import ToolContext
+    from local_operator.tools.builtin import build_sessions_tool
+    from local_operator.tui.app import OperatorApp
+    from tests.e2e.harness import (
+        ScriptedStream,
+        build_session,
+        seed_transcript,
+        text_turn,
+        tool_call_turn,
+        user_message,
+        wait_for_adoption,
+    )
+    from tests.e2e.watchdog import bounded
+
+    config = headless_tui_env
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    source.mkdir()
+    destination.mkdir()
+    directory = config / "sessions" / SESSION_ID
+    await seed_transcript(directory, [user_message("seed")])
+    sessions_tool = build_sessions_tool(
+        ToolContext(cwd=str(source), subagent_launcher=lambda label, prompt, **kwargs: "")
+    )
+    assert sessions_tool is not None
+    stream = ScriptedStream(
+        [
+            tool_call_turn(
+                text="Moving",
+                tool_name="sessions",
+                tool_call_id="move-1",
+                arguments={"op": "move", "cwd": "../destination"},
+            ),
+            text_turn("Queued the move"),
+            text_turn("second turn persisted"),
+        ]
+    )
+    session = build_session(directory, stream, tools=[sessions_tool], cwd=source)
+    where: list[tuple[str, str, bool]] = []
+    app_loop = asyncio.get_running_loop()
+    for name in ("queue_notice", "journal_incident"):
+        real = getattr(session, name)
+
+        def spy(*args: object, _real: object = real, _name: str = name, **kwargs: object) -> object:
+            try:
+                same = asyncio.get_running_loop() is app_loop
+            except RuntimeError:
+                same = False
+            where.append((_name, threading.current_thread().name, same))
+            return _real(*args, **kwargs)  # type: ignore[operator]
+
+        setattr(session, name, spy)
+
+    async def factory() -> Any:
+        return session
+
+    app = OperatorApp(factory)
+    with bounded(90, "an embedded host's cwd-move hold is announced on the app loop"):
+        async with app.run_test(size=(100, 30)) as pilot:
+            await wait_for_adoption(app, pilot)
+            registrant = app._mobile_registrant
+            assert registrant is not None, "the owned session must start its registrant"
+            assert type(app._mobile_handle).__name__ == "TuiSessionHandle"
+            await session.prompt("move this session to ../destination")
+            for _ in range(200):
+                if any(name == "journal_incident" for name, _, _ in where):
+                    break
+                await pilot.pause()
+                await asyncio.sleep(0.05)
+            stored = cwd_move.read_move_intent(config, SESSION_ID)
+            assert stored is not None and stored.blocked_reason == "host_cannot_restart"
+            assert {name for name, _, _ in where} == {"queue_notice", "journal_incident"}, where
+            off_loop = [entry for entry in where if not entry[2]]
+            assert not off_loop, f"a session write ran off the app's loop: {off_loop}"
+            # The turn after the announcement still persists end to end.
+            await session.prompt("and again")
+            text = (directory / "transcript.jsonl").read_text(encoding="utf-8")
+            assert "second turn persisted" in text
+            assert "the program hosting this session cannot restart it" in text
+            await pilot.pause()

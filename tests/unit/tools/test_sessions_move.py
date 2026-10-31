@@ -345,7 +345,7 @@ def test_the_approval_card_names_the_directory_the_move_really_uses(tmp_path: Pa
     used = cwd_move.resolve_destination("../dest", effective_cwd=str(link))
     assert used == str((tmp_path / "x" / "dest").resolve())
     card = _describe_sessions_approval({"op": "move", "cwd": "../dest"}, str(link))
-    assert card.startswith(f"move this session to {used} (now in "), card
+    assert card.startswith(f"move to {used} after this turn (now in "), card
     assert str(tmp_path.resolve() / "a" / "dest") not in card
 
 

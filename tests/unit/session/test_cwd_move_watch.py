@@ -15,6 +15,7 @@ no fake-server test reaches.
 from __future__ import annotations
 
 import asyncio
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -86,11 +87,11 @@ class _Server:
         #: here; the real-server cells below register a real connection.
         self._clients: dict[int, Any] = {0: SimpleNamespace(kind="attach", cwd_adoption=True)}
         self.announced: list[tuple[str, dict[str, Any]]] = []
+        #: The hold/expiry notices the spied ``_announce_cwd_move`` received.
+        self.held: list[str] = []
 
     async def _handle_call_on_session_loop(self, fn: Any, *args: Any, **kwargs: Any) -> Any:
         return fn(*args, **kwargs)
-
-        self.held: list[str] = []
 
     async def announce_retiring(self, reason: str, **kwargs: Any) -> None:
         self.announced.append((reason, kwargs))
@@ -732,6 +733,56 @@ async def test_a_move_queued_in_a_long_turn_cannot_expire_before_its_idle_point(
     assert await server._apply_queued_cwd_move() == ""
     assert len(handle.painted) == 2
     assert handle.calls == [] and announced == []
+
+
+@pytest.mark.asyncio
+async def test_a_hold_whose_cause_cleared_stops_ageing_while_the_runtime_is_busy(
+    tmp_path: Path,
+) -> None:
+    """Agent review round 3, m-1: the reviewer's own sequence, then the fix.
+
+    A headless runtime holds with ``no_capable_viewer``. A capable viewer then
+    attaches and starts a long turn. The hold was cleared only past the busy
+    probe while expiry runs every tick, so the move expired mid-turn although
+    nothing blocked it any more, and a repeat call read "held" while
+    ``notify_move_queued`` said ready. Now a structural hold whose cause is gone
+    is cleared before the busy probe; a hold that still applies keeps its clock.
+    """
+    server, handle, announced = _announcing_server(tmp_path, viewer=False)
+    destination = tmp_path / "dest"
+    destination.mkdir()
+    intent = cwd_move.enqueue_self_move(
+        tmp_path, OWN, requested_cwd=str(destination), effective_cwd=str(tmp_path), owner_pid=1
+    )
+    assert await server._apply_queued_cwd_move() == "waiting"
+    held = cwd_move.read_move_intent(tmp_path, OWN)
+    assert held is not None and held.blocked_reason == "no_capable_viewer"
+    # Still nobody attached, still busy: the hold applies and keeps its clock.
+    handle.busy = "active turn"
+    assert await server._apply_queued_cwd_move() == "waiting"
+    kept = cwd_move.read_move_intent(tmp_path, OWN)
+    assert kept is not None and kept.blocked_at == held.blocked_at > 0
+    # The viewer attaches, its turn starts, and the hold is 29 minutes old: one
+    # more minute of busy ticks used to expire it.
+    _attach_fake_viewer(server)
+    cwd_move._write(
+        tmp_path,
+        cwd_move._with_stage(kept, cwd_move.STAGE_QUEUED, blocked_at=kept.blocked_at - 29 * 60),
+    )
+    assert await server._apply_queued_cwd_move() == "waiting"
+    cleared = cwd_move.read_move_intent(tmp_path, OWN)
+    assert cleared is not None and cleared.stage == cwd_move.STAGE_QUEUED
+    assert cleared.blocked_reason == "" and cleared.blocked_at == 0.0, "the clock stopped"
+    # Thirty more minutes of busy cannot expire a request nothing is holding.
+    assert not cwd_move.hold_lapsed(cleared, now=time.time() + 31 * 60)
+    from local_operator.session.runtime.server import CWD_MOVE_READY, notify_move_queued
+
+    assert notify_move_queued(OWN, tmp_path) == CWD_MOVE_READY
+    # The turn ends: the move goes ahead.
+    handle.busy = ""
+    assert await server._apply_queued_cwd_move() == "retiring"
+    assert announced == [("cwd-move", {"cwd": intent.destination_cwd})]
+    assert len(handle.painted) == 1, "the clear is not announced as another hold"
 
 
 @pytest.mark.asyncio

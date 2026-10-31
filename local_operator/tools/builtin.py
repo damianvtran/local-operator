@@ -16730,13 +16730,13 @@ _SESSIONS_OP_DOCS: dict[str, _SessionsOpDoc] = {
         ),
     ),
     "move": _SessionsOpDoc(
-        summary="move THIS session's own working directory: the move is queued and"
-        " takes effect at the next idle point after the current turn — the session"
-        " restarts there — so until then the working directory is unchanged. It needs"
-        " a viewer that can follow it (the desktop app or a `lop` terminal); a parked"
-        " one follows on its next use, and without one the move is held, says why,"
-        " and expires. It is a write-tier op, so it is approved like one where"
-        " approval is required. Naming the current directory cancels a queued move.",
+        summary="move THIS session's own working directory: queued, it takes effect at"
+        " the next idle point after the current turn, when the session restarts there;"
+        " until then the working directory is unchanged. It needs a viewer that can"
+        " follow it (the desktop app or a `lop` terminal) — a session not open now"
+        " moves when next opened; with none, the move is held, says why, and expires."
+        " Write-tier, approved like one where approval is required. Naming the current"
+        " directory cancels a queued move.",
         example="sessions(op='move', cwd='~/work/project'); back: cwd='.'",
         refusals=(
             "`cwd` alone: a move acts on THIS runtime, so a `session`, `pid`,"
@@ -17207,16 +17207,29 @@ def _describe_sessions_approval(args: dict[str, Any], cwd: str) -> str:
         # unable to tell "." from "../other"; the source is the second half of
         # the same fact (agent review round 1, M1; UX round 1, U2).
         #
-        # THE DESTINATION LEADS (UX round 2, U12): at narrow widths the card is
-        # cut from the right, and the destination is the one thing being decided,
-        # so it is the half that must survive the cut.
+        # THE PATH LEADS THE WHOLE SENTENCE (UX round 2, U12; round 3, U15): the
+        # card clamps the question to one line at 80x24, so the destination has
+        # to start within the first few cells or it is the half that is cut.
+        #
+        # NO ``: `` BEFORE THE DESTINATION (U16): the receipt keeps only what
+        # follows the first ``: `` (``ApprovalBlock._split_target``), which used
+        # to be the boilerplate clause, so a move and a cancel left identical
+        # receipts. With no separator the whole sentence is the receipt.
+        #
+        # "AFTER THIS TURN" SAYS IT IS PENDING (U16/U17): the call queues; nothing
+        # has moved when the card or its receipt is read.
         destination = _sessions_move_destination_label(args, cwd)
         source = _approval_directory_label(cwd) or "its current directory"
         if not destination:
             return f"move this session (now in {source}): no destination was given"
+        here = os.path.realpath(os.path.expanduser(cwd)) if cwd else ""
+        if here and _approval_directory_label(here) == destination:
+            # NAMING THE CURRENT DIRECTORY CANCELS (U17): the call restarts
+            # nothing, so the card must not promise a restart.
+            return f"stay in {destination} — cancels any queued move; nothing restarts"
         return (
-            f"move this session to {destination} (now in {source}): it restarts there "
-            "once the current turn ends"
+            f"move to {destination} after this turn (now in {source}) — the session "
+            "restarts there"
         )
     if op == "stop":
         if peer:
@@ -18173,8 +18186,10 @@ def _sessions_move_state_sentence(extras: Mapping[str, Any]) -> str:
     says so rather than looking like a move that simply has not happened yet.
     """
     stage = str(extras.get("move_stage") or "")
-    destination = str(extras.get("move_destination") or "")
-    source = str(extras.get("move_source") or "")
+    # Spelled the way the card and the notices spell them (UX round 3, U19), so
+    # one reply never prints ``~/work/…`` beside the raw absolute path.
+    destination = _approval_directory_label(str(extras.get("move_destination") or ""))
+    source = _approval_directory_label(str(extras.get("move_source") or ""))
     blocked = str(extras.get("move_blocked") or "")
     if stage == "queued":
         if blocked:
@@ -20454,12 +20469,20 @@ def sessions_move_hold_sentence(reason: str, destination: str) -> str:
     Names the destination, the reason in plain words, and both ways out —
     resolve the reason, or cancel by naming the current directory — and that the
     request lapses if the hold persists, so a hold is never a silent wait.
+
+    ONE SENTENCE FOR BOTH READERS (painted for the user, journalled for the
+    agent), so it is worded for both (UX round 3, U18): "this session's", not
+    "your" — the agent asked, the user did not — and the cancel is something
+    the user can ask for, with the argument the agent needs in parentheses.
+    A separate user-only wording would be new user-facing copy owing keys in
+    every locale; this sentence stays model-facing English.
     """
     why = _SESSIONS_MOVE_HOLDS.get(reason, f"the runtime is holding it ({reason})")
     minutes = int(_cwd_move_ttl_s() // 60)
     return (
-        f"Your move to {_approval_directory_label(destination)} is waiting: {why}. "
-        f"Cancel it with cwd='.'; it expires if still held after {minutes} minutes."
+        f"This session's move to {_approval_directory_label(destination)} is waiting: "
+        f"{why}. To cancel it, ask for a move back to the current directory (cwd='.'); "
+        f"it is dropped if still held after {minutes} minutes."
     )
 
 

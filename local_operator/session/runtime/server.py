@@ -1295,6 +1295,12 @@ QUEUED_MOVE_TICK_S = 0.5
 #: later cwd move (agent review round 2, R2-M1).
 _MOVE_IN_FLIGHT_STAGES = frozenset({"finishing", "paused", "retiring"})
 
+#: The cwd-move holds :meth:`RuntimeServer._cwd_move_predicted_hold` can judge on
+#: any tick — what the host is and who is attached — as opposed to the idle-point
+#: facts (a vanished destination, an unreadable boundary). Only these can be
+#: cleared while the runtime is busy, because only these are re-checkable there.
+_CWD_MOVE_STRUCTURAL_HOLDS = frozenset({"no_capable_viewer", "host_cannot_restart"})
+
 #: Default for ``network.move.attach_window_s``: how long a queued move holds
 #: for attached clients to convert to remote viewers or detach cleanly before
 #: the retirement commits. Matches the existing handoff announcements' window
@@ -7612,6 +7618,17 @@ class RuntimeServer:
         if hold:
             await self._note_cwd_move_blocked(root, cwd_move, intent, hold)
             return "waiting"
+        if intent.blocked_reason in _CWD_MOVE_STRUCTURAL_HOLDS and not (
+            self._cwd_move_predicted_hold()
+        ):
+            # A STRUCTURAL HOLD WHOSE CAUSE IS GONE ENDS NOW, before the busy
+            # probe. Its TTL clock otherwise kept running through every busy tick
+            # below, so a viewer that attached and started a long turn could watch
+            # a move it can follow expire mid-turn, and a repeat call said "held"
+            # while ``notify_move_queued`` said ready (agent review round 3, m-1).
+            # Only the structural reasons: they are what this tick can re-judge
+            # without the idle point, which is where the others are checked.
+            intent = cwd_move.mark_blocked(root, self._record.session_id, "") or intent
         probe = getattr(self._handle, "may_refresh", None)
         latch = getattr(self._handle, "begin_retire", None)
         if not callable(probe) or not callable(latch):
@@ -7745,30 +7762,40 @@ class RuntimeServer:
         ``queue_notice`` paints on every attached viewer (after the running
         turn's answer when one is running), and ``journal_incident`` lands in the
         live context — parked to the next boundary mid-turn — and the transcript,
-        so the next open replays it when nobody was watching. Both run on the
-        SESSION's loop through the ordinary hop.
+        so the next open replays it when nobody was watching.
+
+        BOTH RUN ON THE LOOP THAT OWNS THE SESSION, never on this runtime's
+        thread: ``journal_incident`` takes the transcript's lock, which is bound
+        to the session's loop, and taking it from the registrant thread failed
+        the session's OWN turn persistence ("bound to a different event loop",
+        QA round 3, Q5 — intermittent, 1/5 runs on an embedded ``OperatorApp``).
+        A handle that offers ``call_on_session`` (``TuiSessionHandle``, whose
+        loop is the app's and which publishes no ``session_loop``) is asked to
+        run the call there; every other handle goes through the ordinary hop.
         """
-        session = getattr(self._handle, "_session", None)
-        if callable(session) and not hasattr(session, "journal_incident"):
-            # ``TuiSessionHandle._session`` is an accessor, not the session.
-            try:
-                session = session()
-            except Exception:  # noqa: BLE001 -- no session means nobody to tell
-                session = None
-        notice = getattr(session, "queue_notice", None)
-        if callable(notice):
-            try:
-                await self._handle_call_on_session_loop(notice, text, "warning")
-            except Exception:  # noqa: BLE001 -- a notice never breaks the runtime
-                logger.debug("queued move: could not paint the notice", exc_info=True)
-        journal = getattr(session, "journal_incident", None)
-        if callable(journal):
-            try:
-                await self._handle_call_on_session_loop(
-                    journal, raw, rendered=f"[session incident] {text}"
-                )
-            except Exception:  # noqa: BLE001 -- the log line above is the record
-                logger.debug("queued move: could not journal the notice", exc_info=True)
+        hop = getattr(self._handle, "call_on_session", None)
+
+        async def on_session(name: str, *args: Any, **kwargs: Any) -> None:
+            if callable(hop):
+
+                def call(session: Any) -> Any:
+                    method = getattr(session, name, None)
+                    return method(*args, **kwargs) if callable(method) else None
+
+                await cast(Callable[[Callable[[Any], Any]], Awaitable[Any]], hop)(call)
+                return
+            method = getattr(getattr(self._handle, "_session", None), name, None)
+            if callable(method):
+                await self._handle_call_on_session_loop(method, *args, **kwargs)
+
+        try:
+            await on_session("queue_notice", text, "warning")
+        except Exception:  # noqa: BLE001 -- a notice never breaks the runtime
+            logger.debug("queued move: could not paint the notice", exc_info=True)
+        try:
+            await on_session("journal_incident", raw, rendered=f"[session incident] {text}")
+        except Exception:  # noqa: BLE001 -- the log line above is the record
+            logger.debug("queued move: could not journal the notice", exc_info=True)
 
     async def _queued_move_watch(self) -> None:
         """Watch for the queued move's safe point; then pause, announce, retire.

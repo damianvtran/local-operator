@@ -881,13 +881,16 @@ def test_describe_approval_sentences_are_pinned() -> None:
     # "../dest" cannot be judged otherwise. The destination LEADS so a narrow card
     # cuts the source, not the decision (UX round 2, U12). These ``~/work`` paths
     # do not exist, and ``realpath`` leaves a missing path's spelling alone.
-    assert _describe_sessions_approval({"op": "move", "cwd": "~/work/dest"}, "~/work/src") == (
-        "move this session to ~/work/dest (now in ~/work/src): it restarts there "
-        "once the current turn ends"
-    )
-    assert _describe_sessions_approval({"op": "move", "cwd": "../dest"}, "~/work/src") == (
-        "move this session to ~/work/dest (now in ~/work/src): it restarts there "
-        "once the current turn ends"
+    # Round 3: the path starts within the first nine cells (U15, the 80x24 clamp),
+    # no ``: `` precedes it so the receipt keeps it (U16), and the wording says the
+    # move is pending (U16/U17).
+    moved = "move to ~/work/dest after this turn (now in ~/work/src) — the session restarts there"
+    assert _describe_sessions_approval({"op": "move", "cwd": "~/work/dest"}, "~/work/src") == moved
+    assert _describe_sessions_approval({"op": "move", "cwd": "../dest"}, "~/work/src") == moved
+    assert ": " not in moved, "the receipt keeps what follows the first ': '"
+    # U17: naming the current directory CANCELS; the card must not promise a restart.
+    assert _describe_sessions_approval({"op": "move", "cwd": "."}, "~/work/src") == (
+        "stay in ~/work/src — cancels any queued move; nothing restarts"
     )
     assert _describe_sessions_approval({"op": "move"}, "~/work/src") == (
         "move this session (now in ~/work/src): no destination was given"
