@@ -15,6 +15,9 @@ export type MessageParams = {
   "relay.account_policy.scope": undefined;
   "relay.account_policy.title": undefined;
   "relay.account_policy.unavailable": undefined;
+  "relay.agent_avatar.alt": { "name": string };
+  "relay.agent_avatar.change": { "name": string };
+  "relay.agent_avatar.desktop_hint": undefined;
   "relay.approvals.card.notice_session_auto": undefined;
   "relay.approvals.card.request_needs_answer": undefined;
   "relay.approvals.card.set_auto_all": undefined;

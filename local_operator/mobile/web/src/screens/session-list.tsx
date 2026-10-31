@@ -81,6 +81,7 @@ import { getGroupTags, setGroupTags } from "../lib/session-group-pref";
 import { groupByPrimaryTag, hasGroupedRows } from "../lib/session-grouping";
 import type { SessionSummary, TagCatalogueEntry } from "../types";
 import { cn } from "../lib/cn";
+import { agentAvatarUrl, AvatarWithStatus } from "../components/agent-avatar";
 
 /** What a successful bulk clear says it did — naming every bucket it missed.
 
@@ -409,49 +410,62 @@ function SessionCard({
 				    shimmer (applied below whenever `s.streaming`), which is
 				    sufficient and costs no geometry — a second mark would have
 				    to come out of the same 12px box the alignment depends on. */}
-				<span
-					className="flex size-3 shrink-0 items-center justify-center"
-					aria-hidden={!decision && s.streaming ? undefined : true}
-				>
-					{decision ? (
-						<span className="lo-pulse inline-block size-1.5 rounded-full bg-danger" />
-					) : s.streaming ? (
-						/* The obvious in-progress mark beside the title: a small
-						   loading wheel, not just the text sweep — the sweep alone
-						   was too subtle to catch at a glance. */
-						<Spinner />
-					) : unread ? (
-						<span className="inline-block size-1.5 rounded-full bg-accent" />
-					) : delegating ? (
-						/* DELEGATING — the parent's own turn is not running but it still
-						   owns children. BELOW unread on purpose: the unread dot is a
-						   receipt for an outcome the operator has not seen yet, and a
-						   receipt must never be masked by live activity (the same rule
-						   the desktop and TUI ladders follow). ABOVE plain idle, which
-						   is the whole point of the state.
+				{/* THE AGENT'S PICTURE, when the row's session is bound to an agent
+				    that has one. The status slot below is passed in UNCHANGED and kept
+				    as a corner badge (see `components/agent-avatar.tsx`): status must
+				    stay legible, so the picture never replaces the ladder. A row with
+				    no picture renders the slot exactly as before. */}
+				<AvatarWithStatus
+					agentId={s.agent_id}
+					sha={s.avatar_sha256}
+					name={s.conversation_name || "untitled"}
+					hasStatus={decision || s.streaming || unread || delegating}
+					status={
+					<span
+						className="flex size-3 shrink-0 items-center justify-center"
+						aria-hidden={!decision && s.streaming ? undefined : true}
+					>
+						{decision ? (
+							<span className="lo-pulse inline-block size-1.5 rounded-full bg-danger" />
+						) : s.streaming ? (
+							/* The obvious in-progress mark beside the title: a small
+							   loading wheel, not just the text sweep — the sweep alone
+							   was too subtle to catch at a glance. */
+							<Spinner />
+						) : unread ? (
+							<span className="inline-block size-1.5 rounded-full bg-accent" />
+						) : delegating ? (
+							/* DELEGATING — the parent's own turn is not running but it still
+							   owns children. BELOW unread on purpose: the unread dot is a
+							   receipt for an outcome the operator has not seen yet, and a
+							   receipt must never be masked by live activity (the same rule
+							   the desktop and TUI ladders follow). ABOVE plain idle, which
+							   is the whole point of the state.
 
-						   TWO 4px DOTS rather than one, because this package carries no
-						   icon dependency and a single dot would be indistinguishable
-						   from the unread mark sitting one rung above it in the same
-						   slot and the same accent ink. The pair reads as "more than
-						   one thing moving", and the SHAPE is what separates the two
-						   states — the TUI's own reasoning for putting `⇉` in its
-						   column instead of recolouring `●`.
+							   TWO 4px DOTS rather than one, because this package carries no
+							   icon dependency and a single dot would be indistinguishable
+							   from the unread mark sitting one rung above it in the same
+							   slot and the same accent ink. The pair reads as "more than
+							   one thing moving", and the SHAPE is what separates the two
+							   states — the TUI's own reasoning for putting `⇉` in its
+							   column instead of recolouring `●`.
 
-						   2 × 4px + 2px gap = 10px inside the existing 12px slot, so the
-						   ladder's geometry and the title's start x are untouched. The
-						   dots are aria-hidden (the slot already is): the COUNT is
-						   carried as text by the chip below, which is what a screen
-						   reader should hear — a decorative mark is the wrong place
-						   for a number. */
-						<span className="flex items-center gap-[2px]">
-							<span className="inline-block size-1 rounded-full bg-accent" />
-							<span className="inline-block size-1 rounded-full bg-accent" />
-						</span>
-					) : (
-						<span className="inline-block size-1.5 rounded-full bg-transparent" />
-					)}
-				</span>
+							   2 × 4px + 2px gap = 10px inside the existing 12px slot, so the
+							   ladder's geometry and the title's start x are untouched. The
+							   dots are aria-hidden (the slot already is): the COUNT is
+							   carried as text by the chip below, which is what a screen
+							   reader should hear — a decorative mark is the wrong place
+							   for a number. */
+							<span className="flex items-center gap-[2px]">
+								<span className="inline-block size-1 rounded-full bg-accent" />
+								<span className="inline-block size-1 rounded-full bg-accent" />
+							</span>
+						) : (
+							<span className="inline-block size-1.5 rounded-full bg-transparent" />
+						)}
+					</span>
+					}
+				/>
 				{decision && s.streaming ? (
 					/* The "working" announcement for assistive tech, carried as TEXT
 					   rather than as a mark in the slot. The spinner owns
@@ -496,7 +510,9 @@ function SessionCard({
 			    line box to every untagged row and make the list's density depend on
 			    which conversations happen to be tagged, the same defect class the
 			    blank second line had. A tagged row grows by exactly one line. */}
-			<div className="flex min-w-0 items-center gap-2 ps-5 text-meta tabular-nums text-ink-dim">
+			{/* The second line starts under the title: slot (12px) + gap = ps-5, or the
+			    24px picture + gap = ps-8 on a row that draws one. */}
+			<div className={cn("flex min-w-0 items-center gap-2 text-meta tabular-nums text-ink-dim", agentAvatarUrl(s.agent_id, s.avatar_sha256) ? "ps-8" : "ps-5")}>
 				<SessionTagLine tags={s.tags ?? []} primary={s.primary ?? null} className="max-w-[45%] shrink-0" />
 				<span className="min-w-0 truncate">{[
 					s.streaming ? messageRuntime.t("relay.chrome.session.subtitle.working_plain") : null,

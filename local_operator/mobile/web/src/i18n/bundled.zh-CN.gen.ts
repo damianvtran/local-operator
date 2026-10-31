@@ -21,6 +21,13 @@ export const BUNDLED_LOCALE: Readonly<Record<string, Readonly<Record<string,
       "relay.account_policy.unavailable": "\u6b64\u4e2d\u7ee7\u4e0a\u65e0\u6cd5\u4f7f\u7528\u8d26\u6237\u8def\u7531\u8bbe\u7f6e\u3002\u66f4\u65b0\u6b64\u7535\u8111\u4e0a\u7684Local Operator\u3002",
     },
   },
+  "relay.agent_avatar": {
+    "zh-CN": {
+      "relay.agent_avatar.alt": "{name} \u7684\u5934\u50cf",
+      "relay.agent_avatar.change": "\u66f4\u6362 {name} \u7684\u5934\u50cf",
+      "relay.agent_avatar.desktop_hint": "\u8bf7\u5728\u684c\u9762\u5e94\u7528\u4e2d\u66f4\u6362\u6b64\u5934\u50cf",
+    },
+  },
   "relay.approvals": {
     "zh-CN": {
       "relay.approvals.card.notice_session_auto": "\u672c\u4f1a\u8bdd\u73b0\u4e3aauto",

@@ -856,6 +856,7 @@ class AgentRegistry:
         # definition that failed to read, not an empty directory.
         "avatar.png",
         "avatar.jpg",
+        "avatar.jpeg",
     )
 
     @classmethod
@@ -2972,6 +2973,10 @@ class AgentRegistry:
             # the avatar contract forbids outright (see ``agent_avatar``).
             "avatar.png",
             "avatar.jpg",
+            # Spelled out too: nothing in this tree writes it, but a hand-placed
+            # or future-renamed sibling must not leak a person's photograph into
+            # an archive either. The hub lane's contract names all three.
+            "avatar.jpeg",
         }
     )
 

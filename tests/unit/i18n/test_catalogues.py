@@ -56,6 +56,11 @@ def test_shipped_wire_namespaces_exist() -> None:
         "wire.errors.desktop",
         "wire.errors.files",
         "wire.errors.media",
+        # Agent profile pictures: the refusals `PUT /v1/agents/{id}/avatar` returns
+        # (unsupported_type, too_large, too_many_pixels, undecodable, not_found,
+        # imaging_unavailable, empty_body), rendered by the desktop and phone
+        # surfaces from the reason word the envelope carries as `code`.
+        "wire.errors.agent_avatar",
         "wire.errors.sdk_spec",
         "wire.errors.sdk_startup",
         "wire.errors.settings",
@@ -233,6 +238,11 @@ def test_wave3_hindi_carries_its_namespace_snapshot_with_parity(i18n_check) -> N
     # row against the current en bytes (i18n/ledger/hi.json).
     locale = "hi"
     namespaces = (
+        # `lop agents picture set|remove|show`: 11 keys, carried in all seven
+        # locales with its audited ledger row at the current en bytes. Sorted
+        # first: `namespaces()` returns files sorted and this one precedes
+        # cli.exec_remote_help.
+        "cli.agents_picture",
         "cli.exec_remote_help",
         # The serve-supervision slice's 14-key namespace, carried in every locale
         # only with its independently audited ledger row at the current en bytes;
@@ -245,6 +255,11 @@ def test_wave3_hindi_carries_its_namespace_snapshot_with_parity(i18n_check) -> N
         # after cli.services_status.
         "cli.team_bridge",
         "relay.account_policy",
+        # The phone's agent-picture copy (alt text, the header control's label
+        # and the change-it-on-the-desktop hint), carried in all seven locales
+        # only with its independently audited ledger row at the current en
+        # bytes; it sorts before relay.approvals.
+        "relay.agent_avatar",
         "relay.approvals",
         "relay.ask",
         "relay.asks",
@@ -287,6 +302,7 @@ def test_wave3_hindi_carries_its_namespace_snapshot_with_parity(i18n_check) -> N
         "tui.viewer",
         "tui.welcome",
         "wire.errors",
+        "wire.errors.agent_avatar",
         "wire.errors.desktop",
         "wire.errors.notifications",
         "wire.errors.settings",

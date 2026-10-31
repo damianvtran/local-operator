@@ -21,6 +21,13 @@ export const BUNDLED_LOCALE: Readonly<Record<string, Readonly<Record<string,
       "relay.account_policy.unavailable": "\u0627\u0633 \u0631\u06cc\u0644\u06d2 \u067e\u0631 \u0627\u06a9\u0627\u0624\u0646\u0679 \u0631\u0648\u0679\u0646\u06af \u06a9\u06cc \u062a\u0631\u062a\u06cc\u0628\u0627\u062a \u062f\u0633\u062a\u06cc\u0627\u0628 \u0646\u06c1\u06cc\u06ba\u06d4 \u0627\u0633 \u06a9\u0645\u067e\u06cc\u0648\u0679\u0631 \u067e\u0631 Local Operator \u0627\u067e \u0688\u06cc\u0679 \u06a9\u0631\u06cc\u06ba\u06d4",
     },
   },
+  "relay.agent_avatar": {
+    "ur": {
+      "relay.agent_avatar.alt": "{name} \u06a9\u06cc \u062a\u0635\u0648\u06cc\u0631",
+      "relay.agent_avatar.change": "{name} \u06a9\u06cc \u062a\u0635\u0648\u06cc\u0631 \u062a\u0628\u062f\u06cc\u0644 \u06a9\u0631\u06cc\u06ba",
+      "relay.agent_avatar.desktop_hint": "\u06cc\u06c1 \u062a\u0635\u0648\u06cc\u0631 \u0688\u06cc\u0633\u06a9 \u0679\u0627\u067e \u0627\u06cc\u067e \u0645\u06cc\u06ba \u062a\u0628\u062f\u06cc\u0644 \u06a9\u0631\u06cc\u06ba",
+    },
+  },
   "relay.approvals": {
     "ur": {
       "relay.approvals.card.notice_session_auto": "\u06cc\u06c1 \u0633\u06cc\u0634\u0646 \u0627\u0628 auto \u06c1\u06d2",

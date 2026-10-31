@@ -21,6 +21,13 @@ export const BUNDLED_OWNED: Readonly<Record<string, Readonly<Record<string,
       "relay.account_policy.unavailable": "Account routing settings are unavailable on this relay. Update Local Operator on this computer.",
     },
   },
+  "relay.agent_avatar": {
+    "en": {
+      "relay.agent_avatar.alt": "{name}'s picture",
+      "relay.agent_avatar.change": "Change {name}'s picture",
+      "relay.agent_avatar.desktop_hint": "Change this picture in the desktop app",
+    },
+  },
   "relay.approvals": {
     "en": {
       "relay.approvals.card.notice_session_auto": "this session is now auto",

@@ -21,6 +21,13 @@ export const BUNDLED_LOCALE: Readonly<Record<string, Readonly<Record<string,
       "relay.account_policy.unavailable": "Les param\u00e8tres de routage des comptes ne sont pas disponibles sur ce relais. Mettez \u00e0 jour Local Operator sur cet ordinateur.",
     },
   },
+  "relay.agent_avatar": {
+    "fr": {
+      "relay.agent_avatar.alt": "Image de {name}",
+      "relay.agent_avatar.change": "Changer l\u2019image de {name}",
+      "relay.agent_avatar.desktop_hint": "Modifiez cette image dans l\u2019application de bureau",
+    },
+  },
   "relay.approvals": {
     "fr": {
       "relay.approvals.card.notice_session_auto": "cette session est d\u00e9sormais en auto",

@@ -213,16 +213,9 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             "themselves; there is no retry through this tool. An account name "
             "collision is refused: pass ``confirm_replace`` only when the user "
             "asked to overwrite it.\n"
-            "- PICTURES are not a field of this tool (a schema field would ride "
-            "every request for a rare write; see the footprint ladder). Set one "
-            "through ``bash``: ``lop agents picture set <name-or-id> <image-file>`` "
-            "(PNG/JPEG/WebP/GIF/HEIC, <= 10 MiB; the server centre-crops to a "
-            "512px square and strips all metadata), ``lop agents picture remove "
-            "<name-or-id>``, and ``lop agents picture show <name-or-id>`` (prints "
-            "the ``avatar`` metadata JSON, or null). A refusal prints "
-            '``{"error": <reason>}`` to stderr with exit 1; reasons: '
-            "unsupported_type, too_large, too_many_pixels, undecodable, "
-            "imaging_unavailable. Change only a picture the user asked for."
+            "- PICTURES: set/remove/show through ``bash`` "
+            "(``lop agents picture <verb> --help``); the server re-crops and strips "
+            "metadata. Refusals exit 1 with a reason word."
         ),
     ),
     # -- team ---------------------------------------------------------------

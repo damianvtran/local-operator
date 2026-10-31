@@ -65,6 +65,7 @@ import {
 import { blockingPending, outstandingAsks } from "../lib/asks";
 import { askOpenPolicy, namesEveryOutstanding, readQueue } from "../lib/ask-open-policy";
 import type { SessionProjection } from "../types";
+import { AgentAvatar, agentAvatarUrl } from "../components/agent-avatar";
 
 /** A field the keyboard types into. The phone's reading of "the user is typing" is
     FOCUS, not a draft sitting in storage (see the open-by-default block in
@@ -198,6 +199,18 @@ function Header({
 	const pinMarks = usePinMarks();
 	const row = sessions.find((r) => r.session_id === sessionId);
 	const pinned = pinMarks.get(sessionId) ?? Boolean(row?.pinned);
+	/* The bound agent's picture (core `agent_avatar` contract), from the LIST row:
+	   the projection does not carry it, and the list row is already in memory. The
+	   alt text uses the conversation's name — the row carries no agent label. */
+	const avatarUrl = agentAvatarUrl(row?.agent_id, row?.avatar_sha256);
+	const agentName = projection.conversation_name || "untitled";
+	const [avatarHint, setAvatarHint] = useState(false);
+	useEffect(() => {
+		if (!avatarHint) return;
+		const timer = setTimeout(() => setAvatarHint(false), 4000);
+		return () => clearTimeout(timer);
+	}, [avatarHint]);
+	const showAvatarHint = () => setAvatarHint(true);
 	/** True when the daemon accepted the pin, false when it refused — the menu
 	    uses that answer to step aside so this header's refusal strip is visible
 	    instead of sitting behind the open sheet. */
@@ -247,6 +260,27 @@ function Header({
 			>
 				<span aria-hidden dir="ltr" className="lo-directional">‹</span>
 			</button>
+			{avatarUrl ? (
+				/* THE AGENT'S PICTURE, LEFT OF THE NAME (operator rule), for a session
+				   bound to an agent that has one; no picture, no control, and the
+				   header is exactly what it was. The phone has NO picture editor in
+				   this scope, so a tap or a long-press explains where to change it
+				   (the desktop app's Agents page) rather than opening anything. A
+				   real button, so it is focusable and announced; the label says what
+				   it is for in the same words as the desktop's pencil overlay. */
+				<button
+					type="button"
+					onClick={showAvatarHint}
+					onContextMenu={(event) => {
+						event.preventDefault();
+						showAvatarHint();
+					}}
+					aria-label={messageRuntime.t("relay.agent_avatar.change", { name: agentName })}
+					className={cn(HEADER_CONTROL, "-me-1 shrink-0")}
+				>
+					<AgentAvatar agentId={row?.agent_id} sha={row?.avatar_sha256} name={agentName} size={32} />
+				</button>
+			) : null}
 			<div className="min-w-0 flex-1">
 				{/* THE STATUS DOT (operator request, replacing the ended banner): the
 				    title block is the control that opens the health sheet, so its
@@ -336,6 +370,13 @@ function Header({
 				className="bg-elevated px-2 py-1 text-meta text-ink-muted"
 			>
 				{gateReceipt}
+			</p>
+		) : null}
+		{avatarHint ? (
+			/* The picture hint, in the receipt strip's in-flow pattern: it takes
+			   layout space so it never covers a control, and clears itself. */
+			<p role="status" className="bg-elevated px-2 py-1 text-meta break-words text-ink-muted">
+				{messageRuntime.t("relay.agent_avatar.desktop_hint")}
 			</p>
 		) : null}
 		{pinRefusal ? (

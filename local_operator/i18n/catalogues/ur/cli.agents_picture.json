@@ -8,6 +8,6 @@
   "cli.agents_picture.help.set": "کسی امیج فائل سے ایجنٹ کی تصویر سیٹ کریں",
   "cli.agents_picture.help.show": "ایجنٹ کی تصویر کا میٹا ڈیٹا JSON میں دکھائیں",
   "cli.agents_picture.remove.done": "{agent} کی تصویر ہٹا دی گئی۔",
-  "cli.agents_picture.remove.none": "{agent} کی ہٹانے کے لیے کوئی تصویر نہیں ہے۔",
+  "cli.agents_picture.remove.none": "{agent} کے پاس ہٹانے کے لیے کوئی تصویر نہیں ہے۔",
   "cli.agents_picture.set.done": "{agent} کی تصویر سیٹ ہو گئی ({mime}، {bytes} بائٹس)۔"
 }

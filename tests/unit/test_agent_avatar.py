@@ -392,3 +392,70 @@ def test_cli_parser_registers_picture_verbs():
         "picbot",
         "/tmp/x.png",
     )
+
+
+# -- the writers must not drop it ---------------------------------------------
+
+
+def test_an_update_agent_rewrite_keeps_the_picture_block(registry, agent):
+    """A UI-style metadata edit (rename + description) must not lose the picture.
+
+    ``update_agent`` re-dumps the whole row from ``model_dump()``, so the block
+    survives only if ``AgentData.avatar`` is a real field -- a sidecar-only or
+    ``extra="allow"`` carrier would be dropped here and the picture would turn
+    into an orphan file the metadata no longer names (hub round: the desktop
+    editor renames rows constantly).
+    """
+    meta = registry.set_agent_avatar(agent.id, _png())
+    from local_operator.agents import AgentEditFields
+
+    updated = registry.update_agent(
+        agent.id, AgentEditFields(name="renamed", description="new purpose")
+    )
+    assert updated.avatar is not None and updated.avatar.sha256 == meta.sha256
+    # And it is on DISK, not only in memory.
+    stored = yaml.safe_load((registry.config_dir / "agents" / agent.id / "agent.yml").read_text())
+    assert stored["avatar"]["sha256"] == meta.sha256
+    assert stored["avatar"]["mime"] == "image/png"
+    # A fresh registry (a new process) reads the same block back.
+    fresh = AgentRegistry(config_dir=registry.config_dir, refresh_interval=0.0)
+    assert fresh.get_agent(agent.id).avatar.sha256 == meta.sha256
+
+
+def test_save_agent_round_trips_the_picture_block(registry, agent):
+    meta = registry.set_agent_avatar(agent.id, _png())
+    row = registry.get_agent(agent.id)
+    registry.save_agent(row)
+    assert registry.get_agent(agent.id).avatar.sha256 == meta.sha256
+
+
+def test_clone_carries_the_picture_and_its_block(registry, agent):
+    meta = registry.set_agent_avatar(agent.id, _png())
+    clone = registry.clone_agent(agent.id, "picbot-copy")
+    assert clone.avatar is not None and clone.avatar.sha256 == meta.sha256
+    assert (registry.config_dir / "agents" / clone.id / agent_avatar.PNG_NAME).exists()
+
+
+def test_import_drops_an_archives_picture_block(registry, agent, tmp_path):
+    """No cloud->local picture write: an imported archive's block is discarded."""
+    import zipfile
+
+    archive = tmp_path / "in.zip"
+    payload = {
+        "id": "0123456789ab",
+        "name": "imported",
+        "label": "",
+        "created_date": "2026-01-01T00:00:00+00:00",
+        "version": "0.0.0",
+        "avatar": {
+            "sha256": "0" * 64,
+            "mime": "image/png",
+            "bytes": 1,
+            "updated_at": "2026-01-01T00:00:00+00:00",
+        },
+    }
+    with zipfile.ZipFile(archive, "w") as bundle:
+        bundle.writestr("agent.yml", yaml.safe_dump(payload))
+    imported = registry.import_agent(archive)
+    assert imported.agent.avatar is None
+    assert not (registry.config_dir / "agents" / imported.agent.id / "avatar.png").exists()
