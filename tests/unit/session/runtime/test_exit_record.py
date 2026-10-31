@@ -653,15 +653,26 @@ def test_a_record_without_boot_cost_still_reads(tmp_path: Path) -> None:
     assert record is not None and record.boot is None and record.covers_run(7, 9.0)
 
 
-def _fake_linux_proc(monkeypatch, schedstat: dict[str, bytes | None]) -> None:
+def _fake_linux_proc(
+    monkeypatch, schedstat: dict[str, bytes | None], *, cpu_s: float = 1.0
+) -> None:
     """Serve ``/proc/self/task/*/schedstat`` and ``/proc/self/stat`` from a dict.
 
     A ``None`` row is a thread that exited between the listing and the read.
     The stat row puts the start tick at 0 and ``CLOCK_BOOTTIME`` at 100 s, so the
     process age is 100 s.
+
+    ``cpu_s`` IS PINNED TOO, because ``sample()`` reads it from the real
+    ``getrusage`` and the fail-closed guard compares it with the faked wall.
+    Unpinned, the test measured whichever process ran it: a fresh local run
+    has ~1 s of CPU (guard fires), while a CI xdist worker that has already run
+    thousands of tests had more than 100 s (the gap is not material, the guard
+    correctly declines, and the test failed on #3226's head ``5d237f1``).
     """
     import builtins
     import io
+    import resource
+    import types
 
     from local_operator.session.runtime import boot_cost
 
@@ -685,6 +696,18 @@ def _fake_linux_proc(monkeypatch, schedstat: dict[str, bytes | None]) -> None:
     monkeypatch.setattr(boot_cost.time, "clock_gettime", lambda _c: 100.0)
     monkeypatch.setattr(boot_cost.os, "sysconf", lambda _n: 100)
     monkeypatch.setattr(boot_cost.sys, "platform", "linux")
+    real_getrusage = resource.getrusage
+
+    def pinned_getrusage(who):
+        real = real_getrusage(who)
+        return types.SimpleNamespace(
+            ru_utime=cpu_s,
+            ru_stime=0.0,
+            ru_nvcsw=real.ru_nvcsw,
+            ru_nivcsw=real.ru_nivcsw,
+        )
+
+    monkeypatch.setattr(resource, "getrusage", pinned_getrusage)
 
 
 def test_linux_without_run_queue_accounting_fails_closed(monkeypatch) -> None:
@@ -702,6 +725,20 @@ def test_linux_without_run_queue_accounting_fails_closed(monkeypatch) -> None:
     record = boot_cost.window(sample)
     assert record["waited_for_cpu_s"] is None and record["blocked_s"] is None
     assert record["wall_s"] == 100.0, "wall and CPU are still recorded"
+    assert record["cpu_s"] == 1.0
+
+
+def test_linux_zero_run_queue_with_no_material_gap_keeps_the_split(monkeypatch) -> None:
+    """The guard's other side: CPU ~= wall leaves nothing to misattribute.
+
+    This is the input the CI worker accidentally supplied to the test above
+    (process CPU above the faked 100 s wall); declining there is correct.
+    """
+    from local_operator.session.runtime import boot_cost
+
+    _fake_linux_proc(monkeypatch, {"1": b"99950000000 0 3\n"}, cpu_s=99.95)
+    sample = boot_cost.sample()
+    assert sample is not None and sample["runnable_s"] == 99.95
 
 
 def test_linux_thread_exiting_mid_scan_keeps_the_survivors(monkeypatch) -> None:
