@@ -311,21 +311,29 @@ def _served_provider_name(value: Any) -> str | None:
     return trimmed
 
 
-def _compat_cache_usage(raw_usage: Mapping[str, Any]) -> tuple[int, int]:
-    """Normalize cache read/write counters across OpenAI-compatible providers."""
+def _compat_cache_usage(raw_usage: Mapping[str, Any]) -> tuple[int | None, int]:
+    """Normalize counters without mistaking an absent or malformed hit for zero."""
     details = raw_usage.get("prompt_tokens_details") or {}
     if not isinstance(details, Mapping):
         details = {}
     if "cached_tokens" in details:
-        # Presence wins even for zero: a standard field explicitly reporting a
-        # miss is more authoritative than a stray provider compatibility alias.
-        cache_read = _usage_token(details, "cached_tokens")
+        # An explicitly reported standard field takes precedence over aliases,
+        # including an invalid one: a stray alias cannot repair a broken receipt.
+        candidates = (details["cached_tokens"],)
     else:
-        # Kimi's documented field is ``cached_tokens``; DeepSeek's is
-        # ``prompt_cache_hit_tokens``. Both are subsets of ``prompt_tokens``.
-        cache_read = _usage_token(raw_usage, "cached_tokens", "prompt_cache_hit_tokens")
-    cache_write = _usage_token(details, "cache_write_tokens")
-    return cache_read, cache_write
+        candidates = (raw_usage.get("cached_tokens"), raw_usage.get("prompt_cache_hit_tokens"))
+    cache_read = None
+    for value in candidates:
+        if value is None or isinstance(value, bool):
+            continue
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if parsed >= 0 and (not isinstance(value, float) or value == parsed):
+            cache_read = parsed
+            break
+    return cache_read, _usage_token(details, "cache_write_tokens")
 
 
 def _usd_cost(raw_usage: Mapping[str, Any] | None) -> float | None:
@@ -3103,7 +3111,10 @@ class OpenAICompatClient:
         )
         if direct_deepseek:
             messages = _deepseek_tool_images(messages)
-        elif request.model.supports_prompt_cache:
+        elif request.model.supports_prompt_cache and not (
+            request.model.provider == "openai"
+            and endpoint == "https://api.openai.com/v1/chat/completions"
+        ):
             self._message_cache_markers(messages, frozen_entry=epoch_entry)
         body: dict[str, Any] = {
             "model": request.model.model_id,
@@ -3287,6 +3298,12 @@ class OpenAICompatClient:
             if (
                 request.model.supports_prompt_cache
                 and request.model.provider != "deepseek"
+                # Direct OpenAI caches implicitly; Anthropic's marker dialect is
+                # supported by some gateways but is not a Chat API field.
+                and not (
+                    request.model.provider == "openai"
+                    and self._base_url == "https://api.openai.com/v1"
+                )
                 and i < stable_cutoff
             ):
                 out.append(
@@ -3452,13 +3469,13 @@ class OpenAICompatClient:
             body["service_tier"] = fast.value
         if request.model.supports_prompt_cache and request.prompt_cache_key:
             body["prompt_cache_key"] = request.prompt_cache_key
-            # GPT-5.6+ and GPT-6 public Responses use the documented implicit
-            # cache/30m default, not the legacy 24h retention contract. Omit the
-            # incompatible field only on this exact public route: compatible
-            # gateways, older models and unknown future families keep their
-            # existing policy. Codex removes retention separately below.
-            if not _modern_public_cache_defaults(
-                request.model, endpoint or f"{self._base_url}/responses"
+            # The public API's default respects the organization's data policy;
+            # forcing 24h can override ZDR's in-memory default or be unsupported
+            # on older/unknown models. Leave custom gateways' contract untouched.
+            actual_endpoint = endpoint or f"{self._base_url}/responses"
+            if not (
+                request.model.provider == "openai"
+                and actual_endpoint == "https://api.openai.com/v1/responses"
             ):
                 body["prompt_cache_retention"] = "24h"
         actual_endpoint = endpoint or f"{self._base_url}/responses"
@@ -3639,7 +3656,8 @@ class OpenAICompatClient:
                         usage = Usage(
                             input_tokens=int(raw.get("prompt_tokens", 0)),
                             output_tokens=int(raw.get("completion_tokens", 0)),
-                            cache_read_tokens=cache_read,
+                            cache_read_tokens=cache_read if cache_read is not None else 0,
+                            cache_read_reported=cache_read is not None,
                             cache_write_tokens=cache_write,
                             # The thinking slice of the completion, when the wire
                             # separates it. A SUBSET of ``completion_tokens`` (see

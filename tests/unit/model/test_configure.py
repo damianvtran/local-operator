@@ -281,6 +281,23 @@ def test_create_stream_fn_returns_callable():
     assert callable(stream_fn)
 
 
+@pytest.mark.parametrize(
+    "model_id",
+    ["gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-sol-2026-10-01", "gpt-6.1-terra", "gpt-6-luna"],
+)
+def test_discovered_gpt6_uses_responses_and_prompt_cache(model_id: str) -> None:
+    spec = build_model_spec("openai", model_id)
+    assert spec.supports_responses_api is True
+    assert spec.supports_prompt_cache is True
+
+
+@pytest.mark.parametrize("model_id", ["gpt-6.2-unknown", "gpt-6-unknown"])
+def test_unknown_gpt6_variants_do_not_inherit_unverified_capabilities(model_id: str) -> None:
+    spec = build_model_spec("openai", model_id)
+    assert spec.supports_responses_api is False
+    assert spec.supports_prompt_cache is False
+
+
 @pytest.mark.asyncio
 async def test_openai_chat_completions_override_routes_gpt5_to_legacy_endpoint() -> None:
     captured: dict[str, Any] = {}
@@ -313,8 +330,10 @@ async def test_openai_chat_completions_override_routes_gpt5_to_legacy_endpoint()
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("model_id", ["gpt-5.4", "gpt-6.1-sol"])
 async def test_session_stream_supplies_stable_prompt_cache_key_to_public_responses(
     tmp_path,
+    model_id: str,
 ) -> None:
     captured: dict[str, Any] = {}
 
@@ -335,7 +354,7 @@ async def test_session_stream_supplies_stable_prompt_cache_key_to_public_respons
     stream = create_stream_fn(store, {}, session_id="session-cache-key")
     await stream._http.aclose()
     stream._http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    spec = build_model_spec("openai", "gpt-5.4")
+    spec = build_model_spec("openai", model_id)
     try:
         await _collect_stream(stream(ChatRequest(model=spec, messages=[Message.user("hi")]), None))
     finally:
@@ -345,7 +364,7 @@ async def test_session_stream_supplies_stable_prompt_cache_key_to_public_respons
     assert captured["url"] == "https://api.openai.com/v1/responses"
     body = json.loads(captured["body"])
     assert body["prompt_cache_key"] == "session-cache-key"
-    assert body["prompt_cache_retention"] == "24h"
+    assert "prompt_cache_retention" not in body
 
 
 async def _collect_stream(stream: Any) -> list[Any]:
@@ -4260,7 +4279,7 @@ def test_a_fresh_delegated_fork_does_not_inherit_the_pin() -> None:
 
 def _warm_usage(cached: int = 0, prompt: int = 30_000) -> Usage:
     """A prefix big enough for "no reuse" to carry information."""
-    return Usage(input_tokens=prompt, cache_read_tokens=cached)
+    return Usage(input_tokens=prompt, cache_read_tokens=cached, cache_read_reported=True)
 
 
 async def _score(
@@ -4284,6 +4303,57 @@ async def _score(
         previous = 1000.0
         stream._provider_last_turn_at[model_id] = previous
     stream._score_cache_affinity(request, served, usage, now=previous + gap_s)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reported,retired", [(None, False), (0, True), (29000, False)])
+async def test_wire_cache_evidence_controls_affinity(reported: int | None, retired: bool) -> None:
+    """Exercise the real adapter and session wrapper, not just the score helper."""
+    from local_operator.providers.clients import OpenAICompatClient
+
+    model_id = "deepseek/deepseek-v4.1-flash"
+    usage: dict[str, Any] = {"prompt_tokens": 30000, "completion_tokens": 10}
+    if reported is not None:
+        usage["prompt_tokens_details"] = {"cached_tokens": reported}
+    chunks = [
+        {"provider": "SiliconFlow", "choices": [{"delta": {}, "finish_reason": "stop"}]},
+        {"choices": [], "usage": usage},
+    ]
+    payload = "".join(f"data: {json.dumps(chunk)}\n\n" for chunk in chunks) + "data: [DONE]\n\n"
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(
+            200, text=payload, headers={"content-type": "text/event-stream"}
+        )
+    )
+    stream = _affinity_stream()
+    stream._provider_affinity[model_id] = "SiliconFlow"
+    stream._provider_last_turn_at[model_id] = time.monotonic()
+    async with httpx.AsyncClient(transport=transport) as http:
+        client = OpenAICompatClient("https://openrouter.ai/api/v1", http_client=http)
+        for _ in range(2):
+            request = stream._apply_cache_affinity(_affinity_request())
+            await _collect_stream(
+                stream._record_stream(request, client.stream(request, "synthetic-key"))
+            )
+    assert ("SiliconFlow" in stream._provider_retired.get(model_id, set())) is retired
+
+
+@pytest.mark.asyncio
+async def test_unknown_cache_read_does_not_retire_a_host() -> None:
+    """A missing counter is not evidence that a warm prefix missed."""
+    stream = _affinity_stream()
+    model_id = "deepseek/deepseek-v4.1-flash"
+    stream._provider_affinity[model_id] = "SiliconFlow"
+
+    unknown = Usage(input_tokens=30_000)
+    # Old serialized usages include the default numeric zero, so a round trip
+    # must not promote that fabricated zero into evidence of a miss.
+    unknown = Usage.model_validate(unknown.model_dump())
+    for _ in range(2):
+        await _score(stream, asked="SiliconFlow", served="SiliconFlow", usage=unknown)
+
+    assert not stream._provider_retired.get(model_id)
+    assert stream._provider_affinity[model_id] == "SiliconFlow"
 
 
 @pytest.mark.asyncio
@@ -4649,6 +4719,7 @@ async def test_strikes_follow_the_served_model_too() -> None:
             usage=Usage(
                 input_tokens=30_000,
                 cache_read_tokens=0,
+                cache_read_reported=True,
                 provider="openrouter",
                 model_id=served_id,
             ),

@@ -1272,7 +1272,7 @@ def _omit_unset_usage_stamp(data: dict[str, Any]) -> dict[str, Any]:
     invisibly, until the attach frame crosses its 1 MiB socket line limit again
     (review round 1, MINOR 2).
     """
-    for field in ("at_ms", "billing_basis"):
+    for field in ("at_ms", "billing_basis", "cache_read_reported"):
         if data.get(field) is None:
             data.pop(field, None)
     return data
@@ -1333,6 +1333,11 @@ class Usage(BaseModel):
     input_tokens: int = 0
     output_tokens: int = 0
     cache_read_tokens: int = 0
+    # Numeric defaults are used throughout pricing and rendering, but zero alone
+    # cannot prove a provider measured a miss. Preserve that distinction across
+    # copies and serialization without changing the established numeric contract.
+    # None is legacy/unspecified; explicit False means the wire omitted a counter.
+    cache_read_reported: bool | None = None
     cache_write_tokens: int = 0
     # The TTL split of ``cache_write_tokens`` when the provider reports one
     # (Anthropic's ``usage.cache_creation.ephemeral_5m_input_tokens`` /

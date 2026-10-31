@@ -496,7 +496,11 @@ _USER_SUPPLIED_MODEL_PROVIDERS = frozenset({"ollama"})
 #: direct `/v1/models` listing exposes ids but no capability flags, so an
 #: uncurated current snapshot still needs a family rule; older registry rows
 #: remain explicitly off through ``ModelInfo.supports_responses_api``'s default.
-_OPENAI_RESPONSES_API = re.compile(r"^gpt-5(?:[.-]|$)")
+# Keep the established GPT-5 rule, but infer GPT-6 capabilities only for
+# documented models and their dated snapshots, not an unknown future variant.
+_OPENAI_RESPONSES_API = re.compile(
+    r"^(?:gpt-5(?:[.-]|$)|gpt-6(?:-astra|-sol|-luna|\.1-sol|\.1-terra)" r"(?:-\d{4}-\d{2}-\d{2})?$)"
+)
 
 #: The DeepSeek-hosted models that run DeepSeek's THINKING MODE, and therefore
 #: demand the reasoning echo documented on ``ModelSpec.requires_reasoning_echo``
@@ -4458,7 +4462,14 @@ class SessionStreamFn:
         prompt_tokens = usage.input_tokens if usage else 0
         if prompt_tokens < self.PROVIDER_STRIKE_MIN_PROMPT_TOKENS:
             return
-        cached = usage.cache_read_tokens if usage else 0
+        # Serialized legacy Usage always contains a numeric zero, even if the
+        # provider omitted the counter. Only an explicit receipt can establish a
+        # zero miss; positive legacy counts can still establish a cache hit.
+        if usage is None or (
+            usage.cache_read_reported is not True and usage.cache_read_tokens == 0
+        ):
+            return
+        cached = usage.cache_read_tokens
         floor = max(
             self.PROVIDER_STRIKE_MIN_CACHED_TOKENS,
             int(prompt_tokens * self.PROVIDER_STRIKE_MIN_CACHED_FRACTION),
