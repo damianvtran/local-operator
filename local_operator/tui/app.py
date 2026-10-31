@@ -138,9 +138,10 @@ from local_operator.i18n.keys import tui_asks as _ask_keys
 from local_operator.i18n.keys import tui_library
 from local_operator.i18n.keys import tui_projects as _pc
 from local_operator.i18n.keys import tui_projects_edit as _pe
+from local_operator.i18n.keys import tui_setup_cues as _setup_keys
 from local_operator.i18n.keys import tui_status_command as _sc_keys
 from local_operator.i18n.keys import tui_tags as _tag_keys
-from local_operator.i18n.text import tr
+from local_operator.i18n.text import register_refresh, tr
 from local_operator.logger import current_log_file
 
 # The `/mcp` verb helpers live with the verbs they serve, so the terminal and
@@ -611,6 +612,10 @@ _t_tags = tr("tui.tags")
 #: The queued-ask surfaces' own namespace (R5). Read through the binding at every
 #: use site, never copied: a language move re-materialises the catalogue.
 _t_asks = tr("tui.asks")
+#: First-run setup cues (the composer placeholder and the no-provider cue). Read
+#: through the binding at every use, never copied: ``_reload_setup_cues`` re-points
+#: the two module constants below on a live language move.
+_t_setup = tr("tui.setup_cues")
 #: Fixed-width, non-colour membership markers. Width is the point: six rows with
 #: `[x]`/`[ ]` line up in monochrome and in an ASCII fallback, where a bullet or
 #: a coloured dot would carry the only copy of the state.
@@ -3151,7 +3156,9 @@ CREDENTIAL_PLACEHOLDER = "Type or paste the secret… — masked; Enter chips it
 
 #: The composer's placeholder in the first-run setup state (see
 #: ``_composer_placeholder_for``).
-SETUP_PLACEHOLDER = f"Type {RECOMMENDED_LOGIN_COMMAND} to begin"
+SETUP_PLACEHOLDER = _t_setup(
+    _setup_keys.setup_placeholder(command=RECOMMENDED_LOGIN_COMMAND)
+)
 
 #: How often the ask surfaces re-derive their countdown while a row is present.
 #:
@@ -4601,7 +4608,24 @@ class TranscriptScreen(Screen[None]):
 #: for someone who may have no AI account at all (audit D1/U2/U4/Q3). The
 #: command comes from ``providers.login_catalog`` so the splash, the hints,
 #: the CLI and the README cannot recommend different providers again.
-AIDA_NO_PROVIDER_CUE = f"Connect an AI account first: type {RECOMMENDED_LOGIN_COMMAND}"
+AIDA_NO_PROVIDER_CUE = _t_setup(_setup_keys.no_provider_cue(command=RECOMMENDED_LOGIN_COMMAND))
+
+
+def _reload_setup_cues() -> None:
+    """Follow backend locale moves for the two first-run cue constants.
+
+    They are module constants (tests and the e2e harness import them by name), so
+    a language change has to re-materialise them; every use site reads the module
+    global at call time and therefore sees the moved text.
+    """
+    global SETUP_PLACEHOLDER, AIDA_NO_PROVIDER_CUE
+    SETUP_PLACEHOLDER = _t_setup(_setup_keys.setup_placeholder(command=RECOMMENDED_LOGIN_COMMAND))
+    AIDA_NO_PROVIDER_CUE = _t_setup(
+        _setup_keys.no_provider_cue(command=RECOMMENDED_LOGIN_COMMAND)
+    )
+
+
+register_refresh(_reload_setup_cues)
 
 
 def bridge_decision_target(

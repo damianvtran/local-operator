@@ -50,6 +50,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
+from local_operator.i18n.cli_help import help_text
+from local_operator.i18n.keys import cli_group_help as _gg
+
 #: The default invite lifetime. A string flag parsed by :func:`_duration`, because
 #: ``--expires 10m`` is what a person types and ``600`` is what they would have to
 #: compute.
@@ -132,7 +135,9 @@ def _duration(text: str) -> float:
     return value * multiplier
 
 
-def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
+def add_parser(
+    subparsers: Any, parent_parser: Any = None, *, help_locale: str | None = None
+) -> None:
     """Register ``lop network`` and its actions.
 
     ``parent_parser`` is threaded through so the position-independent globals
@@ -144,7 +149,7 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
     parents = [parent_parser] if parent_parser is not None else []
     parser = subparsers.add_parser(
         "network",
-        help="Mesh networks: pair devices, drive sessions across them",
+        help=help_text(_gg.network(), help_locale),
         parents=parents,
     )
     actions = parser.add_subparsers(dest="network_command")

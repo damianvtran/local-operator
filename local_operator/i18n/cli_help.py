@@ -12,6 +12,8 @@ constructing a manager" is how one of them grows a side effect later.
 
 from __future__ import annotations
 
+from typing import Any
+
 from .resolve import resolve_language
 
 
@@ -26,3 +28,16 @@ def help_locale() -> str:
     from .boot import configured_language
 
     return resolve_language(configured_language())
+
+
+def help_text(message: Any, locale: str | None = None) -> str:
+    """Render one key for an argparse surface in the help locale.
+
+    ``locale`` is the snapshot ``build_cli_parser`` already resolved; a standalone
+    caller (a test, or a failure raised after the build) passes ``None`` and
+    resolves fresh. This is the explicit-locale render the module docstring
+    requires: ``tr()`` would read the PROCESS locale, which a ``--help`` or usage
+    failure has not activated yet, so a localised exec/skills line would still
+    paint English there.
+    """
+    return str(message.envelope(locale=locale or help_locale())["text"])
