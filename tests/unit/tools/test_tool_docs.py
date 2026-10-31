@@ -544,7 +544,13 @@ MEASURED_TOKENS: dict[str, int] = {
     # this feature on the start-context arms from 168 chars to 125; the resolved
     # form moved to the `op='help'` entry, which the reference renders on demand
     # and the arms do not pay for. No other entry moved.
-    "sessions": 868,
+    # RE-MEASURED for the own-cwd `move` round-1 remediation: 868 -> 867. The
+    # description LOST a token net: the per-op row no longer advertises the
+    # three address fields a move cannot use (`session|target|pid, peer, cwd`
+    # -> `cwd`, UX round 1 U6) and pays for the own-session clause in the
+    # opening sentence with it. Nothing else moved; the field schema did not
+    # change, so `tool_schemas` and `scripts/bench_context_budget.py` stand.
+    "sessions": 867,
     # NEW (wave 4 slice A, 2026-10-10): the ``setting`` doc — the key
     # vocabulary, the op split and the validation-by-registry contract. 191
     # tokens is the deliberate cost of the reference detail staying off the

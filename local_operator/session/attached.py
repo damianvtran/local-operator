@@ -4514,6 +4514,12 @@ class AttachedSession:
             if self._pending_frame_cwd:
                 self._cwd = self._pending_frame_cwd
                 self._pending_frame_cwd = ""
+                # THE BAND FOLLOWS THE ENGAGE, not the successor's first snapshot:
+                # without this the visible directory stays the OLD one for as long
+                # as the successor takes to publish, which is the same gap
+                # ``set_working_directory`` closes by calling this method (agent
+                # review round 1, m4). Best-effort by that method's own contract.
+                self._publish_working_directory(self._cwd)
             await self._bind_under_lock(foreground=foreground)
             # Cover every winning-owner path, including another attach/recovery
             # completing during an await. A failed model RPC is not a failed
@@ -5341,6 +5347,13 @@ class AttachedSession:
             on_frontend_sync=once_adopted(self._on_frontend_sync),
             on_frontend_update=once_adopted(self._on_frontend_update),
             on_retiring=once_adopted(self._on_retiring_frame),
+            # THIS FACADE ADOPTS the directory a cwd-move `retiring` frame names
+            # (`_ensure_bound` -> `_pending_frame_cwd`), so it declares the
+            # capability the owning runtime requires before it will retire toward
+            # a move at all. Without the declaration a runtime correctly treats
+            # "nobody can follow this" as a hold — see
+            # `RuntimeServer._cwd_move_successor_guaranteed`.
+            cwd_adoption=True,
             # THE PRODUCTION WIRING FOR THE PROMPT COPY (UX round 6, U3 = design
             # round 6, D3). This client is the pane a human is standing at when the
             # machine's key raises its presence prompt, so it is the one surface
@@ -8502,6 +8515,20 @@ class AttachedSession:
         if client is None or not client.connected:
             return True
         return bool(getattr(client, "supports_exclusive_move", False))
+
+    @property
+    def pending_move_cwd(self) -> str:
+        """The destination a cwd-move ``retiring`` frame named, while it is pending.
+
+        Set by :meth:`_on_retiring_frame` and cleared the moment ``_ensure_bound``
+        adopts it into ``_cwd``. Read by the HOST at the instant the retirement
+        lands (the refresh callback), which is the only point where the
+        destination is still knowable and a notice is still worth painting: a
+        cwd-move departure reaches the host as an ordinary retirement, so without
+        this the session restarted in a new directory and said nothing (UX round
+        1, U3). Empty for every other departure.
+        """
+        return self._pending_frame_cwd
 
     def set_refresh_callback(self, callback: Callable[[], Any] | None) -> None:
         """Told when the runtime retired itself for a newer build.

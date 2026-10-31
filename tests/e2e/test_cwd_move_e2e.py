@@ -182,6 +182,12 @@ def _stage(config_dir: Path) -> str:
     return intent.stage if intent is not None else "missing"
 
 
+def _hold(config_dir: Path) -> str:
+    """Why the consumer is holding the intent, or ``""`` (agent review B2)."""
+    intent = cwd_move.read_move_intent(config_dir, SESSION_ID)
+    return intent.blocked_reason if intent is not None else ""
+
+
 def test_a_real_successor_boot_commits_the_move_and_nothing_else_does(
     headless_tui_env: Path, tmp_path: Path
 ) -> None:
@@ -291,20 +297,21 @@ def test_a_crash_between_the_request_and_the_boot_is_settled_by_where_it_really_
     assert crashed is not None, "the request survived the process that made it"
     assert crashed.stage == cwd_move.STAGE_QUEUED
 
-    # 2. A SUCCESSOR IN THE WRONG DIRECTORY claims nothing — and, by design, it also
-    #    RETIRES: its move watcher reads the queued intent at the first idle tick and
-    #    stops the runtime, because confirming the move is the job of a successor that
-    #    is IN the destination. So the observable here is its EXIT, not a published
-    #    record: CI caught the earlier version waiting for a record this runtime may
-    #    never write (it retires before the publisher runs on a fast host), which made
-    #    a real behaviour read as a hang.
+    # 2. A SUCCESSOR IN THE WRONG DIRECTORY claims nothing, and — by design — it does
+    #    NOT retire toward the move either (agent review round 1, B2; UX round 1, U4).
+    #    Retiring there was the defect: with nobody attached who could adopt the
+    #    destination, the runtime stopped, the next boot read the same intent and
+    #    stopped again, and the session could never be opened. The contract pinned here
+    #    instead is the HOLD — a serving runtime, the intent still ``queued``, and the
+    #    reason recorded where `sessions(info)` and the next operator can read it.
     wrong = _spawn_successor(config_dir, str(elsewhere), inherit_cwd=host_cwd)
     try:
         _wait_until(
-            lambda: True if wrong.poll() is not None else None,
+            lambda: True if _hold(config_dir) == "no_capable_viewer" else None,
             timeout=BOOT_COMMIT_TIMEOUT_S,
-            what="the wrong-directory successor to retire instead of claiming the move",
+            what="the wrong-directory successor to record why it is holding the move",
         )
+        assert wrong.poll() is None, "a runtime that cannot guarantee a successor keeps serving"
         assert (
             _stage(config_dir) == cwd_move.STAGE_QUEUED
         ), "a boot elsewhere is not a confirmation, and not a failure either"

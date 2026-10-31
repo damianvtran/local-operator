@@ -16506,7 +16506,13 @@ _SESSIONS_OP_FIELDS: dict[str, frozenset[str]] = {
     "peek": frozenset({"op", "session", "target", "pid", "query", "peer"}) | _SESSIONS_PEEK_FIELDS,
     # ``move`` comes after ``peek`` so the reference and the op list read
     # stop; peek; move; help, the order the enum text states.
-    "move": frozenset({"op", "session", "target", "pid", "peer", "cwd"}),
+    # ``cwd`` AND NOTHING ELSE, which is the honest set rather than a narrowing
+    # of convenience: a move acts on the runtime running the call, so `session`,
+    # `pid`, `target` and `peer` could never address one. Advertising them (and
+    # accepting them only to refuse them) taught a model to try addresses that
+    # cannot work (UX round 1, U6) — a stray one now earns the ordinary
+    # wrong-field refusal, which names the field to use instead.
+    "move": frozenset({"op", "cwd"}),
     # ``help`` reads nothing: the reference is static, so an address or a
     # `prompt` beside it is a misspelled intent like any other stray field.
     "help": frozenset({"op"}),
@@ -16599,8 +16605,8 @@ def _sessions_tool_description() -> str:
         f"{op}: {_sessions_op_accepted_text(op) or 'none'}" for op in _SESSIONS_OP_ORDER
     )
     return (
-        "Manage OTHER local `lop` sessions (top-level and stored; subagents are"
-        " `hub`'s)."
+        "Manage local `lop` sessions (top-level and stored; subagents are"
+        " `hub`'s); `move` acts on THIS one."
         f" Inputs per op (anything else is refused) — {summary}."
         # What each op DOES (spawn for user-requested work, resume's batch SET,
         # peek's window, the mesh `peer`) is the ``op='help'`` reference's
@@ -16724,14 +16730,18 @@ _SESSIONS_OP_DOCS: dict[str, _SessionsOpDoc] = {
         ),
     ),
     "move": _SessionsOpDoc(
-        summary="queue a move of THIS session's own working directory; returns"
-        " stage=queued, and the effective cwd is unchanged until a successor boots"
-        " there.",
-        example="sessions(op='move', cwd='~/work/project')",
+        summary="move THIS session's own working directory: the move is queued and"
+        " takes effect at the next idle point after the current turn — the session"
+        " restarts there — so until then the working directory is unchanged. It is a"
+        " write-tier op, so it is approved like one where approval is required."
+        " Naming the current directory cancels a queued move.",
+        example="sessions(op='move', cwd='~/work/project'); back: cwd='.'",
         refusals=(
-            "own session only: a foreign `session`, any `pid` but your own, `peer`"
-            " and a delegated/background child are refused by code; the destination"
-            " must already exist and be enterable.",
+            "`cwd` alone: a move acts on THIS runtime, so a `session`, `pid`,"
+            " `target` or `peer` field is refused, as is a delegated/background"
+            " child; the destination must already exist and be enterable, and naming"
+            " the directory the session is already in cancels a queued move (with"
+            " none queued it is refused).",
         ),
     ),
     "help": _SessionsOpDoc(
@@ -17188,6 +17198,20 @@ def _describe_sessions_approval(args: dict[str, Any], cwd: str) -> str:
             )
         return f"{head}: {prompt}" if prompt else head
     address = _sessions_address_label(args)
+    if op == "move":
+        # A MOVE IS DECIDED BY ITS TWO DIRECTORIES, so both are named. ``cwd``
+        # arrives relative to the SESSION's directory (that is what the op
+        # resolves against), so showing the raw argument alone leaves a reader
+        # unable to tell "." from "../other"; the source is the second half of
+        # the same fact (agent review round 1, M1; UX round 1, U2).
+        destination = _sessions_move_destination_label(args, cwd)
+        source = _approval_directory_label(cwd) or "its current directory"
+        if not destination:
+            return f"move this session (now in {source}): no destination was given"
+        return (
+            f"move this session from {source} to {destination}: it restarts there once "
+            "the current turn ends"
+        )
     if op == "stop":
         if peer:
             return f"stop {address} on {peer}: ends its run on that device"
@@ -17227,6 +17251,50 @@ def _describe_sessions_approval(args: dict[str, Any], cwd: str) -> str:
             )
         return f"resume {address}: reopens its transcript headlessly"
     return op or "sessions"
+
+
+def _approval_directory_label(path: str) -> str:
+    """``~/rel/path`` inside the home tree, the absolute path outside it.
+
+    The same spelling ``/move``'s receipt and the status band use, so the two
+    paths an approval card names are the two the operator recognises. Deliberately
+    not importing ``tui.move_targets``: a describer runs on the tool path, in a
+    runtime that ships no TUI, and the one rule it needs is four lines.
+    """
+    text = str(path or "").strip()
+    if not text:
+        return ""
+    home = os.path.expanduser("~")
+    if home and home != "~":
+        if text == home:
+            return "~"
+        prefix = home + os.sep
+        if text.startswith(prefix):
+            return "~" + os.sep + text[len(prefix) :]
+    return text
+
+
+def _sessions_move_destination_label(args: Mapping[str, Any], cwd: str) -> str:
+    """The destination a ``move`` call will really use, for the approval card.
+
+    RESOLVED THE WAY THE OP RESOLVES IT — ``~`` expanded, a relative path joined
+    to the session's own directory — but NOT stat-ed: the card is composed before
+    the call runs, and a describer that failed on a missing directory would leave
+    the operator approving the opaque word "move" again. Normalised only, so the
+    path reads as the one the op will act on.
+    """
+    requested = str(args.get("cwd") or "").strip()
+    if not requested:
+        return ""
+    candidate = os.path.expanduser(requested)
+    if not os.path.isabs(candidate):
+        # ``cwd`` is itself printed ``~/…`` by the host, so it is expanded before
+        # it can serve as the base; a relative one falls back to its directory.
+        base = os.path.expanduser(cwd or "")
+        if not os.path.isabs(base):
+            base = os.path.dirname(base)
+        candidate = os.path.join(base or os.getcwd(), candidate)
+    return _approval_directory_label(os.path.normpath(candidate))
 
 
 def _sessions_address_label(args: Mapping[str, Any]) -> str:
@@ -18001,6 +18069,39 @@ def _sessions_disk_only_body(
     return text
 
 
+def _sessions_pending_move_fields(
+    context: ToolContext | None, session_id: str, *, is_own: bool
+) -> dict[str, Any]:
+    """A queued cwd move, as fields the ``info`` body renders for its own row.
+
+    WHY ``info`` CARRIES IT: a move is queued by one call and acted on at a later
+    idle point, so between those two moments the session's state is "still here,
+    going there" and NOTHING said so — not the model's own case of the tool, not
+    the row, not the record (UX round 1, U3). ``stage`` and the recorded hold come
+    from the durable marker, which is why an intent left blocked by a runtime that
+    could not guarantee a successor is visible instead of silent.
+
+    Own session only: another session's marker is not this caller's to report on,
+    and a peer's lives on its own device.
+    """
+    if not (is_own and context and session_id):
+        return {}
+    from local_operator.paths import config_dir
+    from local_operator.session import cwd_move
+
+    session_dir_value = str(getattr(context, "session_dir", "") or "")
+    root = Path(session_dir_value).parent.parent if session_dir_value else config_dir()
+    intent = cwd_move.read_move_intent(root, session_id)
+    if intent is None:
+        return {}
+    return {
+        "move_stage": intent.stage,
+        "move_destination": intent.destination_cwd,
+        "move_source": intent.source_cwd,
+        "move_blocked": intent.blocked_reason,
+    }
+
+
 def _sessions_info_body(
     row: Mapping[str, Any],
     extras: Mapping[str, Any],
@@ -18044,9 +18145,36 @@ def _sessions_info_body(
     if row.get("model_label"):
         parts.append(str(row["model_label"]))
     text = ", ".join(parts) + "\n" + _sessions_facts_line(extras, context)
+    if extras.get("move_stage"):
+        text += "\n" + _sessions_move_state_sentence(extras)
     if is_own:
         text += "\n" + _OWN_SESSION_SENTENCE
     return text
+
+
+def _sessions_move_state_sentence(extras: Mapping[str, Any]) -> str:
+    """The pending move, in the words that stop a caller acting on a stale cwd.
+
+    Model-facing, so plain English (AGENTS.md "Internationalization"); the point
+    is that "queued" is not "done" — the cwd in force is still the source until
+    the successor boots, and a hold (a runtime that could not guarantee one)
+    says so rather than looking like a move that simply has not happened yet.
+    """
+    stage = str(extras.get("move_stage") or "")
+    destination = str(extras.get("move_destination") or "")
+    source = str(extras.get("move_source") or "")
+    blocked = str(extras.get("move_blocked") or "")
+    if stage == "queued":
+        sentence = (
+            f"a move from {source} to {destination} is queued: it happens at the next idle "
+            f"point, when this session restarts there, and the working directory is still {source}"
+        )
+        if blocked:
+            sentence += f" — currently held ({blocked}) rather than acted on"
+        return sentence
+    if stage == "committed":
+        return f"this session moved from {source} to {destination}"
+    return f"the last move request to {destination} ended as {stage}"
 
 
 async def _sessions_info_mesh(
@@ -18208,6 +18336,7 @@ async def _sessions_info(
             "run `lop sessions` via bash for the raw listing.",
         )
     extras = await asyncio.to_thread(_sessions_marker_extras, target.session_id)
+    extras.update(_sessions_pending_move_fields(context, target.session_id, is_own=is_own))
     details: dict[str, Any] = {"op": "info", **row, **extras}
     text = _sessions_info_body(row, extras, context, is_own=is_own)
     text, spill = spill_truncate(text, "sessions", context)
@@ -20250,49 +20379,75 @@ def _sessions_params_error(
     )
 
 
+#: The sentence a ``move`` refusal carries after its code (UX round 1, U5).
+#:
+#: A CODE ALONE IS NOT A RECOVERY INSTRUCTION, and the sibling refusals in this
+#: tool are full sentences that name the way out; ``move`` was the one op whose
+#: model was left to guess. Model-facing text, so it lives here in English rather
+#: than in the copy catalogue (AGENTS.md "Internationalization").
+_SESSIONS_MOVE_REMEDIES: dict[str, str] = {
+    "sessions_move_cwd_required": "`cwd` is required — the directory to move to, absolute or "
+    "relative to this session's working directory",
+    "sessions_move_destination_missing": "that directory does not exist — create it, or name "
+    "one that does",
+    "sessions_move_destination_not_a_directory": "that path is not a directory — point at a folder",
+    "sessions_move_destination_not_enterable": "this session cannot enter that directory — check "
+    "its permissions or pick another",
+    "sessions_move_destination_is_current": "this session already works there and no move is "
+    "queued — naming the current directory cancels a queued move",
+    "sessions_move_no_owner_identity": "this runtime has no session identity, so there is nothing "
+    "to move — reopen the session and retry",
+    "sessions_move_child_has_no_runtime": "a background job or delegated child has no runtime of "
+    "its own to move — ask the parent session to move instead",
+}
+
+
 async def _sessions_move(
     tool_call_id: str, params: SessionsParams, context: "ToolContext | None"
 ) -> ToolResult:
     """Queue a move of THIS session's own working directory.
 
     ONLY ITS OWN. A move is a lifecycle act on the runtime that is running the
-    call, so every other address is refused as a technical code rather than
-    quietly resolved to the caller: a foreign id, an explicit pid, and ``peer``
-    (another device's session has its own owner, and the mesh carries no move
-    frame yet) are all ``sessions_move_*`` refusals.
+    call, so no address is accepted at all: the schema admits ``cwd`` and the
+    shared wrong-field refusal answers anything else, rather than this op
+    advertising a ``session``/``pid``/``target``/``peer`` it could only refuse
+    (UX round 1, U6).
 
-    STAGE ``queued`` ONLY. Nothing here retires a runtime or spawns a successor;
-    slice 2 does that. Reporting ``applied`` from this call would claim a boot
-    that has not happened, so the result's stage is the durable intent's stage.
+    STAGE ``queued`` ONLY, AND THEN THE RUNTIME IS WOKEN. Writing the marker is
+    half the act: the consumer that retires this runtime at its next idle point
+    starts at boot and exits when there is nothing to do, so a call that queued
+    mid-turn has to arm it (``server.notify_move_queued``) — without that the
+    intent sat on disk until some later boot, which is the "a queued move never
+    happens" defect both round-1 reviewers found (agent B1, UX U1). Reporting
+    ``applied`` here would still claim a boot that has not happened, so the stage
+    reported is the durable intent's.
+
+    A DESTINATION EQUAL TO THE CURRENT DIRECTORY IS A CANCEL when an intent is
+    queued (UX U4): the module withdraws it and returns stage ``superseded``,
+    and this reports that rather than a move.
     """
     from local_operator.paths import config_dir
     from local_operator.session import cwd_move
+    from local_operator.session.runtime.server import notify_move_queued
 
     def refuse(code: str, **fields: Any) -> ToolResult:
+        # EVERY REFUSAL CARRIES ITS REMEDY. The code alone told a model nothing
+        # it could act on, and the fields that would have helped live in
+        # ``details``, which the model never sees (UX round 1, U5). Model-facing
+        # text is exempt from the copy catalogue (AGENTS.md
+        # "Internationalization"), so the sentence is written here rather than
+        # keyed.
+        remedy = _SESSIONS_MOVE_REMEDIES.get(code, "correct the arguments and retry")
         return _error(
             tool_call_id,
             "sessions",
-            f"refused: {code}",
+            f"refused ({code}): {remedy}",
             details={"op": "move", "code": code, **fields},
         )
 
-    if str(params.peer or "").strip():
-        return refuse("sessions_move_peer_unsupported", peer=str(params.peer))
-    if params.pid is not None and params.pid != os.getpid():
-        # The caller's OWN pid is allowed as a synonym for "me"; any other pid is
-        # somebody else's runtime and is not this call's to move.
-        return refuse("sessions_move_pid_not_self", pid=params.pid)
     own_session_id = str(getattr(context, "session_id", "") or "")
     if not own_session_id:
         return refuse("sessions_move_no_owner_identity")
-    if params.session and params.session != own_session_id:
-        return refuse(
-            "sessions_move_foreign_session",
-            session=str(params.session),
-            own_session_id=own_session_id,
-        )
-    if str(params.target or "").strip():
-        return refuse("sessions_move_target_unsupported", target=str(params.target))
     child_job_id = str(getattr(context, "job_id", "") or "")
     if child_job_id:
         # A call executing on behalf of a background job or a delegated child has
@@ -20312,14 +20467,40 @@ async def _sessions_move(
         )
     except cwd_move.CwdMoveRefused as refused:
         return refuse(refused.code, **refused.fields)
+    if intent.stage == cwd_move.STAGE_SUPERSEDED:
+        # THE CANCEL RECEIPT. Naming the withdrawn destination and where the
+        # session stays is the whole answer a caller needs; there is nothing
+        # queued any more, so nothing will restart.
+        return _text(
+            tool_call_id,
+            "sessions",
+            f"cancelled: the queued move is withdrawn — this session stays in "
+            f"{intent.source_cwd} (request {intent.request_id})",
+            details={"op": "move", **intent.as_fields(effective_cwd=effective_cwd)},
+        )
+    # THE WAKE IS REPORTED, not assumed: a runtime this process hosts picks the
+    # request up at the next idle point, and a process that hosts none says so
+    # rather than promising a move nothing is watching.
+    armed = notify_move_queued(own_session_id, root)
+    when = (
+        "at the next idle point after this turn, when the session restarts there"
+        if armed
+        else "the next time this session opens (no runtime in this process is watching it now)"
+    )
     # The effective cwd is the context's, read back rather than assumed: this call
     # must not (and cannot) mutate it, so the field proves the intent is queued and
     # not applied.
     return _text(
         tool_call_id,
         "sessions",
-        f"queued: {intent.request_id}",
-        details={"op": "move", **intent.as_fields(effective_cwd=effective_cwd)},
+        f"queued: move this session from {intent.source_cwd} to {intent.destination_cwd} {when}. "
+        f"Its working directory is still {effective_cwd} until then; nothing runs in "
+        f"{intent.destination_cwd} yet (request {intent.request_id})",
+        details={
+            "op": "move",
+            **intent.as_fields(effective_cwd=effective_cwd),
+            "watcher_armed": armed,
+        },
     )
 
 

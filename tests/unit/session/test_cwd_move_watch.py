@@ -14,6 +14,7 @@ no fake-server test reaches.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -21,7 +22,7 @@ from typing import Any
 import pytest
 
 from local_operator.session import cwd_move
-from local_operator.session.runtime.server import RuntimeServer
+from local_operator.session.runtime.server import RuntimeServer, _ClientConn
 
 OWN = "own0000000001"
 
@@ -60,6 +61,15 @@ class _Server:
     """Only the attributes the consumer touches; the METHOD is the real one."""
 
     _apply_queued_cwd_move = RuntimeServer._apply_queued_cwd_move
+    # The gate itself is pinned by the real-server cells below; here it is the
+    # GATE's inputs this fake is about, so it answers "a successor is guaranteed"
+    # unless a case says otherwise.
+    _cwd_move_successor_guaranteed = RuntimeServer._cwd_move_successor_guaranteed
+    # The hold recorder and its clearer ride along: the gate's outcome IS the
+    # record it leaves, so a fake that gated without recording would test half
+    # of the behaviour.
+    _note_cwd_move_blocked = RuntimeServer._note_cwd_move_blocked
+    _clear_cwd_move_blocked = RuntimeServer._clear_cwd_move_blocked
 
     def __init__(self, handle: _Handle, root: Path) -> None:
         self._handle = handle
@@ -68,6 +78,11 @@ class _Server:
         self._queued_move: dict[str, Any] | None = None
         self._queued_move_stage = ""
         self._retirement_committed = False
+        self._cwd_move_blocked_reason = ""
+        #: One attached viewer that declares cwd adoption — the successor the
+        #: gate requires. The fake never sends a frame, so a stand-in is enough
+        #: here; the real-server cells below register a real connection.
+        self._clients: dict[int, Any] = {0: SimpleNamespace(kind="attach", cwd_adoption=True)}
         self.announced: list[tuple[str, dict[str, Any]]] = []
 
     async def _handle_call_on_session_loop(self, fn: Any, *args: Any, **kwargs: Any) -> Any:
@@ -177,9 +192,8 @@ async def test_identical_repeat_is_the_same_request_and_a_new_destination_supers
     )
     assert second.request_id != first.request_id
     assert second.stage == cwd_move.STAGE_QUEUED
-    with pytest.raises(cwd_move.CwdMoveRefused) as refused:
-        cwd_move.commit_move(tmp_path, OWN, first.request_id, effective_cwd=str(tmp_path))
-    assert refused.value.code == "sessions_move_request_unknown"
+    stored = cwd_move.read_move_intent(tmp_path, OWN)
+    assert stored is not None and stored.request_id == second.request_id
 
 
 def test_the_retiring_frame_carries_cwd_additively() -> None:
@@ -215,6 +229,147 @@ def test_the_viewer_stages_the_frame_cwd_for_adoption(tmp_path: Path) -> None:
     assert facade._pending_frame_cwd == destination, "an older frame must not un-stage it"
 
 
+@pytest.mark.asyncio
+async def test_a_move_queued_while_the_session_runs_is_consumed_at_the_next_boundary(
+    tmp_path: Path,
+) -> None:
+    """THE PATH A TOOL CALL ACTUALLY TAKES, which no cell exercised (B1/U1).
+
+    Every cell above queues BEFORE the watcher starts (or before a successor
+    spawns), so "the asking runtime consumes its own intent" was never tested —
+    and it did not work: the boot watcher exits with nothing queued, the tool only
+    wrote the marker, and the intent waited for some later, unrelated boot.
+
+    This cell reproduces the real order instead: the runtime is UP, the watcher has
+    already exited, a turn is in flight, and only then does the tool write the
+    marker and wake the consumer (``notify_move_queued``, the call
+    ``_sessions_move`` makes). Two properties are pinned:
+
+    * the woken watcher KEEPS POLLING while the runtime is busy — the first tick
+      after a mid-turn enqueue is always "not at a boundary", so a watcher that
+      gave up there would reproduce the original defect one layer down;
+    * it retires as soon as the turn ends, with no second wake.
+    """
+    import asyncio
+
+    from local_operator.session.runtime.server import notify_move_queued
+
+    server, handle, announced = _real_server(tmp_path)
+    # 1. The boot watcher, with nothing queued: it exits (the pinned behaviour).
+    await asyncio.wait_for(server._queued_move_watch(), timeout=5)
+    assert server._queued_move_task is None or server._queued_move_task.done()
+    # 2. A turn is running, and the tool queues a move inside it.
+    handle.busy = "active turn"
+    destination = tmp_path / "dest"
+    destination.mkdir()
+    intent = cwd_move.enqueue_self_move(
+        tmp_path, OWN, requested_cwd=str(destination), effective_cwd=str(tmp_path), owner_pid=1
+    )
+    assert notify_move_queued(OWN, tmp_path), "the tool-path wake must find this runtime"
+    # 3. Busy at the boundary: the watcher stays on the intent, latching nothing.
+    await asyncio.sleep(0.2)
+    assert handle.calls == [], "nothing is cut over mid-turn"
+    assert announced == []
+    stored = cwd_move.read_move_intent(tmp_path, OWN)
+    assert stored is not None and stored.stage == cwd_move.STAGE_QUEUED
+    assert server._queued_move_task is not None and not server._queued_move_task.done(), (
+        "a queued intent keeps the consumer polling until it can act"
+    )
+    # 4. The turn ends: the move happens with no further wake of any kind.
+    handle.busy = ""
+    for _ in range(60):
+        if handle.calls:
+            break
+        await asyncio.sleep(0.05)
+    assert handle.calls == ["begin_retire:cwd-move", "request_stop"]
+    assert announced == [("cwd-move", {"cwd": intent.destination_cwd})]
+
+
+@pytest.mark.asyncio
+async def test_a_runtime_that_cannot_guarantee_a_successor_holds_the_intent(
+    tmp_path: Path,
+) -> None:
+    """NEVER RETIRE TOWARD A MOVE NOTHING WILL ADOPT (agent review round 1, B2).
+
+    A viewer that cannot adopt the destination re-engages at the OLD directory, so
+    a retirement toward the move succeeds in nothing: the successor boots in the
+    source, the intent stays ``queued``, and the next boot retires again — a
+    session that can never be opened. The runtime therefore refuses to leave, and
+    the intent stays visibly ``queued`` with the reason recorded instead of
+    disappearing into a crash loop.
+    """
+    destination = tmp_path / "dest"
+    destination.mkdir()
+    server, handle, announced = _real_server(tmp_path, viewer=False)
+    cwd_move.enqueue_self_move(
+        tmp_path, OWN, requested_cwd=str(destination), effective_cwd=str(tmp_path), owner_pid=1
+    )
+    assert await server._apply_queued_cwd_move() == "waiting"
+    assert handle.calls == [], "no latch: the runtime keeps serving"
+    assert announced == [], "and no viewer is told it is leaving"
+    stored = cwd_move.read_move_intent(tmp_path, OWN)
+    assert stored is not None
+    assert stored.stage == cwd_move.STAGE_QUEUED, "the intent survives for the next open"
+    assert stored.blocked_reason == "no_capable_viewer"
+    # AND A RUNTIME THAT *CAN* GUARANTEE ONE PROCEEDS, so the gate is a gate and
+    # not a permanent refusal.
+    capable, capable_handle, _ = _real_server(tmp_path / "second")
+    (tmp_path / "second" / "dest").mkdir(parents=True)
+    cwd_move.enqueue_self_move(
+        tmp_path / "second",
+        OWN,
+        requested_cwd=str(tmp_path / "second" / "dest"),
+        effective_cwd=str(tmp_path / "second"),
+        owner_pid=1,
+    )
+    assert await capable._apply_queued_cwd_move() == "retiring"
+    assert capable_handle.calls == ["begin_retire:cwd-move", "request_stop"]
+
+
+def test_a_queued_intent_expires_instead_of_blocking_the_session_forever(
+    tmp_path: Path,
+) -> None:
+    """A BOUNDED LIFE FOR AN UNANSWERED REQUEST (UX round 1, U4).
+
+    The hold above is correct while a successor might still come; it must not be
+    permanent. Past the TTL the intent is ``expired`` — a terminal stage, so no
+    later boot re-consumes it and the session opens normally.
+    """
+    destination = tmp_path / "dest"
+    destination.mkdir()
+    intent = cwd_move.enqueue_self_move(
+        tmp_path, OWN, requested_cwd=str(destination), effective_cwd=str(tmp_path), owner_pid=1
+    )
+    # Young: untouched.
+    fresh = cwd_move.expire_stale_intent(tmp_path, OWN, now=intent.created_at + 1)
+    assert fresh is not None and fresh.stage == cwd_move.STAGE_QUEUED
+    # Past the bound: expired, and every later read agrees.
+    aged = cwd_move.expire_stale_intent(
+        tmp_path, OWN, now=intent.created_at + cwd_move.QUEUED_MOVE_TTL_S + 1
+    )
+    assert aged is not None and aged.stage == cwd_move.STAGE_EXPIRED
+    settled = cwd_move.read_move_intent(tmp_path, OWN)
+    assert settled is not None and settled.stage == cwd_move.STAGE_EXPIRED
+
+
+def test_a_symlinked_current_directory_is_not_a_move(tmp_path: Path) -> None:
+    """Both sides of the comparison are realpath-ed (agent review m1, UX U7).
+
+    A session whose cwd is reached through a symlink (every macOS ``/var`` path,
+    any hand-made link) used to queue a move to the tree it was already in — a
+    full restart that changed nothing.
+    """
+    real = tmp_path / "src"
+    real.mkdir()
+    link = tmp_path / "src-link"
+    link.symlink_to(real)
+    with pytest.raises(cwd_move.CwdMoveRefused) as refused:
+        cwd_move.enqueue_self_move(
+            tmp_path, OWN, requested_cwd=str(real), effective_cwd=str(link), owner_pid=1
+        )
+    assert refused.value.code == "sessions_move_destination_is_current"
+    assert cwd_move.read_move_intent(tmp_path, OWN) is None, "and nothing was written"
+
 # ---------------------------------------------------------------------------
 # THE WATCHER ITSELF. Everything above drives one method against a fake server;
 # these drive the coroutine the runtime really starts.
@@ -238,6 +393,9 @@ class _RealHandle:
         self.session_id = session_id
         self.cwd = cwd
         self.calls: list[str] = []
+        #: What ``may_refresh`` answers — ``""`` is the idle boundary. A test
+        #: sets it to model the turn a tool call is running inside.
+        self.busy = ""
 
     @property
     def session_projection_seed(self) -> Any:
@@ -253,7 +411,7 @@ class _RealHandle:
         )
 
     def may_refresh(self) -> str:
-        return ""
+        return self.busy
 
     def begin_retire(self, cause: str, detail: str = "") -> bool:
         self.calls.append(f"begin_retire:{cause}")
@@ -263,8 +421,41 @@ class _RealHandle:
         self.calls.append("request_stop")
 
 
+class _FakeWriter:
+    """A sink that satisfies ``_ClientConn.writer``: the frames go nowhere."""
+
+    def __init__(self) -> None:
+        self.written: list[bytes] = []
+
+    def write(self, data: bytes) -> None:
+        self.written.append(data)
+
+    async def drain(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+    async def wait_closed(self) -> None:
+        return None
+
+
+def _attach_fake_viewer(server: RuntimeServer) -> None:
+    """Register a viewer that DECLARES cwd adoption, through the real registry.
+
+    A real ``Connection`` on a started runtime is the whole point of the
+    guarantee: the retiring announce is ordinary code and walks ``_clients``, so
+    a stand-in that skipped the registry would test a runtime that never sends.
+    """
+    writer = _FakeWriter()
+    conn = _ClientConn(writer=writer, kind="attach", cwd_adoption=True)  # type: ignore[arg-type]
+    server._clients[id(writer)] = conn
+
+
 def _real_server(
     tmp_path: Path,
+    *,
+    viewer: bool = True,
 ) -> tuple[RuntimeServer, _RealHandle, list[tuple[str, dict[str, Any]]]]:
     """A REAL ``RuntimeServer`` pointed at ``tmp_path`` as its config root.
 
@@ -278,6 +469,20 @@ def _real_server(
     server = RuntimeServer(handle, kind="tui")  # type: ignore[arg-type]
     server._config_root = tmp_path
     server._record.session_id = OWN
+    # REGISTERED THE WAY BOOT REGISTERS IT, so a tool-path wake finds this runtime
+    # exactly as it does in production (agent review round 1, B1).
+    # THE RUNTIME'S OWN LOOP, which a started runtime records before it serves:
+    # the frame send refuses to run on a foreign loop, and the retiring announce
+    # goes through it.
+    server._loop = asyncio.get_running_loop()
+    server._register_queued_move_waker()
+    if viewer:
+        # A viewer that can follow a move, declared the way one declares itself in
+        # its auth frame. Without it this runtime is CORRECT to hold the intent —
+        # see ``test_a_runtime_that_cannot_guarantee_a_successor_holds_it``. A
+        # real ``_ClientConn`` with a sink writer, because the retiring announce
+        # sends to every attached client through the ordinary path.
+        _attach_fake_viewer(server)
     announced: list[tuple[str, dict[str, Any]]] = []
     real_announce = server.announce_retiring
 

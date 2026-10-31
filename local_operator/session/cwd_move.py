@@ -6,11 +6,24 @@ ACTS, by booting in the destination. The request therefore has to outlive the
 asking process — a crash, a lost acknowledgement, or a retire that lands between
 the two — so it is a document on disk, not state in memory.
 
-THE STAGES ARE THE RECONCILIATION AXIS, and there are only three:
+THE STAGES ARE THE RECONCILIATION AXIS, and there are four:
 
 * ``queued``     — asked for, not yet observed. The effective cwd is unchanged.
 * ``committed``  — a successor was observed running in the destination.
-* ``superseded`` — a later request replaced this one before it committed.
+* ``superseded`` — a later request replaced this one before it committed, OR the
+  caller asked to move back to where the session already is, which is this
+  module's CANCEL: it is the only request that can undo a queued one without
+  minting a third destination (UX round 1, U4).
+* ``expired``    — still ``queued`` past :data:`QUEUED_MOVE_TTL_S`. A bounded
+  life is what keeps an intent whose successor never came from blocking the
+  session forever: without it, every boot would re-consume a request nothing
+  satisfies (UX round 1, U4; agent review round 1, B2).
+
+NOTHING HERE RETIRES A RUNTIME. This module owns the DOCUMENT; the runtime that
+consumes it (``session/runtime/server._apply_queued_cwd_move``) owns the
+retirement, and it refuses to retire toward a move it cannot guarantee a
+successor for — leaving the intent ``queued`` is a legal, visible state rather
+than a failure.
 
 NOTHING ROLLS A DESTINATION BACK. Once ``committed``, the destination may be the
 tree a successor is already running in, and "restoring" the old directory would
@@ -56,7 +69,19 @@ MOVE_MARKER_NAME = "runtime-cwd-move.json"
 STAGE_QUEUED = "queued"
 STAGE_COMMITTED = "committed"
 STAGE_SUPERSEDED = "superseded"
-STAGES = frozenset({STAGE_QUEUED, STAGE_COMMITTED, STAGE_SUPERSEDED})
+STAGE_EXPIRED = "expired"
+STAGES = frozenset({STAGE_QUEUED, STAGE_COMMITTED, STAGE_SUPERSEDED, STAGE_EXPIRED})
+
+#: How long a ``queued`` intent may stay unobserved before it expires.
+#:
+#: BOUNDED ON PURPOSE. A queued intent is consumed by a runtime repeating "is
+#: the successor here yet", and a request no successor ever satisfies would
+#: otherwise re-arm on every boot for the life of the session — the state that
+#: made a session unopenable (agent review round 1, B2). Thirty minutes is longer
+#: than a turn the user is watching and shorter than "the operator forgot about
+#: it": past that, the honest answer is that the request lapsed, and the message
+#: says so rather than the move happening hours later out of nowhere.
+QUEUED_MOVE_TTL_S = 30 * 60.0
 
 
 class CwdMoveRefused(Exception):
@@ -89,6 +114,14 @@ class MoveIntent:
     stage: str
     owner_pid: int
     created_at: float
+    #: Why the consumer is holding this intent ``queued`` instead of acting on
+    #: it, as a code (``""`` when nothing is blocking), and when it first said
+    #: so. A runtime that cannot guarantee a successor must SAY it rather than
+    #: retire blind, and this is the surviving half of that notice: a marker is
+    #: readable by ``sessions(op='info')`` and by the next operator when no
+    #: viewer was attached to paint it (agent review round 1, B2).
+    blocked_reason: str = ""
+    blocked_at: float = 0.0
 
     def as_fields(self, *, effective_cwd: str = "") -> dict[str, Any]:
         """The structured result: exactly the keys the tool's contract names."""
@@ -96,9 +129,11 @@ class MoveIntent:
             "request_id": self.request_id,
             "session_id": self.session_id,
             "requested_cwd": self.destination_cwd,
+            "destination_cwd": self.destination_cwd,
             "source_cwd": self.source_cwd,
             "effective_cwd": effective_cwd,
             "stage": self.stage,
+            "blocked_reason": self.blocked_reason,
         }
 
     def to_payload(self) -> dict[str, Any]:
@@ -111,6 +146,8 @@ class MoveIntent:
             "stage": self.stage,
             "owner_pid": self.owner_pid,
             "created_at": self.created_at,
+            "blocked_reason": self.blocked_reason,
+            "blocked_at": self.blocked_at,
         }
 
 
@@ -161,6 +198,11 @@ def read_move_intent(root: Path, session_id: str) -> MoveIntent | None:
             stage=stage,
             owner_pid=int(payload.get("owner_pid") or 0),
             created_at=float(payload.get("created_at") or 0.0),
+            # ADDITIVE, and defaulted: every marker written before these keys
+            # existed reads back as "nothing is blocking it", which is what the
+            # consumer's own guarantee check decides afresh anyway.
+            blocked_reason=str(payload.get("blocked_reason") or ""),
+            blocked_at=float(payload.get("blocked_at") or 0.0),
         )
     except (KeyError, TypeError, ValueError):
         return None
@@ -208,31 +250,32 @@ def enqueue_self_move(
 ) -> MoveIntent:
     """Persist a ``queued`` intent for this session; the cwd does NOT change.
 
-    IDEMPOTENT PER DESTINATION: asking twice for the directory already queued
-    returns the SAME request rather than minting a second one, because a retried
-    tool call must not look like a new move to the reconciliation. A different
-    destination supersedes the queued request — the later intent wins, and the
-    earlier one never reaches ``committed``.
+    IDEMPOTENT PER REQUEST. A second message asking for the directory already
+    queued returns that same request rather than a new one — a retried tool call
+    must not look like a new move to the reconciliation. A third destination
+    supersedes the queued request (the later intent wins; the earlier one never
+    reaches ``committed``), and one naming the directory the caller is ALREADY IN
+    is the CANCEL: it supersedes the queued intent and returns it at stage
+    ``superseded``, which is how a move is withdrawn without inventing a third
+    destination (UX round 1, U4). With nothing queued it stays the refusal it was.
     """
     destination = resolve_destination(requested_cwd, effective_cwd=effective_cwd)
-    if destination == str(Path(effective_cwd)):
-        raise CwdMoveRefused("sessions_move_destination_is_current", requested_cwd=destination)
     previous = read_move_intent(root, session_id)
+    # THE INTENT IS CONSULTED BEFORE THE CURRENT-DIRECTORY REFUSAL, and that
+    # ordering is the cancel path: "move back to where I am" is how a queued
+    # request is withdrawn, so a call that would have been refused for pointing
+    # at the current directory must first get the chance to mean "cancel"
+    # (UX round 1, U4).
+    if _same_directory(destination, effective_cwd):
+        if previous is not None and previous.stage == STAGE_QUEUED:
+            cancelled = _with_stage(previous, STAGE_SUPERSEDED)
+            _write(root, cancelled)
+            return cancelled
+        raise CwdMoveRefused("sessions_move_destination_is_current", requested_cwd=destination)
     if previous is not None and previous.stage == STAGE_QUEUED:
         if previous.destination_cwd == destination:
             return previous
-        _write(
-            root,
-            MoveIntent(
-                request_id=previous.request_id,
-                session_id=previous.session_id,
-                source_cwd=previous.source_cwd,
-                destination_cwd=previous.destination_cwd,
-                stage=STAGE_SUPERSEDED,
-                owner_pid=previous.owner_pid,
-                created_at=previous.created_at,
-            ),
-        )
+        _write(root, _with_stage(previous, STAGE_SUPERSEDED))
     intent = MoveIntent(
         request_id=uuid.uuid4().hex,
         session_id=session_id,
@@ -246,50 +289,97 @@ def enqueue_self_move(
     return intent
 
 
-def commit_move(
-    root: Path,
-    session_id: str,
-    request_id: str,
-    *,
-    effective_cwd: str,
-) -> MoveIntent:
-    """Record that the successor really is running in the destination.
+def _same_directory(left: str, right: str) -> bool:
+    """Whether two paths name one directory, however they are spelled.
 
-    THE VALIDATION IS REPEATED HERE, deliberately: the directory can be renamed,
-    unmounted or removed between enqueue and the boot, and the commit is the last
-    moment the runtime can still stay where it is instead of booting into a path
-    that no longer exists.
+    REALPATH ON BOTH SIDES, which is the whole reason this exists as a helper:
+    the destination is stored resolved, while a session's cwd arrives from a
+    record or a tool context and may reach the same tree through a symlink
+    (``/var`` versus ``/private/var`` on macOS, any hand-made link elsewhere).
+    Comparing a resolved path with an unresolved one queued a full session
+    restart toward the directory the session was already in (agent review m1,
+    UX round 1, U7), and :func:`reconcile_move` has applied this rule since the
+    commit path was fixed — two spellings of one comparison is how the two ends
+    drift apart.
+    """
+    if not left.strip() or not right.strip():
+        return False
+    return os.path.realpath(left) == os.path.realpath(right)
 
-    Refuses when the request is unknown, superseded, or when the session's source
-    cwd is no longer the one the request recorded — that last case means something
-    else moved the session, and claiming this request completed would be a lie.
+
+def _with_stage(intent: MoveIntent, stage: str, **overrides: Any) -> MoveIntent:
+    """A copy of ``intent`` at another stage, keeping the request identity.
+
+    ONE PLACE THAT BUILDS A STAGE TRANSITION: every writer here mints the next
+    document from the previous one, and a field forgotten in one of the copies
+    is a request that changes identity mid-flight.
+    """
+    fields: dict[str, Any] = {
+        "request_id": intent.request_id,
+        "session_id": intent.session_id,
+        "source_cwd": intent.source_cwd,
+        "destination_cwd": intent.destination_cwd,
+        "stage": stage,
+        "owner_pid": intent.owner_pid,
+        "created_at": intent.created_at,
+        "blocked_reason": intent.blocked_reason,
+        "blocked_at": intent.blocked_at,
+    }
+    fields.update(overrides)
+    return MoveIntent(**fields)
+
+
+def expire_stale_intent(
+    root: Path, session_id: str, *, now: float | None = None
+) -> MoveIntent | None:
+    """Flip a ``queued`` intent that outlived its TTL to ``expired``.
+
+    CALLED ON BOTH PATHS THAT RE-READ AN INTENT — the boot reconcile and the
+    runtime's consumer — because a bounded life only bounds anything if every
+    reader applies it. An intent younger than the TTL, or one already past
+    ``queued``, is returned untouched; ``None`` is still "no intent" rather than
+    an error, for the same reason :func:`read_move_intent` documents.
     """
     intent = read_move_intent(root, session_id)
-    if intent is None or intent.request_id != request_id:
-        raise CwdMoveRefused("sessions_move_request_unknown", request_id=request_id)
-    if intent.stage != STAGE_QUEUED:
-        raise CwdMoveRefused(
-            "sessions_move_request_not_queued", request_id=request_id, stage=intent.stage
-        )
-    resolve_destination(intent.destination_cwd, effective_cwd=intent.source_cwd)
-    if str(Path(effective_cwd)) != intent.source_cwd:
-        raise CwdMoveRefused(
-            "sessions_move_source_changed",
-            request_id=request_id,
-            source_cwd=intent.source_cwd,
-            effective_cwd=str(effective_cwd),
-        )
-    committed = MoveIntent(
-        request_id=intent.request_id,
-        session_id=intent.session_id,
-        source_cwd=intent.source_cwd,
-        destination_cwd=intent.destination_cwd,
-        stage=STAGE_COMMITTED,
-        owner_pid=intent.owner_pid,
-        created_at=intent.created_at,
+    if intent is None or intent.stage != STAGE_QUEUED:
+        return intent
+    instant = time.time() if now is None else now
+    # A marker with no ``created_at`` (a hand-written or truncated document)
+    # cannot be aged, and expiring it on a guess would discard a request that may
+    # be a second old. Left ``queued``: it is bounded by the same check next tick.
+    if intent.created_at <= 0:
+        return intent
+    if instant - intent.created_at < QUEUED_MOVE_TTL_S:
+        return intent
+    expired = _with_stage(intent, STAGE_EXPIRED)
+    _write(root, expired)
+    return expired
+
+
+def mark_blocked(
+    root: Path, session_id: str, reason: str, *, now: float | None = None
+) -> MoveIntent | None:
+    """Record why the consumer is holding the intent, so the hold is visible.
+
+    WRITTEN ONLY WHEN THE REASON CHANGES: the consumer ticks twice a second, and
+    a staged write per tick would rewrite the same bytes for as long as the
+    session stays busy. ``""`` clears the record (the hold ended) for the same
+    reason the file name says nothing about it: the stage is the state, this is
+    the explanation attached to it.
+    """
+    intent = read_move_intent(root, session_id)
+    if intent is None or intent.stage != STAGE_QUEUED:
+        return intent
+    if intent.blocked_reason == reason and (reason == "" or intent.blocked_at > 0):
+        return intent
+    updated = _with_stage(
+        intent,
+        STAGE_QUEUED,
+        blocked_reason=reason,
+        blocked_at=(time.time() if now is None else now) if reason else 0.0,
     )
-    _write(root, committed)
-    return committed
+    _write(root, updated)
+    return updated
 
 
 def reconcile_move(root: Path, session_id: str, *, effective_cwd: str) -> MoveIntent | None:
@@ -314,16 +404,8 @@ def reconcile_move(root: Path, session_id: str, *, effective_cwd: str) -> MoveIn
         return intent
     if not effective_cwd.strip():
         return intent
-    if os.path.realpath(effective_cwd) != os.path.realpath(intent.destination_cwd):
+    if not _same_directory(effective_cwd, intent.destination_cwd):
         return intent
-    committed = MoveIntent(
-        request_id=intent.request_id,
-        session_id=intent.session_id,
-        source_cwd=intent.source_cwd,
-        destination_cwd=intent.destination_cwd,
-        stage=STAGE_COMMITTED,
-        owner_pid=intent.owner_pid,
-        created_at=intent.created_at,
-    )
+    committed = _with_stage(intent, STAGE_COMMITTED)
     _write(root, committed)
     return committed

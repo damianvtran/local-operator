@@ -1320,6 +1320,45 @@ def _queued_move_window_s(root: Path) -> float:
     return max(0.0, min(value, 3600.0))
 
 
+#: THIS PROCESS'S HOSTED RUNTIMES, by session id, and it exists for ONE message:
+#: "the move intent for your session was just written — start consuming it".
+#:
+#: A QUEUED MOVE IS ASKED FOR MID-TURN, by a tool call running inside this very
+#: process. Until this index existed, nothing in the asking runtime ever woke the
+#: consumer again: the watcher had been started at boot (with no intent, so it
+#: exited), and the request sat on disk until some later process boot happened to
+#: find it — so a move did nothing at all in a live session (agent review round 1,
+#: B1; UX round 1, U1). The index is weak on purpose: a runtime that goes away is
+#: dropped by the collector, and the marker is the durable half a successor reads.
+_HOSTED_RUNTIMES: "weakref.WeakValueDictionary[str, RuntimeServer]" = weakref.WeakValueDictionary()
+
+
+def notify_move_queued(session_id: str, root: Path) -> bool:
+    """Wake this process's runtime for ``session_id``, if it hosts one.
+
+    Returns whether a runtime was told. FALSE IS A NORMAL ANSWER, not an error: a
+    tool call can run in a process that hosts no runtime for its session (a plain
+    ``exec`` worker, an embedder driving tools off the runtime), and there the
+    durable marker is still exactly what a later boot consumes. The caller reports
+    which half happened rather than promising a move nobody is watching.
+
+    ``root`` is compared REALPATH-ED against each hosted runtime's config root: a
+    tool in one config tree must never wake a runtime in another, which is how an
+    isolated test or a second store would otherwise cross-talk.
+    """
+    if not session_id:
+        return False
+    wanted = os.path.realpath(str(root))
+    for hosted_id, server in list(_HOSTED_RUNTIMES.items()):
+        if hosted_id != session_id or server._closed.is_set():
+            continue
+        if os.path.realpath(str(getattr(server, "_config_root", "") or "")) != wanted:
+            continue
+        server._ensure_queued_move_watcher()
+        return True
+    return False
+
+
 def _running_loop() -> asyncio.AbstractEventLoop | None:
     """The loop this thread is running, or ``None`` on a plain thread.
 
@@ -1818,6 +1857,16 @@ class _ClientConn:
     #: was protecting against. ABSENT MEANS LOCAL, exactly as every other additive
     #: auth field does: nothing that reaches this socket today changes behaviour.
     capabilities: frozenset[str] = frozenset()
+    #: Whether this viewer can ADOPT a directory from a ``retiring`` frame — the
+    #: one fact that decides whether a queued cwd move may retire this runtime
+    #: (see ``RuntimeServer._cwd_move_successor_guaranteed``).
+    #:
+    #: FALSE BY DEFAULT, which is the safe direction rather than an oversight: a
+    #: client built before the key exists re-engages at the OLD directory, so
+    #: treating silence as "can follow" is how a session ends up booting in the
+    #: source forever (agent review round 1, B2). The viewer that adopts turns it
+    #: on in its own auth frame, in the same step it gained the adoption code.
+    cwd_adoption: bool = False
     #: ``{"device_id", "name"}`` of the device a relayed viewer sits at, or empty
     #: for a local one. Carried for ONE reason: a refusal a remote viewer can hit
     #: has to name the machine to act on (§4.4 — "run it on build-box" is not
@@ -2721,6 +2770,11 @@ class RuntimeServer:
         #: The watcher's last stage ("", "finishing", "paused", "retiring") —
         #: what the relay's delivery polls see in the ``queue_move`` reply.
         self._queued_move_stage = ""
+        #: The reason this runtime is currently HOLDING a queued cwd intent for
+        #: (``""`` when it is not). Runtime memory only: it exists to stop the
+        #: twice-a-second watcher rewriting the marker and re-logging the same
+        #: hold, while the marker itself is the durable half of the same fact.
+        self._cwd_move_blocked_reason = ""
         #: The one watcher task, started on the first ``queue_move`` op.
         self._queued_move_task: asyncio.Task[None] | None = None
         self._thread: threading.Thread | None = None
@@ -3359,6 +3413,10 @@ class RuntimeServer:
         if self._closed.is_set():
             return
         self._closed.set()
+        # DROPPED FROM THE PROCESS INDEX FIRST: a tool call racing this shutdown
+        # must find no consumer rather than a dead one, and the weak entry would
+        # otherwise outlive the runtime for as long as its host holds it.
+        self._unregister_queued_move_waker()
         self._wake_close_wait()
         if self._unsubscribe is not None:
             try:
@@ -3567,6 +3625,10 @@ class RuntimeServer:
                 )
             except Exception:  # noqa: BLE001 -- evidence must not block a boot
                 logger.warning("session runtime: cwd-move boot reconcile skipped", exc_info=True)
+            # REGISTERED BEFORE THE WATCHER, so a tool call that queues a move
+            # while this runtime is still coming up finds it (see
+            # ``_HOSTED_RUNTIMES``).
+            self._register_queued_move_waker()
             self._ensure_queued_move_watcher()
             # INSTALL THE PUBLISHER BEFORE ITS RECORD CAN BE READ, and the
             # ordering is the guarantee rather than housekeeping: ``_republish``
@@ -4621,6 +4683,10 @@ class RuntimeServer:
         # carrying the flag (there is none today) is deliberately ignored.
         wants_events = kind == "attach" and bool(frame.get("events"))
         wants_frontend = kind == "attach" and bool(frame.get("frontend_state"))
+        # The viewer's half of the cwd-move successor guarantee: only a client that
+        # declares it will spawn the successor in the frame's ``cwd`` makes a move
+        # retirable (see ``_ClientConn.cwd_adoption``). Absent is FALSE.
+        cwd_adoption = kind == "attach" and bool(frame.get("cwd_adoption"))
         # Which action-carrying receipts this client consumes itself. Parsed
         # ONCE here rather than per command: the answer cannot change for the
         # life of a connection. Absent (the common case today, and every
@@ -4707,6 +4773,7 @@ class RuntimeServer:
             slash_consumers=slash_consumers,
             wants_events=wants_events,
             wants_frontend=wants_frontend,
+            cwd_adoption=cwd_adoption,
             operator_nonce=client_nonce,
             operator_salt=server_salt,
             device_certificate=device_certificate,
@@ -7395,17 +7462,59 @@ class RuntimeServer:
         }
 
     def _ensure_queued_move_watcher(self) -> None:
-        """Start the watcher if it is not already running (idempotent)."""
+        """Start the watcher if it is not already running (idempotent).
+
+        TWO CALLERS, TWO THREADS. The boot path and the ``queue_move`` op run on
+        the runtime's own loop; :func:`notify_move_queued` arrives from the tool
+        call that just wrote the marker, on the SESSION's loop (or a plain
+        thread, for a host that drives tools synchronously). The task must land
+        on the RUNTIME's loop either way, because everything the watcher awaits
+        (``announce_retiring``, the handle hops) is bound to it — a task created
+        on the caller's loop would announce through closures this runtime never
+        publishes on.
+        """
         task = self._queued_move_task
         if task is not None and not task.done():
             return
-        loop = _running_loop()
-        if loop is None:
-            # A reduced host driving the op body off the runtime loop has
-            # nowhere to schedule this; the intent stays set and a later op
-            # from the loop path starts the watcher. Belt, not the wire path.
+        target = self._loop or _running_loop()
+        if target is None:
+            # A reduced host driving the op body off any loop has nowhere to
+            # schedule this; the intent stays set and a later op from the loop
+            # path starts the watcher. Belt, not the wire path.
             return
-        self._queued_move_task = loop.create_task(self._queued_move_watch())
+
+        def start() -> None:
+            existing = self._queued_move_task
+            if existing is not None and not existing.done():
+                return
+            self._queued_move_task = target.create_task(self._queued_move_watch())
+
+        if _running_loop() is target:
+            start()
+            return
+        try:
+            target.call_soon_threadsafe(start)
+        except RuntimeError:
+            # The runtime's loop is already closed: there is no session left to
+            # honour the request, and the durable marker is what a successor
+            # reads. Nothing to start, and nothing to report to the tool that
+            # has already returned its receipt.
+            logger.debug("queued move: runtime loop closed; intent left for the successor")
+
+    def _register_queued_move_waker(self) -> None:
+        """Publish this runtime in the process index a tool call wakes (idempotent).
+
+        Named as a method rather than done inline at boot so the test rig and the
+        boot path register the SAME way — a rig that spelled it differently would
+        pass while production stayed unwoken, which is the class of defect the
+        index exists to close (agent review round 1, B1).
+        """
+        _HOSTED_RUNTIMES[self._record.session_id] = self
+
+    def _unregister_queued_move_waker(self) -> None:
+        """Withdraw it again; a wake after this finds no consumer, by design."""
+        if _HOSTED_RUNTIMES.get(self._record.session_id) is self:
+            _HOSTED_RUNTIMES.pop(self._record.session_id, None)
 
     async def _apply_queued_cwd_move(self) -> str:
         """Consume a QUEUED cwd intent at an idle boundary; say why if not.
@@ -7422,6 +7531,15 @@ class RuntimeServer:
         move state's own latches. Anything short of idle leaves the intent
         ``queued`` for the next tick; nothing is cut over mid-turn.
 
+        AND ONE PRECONDITION BEFORE THE LATCH: A SUCCESSOR HAS TO EXIST. Retiring
+        toward a destination no attached viewer will adopt leaves this session
+        alive in the SOURCE with the intent still ``queued`` — the next boot reads
+        it, retires again, and the session never opens (agent review round 1, B2).
+        So the guarantee is checked FIRST, and when it does not hold the intent is
+        left ``queued`` with the reason recorded on it (visible in `sessions
+        info`, in this runtime's log and in the tool result the model reports),
+        rather than the runtime killing itself on an unfalsifiable hope.
+
         Returns ``"retiring"`` when it latched and announced, ``"waiting"`` when
         an intent exists but the runtime is not at a boundary, ``""`` when there
         is nothing to do.
@@ -7433,9 +7551,15 @@ class RuntimeServer:
         from local_operator.session import cwd_move
 
         root = Path(getattr(self, "_config_root", None) or config_dir())
-        intent = cwd_move.read_move_intent(root, self._record.session_id)
+        # A BOUNDED LIFE, APPLIED BY EVERY READER: an intent whose successor never
+        # came expires here rather than blocking the session for the rest of its
+        # life (UX round 1, U4). ``None`` is still "nothing to do".
+        intent = cwd_move.expire_stale_intent(root, self._record.session_id)
         if intent is None or intent.stage != cwd_move.STAGE_QUEUED:
             return ""
+        if not self._cwd_move_successor_guaranteed():
+            self._note_cwd_move_blocked(root, cwd_move, "no_capable_viewer")
+            return "waiting"
         probe = getattr(self._handle, "may_refresh", None)
         latch = getattr(self._handle, "begin_retire", None)
         if not callable(probe) or not callable(latch):
@@ -7443,11 +7567,16 @@ class RuntimeServer:
         try:
             reason = str(await self._handle_call_on_session_loop(probe) or "")
         except Exception:  # noqa: BLE001 -- an unreadable probe keeps the runtime
+            self._note_cwd_move_blocked(root, cwd_move, "boundary_unreadable")
             return "waiting"
         if reason:
+            # BUSY IS NOT A HOLD WORTH RECORDING: it is the ordinary case for a
+            # move this turn just queued, and it clears itself within a tick.
+            self._clear_cwd_move_blocked(root, cwd_move)
             return "waiting"
         accepted = await self._handle_call_on_session_loop(lambda: latch("cwd-move", "cwd move"))
         if not accepted:
+            self._note_cwd_move_blocked(root, cwd_move, "latch_refused")
             return "waiting"
         self._queued_move_stage = "retiring"
         await self.announce_retiring("cwd-move", cwd=intent.destination_cwd)
@@ -7455,6 +7584,57 @@ class RuntimeServer:
         if callable(request_stop):
             await self._handle_call_on_session_loop(request_stop)
         return "retiring"
+
+    def _cwd_move_successor_guaranteed(self) -> bool:
+        """Whether some live viewer will adopt the destination and re-engage.
+
+        THE PRECONDITION OF THE WHOLE ACT (agent review round 1, B2). Retiring a
+        session toward a directory nothing will spawn into is how a move leaves a
+        session that boots, retires and exits on every open. A viewer proves it
+        can follow by declaring ``cwd_adoption`` in its auth frame — the same
+        additive-key negotiation every other capability uses — so an older build,
+        a phone viewer and a headless runtime are all honestly "nobody can take
+        this" instead of a guess about what another process does on disconnect.
+
+        NO VIEWER IS THE NORMAL HEADLESS CASE, and it is a correct HOLD rather
+        than a failure: a runtime with nobody attached has nobody to re-engage it,
+        so a queued move waits for the next open — which is exactly what a durable
+        intent is for.
+        """
+        for conn in list(self._clients.values()):
+            if conn.kind == "attach" and conn.cwd_adoption:
+                return True
+        return False
+
+    def _note_cwd_move_blocked(self, root: Path, cwd_move: Any, reason: str) -> None:
+        """Record and report a hold, ONCE PER REASON, without writing per tick.
+
+        The marker write is what a later reader sees (``sessions(op='info')``, the
+        tool result, the next boot); the log line is this process's record of the
+        same fact. Both are suppressed while the reason is unchanged — the watcher
+        ticks twice a second and a repeated line at that cadence is noise, not
+        evidence.
+        """
+        if self._cwd_move_blocked_reason == reason:
+            return
+        intent = cwd_move.mark_blocked(root, self._record.session_id, reason)
+        if intent is None:
+            return
+        self._cwd_move_blocked_reason = reason
+        logger.warning(
+            "queued move: holding session %s in %s; moving to %s is blocked (%s)",
+            self._record.session_id,
+            intent.source_cwd or "?",
+            intent.destination_cwd,
+            reason,
+        )
+
+    def _clear_cwd_move_blocked(self, root: Path, cwd_move: Any) -> None:
+        """Drop a recorded hold once it no longer applies (no-op if none)."""
+        if not self._cwd_move_blocked_reason:
+            return
+        self._cwd_move_blocked_reason = ""
+        cwd_move.mark_blocked(root, self._record.session_id, "")
 
     async def _queued_move_watch(self) -> None:
         """Watch for the queued move's safe point; then pause, announce, retire.
@@ -7521,7 +7701,17 @@ class RuntimeServer:
             self._queued_move_stage = ""
 
     async def _queued_move_run(self) -> None:
-        """One pass's loop body — split from the wrapper for the try/finally above."""
+        """One pass's loop body — split from the wrapper for the try/finally above.
+
+        THE CWD INTENT IS POLLED, NOT SAMPLED (agent review round 1, B1; UX round
+        1, U1). A tool call queues a move MID-TURN, so the first tick after it is
+        always "not at a boundary yet": a watcher that returned there would leave
+        the intent to whatever later start happened to occur, which in practice
+        was the next process boot. A queued intent therefore keeps this loop
+        alive until it is acted on, cancelled, expired or the runtime goes away,
+        and the plain "nothing queued" case still returns on the first tick — the
+        cost this loop is allowed to pay in an idle runtime is exactly zero.
+        """
         from pathlib import Path
 
         from local_operator.network import move_queue
@@ -7537,8 +7727,15 @@ class RuntimeServer:
                 return
             # BEFORE ANY MESH WORK: a cwd intent must never reach the record
             # gate below, send a move_pending frame, or name a peer.
-            if await self._apply_queued_cwd_move() == "retiring":
+            cwd_outcome = await self._apply_queued_cwd_move()
+            if cwd_outcome == "retiring":
                 return
+            if cwd_outcome == "waiting":
+                # AN INTENT EXISTS AND IS NOT YET ACTIONABLE: stay on it. This is
+                # the mid-turn case a tool call always creates, and the sleep is
+                # the same tick the mesh poll below pays.
+                await asyncio.sleep(QUEUED_MOVE_TICK_S)
+                continue
             if self._queued_move is None:
                 return
             movement = dict(self._queued_move)
