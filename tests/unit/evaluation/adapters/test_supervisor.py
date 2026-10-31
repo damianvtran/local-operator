@@ -13,7 +13,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -46,6 +46,7 @@ from local_operator.evaluation.adapters.api import (
 from local_operator.evaluation.adapters.rpc import RpcErrorDetail, RpcRemoteError
 from local_operator.evaluation.adapters.supervisor import (
     MAX_DIAGNOSTIC_TAIL,
+    AdapterSupervisor,
     HostVerifier,
     SupervisionError,
     VerifiedAdapterSession,
@@ -1811,7 +1812,8 @@ async def test_command_cap_is_enforced_for_any_adapter(tmp_path: Path) -> None:
             )
         ]
     )
-    session = VerifiedAdapterSession(raw, verifier)
+    # This fixture implements only the raw-call/termination seam exercised here.
+    session = VerifiedAdapterSession(cast(AdapterSupervisor, raw), verifier)
     result = await session.run_command(
         RunCommandParams(
             operation_id="command",
