@@ -595,6 +595,77 @@ def test_anthropic_cache_tokens_are_billed_alongside_input_not_within_it() -> No
     assert cost_for_usage("anthropic", _priced(), usage) == pytest.approx(10.0 + 1.0 + 12.5)
 
 
+@pytest.mark.parametrize(
+    "one_hour,expected", [(0, 12.5), (250_000, 14.375), (1_000_000, 20.0), (2_000_000, 20.0)]
+)
+def test_anthropic_duration_prices_only_measured_write_subset(
+    one_hour: int, expected: float
+) -> None:
+    usage = Usage(cache_write_tokens=1_000_000, cache_write_1h_tokens=one_hour)
+    assert cost_for_usage("anthropic", _priced(), usage) == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("count,expected", [(272_000, 0.97), (272_001, 1.69002), (300_000, 2.25)])
+def test_openai_astra_long_context_prices_entire_request(count: int, expected: float) -> None:
+    """The long-context rates apply to all input and output, not only excess."""
+    model = _priced(
+        id="gpt-6-astra", name="gpt-6-astra", input_price=10, output_price=50, cache_reads_price=1
+    )
+    usage = Usage(input_tokens=count, output_tokens=10_000, cache_read_tokens=250_000)
+    assert cost_for_usage("openai", model, usage) == pytest.approx(expected)
+
+
+def test_openai_long_context_uses_canonical_id_not_display_name() -> None:
+    model = _priced(
+        id="gpt-6-astra", name="GPT-6 Astra", input_price=10, output_price=50, cache_reads_price=1
+    )
+    usage = Usage(input_tokens=300_000, output_tokens=10_000, cache_read_tokens=250_000)
+    assert cost_for_usage("openai", model, usage) == pytest.approx(2.25)
+
+
+@pytest.mark.parametrize(
+    "model_id",
+    [
+        "gpt-6-astra",
+        "gpt-6.1-sol",
+        "gpt-6.1-terra",
+        "gpt-6-luna",
+        "gpt-6-sol",
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+        "gpt-5.5",
+        "gpt-5.5-pro",
+        "gpt-5.4",
+        "gpt-5.4-pro",
+        "gpt-6-astra-2026-10-01",
+    ],
+)
+def test_openai_long_context_documented_ids(model_id: str) -> None:
+    usage = Usage(input_tokens=300_000, output_tokens=10_000, cache_read_tokens=250_000)
+    model = _priced(id=model_id, input_price=10, output_price=50, cache_reads_price=1)
+    assert cost_for_usage("openai", model, usage) == pytest.approx(2.25)
+
+
+@pytest.mark.parametrize(
+    "provider,model_id,receipt,expected",
+    [
+        ("openrouter", "gpt-6-astra", None, 1.25),
+        ("openai", "gpt-6-astra-mini", None, 1.25),
+        ("openai", "openai/gpt-6-astra", None, 1.25),
+        ("openai", "gpt-6-astra", 0.123, 0.123),
+    ],
+)
+def test_long_context_never_guesses_other_models_routes_or_receipts(
+    provider, model_id, receipt, expected
+) -> None:
+    usage = Usage(
+        input_tokens=300_000, output_tokens=10_000, cache_read_tokens=250_000, usd_cost=receipt
+    )
+    model = _priced(id=model_id, input_price=10, output_price=50, cache_reads_price=1)
+    assert cost_for_usage(provider, model, usage) == pytest.approx(expected)
+
+
 def test_openai_usage_carves_cache_tokens_out_of_input() -> None:
     """OpenAI reports cached tokens as a SUBSET of ``input_tokens``.
 

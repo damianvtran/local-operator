@@ -6201,6 +6201,41 @@ async def test_anthropic_usage_parses_cache_creation_ttl_split() -> None:
     assert usage.cache_write_5m_tokens + usage.cache_write_1h_tokens == usage.cache_write_tokens
     assert usage.context_tokens == 10 + 1_800 + 248
 
+    # Price the actual adapter receipt through both direct and persisted-call
+    # paths: the 1h subset must not disappear between parsing and accounting.
+    from local_operator.analytics.model import CallSnapshot, price_snapshot
+    from local_operator.model import configure
+    from local_operator.model.registry import ModelInfo
+
+    info = ModelInfo(
+        id="synthetic",
+        name="synthetic",
+        description="",
+        input_price=10,
+        output_price=50,
+        cache_reads_price=1,
+        cache_writes_price=12.5,
+    )
+    expected = (10 * 10 + 1800 * 1 + 148 * 12.5 + 100 * 20) / 1_000_000
+    assert configure.cost_for_usage("anthropic", info, usage) == pytest.approx(expected)
+    snapshot = CallSnapshot(
+        ts_ms=1,
+        session_id="synthetic",
+        provider="anthropic",
+        model_id="synthetic",
+        input_tokens=usage.input_tokens,
+        output_tokens=usage.output_tokens,
+        cache_read_tokens=usage.cache_read_tokens,
+        cache_write_tokens=usage.cache_write_tokens,
+        cache_write_1h_tokens=usage.cache_write_1h_tokens,
+        reasoning_tokens=0,
+        context_tokens=usage.context_tokens,
+    )
+    from unittest.mock import patch
+
+    with patch.object(configure, "resolve_model_info", return_value=info):
+        assert price_snapshot(snapshot) == (round(expected * 1_000_000), True)
+
 
 async def test_anthropic_usage_without_cache_creation_object_leaves_split_zero() -> None:
     """Older API versions omit the object; the split must read 0, not raise."""
