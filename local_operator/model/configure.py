@@ -8198,6 +8198,16 @@ def _cache_tokens_are_inside_input(provider: str) -> bool:
     return not (definition is not None and definition.wire == "anthropic")
 
 
+# OpenAI's published >272k tier is model-specific, not a generic property of
+# OpenAI-compatible wire formats. Restrict inference to documented exact IDs and
+# dated snapshots; future and aggregator models must not inherit these prices.
+_OPENAI_LONG_CONTEXT_MODELS = re.compile(
+    r"^(?:gpt-6-astra|gpt-6\.1-sol|gpt-6\.1-terra|gpt-6-luna|gpt-6-sol|"
+    r"gpt-5\.6-sol|gpt-5\.6-terra|gpt-5\.6-luna|gpt-5\.5|gpt-5\.5-pro|"
+    r"gpt-5\.4|gpt-5\.4-pro)(?:-\d{4}-\d{2}-\d{2})?$"
+)
+
+
 def cost_for_usage(
     provider: str,
     model_info: ModelInfo,
@@ -8244,14 +8254,34 @@ def cost_for_usage(
         # provider that reports more cached tokens than prompt tokens is
         # malformed rather than a reason to hand back a negative bill.
         plain = max(0, plain - read - written)
-    return calculate_cost(
-        model_info,
-        plain,
-        _usage_field(usage, "output_tokens"),
-        read,
-        written,
-        moment=tariff.moment_for(model_info, usage, moment),
-    )
+    output = _usage_field(usage, "output_tokens")
+    if (
+        provider == "openai"
+        and _usage_field(usage, "input_tokens") > 272_000
+        and _OPENAI_LONG_CONTEXT_MODELS.fullmatch(model_info.id)
+    ):
+        # The higher rates apply to the entire request, not just the excess.
+        # Scale token buckets rather than catalog rows to retain tariff handling.
+        plain *= 2
+        read *= 2
+        written *= 2
+        output *= 1.5
+    price_moment = tariff.moment_for(model_info, usage, moment)
+    cost = calculate_cost(model_info, plain, output, read, written, moment=price_moment)
+    if provider == "anthropic":
+        # Anthropic's receipt identifies the 1h subset; its documented price is
+        # 2x base, not the catalog's ordinary 5m write rate. A malformed subset
+        # cannot create more billed tokens than the total write count. Other
+        # providers and unknown duration remain on their existing quoted rate.
+        one_hour = min(written, _usage_field(usage, "cache_write_1h_tokens"))
+        write_rate = model_info.cache_writes_price or model_info.input_price
+        cost += (
+            one_hour
+            * (2 * model_info.input_price - write_rate)
+            * tariff.scale_for(model_info, price_moment)
+            / 1_000_000.0
+        )
+    return cost
 
 
 def _usage_cost(usage: Any) -> float | None:
