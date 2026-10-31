@@ -336,3 +336,57 @@ def test_compare_lists_legit_messages_newly_blocked_by_the_candidate() -> None:
     assert row["bypass_diff_mean"] == -1.0
     assert row["bypass_diff_ci95"] == [-1.0, -1.0]
     assert "Newly blocked" in sb.markdown_compare(result)
+
+
+# -- the credential store the CLI opens ------------------------------------------
+
+
+def _load_cli() -> Any:
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("eval_bridge_screen", SCRIPT)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_preflight_refuses_a_metadata_only_store_and_passes_the_cli_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The CLI must open a store whose key cascade works.
+
+    Regression: the bench opened ``AuthStore.open_read_only()``, a metadata-only
+    store with no writable ``_conn``; ``get_api_key`` reaches ``is_blocked`` ->
+    ``self._conn`` and raised, so every real run exited 3. The negative control
+    proves the preflight is the thing that would catch it; the positive half proves
+    the store the CLI actually opens resolves a key.
+    """
+
+    from local_operator.providers.auth_store import AuthStore
+
+    cli = _load_cli()
+    # A STORED row, as on the operator's machine: an env key short-circuits the
+    # cascade before it ever reads a row, which is how the defect hid.
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    root = tmp_path / "cfg"
+    root.mkdir()
+    seeded = AuthStore(db_path=root / "auth.db", config_dir=root)
+    seeded.upsert_credential("deepseek", {"key": "sk-synthetic-not-real", "type": "api_key"})
+    seeded.close()
+
+    metadata_only = AuthStore.open_read_only(root / "auth.db")
+    try:
+        refusal = cli._preflight([ROUTE], metadata_only)
+    finally:
+        metadata_only.close()
+    assert refusal is not None and "AttributeError" in refusal
+
+    store = cli._open_auth_store(root)
+    try:
+        assert not getattr(store, "_read_only", False)
+        assert cli._preflight([ROUTE], store) is None
+    finally:
+        store.close()
+    # auth.db is the only thing the store creates under the root.
+    assert not (root / "team_bridge").exists()

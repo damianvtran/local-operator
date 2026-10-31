@@ -25,10 +25,11 @@ USAGE
 
 WHAT IT TOUCHES. Never ``~/.local-operator/team_bridge`` (no store, budget or
 receipts). Provider credentials are read from the operator's config dir through
-``AuthStore`` opened READ-ONLY. A read-only store has no writable handle, so it is
-not the place an expiring OAuth login gets refreshed: if one expires mid-run its
-trials come back invalid (``provider:...``) and are excluded, never scored - run any
-``lop`` turn on that provider first so the login is fresh. Each call is
+the same plain ``AuthStore`` the production screening connector builds
+(``team_bridge/connector/__main__.py``): ``auth.db`` under the config root, with
+that store's ordinary open side effects (schema check, WAL, an OAuth refresh
+persisting a rotated token). Resolves are ``read_only=True``, so no credential is
+blocked and no session stickiness moves. Each call is
 recorded in the shared analytics ledger under the session id ``tb-screen-bench``.
 Everything else is written under ``--out``.
 
@@ -144,6 +145,27 @@ def _preflight(models, auth) -> str | None:
     return None
 
 
+def _open_auth_store(root: Path | None = None):
+    """The operator's inference credential store, built as production builds it.
+
+    WHY NOT ``AuthStore.open_read_only()``. That constructor is METADATA-ONLY (the
+    paired-phone seam): it never assigns the writable connection, and the key
+    cascade (``get_api_key`` -> ``_usable_key_rows`` -> ``is_blocked``) reads
+    ``self._conn``, so every real run died in preflight with ``AttributeError``.
+    The screening connector opens a plain store with an explicit ``db_path`` (the
+    ``config_dir`` argument alone only feeds the env-override tier), and the bench
+    measures that connector's screen, so it opens the same thing. Nothing here
+    names ``team_bridge/``; an audit-hook run of a real call confirmed no path
+    under it is opened.
+    """
+
+    from local_operator.paths import config_dir
+    from local_operator.providers.auth_store import AuthStore
+
+    root = Path(root) if root is not None else config_dir()
+    return AuthStore(db_path=root / "auth.db", config_dir=root)
+
+
 def _leg_factory(auth, models, organization: str):
     """One shared production stream function per model; a fresh ScreenLeg per attempt."""
 
@@ -222,9 +244,7 @@ def main(argv: list[str] | None = None) -> int:
         print("--max-calls is required for a run (a hard spend cap)", file=sys.stderr)
         return EXIT_PLAN
 
-    from local_operator.providers.auth_store import AuthStore
-
-    auth = AuthStore.open_read_only()
+    auth = _open_auth_store()
     try:
         refusal = _preflight(plan.models, auth)
         if refusal:

@@ -165,8 +165,10 @@ the decision rule for adopting a candidate template, is
   (sha256 `3abc0071...0304`, pinned by a test).
 - **What it touches.** Never `~/.local-operator/team_bridge`: no bridge store, budget
   or receipts. Provider credentials are read from the config dir through `AuthStore`
-  opened read-only. Calls are recorded in the shared analytics ledger under the
-  session id `tb-screen-bench`. Everything else goes under `--out`.
+  built as the production screening connector builds it (resolves are read-only, so
+  no credential is blocked or re-pinned). Like any `lop` model call, each one is
+  recorded in the shared analytics ledger (session id `tb-screen-bench`) and uses
+  the provider caches beside it. Everything else goes under `--out`.
 - **What it records.** `trials.jsonl`, appended per trial so a crash keeps the data:
   corpus id, label, class, split (`sha256(id) mod 2`: 0 = dev, 1 = heldout), template
   sha256, model route, served model, whether the spec supports sampling params (that

@@ -159,7 +159,7 @@ class ScreenLeg:
         path: ``render_prompt`` with its refusal of unembedded versions.
 
         ``stream_fn`` replaces the leg's own ``create_stream_fn``. The screen bench
-        passes one stream function per model, built over a READ-ONLY auth store and
+        passes one stream function per model, built over the operator's auth store and
         shared by many concurrent legs (each leg still wraps it in its own counting
         wrapper, so usage never crosses trials); tests pass a stub. Either way the
         call still runs through the production ``ScreenModelRunner`` (isolation

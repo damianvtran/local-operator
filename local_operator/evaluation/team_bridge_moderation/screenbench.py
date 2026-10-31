@@ -21,10 +21,13 @@ third stage: no receipt, no budget charge, no quarantine.
 
 WHAT IT TOUCHES ON DISK. It never opens ``~/.local-operator/team_bridge``: no
 bridge store, no budget table, no receipts. Provider credentials are read through
-``AuthStore`` opened READ-ONLY over the operator's config dir. The production
-stream function it builds records each call in the shared analytics ledger under
-the session id ``tb-screen-bench`` - the same bookkeeping every ``lop`` model call
-gets, and the reason the bench's spend is visible in ``/analytics``. Everything the
+the same plain ``AuthStore`` the production screening connector opens over the
+operator's config dir. The production stream function then does what every ``lop``
+model call does: records the call in the shared analytics ledger (session id
+``tb-screen-bench``, so the bench's spend is visible in ``/analytics``) and reads
+or updates the provider caches beside it (measured with an audit hook on a real
+call: ``auth.db``, ``analytics.db``, ``account-affinity``, ``cache/``, and
+``usage_cache.db`` read-only - and no ``team_bridge/`` path). Everything the
 bench itself writes goes under ``--out``.
 
 WHY TRIAL-LEVEL CIs ARE A CLUSTER BOOTSTRAP. Repeats of one message are correlated
