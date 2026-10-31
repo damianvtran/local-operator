@@ -1,7 +1,7 @@
 {
   "wire.errors.agent_avatar.empty_body": "Chưa gửi ảnh nào. Hãy gửi dữ liệu ảnh trong phần thân yêu cầu.",
   "wire.errors.agent_avatar.imaging_unavailable": "Ảnh cần hỗ trợ hình ảnh nhưng chưa được cài đặt. Hãy cài lại Local Operator kèm gói bổ sung images.",
-  "wire.errors.agent_avatar.not_found": "Tác tử này chưa có ảnh.",
+  "wire.errors.agent_avatar.not_found": "Tác nhân này chưa có ảnh.",
   "wire.errors.agent_avatar.too_large": "Ảnh này quá lớn. Hãy chọn ảnh nhỏ hơn {limit_mib} MB.",
   "wire.errors.agent_avatar.too_many_pixels": "Ảnh này có quá nhiều điểm ảnh. Hãy chọn ảnh dưới {limit_mp} megapixel.",
   "wire.errors.agent_avatar.undecodable": "Không đọc được ảnh này. Tệp có thể đã bị hỏng.",
