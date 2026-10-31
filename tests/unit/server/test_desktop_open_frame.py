@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import json
 import time
 from pathlib import Path
 from typing import Any
@@ -1050,6 +1051,34 @@ def test_wire_rows_never_alias_the_cached_page() -> None:
     row["payload"]["content"][0]["text"] = "edited"
     row["payload"]["role"] = "edited"
     assert entry.payload == {"role": "user", "content": [{"text": "a"}]}
+
+
+@pytest.mark.asyncio
+async def test_an_open_frame_never_aliases_the_cached_page(tmp_path: Path) -> None:
+    """openframe-cpu: the frame now strips the page cache's own payloads and
+    copies only the rows it serves (``_frame_answer``). A client-side edit of a
+    served row — tail or anchored — must still not reach the cached page, or the
+    next open would paint the edit. Mutant: drop the copy in ``_frame_answer`` ->
+    the second open serves ``"edited"``."""
+    async with _Harness(tmp_path) as harness:
+        harness.seed(turns=4)
+        await harness.warm()
+        async with harness.pool.session(harness.session_id, read=True) as bridge:
+            first = await bridge.history(limit=6, open_frame=True)
+            pristine = json.dumps(first)
+            anchor = first["entries"][len(first["entries"]) // 2]["id"]
+            around = await bridge.history(
+                limit=6, open_frame=True, around_id=anchor, before=2, after=2
+            )
+            for page in (first, around):
+                for entry in page["entries"]:
+                    entry["payload"]["edited"] = True
+                    for block in entry["payload"].get("content") or []:
+                        if isinstance(block, dict):
+                            block["text"] = "edited"
+            again = await bridge.history(limit=6, open_frame=True)
+        assert json.dumps(again) == pristine
+        assert "edited" not in json.dumps(again)
 
 
 @pytest.mark.asyncio

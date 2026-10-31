@@ -38,7 +38,7 @@ import json
 import logging
 from bisect import bisect_right
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Final, Iterable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Final, Iterable, Mapping, Sequence
 
 from local_operator.harness.rows import is_harness_chrome, is_harness_injection
 from local_operator.session.transcript_index import RunRecord, TranscriptIndex
@@ -395,8 +395,71 @@ def strip_entry(entry: Mapping[str, Any], *, supplements: bool = False) -> dict[
     return {**entry, "payload": payload}
 
 
+class StripMemo:
+    """One request's :func:`strip_entry` results, keyed by the row object itself.
+
+    WHY THIS EXISTS (conversation-first-paint, openframe-cpu, 2026-10-31). One
+    open strips the SAME rows again and again: every head-hunt attempt calls
+    :func:`align_page` and :func:`paintable` over the whole of ``collected``
+    (twice for ``paintable``), and the final cut runs :func:`align_page` then
+    :func:`build_frame`, which strips each row twice more. On a cProfile of 210
+    warm ``limit=100`` opens over 42 real journals that was ~1,310
+    ``strip_entry`` calls per open for 150-250 rows, and 40% of the open-frame
+    build's CPU. The strip is a pure function of (row, ``supplements``), so the
+    repeats are pure waste.
+
+    THE CONSTRAINTS that make memoising it safe, and that a change here must keep:
+
+    - SCOPED TO ONE REQUEST. The rows are that request's own ``_json_copy``
+      (never a shared page-cache object), and the memo dies with the request, so
+      a later journal state can never be answered from it.
+    - KEYED BY IDENTITY, HOLDING THE ROW. ``id()`` alone could be reused by a
+      new object once the old one is freed, so each entry keeps its row alive
+      and a hit also checks ``is``; an equal-but-distinct row is stripped anew.
+    - THE SAME ``supplements`` FOR EVERY CALL. It is fixed at construction,
+      because the strip's answer depends on it and a memo shared across two
+      values would serve one value's answer for the other.
+    - A HIT RETURNS THE SAME DICT a miss returned. Every caller in this module
+      only reads a stripped row (counts, sizes, the user-row test) or serves it
+      as is, which is why sharing it cannot change a byte of the page; a caller
+      that MUTATES a stripped row must not take a memo.
+    """
+
+    __slots__ = ("supplements", "_seen")
+
+    def __init__(self, *, supplements: bool = False) -> None:
+        self.supplements = supplements
+        self._seen: dict[int, tuple[Mapping[str, Any], dict[str, Any] | None]] = {}
+
+    def __call__(self, row: Mapping[str, Any]) -> dict[str, Any] | None:
+        hit = self._seen.get(id(row))
+        if hit is not None and hit[0] is row:
+            return hit[1]
+        stripped = strip_entry(row, supplements=self.supplements)
+        self._seen[id(row)] = (row, stripped)
+        return stripped
+
+
+def _stripper(
+    supplements: bool, memo: StripMemo | None
+) -> Callable[[Mapping[str, Any]], dict[str, Any] | None]:
+    """The strip a pure helper uses: the request's memo, or the plain function.
+
+    A memo built for the other ``supplements`` value is a caller bug that would
+    serve the wrong rows, so it is refused rather than silently used.
+    """
+    if memo is None:
+        return lambda row: strip_entry(row, supplements=supplements)
+    if memo.supplements is not supplements:
+        raise ValueError("StripMemo built for a different supplements value")
+    return memo
+
+
 def paintable(
-    rows: Iterable[Mapping[str, Any]], *, supplements: bool = False
+    rows: Iterable[Mapping[str, Any]],
+    *,
+    supplements: bool = False,
+    memo: StripMemo | None = None,
 ) -> list[dict[str, Any]]:
     """The rows of ``rows`` a transcript paints, in order, stripped.
 
@@ -407,9 +470,10 @@ def paintable(
     caller, which is why this is a pure filter over the strip and not a second
     predicate beside it.
     """
+    strip = _stripper(supplements, memo)
     out: list[dict[str, Any]] = []
     for row in rows:
-        stripped = strip_entry(row, supplements=supplements)
+        stripped = strip(row)
         if stripped is not None:
             out.append(stripped)
     return out
@@ -456,6 +520,7 @@ def late_index_stop(
     index: TranscriptIndex | FrameSummary | None,
     limit: int,
     supplements: bool = False,
+    memo: StripMemo | None = None,
 ) -> int | None:
     """How many of the hunt's pages a read WITH the index would have kept, or ``None``.
 
@@ -489,7 +554,10 @@ def late_index_stop(
     taken = 0
     for pages, rows in enumerate(page_rows, start=1):
         taken += rows
-        if taken and len(paintable(collected[-taken:], supplements=supplements)) >= limit:
+        if (
+            taken
+            and len(paintable(collected[-taken:], supplements=supplements, memo=memo)) >= limit
+        ):
             return pages
     return None
 
@@ -538,6 +606,7 @@ def align_page(
     *,
     extra_rows: int = OPEN_FRAME_MAX_EXTRA_ROWS,
     supplements: bool = False,
+    memo: StripMemo | None = None,
 ) -> tuple[list[Mapping[str, Any]], bool]:
     """Cut ``rows`` to the page the contract promises: (kept rows, head reached).
 
@@ -567,9 +636,8 @@ def align_page(
     if limit < 1:
         return list(rows), True
     order = list(rows)
-    painted = [
-        (index, strip_entry(row, supplements=supplements)) for index, row in enumerate(order)
-    ]
+    strip = _stripper(supplements, memo)
+    painted = [(index, strip(row)) for index, row in enumerate(order)]
     paintable = [(index, entry) for index, entry in painted if entry is not None]
     if not paintable:
         return order, True
@@ -715,6 +783,7 @@ def build_frame(
     has_newer: bool | None = None,
     anchor_id: str | None = None,
     supplements: bool = False,
+    memo: StripMemo | None = None,
 ) -> FrameResult:
     """Strip, cap and publish one page from rows already read, newest last.
 
@@ -733,7 +802,8 @@ def build_frame(
     """
     ordered = list(raw_entries)
     raw_rows = len(ordered)
-    dropped = sum(1 for raw in ordered if strip_entry(raw, supplements=supplements) is None)
+    strip = _stripper(supplements, memo)
+    dropped = sum(1 for raw in ordered if strip(raw) is None)
     # FROM THE NEWEST END, because the caps decide what a page can hold and the
     # rows a reader cannot lose are the recent ones: a page truncated at its
     # OLDEST end is a page with a short tail, which is the defect this contract
@@ -743,7 +813,7 @@ def build_frame(
     # that row too.
     painted = [
         stripped
-        for stripped in (strip_entry(raw, supplements=supplements) for raw in ordered)
+        for stripped in (strip(raw) for raw in ordered)
         if stripped is not None
     ]
     sizes = [len(json.dumps(entry, separators=(",", ":"))) for entry in painted]
