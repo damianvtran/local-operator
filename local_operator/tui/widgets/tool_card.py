@@ -151,6 +151,15 @@ _strip_control_sequences = strip_control_sequences
 ICON_SUCCESS = "✓"
 ICON_ERROR = "✗"
 ICON_INTERRUPTED = "⊘"
+#: ATTENTION, NOT FAILURE — and not completion either. Its own glyph outside the
+#: ✓/✗/⊘/◐ set because it answers a different question: those three say how the
+#: call ENDED, this one says the call ended without settling the state it was
+#: asked about. The stop tool's accepted-but-unconfirmed stop is the case (a
+#: `✓` there claimed a completed stop nobody had confirmed, UX round 2 U6), and
+#: `!` is the card's already-shipped vocabulary for that distinction — the live
+#: memory advisory's glyph, which exists for the same shape of statement. Plain
+#: unicode for the family's reason: it has to survive a colourless frame.
+ICON_ATTENTION = "!"
 #: A result a stop made PARTIAL: the tool answered, but not about the whole tree
 #: it was asked about. Its OWN glyph in the same family, for the reason the
 #: family exists — ✓/✗/⊘/◐ separate by SHAPE alone in a colourless frame — and
@@ -188,6 +197,16 @@ _RESET_LEADS = ("Session state was reset",)
 #: session was reset, so the row must state that even where there is no notice
 #: sentence to promote (design review round 1, D2).
 _RESET_LABEL = "session reset"
+#: The word a stopped row states when the owner ACCEPTED the stop but had not
+#: exited when the tool stopped waiting — the collapsed row's whole signal that
+#: this is not a completed stop (UX round 2, U6: it painted the same `✓` as one).
+#: It names WHAT is unconfirmed for the reason ``DELIVERY_OUTCOME_WORDS`` does:
+#: a bare "unconfirmed" beside a row that already says ``sessions stop`` is the
+#: same word for a wake, a delivery and a stop, and the reader has to guess which
+#: fact it belongs to. The receipt in the expansion carries the rest — the wait,
+#: the no-signal statement and the next step — and is promoted below so it wraps
+#: whole instead of being cropped to one line.
+_STOP_PENDING_LABEL = "stop unconfirmed"
 #: Expansion affordance trailing the summary. Both spellings are the same
 #: click target; only the label flips so the row always says what a click does.
 EXPAND_HINT = "⟨expand⟩"
@@ -556,11 +575,11 @@ LIVE_HEADER_RUNNING = "⋯ running"
 #: it is this clause that stops being load-bearing, not the card.
 LIVE_HEADER_PENDING = "no output yet"
 #: The one-cell lead on the live memory advisory (see
-#: :meth:`ToolCard.set_live_advisory`). A glyph rather than colour alone, for the
-#: reason the live header carries one: the distinction has to survive a
-#: monochrome capture or a colour-blind reader, and `!` is the card's existing
-#: vocabulary for "attention, not failure" (the settled error row uses `✗`).
-LIVE_ADVISORY_GLYPH = "!"
+#: :meth:`ToolCard.set_live_advisory`). Named for its live role, the same glyph
+#: :data:`ICON_ATTENTION` puts on a settled row: a glyph rather than colour
+#: alone, for the reason the live header carries one — the distinction has to
+#: survive a monochrome capture or a colour-blind reader.
+LIVE_ADVISORY_GLYPH = ICON_ATTENTION
 #: How often a live card repaints, in seconds. ONE timer drives both the
 #: duration on the collapsed row and the streaming body, for the reason the
 #: subagent panel gives for its own single tick: a repaint scheduled per
@@ -1823,6 +1842,15 @@ class ToolCard(ExpandableActionBlock):
         #: The bridge card's expanded parts (headline, body, outcome sentence,
         #: internals), or None for every other tool. See :meth:`_append_bridge_body`.
         self._bridge_view: dict[str, Any] | None = None
+        #: True when the stop tool's result says the owner ACCEPTED the stop but
+        #: had not exited when the tool gave up waiting (``details["op"] ==
+        #: "stop"`` and ``details["method"] == "pending"``, both published by
+        #: ``tools/builtin._sessions_stop``). The COLLAPSED row reads this: the
+        #: call SUCCEEDED, so without the flag it paints the same `✓` a completed
+        #: stop earns — the one thing this state must not claim (UX round 2, U6).
+        #: Set in :meth:`_absorb_result` from the machine tokens, never from the
+        #: translated receipt.
+        self._stop_pending = False
         #: Rows the card currently occupies (1 collapsed, N expanded).
         self._row_count = 1
         #: ``_row_count`` as of the last content APPLIED to the widget, or -1
@@ -3070,6 +3098,20 @@ class ToolCard(ExpandableActionBlock):
         self._kernel_reset = (
             bool(details.get("kernel_reset")) if isinstance(details, Mapping) else False
         )
+        # A STOP THE OWNER ACCEPTED WITHOUT CONFIRMING ITS EXIT (UX round 2, U6).
+        # The result is a success — nothing failed and nothing was refused — but
+        # the stop had not happened when the tool gave up waiting, so the row may
+        # not paint the completed-stop `✓`. Both halves are read from the tokens
+        # the sessions tool already publishes on its details
+        # (``tools/builtin._sessions_stop``): ``op`` names the tool's own op and
+        # ``method`` is the ladder's machine category, so no other tool's payload
+        # can set this and no prose is parsed. A rebuilt card reads it from the
+        # same payload, exactly like the two flags above.
+        self._stop_pending = (
+            isinstance(details, Mapping)
+            and details.get("op") == "stop"
+            and details.get("method") == "pending"
+        )
         name = self.tool_name.lower()
         self._absorb_bridge(details)
         search_output = _search_result_output(details) if name == "web_search" else []
@@ -3965,6 +4007,28 @@ class ToolCard(ExpandableActionBlock):
             ]
         return self._summary.startswith(tuple(prefixes))
 
+    def _stop_pending_reason(self) -> str:
+        """The stop receipt's own line when the stop was not confirmed.
+
+        The third twin of :meth:`_partial_reason`, and the one that needs no
+        lead-prefix test: the stop tool's result ALWAYS leads with its receipt
+        (``tools/builtin._sessions_stop`` composes it that way, so the collapsed
+        row's headline is the outcome and not the waiting step), and the flag is
+        set from machine tokens rather than by reading the sentence. That is also
+        what makes it locale-safe — the receipt is translated copy, so a prefix
+        test against English would silently stop promoting it in every other
+        language.
+
+        Why it is promoted at all: the receipt's second half ("No signal was
+        sent — read the session list before retrying") is the sentence that stops
+        the operator retrying blind, and a captured output line is CROPPED, so
+        without this it is the first thing lost at narrow widths. Only a claimed
+        lead wraps whole.
+        """
+        if not self._stop_pending or not self._output:
+            return ""
+        return self._output[0].strip()
+
     def _partial_reason(self) -> str:
         """The body's LEADING line when the collapsed row must carry it too.
 
@@ -4041,6 +4105,7 @@ class ToolCard(ExpandableActionBlock):
         """The lead line the collapsed row claims, whichever state owns it."""
         return (
             self._failure_reason()
+            or self._stop_pending_reason()
             or self._partial_reason()
             or self._reset_reason()
             or self._send_receipt_reason()
@@ -4064,6 +4129,11 @@ class ToolCard(ExpandableActionBlock):
             # disagree with it (review round 2, R2-6). Ordered the same way
             # `_promoted_lead` is, so the two cannot diverge.
             return ICON_ERROR, fallback
+        if self._stop_pending_reason():
+            # The same `!` and the same amber the collapsed row's status carries
+            # for this state, so the lead line and the row cannot disagree about
+            # what the stop's outcome was.
+            return ICON_ATTENTION, bindings.style("tool.status.partial_glyph")
         if self._partial_reason() or self._send_receipt_reason():
             return ICON_PARTIAL, bindings.style("tool.status.partial_glyph")
         if self._reset_reason():
@@ -5155,6 +5225,7 @@ class ToolCard(ExpandableActionBlock):
             and not self._partial
             and not self._kernel_reset
             and self._bridge_tier != "warn"
+            and not self._stop_pending
         ):
             # See `bindings.BY_ELEMENT["tool.status.success_glyph"].note`.
             success_ink = bindings.style("tool.status.success_glyph")
@@ -5194,7 +5265,18 @@ class ToolCard(ExpandableActionBlock):
             tint = bindings.style("tool.status.partial_glyph")
             abbreviates = True
         elif self._state == "success":
-            if self._partial:
+            if self._stop_pending:
+                # ACCEPTED, NOT CONFIRMED — so it cannot paint the completed
+                # stop's `✓`. The outcome is not an error either (nothing was
+                # refused and nothing failed), which is exactly the pair `!` in
+                # the amber the card already spends on "attention, not failure"
+                # states. The word names the ONE fact the row must not lose,
+                # because the receipt that says it lives a click away.
+                glyph = ICON_ATTENTION
+                reason = _STOP_PENDING_LABEL
+                tint = bindings.style("tool.status.partial_glyph")
+                abbreviates = True
+            elif self._partial:
                 # PARTIAL: the tool answered, but not about the whole tree it was
                 # asked about. It gets its own glyph and the state's own ink —
                 # `warning`, the amber this card already spends on a harness state
