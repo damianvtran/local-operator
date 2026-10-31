@@ -1092,7 +1092,9 @@ def _refusal(response: httpx.Response) -> BridgeRefusal:
     code = body.get("code") if body else None
     message = body.get("error") if body else None
     details = body.get("details") if body else None
-    if not isinstance(code, str) or not code:
+    # Codes reach CLI diagnostics and logs. Treat the hub as untrusted here:
+    # neither line breaks nor response-sized junk are machine identifiers (QA Q2).
+    if not isinstance(code, str) or re.fullmatch(r"[a-z][a-z0-9_]{0,63}", code) is None:
         code = "bridge_error"
     if not isinstance(message, str) or not message:
         message = f"Radient refused the request (HTTP {status})."  # i18n: ignore, no code
