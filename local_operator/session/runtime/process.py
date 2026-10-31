@@ -72,7 +72,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, cast
 
 from local_operator import buildwatch as _buildwatch
-from local_operator import procstate
+from local_operator import procstate, siginfo
 from local_operator.procstate import install_loop_signal_handlers
 from local_operator.session.runtime import stall_watchdog
 from local_operator.session.runtime.types import (
@@ -5542,6 +5542,21 @@ async def amain(operator_cap: bytes | None = None) -> int:
             signal.SIGINT: lambda: _on_signal(signal.SIGINT),
         },
     )
+    # WHO SENT THIS SIGNAL, armed the moment the handler that answers it exists.
+    # ORDER IS THE CONTRACT (see ``siginfo.arm``): `add_signal_handler` and the
+    # fallback `signal.signal` both install through ``sigaction``, so arming
+    # before this call would leave CPython's action in place and the sensor
+    # discarded. Armed here, the sensor sits on top of whichever one the present
+    # platform installed, reads the sender out of the kernel's ``siginfo_t`` on
+    # the first delivery, restores that same action and re-raises — so the
+    # `_on_signal` path above runs unchanged, and the ``signal_receipt`` it writes
+    # can finally name who sent the signal instead of saying ``unavailable``.
+    # That gap is what made the 2026-10-30 21:57 fleet stop unfalsifiable: twelve
+    # exec workers and at least five runtimes died inside 1.33 s and not one row
+    # named a sender. Best-effort by contract: ``arm`` returns False where the
+    # platform cannot capture (see its module docstring) and the receipt keeps
+    # exactly the wording it has today.
+    siginfo.arm(int(signal.SIGTERM))
     # The socket ``stop`` op (the kill switch's graceful rung) and SIGTERM
     # converge on the same event, so the deny → dispose → aclose ordering
     # below runs once, identically, for both triggers. Armed HERE, with the

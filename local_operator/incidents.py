@@ -784,22 +784,52 @@ def involuntary_kill_detail(
 
 
 def render_signal_receipt_detail(
-    *, signal_name: str = "", at: object = None, count: int = 1, spawn_chain: object = None
+    *,
+    signal_name: str = "",
+    at: object = None,
+    count: int = 1,
+    spawn_chain: object = None,
+    sender: object = None,
 ) -> str:
     """The parenthetical a runtime's OWN signal receipt gives a ``runtime-shutdown`` reason.
 
     Scalar arguments, for the reason :func:`render_stop_attribution` gives: the
     receipt's schema belongs to its writer (``session/runtime/signal_receipt``).
 
-    SAYS WHAT WAS RECORDED AND NOTHING MORE. The sender is not knowable on this
-    platform, so the sentence names an "unidentified sender" and then states the
-    one fact that matters to a reader — NOBODY ASKED FOR THIS STOP. It never
-    names a party, it leads with :data:`KILL_UNATTRIBUTED` so a marked death and
-    an unmarked one are not read as one sentence, and it opens as an aside (see
-    :func:`_render_cut_off_detail`) as ONE parenthetical — never nested in its
-    no-clause shape, which is what the pinned single-pair test covers; the
-    spawn-chain clause below is the one shape that adds a second pair (its own
-    bundle + pid group) and only when it renders.
+    SAYS WHAT WAS RECORDED AND NOTHING MORE, IN ONE OF TWO ARMS. ``sender`` is
+    the receipt's ``sender`` dict, and the two arms are the whole of this
+    function's branching:
+
+    * NOT NAMED (no capture, a kernel-originated delivery, or a receipt written
+      before the capture existed) — the sentence names an "unidentified sender"
+      and then states the one fact that matters to a reader, NOBODY ASKED FOR
+      THIS STOP. This arm is BYTE-IDENTICAL to what this function returned before
+      a sender could ever be named: it is a persisted, pinned string, and a
+      receipt that names nobody must not start reading differently because the
+      product learned to name somebody else's signal.
+    * NAMED (``local_operator.siginfo`` captured ``si_pid``/``si_uid``) —
+      "from pid N (uid U)". The ``unattributed`` lead-in is DROPPED here, exactly
+      as :func:`involuntary_kill_detail` drops it when it names an actor: that
+      word is the marker of an evidence GAP, and printing it next to a pid would
+      say the opposite of what the sentence knows. The uid group is the one
+      second pair this function has always been willing to add (see the
+      spawn-chain clause below), and it stays attached to the pid rather than
+      becoming a comma clause of its own, so it cannot be read as belonging to
+      the timestamp.
+
+    Both arms end with the same conclusion, in the same place, and both keep the
+    spawn-chain clause immediately before it (D4: the conclusion stays final).
+
+    The sender is NOT upgraded into a cause: a pid names who delivered the
+    signal, never who asked for the stop, which is why the closing words are
+    unchanged in both arms.
+
+    It leads with :data:`KILL_UNATTRIBUTED` in the unnamed arm so a marked death
+    and an unmarked one are not read as one sentence, and it opens as an aside
+    (see :func:`_render_cut_off_detail`) as ONE parenthetical in that arm — never
+    nested, which is what the pinned single-pair test covers; the spawn-chain
+    clause and the named arm's uid group are the shapes that add a second pair,
+    and only when they render.
 
     "NOBODY ASKED FOR A STOP" RATHER THAN "NO STOP WAS STAGED" (design round 1,
     D1). "Staged" is this feature's own verb for writing the marker file, and it
@@ -843,10 +873,41 @@ def render_signal_receipt_detail(
     when = ""
     if isinstance(at, (int, float)) and not isinstance(at, bool) and at:
         when = " at " + time.strftime("%Y-%m-%d %H:%M:%S %z", time.localtime(float(at)))
+    named = render_named_sender(sender)
+    if named:
+        return (
+            f" ({name} received{times}{when} from {named}"
+            f"{_spawn_chain_clause(spawn_chain)}; nobody asked for a stop)"
+        )
     return (
         f" ({KILL_UNATTRIBUTED}, {name} received{times}{when} from an unidentified sender"
         f"{_spawn_chain_clause(spawn_chain)}; nobody asked for a stop)"
     )
+
+
+def render_named_sender(sender: object) -> str:
+    """The sender fragment for a receipt that names a process — ``"pid 7 (uid 0)"`` — or ``""``.
+
+    The single place the sender is turned into text, so the two arms cannot drift.
+    Deliberately strict about what counts as KNOWN: ``state`` must be ``"known"``
+    and the pid must be a positive integer that is not a bool. A hand-edited
+    record, a file written by another build, and a kernel-filled ``si_pid`` of 0
+    all fall back to ``""`` and let the caller print the unknown-sender arm —
+    printing ``pid 0`` would name the kernel as if it were a process.
+
+    The uid is rendered only when it is an int: a capture that lost the sender's
+    uid (a platform whose layout this module does not read) must not print
+    ``uid None`` next to a pid that it does know.
+    """
+    if not isinstance(sender, dict) or sender.get("state") != "known":
+        return ""
+    pid = sender.get("pid")
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return ""
+    uid = sender.get("uid")
+    if isinstance(uid, int) and not isinstance(uid, bool):
+        return f"pid {pid} (uid {uid})"
+    return f"pid {pid}"
 
 
 #: The one marker that makes a recorded command an app-bundle main executable.

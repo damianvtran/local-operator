@@ -533,10 +533,28 @@ grant is a one-time, per-host decision.
 * `<session dir>/runtime-signal.json` — a *runtime's* receipt of a termination
   signal, written at arrival. v1 schema: `{"v":1,"kind":"runtime","session_id",
   "pid","started_at","signals":[{"name","number","at","in_flight","action":
-  "drain"|"stop"|"repeat-absorbed","sender":{"state":"unavailable",...},
+  "drain"|"stop"|"repeat-absorbed","sender":{...},
   "spawn_chain":[{"pid","argv0","alive_at_spawn","alive_now"}...],"stop_marker":null|{...},"sanction":
   "none"|"marker"}],"count","receiver":
-  {"uid","euid","gid","ppid","pgid","argv0"},"platform"}`. `sanction` is decided
+  {"uid","euid","gid","ppid","pgid","argv0"},"platform"}`. `sender` has three
+  shapes: `{"state":"unavailable","reason":"no-siginfo","could_be":
+  "same-uid-or-root"}` — nothing was captured, and this is byte-identical to what
+  every receipt written before `local_operator/siginfo.py` carried;
+  `{"state":"unavailable","reason":"kernel-originated"}` — a capture happened and
+  `si_pid` was 0, i.e. the KERNEL delivered it and no process did, which is why
+  it is never rendered as "pid 0"; and `{"state":"known","reason":"siginfo",
+  "pid","uid","code"}` — the sender's pid, real uid, and `si_code` verbatim (the
+  code is recorded, not interpreted: `kill(2)` and a kernel timer both measured
+  `0` on macOS, so the pid is the field that tells a sender from the kernel). The
+  capture is claimed ONCE, by the receipt for the delivery that made it; a later
+  signal on the same process carries `no-siginfo` rather than borrowing an
+  earlier sender. This is by design and bounded to ONE
+  named sender per process: if the same actor re-sends or escalates, only the
+  first delivery is attributed and a second receipt's `no-siginfo` means "this
+  delivery was not captured", NOT "the sender is unknowable on this host". The
+  rendered reason follows the same latest-wins rule as the stop class, so after a
+  repeat it says "unidentified sender" even though the first entry in `signals`
+  names a pid. `sanction` is decided
   at write time: `marker` iff a `runtime-stop.json` for this exact run, staged no
   more than `PAIR_WINDOW_S` before the signal and never after, was on disk when it
   arrived; otherwise `none` — nobody staged a stop. `spawn_chain` is present only
@@ -557,10 +575,17 @@ The durable fact is the receipt's epoch `at`; the sentence exists so a person
 reading a transcript days later, from another device, is not left guessing whose
 clock `20:00:03` is on.
 
-**Honest limits.** The *sender* is unavailable on macOS (the stdlib exposes no
-siginfo and asyncio discards it), which is why the receipt says "unidentified
-sender" rather than naming a party; an unsanctioned wave therefore yields one
-receipt per victim and **no** sweep row — never a fabricated one. SIGKILL, a
+**Honest limits.** The *sender* is named where it can be observed, and that is
+the only place the claim is made: `local_operator/siginfo.py` arms a one-shot
+`SA_SIGINFO` sensor over the handler that owns SIGTERM (stdlib plus ctypes, since
+the stdlib exposes no siginfo and asyncio discards it), reads `si_pid`/`si_uid`
+out of the kernel's `siginfo_t`, restores the saved action and re-raises so the
+platform's own delivery runs unchanged. That is armed on macOS today; on a
+platform whose layout this build cannot execute against a real kernel, and for a
+kernel-originated delivery, the receipt still says "unidentified sender" rather
+than naming a party. An unsanctioned wave therefore yields one receipt per victim
+and **no** sweep row — never a fabricated one, and never a sender the receipt did
+not observe. SIGKILL, a
 crash and power loss leave nothing target-side. The TUI and `serve`/mobile
 daemons are not covered by the receipt (their in-process sessions are ended by
 their own owner, not by a runtime receiving a signal), and neither is a turn

@@ -59,6 +59,7 @@ from typing import Any
 
 import pytest
 
+from local_operator import siginfo
 from local_operator.session.runtime import control, journal, registry
 from local_operator.session.runtime.process import SIGNAL_DRAIN_S
 from tests.e2e.harness import NO_NOTIFY_ENV
@@ -988,8 +989,9 @@ async def test_a_turn_that_outlives_the_bound_rides_through(
 # The 2026-09-30 18:14 and 20:00 waves left victims with no record of the signal
 # that took them. These cells deliver a real SIGTERM to a real runtime and read the
 # artifact it leaves (``runtime-signal.json``): the signal's name and number, that no
-# stop was staged for it, that the sender is unavailable, and the run key. No cell
-# signals a process this file did not spawn.
+# stop was staged for it, who sent it (named on Darwin, where
+# ``local_operator.siginfo`` arms its sensor; unavailable elsewhere), and the run
+# key. No cell signals a process this file did not spawn.
 
 
 def _receipt(directory: Path) -> dict[str, Any] | None:
@@ -1032,7 +1034,24 @@ async def test_an_idle_runtime_leaves_a_receipt_for_an_unsanctioned_sigterm(
             assert (entry["name"], entry["number"]) == ("SIGTERM", 15)
             assert entry["sanction"] == "none" and entry["stop_marker"] is None
             assert entry["action"] == "stop" and entry["in_flight"] is False
-            assert entry["sender"]["state"] == "unavailable"
+            # THE SENDER IS NAMED WHERE THE PLATFORM CAN CAPTURE IT. This cell used
+            # to pin ``unavailable`` because that was all a Python-level handler
+            # could say; ``process.amain`` now arms ``siginfo``'s one-shot sensor,
+            # and the only process that signalled this runtime is THIS test
+            # (``os.kill`` above), so the receipt must name our pid and uid. On a
+            # platform where the sensor is not armed the old, unnamed shape is still
+            # the whole truth, and is asserted byte-for-byte.
+            sender = entry["sender"]
+            if siginfo.supported():
+                assert sender["state"] == "known", sender
+                assert sender["pid"] == os.getpid(), sender
+                assert sender["uid"] == os.getuid(), sender
+            else:
+                assert sender == {
+                    "state": "unavailable",
+                    "reason": "no-siginfo",
+                    "could_be": "same-uid-or-root",
+                }, sender
             assert (receipt["kind"], receipt["session_id"]) == ("runtime", "rcptidle01")
             assert receipt["pid"] == record.pid
             assert registry.read_stop_marker(directory) is None, "nothing staged a stop"
