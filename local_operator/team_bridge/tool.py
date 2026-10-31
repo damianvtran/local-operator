@@ -413,14 +413,11 @@ class BridgeToolParams(BaseModel):
     thread_root_id: str = ""
     in_reply_to_message_id: str = Field(
         default="",
-        description="Exact admitted inbound bcmsg_ being answered; distinct from thread_root_id.",
+        description="Exact admitted inbound bcmsg_; not thread placement.",
     )
     new_post: bool = Field(
         default=False,
-        description=(
-            "Intentionally start a new post instead of replying to bridge input. "
-            "An intent declaration only, not semantic isolation or outbound authority."
-        ),
+        description="Intent only; no semantic isolation or authority.",
     )
     # dm: the person (account_id) or agent (endpoint_id, from `directory`).
     # Kept as plain strings so the shared pair-lane validator never reads them
