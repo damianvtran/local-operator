@@ -1,0 +1,51 @@
+{
+  "locale": "vi",
+  "namespace": "tui.analytics",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 1,
+    "nit": 2
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 1,
+      "id": "VI-007",
+      "severity": "MINOR",
+      "namespace": "tui.analytics",
+      "key": "tui.analytics.search.share_short",
+      "english": "{counted} · {share} of search",
+      "current": "{counted} · {share} tìm kiếm",
+      "problem": "Context: the rung must still name what the share is OF. '{share} tìm kiếm' reads as '100% search' (a quantity of searches), not 'share of search'.",
+      "suggested": "{counted} · {share} của tìm kiếm",
+      "disposition": "fixed (remediation core-fix, session 5e0b68c135be)"
+    },
+    {
+      "round": 1,
+      "id": "VI-008",
+      "severity": "NIT",
+      "namespace": "tui.analytics",
+      "key": "tui.analytics.model.meta",
+      "english": "from the ledger · all time",
+      "current": "từ sổ cái · mọi thời điểm",
+      "problem": "'ledger' is rendered 'sổ cái' here and in search.note/model.pending, but 'sổ theo dõi' in tui.small.subagent_view.no_longer_on_ledger; pick one across the wave (sổ cái is the more established rendering).",
+      "suggested": "từ sổ cái · mọi thời điểm (and align tui.small to 'sổ cái')",
+      "disposition": "fixed (remediation core-fix, session 5e0b68c135be)"
+    },
+    {
+      "round": 2,
+      "id": "R2-VI-009",
+      "severity": "NIT",
+      "namespace": "tui.analytics",
+      "key": "tui.analytics.search.share_short",
+      "english": "{counted} · {share} of search",
+      "current": "{counted} · {share} của tìm kiếm",
+      "problem": "«{share} của tìm kiếm» is understandable but stiff; sibling share_bare already uses «chiếm {share}». Fits with no budget.",
+      "suggested": "{counted} · chiếm {share} tìm kiếm",
+      "disposition": "fixed (remediation core-fix2, session 053117b4ad36)"
+    }
+  ]
+}

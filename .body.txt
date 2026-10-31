@@ -1,0 +1,115 @@
+## Summary of Changes
+
+Fills the 56 Vietnamese (`vi`) core catalogue namespaces that `origin/main` carried as English-fallback debt in `i18n/coverage-allowance.json`: **1311 keys**. One PR per locale (ru, hi, ur, vi). Values were applied mechanically from audited patch files; **no translated value was edited by the applier** (the script asserts patch values are byte-equal to what lands in the catalogue, all English keys are present, English key order, and no key outside English).
+
+| prefix family | namespaces | keys | largest |
+|---|---|---|---|
+| `cli.*` | 32 | 410 | `cli.browser` 64, `cli.sessions_help` 47, `cli.teams_help` 34, `cli.agents_help` 21 … |
+| `mobile.*` | 1 | 76 | `mobile.setup` 76 |
+| `relay.*` | 1 | 4 | `relay.login` 4 |
+| `tui.*` | 8 | 650 | `tui.small` 137, `tui.library` 108, `tui.analytics` 98, `tui.projects` 97 … |
+| `wire.*` | 14 | 171 | `wire.errors.agents` 44, `wire.errors.sdk_spec` 21, `wire.errors.media` 20, `wire.exec` 17 … |
+
+## Audit
+
+Translator lane: `anthropic/claude-sonnet-5-5` (parent-selected task subagent, session lane `7478fbd215f7`); remediation translators (fresh sessions `5e0b68c135be`, `053117b4ad36`) and every auditor: `anthropic/claude-opus-5-5`, verified from each session's `selected_model`/`model_id` in its transcript, no fallback. Translator and auditors share the Claude model family (disclosed). Every auditor was a fresh session that translated nothing it judged.
+
+| round | auditor session | model | verdict | counts |
+|---|---|---|---|---|
+| 1 | `3ca692471511` | `anthropic/claude-opus-5-5`, no fallback | CHANGES_REQUESTED | BLOCKER 0 · MAJOR 31 · MINOR 17 · NIT 5 · 53 findings over 1311 values in 56 namespaces |
+| 2 | `a3954428c96c` | `anthropic/claude-opus-5-5`, no fallback | CHANGES_REQUESTED | BLOCKER 0 · MAJOR 2 · MINOR 5 · NIT 2 — 9 findings; 70 changed values + 2 declines re-judged; 56 namespaces swept |
+| 3 | `0cc22c4c8b4f` | `anthropic/claude-opus-5-5`, no fallback | PASS | BLOCKER 0 · MAJOR 0 · MINOR 2 · NIT 1 |
+
+Round 1 and 2 findings were remediated by fresh translator sessions (70 + 8 keys changed; 2 + 1 findings declined with reasons, accepted by the next auditor). Round 3 is the PASS on current bytes.
+
+Per-namespace evidence bundles (`record.json`, `findings.json`, `audit.log`, `report.md`, `receipt.json`) sit under `i18n/audits/evidence/vi/<namespace>/cg1/`; each ledger row's `note` cites its `record.json`. The audit sessions were read-only and wrote `findings.jsonl`/`progress.log`/`summary.md`, not a shell log, so each `audit.log` carries those records verbatim plus the applier's computed hashes; no command output is invented.
+
+**Audited input is committed, not scratchpad.** `input_hashes.audited_patch_file` used to hash an out-of-tree scratchpad file, which no reader could re-hash, so "patch values byte-equal to catalogue values" was self-attested. Every bundle now binds `i18n/audits/evidence/vi/_input/cg1.json` instead (`input_hashes.audited_input_manifest` = that file's sha256): SHA-256 of each of the 1311 shipped values as the auditors judged them, a `manifest_sha256` self-hash, and `remade_by_remediation` listing the 74 keys changed by remediation after the first audit round (core-fix and core-fix2 `changes.jsonl`, sessions in each `record.json`; 4 keys were remade twice). For every key the audited patch value equals the shipped value byte for byte (checked when the manifest was built; none needed reconciling), and `tests/unit/i18n/test_audit_input_manifests.py` recomputes every entry from the catalogue on each run. No value, verdict or severity was changed; receipts were re-hashed.
+
+## Impact
+
+- Catalogue data plus test changes: 56 new catalogue files, ledger shard + regenerated mirror, shrunk allowance (vi 56 pairs / 1311 keys -> 0; file 234 -> 178 pairs), re-rendered `i18n/ledger.json` mirror (the other generated artifacts re-rendered byte-identical). No product Python behaviour change; two existing tests that asserted vi lacked `relay.login`/`wire.errors.sdk_startup` were rewritten (see Testing) and one new test file verifies the audit-input manifest. **No version bump.**
+- Ledger rows were authored by script per `docs/I18N.md` ("Append the audit row"), because core ships no ledger writer; all hashes are computed from file bytes, none typed. `vi` stays in `local_operator/i18n/data/shipped.json`.
+
+## Testing Details
+
+Rebased onto `origin/main` @ c93e4fd562a (conflict: `i18n/ledger/vi.json` / `i18n/ledger.json`, resolved by appending main's 3 agent-avatar rows then this PR's 56, then regenerating the mirror). Run in a clean worktree on this branch (interpreter: a sibling venv with `PYTHONPATH` pinned to the worktree so the tree-identity guard passes):
+
+```
+$ generate.py --check
+generate.py --check: 116 artifact(s) byte-identical
+$ scripts/i18n/check.py
+check.py: ok — 198 file(s) scanned, 2411 literal(s) at or below the baseline, catalogues consistent; 58 advisory finding(s) (report-only until activated)
+$ pytest -q tests/unit/i18n/test_language_manifest.py
+35 passed in 12.29s
+$ pytest -q tests/unit/i18n/test_audit_input_manifests.py
+2 passed in 5.72s
+$ pytest -q tests/unit/i18n/test_catalogue_sizes.py
+4 passed in 9.29s   (eager vi payload is within the 64 KiB ceiling)
+```
+
+### Tests fixed (these failed on the first push of this PR)
+
+Both asserted the committed corpus lacked a namespace that the locale PRs supply: `test_relay_login.py::test_actual_shipped_missing_namespace_uses_english_metadata[vi]` and `test_sdk.py::test_sdk4_explicit_locale_and_english_child_fallback` (`wire.errors.sdk_startup` cases). Mechanism chosen (shared commits `09ee36f66c0` + `9e853be12e6`, identical on all four locale PRs, first landed on #3229): **derive the expectation from the committed tree, and pin the absent path on a constructed tree.** Why: asserting "locale X lacks namespace Y" is a statement about the translation wave, not the fallback, so every wave reddened it; reading the tree keeps the test discriminating while it stops encoding which namespaces are translated today.
+
+- For each case the test asks whether `local_operator/i18n/catalogues/<rendered>/<namespace>.json` exists and carries the key. Present: the page/refusal must be that locale's own copy, `lookups == [rendered]`. Absent: English whole, `lookups == [rendered, "en"]`.
+- New `test_absent_namespace_falls_back_to_english_page` and `test_sdk4_absent_child_namespace_falls_back_to_english` build a synthetic catalogue root where the namespace is genuinely missing, so the fallback is proven whatever the catalogues contain. Negative control (run on #3229): disabling the `en` fallback in `messages.render` turns them red (`4 failed, 7 passed`); reverted.
+
+```
+$ pytest tests/unit/i18n/test_relay_login.py::test_actual_shipped_missing_namespace_uses_english_metadata   -> 8 passed in 10.94s
+$ pytest tests/unit/i18n/test_relay_login.py::test_absent_namespace_falls_back_to_english_page             -> 7 passed in 8.62s
+$ pytest tests/unit/test_sdk.py::test_sdk4_explicit_locale_and_english_child_fallback                      -> 64 passed in 8.50s
+$ pytest tests/unit/test_sdk.py::test_sdk4_absent_child_namespace_falls_back_to_english                    -> 4 passed in 6.94s
+```
+
+No known failing tests on this branch at this head. The first push of this PR (85188a5ce51) did fail the two tests above, because it was opened claiming a clean sheet without running them. Siblings: #3229 ru, #3231 hi and #3232 ur fail the eager-payload ceiling (`test_the_eager_wire_payload_stays_within_the_total_ceiling`), blocked on the eager-payload policy PR, owner 3ef6295a5545; vi does not, and no ceiling, deferred-namespace list or test was touched. Not run: the full suite locally (CI runs it); no rendered terminal check.
+
+## Honest gaps
+
+- Rendered terminal widths and (for ur) RTL were **not** measured in a terminal; auditors counted terminal cells with their own scripts. 
+- Native-speaker review is open for the judgement calls flagged in the translator's `ambiguous.txt`:
+```
+tui.small.goal_panel.judge_line / judge_*: 'judge' rendered 'giám khảo'
+tui.small.info_panel.last_heartbeat_ago: 'heartbeat' rendered 'nhịp tim'
+tui.analytics.hint.expand.keys_bare: 12-cell budget, used '↵ · e hết'
+cli.browser.*: aligned label columns padded to 21 cells like English; 'daemon', 'handle', 'foreground' kept English
+
+--- remediation round (audit VI-001..056) ---
+tui.small.goal_panel.judge_*: «giám khảo» withdrawn; `judge:` kept as protocol word (VI-001/002).
+heartbeat: kept English «heartbeat» in cli.browser.heartbeat_stale, tui.small.info_panel.last_heartbeat_ago, cli.browser_help.status_repair (VI-027); «STALE by» → «QUÁ HẠN», label padded to keep value at cell 21.
+tui.small.network_panel: kept «chuyển tiếp:» per style guide; realigned installed/identity rows to cell 15 instead of reverting to 'relay:' (VI-003/004 alternative). Note: the context sidecar calls relay/installed/identity protocol labels; if the re-auditor prefers Latin labels, revert all four rows together.
+foreground → «tiền cảnh» (existing vi catalogue term) across cli.browser, cli.browser_help, cli.mobile_help, cli.wake_help, wire.exec.exec_epilog (VI-029).
+hosting (platform) → «nhà cung cấp» matching wire.settings.hosting.label (VI-049/050).
+cli.mobile_help.password: «cổng thông tin (portal)» to disambiguate from port/gate (VI-052).
+
+--- remediation round 2 (R2-VI-001..009) ---
+prompt kept Latin in LLM sense (move_engage_on_arrival, wake create_message); UI 'confirmation prompt' sense stays «lời nhắc» (publish_yes, revision_moved).
+token kept Latin incl. auth sense (wire.errors.files.sign_auth).
+cli.mobile_help.status: gate → «cổng kiểm soát truy cập» to separate it from port «cổng».
+R2-VI-004 declined: network_panel labels stay translated per glossary relay row; the style guide should record this as a vi exception (repo edit needed).
+```
+- Original gap-fill sessions and auditors read `origin/main` at audit time; the exact audited commit was not recorded (stated in each `record.json`).
+
+## Checklist
+
+- [x] Conventional commit; no version bump.
+- [x] Catalogue data plus test-only code changes (two existing tests rewritten, one test file added); no product code touched.
+- [x] Generated files produced by `scripts/i18n/generate.py`, never hand-edited.
+- [ ] Independent agent review / QA round: pending, not yet requested.
+
+## Rebase onto current main (post-review): content unchanged
+
+Merging was blocked by bookkeeping conflicts, so the branch was rebased onto main and force-pushed with lease. Old head `ebfd4a837ab` (base `5572ba9210`) -> new head `03de4f25881` (base `6a5d570919`).
+
+The proof a reviewer can re-run, because the two-head comparison is the WRONG test here (40+ files differ between the two heads purely because main moved): hash the PR's own delta against each base.
+
+```
+git diff 5572ba9210b..ebfd4a837ab -- local_operator/i18n/catalogues/vi | shasum -a 256
+  cc13bbb779a3408f4d6059e9d7e8f07ad3d2388ff5316c24145b3e64c11d17c0
+git diff 6a5d570919b..03de4f25881 -- local_operator/i18n/catalogues/vi | shasum -a 256
+  cc13bbb779a3408f4d6059e9d7e8f07ad3d2388ff5316c24145b3e64c11d17c0
+```
+
+Identical, so the vi copy is byte-for-byte what the audits passed and the review rounds stand on content. `generate.py --check` prints `117 artifact(s) byte-identical` on the new head.
+
+Three files conflicted and all three are bookkeeping: `i18n/coverage-allowance.json` (took main and dropped its 56 vi rows, 178 -> 122 pairs, because vi now carries everything), `i18n/ledger.json` (main's aggregate), `i18n/ledger/vi.json` (this PR's shard). The repo's own tooling then required `scripts/i18n/shard_ledger.py --fold-stranded`, which moved 105 stranded aggregate rows into their locale shards - the documented path, which is why the vi ledger delta differs while the catalogue delta does not.

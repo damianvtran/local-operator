@@ -1,0 +1,27 @@
+{
+  "locale": "vi",
+  "namespace": "cli.exec_worker_help",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 1,
+    "nit": 0
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 1,
+      "id": "VI-047",
+      "severity": "MINOR",
+      "namespace": "cli.exec_worker_help",
+      "key": "cli.exec_worker_help.yolo",
+      "english": "Auto-approve all tool tiers",
+      "current": "Tự động chấp thuận mọi bậc công cụ",
+      "problem": "Glossary: approvals → «phê duyệt» (used 9× in vi neighbours and in this wave's own cli.exec_help.control/tools); 'chấp thuận' is a second, unglossed term for the same safety act, so the user sees two words for one gate.",
+      "suggested": "Tự động phê duyệt mọi bậc công cụ",
+      "disposition": "fixed (remediation core-fix, session 5e0b68c135be)"
+    }
+  ]
+}

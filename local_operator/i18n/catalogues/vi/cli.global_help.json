@@ -1,0 +1,19 @@
+{
+  "cli.global_help.debug": "Bật chế độ gỡ lỗi để có đầu ra chi tiết",
+  "cli.global_help.agent": "Chọn một tác nhân có tên kiểu cũ (tạo nếu chưa có). Không có --train, dùng một phiên lưu riêng; exec --profile sẽ gắn một vai trò dùng lại được thay thế.",
+  "cli.global_help.train": "Dùng thư mục lịch sử tác nhân kiểu cũ (hoặc một tác nhân tự lưu) thay vì một phiên riêng. Các phiên thông thường cũng được lưu và tiếp tục được; --resume được ưu tiên hơn lựa chọn thư mục này.",
+  "cli.global_help.description": "\n    Local Operator - Môi trường để các mô hình AI dạng tác nhân thực hiện tác vụ trên thiết bị cục bộ.\n\n    Hỗ trợ nhiều nhà cung cấp gồm DeepSeek, OpenAI, Anthropic, Ollama, Kimi\n    và Alibaba. Tính năng gồm trò chuyện tương tác, thực thi mã an toàn,\n    lịch sử hội thoại có ngữ cảnh và các bước kiểm tra an toàn tích hợp.\n\n    Cấu hình mô hình và nhà cung cấp bạn muốn qua đối số dòng lệnh. Tệp\n    cấu hình nằm tại ~/.local-operator/config.yml và có thể chỉnh sửa trực tiếp.\n",
+  "cli.global_help.resume": "Tiếp tục một phiên trước đó theo id, phát lại bản ghi của nó. Id là giá trị được in ra khi một phiên bị dừng bằng Ctrl+C hai lần, và là tên thư mục dưới ~/.local-operator/sessions. Dùng --resume không kèm id để mở lại phiên gần nhất.",
+  "cli.global_help.version": "Hiển thị số phiên bản của chương trình rồi thoát",
+  "cli.global_help.hosting": "Nhà cung cấp sẽ dùng (radient, deepseek, openai, anthropic, ollama, kimi, alibaba, google, mistral, test, openrouter, xai, zai)",
+  "cli.global_help.model": "Mô hình sẽ dùng (ví dụ: gpt-6-astra, claude-opus-5-5, deepseek-flash, grok-4.7, glm-5.3, gemini-3.8-flash, qwen3.8-max, kimi-k3, mistral-medium-latest, anthropic/claude-opus-5.5). Tùy chọn: nếu bỏ qua, dùng mô hình do nhà cung cấp gợi ý.",
+  "cli.global_help.run_in": "Thư mục làm việc để chạy operator. Phải là một thư mục hợp lệ.",
+  "cli.global_help.yolo": "Tự động phê duyệt mọi lần thực thi công cụ (bậc read/write/exec) mà không hỏi",
+  "cli.global_help.no_tui": "Tắt TUI toàn màn hình; dùng REPL không giao diện thuần túy thay thế",
+  "cli.global_help.tui": "Buộc dùng TUI toàn màn hình kể cả khi stdout không phải tty (báo lỗi rõ ràng nếu TUI không chạy được khi không có tty)",
+  "cli.global_help.yolo_conditional": "Có điều kiện cho lệnh tạo ngang hàng của động từ này: phiên chỉ bắt đầu không giám sát khi thiết bị đích cấp cho thiết bị này khả năng `unattended`",
+  "cli.global_help.propagated_resume": "Tiếp tục một phiên trước đó theo id. Không kèm id để lấy phiên gần nhất.",
+  "cli.global_help.propagated_hosting": "Nhà cung cấp cho lần chạy này (ví dụ: anthropic, openai, openrouter)",
+  "cli.global_help.propagated_model": "Mô hình sẽ dùng cho lần chạy này",
+  "cli.global_help.propagated_run_in": "Thư mục làm việc để chạy operator"
+}

@@ -1,0 +1,8 @@
+{
+  "cli.update_help.update": "Nâng cấp bản cài này từ PyPI. Không phải script lop-update, vốn dựng lại runtime toàn cục từ một bản checkout git cục bộ.",
+  "cli.update_help.check": "In bản đã cài so với PyPI; không cài",
+  "cli.update_help.from_snapshot": "Cài một cây mã nguồn cục bộ (một thư mục, hoặc một git ref của kho hiện tại) vào thế hệ cài đặt riêng. Trên macOS, ref đúng là một bản phát hành đã công bố sẽ cài wheel đã công bố từ PyPI — bản dựng duy nhất mang macOS key agent — còn mọi ref khác được dựng từ mã nguồn.",
+  "cli.update_help.allow_downgrade": "Cho phép --from-snapshot cài một bản dựng CŨ HƠN bản cài hiện tại (hoàn nguyên có chủ ý; được ghi vào dấu cài đặt). Không có --from-snapshot thì bị từ chối trên đường PyPI, vốn chỉ cài bản mới hơn; các cờ làm mới được ưu tiên.",
+  "cli.update_help.no_services": "Không đưa các daemon `lop serve` lên bản dựng mới; các daemon được giám sát vẫn được sửa. Chỉ dùng khi có thứ khác sẽ khởi động các serve, ví dụ một script nắm quyền khởi chạy chúng.",
+  "cli.update_help.no_roll": "Không xếp hàng đợt cuốn chiếu mesh cho lần cập nhật này, bất kể `network.rollout_on_update` nói gì; `lop network update` vẫn cuốn chiếu thủ công."
+}

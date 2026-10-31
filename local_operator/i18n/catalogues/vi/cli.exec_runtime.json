@@ -1,0 +1,13 @@
+{
+  "cli.exec_runtime.thinking": "· đang suy nghĩ…",
+  "cli.exec_runtime.tool_interrupted": "⊘ {name} bị ngắt",
+  "cli.exec_runtime.tool_failed": "✗ {name} thất bại",
+  "cli.exec_runtime.output_check_failed": "! kiểm tra đầu ra thất bại ({format}, lần thử {attempt}/{max_attempts}): {reason}",
+  "cli.exec_runtime.retry": "[dim]thử lại {attempt}: {error}[/dim]",
+  "cli.exec_runtime.model_fallback": "[dim]đã dự phòng sang {selector}[/dim]",
+  "cli.exec_runtime.model_switched": "[dim]đã chuyển sang {selector}[/dim]",
+  "cli.exec_runtime.model_returned": "[dim]đã quay lại {selector}[/dim]",
+  "cli.exec_runtime.compacting": "[dim]đang nén ngữ cảnh…[/dim]",
+  "cli.exec_runtime.error": "Lỗi: {sentence}",
+  "cli.exec_runtime.aborted": "[red]đã hủy bỏ[/red]"
+}
