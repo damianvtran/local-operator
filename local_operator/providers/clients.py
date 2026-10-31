@@ -3975,6 +3975,74 @@ class OpenAICompatClient:
         # Output item/call ids -> normalized tool-call index.
         call_indexes: dict[str, int] = {}
         output_items: dict[int, dict[str, Any]] = {}
+        argument_parts: dict[int, list[str]] = {}
+        output_call_indexes: dict[int, int] = {}
+        call_identities: dict[int, tuple[str, str, str]] = {}
+        finalized_arguments: set[int] = set()
+
+        def conflicting_call() -> ProviderError:
+            return ProviderError(
+                None,
+                "responses_tool_arguments_conflict",
+                retryable=False,
+                fail_closed=True,
+            )
+
+        def reconcile_arguments(index: int, arguments: Any) -> list[StreamToolCallDelta]:
+            """Final snapshots repeat deltas, but may be the ONLY argument source.
+
+            Append only a missing suffix. A contradictory snapshot cannot be
+            repaired with append-only deltas: fail closed before any pending
+            tool (especially a write) can execute with the wrong arguments.
+            """
+            if not isinstance(arguments, str):
+                return []
+            parts = argument_parts.setdefault(index, [])
+            streamed = "".join(parts)
+            if not arguments.startswith(streamed):
+                raise conflicting_call()
+            suffix = arguments[len(streamed) :]
+            if not suffix:
+                return []
+            envelope.charge(suffix)
+            parts.append(suffix)
+            return [StreamToolCallDelta(index=index, argument_delta=suffix)]
+
+        def reconcile_item(
+            item: Mapping[str, Any], output_index: int, *, final: bool = False
+        ) -> list[StreamToolCallDelta]:
+            nonlocal tool_call_count
+            if item.get("type") != "function_call":
+                return []
+            call_id = item.get("call_id") or item.get("id") or ""
+            item_id = item.get("id") or ""
+            index = call_indexes.get(call_id, call_indexes.get(item_id))
+            position_index = output_call_indexes.get(output_index)
+            if position_index is not None:
+                if index is not None and index != position_index:
+                    raise conflicting_call()
+                index = position_index
+            identity = (call_id, item_id, item.get("name") or "")
+            if index is not None and call_identities[index] != identity:
+                raise conflicting_call()
+            if final and not isinstance(item.get("arguments"), str):
+                raise conflicting_call()
+            events: list[StreamToolCallDelta] = []
+            if index is None:
+                index = tool_call_count
+                tool_call_count += 1
+                envelope.charge(item.get("name") or "")
+                events.append(StreamToolCallDelta(index=index, id=call_id, name=item.get("name")))
+                call_identities[index] = identity
+            output_call_indexes[output_index] = index
+            if final:
+                finalized_arguments.add(index)
+            if call_id:
+                call_indexes[call_id] = index
+            if item_id:
+                call_indexes[item_id] = index
+            events.extend(reconcile_arguments(index, item.get("arguments")))
+            return events
 
         async with self._http.stream(
             "POST",
@@ -4022,17 +4090,10 @@ class OpenAICompatClient:
                     item = payload.get("item") or {}
                     if item.get("type") == "reasoning":
                         continue
-                    if item.get("type") == "function_call":
-                        index = tool_call_count
-                        tool_call_count += 1
-                        call_id = item.get("call_id") or item.get("id") or ""
-                        item_id = item.get("id") or ""
-                        if call_id:
-                            call_indexes[call_id] = index
-                        if item_id:
-                            call_indexes[item_id] = index
-                        envelope.charge(item.get("name") or "")
-                        yield StreamToolCallDelta(index=index, id=call_id, name=item.get("name"))
+                    for event in reconcile_item(
+                        item, int(payload.get("output_index", tool_call_count))
+                    ):
+                        yield event
                 elif event_type == "response.output_item.done":
                     item = payload.get("item")
                     if isinstance(item, dict):
@@ -4044,16 +4105,30 @@ class OpenAICompatClient:
                             )
                         )
                         output_items[index] = item
+                        for event in reconcile_item(item, index, final=True):
+                            yield event
+                elif event_type == "response.function_call_arguments.done":
+                    call_id = payload.get("call_id") or payload.get("item_id") or ""
+                    index = call_indexes.get(call_id)
+                    if index is not None:
+                        if not isinstance(payload.get("arguments"), str):
+                            raise conflicting_call()
+                        finalized_arguments.add(index)
+                        for event in reconcile_arguments(index, payload.get("arguments")):
+                            yield event
                 elif event_type == "response.function_call_arguments.delta":
                     call_id = payload.get("call_id") or payload.get("item_id") or ""
                     delta = payload.get("delta")
                     if delta:
                         envelope.charge(delta)
                         fallback_index = int(payload.get("output_index", 0) or 0)
-                        yield StreamToolCallDelta(
-                            index=call_indexes.get(call_id, fallback_index),
-                            argument_delta=delta,
+                        index = call_indexes.get(
+                            call_id, output_call_indexes.get(fallback_index, fallback_index)
                         )
+                        if index in finalized_arguments:
+                            raise conflicting_call()
+                        argument_parts.setdefault(index, []).append(delta)
+                        yield StreamToolCallDelta(index=index, argument_delta=delta)
                 elif event_type == "response.output_text.delta":
                     delta = payload.get("delta")
                     if delta:
@@ -4071,12 +4146,19 @@ class OpenAICompatClient:
                         provider_payload = {"id": response_obj["id"]}
                     native = response_obj.get("output")
                     if not isinstance(native, list) or not native:
-                        native = [output_items[index] for index in sorted(output_items)]
+                        native_indexes = sorted(output_items)
+                        native = [output_items[index] for index in native_indexes]
+                    else:
+                        native_indexes = list(range(len(native)))
                     envelope.check(
                         _responses_output_bytes(
                             [item for item in native if isinstance(item, Mapping)]
                         )
                     )
+                    for output_index, item in zip(native_indexes, native):
+                        if isinstance(item, Mapping):
+                            for event in reconcile_item(item, output_index, final=True):
+                                yield event
                     # Terminal output is authoritative; .done events cover
                     # compatible endpoints whose terminal omits output.
                     replay_text: list[str] = []
@@ -4212,6 +4294,9 @@ class OpenAICompatClient:
                                 f"OpenAI Responses incomplete: {reason or 'unknown reason'}",
                                 retryable=False,
                             )
+                    # A terminal snapshot is authoritative. Do not append late
+                    # duplicate deltas from a compatible endpoint after it.
+                    break
                 elif event_type in ("response.failed", "error"):
                     raise _openai_response_error(payload)
 

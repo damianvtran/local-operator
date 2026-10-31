@@ -3662,7 +3662,15 @@ class AgentLoop:
                         else int(fingerprint is not None)
                     )
                     last_error_batch = fingerprint
-                    if repeated_error_batches >= REPEATED_TOOL_ERROR_LIMIT:
+                    # Missing required fields are known before execution: an unchanged
+                    # retry cannot improve them. Give one explicit correction opportunity,
+                    # not the six-call budget reserved for real execution failures.
+                    missing_required = bool(tool_results) and all(
+                        (result.details or {}).get("__missing_required_arguments")
+                        for result in tool_results
+                    )
+                    error_limit = 2 if missing_required else REPEATED_TOOL_ERROR_LIMIT
+                    if repeated_error_batches >= error_limit:
                         names = ", ".join(sorted({call.name for call in assistant.tool_calls}))
                         yield AgentEndEvent(
                             messages=new_messages,
@@ -3675,9 +3683,18 @@ class AgentLoop:
                             generation=generation,
                         )
                         return
-                    if repeated_error_batches == REPEATED_TOOL_ERROR_WARNING:
+                    if missing_required or repeated_error_batches == REPEATED_TOOL_ERROR_WARNING:
                         recovery = Message.user(
-                            "Harness recovery notice: the last three tool batches repeated "
+                            (
+                                "Harness recovery notice: required tool arguments were omitted. "
+                                "No rejected call ran. Supply the named required fields "
+                                "inside each call's argument object, including each "
+                                "parallel child's parameters; "
+                                "do not resend empty objects or invent values. If the values are "
+                                "unavailable, explain the blocker. An unchanged retry will stop."
+                            )
+                            if missing_required
+                            else "Harness recovery notice: the last three tool batches repeated "
                             "the same arguments and errors. Inspect the error and change approach; "
                             "do not repeat the unchanged failing calls. If an external condition "
                             "must change, use a supported wait operation or explain the blocker."
@@ -5467,14 +5484,31 @@ class AgentLoop:
 
         errors = validate_tool_arguments(tool, args, call.raw_arguments)
         if errors:
+            missing_required = [
+                name for name in (tool.parameters or {}).get("required", []) if name not in args
+            ]
+            guidance = ""
+            if missing_required:
+                # Use schema names, never guessed values or an example the model
+                # could mistake for permission to replay a write.
+                guidance = (
+                    ". Supply these fields in this call's arguments object; "
+                    "parallel calls each need their own populated parameters. "
+                    "Do not retry unchanged or invent missing values."
+                )
             text = self._with_deferred_hint(
-                "Invalid arguments: " + "; ".join(errors), tool.name, config
+                "Invalid arguments: " + "; ".join(errors) + guidance, tool.name, config
             )
             return _PlannedCall(
                 call=call,
                 tool=tool,
                 failure=self._synthetic_result(
-                    call, text, details={FAULT_KEY: FAULT_INVALID_ARGUMENTS}
+                    call,
+                    text,
+                    details={
+                        FAULT_KEY: FAULT_INVALID_ARGUMENTS,
+                        "__missing_required_arguments": missing_required,
+                    },
                 ),
             )
         # A tool's OWN plan-time refusal, after the schema check: the ordering
