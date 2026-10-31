@@ -229,9 +229,7 @@ async def test_already_disposing_owner_is_skipped_not_refused(tmp_path, monkeypa
     signal = AsyncMock(side_effect=AssertionError("idle-only stop must never signal"))
     monkeypatch.setattr(control, "_signal_and_confirm", signal)
 
-    outcome = await control.stop_session(
-        record, timeout_s=1, _root=tmp_path, graceful_only=True
-    )
+    outcome = await control.stop_session(record, timeout_s=1, _root=tmp_path, graceful_only=True)
 
     assert outcome.method == "draining"
     assert outcome.reason == ""
