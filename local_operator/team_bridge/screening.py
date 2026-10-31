@@ -1297,6 +1297,11 @@ async def _screen_core(
             return ScreenResult("hold", hold_code=code)
         raise
     except Exception as failure:  # noqa: BLE001 - sanitized hold; never prose
+        # A CLOSED class from the exception's type/typed fields (never its
+        # text), so the receiver status can say what kind of failure parked
+        # the message — ``chain_exhausted`` when every configured hop failed.
+        from local_operator.team_bridge.model_boundary import screening_failure_class
+
         # The breaker measures the ROUTE, not the message (#3195). A stream
         # that the provider COMPLETED but that cannot admit -- the model's own
         # safety refusal, a reply truncated at the token ceiling -- proves the
@@ -1314,10 +1319,9 @@ async def _screen_core(
                 store.record_screening_success(owner)
             except StoreRefused:
                 pass
-            # The receiver status keeps the same closed class #3194 gives it
-            # (``stream_refused``); only the breaker accounting differs.
-            from local_operator.team_bridge.model_boundary import screening_failure_class
-
+            # The receiver status keeps the same closed class an answered
+            # refusal always had (``stream_refused``); only the breaker
+            # accounting differs.
             _commit_hold(
                 store,
                 owner,
@@ -1330,11 +1334,6 @@ async def _screen_core(
             )
             return ScreenResult("hold", hold_code=answered)
         retry_at = _record_failure(store, owner)
-        # A CLOSED class from the exception's type/typed fields (never its
-        # text), so the receiver status can say what kind of failure parked
-        # the message — ``chain_exhausted`` when every configured hop failed.
-        from local_operator.team_bridge.model_boundary import screening_failure_class
-
         _commit_hold(
             store,
             owner,
