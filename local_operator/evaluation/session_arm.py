@@ -169,7 +169,11 @@ from local_operator.evaluation.runner.provider_client import (
     build_completion_challenge,
 )
 from local_operator.evaluation.runner.public_reply import tolerated_fields_note
-from local_operator.evaluation.runner.step_budget import StepPosition
+from local_operator.evaluation.runner.step_budget import (
+    StepPosition,
+    enforced_position,
+    restate_step_budget,
+)
 from local_operator.harness.types import (
     AgentEndEvent,
     AgentEvent,
@@ -1168,8 +1172,12 @@ class ActionBridge:
         #: looking at from HERE instead of calling the renderer again -- the
         #: renderer is stateful and a second render would append a duplicate
         #: turn to the transcript the model is shown.
-        self._initial_shown: tuple[str, list[Any]] | None = None
-        self._last_shown: tuple[str, list[Any]] | None = None
+        #: ``(observation_id, rendered blocks, step position rendered with)``.
+        #: The position is kept so a re-attach (the completion challenge) can
+        #: restate the budget line at the position CURRENT then -- the
+        #: challenge itself charges a step after the screen was rendered.
+        self._initial_shown: tuple[str, list[Any], StepPosition | None] | None = None
+        self._last_shown: tuple[str, list[Any], StepPosition | None] | None = None
         #: The terminal assistant message the prose arm reads. Updated by
         #: ``fold`` on every ``MessageEndEvent``, so once the turn ends this is
         #: the message the run ended on -- a prose "Done" never reaches
@@ -1226,7 +1234,11 @@ class ActionBridge:
         if self._token is not None:
             raise SessionArmError("the action bridge was already armed with an observation")
         self._token = PendingObservationToken(observation)
-        self._initial_shown = (observation.observation_id, list(self.render(observation)))
+        self._initial_shown = (
+            observation.observation_id,
+            list(self.render(observation)),
+            self.step_position(),
+        )
         self._last_observation = observation
 
     @property
@@ -1241,18 +1253,21 @@ class ActionBridge:
     def steps(self) -> int:
         return self._steps
 
-    def step_position(self) -> StepPosition:
+    def step_position(self) -> StepPosition | None:
         """The budget position the model is shown, on the ENFORCED clocks.
 
         ``max_steps`` is enforced on BOTH clocks (``call`` refuses at
         ``_attempted_groups >= max_steps`` and at ``_steps >= max_steps``), so
         the binding one -- the larger -- is what has been used: stating the
         smaller would promise steps the bridge will refuse. Read live, so a
-        ``max_steps`` changed mid-run is stated as the value now enforced.
-        See ``runner.step_budget`` for why the model is told at all.
+        ``max_steps`` changed mid-run is stated as the value now enforced --
+        the driver's stop gate reads this same ``bridge.max_steps``. ``None``
+        for a cap below 1: that episode is refused at its first call and has
+        no position to state. See ``runner.step_budget`` for why the model is
+        told at all.
         """
 
-        return StepPosition(used=max(self._steps, self._attempted_groups), budget=self.max_steps)
+        return enforced_position(max(self._steps, self._attempted_groups), self.max_steps)
 
     @property
     def attempted_groups(self) -> int:
@@ -1501,11 +1516,17 @@ class ActionBridge:
         total by construction. The empty fallback exists only so a future
         arming path cannot make the bridge raise inside a socket handler; it is
         not a state either shipped path can produce.
+
+        The blocks are the ones already shown -- never a re-render, which would
+        charge the builder's per-turn state twice -- except that their budget
+        line is restated at the position NOW: a challenge consumes a step after
+        the screen was rendered, and the stale count would understate ``used``
+        by one at the very moment the model weighs whether to stop.
         """
 
         for shown in (self._last_shown, self._initial_shown):
             if shown is not None and shown[0] == observation.observation_id:
-                return shown[1]
+                return restate_step_budget(shown[1], shown[2], self.step_position())
         return []
 
     def fold(self, event: AgentEvent) -> None:
@@ -2020,7 +2041,7 @@ class ActionBridge:
             # state alone -- the note is a correction of an EARLIER reply, and
             # re-attached to an unrelated claim it reads as guidance for the
             # claim instead. It is delivered once, on the call's own result.
-            self._last_shown = (result.observation.observation_id, rendered)
+            self._last_shown = (result.observation.observation_id, rendered, self.step_position())
             note = tolerated_fields_note(tolerated_fields)
             if note is not None:
                 # The correction for a sibling field this call carried and the
@@ -2271,7 +2292,7 @@ class ActionBridge:
         ]
         if shown_before is None or shown_before.observation_id != recovered.observation_id:
             rendered = (self.render_read_only or self.render)(recovered)
-            self._last_shown = (recovered.observation_id, rendered)
+            self._last_shown = (recovered.observation_id, rendered, self.step_position())
             self._last_observation = recovered
             content = [*content, *rendered]
         if self.record is not None:
@@ -2337,7 +2358,7 @@ class ActionBridge:
         ]
         if shown_before is None or shown_before.observation_id != recovered.observation_id:
             rendered = self.render(recovered)
-            self._last_shown = (recovered.observation_id, rendered)
+            self._last_shown = (recovered.observation_id, rendered, self.step_position())
             self._last_observation = recovered
             content = [*content, *rendered]
         if self.record is not None:
@@ -2407,7 +2428,7 @@ class ActionBridge:
         ]
         if shown_before is None or shown_before.observation_id != recovered.observation_id:
             rendered = self.render(recovered)
-            self._last_shown = (recovered.observation_id, rendered)
+            self._last_shown = (recovered.observation_id, rendered, self.step_position())
             self._last_observation = recovered
             content = [*content, *rendered]
         if self.record is not None:
@@ -3401,6 +3422,10 @@ async def run_session_episode(
             #   produced no MessageEnd fold -- fires while the episode is
             #   still LIVE (``end_requested is None``): a completed
             #   terminal turn has nothing left to stop.
+            # The cap is read from the BRIDGE (seeded from
+            # ``config.max_steps``), the same value its refusals and the
+            # model's budget line read: one source, so the stated budget is
+            # literally the one this stop enforces.
             if (
                 not budget_stop_sent
                 and handle is not None
@@ -3414,20 +3439,20 @@ async def run_session_episode(
                             call.name == declaration.tool_name for call in event.message.tool_calls
                         )
                         and bridge.end_requested is None
-                        and bridge.attempted_groups >= config.max_steps
+                        and bridge.attempted_groups >= bridge.max_steps
                     )
                     or (
                         isinstance(event, ToolExecutionEndEvent)
                         and event.tool_name == declaration.tool_name
                         and (
-                            bridge.steps >= config.max_steps
-                            or bridge.attempted_groups >= config.max_steps
+                            bridge.steps >= bridge.max_steps
+                            or bridge.attempted_groups >= bridge.max_steps
                         )
                     )
                     or (
                         isinstance(event, TurnEndEvent)
                         and bridge.end_requested is None
-                        and bridge.attempted_groups >= config.max_steps
+                        and bridge.attempted_groups >= bridge.max_steps
                     )
                 )
             ):
@@ -3609,7 +3634,7 @@ async def run_session_episode(
             # The runner's guard truncation: a scored partial whose reason is
             # the guard's stable code (``truncation_reason`` on the reply arm).
             status = "truncated"
-        elif terminal_reason == "max-steps" or steps >= config.max_steps:
+        elif terminal_reason == "max-steps" or steps >= bridge.max_steps:
             status = "truncated"
             terminal_reason = terminal_reason or "max-steps"
         else:

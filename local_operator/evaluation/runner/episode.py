@@ -143,7 +143,7 @@ from local_operator.evaluation.runner.secrets import (
     SecretResolver,
     StaticSecretResolver,
 )
-from local_operator.evaluation.runner.step_budget import StepPosition
+from local_operator.evaluation.runner.step_budget import enforced_position
 
 # Cleanup kinds are a closed vocabulary in ``lifecycle.CleanupAction``. A worker
 # session is the one resource the parent always knows exists before the adapter
@@ -1173,11 +1173,7 @@ class EpisodeRunner:
             # The builder renders each turn once, so a re-decide of this turn
             # (a rejection, a challenge) cannot restate a different number.
             self._turns[-1] = self._turns[-1].model_copy(
-                update={
-                    "step_budget": StepPosition(
-                        used=self._steps_taken, budget=self._config.max_steps
-                    )
-                }
+                update={"step_budget": enforced_position(self._steps_taken, self._config.max_steps)}
             )
             decision = await self._decide(current)
             batch = decision.action_batch

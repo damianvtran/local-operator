@@ -31,6 +31,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -4285,6 +4286,7 @@ _LIFETIME_PROBE = '''
 import asyncio
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -5232,13 +5234,91 @@ class TestStepBudgetPosition:
         challenge = reply["content"][0].text
         assert "That declaration is a CLAIM" in challenge
         assert "the task as stated" in challenge
-        # The challenge text itself is unchanged; the re-attached screen is the
-        # one already shown (budget line included), never a re-render.
+        # The challenge text itself is unchanged and carries no line; the
+        # re-attached screen is the one already shown, never a re-render.
         assert "Step budget" not in challenge
         accepted = await bridge.call(
             {"actions": [{"kind": "finish", "status": "done", "reason": "filled the form"}]}
         )
         assert accepted["details"]["terminal"] == "finish"
+
+    @pytest.mark.asyncio
+    async def test_the_challenge_re_attach_states_the_position_now(self, tmp_path: Path) -> None:
+        # Review r1 M1 / QA r1 Q2: the challenge CONSUMES a step after the
+        # screen was rendered, so the re-attached screen must state the
+        # position enforced at the moment the model reads it, not the count it
+        # carried when first shown ("0 of 5" while the bridge was at 1).
+        bridge = self._rendered_bridge(tmp_path, max_steps=5)
+        assert "Step budget: 0 of 5 steps used" in bridge.initial_blocks[0].text
+        reply = await bridge.call(
+            {"actions": [{"kind": "finish", "status": "done", "reason": "filled the form"}]}
+        )
+        assert reply["details"]["terminal"] == "completion-challenged"
+        enforced = max(bridge.steps, bridge.attempted_groups)
+        assert enforced == 1
+        reattached = "\n".join(
+            block.text for block in reply["content"][1:] if hasattr(block, "text")
+        )
+        shown = re.findall(r"Step budget: (\d+) of (\d+) steps used, (\d+) remaining", reattached)
+        assert shown == [(str(enforced), "5", str(5 - enforced))]
+        # The screen first delivered is left as it was delivered.
+        assert "Step budget: 0 of 5 steps used" in bridge.initial_blocks[0].text
+
+    @pytest.mark.asyncio
+    async def test_the_challenge_after_an_action_states_the_position_now(
+        self, tmp_path: Path
+    ) -> None:
+        # The same pin on ``_last_shown`` (a screen rendered by ``call``): the
+        # premature rule does not fire after an action, but the ``done`` gate
+        # does, and its re-attach must also read the live clocks.
+        bridge = self._rendered_bridge(tmp_path, max_steps=6)
+        await bridge.call({"actions": [{"kind": "wait", "duration_ms": 50}]})
+        bridge.fold(TurnEndEvent())
+        reply = await bridge.call(
+            {"actions": [{"kind": "finish", "status": "done", "reason": "filled the form"}]}
+        )
+        assert reply["details"]["terminal"] == "completion-challenged"
+        enforced = max(bridge.steps, bridge.attempted_groups)
+        assert enforced == 2
+        reattached = "\n".join(
+            block.text for block in reply["content"][1:] if hasattr(block, "text")
+        )
+        assert f"Step budget: {enforced} of 6 steps used, {6 - enforced} remaining." in reattached
+        assert "Step budget: 1 of 6" not in reattached
+
+    def test_a_zero_cap_arms_with_no_line(self, tmp_path: Path) -> None:
+        # Review r1 M3: base armed ``max_steps=0`` and refused at the first
+        # call; the line must not turn that into a validation crash before
+        # the first screen, nor state a ``0 of 0`` count.
+        bridge = self._rendered_bridge(tmp_path, max_steps=0)
+        assert bridge.step_position() is None
+        assert "Step budget" not in bridge.initial_blocks[0].text
+
+    @pytest.mark.asyncio
+    async def test_a_zero_cap_still_ends_at_the_first_call(self, tmp_path: Path) -> None:
+        bridge = self._rendered_bridge(tmp_path, max_steps=0)
+        result = await bridge.call({"actions": [{"kind": "wait", "duration_ms": 50}]})
+        assert "Step budget" not in "\n".join(
+            block.text for block in result["content"] if hasattr(block, "text")
+        )
+        assert bridge.steps == 0
+
+    @pytest.mark.asyncio
+    async def test_a_cap_lowered_to_zero_mid_run_drops_the_line(self, tmp_path: Path) -> None:
+        bridge = self._rendered_bridge(tmp_path, max_steps=5)
+        obs1 = _observation(sequence=1, text="screen B")
+
+        async def lowering_execute(batch: Any) -> ExecuteResult:
+            del batch
+            bridge.max_steps = 0
+            return _result(input_observation=_observation(), output_observation=obs1)
+
+        bridge.execute = lowering_execute
+        result = await bridge.call({"actions": [{"kind": "wait", "duration_ms": 50}]})
+        text = result["content"][0].text
+        assert bridge.step_position() is None
+        assert "Step budget" not in text
+        assert text.endswith("screen B")
 
     def test_a_renderer_without_a_budget_is_unchanged(self, tmp_path: Path) -> None:
         # No ``step_position`` wired: the content is the builder's base render.
