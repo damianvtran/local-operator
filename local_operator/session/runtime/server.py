@@ -7769,9 +7769,11 @@ class RuntimeServer:
         to the session's loop, and taking it from the registrant thread failed
         the session's OWN turn persistence ("bound to a different event loop",
         QA round 3, Q5 — intermittent, 1/5 runs on an embedded ``OperatorApp``).
-        A handle that offers ``call_on_session`` (``TuiSessionHandle``, whose
-        loop is the app's and which publishes no ``session_loop``) is asked to
-        run the call there; every other handle goes through the ordinary hop.
+        A handle that offers ``call_on_session`` is asked to run the call there:
+        ``TuiSessionHandle`` (whose loop is the app's and which publishes no
+        ``session_loop``, so the ordinary hop would run it INLINE here) and
+        ``ServingSessionHandle`` (which hops to its published loop). Any other
+        handle — a reduced host — goes through the ordinary hop.
         """
         hop = getattr(self._handle, "call_on_session", None)
 

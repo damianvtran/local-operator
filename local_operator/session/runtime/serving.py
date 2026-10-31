@@ -3396,6 +3396,37 @@ class ServingSessionHandle(SessionHandle):
         """
         return self._loop
 
+    @_on_session_loop
+    async def call_on_session(self, fn: Callable[[Any], Any]) -> Any:
+        """Run ``fn(session)`` on the session's loop and await its result.
+
+        The owned twin of ``TuiSessionHandle.call_on_session``, for a runtime
+        caller that must touch the SESSION rather than one of this handle's verbs
+        — today the cwd-move hold and expiry announcements
+        (``RuntimeServer._announce_cwd_move``), whose ``journal_incident`` takes
+        the transcript's loop-bound lock (QA round 3, Q5). Implemented here
+        rather than left to the server's ``_session`` fallback because the
+        server probes for this capability, and the capability-surface guard
+        requires the handle EVERY session uses to answer what the server asks
+        for: an owned session reaching the same notice through a second,
+        unadvertised path is the drift that guard exists to stop.
+
+        NO DEADLOCK BY CONSTRUCTION: ``@_on_session_loop`` hands the body to the
+        session's loop with ``run_coroutine_threadsafe`` and awaits it through
+        ``wrap_future`` (never ``.result()``), and runs it inline when the caller
+        is already on that loop, so neither loop ever waits on itself. An
+        awaitable result (``queue_notice``/``journal_incident`` are ``async``)
+        is awaited here, i.e. on the session's loop too.
+
+        ``_check_loop_thread`` refuses the closed-loop case the decorator runs
+        inline, as the other session-writing bodies do: a transcript write on the
+        runtime's thread is exactly the Q5 failure, and the announcement's caller
+        already treats a refusal as "log, do not break the runtime".
+        """
+        self._check_loop_thread()
+        result = fn(self._session)
+        return await result if inspect.isawaitable(result) else result
+
     @property
     def session_projection_seed(self) -> SessionProjection:
         """The projection skeleton: identity fields the runtime folds onto.
