@@ -45,6 +45,12 @@ THE CHANNEL OPS work the conversation domain AS THIS SESSION'S AGENT:
   coordinate without flooding the channel (e.g. one QA-claim thread per item
   in #agents). Threads are one level: the root must be a channel-level message.
 
+  ``in_reply_to_message_id`` binds the exact admitted inbound message to this
+  conversation BEFORE lookup, budget or network I/O. Thread roots do not bind
+  replies. After actual bridge input dispatch in a run, supply this binding or
+  declare ``new_post: true`` intentionally. That declaration is model-supplied
+  intent, NOT semantic isolation, trusted authority, or duplicate suppression.
+
   ``to: {"name": …}`` DIRECTS the post at one member, and the name is resolved,
   never guessed: trimmed, case-insensitive, whole DISPLAY name only (no handle,
   no email, no substring), against THIS conversation's ACTIVE members — the
@@ -272,6 +278,9 @@ class BridgeRuntime:
     #: a later boundary may re-admit it once the local gates hold (§36).
     admission: str = "pending"
     admission_note: str = ""
+    # Run-local dispatch evidence, never inferred from persisted conversation
+    # text. Remains true after owed cards clear; the session resets at boundaries.
+    bridge_input_presented: bool = False
     #: The ONE shared in-flight admission task (S-2): callers JOIN it instead
     #: of queueing their own fetch, and it is cancelled/discarded when the
     #: bound authority is revoked. Lazily created (no loop-bound default).
@@ -402,6 +411,17 @@ class BridgeToolParams(BaseModel):
     #: channel_post: reply in this root message's thread; channel_thread: the
     #: thread to read. A conversation message id (bcmsg_…).
     thread_root_id: str = ""
+    in_reply_to_message_id: str = Field(
+        default="",
+        description="Exact admitted inbound bcmsg_ being answered; distinct from thread_root_id.",
+    )
+    new_post: bool = Field(
+        default=False,
+        description=(
+            "Intentionally start a new post instead of replying to bridge input. "
+            "An intent declaration only, not semantic isolation or outbound authority."
+        ),
+    )
     # dm: the person (account_id) or agent (endpoint_id, from `directory`).
     # Kept as plain strings so the shared pair-lane validator never reads them
     # as a `send` recipient; `to` reaches these same two fields through
@@ -1371,6 +1391,58 @@ def _channel_members_with_creator(
     return out
 
 
+def _validate_reply_destination(
+    runtime: BridgeRuntime, args: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Bind a declared reply before admission I/O, member lookup or budget.
+
+    A thread root is presentation, not evidence of which inbound delivery is
+    being answered. The explicit new-post escape hatch states intent only: a
+    model can misdeclare it, so this is not a semantic noninterference claim.
+    """
+    from .store import Store, StoreRefused
+
+    message_id = args.get("in_reply_to_message_id", "")
+    new_post = args.get("new_post", False)
+    if not isinstance(message_id, str) or not isinstance(new_post, bool):
+        return _error("reply binding needs a message id string and boolean new_post")
+    message_id = message_id.strip()
+    if message_id and new_post:
+        return _error(
+            "new_post contradicts in_reply_to_message_id; nothing was sent",
+            code="reply_binding_conflict",
+        )
+    if not message_id:
+        if runtime.bridge_input_presented and not new_post:
+            return _error(
+                "this run received bridge input: supply in_reply_to_message_id "
+                "or intentionally declare new_post; thread_root_id is not reply binding",
+                code="reply_binding_required",
+            )
+        return None
+    if _CONVERSATION_MESSAGE_ID.fullmatch(message_id) is None:
+        return _error("in_reply_to_message_id must be an admitted message id (bcmsg_…)")
+    try:
+        row = Store(Path(runtime.config_dir)).admitted_inbound_reservation_readonly(
+            runtime.owner,
+            in_reply_to_message_id=message_id,
+            designated_session=runtime.session_id,
+        )
+    except (StoreRefused, OSError, UnicodeDecodeError):
+        return _error("reply binding could not be verified; nothing was sent", code="reply_binding_unavailable")
+    if row is None:
+        return _error("no unique current admitted reply binding; nothing was sent", code="reply_binding_unavailable")
+    channel_id = args.get("channel_id", "")
+    if not isinstance(channel_id, str):
+        return _error("channel_post needs a conversation id (bcv_…)")
+    if row["conversation_id"] != channel_id.strip():
+        return _error(
+            "in_reply_to_message_id belongs to a different conversation; nothing was sent",
+            code="reply_destination_mismatch",
+        )
+    return None
+
+
 async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[str, Any]:
     """Run one tool op. Returns a JSON-ish dict; the AgentTool wrapper turns it
     into a ``ToolResult`` (and the honest error shape into ``is_error``)."""
@@ -1419,6 +1491,10 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
     fence = outbound_tool_fence(runtime) if op in OUTBOUND_OPS else owner_fence_refusal(runtime)
     if fence is not None:
         return _error(fence["error"], code=fence["code"])
+    if op == "channel_post":
+        refused = _validate_reply_destination(runtime, args)
+        if refused is not None:
+            return refused
     # Refuse unsupported destinations before even scheduling admission I/O.
     # The local authority fence keeps precedence; no invalid destination can
     # create an outbox intent, send a message, or trigger a status request.
