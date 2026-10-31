@@ -5371,13 +5371,12 @@ class Session:
 
         # A persisted wake envelope is human-visible immediately, but its
         # journal boundary is not proof that a model read the admitted body.
-        # Historical eligibility is re-read here, for every provider/aside/
-        # compaction render; only exact completed admissions may bypass the
-        # shared renderer's structural delivery_pending projection.
+        # Historical status is re-read here for every provider/aside/compaction
+        # render. Completion chooses a content-free earlier-delivery marker;
+        # no historical envelope bytes can bypass the shared renderer.
         projected = project_history(
             messages,
             runtime=lambda: getattr(self, "bridge_runtime", None),
-            transcript=self._transcript,
         )
         rendered = self._convert_to_llm(
             self._live_project_reminders(self._live_todo_reminders(projected))

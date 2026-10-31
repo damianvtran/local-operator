@@ -290,23 +290,16 @@ class PendingTurn:
         text = self.for_call()
         if text is None:
             return messages
-        from .card_projection import admit_matching_cards, mark_admitted_frame
+        from .card_projection import mark_admitted_frame
         from .request_body import CustomFrameInjection
 
         shaped = CustomFrameInjection.append(messages, text, message_id=self._frame_message_id())
         if self._presentation_ref is not None:
             mark_admitted_frame(shaped[-1], self._presentation_ref, self._card_admission_intact)
-        # A tool-safe journal flush may expose a card long before this hook
-        # can hydrate it. Only this live, claim-checked request copy may pair
-        # that exact card with the screened frame; never mutate the journal.
-        return admit_matching_cards(
-            shaped,
-            frame=shaped[-1],
-            tenant_id=self._owner.tenant_id,
-            conversation_id=self._conversation_id or "",
-            message_id=self._message_id or "",
-            valid=self._card_admission_intact,
-        )
+        # This native frame contains screened source metadata AND body. Raw
+        # journal cards never borrow its admission by repeating the same ids;
+        # they remain content-free markers even in this very request.
+        return shaped
 
     def _card_admission_intact(self) -> bool:
         """Reused ephemeral copies cannot outlive their exact admission lease."""
