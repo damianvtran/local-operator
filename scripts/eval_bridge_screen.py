@@ -35,7 +35,8 @@ Everything else is written under ``--out``.
 
 EXIT CODES
     0  the run (or comparison) completed; every planned trial ran and none is invalid
-    1  the plan is invalid (bad corpus, refused template, bad flags); nothing ran
+    1  the plan is invalid (bad corpus, refused template, bad flags, or --out already
+       holds trials.jsonl without --resume); nothing ran
     3  preflight refused (no provider credential for a model)
     5  PARTIAL: --max-calls stopped some trials, or some trials are invalid
 """
@@ -103,6 +104,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--organization", default=DEFAULT_ORGANIZATION)
     parser.add_argument("--dry-run", action="store_true", help="print the plan; make no call")
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="continue a run whose --out already holds trials.jsonl; attempted trials are skipped",
+    )
     parser.add_argument(
         "--compare",
         nargs=2,
@@ -232,6 +238,14 @@ def main(argv: list[str] | None = None) -> int:
         if stripped:
             print(f"stripped inherited env: {', '.join(sorted(stripped))}")
         print(json.dumps(described, indent=2))
+        if plan.max_calls is not None and plan.max_calls < plan.worst_case_calls:
+            # QA r1 Q3: the truncation used to surface only at run time, as exit 5.
+            short = "every planned trial" if plan.max_calls < plan.trial_count else "every retry"
+            print(
+                f"warning: --max-calls {plan.max_calls} is below the worst case "
+                f"{plan.worst_case_calls} ({plan.trial_count} trials x {1 + sb.MAX_RETRIES} "
+                f"attempts); the run may not cover {short} and would exit 5 (partial)"
+            )
         print(
             f"dry run: {plan.trial_count} trial(s), up to {plan.worst_case_calls} call(s) "
             f"with retries; no model call made"
@@ -242,6 +256,15 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_PLAN
     if args.max_calls is None:
         print("--max-calls is required for a run (a hard spend cap)", file=sys.stderr)
+        return EXIT_PLAN
+    existing = args.out / "trials.jsonl"
+    if existing.exists() and existing.stat().st_size > 0 and not args.resume:
+        # Checked here, before preflight opens any store, as well as in run_plan.
+        print(
+            f"{existing} already holds trials; pass --resume to continue that run, "
+            f"or choose a fresh --out",
+            file=sys.stderr,
+        )
         return EXIT_PLAN
 
     auth = _open_auth_store()
@@ -261,7 +284,11 @@ def main(argv: list[str] | None = None) -> int:
         async def run():
             try:
                 return await sb.run_plan(
-                    plan, out_dir=args.out, leg_factory=factory, progress=progress
+                    plan,
+                    out_dir=args.out,
+                    leg_factory=factory,
+                    progress=progress,
+                    resume=args.resume,
                 )
             finally:
                 await _close_streams(streams)

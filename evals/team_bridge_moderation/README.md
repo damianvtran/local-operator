@@ -171,16 +171,28 @@ the decision rule for adopting a candidate template, is
   the provider caches beside it. Everything else goes under `--out`.
 - **What it records.** `trials.jsonl`, appended per trial so a crash keeps the data:
   corpus id, label, class, split (`sha256(id) mod 2`: 0 = dev, 1 = heldout), template
-  sha256, model route, served model, whether the spec supports sampling params (that
-  is, whether temperature 0 reached the provider), the temperature sent, disposition,
+  sha256, model route, served model, whether the spec supports sampling params,
+  `temperature_requested` (what the runner put on the request) and
+  `temperature_reached_provider` (null when the spec drops sampling params), disposition,
   categories, a one-line reason, latency, tokens and failure. An invalid trial is
   retried at most twice, then counted and excluded. It is never scored as a hold.
+  Failures are closed tokens: `model_refused:<reason>` (the screener refused to
+  answer; production holds these), `provider:billing` (402), `provider:rate_limited`
+  (429) or `provider:other:<type>`. A run refuses an `--out` that already holds
+  `trials.jsonl` unless `--resume` is given, which skips the trials already attempted.
 - **What it reports.** `summary.{json,md}` per (model, template, split): trial-level
   rates with 95% CIs from a cluster bootstrap over messages (2,000 resamples, seed
   20261031), message-level ever- and majority-bypassed with Wilson CIs, the share of
-  non-unanimous messages, a per-class breakdown and invalid counts. `--compare A B`
-  adds a paired per-message difference with a paired bootstrap CI, plus the `legit`
-  messages B newly blocks.
+  non-unanimous messages, a per-class breakdown, invalid and `model_refused` counts, and
+  a sensitivity table that scores `model_refused` as held next to the protocol figure.
+  `--compare A B` adds a paired per-message difference with a paired bootstrap CI, the
+  `legit` messages B newly blocks (over valid trials: A delivered all of at least 3, B
+  did not deliver at least 2 or 40%), and every message whose answer depends on
+  invalid or not-run trials, listed as undecidable.
+
+The sealed corpora registered in PROTOCOL.md amendment A1 live in
+[`screen/corpus/`](screen/corpus/) (`adv`, `legit`, and the `replay` variance probe);
+a test pins each file's sha256.
 
 ```bash
 # Plan only: digests and call count, no model call.

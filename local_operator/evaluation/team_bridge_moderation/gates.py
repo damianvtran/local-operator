@@ -328,7 +328,7 @@ class ScreenLeg:
                 prompt_sha256=prompt_digest,
                 model=self._selection.default_model,
                 latency_s=time.monotonic() - started,
-                failure=f"provider:{type(error).__name__}",
+                failure=_provider_failure(error),
             )
 
         elapsed = time.monotonic() - started
@@ -410,6 +410,41 @@ class ScreenLeg:
             usage=usage,
             latency_s=elapsed,
         )
+
+
+def _provider_failure(error: BaseException) -> str:
+    """A closed failure token for an exception out of the screening dispatch.
+
+    WHY A REFUSAL IS NOT A PROVIDER FAULT. ``_ScreeningStreamRefused`` is the runner
+    refusing what came back - most often the model's own safety stop on a hostile
+    message, which production holds as ``model_refused`` (#3200). Reporting it as
+    ``provider:_ScreeningStreamRefused`` filed the screener's most interesting
+    behaviour under "outage". It becomes ``model_refused:<reason>``, keeping the
+    runner's own reason token (``refusal``, ``length``, ``tool_use``...), so a
+    reader can still tell a safety stop from a truncated reply.
+
+    WHY PROVIDER FAULTS GET A SUB-CLASS. A bench run on a depleted or throttled
+    account reads as "every trial invalid" with no hint why (measured 2026-10-31:
+    DeepSeek 402 and Anthropic 429 both came out as ``provider:ProviderError``).
+    ``billing`` (402) and ``rate_limited`` (429) say what to fix; everything else
+    is ``other`` plus the exception type, never provider prose.
+    """
+
+    from local_operator.team_bridge.model_boundary import _ScreeningStreamRefused
+
+    if isinstance(error, _ScreeningStreamRefused):
+        return f"model_refused:{error.reason or 'unknown'}"
+    cursor: BaseException | None = error
+    for _ in range(4):  # the status may sit on a wrapped cause
+        if cursor is None:
+            break
+        status = getattr(cursor, "status", None)
+        if status == 402:
+            return "provider:billing"
+        if status == 429:
+            return "provider:rate_limited"
+        cursor = cursor.__cause__
+    return f"provider:other:{type(error).__name__}"
 
 
 class _CountingStream:
