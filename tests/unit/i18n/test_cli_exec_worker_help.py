@@ -37,7 +37,6 @@ from pathlib import Path
 import local_operator
 from local_operator.i18n import catalogues, messages
 from local_operator.i18n.keys import cli_exec_worker_help as keys
-from local_operator.i18n.runtime import render_message
 from local_operator.i18n.text import tr
 from tests.unit.i18n import locale_coverage
 
@@ -155,7 +154,7 @@ def _collapse(text: str) -> str:
     return " ".join(text.split())
 
 
-def test_every_help_literal_renders_byte_for_byte() -> None:
+def test_every_help_literal_renders_byte_for_byte(monkeypatch) -> None:
     """The rendered English equals the string argparse used to receive.
 
     The catalogue value is the ICU SOURCE (a literal apostrophe is doubled for
@@ -166,10 +165,15 @@ def test_every_help_literal_renders_byte_for_byte() -> None:
     """
     from local_operator.exec_worker import build_parser
 
+    # This pins the source round-trip, not translation coverage. The parser
+    # resolves help independently of the process locale, so pin both paths.
+    monkeypatch.setenv("LOP_LANG", "en")
     rendered_help = _collapse(build_parser().format_help())
-    for key, source in _catalogue().items():
-        rendered = _t(messages.msg(key))
-        assert rendered == source.replace("''", "'"), key
+    for key in _catalogue():
+        rendered = messages.render(key, {}, locale="en")
+        # Compare to the frozen argparse literal, not another projection of the
+        # same catalogue: otherwise changing a --flag changes both sides.
+        assert rendered == REPLACED_LITERALS[key.rsplit(".", 1)[1]], key
         assert _collapse(rendered) in rendered_help, f"{key}: {rendered!r} is not shown by --help"
 
 
@@ -189,36 +193,16 @@ def test_every_generated_message_is_zero_argument() -> None:
         assert function().params == {}
 
 
-def test_translated_locales_use_their_copy_and_others_fall_back_to_english() -> None:
-    translated = locale_coverage.carrying(NAMESPACE)
-    untranslated = locale_coverage.absent(NAMESPACE)
-    locale_coverage.require_nonempty(
-        translated,
-        subject=f"{NAMESPACE} own copy",
-        detail="no shipped locale carries the namespace",
-    )
-    locale_coverage.require_nonempty(
-        untranslated,
-        subject=f"{NAMESPACE} fallback",
-        detail=f"every shipped locale carries it (carries={list(translated)})",
-    )
-    own_copy = {locale: catalogues.load_catalogue(locale, NAMESPACE) for locale in translated}
-    for function in (keys.prompt(), keys.resume(), keys.job_id()):
-        english = messages.render(function.code, function.params, locale="en")
-        for locale, catalogue in own_copy.items():
-            rendered = messages.render(function.code, function.params, locale=locale)
-            # The locale carries this namespace: the catalogue is the expected
-            # bytes, and it must be a real translation, not the English source.
-            assert rendered == render_message(
-                catalogue[function.code], function.params, locale
-            ), locale
-            assert rendered != english, locale
-        # Every shipped locale without this namespace still renders the source.
-        for locale in untranslated:
-            assert messages.render(function.code, function.params, locale=locale) == english, locale
-        # An unshipped tag is not a locale: it resolves to the source too, which
-        # is a different guarantee from "shipped but untranslated".
-        assert messages.render(function.code, function.params, locale="unknown") == english
+def test_supported_locales_use_carried_keys_or_english() -> None:
+    for message in (keys.prompt(), keys.resume(), keys.job_id()):
+        for locale in locale_coverage.supported_targets():
+            expected = locale_coverage.expected_message(
+                locale, NAMESPACE, message.code, message.params
+            )
+            assert messages.render(message.code, message.params, locale=locale) == expected, locale
+        assert messages.render(message.code, message.params, locale="unknown") == messages.render(
+            message.code, message.params, locale="en"
+        )
 
 
 def test_every_key_carries_full_context() -> None:

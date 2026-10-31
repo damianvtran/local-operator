@@ -13,7 +13,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
-from local_operator.i18n import locale_direction, resolve
+from local_operator.i18n import catalogues, locale_direction, resolve
 from local_operator.i18n.format import format_number, plural_category
 from local_operator.server.routes import capabilities, i18n
 from tests.unit.i18n import locale_coverage
@@ -80,23 +80,16 @@ async def test_mounted_capabilities_metadata_and_catalogue_gate(
         result = response.json()["result"]
         assert result["language"] == expected
         assert result["language_direction"] == direction
-        # Genuinely absent (locale, namespace) pairs, DERIVED from the committed
-        # catalogues: the raw route serves committed files only, and must 404 an
-        # absence rather than forge an English copy under the locale's tag. A
-        # hardcoded pair retires itself the moment that wave lands — this loop has
-        # already had to move it twice, most recently when `relay.approvals`
-        # reached every locale.
-        absent = locale_coverage.absent_pairs()
-        locale_coverage.require_nonempty(
-            absent,
-            subject="catalogue 404",
-            detail="every shipped locale carries every authored namespace",
-        )
-        for locale, namespace in absent[:2]:
-            blocked = await client.get(
-                f"/v1/i18n/catalogues/{locale}/{namespace}", headers={"If-None-Match": "*"}
-            )
-            assert blocked.status_code == 404, (locale, namespace)
+        # Exercise both raw-file outcomes without requiring translation debt
+        # to exist. Full coverage is a healthy tree, not lost test coverage.
+        for locale in locale_coverage.supported_targets():
+            for namespace in catalogues.namespaces("en"):
+                path = catalogues.catalogue_root() / locale / f"{namespace}.json"
+                response = await client.get(
+                    f"/v1/i18n/catalogues/{locale}/{namespace}",
+                    headers={"If-None-Match": "*"},
+                )
+                assert response.status_code == (304 if path.is_file() else 404), (locale, namespace)
         for shipped in ("ur", "zh-CN", "en"):
             control = await client.get(
                 f"/v1/i18n/catalogues/{shipped}/wire.errors", headers={"If-None-Match": "*"}
