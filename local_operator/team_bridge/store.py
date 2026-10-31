@@ -1181,6 +1181,65 @@ def screening_hold_message_id(value: str) -> str:
     return ref.message_id if ref is not None else value
 
 
+def _screening_hold_row(
+    conn: sqlite3.Connection, owner_key: str, exact_key: str, message_id: str
+) -> sqlite3.Row | None:
+    """The ONE hold-row lookup for a message, across both stored keyspaces (#3199).
+
+    WHY TWO KEYSPACES. The connector queues a conversation message's retry under
+    its canonical feed ref (``message_available:conversation_id=<bcv>/<bcmsg>/…``,
+    see :func:`_contentless_delivery_key`) because the retry has to re-drive the
+    conversation, and a bare ``bcmsg_`` id cannot name one. Every READ surface,
+    however, asks by the bare id — that is the key receipts, intents and the
+    hub's page rows carry. A reader that looked under the bare id alone answered
+    "no hold" for every held conversation message, so the agent saw
+    ``unreviewed`` with ``content: null`` and no sign the message was held.
+
+    HOW. The exact key is tried first (pair ids, screener-written bare rows, and
+    a caller that already holds the composite). Only for a bare CONVERSATION id
+    does it then join the owner's composite rows back to their bare id through
+    :func:`screening_hold_message_id` — the same parser the status counters use,
+    so there is one mapping between the two spellings, not a second one here.
+    The bare id cannot be forward-encoded into the composite (it lacks the
+    conversation and sequence), hence the reverse join. Pair ids (``bmsg_…``)
+    are never widened: they have one spelling.
+
+    CONSTRAINTS. Read-only: it only SELECTs on the caller's connection (and so
+    inside the caller's transaction — ``content_proof_readonly`` depends on that
+    for its one-snapshot guarantee) and never re-keys the connector's table,
+    whose composite spelling ``delete_hold`` and the retry loop depend on. The
+    ``substr``/``instr`` prefilter only narrows the scan; the parser decides, so
+    a ``thread_root=`` tag naming the id, or a malformed composite, never
+    matches. Several composite rows for one id (re-queued under another
+    sequence) resolve to the earliest-created one, deterministically.
+    """
+
+    from local_operator.team_bridge.types import (
+        CONVERSATION_FEED_KIND,
+        CONVERSATION_FEED_TYPE,
+        is_conversation_message_id,
+    )
+
+    row = conn.execute(
+        "SELECT hold_code, retry_at, created_at FROM screening_holds "
+        "WHERE owner_key = ? AND message_id = ?",
+        (owner_key, exact_key),
+    ).fetchone()
+    if row is not None or not is_conversation_message_id(message_id):
+        return row
+    prefix = f"{CONVERSATION_FEED_TYPE}:{CONVERSATION_FEED_KIND}="
+    candidates = conn.execute(
+        "SELECT message_id, hold_code, retry_at, created_at FROM screening_holds "
+        "WHERE owner_key = ? AND substr(message_id, 1, ?) = ? "
+        "AND instr(message_id, ?) > 0 ORDER BY created_at, message_id",
+        (owner_key, len(prefix), prefix, f"/{message_id}/"),
+    ).fetchall()
+    for candidate in candidates:
+        if screening_hold_message_id(str(candidate["message_id"])) == message_id:
+            return candidate
+    return None
+
+
 #: Hold codes a status read may emit verbatim, beyond screening's own
 #: ``screening.HOLD_CODES`` (imported lazily: ``screening`` imports this
 #: module). WHY a closed list (PR #3189 review m1): ``hold_code`` is a TEXT
@@ -3321,11 +3380,7 @@ class Store:
                 if version is not None and version[0] == str(SCHEMA_VERSION)
                 else str(message_id)
             )
-            row = conn.execute(
-                "SELECT hold_code, retry_at, created_at FROM screening_holds "
-                "WHERE owner_key = ? AND message_id = ?",
-                (_owner_key(owner), lookup),
-            ).fetchone()
+            row = _screening_hold_row(conn, _owner_key(owner), lookup, str(message_id))
             if row is None:
                 return None
             return {
@@ -3405,11 +3460,15 @@ class Store:
                     "AND target = 'read'",
                     (key, message_id),
                 ).fetchone()
-                hold_row = conn.execute(
-                    "SELECT hold_code, retry_at, created_at FROM screening_holds "
-                    "WHERE owner_key = ? AND message_id = ?",
-                    (key, message_id),
-                ).fetchone()
+                # Same connection, same deferred transaction: a conversation
+                # hold stored under its feed ref is part of this one snapshot.
+                hold_row = _screening_hold_row(conn, key, message_id, message_id)
+                if hold_row is not None:
+                    hold_row = {
+                        "hold_code": hold_row["hold_code"],
+                        "retry_at": hold_row["retry_at"],
+                        "created_at": hold_row["created_at"],
+                    }
                 intent = dict(intent_row) if intent_row is not None else None
                 if intent is not None:
                     intent["categories"] = _decode_intent_categories(intent.get("categories"))
@@ -5874,11 +5933,9 @@ class Store:
         try:
             with self._connect() as conn:
                 self._init(conn)
-                row = conn.execute(
-                    "SELECT hold_code, retry_at, created_at FROM screening_holds "
-                    "WHERE owner_key = ? AND message_id = ?",
-                    (_owner_key(owner), _contentless_delivery_key(message_id)),
-                ).fetchone()
+                row = _screening_hold_row(
+                    conn, _owner_key(owner), _contentless_delivery_key(message_id), message_id
+                )
                 if row is None:
                     return None
                 return {
