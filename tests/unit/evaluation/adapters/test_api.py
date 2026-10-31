@@ -342,3 +342,136 @@ def test_probe_is_optional_at_the_plugin_surface() -> None:
         {name: value for name, value in vars(_MinimalAdapter).items() if name != "observe"},
     )
     assert not isinstance(missing_observe(), EvaluationAdapter)
+
+
+# ---------------------------------------------------------------------------
+# The remote command capability (``run_command``)
+# ---------------------------------------------------------------------------
+
+
+def test_capability_command_is_omitted_while_false_and_rides_when_true() -> None:
+    """A target that cannot run commands keeps its exact old hello bytes.
+
+    Same wire discipline as ``drag``: the false is omitted so an adapter that
+    never heard of the capability -- and an old parent's ``extra="forbid"`` --
+    see byte-identical capabilities; only a true rides the wire.
+    """
+
+    off = AdapterCapabilities(routes=("computer",), ask_user=True, scoring=True)
+    on = AdapterCapabilities(routes=("computer",), ask_user=True, scoring=True, command=True)
+    assert "command" not in json.loads(off.to_canonical_json())
+    assert json.loads(on.to_canonical_json())["command"] is True
+    assert AdapterCapabilities.model_validate(json.loads(off.to_canonical_json())).command is False
+    # Both omissions at once: neither false key leaks onto the wire.
+    both_off = json.loads(off.to_canonical_json())
+    assert "drag" not in both_off and "command" not in both_off
+
+
+def test_run_command_is_a_keyed_running_method_outside_the_structural_check() -> None:
+    from local_operator.evaluation.adapters.api import (
+        KEYED_METHODS,
+        METHOD_NEXT_STATE,
+        METHOD_STATES,
+        PARAM_MODELS,
+        READ_ONLY_METHODS,
+        RESULT_MODELS,
+        EvaluationAdapter,
+        RunCommandParams,
+        RunCommandResult,
+    )
+
+    assert METHOD_STATES["run_command"] == frozenset({"RUNNING"})
+    assert METHOD_NEXT_STATE["run_command"] == "RUNNING"
+    assert PARAM_MODELS["run_command"] is RunCommandParams
+    assert RESULT_MODELS["run_command"] is RunCommandResult
+    # A command may change the target, so it carries an operation key (a
+    # re-sent request replays the recorded answer instead of running twice)
+    # and is never read-only.
+    assert "run_command" in KEYED_METHODS
+    assert "run_command" not in READ_ONLY_METHODS
+    # Optional, like ``probe``: an adapter without it must stay loadable.
+    assert "run_command" not in EvaluationAdapter.__dict__.get("__annotations__", {})
+    assert not hasattr(EvaluationAdapter, "run_command")
+
+
+def _command_result(**overrides: object) -> dict[str, object]:
+    values: dict[str, object] = {
+        "exit_code": 0,
+        "timed_out": False,
+        "stdout": "hello\n",
+        "stderr": "",
+        "stdout_bytes": 6,
+        "stderr_bytes": 0,
+        "stdout_truncated": False,
+        "stderr_truncated": False,
+    }
+    values.update(overrides)
+    return values
+
+
+def test_run_command_result_shape_keeps_streams_and_truncation_apart() -> None:
+    from local_operator.evaluation.adapters.api import RunCommandResult
+
+    plain = RunCommandResult.model_validate(_command_result())
+    assert (plain.stdout, plain.stderr) == ("hello\n", "")
+    cut = RunCommandResult.model_validate(
+        _command_result(stdout="abc", stdout_bytes=10, stdout_truncated=True)
+    )
+    assert cut.stdout_truncated is True and cut.stderr_truncated is False
+    # A truncated stream must report a total larger than nothing: a flag with
+    # no size would say "something was cut" without saying how much.
+    with pytest.raises(ValidationError):
+        RunCommandResult.model_validate(
+            _command_result(stdout="", stdout_bytes=0, stdout_truncated=True)
+        )
+
+
+def test_run_command_result_ties_the_exit_code_to_the_timeout() -> None:
+    from local_operator.evaluation.adapters.api import RunCommandResult
+
+    timed = RunCommandResult.model_validate(_command_result(exit_code=None, timed_out=True))
+    assert timed.exit_code is None
+    # A timed-out command has no exit status of its own, and a finished one
+    # always has one: the two fields cannot disagree.
+    with pytest.raises(ValidationError):
+        RunCommandResult.model_validate(_command_result(exit_code=0, timed_out=True))
+    with pytest.raises(ValidationError):
+        RunCommandResult.model_validate(_command_result(exit_code=None, timed_out=False))
+
+
+def test_run_command_params_are_bounded() -> None:
+    from local_operator.evaluation.adapters.api import (
+        MAX_COMMAND_LENGTH,
+        MAX_COMMAND_OUTPUT_BYTES,
+        MAX_COMMAND_TIMEOUT_S,
+        RunCommandParams,
+    )
+
+    base = {
+        "operation_id": "cmd-1",
+        "episode_id": "ep-1",
+        "command": "echo hi",
+        "timeout_s": 30.0,
+        "max_output_bytes": 1000,
+    }
+    RunCommandParams.model_validate(base)
+    for key, bad in (
+        ("command", ""),
+        ("command", "x" * (MAX_COMMAND_LENGTH + 1)),
+        ("timeout_s", 0.0),
+        ("timeout_s", MAX_COMMAND_TIMEOUT_S + 1),
+        ("max_output_bytes", 0),
+        ("max_output_bytes", MAX_COMMAND_OUTPUT_BYTES + 1),
+    ):
+        with pytest.raises(ValidationError):
+            RunCommandParams.model_validate({**base, key: bad})
+
+
+def test_cap_command_output_keeps_a_utf8_prefix_and_reports_the_total() -> None:
+    from local_operator.evaluation.adapters.api import cap_command_output
+
+    assert cap_command_output("short", 100) == ("short", 5, False)
+    text, total, truncated = cap_command_output("é" * 10, 5)  # 2 bytes each
+    assert (total, truncated) == (20, True)
+    # Never splits a multi-byte character: the prefix is valid UTF-8 within cap.
+    assert text == "éé" and len(text.encode("utf-8")) <= 5

@@ -130,6 +130,16 @@ from local_operator.evaluation.receipts import (
 # cannot canonically round-trip old requests that lack it (same reason as 1.3).
 # The exact-version pin in ``AdapterSelector`` refuses mixed peers at selection
 # before a worker is spawned, not mid-episode on the error/recovery path.
+#
+# ``run_command`` (deliberately NOT a bump, for the same reason ``probe`` was
+# not) adds the remote command capability: a NEW method and a NEW capability
+# key, neither of which moves an existing line's canonical bytes. The key is
+# omitted from hello while false (``_omit_disabled_flags``), so a worker that
+# does not offer it is byte-identical to one built before it existed; a worker
+# that advertises it is refused by an old parent at hello (``extra="forbid"``),
+# fail-closed before prepare/reset allocate -- the documented ``drag``
+# direction. The method is sent only to a worker that advertised the key, so an
+# old worker never receives it.
 ADAPTER_SCHEMA_VERSION = "1.7"
 # One alias for the three models that pin the version, so a future bump cannot
 # move the constant while leaving a model silently accepting the older literal.
@@ -148,6 +158,7 @@ AdapterMethod: TypeAlias = Literal[
     "observe",
     "probe",
     "execute",
+    "run_command",
     "ask_user_exchange",
     "score",
     "cleanup",
@@ -177,6 +188,7 @@ METHOD_STATES: Mapping[AdapterMethod, frozenset[AdapterState]] = {
     "observe": frozenset({"RUNNING"}),
     "probe": frozenset({"RUNNING"}),
     "execute": frozenset({"RUNNING"}),
+    "run_command": frozenset({"RUNNING"}),
     "ask_user_exchange": frozenset({"RUNNING"}),
     "score": frozenset({"RUNNING", "FINALIZING"}),
     "cleanup": frozenset({"PREPARED", "RUNNING", "FINALIZING", "CLEANING"}),
@@ -193,6 +205,7 @@ METHOD_NEXT_STATE: Mapping[AdapterMethod, AdapterState] = {
     "observe": "RUNNING",
     "probe": "RUNNING",
     "execute": "RUNNING",
+    "run_command": "RUNNING",
     "ask_user_exchange": "RUNNING",
     "score": "FINALIZING",
     "cleanup": "CLEANING",
@@ -204,6 +217,9 @@ KEYED_METHODS = frozenset(
         "prepare",
         "reset_start",
         "execute",
+        # Keyed because a command may change the target: a re-sent request
+        # must replay the recorded answer, never run the command twice.
+        "run_command",
         "ask_user_exchange",
         "score",
         "cleanup",
@@ -331,7 +347,7 @@ class AdapterCapabilities(ProtocolModel):
     #: in ``computer_input`` plus the adapter's compile branch). The default
     #: lets a NEW parent accept an OLD worker that predates the field — it
     #: simply advertises no drag, which is the behaviour it already had.
-    #: Serialization OMITS this key while it is false (``_omit_disabled_pointer_capabilities``),
+    #: Serialization OMITS this key while it is false (``_omit_disabled_flags``),
     #: so a worker without the capability keeps its exact old hello bytes and an
     #: old parent's ``extra="forbid"`` handshake cannot see them; a worker that
     #: advertises ``true`` rides the wire and is refused by an old parent at
@@ -341,6 +357,15 @@ class AdapterCapabilities(ProtocolModel):
     #: Same opt-in/fail-closed handshake as drag: false is absent on the wire,
     #: true is refused by old strict cores before any environment allocation.
     modifiers: bool = False
+    #: Whether the target can run one shell command and answer its exit code
+    #: and output as TEXT (``run_command``). A sibling of the action routes,
+    #: not an action kind: a command is not part of a screen-bound batch, it
+    #: produces no observation, and its result is read as text instead of off
+    #: a screenshot. Default False, and omitted from hello while false, for
+    #: exactly the reasons ``drag`` documents: an adapter that cannot run
+    #: commands keeps its old hello bytes, and the harness offers the tool
+    #: only when this is True -- a target without it sees no dead tool.
+    command: bool = False
 
     def action_surface(self) -> "ActionSurface":
         return ActionSurface(
@@ -353,20 +378,20 @@ class AdapterCapabilities(ProtocolModel):
         )
 
     @model_serializer(mode="wrap")
-    def _omit_disabled_pointer_capabilities(self, handler: Any, info: Any) -> Any:
-        """Omit disabled opt-in pointer capabilities from the hello wire.
+    def _omit_disabled_flags(self, handler: Any, info: Any) -> Any:
+        """Omit disabled opt-in capabilities from the hello wire.
 
-        Mirror of ``AdapterSelector._omit_absent_core_source``: only these
-        capabilities' false values are dropped, preserving pre-capability hello
-        bytes. Advertising either translator rides the wire, so a strict old
-        parent refuses it at hello rather than allocating an incompatible guest.
+        Mirror of ``AdapterSelector._omit_absent_core_source``: false flags
+        preserve pre-capability hello bytes. Advertising a pointer translator
+        or command channel still reaches strict old parents, which refuse it
+        at hello before allocating an incompatible guest.
         """
 
         data = handler(self)
-        if isinstance(data, dict) and data.get("drag") is False:
-            data.pop("drag", None)
-        if isinstance(data, dict) and data.get("modifiers") is False:
-            data.pop("modifiers", None)
+        if isinstance(data, dict):
+            for key in ("drag", "modifiers", "command"):
+                if data.get(key) is False:
+                    data.pop(key, None)
         return data
 
     @field_validator("routes", mode="before")
@@ -757,6 +782,105 @@ class ProbeResult(ProtocolModel):
     reachable: bool
 
 
+# --- the remote command capability ------------------------------------------
+#
+# WHY A SEPARATE METHOD, NOT AN ACTION. A command's answer is TEXT (exit code,
+# stdout, stderr), and the only other way to get it is to type it into a
+# terminal on the target and read the result back off a screenshot -- slow,
+# lossy, and a common way for a session to spend its whole budget re-reading
+# values it already set. A command produces no observation and binds to no
+# screen, so it does not belong in an ``ActionBatch``; it is a sibling
+# capability the target advertises (``AdapterCapabilities.command``).
+#
+# THE BOUNDS ARE THE HARNESS'S, NOT THE TARGET'S. The parent sends the timeout
+# and the output cap with every call so every adapter enforces the SAME
+# contract; an adapter may not widen either. The ceilings below only stop a
+# caller from asking for something unbounded.
+
+#: Longest command string accepted. A command is one line of intent, not a
+#: file transfer; a script that needs more belongs in a file the command runs.
+MAX_COMMAND_LENGTH = 16_000
+#: The longest a single command may be allowed to run.
+MAX_COMMAND_TIMEOUT_S = 600.0
+#: The most text one stream may return. Kept far below the RPC envelope so
+#: both streams plus the frame always fit one reply line.
+MAX_COMMAND_OUTPUT_BYTES = 256 * 1024
+
+
+def cap_command_output(text: str, max_bytes: int) -> tuple[str, int, bool]:
+    """``text`` cut to at most ``max_bytes`` UTF-8 bytes, plus its true size.
+
+    Returns ``(kept, total_bytes, truncated)``. The cut never splits a
+    multi-byte character (the kept prefix always decodes), and the total is
+    the size BEFORE the cut, so a reader can say how much was dropped rather
+    than only that something was. One implementation for every adapter, so
+    "truncated" means the same thing whichever target produced it.
+    """
+
+    encoded = text.encode("utf-8", errors="replace")
+    total = len(encoded)
+    if total <= max_bytes:
+        return text, total, False
+    kept = encoded[:max_bytes].decode("utf-8", errors="ignore")
+    return kept, total, True
+
+
+class RunCommandParams(OperationParams):
+    """Run ONE command string in a shell on the target.
+
+    ``command`` is handed to a shell as-is (pipes and redirections work), in
+    the target's own default working directory. ``timeout_s`` is the
+    command's wall-clock budget ON THE TARGET; ``max_output_bytes`` caps each
+    stream separately.
+    """
+
+    episode_id: StrictIdentifier
+    command: str = Field(min_length=1, max_length=MAX_COMMAND_LENGTH)
+    timeout_s: float = Field(gt=0, le=MAX_COMMAND_TIMEOUT_S)
+    max_output_bytes: int = Field(ge=1, le=MAX_COMMAND_OUTPUT_BYTES)
+
+
+class RunCommandResult(ProtocolModel):
+    """One command's answer, as text, with nothing merged or hidden.
+
+    ``stdout`` and ``stderr`` are kept apart -- never interleaved into one
+    stream -- because a caller parsing stdout must not find diagnostics in
+    it. ``*_bytes`` is the raw number of bytes each stream produced (before
+    capping and decoding) and ``*_truncated``
+    says whether the cap cut it, so a cut is always visible in the result.
+    ``exit_code`` is ``None`` exactly when ``timed_out`` is True: a command
+    that was stopped has no exit status of its own, and one that finished
+    always has one.
+
+    A command that RAN and failed (non-zero exit) is a normal result. Only a
+    target that could not run the command at all raises, so the two are never
+    confused.
+    """
+
+    exit_code: int | None
+    timed_out: bool
+    stdout: str = Field(max_length=MAX_COMMAND_OUTPUT_BYTES)
+    stderr: str = Field(max_length=MAX_COMMAND_OUTPUT_BYTES)
+    stdout_bytes: SafeCount
+    stderr_bytes: SafeCount
+    stdout_truncated: bool
+    stderr_truncated: bool
+
+    @model_validator(mode="after")
+    def _consistent(self) -> "RunCommandResult":
+        if self.timed_out != (self.exit_code is None):
+            raise ValueError("exit_code is None exactly when the command timed out")
+        for name in ("stdout", "stderr"):
+            # No "text no longer than its size" check: the size counts the
+            # RAW bytes the command wrote, and decoding non-UTF-8 output with
+            # replacement characters legitimately makes the text longer.
+            total: int = getattr(self, f"{name}_bytes")
+            truncated: bool = getattr(self, f"{name}_truncated")
+            if truncated and total == 0:
+                raise ValueError(f"{name} cannot be truncated from nothing")
+        return self
+
+
 class ObservationPhaseError(Exception):
     """The mutation COMMITTED; only reading the resulting state failed.
 
@@ -991,6 +1115,7 @@ AdapterParams: TypeAlias = (
     | ObserveParams
     | ProbeParams
     | ExecuteParams
+    | RunCommandParams
     | AskUserExchangeParams
     | ScoreParams
     | CleanupParams
@@ -1003,6 +1128,7 @@ AdapterResult: TypeAlias = (
     | ObservationResult
     | ProbeResult
     | ExecuteResult
+    | RunCommandResult
     | AskUserExchangeResult
     | ScoreResult
     | CleanupResult
@@ -1017,6 +1143,7 @@ PARAM_MODELS: Mapping[AdapterMethod, type[ProtocolModel]] = {
     "observe": ObserveParams,
     "probe": ProbeParams,
     "execute": ExecuteParams,
+    "run_command": RunCommandParams,
     "ask_user_exchange": AskUserExchangeParams,
     "score": ScoreParams,
     "cleanup": CleanupParams,
@@ -1031,6 +1158,7 @@ RESULT_MODELS: Mapping[AdapterMethod, type[ProtocolModel]] = {
     "observe": ObservationResult,
     "probe": ProbeResult,
     "execute": ExecuteResult,
+    "run_command": RunCommandResult,
     "ask_user_exchange": AskUserExchangeResult,
     "score": ScoreResult,
     "cleanup": CleanupResult,
@@ -1065,7 +1193,11 @@ class EvaluationAdapter(Protocol):
     method. Reflection over the wire tables is the other half: the worker
     dispatches ``probe`` by attribute lookup, and an adapter without it
     answers the one request with an ``adapter_error`` that the caller reads
-    as an unanswered probe. Every other method here is required: its absence
+    as an unanswered probe. ``run_command`` is optional for the same reason
+    and by the same mechanism: it is offered only when the adapter advertises
+    ``capabilities.command``, so an adapter that cannot run commands simply
+    never implements it and stays loadable. Every other method here is
+    required: its absence
     would break the episode's core flow rather than one resilience path.
     """
 
