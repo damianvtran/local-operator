@@ -22,6 +22,7 @@ from local_operator.evaluation.action_surface import ActionSurface
 from local_operator.evaluation.evidence.models import RouteIdentity
 from local_operator.evaluation.protocol import ActionBatch, Observation, ProtocolModel
 from local_operator.evaluation.receipts import SafeCount, StrictIdentifier
+from local_operator.evaluation.runner.step_budget import StepPosition
 
 
 class ModelUsage(ProtocolModel):
@@ -192,6 +193,11 @@ class EpisodeTurn(ProtocolModel):
     #: state it applies to. Empty for an ordinary turn.
     tolerated_field_names: tuple[str, ...] = ()
     ask_answer: str | None = None
+    #: The step budget's position when this turn's observation was shown, read
+    #: by the runner from the counter it ENFORCES (``runner.step_budget``).
+    #: ``None`` for any turn without a step budget, which renders exactly as a
+    #: turn did before the field existed.
+    step_budget: StepPosition | None = None
 
 
 class StreamShape(ProtocolModel):

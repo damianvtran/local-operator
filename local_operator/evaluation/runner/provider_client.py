@@ -94,6 +94,7 @@ from local_operator.evaluation.runner.public_reply import (
     read_action_sequence,
     tolerated_fields_note,
 )
+from local_operator.evaluation.runner.step_budget import step_budget_line
 from local_operator.harness.reply_channel import (
     REPLY_CHANNEL_TOOL_NAME,
     envelope_from_tool_call,
@@ -2450,6 +2451,12 @@ class _ContextBuilder:
             # cached prefix; repeating it per turn would be tokens spent on a
             # fact the model already has.
             lines.insert(0, f"Task: {observation.task_id}")
+        budget_line = step_budget_line(turn.step_budget)
+        if budget_line is not None:
+            # Stated per observation because the count changes per step; a
+            # turn without a budget gets nothing, so its render (and every
+            # cached prefix built from it) is byte-identical to before.
+            lines.append(budget_line)
         if previous is not None and previous.ask_answer is not None:
             # The answer to the previous turn's ask_user reaches the model as
             # part of the observation that followed it -- "the state after
