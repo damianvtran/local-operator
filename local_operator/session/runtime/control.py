@@ -273,6 +273,14 @@ REASON_BUSY = "busy"
 REASON_WAKE = "wake"
 REASON_OLD_OWNER = "old_owner"
 REASON_UNANSWERED = "unanswered"
+#: The owner is ALREADY GOING: its retirement was committed before this request
+#: arrived (``serving.ServingSessionHandle.begin_retire`` refuses a second rung
+#: from an already-disposing handle), so there is nothing to stop and nothing to
+#: retry. Its own token rather than ``busy`` — an operator told "it is working,
+#: try again once it is idle" about a session that is leaving right now is being
+#: sent to retry a stop that is already happening (R3 / Q-1). The caller turns
+#: this into the same skip a record that says ``leaving`` earns.
+REASON_LEAVING = "leaving"
 
 
 @dataclass(frozen=True, slots=True)
@@ -438,6 +446,24 @@ async def _exchange(
         return None
     finally:
         await _close_dial(dial)
+
+
+def _is_unknown_op(reply: dict[str, Any], op: str) -> bool:
+    """Whether this error frame is an older build refusing a verb it lacks.
+
+    The dispatcher's last resort for an op it does not serve is
+    ``unknown op: {op!r}`` (``server.py``'s trailing ``ValueError``), and its
+    wording is the only cause an old owner can hand back: it predates the
+    ``reason`` field this build's refusals carry. Matching the same two halves
+    ``mobile.peer_send`` matches on its own unknown-op reply keeps one reading of
+    one frame shape in this repo, and the verb name in the CHECK is what stops an
+    unrelated error that merely opens with those words from being read as a
+    version fact. Deliberately not a bare ``"unknown op" in message``: a future
+    op whose name happens to appear in another tool's prose would then reframe a
+    live refusal as an old build, which is the one wrong answer here.
+    """
+    message = str(reply.get("message") or "")
+    return message.startswith("unknown op") and op in message
 
 
 async def _confirmed_session_id(record: SessionRecord) -> tuple[bool, str]:
@@ -1326,12 +1352,27 @@ async def _graceful_stop(
     if reply is None:
         return _GracefulAsk(acked=False, exited=False, reason=REASON_UNANSWERED)
     if reply.get("op") != "ack":
-        # An error frame is an ANSWER, and for the idle-only verb this build's
-        # owners put the cause in ``reason``. An error without one came from a
-        # build that predates the field, so it is treated as the retryable
-        # bucket rather than inventing a cause we cannot read.
-        reason = str(reply.get("reason") or "") or REASON_BUSY
-        return _GracefulAsk(acked=False, exited=False, reason=reason)
+        # An error frame is an ANSWER. THIS build's owners put the cause in
+        # ``reason``; a build that predates the field answers with the dispatch
+        # error alone (``unknown op: 'stop_if_idle'``), and that shape is NOT the
+        # retryable bucket. An owner that does not know the verb can never accept
+        # it, so folding it into ``busy`` printed "it is working right now … try
+        # again once it is idle" — advice that can never come true, and the one
+        # thing ``old_owner``'s receipt exists to say instead (R3). Read the same
+        # way ``mobile.peer_send`` reads its own unknown-op reply: the error
+        # opens with ``unknown op`` and names the verb this caller sent.
+        #
+        # WHAT BREAKS IF THIS FOLDS BACK INTO ``busy``: the ``old_owner`` copy
+        # becomes unreachable in practice — an owner that knows the verb answers
+        # with a ``reason``, so the only party that could produce that token never
+        # needs to — while the party that does produce this frame is told to wait
+        # for an idle state it will never report under a verb it does not serve.
+        reason = str(reply.get("reason") or "")
+        if not reason and _is_unknown_op(reply, op):
+            reason = REASON_OLD_OWNER
+        # An error with no cause we can read stays the retryable bucket: it is
+        # the one answer that does not claim a fact the frame withheld.
+        return _GracefulAsk(acked=False, exited=False, reason=reason or REASON_BUSY)
     _write_stop_marker(record, root, "socket", command=command, sweep_id=sweep_id)
     return _GracefulAsk(acked=True, exited=await _await_stopped(record, timeout_s, root))
 
@@ -1685,6 +1726,34 @@ async def stop_session(
                 "list before retrying.",
                 wakes_dormant=wakes,
                 monitors_dormant=monitors,
+            )
+        # THE OWNER IS ALREADY GOING, SO THERE IS NOTHING TO REFUSE. A second
+        # retirement rung meeting a handle that has already committed to its own
+        # disposal answers ``REASON_LEAVING`` (``server._idle_refusal_reason``
+        # reads ``begin_retire``'s recorded "already disposing"), and that is the
+        # same fact rung 0 reports from a record whose ``leaving`` field is set:
+        # the exit is scheduled, nothing was stopped, no signal was sent, and no
+        # retry can add anything. Reporting it as a REFUSAL told the reader its
+        # stop had failed while the session was on its way out, and the ``busy``
+        # receipt before this named work in flight that does not exist (R3 /
+        # Q-1). So it takes rung 0's method and shape — ``draining``, the token
+        # every front end already reads as "left alone (it is already leaving)"
+        # (``LEFT_ALONE_METHODS``).
+        #
+        # NO MARKER IS WITHDRAWN AND NO WAKE IS PARKED, for rung 0's reasons: this
+        # rung acked nothing, so it staged nothing, and a runtime that leaves by
+        # itself parks its own schedules on the way out. Withdrawing here could
+        # only reach a marker somebody else staged for the exit already underway.
+        if asked.reason == REASON_LEAVING:
+            return StopOutcome(
+                pid=record.pid,
+                session_id=record.session_id,
+                name=name,
+                method="draining",
+                line=(
+                    f'skipped "{name}" (pid {record.pid}) — it is already shutting '
+                    "down; nothing to do"
+                ),
             )
         # Nothing was committed by the owner, so nothing may be claimed. The
         # English line here is the degrade path a wheel without catalogues takes;

@@ -164,7 +164,19 @@ async def test_acked_late_exit_is_pending_not_refused(tmp_path, monkeypatch):
         ({"op": "error", "req": 1, "reason": "busy"}, control.REASON_BUSY),
         ({"op": "error", "req": 1, "reason": "wake"}, control.REASON_WAKE),
         ({"op": "error", "req": 1, "reason": "old_owner"}, control.REASON_OLD_OWNER),
-        # An owner too old to send the field is not invented into a cause.
+        # AN OLDER BUILD refuses the verb it does not serve with the dispatcher's
+        # own error and no ``reason`` field — the exact frame every released
+        # build produces for ``stop_if_idle``, and the message is the version
+        # fact. Reading it as ``busy`` told the operator to retry a stop that can
+        # never be accepted (R3 / Q-1).
+        (
+            {"op": "error", "req": 1, "message": "unknown op: 'stop_if_idle'"},
+            control.REASON_OLD_OWNER,
+        ),
+        # A frame with no cause we can READ — no ``reason``, and no dispatch
+        # message we recognise — is not invented into one: it stays the
+        # retryable bucket, the one answer that claims nothing the frame
+        # withheld.
         ({"op": "error", "req": 1}, control.REASON_BUSY),
     ],
 )
@@ -189,6 +201,70 @@ async def test_refusal_carries_the_owner_reason(tmp_path, monkeypatch, reply, re
     assert outcome.method == "refused"
     assert outcome.reason == reason
     signal.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_already_disposing_owner_is_skipped_not_refused(tmp_path, monkeypatch):
+    """An owner already on its way out gets rung 0's skip, not a refusal.
+
+    QA round 1 Q-1 / R3: ``begin_retire`` refuses a second retirement request
+    from a handle that has already committed to its own disposal, recording
+    "already disposing" — and the reader had no token for it, so an IDLE session
+    that was LEAVING was reported as working, with the retry-when-idle advice
+    that can never apply. It is the same fact rung 0 reports from a record whose
+    ``leaving`` field is set, so it takes the same method: ``draining``, which
+    every front end already reads as "left alone (it is already leaving)".
+    """
+    record = _bare_record()
+    monkeypatch.setattr(
+        control,
+        "_exchange",
+        AsyncMock(return_value={"op": "error", "req": 1, "reason": "leaving"}),
+    )
+    marker = Mock()
+    withdraw = Mock(side_effect=AssertionError("this rung staged nothing to withdraw"))
+    monkeypatch.setattr(control, "_write_stop_marker", marker)
+    monkeypatch.setattr(control, "_withdraw_staged_stop_marker", withdraw)
+    monkeypatch.setattr(registry, "pid_alive", lambda pid: True)
+    signal = AsyncMock(side_effect=AssertionError("idle-only stop must never signal"))
+    monkeypatch.setattr(control, "_signal_and_confirm", signal)
+
+    outcome = await control.stop_session(
+        record, timeout_s=1, _root=tmp_path, graceful_only=True
+    )
+
+    assert outcome.method == "draining"
+    assert outcome.reason == ""
+    assert "already shutting down" in outcome.line
+    # The refusal sentence must not reach the operator: nothing was refused.
+    assert "may be busy, unavailable, too old, or still exiting" not in outcome.line
+    marker.assert_not_called()
+    withdraw.assert_not_called()
+    signal.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_real_socket_reports_an_already_disposing_owner_as_leaving(monkeypatch):
+    """The token comes off the REAL latch, over a real socket.
+
+    ``_IdleStopHandle`` borrows ``ServingSessionHandle.begin_retire`` rather than
+    reimplementing it, so setting ``_disposing`` exercises the producer's own
+    "already disposing" branch. What this pins is the READER: that frame must
+    not be answered ``busy`` (QA round 1 Q-1).
+    """
+    handle = _IdleStopHandle(busy=False)
+    handle._disposing = True
+    server, record = await _serve(handle)
+    try:
+        reply = await control._exchange(
+            _record_for(record), {"op": "stop_if_idle"}, reply_timeout_s=5
+        )
+    finally:
+        server.close()
+    assert reply is not None
+    assert reply["op"] == "error"
+    assert reply["reason"] == control.REASON_LEAVING
+    assert handle.stops == []
 
 
 @pytest.mark.asyncio

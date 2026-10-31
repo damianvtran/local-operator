@@ -56,6 +56,7 @@ from local_operator.tui.widgets.tool_card import (
     DURATION_COL,
     EXPAND_HINT,
     EXPAND_MAX_LINES,
+    ICON_ATTENTION,
     ICON_ERROR,
     ICON_INTERRUPTED,
     ICON_PARTIAL,
@@ -4850,3 +4851,48 @@ def test_bridge_and_send_rows_condense_into_one_quiet_group() -> None:
     (planned,) = quiet_group_plan(run, head_cut=False)
     assert planned.span == (0, 4)
     assert planned.group.actions == 3
+
+
+def test_pending_stop_does_not_paint_as_a_completed_stop() -> None:
+    """U6: an accepted-but-unconfirmed stop must not wear the stopped `✓`.
+
+    The tool result is a SUCCESS — nothing failed and nothing was refused — so it
+    settled through ``mark_done`` and painted byte-identically to a stop that
+    happened: the same `✓`, the same ground, and a collapsed row carrying none of
+    the receipt's words. The result already publishes ``method: pending``; the row
+    states it with the card's existing ``!`` "attention, not failure" glyph
+    rather than a second vocabulary, and the receipt is promoted into the
+    expansion so its no-signal clause wraps instead of being cropped.
+    """
+    receipt = (
+        'stop accepted by "payments-audit", but it had not exited after 0.1 s. '
+        "No signal was sent — read the session list before retrying."
+    )
+    pending = ToolCard("t", "sessions", {"session": "payments-audit"})
+    pending.mark_done(receipt, {"op": "stop", "method": "pending"})
+    row = pending._build_row(80).plain
+    assert ICON_ATTENTION in row, row
+    assert "stop unconfirmed" in row, row
+    assert ICON_SUCCESS not in row, row
+    assert pending._promoted_lead() == receipt
+    assert pending._captured_output() == []
+
+    # A stop that LANDED is untouched: the completed `✓` and no state word.
+    stopped = ToolCard("t", "sessions", {"session": "payments-audit"})
+    stopped.mark_done('stopped "payments-audit"', {"op": "stop", "method": "socket"})
+    done_row = stopped._build_row(80).plain
+    assert ICON_SUCCESS in done_row, done_row
+    assert "stop unconfirmed" not in done_row, done_row
+    assert ICON_ATTENTION not in done_row, done_row
+    assert stopped._promoted_lead() == ""
+
+    # A REFUSAL arrives through ``mark_failed`` and keeps its own unmistakable
+    # treatment — `✗` with the cause as the headline — which this change must
+    # not touch.
+    refused = ToolCard("t", "sessions", {"session": "payments-audit"})
+    refused.mark_failed(receipt, receipt, {"op": "stop", "method": "refused", "reason": "busy"})
+    refused_row = refused._build_row(80).plain
+    assert ICON_ERROR in refused_row, refused_row
+    assert "stop unconfirmed" not in refused_row, refused_row
+    assert ICON_ATTENTION not in refused_row, refused_row
+    assert refused._promoted_lead() == receipt

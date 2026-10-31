@@ -1121,8 +1121,20 @@ def _idle_refusal_reason(handle: Any) -> str:
     Anything unexpected — a host that records nothing, an unknown reason
     string — is reported as work in flight, which is the answer that says "this
     may clear on its own" rather than the one that says "never retry".
+
+    THE ONE RECORDED REASON THAT IS NOT WORK IN FLIGHT IS CHECKED FIRST: a
+    handle that has already committed to its own disposal records "already
+    disposing" (:meth:`ServingSessionHandle.begin_retire`). It is leaving, not
+    busy, and folding that into ``busy`` told the operator to retry once the
+    session was idle — advice about a session that will be gone before the
+    retry (R3 / Q-1). Its own token, so the ladder reports the skip it already
+    reports for a record whose ``leaving`` field is set
+    (``control.REASON_LEAVING``).
     """
-    if "wake" in str(getattr(handle, "_retire_refusal", "") or ""):
+    refusal = str(getattr(handle, "_retire_refusal", "") or "")
+    if "already disposing" in refusal:
+        return "leaving"
+    if "wake" in refusal:
         return "wake"
     return "busy"
 
