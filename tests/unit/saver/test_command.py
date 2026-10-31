@@ -462,8 +462,13 @@ def test_the_ledger_row_and_the_catalogue_agree(tmp_path):
         (root / "local_operator/i18n/catalogues/en/wire.radient_saver.json").read_bytes()
     ).hexdigest()
     ledger = json.loads((root / "i18n/ledger.json").read_text(encoding="utf-8"))
-    rows_for_namespace = [
-        entry for entry in ledger["entries"] if entry["namespace"] == "wire.radient_saver"
-    ]
-    assert rows_for_namespace
-    assert {entry["source_sha256"] for entry in rows_for_namespace} == {digest}
+    # The ledger is append-only since #3154 (per-locale shards, last row per
+    # (locale, namespace) wins), so the rows audited against earlier source
+    # digests legitimately stay as history. What must hold is the row the ship
+    # gate reads: the LAST one per locale carries the current digest.
+    effective: dict[str, str] = {}
+    for entry in ledger["entries"]:
+        if entry["namespace"] == "wire.radient_saver":
+            effective[entry["locale"]] = entry["source_sha256"]
+    assert effective
+    assert set(effective.values()) == {digest}
