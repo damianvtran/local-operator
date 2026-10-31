@@ -89,6 +89,32 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "Rolls back only the network-request-*.body files the same read created.",
     ),
+    # The session host's rendezvous and the engage's capture file (design-
+    # surface-independence slice 2). ``_bind`` unlinks only the unix SOCKET FILE at
+    # ``session_host.socket_path(root)`` -- a corpse a dead host left (after a
+    # connect probe proved nobody answers) -- and ``serve`` unlinks that same path
+    # on exit, by inode, only if it is still the socket this host bound. The path is
+    # ``<root>/run/session-host/host.sock`` (or its short ``lop-session-host-*``
+    # fallback under the temp dir): never under ``sessions/``, never a transcript.
+    # ``_spawn_runtime_hosted`` unlinks only the ``lop-runtime-*.log`` capture
+    # file its own ``mkstemp`` created a few lines earlier, on its two failure arms
+    # (host unavailable / any other error), so a refused spawn leaves no tempfile.
+    (
+        "local_operator/session/runtime/host_service.py::_bind",
+        "<path>.unlink",
+        "Removes the stale host.sock a dead host left, after a connect probe found no listener.",
+    ),
+    (
+        "local_operator/session/runtime/host_service.py::serve",
+        "<path>.unlink",
+        "Removes this host's own host.sock on exit, only if the inode is still the one it bound.",
+    ),
+    (
+        "local_operator/session/runtime/launch.py::_spawn_runtime_hosted",
+        "<path>.unlink",
+        "Unlinks the mkstemp lop-runtime-*.log capture this call created, on its two failure arms.",
+        2,
+    ),
     # The bridge connector's registration file, on all three receivers the
     # cross-platform install added (the original entry covered macOS only). Each
     # path is FIXED by the platform helper, never caller-supplied: ``plist_path()``

@@ -162,7 +162,6 @@ class _Forks:
 
 def _arm_fork_counters(monkeypatch: pytest.MonkeyPatch) -> _Forks:
     forks = _Forks()
-    real_init = subprocess.Popen.__init__
 
     def counting_init(self: Any, args: Any, *a: Any, **k: Any) -> None:
         forks.popen.append(args)
@@ -180,7 +179,6 @@ def _arm_fork_counters(monkeypatch: pytest.MonkeyPatch) -> _Forks:
     monkeypatch.setattr(launch, "spawn_disclaimed", counting_disclaimed)
     monkeypatch.setattr(macos_disclaim, "spawn_disclaimed", counting_disclaimed)
     monkeypatch.setattr(launch, "_spawn_runtime_local", counting_local)
-    del real_init
     return forks
 
 
@@ -591,6 +589,8 @@ def test_the_host_refuses_what_it_should_not_act_on(make_host: Any, tmp_path: Pa
         "another store": {"root": str(tmp_path / "elsewhere")},
         "a path in the session id": {"session_id": "../x"},
         "a relative interpreter": {"interpreter": "python3"},
+        # R-6: a real, executable, absolute path that is not this install's.
+        "an arbitrary executable": {"interpreter": "/bin/echo"},
         "a symlinked capture": {"capture": str(link)},
         "a missing capture": {"capture": str(tmp_path / "absent.log")},
         "a promised descriptor that never arrived": {"has_cap_fd": True},
@@ -796,3 +796,285 @@ def test_a_second_host_for_the_same_store_exits_cleanly_without_serving(
     assert code == 0, "a loser exits 0 so KeepAlive{SuccessfulExit:false} does not loop it"
     assert time.monotonic() - started < 5
     assert session_host.ping(rig.root), "the first host is undisturbed"
+
+
+# ---------------------------------------------------------------------------
+# Review round 1 (#3222): R-1 descriptor hygiene, R-3 warming, R-4 install ladder,
+# R-5 switch parsing, R-7 trip-wire controls, R-8a ownership marker, N-1 SIGHUP
+# ---------------------------------------------------------------------------
+
+
+def _open_fds() -> int:
+    return len(os.listdir("/dev/fd"))
+
+
+def _send_raw(path: Path, payload: bytes, *, with_fd: bool) -> None:
+    """One hand-built request, optionally carrying a real descriptor, then hang up."""
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.settimeout(5)
+    sock.connect(str(path))
+    donor_r, donor_w = os.pipe()
+    try:
+        if with_fd:
+            socket.send_fds(sock, [payload], [donor_r])
+        else:
+            sock.sendall(payload)
+        try:
+            sock.shutdown(socket.SHUT_WR)
+            sock.recv(1)  # the host answers or hangs up; either way it is done with us
+        except OSError:
+            pass
+    finally:
+        sock.close()
+        os.close(donor_r)
+        os.close(donor_w)
+
+
+def _frame(body: bytes) -> bytes:
+    return len(body).to_bytes(4, "big") + body
+
+
+def test_no_bad_request_leaves_a_descriptor_in_the_hosts_table(
+    make_host: Any, tmp_path: Path
+) -> None:
+    """R-1: every received descriptor is closed on EVERY path, not only the success one.
+
+    Runs against a real ``serve`` (the host's table is this process's table, so the
+    count is the host's). Each shape below used to strand the descriptor
+    ``recv_fds`` had already handed over: a torn body, an oversized frame, non-JSON,
+    a header cut short, a well-formed but refused request, and a wrong version.
+    """
+    import json
+
+    rig = make_host(lambda r, c: _Child(os.getpid(), exits=threading.Event()))
+    path = session_host.socket_path(rig.root)
+    good = json.dumps(
+        {"op": "spawn", "v": session_host.PROTOCOL_VERSION, "root": "nowhere", "has_cap_fd": True}
+    ).encode()
+    shapes = {
+        "torn body": _frame(b'{"op": "spawn", "v"')[:-3],
+        "oversized": (2 << 20).to_bytes(4, "big") + b"x",
+        "not json": _frame(b"this is not json"),
+        "header cut short": b"\x00\x00",
+        "refused": _frame(good),
+        "wrong version": _frame(json.dumps({"op": "ping", "v": 99}).encode()),
+        "unknown op": _frame(json.dumps({"op": "x", "v": session_host.PROTOCOL_VERSION}).encode()),
+    }
+    # Warm every code path once so lazy imports and thread stacks are not counted.
+    for payload in shapes.values():
+        _send_raw(path, payload, with_fd=True)
+    time.sleep(0.5)
+    before = _open_fds()
+    for _ in range(6):
+        for payload in shapes.values():
+            _send_raw(path, payload, with_fd=True)
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and _open_fds() > before:
+        time.sleep(0.1)
+    assert _open_fds() <= before, (
+        f"the host's fd table grew by {_open_fds() - before} after "
+        f"{6 * len(shapes)} bad requests that each carried a descriptor"
+    )
+    assert rig.host.stats()["forks"] == 0
+
+
+def test_the_recv_helper_closes_what_it_received_when_the_frame_is_torn() -> None:
+    """R-1 at the unit: the helper itself, with no host around it, so a regression
+    is localised to ``_recv_request`` rather than to ``serve_connection``."""
+    from local_operator.session.runtime.standby import _recv_request
+
+    a, b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    donor_r, donor_w = os.pipe()
+    try:
+        socket.send_fds(a, [_frame(b"not json")], [donor_r])
+        a.close()
+        before = _open_fds()
+        with pytest.raises(ValueError):
+            _recv_request(b)
+        assert _open_fds() == before, "the descriptor that arrived with a bad frame leaked"
+    finally:
+        b.close()
+        os.close(donor_r)
+        os.close(donor_w)
+
+
+@pytest.mark.parametrize("value", ["1", "true", "TRUE", " Yes ", "on", "On"])
+def test_the_switch_accepts_the_positive_spellings(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv(session_host.SPAWN_AUTHORITY_ENV, value)
+    assert session_host.spawn_authority() == session_host.AUTHORITY_HOST
+
+
+@pytest.mark.parametrize(
+    "value", ["", "0", "false", "False", "FALSE", "off", "OFF", "No", "no", "nope", "2", "enabled"]
+)
+def test_any_other_spelling_of_the_switch_means_local(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    """R-5: an opt-in whose default is the unsafe path must read an unrecognised value as 'no'."""
+    monkeypatch.setenv(session_host.SPAWN_AUTHORITY_ENV, value)
+    assert session_host.spawn_authority() == session_host.AUTHORITY_LOCAL
+
+
+def test_the_host_route_switches_off_the_surfaces_warm_standbys(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """R-3: a spare is a runtime image the console forked -- an app descendant -- and
+    nothing on the host route adopts it. ``enable_warming`` must not start the
+    supervisor and ``notify_engage`` must not nudge it."""
+    from local_operator.session.runtime import standby
+
+    monkeypatch.delenv(standby.DISABLE_ENV, raising=False)
+    monkeypatch.delenv("LOP_MOBILE_CHILD_RESUME", raising=False)
+    monkeypatch.delenv(session_host.SPAWN_AUTHORITY_ENV, raising=False)
+    assert standby.disabled() is False, "control: with the flag off, warming is available"
+
+    monkeypatch.setenv(session_host.SPAWN_AUTHORITY_ENV, "1")
+    assert standby.disabled() is True
+    assert standby.adoption_possible() is False
+    assert standby.try_adopt(tmp_path, sys.executable, {}, tmp_path / "c", None) is None
+
+    started: list[Any] = []
+    monkeypatch.setattr(standby, "_WARMING", [False])
+    monkeypatch.setattr(standby, "_take_slot", lambda *a, **k: started.append(a) or None)
+    standby.enable_warming(tmp_path)
+    assert started == [] and standby._WARMING[0] is False, "no supervisor, no spare, no fork"
+
+    standby._NUDGE.clear()
+    monkeypatch.setattr(standby, "_WARMING", [True])
+    standby.notify_engage()
+    assert not standby._NUDGE.is_set(), "an engage must not wake a refill the host route never uses"
+
+
+def test_the_install_ladder_is_serialised_so_a_second_cold_start_finds_the_first_host(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """R-4: two surfaces that both found no host must not both run the installer --
+    the second ``kickstart -k`` would SIGKILL the host the first just started."""
+    installs: list[int] = []
+    up = threading.Event()
+
+    def pinging(root: Path, *, timeout_s: float = 2.0) -> bool:
+        return up.is_set()
+
+    def installer(root: Path) -> host_install.HostInstallOutcome:
+        installs.append(threading.get_ident())
+        time.sleep(0.4)  # the window in which a racing surface would also install
+        up.set()
+        return host_install.HostInstallOutcome(True)
+
+    monkeypatch.setattr(session_host, "ping", pinging)
+    monkeypatch.setattr(host_install, "ensure_host_installed", installer)
+    errors: list[BaseException] = []
+
+    def surface() -> None:
+        try:
+            session_host.ensure_session_host(tmp_path)
+        except BaseException as exc:  # noqa: BLE001 -- surfaced to the main thread
+            errors.append(exc)
+
+    threads = [threading.Thread(target=surface) for _ in range(5)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(15)
+    assert errors == []
+    assert len(installs) == 1, f"{len(installs)} surfaces ran the installer for one cold start"
+
+
+def test_an_unanswered_launchctl_print_does_not_kick_a_host(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """R-4: UNKNOWN is not 'dead'. ``kickstart -k`` on a healthy host that merely
+    timed out under load kills it and the request in flight."""
+    from local_operator import launchd
+
+    monkeypatch.setattr(supervisors, "supervisor", lambda: supervisors.LAUNCHCTL)
+    monkeypatch.setattr(launchd, "shared_label_refusal", lambda cfg: None)
+    monkeypatch.setattr(host_install, "plist_path", lambda: tmp_path / "LaunchAgents" / "x.plist")
+    path = host_install.plist_path()
+    path.parent.mkdir(parents=True)
+    import plistlib
+
+    path.write_bytes(plistlib.dumps(host_install.render_plist(tmp_path)))
+    kicks: list[Any] = []
+    monkeypatch.setattr(
+        launchd,
+        "observe_job",
+        lambda **kw: launchd.JobObservation(launchd.JobState.UNKNOWN, None, "timed out"),
+    )
+    monkeypatch.setattr(launchd, "kickstart", lambda **kw: kicks.append(kw) or True)
+    monkeypatch.setattr(launchd, "reload_job", lambda **kw: kicks.append(kw))
+    outcome = host_install.ensure_host_installed(tmp_path)
+    assert outcome.ok and kicks == []
+
+
+@pytest.mark.parametrize("which", ["popen", "disclaimed"])
+def test_the_r4_check_goes_red_for_each_trip_wire_not_only_the_local_route(
+    which: str, host_route: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """R-7: a counter nobody has seen trip proves nothing. One mutant per counter:
+    the hosted route's fallback reaches ``spawn_disclaimed`` / ``Popen`` DIRECTLY,
+    bypassing ``_spawn_runtime_local``, and the shared R4 check must go red on it."""
+    forks = _arm_fork_counters(monkeypatch)
+    monkeypatch.setattr(
+        host_install,
+        "ensure_host_installed",
+        lambda root: host_install.HostInstallOutcome(False, "unavailable", "down"),
+    )
+    real_hosted = launch._spawn_runtime_hosted
+
+    def mutant(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return real_hosted(*args, **kwargs)
+        except RuntimeStartupError:
+            if which == "popen":
+                return subprocess.Popen([sys.executable, "-c", "pass"])
+            return launch.spawn_disclaimed([sys.executable, "-c", "pass"])
+
+    monkeypatch.setattr(launch, "_spawn_runtime_hosted", mutant)
+    with pytest.raises(AssertionError, match="R4"):
+        _assert_engage_refuses_without_forking(tmp_path, forks)
+    seen = forks.popen if which == "popen" else forks.disclaimed
+    assert seen, f"the {which} counter did not see the fallback"
+
+
+def test_a_host_forked_runtime_does_not_carry_the_wake_supervisors_ownership_marker(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """R-8a: ``owned_runtimes.sweep`` selects by ENV marker, not parentage, so a
+    marker on a host-forked runtime would get it SIGTERMed on a supervisor stop."""
+    from local_operator.wakes import owned_runtimes
+
+    monkeypatch.setenv(owned_runtimes.OWNER_ENV, "tok")
+    monkeypatch.setenv(owned_runtimes.SUPERVISOR_PID_ENV, str(os.getpid()))
+    local_env = launch._runtime_env("markersess01", str(tmp_path), defer_materialise=False)
+    assert local_env.get(owned_runtimes.OWNER_ENV) == "tok", "control: the local route stamps it"
+
+    seen: dict[str, Any] = {}
+
+    def fake_request(root: Path, **kw: Any) -> Any:
+        seen.update(kw["env"])
+        return session_host.HostedProcess(7, coalesced=True, connection=None)
+
+    monkeypatch.setattr(session_host, "request_spawn", fake_request)
+    launch._spawn_runtime_hosted("markersess01", str(tmp_path), defer_materialise=False)
+    for name in owned_runtimes.MARKER_ENVS:
+        assert name not in seen, f"{name} reached a host-forked runtime"
+
+
+def test_the_host_does_not_plant_an_inheritable_sighup_ignore(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """N-1: SIG_IGN survives exec, so every runtime would be born ignoring SIGHUP; a
+    handler resets to default in the child."""
+    import signal
+
+    registered: dict[int, Any] = {}
+    monkeypatch.setattr(signal, "signal", lambda num, handler: registered.__setitem__(num, handler))
+    monkeypatch.setattr(host_service, "serve", lambda root, stop: 0)
+    monkeypatch.setattr("local_operator.logger.configure_cli_logging", lambda: None)
+    assert host_service.main([]) == 0
+    assert registered[signal.SIGHUP] is not signal.SIG_IGN
+    assert callable(registered[signal.SIGHUP])
