@@ -22,9 +22,10 @@ WHAT IT CAN AND CANNOT SAY (stated here once, repeated in ``docs/EXEC.md``):
   why the capture needed a module of its own rather than a flag; where it is not
   armed, or the platform cannot capture, the receipt still says
   ``sender: unavailable`` and claims nothing. The 2026-10-30 21:57 wave — twelve
-  exec workers, five runtimes and two daemons signalled inside 1.33 s — is the
-  reason that distinction is worth a whole module: every one of those rows said
-  ``no-siginfo``, so the sender was unnameable and the incident unfalsifiable.
+  exec workers, at least five runtimes and two daemons signalled inside 1.33 s —
+  is the reason that distinction is worth a whole module: every one of those rows
+  said ``no-siginfo``, so the sender was unnameable and the incident
+  unfalsifiable.
   The ``sender`` dict carries ``state``/``reason`` on both arms, plus ``pid``,
   ``uid`` and ``code`` when captured, and a pid of ``0`` there means the KERNEL
   delivered it (no sending process), never "process zero".
