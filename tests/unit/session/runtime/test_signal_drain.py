@@ -942,7 +942,16 @@ def _route(tmp_path: Any, *, busy: bool, cuts: bool = True, marker: Any = None):
     handle = _RoutingHandle(session, busy=busy)
     state = process._SignalState(stop=asyncio.Event(), trigger={})
     process._route_signal(handle, _RoutingRuntime(), process.signal.SIGTERM, state=state)
-    assert state.receipts and state.receipts[-1] is not None, "no receipt was written"
+    if marker is None:
+        # NOTHING STAGED, SO NOTHING WAS OBEYED: since the victim-side sanction gate
+        # (slice 1) an arrival no marker covers is refused, so no signal receipt is
+        # written — the refusal goes to its own file (registry.SIGNAL_REFUSALS_NAME)
+        # and the run keeps its turn. A cell that needs a receipt stages a marker.
+        assert state.receipts == [], "a refused arrival wrote a signal receipt"
+        assert state.refusals == 1
+        assert registry.read_signal_refusals(tmp_path) is not None
+    else:
+        assert state.receipts and state.receipts[-1] is not None, "no receipt was written"
     assert signal_receipt  # the module the verdict comes from
     return session, state
 
@@ -957,18 +966,35 @@ async def test_the_routing_names_the_signals_effect_on_BOTH_branches(tmp_path: A
     else first (measured: the ``wait`` tool's own "aborted" result 171 ms after
     the signal, with the row following it).
     """
-    idle_session, idle_state = _route(tmp_path / "idle", busy=False)
+    # AN INVOLUNTARY MARKER, because since slice 1 the only arrivals that reach the
+    # branch at all are SANCTIONED ones, and this cell is about the branch rather than
+    # the gate (the gate has its own file: test_signal_sanction_gate.py). The
+    # involuntary kind is used because it is the one that still arms a cut-off cause —
+    # a deliberate marker deliberately arms none.
+    marker = {
+        "session_id": "route00000001",
+        "pid": process.os.getpid(),
+        "started_at": 1_760_000_000.0,
+        "at": process.time.time() - 1.0,
+        "rung": "",
+        "deliberate": False,
+        "mechanism": "reclaim",
+        "actor": "runtime residency sweep",
+        "killer": {"pid": 1, "argv0": "lop", "command": "reclaim"},
+    }
+
+    idle_session, idle_state = _route(tmp_path / "idle", busy=False, marker=dict(marker))
     assert idle_state.stop.is_set(), "an idle runtime must leave now"
     assert idle_state.draining is None
-    assert idle_session.notes and idle_session.notes[0][0] == "runtime-shutdown"
-    assert "nobody asked for a stop" in idle_session.notes[0][1]
+    assert idle_session.notes and idle_session.notes[0][0] == "runtime-killed"
+    assert "runtime residency sweep" in idle_session.notes[0][1]
 
-    busy_session, busy_state = _route(tmp_path / "busy", busy=True)
+    busy_session, busy_state = _route(tmp_path / "busy", busy=True, marker=dict(marker))
     assert not busy_state.stop.is_set(), "a busy runtime drains rather than stopping now"
     assert busy_state.draining is not None, "the busy branch must commit to a drain"
     # ... AND THE CAUSE IS ARMED BEFORE THE DRAIN STARTS, which is the whole point:
     # everything the turn publishes between here and the boundary reads that cause.
-    assert busy_session.notes and busy_session.notes[0][0] == "runtime-shutdown"
+    assert busy_session.notes and busy_session.notes[0][0] == "runtime-killed"
     busy_state.draining.cancel()
     with pytest.raises(asyncio.CancelledError):
         await busy_state.draining

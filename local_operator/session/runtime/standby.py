@@ -1931,6 +1931,13 @@ def _commit_adoption(sock: socket.socket, request: dict[str, Any]) -> int:
     ``id=``, so a platform that cannot rewrite argv still gets a working runtime
     (agent review round 2, nit).
     """
+    # FIRST, before any adoption work: the boundary between "CPU this process
+    # spent warming as a spare" and "CPU it spent booting the session". The run
+    # record (``process._boot_cost``) reports the two separately, because a slow
+    # adopted boot and a slow warm are different findings. Never raises.
+    from local_operator.session.runtime.journal import note_adoption
+
+    note_adoption()
     env = request.get("env")
     env = env if isinstance(env, dict) else {}
     # Recover the fd number this process was STARTED with, before the channel is
@@ -2101,6 +2108,16 @@ def _warm() -> None:
             importlib.import_module(name)
         except Exception:  # noqa: BLE001 — a warm-up must never be the failure
             logger.debug("standby warm skipped %s", name, exc_info=True)
+    try:
+        # The start record's instrument (``process._boot_cost``) resolves ctypes
+        # handles on first use (~1 ms median, up to ~7 ms on a loaded host);
+        # paying it here leaves ~0.04 ms on the adopted boot's critical path.
+        # Measured in #3226 round 1 (MINOR-2).
+        from local_operator.session.runtime import boot_cost
+
+        boot_cost.sample()
+    except Exception:  # noqa: BLE001
+        logger.debug("standby boot-cost warm skipped", exc_info=True)
     try:
         from local_operator.compaction.tokens import warm_tokenizer
 

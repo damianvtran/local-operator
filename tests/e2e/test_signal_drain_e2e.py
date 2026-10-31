@@ -127,6 +127,27 @@ def _record_for(config_dir: Path, session_id: str) -> Any:
     return None
 
 
+def _stage_sanction(config_dir: Path, session_id: str, directory: Path) -> None:
+    """Stage the DELIBERATE stop marker a sanctioned sender writes before its signal.
+
+    Keyed to the run the runtime PUBLISHED (pid + ``started_at``) through the
+    production payload builder, because that is the run key the victim pairs on —
+    a marker invented here could pass while the real ladder's failed to.
+
+    ``deliberate`` rather than involuntary on purpose: a deliberate marker arms no
+    cut-off cause, so the cells that assert "no cut-off was recorded" keep measuring
+    the drain rather than the marker's own classification. The involuntary shape is
+    exercised by ``test_a_ladder_stop_still_ends_a_running_turn`` and by
+    ``tests/unit/wakes/test_owned_runtimes.py``.
+    """
+    record = _record_for(config_dir, session_id)
+    assert record is not None, f"{session_id}: no published record to key a sanction on"
+    registry.write_stop_marker(
+        directory,
+        control._stop_marker_payload(record, "sigterm", command="e2e sanctioned stop"),
+    )
+
+
 async def _wait_record(
     config_dir: Path, session_id: str, *, busy: bool = False, timeout: float = 45.0
 ) -> Any:
@@ -214,10 +235,18 @@ class _Rig:
 
 
 @pytest.mark.asyncio
-async def test_a_broadcast_sigterm_mid_turn_lets_every_turn_finish(
+async def test_an_unsanctioned_broadcast_sigterm_is_refused_and_every_turn_finishes(
     headless_tui_env: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """THE ACCEPTANCE CELL: one pass of SIGTERM over three busy runtimes.
+    """THE ACCEPTANCE CELL: one unstaged pass of SIGTERM over three busy runtimes.
+
+    SINCE SLICE 1 THE UNSTAGED PASS ENDS NOTHING. This is the incident's own shape —
+    one loop, three victims, no marker staged anywhere — and the rule it now proves is
+    the victim-side sanction gate: every arrival is REFUSED (recorded in the receipt's
+    ``refusals`` list, never in ``signals``), every runtime keeps serving, and every
+    turn finishes. The second half of the cell then stops each runtime the way a
+    sanctioned sender does — marker first — so the drain behaviour the rest of this
+    file measures is still proved end to end on the same three processes.
 
     The sweep SHAPE is evidence rather than decoration: the incident delivered
     SIGTERM to every live runtime within ~6 ms, and a sequential ladder cannot
@@ -246,9 +275,26 @@ async def test_a_broadcast_sigterm_mid_turn_lets_every_turn_finish(
 
             log_before = len(_runtime_log(config))
 
-            # ONE pass, exactly as the sweep arrived.
+            # ONE pass, exactly as the sweep arrived: nothing staged for any of them.
             started = time.monotonic()
             for session_id in session_ids:
+                os.kill(rig.children[session_id].pid, signal.SIGTERM)
+
+            # THE REFUSAL, per victim: the receipt records the arrival in
+            # ``refusals`` — never in ``signals`` — and the run keeps serving.
+            for session_id in session_ids:
+                refusals = await _wait_refusals(rig.directories[session_id])
+                assert refusals["refusals"][0]["disposition"] == "refused", refusals["refusals"]
+                assert (
+                    registry.read_signal_receipt(rig.directories[session_id]) is None
+                ), f"{session_id}: a refused arrival wrote a signal receipt"
+                assert (
+                    rig.children[session_id].poll() is None
+                ), f"{session_id}: an unsanctioned SIGTERM ended the runtime"
+
+            # THEN the ladder's own stop for each, which stages its marker first.
+            for session_id in session_ids:
+                _stage_sanction(config, session_id, rig.directories[session_id])
                 os.kill(rig.children[session_id].pid, signal.SIGTERM)
 
             exits: dict[str, tuple[int, float]] = {}
@@ -272,7 +318,8 @@ async def test_a_broadcast_sigterm_mid_turn_lets_every_turn_finish(
                         f"completed={TURN_COMPLETED in _transcript(directory)} "
                         f"cut_offs={_cut_off_causes(directory)}"
                     )
-            # 1. Every receiver took the SIGNAL path and left cleanly.
+            # 1. Every receiver survived the unstaged sweep, and the SANCTIONED
+            #    signal that followed ended it cleanly.
             assert all(code == 0 for code, _latency in exits.values()), report
             # 2. NOBODY was killed on arrival. The old handler was gone in
             #    ~0.65 s; a turn parked for PARK_S cannot be, and this is the
@@ -331,6 +378,11 @@ async def test_a_sigterm_with_nothing_in_flight_is_still_immediate(
         with bounded(90, "signal drain: idle SIGTERM"):
             rig.seed_and_spawn("drainsigidle")
             await _wait_record(config, "drainsigidle")
+            # A SANCTIONED idle signal: since slice 1 an arrival nothing staged is
+            # refused (see the refusal cells below), so the latency property this
+            # cell measures is about the ladder's own stop, which stages its marker
+            # before every rung. Nothing about the drain changed.
+            _stage_sanction(config, "drainsigidle", rig.directories["drainsigidle"])
             log_before = len(_runtime_log(config))
 
             started = time.monotonic()
@@ -791,6 +843,10 @@ async def test_a_signalled_runtime_publishes_its_pending_exit_and_keeps_its_turn
             heard: list[str] = []
             rig.viewers["drainvis01"].set_drain_callback(heard.append)
 
+            # A sanctioned arrival: the marker the ladder stages, written here because
+            # this cell drives the signal directly instead of going through it.
+            _stage_sanction(config, "drainvis01", directory)
+
             started = time.monotonic()
             os.kill(rig.children["drainvis01"].pid, signal.SIGTERM)
 
@@ -947,6 +1003,9 @@ async def test_a_turn_that_outlives_the_bound_rides_through(
             # for — and the drain must not need one watching.
             rig.viewers.pop(session_id, None)
             await viewer.dispose()
+            # A sanctioned arrival, so what this cell measures is the BOUND rather
+            # than the gate (an unstaged signal is refused and starts no drain).
+            _stage_sanction(config, session_id, directory)
             log_before = len(_runtime_log(config))
 
             started = time.monotonic()
@@ -1016,6 +1075,23 @@ async def _wait_receipt(directory: Path, timeout: float = 90.0) -> dict[str, Any
     raise AssertionError(f"no signal receipt appeared in {directory}")
 
 
+async def _wait_refusals(directory: Path, timeout: float = 30.0) -> dict[str, Any]:
+    """Wait for the refusal record a real runtime writes at an unsanctioned arrival.
+
+    Its own file (``registry.SIGNAL_REFUSALS_NAME``), deliberately not the receipt:
+    see R-9 in the design and ``registry``'s note on the terminal
+    ``unclassified/receipt-no-signals`` state a signals-less receipt creates.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        found = registry.read_signal_refusals(directory)
+        if found is not None:
+            return found
+        await asyncio.sleep(0.05)
+    raise AssertionError(f"no refusal record appeared in {directory}")
+
+
 @pytest.mark.asyncio
 async def test_an_idle_runtime_leaves_a_receipt_for_an_unsanctioned_sigterm(
     headless_tui_env: Path,
@@ -1027,21 +1103,18 @@ async def test_an_idle_runtime_leaves_a_receipt_for_an_unsanctioned_sigterm(
             directory = rig.seed_and_spawn("rcptidle01")
             record = await _wait_record(config, "rcptidle01")
             os.kill(rig.children["rcptidle01"].pid, signal.SIGTERM)
-            assert rig.children["rcptidle01"].wait(timeout=30) == 0
-            receipt = _receipt(directory)
-            assert receipt is not None, "an idle runtime wrote no receipt for a SIGTERM"
-            entry = receipt["signals"][0]
-            assert (entry["name"], entry["number"]) == ("SIGTERM", 15)
-            assert entry["sanction"] == "none" and entry["stop_marker"] is None
-            assert entry["action"] == "stop" and entry["in_flight"] is False
-            # THE SENDER IS NAMED WHERE THE PLATFORM CAN CAPTURE IT. This cell used
-            # to pin ``unavailable`` because that was all a Python-level handler
-            # could say; ``process.amain`` now arms ``siginfo``'s one-shot sensor,
-            # and the only process that signalled this runtime is THIS test
-            # (``os.kill`` above), so the receipt must name our pid and uid. On a
-            # platform where the sensor is not armed the old, unnamed shape is still
-            # the whole truth, and is asserted byte-for-byte.
-            sender = entry["sender"]
+            refusal_doc = await _wait_refusals(directory)
+            refusal = refusal_doc["refusals"][0]
+            assert refusal["disposition"] == "refused", refusal
+            assert (refusal["name"], refusal["number"]) == ("SIGTERM", 15)
+            assert refusal["sanction"] == "none"
+            # THE SENDER IS STILL NAMED ON A REFUSAL (#3214 x the sanction gate): who TRIED
+            # is the whole value of the siginfo sensor, and a refusal is the one place
+            # nothing else (no marker, no ladder) says. ``process.amain`` arms the sensor
+            # and the only process that signalled this runtime is THIS test, so the
+            # refusal row must name our pid and uid. Where the sensor is not armed the
+            # old, unnamed shape is the whole truth and is asserted byte-for-byte.
+            sender = refusal["sender"]
             if siginfo.supported():
                 assert sender["state"] == "known", sender
                 assert sender["pid"] == os.getpid(), sender
@@ -1052,9 +1125,23 @@ async def test_an_idle_runtime_leaves_a_receipt_for_an_unsanctioned_sigterm(
                     "reason": "no-siginfo",
                     "could_be": "same-uid-or-root",
                 }, sender
-            assert (receipt["kind"], receipt["session_id"]) == ("runtime", "rcptidle01")
-            assert receipt["pid"] == record.pid
+            assert (refusal_doc["kind"], refusal_doc["session_id"]) == ("runtime", "rcptidle01")
+            assert refusal_doc["pid"] == record.pid
+            # THE SEPARATION IS THE CONTRACT: the REFUSAL has its own file, and the
+            # signal receipt is not written at all — "a receipt exists" keeps meaning
+            # "a signal reached this run", which is what the rescue lane reads (a
+            # signals-less receipt would be terminal there: R-9).
+            assert registry.read_signal_receipt(directory) is None
+            # AND THE RUN IS STILL UP — the whole point of refusing.
+            await asyncio.sleep(1.0)
+            assert (
+                rig.children["rcptidle01"].poll() is None
+            ), "an unsanctioned SIGTERM ended an idle runtime"
             assert registry.read_stop_marker(directory) is None, "nothing staged a stop"
+            # ... while the sanctioned stop still ends it, so nothing is stuck.
+            _stage_sanction(config, "rcptidle01", directory)
+            os.kill(rig.children["rcptidle01"].pid, signal.SIGTERM)
+            assert rig.children["rcptidle01"].wait(timeout=30) == 0
     finally:
         await rig.aclose()
 
@@ -1072,11 +1159,12 @@ async def test_a_runtime_signalled_mid_turn_writes_its_receipt_before_the_drain_
             await _wait_record(config, "rcptbusy01")
             await rig.park("rcptbusy01")
             await _wait_record(config, "rcptbusy01", busy=True)
+            _stage_sanction(config, "rcptbusy01", directory)
             os.kill(rig.children["rcptbusy01"].pid, signal.SIGTERM)
             receipt = await _wait_receipt(directory)
             entry = receipt["signals"][0]
             assert entry["action"] == "drain" and entry["in_flight"] is True
-            assert entry["sanction"] == "none"
+            assert entry["sanction"] == "marker"
             assert rig.children["rcptbusy01"].poll() is None, "the drain must still be running"
             os.kill(rig.children["rcptbusy01"].pid, signal.SIGTERM)  # a repeat
             await asyncio.sleep(0.5)
@@ -1113,3 +1201,156 @@ async def test_stop_all_leaves_one_sweep_and_markers_that_name_it(
                 assert marker is not None and marker["sweep_id"] == rows[0]["sweep_id"]
     finally:
         await rig.aclose()
+
+
+# ---------------------------------------------------------------------------
+# The sanction gate's two remaining acceptance criteria, on real processes:
+# the ladder still stops a runtime, and SIGKILL is unrefusable
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_ladder_stop_still_ends_a_runtime(headless_tui_env: Path) -> None:
+    """The ONE person-shaped stop still works, driven through the REAL ladder.
+
+    ``control.stop_session`` stages a marker before every rung — that ordering is the
+    reason the gate's key is the marker rather than the sender's identity. This cell
+    does not name the rung: whatever the ladder picks must land, and the runtime must
+    be gone afterwards with exit 0. An idle runtime is used deliberately, so the cell
+    measures the stop path rather than the deliberate cut of a live turn (which the
+    broadcast cell's sanctioned half already covers).
+    """
+    config = headless_tui_env
+    rig = _Rig(config)
+    try:
+        with bounded(180, "sanction gate: the ladder still stops a runtime"):
+            rig.seed_and_spawn("ladders001")
+            record = await _wait_record(config, "ladders001")
+
+            outcome = await control.stop_session(record, _root=config, timeout_s=120)
+
+            assert outcome.pid == record.pid, outcome
+            assert outcome.method in {"socket", "sigterm"}, outcome
+            assert rig.children["ladders001"].wait(timeout=60) == 0
+    finally:
+        await rig.aclose()
+
+
+@pytest.mark.asyncio
+async def test_sigkill_still_ends_a_runtime_that_refused_a_sigterm(
+    headless_tui_env: Path,
+) -> None:
+    """SIGKILL is unrefusable — the gate must never weaken the escape hatch.
+
+    A refused SIGTERM is inert; the same process dies on SIGKILL, which is every
+    ladder's last rung and ``lop stop --force``. There is no handler to route it
+    through and there must not be one.
+    """
+    config = headless_tui_env
+    rig = _Rig(config)
+    try:
+        with bounded(120, "sanction gate: SIGKILL still ends it"):
+            directory = rig.seed_and_spawn("hardkill01")
+            await _wait_record(config, "hardkill01")
+
+            os.kill(rig.children["hardkill01"].pid, signal.SIGTERM)
+            refusals = await _wait_refusals(directory)
+            assert refusals["refusals"][0]["disposition"] == "refused"
+            assert rig.children["hardkill01"].poll() is None, "the refusal did not hold"
+
+            os.kill(rig.children["hardkill01"].pid, signal.SIGKILL)
+            assert rig.children["hardkill01"].wait(timeout=30) == -signal.SIGKILL
+    finally:
+        await rig.aclose()
+
+
+#: Boot latency the real-process reclaim cell forces BEFORE the runtime starts, so the
+#: precondition "``ps`` etime and the runtime's own start differ by more than the
+#: victim's 1.0 s tolerance" holds by construction on any machine, rather than only
+#: on one slow enough to boot in 1.2 s.
+_FORCED_BOOT_LATENCY_S = 1.8
+
+
+@pytest.mark.asyncio
+async def test_reclaims_sigterm_is_honoured_by_a_runtime_that_booted_slowly(
+    headless_tui_env: Path,
+) -> None:
+    """R-1/Q1, on a REAL runtime: reclaim's own marker path must be covered.
+
+    The first cut staged ``started_at = now - ps etime``. ``etime`` counts from
+    ``exec`` while the runtime stamps its record after interpreter boot, imports and
+    session construction (1.2-3 s), and the victim pairs only inside 1.0 s, so the
+    sweep's SIGTERM was REFUSED and the orphan it exists to end stayed up (review
+    measured 0 of 10, QA 0 of 21 live runtimes inside the tolerance).
+
+    HOW THE PRECONDITION IS FORCED: the child is started through a wrapper that sleeps
+    ``_FORCED_BOOT_LATENCY_S`` before running the production module, so exec -> record
+    exceeds the tolerance whatever the host's speed. The cell then PROVES the old
+    derivation would have missed (so it is discriminating, not decorative), stages the
+    marker through reclaim's REAL ``_attestation_record`` + ``_attest_before_signal``
+    from the real fleet read, sends the SIGTERM, and asserts the runtime honoured it:
+    exit 0, a receipt with ``sanction: marker``, and no refusal on disk.
+    """
+    from local_operator.session.runtime import reclaim
+
+    config = headless_tui_env
+    session_id = "reclaimslow01"
+    directory = _seed(config, session_id)
+    env = _child_env(config, session_id)
+    wrapper = (
+        "import runpy, time; "
+        f"time.sleep({_FORCED_BOOT_LATENCY_S}); "
+        "runpy.run_module('local_operator.session.runtime.process', "
+        "run_name='__main__', alter_sys=True)"
+    )
+    child = subprocess.Popen(
+        [sys.executable, "-c", wrapper],
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    try:
+        with bounded(150, "reclaim: marker from the published record is honoured"):
+            record = await _wait_record(config, session_id)
+            assert record.pid == child.pid
+
+            etime = subprocess.run(
+                ["ps", "-o", "etime=", "-p", str(child.pid)],
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+            age_s = reclaim.etime_seconds(etime)
+            old_key = time.time() - age_s
+            assert abs(old_key - record.started_at) >= 1.0, (
+                "precondition failed: the retired etime derivation would have been "
+                f"covered anyway (delta {old_key - record.started_at:+.2f}s), so this "
+                "cell would not discriminate"
+            )
+
+            item = reclaim.Verdict(
+                process=reclaim.RuntimeProcess(
+                    pid=child.pid,
+                    parent_pid=os.getpid(),
+                    age_s=float(age_s),
+                    cpu_s=0.0,
+                    command=f"{sys.executable} -m {reclaim.RUNTIME_MODULE}",
+                ),
+                config_root=str(config),
+                session_id=session_id,
+            )
+            attestation = reclaim._attestation_record(item, reclaim.read_fleet(config))
+            assert attestation is not None
+            assert attestation.started_at == record.started_at, "the key was not the published one"
+            reclaim._attest_before_signal(item, attestation)
+
+            os.kill(child.pid, signal.SIGTERM)
+            assert await asyncio.to_thread(child.wait, 120) == 0, "the sweep's SIGTERM was refused"
+            assert registry.read_signal_refusals(directory) is None, "a sanctioned stop was refused"
+            receipt = _receipt(directory)
+            assert receipt is not None and receipt["signals"][0]["sanction"] == "marker", receipt
+    finally:
+        if child.poll() is None:
+            _reap(child, config)

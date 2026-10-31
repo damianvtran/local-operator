@@ -1298,6 +1298,12 @@ class AttachedSession:
         #: viewer needs it (an attached one inherits the runtime's own cwd);
         #: ``cold()`` sets the real value.
         self._cwd = ""
+        #: A ``retiring`` frame's destination, recorded by the SYNCHRONOUS frame
+        #: handler and adopted inside ``_bind_lock`` before the engage reads
+        #: ``_cwd``. Assigning ``_cwd`` here would race that read (the measured
+        #: blocker on ``set_working_directory``), and calling that method from
+        #: the handler would retire a runtime that is already retiring.
+        self._pending_frame_cwd = ""
         #: Serialises ``_ensure_bound`` so concurrent first-writes engage one
         #: runtime between them rather than one each.
         self._bind_lock = asyncio.Lock()
@@ -4662,6 +4668,19 @@ class AttachedSession:
         if not self.is_cold and not self._model_selection_override:
             return
         async with self._bind_lock_for(foreground=foreground):
+            # THE ADOPTION IS FIRST, INSIDE THE LOCK: the engage below reads
+            # ``_cwd`` in this same critical section, so a destination that
+            # arrived on the retiring frame must be in place before that read or
+            # the successor is spawned at the old path.
+            if self._pending_frame_cwd:
+                self._cwd = self._pending_frame_cwd
+                self._pending_frame_cwd = ""
+                # THE BAND FOLLOWS THE ENGAGE, not the successor's first snapshot:
+                # without this the visible directory stays the OLD one for as long
+                # as the successor takes to publish, which is the same gap
+                # ``set_working_directory`` closes by calling this method (agent
+                # review round 1, m4). Best-effort by that method's own contract.
+                self._publish_working_directory(self._cwd)
             await self._bind_under_lock(foreground=foreground)
             # Cover every winning-owner path, including another attach/recovery
             # completing during an await. A failed model RPC is not a failed
@@ -5489,6 +5508,13 @@ class AttachedSession:
             on_frontend_sync=once_adopted(self._on_frontend_sync),
             on_frontend_update=once_adopted(self._on_frontend_update),
             on_retiring=once_adopted(self._on_retiring_frame),
+            # THIS FACADE ADOPTS the directory a cwd-move `retiring` frame names
+            # (`_ensure_bound` -> `_pending_frame_cwd`), so it declares the
+            # capability the owning runtime requires before it will retire toward
+            # a move at all. Without the declaration a runtime correctly treats
+            # "nobody can follow this" as a hold — see
+            # `RuntimeServer._cwd_move_successor_guaranteed`.
+            cwd_adoption=True,
             # THE PRODUCTION WIRING FOR THE PROMPT COPY (UX round 6, U3 = design
             # round 6, D3). This client is the pane a human is standing at when the
             # machine's key raises its presence prompt, so it is the one surface
@@ -8651,6 +8677,20 @@ class AttachedSession:
             return True
         return bool(getattr(client, "supports_exclusive_move", False))
 
+    @property
+    def pending_move_cwd(self) -> str:
+        """The destination a cwd-move ``retiring`` frame named, while it is pending.
+
+        Set by :meth:`_on_retiring_frame` and cleared the moment ``_ensure_bound``
+        adopts it into ``_cwd``. Read by the HOST at the instant the retirement
+        lands (the refresh callback), which is the only point where the
+        destination is still knowable and a notice is still worth painting: a
+        cwd-move departure reaches the host as an ordinary retirement, so without
+        this the session restarted in a new directory and said nothing (UX round
+        1, U3). Empty for every other departure.
+        """
+        return self._pending_frame_cwd
+
     def set_refresh_callback(self, callback: Callable[[], Any] | None) -> None:
         """Told when the runtime retired itself for a newer build.
 
@@ -8727,6 +8767,9 @@ class AttachedSession:
         they decide; a frame that names neither trigger still yields ``""``, and
         the host paints the sentence that is true of any drain.
         """
+        pending_cwd = str(frame.get("cwd") or "")
+        if pending_cwd:
+            self._pending_frame_cwd = pending_cwd
         if not frame.get("draining") and not frame.get("updating"):
             return
         callback = self._drain_callback

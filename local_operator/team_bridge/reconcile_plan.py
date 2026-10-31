@@ -11,6 +11,8 @@ import json
 from dataclasses import dataclass
 from enum import StrEnum
 
+from local_operator.team_bridge.consent_versions import DEFAULT_ON_CONSENT_VERSIONS
+
 
 class Preference(StrEnum):
     UNSET = "unset"  # A schema default False is not persisted user intent.
@@ -293,7 +295,9 @@ def _reason(s: AccountSnapshot, t: TenantSnapshot) -> Reason:
     o = s.offer
     if (
         o is None
-        or o.version != "bridge_consent_v2"
+        # Only a default-on disclosure (v2, or v3 naming #general) may enrol
+        # without a member act; exact membership, never ordering.
+        or o.version not in DEFAULT_ON_CONSENT_VERSIONS
         or not o.text_ref.strip()
         or not o.bytes_validated
         or not o.policy_accepted

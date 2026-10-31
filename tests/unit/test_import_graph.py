@@ -833,6 +833,10 @@ _RESCUE_LEAF_MODULES = frozenset(
         "local_operator.session",
         "local_operator.session.retention",
         "local_operator.session.runtime",
+        # The stdlib-free leaf that holds the refusals filename. It arrives through
+        # ``session.retention`` (which classifies the file as bookkeeping) and could
+        # not live in ``registry``: retention sits BELOW it in the import graph.
+        "local_operator.session.runtime.artefact_names",
         "local_operator.session.runtime.registry",
         "local_operator.session.runtime.rescue",
         "local_operator.session.runtime.types",
@@ -996,6 +1000,13 @@ def test_delegated_retention_import_is_light(delegated_retention_modules: set[st
         "local_operator.session.compression",
         "local_operator.session.delegated_retention",
         "local_operator.session.retention",
+        # ``session.retention`` names the refusals sidecar from the stdlib-free leaf
+        # ``runtime.artefact_names`` (a literal would slip past the guard test that
+        # pins the name). The leaf has no imports of its own; the package
+        # ``__init__`` above it is import-free too, so neither carries the engine,
+        # a loop or a front end onto the maintenance thread.
+        "local_operator.session.runtime",
+        "local_operator.session.runtime.artefact_names",
     ], ours
 
 

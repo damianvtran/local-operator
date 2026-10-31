@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from local_operator.i18n import catalogues, resolve
+from tests.unit.i18n import locale_coverage
 
 
 @pytest.mark.asyncio
@@ -142,9 +143,6 @@ async def test_weak_and_list_validators_still_revalidate_to_304(test_app_client)
 @pytest.mark.parametrize(
     "path",
     [
-        # Shipped Urdu carries no wire.exec file; the raw route must not
-        # synthesize one from English or return a synthetic empty namespace.
-        "/v1/i18n/catalogues/ur/wire.exec",
         "/v1/i18n/catalogues/xx/wire.errors",  # unknown locale
         "/v1/i18n/catalogues/en/nope",  # unknown namespace
         "/v1/i18n/catalogues/en/..",  # traversal-shaped component
@@ -217,25 +215,22 @@ async def test_the_per_locale_bundle_serves_eager_wire_messages_and_a_deferred_m
             "wire.errors.desktop.runtime_unreachable"
         ]
     )
-    # The known-large namespace is described, never carried, in the eager map.
-    # (`wire.settings.account_policy` is a CHILD namespace with its own small
-    # file and its own keys, so compare against this namespace's own key set.)
-    settings_keys = catalogues.load_catalogue("en", "wire.settings")
-    assert not any(key in messages for key in settings_keys)
     assert result["namespaces"]["wire.errors.desktop"] == catalogues.catalogue_sha256(
         "en", "wire.errors.desktop"
     )
     deferred = {entry["namespace"]: entry for entry in result["deferred"]}
-    assert set(deferred) == {"wire.settings"}
-    assert deferred["wire.settings"]["content_sha256"] == catalogues.catalogue_sha256(
-        "en", "wire.settings"
-    )
-    assert deferred["wire.settings"]["keys"] == len(
-        catalogues.load_catalogue("en", "wire.settings")
-    )
-    assert deferred["wire.settings"]["bytes"] == len(
-        catalogues.catalogue_bytes("en", "wire.settings")
-    )
+    assert set(deferred) == set(catalogues.DEFERRED_NAMESPACES)
+    # EVERY deferred namespace is described and absent, not just the large one
+    # this test was written for: each carries its own hash/bytes/keys, and none
+    # of its keys may appear in the eager map. (A child namespace such as
+    # `wire.settings.account_policy` is NOT deferred and keeps its own keys, so
+    # each namespace is compared against its own catalogue.)
+    for namespace, entry in deferred.items():
+        keys = catalogues.load_catalogue("en", namespace)
+        assert not any(key in messages for key in keys), namespace
+        assert entry["content_sha256"] == catalogues.catalogue_sha256("en", namespace), namespace
+        assert entry["keys"] == len(keys), namespace
+        assert entry["bytes"] == len(catalogues.catalogue_bytes("en", namespace)), namespace
     assert response.headers["etag"] == f'"{result["content_sha256"]}"'
     assert response.headers["cache-control"] == "no-cache"
 
@@ -354,3 +349,17 @@ async def test_a_malformed_bundle_is_500_not_a_half_typed_map(
     monkeypatch.setattr(catalogues, "_CATALOGUES", root)
     response = await test_app_client.get("/v1/i18n/catalogues/en")
     assert response.status_code == 500
+
+
+@pytest.mark.asyncio
+async def test_supported_catalogue_route_matches_tree(test_app_client) -> None:
+    # This route serves raw files, not rendered messages: an absent file is 404,
+    # whereas messages.render falls back per key. Never conflate those contracts.
+    for locale in locale_coverage.supported_targets():
+        path = catalogues.catalogue_root() / locale / "wire.exec.json"
+        response = await test_app_client.get(f"/v1/i18n/catalogues/{locale}/wire.exec")
+        assert response.status_code == (200 if path.is_file() else 404), locale
+        if path.is_file():
+            assert response.json()["result"]["messages"] == json.loads(
+                path.read_text(encoding="utf-8")
+            )

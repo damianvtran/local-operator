@@ -2486,7 +2486,8 @@ def _engage_transcript(tmp_path: Path, session_id: str = "sess_cos") -> None:
         ("bridge_consent_v1", False, "open_chief_of_staff"),  # v1 + never engaged: hold
         ("bridge_consent_v1", True, ""),  # v1 + engaged: the F1-F6 path
         ("bridge_consent_v2", False, ""),  # v2 + never engaged: may engage
-        ("bridge_consent_v3", False, "open_chief_of_staff"),  # unknown: never inferred
+        ("bridge_consent_v3", False, ""),  # v3 repeats v2's engagement disclosure
+        ("bridge_consent_v4", False, "open_chief_of_staff"),  # unknown: never inferred
         ("bridge_consent_v10", False, "open_chief_of_staff"),  # not "v2 or later" by order
     ],
 )

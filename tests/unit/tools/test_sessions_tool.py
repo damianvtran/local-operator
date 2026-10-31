@@ -875,6 +875,26 @@ def test_describe_approval_sentences_are_pinned() -> None:
         "resume session abcdef123456: reopens its transcript headlessly"
     )
     assert _describe_sessions_approval({"op": "list"}, ".") == "list"
+    # A MOVE IS DECIDED BY ITS TWO DIRECTORIES (agent review round 1, M1; UX round
+    # 1, U2). Both are named, and a RELATIVE destination is resolved against the
+    # session's own directory — the reading the op itself will use — because
+    # "../dest" cannot be judged otherwise. The destination LEADS so a narrow card
+    # cuts the source, not the decision (UX round 2, U12). These ``~/work`` paths
+    # do not exist, and ``realpath`` leaves a missing path's spelling alone.
+    # Round 3: the path starts within the first nine cells (U15, the 80x24 clamp),
+    # no ``: `` precedes it so the receipt keeps it (U16), and the wording says the
+    # move is pending (U16/U17).
+    moved = "move to ~/work/dest after this turn (now in ~/work/src) — the session restarts there"
+    assert _describe_sessions_approval({"op": "move", "cwd": "~/work/dest"}, "~/work/src") == moved
+    assert _describe_sessions_approval({"op": "move", "cwd": "../dest"}, "~/work/src") == moved
+    assert ": " not in moved, "the receipt keeps what follows the first ': '"
+    # U17: naming the current directory CANCELS; the card must not promise a restart.
+    assert _describe_sessions_approval({"op": "move", "cwd": "."}, "~/work/src") == (
+        "stay in ~/work/src — cancels any queued move; nothing restarts"
+    )
+    assert _describe_sessions_approval({"op": "move"}, "~/work/src") == (
+        "move this session (now in ~/work/src): no destination was given"
+    )
 
 
 @pytest.mark.asyncio
@@ -1201,7 +1221,12 @@ def test_schema_budget_is_measured_with_the_repos_own_ruler() -> None:
     params = json.dumps(SessionsParams.model_json_schema(), ensure_ascii=False)
     # LOH-11 adds one optional existing-category name list: 1267 measured
     # (54 tokens above 1213), with the same one-token headroom. No new tool.
-    assert count_text_tokens(params) <= 1268
+    # RE-MEASURED for the own-cwd `move` op: one property (`cwd`) and one enum
+    # word, 1313 measured with this test's own ruler after the field's prose was
+    # trimmed to the start-context budget — pinned at 1314, the same one-token
+    # headroom as every pin above rather than the cushion the untrimmed field
+    # would have left.
+    assert count_text_tokens(params) <= 1314
     assert count_text_tokens(_SESSIONS_TOOL_DESCRIPTION) <= 273
 
 
@@ -2009,7 +2034,7 @@ async def test_a_stray_parameter_refusal_names_the_ops_accepted_set() -> None:
     mixed = await execute_sessions("t", {"op": "bogus", "timeout_ms": 1}, None, None, None)
     assert mixed.is_error
     assert mixed.text.startswith("invalid arguments:")
-    assert "The ops are list, info, spawn, resume, stop, peek, help." in mixed.text
+    assert "The ops are list, info, spawn, resume, stop, peek, move, help." in mixed.text
 
 
 @pytest.mark.asyncio
@@ -3352,3 +3377,46 @@ async def test_mesh_presence_info_and_list_do_not_promote_cached_live_claims(
             assert "link down; status unknown" in result.text
             assert "[live]" not in result.text
             assert "waiting on 2 jobs" not in result.text
+
+
+def test_move_is_advertised_as_its_own_session_only_and_cannot_be_addressed() -> None:
+    """HONEST COPY (UX round 1, U6).
+
+    The always-loaded description began "Manage OTHER local sessions" while
+    `move` acts on your own, and listed `target`/`peer` among its inputs — two
+    addresses the op always refuses. The reference now names the one input a move
+    can act on, and says when the move takes effect and how to withdraw it.
+    """
+    from local_operator.tools.builtin import (
+        _SESSIONS_TOOL_DESCRIPTION,
+        _sessions_reference_body,
+    )
+
+    assert "; `move` acts on THIS one." in _SESSIONS_TOOL_DESCRIPTION
+    assert "; move: cwd;" in _SESSIONS_TOOL_DESCRIPTION, "the only input a move takes"
+    assert "move: session|target|pid" not in _SESSIONS_TOOL_DESCRIPTION
+    reference = _sessions_reference_body()
+    move_entry = reference[reference.index("`move`") :]
+    assert "next idle point" in move_entry, "when the move takes effect"
+    assert "cancels a queued move" in move_entry, "and how to withdraw it"
+
+
+def test_the_viewer_declares_that_it_adopts_a_move_destination() -> None:
+    """The runtime will not retire toward a move nobody can follow (B2).
+
+    The guarantee is the viewer's declaration, so this pins the two halves that
+    make it more than a comment: the facade sends it, and the client carries it
+    into its auth frame.
+    """
+    import inspect
+
+    from local_operator.mobile.attach_client import AttachClient
+    from local_operator.session.attached import AttachedSession
+
+    # The client is dialled by ``_dial`` (the one place a viewer is built), so
+    # that is where the capability is asserted on.
+    assert "cwd_adoption=True" in inspect.getsource(AttachedSession._dial)
+    assert "pending_move_cwd" in dir(AttachedSession)
+    source = inspect.getsource(AttachClient)
+    assert 'auth["cwd_adoption"] = True' in source
+    assert "self._cwd_adoption = cwd_adoption" in source
