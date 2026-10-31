@@ -49,25 +49,18 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Protocol
 
 from local_operator.team_bridge.cos_name import (
     AVATAR_MAX_BYTES,
+    SHA256_HEX,
     PublishedAgent,
     published_agent,
 )
 
 logger = logging.getLogger(__name__)
-
-#: The hub's digest grammar: lowercase hex, the same string it echoes back as
-#: ``source_sha256`` and compares against the ``X-Source-SHA256`` header.
-_SOURCE_SHA256 = re.compile(r"[0-9a-f]{64}")
-
-#: One published result is a few digests and two variant rows. The cap exists so
-#: a hostile or broken hub cannot make this trust an unbounded body.
-_RESULT_MAX_BYTES = 64 * 1024
 
 #: Actions a plan can carry. ``none`` = there is nothing to answer for (no
 #: endpoint, no designated chief of staff, or an older hub without the field),
@@ -116,7 +109,10 @@ class AvatarPlan:
     endpoint_id: str | None = None
     agent_id: str | None = None
     name: str | None = None
-    data: bytes | None = None
+    #: The picture itself. ``repr=False`` because an exception, a traceback or a
+    #: test dump would otherwise carry somebody's image bytes into a log — the
+    #: one thing this module's doctrine says never escapes (review R1-S5).
+    data: bytes | None = field(default=None, repr=False)
     digest: str | None = None
     #: What the hub holds, for the CLI's ``status`` answer only.
     hub_hash: str | None = None
@@ -144,28 +140,39 @@ def _payload(status: Any) -> Mapping[str, Any] | None:
     return payload if isinstance(payload, Mapping) else None
 
 
-def _endpoint(payload: Mapping[str, Any], tenant_id: str) -> tuple[str, Mapping[str, Any]] | None:
-    """``(endpoint_id, endpoint_block)`` for THIS tenant, or ``None``.
+def _endpoint(
+    payload: Mapping[str, Any], tenant_id: str, endpoint_id: str | None = None
+) -> tuple[str, Mapping[str, Any]] | None:
+    """``(endpoint_id, endpoint_block)`` for THIS tenant — or ``None``.
 
-    Addressed by ``tenant_id`` rather than through ``select_tenant``: the caller
-    has already selected the row this machine is about, and re-selecting here
-    could publish to a different organization than the answer describes.
+    Two callers, one rule: AMBIGUITY IS A DOUBT.
+
+    * ``endpoint_id`` given (the status boundary): that exact endpoint must BE
+      the row's endpoint. The boundary's ownership guard validated that id, and
+      re-deriving the address by tenant alone let a payload with two rows for
+      one tenant write to an endpoint the guard never checked (review R1-S3);
+    * ``endpoint_id`` omitted (the explicit CLI paths): the tenant must appear
+      EXACTLY once. A duplicate row is a hub bug or a hostile hub, and this
+      module's rule everywhere else is that a doubt publishes nothing.
     """
 
     tenants = payload.get("tenants")
     if not isinstance(tenants, list):
         return None
-    for row in tenants:
-        if not isinstance(row, Mapping) or row.get("tenant_id") != tenant_id:
-            continue
-        endpoint = row.get("endpoint")
-        if not isinstance(endpoint, Mapping):
-            return None
-        endpoint_id = endpoint.get("id")
-        if not isinstance(endpoint_id, str) or not endpoint_id:
-            return None
-        return endpoint_id, endpoint
-    return None
+    rows = [
+        row for row in tenants if isinstance(row, Mapping) and row.get("tenant_id") == tenant_id
+    ]
+    if len(rows) != 1:
+        return None
+    endpoint = rows[0].get("endpoint")
+    if not isinstance(endpoint, Mapping):
+        return None
+    found_id = endpoint.get("id")
+    if not isinstance(found_id, str) or not found_id:
+        return None
+    if endpoint_id is not None and found_id != endpoint_id:
+        return None
+    return found_id, endpoint
 
 
 def _hub_avatar(endpoint: Mapping[str, Any]) -> tuple[bool, str | None, str | None]:
@@ -186,17 +193,21 @@ def _hub_avatar(endpoint: Mapping[str, Any]) -> tuple[bool, str | None, str | No
     return (
         True,
         key if isinstance(key, str) and re.fullmatch(r"[0-9a-f]{16}", key) else None,
-        digest if isinstance(digest, str) and _SOURCE_SHA256.fullmatch(digest) else None,
+        digest if isinstance(digest, str) and SHA256_HEX.fullmatch(digest) else None,
     )
 
 
 def _avatar_bytes(agent: PublishedAgent) -> tuple[bytes, str] | None:
     """The bytes to publish and their digest, or ``None`` when it is not a picture.
 
-    The stored digest is reused only when the stored SIZE still matches the
-    file: a hand edit is exactly the case the recorded digest is stale for, and
-    sending it would make the hub record a fingerprint its own bytes do not
-    have — which turns every later boundary into a pointless re-PUT.
+    The digest is ALWAYS computed from the bytes being sent, never taken from
+    ``agent.yml``. The recorded value is a claim about a file that may have been
+    edited since, and the hub dedupes on exactly this header: a stale digest for
+    new bytes earns a 204 "bytes I already hold", so the hub keeps the old
+    picture, keeps echoing the old digest, and every later boundary compares
+    equal and plans ``keep`` — a replaced photo that never publishes and never
+    repairs (review R1-F3). A same-size edit is the case only this rule catches.
+    At most one MiB, already in memory, so the hash costs nothing that matters.
     """
 
     path = agent.avatar_path
@@ -208,24 +219,31 @@ def _avatar_bytes(agent: PublishedAgent) -> tuple[bytes, str] | None:
         return None
     if not data or len(data) > AVATAR_MAX_BYTES:
         return None
-    stored = agent.avatar_sha256
-    if stored is not None and agent.avatar_bytes == len(data):
-        return data, stored
     return data, hashlib.sha256(data).hexdigest()
 
 
-def plan_avatar(status: Any, tenant_id: str, config_dir: Path | str | None) -> AvatarPlan:
-    """Resolve the one action this status answer calls for. Raises on nothing it can avoid.
+def plan_avatar(
+    status: Any,
+    tenant_id: str,
+    config_dir: Path | str | None,
+    endpoint_id: str | None = None,
+) -> AvatarPlan:
+    """Resolve the one action this status answer calls for.
 
     ``config_dir`` is ``None`` on the clear path, where the local definition is
     deliberately not consulted: clearing the hub copy is the caller's decision
     and must work on a machine whose local files are unreachable.
+
+    ``endpoint_id`` is the endpoint the caller's ownership guard VALIDATED. The
+    status boundary always passes it, so the plan can only ever address the row
+    that guard approved; the CLI omits it, and then a duplicated tenant row is
+    refused rather than resolved by first match (review R1-S3).
     """
 
     payload = _payload(status)
     if payload is None:
         return AvatarPlan()
-    found = _endpoint(payload, tenant_id)
+    found = _endpoint(payload, tenant_id, endpoint_id)
     if found is None:
         return AvatarPlan()
     endpoint_id, endpoint = found
@@ -295,6 +313,7 @@ async def reconcile(
     status: Any,
     tenant_id: str,
     config_dir: Path | str | None,
+    endpoint_id: str | None = None,
 ) -> None:
     """Publish, keep or clear this endpoint's picture. NEVER raises.
 
@@ -305,7 +324,7 @@ async def reconcile(
     """
 
     try:
-        plan = plan_avatar(status, tenant_id, config_dir)
+        plan = plan_avatar(status, tenant_id, config_dir, endpoint_id)
         await _apply(client, plan, _account_id(status))
     except Exception as exc:  # noqa: BLE001 - a picture never fails a status read
         code = getattr(exc, "code", None)
@@ -317,41 +336,55 @@ async def reconcile(
 
 
 async def publish_agent_avatar(
-    client: AvatarClient, tenant_id: str, config_dir: Path | str | None
+    client: AvatarClient,
+    tenant_id: str,
+    config_dir: Path | str | None,
+    *,
+    access: Any = None,
+    status: Any = None,
 ) -> AvatarPlan:
     """Publish the local picture NOW, whatever the hub already holds.
 
     The explicit-save and CLI path: an explicit save means "this file is the
     picture", so the digest comparison is deliberately skipped. Refusals and
     transport failures propagate — there is a caller here who can read them.
+
+    ONE identity, one read. ``status`` and ``access`` are the caller's already
+    resolved records; when they are not supplied both are resolved here, in this
+    order, and the status is fetched WITH that access. Resolving the access
+    afterwards and pinning the write to it compared a value with itself, so the
+    advertised account pin could never fail (review R1-S4).
     """
 
-    status = await client.status()
+    access = access if access is not None else await client.current_access()
+    status = status if status is not None else await client.status(access=access)
     plan = plan_avatar(status, tenant_id, config_dir)
     if plan.endpoint_id is None or plan.digest is None or plan.data is None:
         # Nothing to publish IS the answer: an explicit publish never turns into
         # a delete behind the caller's back.
         return plan.replaced(NONE)
     forced = plan.replaced(PUBLISH)
-    access = await client.current_access()
     await _apply(client, forced, _account_id(access))
     return forced
 
 
-async def clear_agent_avatar(client: AvatarClient, tenant_id: str) -> AvatarPlan:
+async def clear_agent_avatar(
+    client: AvatarClient, tenant_id: str, *, access: Any = None, status: Any = None
+) -> AvatarPlan:
     """Remove the HUB copy. The local file is the local writer's to delete.
 
     Deliberately does not touch ``<config>/agents``: clearing locally is one
     write through the agent store, and a second writer for the same block is
     exactly how the two would end up disagreeing about what the file says.
+    Same one-identity rule as :func:`publish_agent_avatar`.
     """
 
-    status = await client.status()
+    access = access if access is not None else await client.current_access()
+    status = status if status is not None else await client.status(access=access)
     plan = plan_avatar(status, tenant_id, None)
     if plan.endpoint_id is None:
         return plan
     forced = plan.replaced(DELETE)
-    access = await client.current_access()
     await _apply(client, forced, _account_id(access))
     return forced
 
