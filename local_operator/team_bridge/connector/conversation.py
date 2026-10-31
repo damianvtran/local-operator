@@ -698,7 +698,45 @@ async def _deliver_card(
         card,
         session_id=session_id,
         config_dir=config_dir,
-        sender_display={"sender_name": metadata.sender_label},
+        sender_display={
+            "sender_name": metadata.sender_label,
+            # Display-only facts come from this card's typed producer, never
+            # by parsing its model-facing envelope. Coalesced mixed identity
+            # is intentionally unnamed rather than attributed to the newest.
+            "bridge_receipt": {
+                "v": 1,
+                "sender": {
+                    **(
+                        {"name": metadata.sender_label}
+                        if metadata.sender_label and len(metadata.coalesced_message_ids) <= 1
+                        else {}
+                    ),
+                    **(
+                        {"kind": metadata.sender_kind}
+                        if metadata.sender_kind in ("human", "agent")
+                        and len(metadata.coalesced_message_ids) <= 1
+                        else {}
+                    ),
+                },
+                "conversation": {
+                    **({"kind": metadata.conversation_kind} if metadata.conversation_kind else {}),
+                    **(
+                        {"label": metadata.conversation_label}
+                        if metadata.conversation_label
+                        else {}
+                    ),
+                },
+                "attachment_count": metadata.attachments,
+            },
+            "bridge_receipt_source": {
+                "account_id": owner.account_id,
+                "tenant_id": owner.tenant_id,
+                "endpoint_id": owner.endpoint_id,
+                "conversation_id": metadata.conversation_id,
+                "message_ids": list(metadata.coalesced_message_ids or (metadata.message_id,)),
+                "conversation_seq": metadata.conversation_seq,
+            },
+        },
     )
 
 
