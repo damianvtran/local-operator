@@ -55,9 +55,20 @@ __all__ = [
     "screening_failure_class",
 ]
 
-#: Output ceiling for one screening reply: the frozen grammar is two short
-#: lines, and a bounded stream is part of the cost contract.
-_SCREEN_MAX_TOKENS = 256
+#: Output ceiling for one screening reply. The frozen grammar is two short
+#: lines, and a bounded stream is part of the cost contract -- but on a
+#: reasoning model this ceiling ALSO bounds the thinking that precedes those
+#: lines (Anthropic counts adaptive-thinking tokens against ``max_tokens``, and
+#: the default spec seeds an effort level, so the screener thinks). 256 was
+#: sized for the two lines alone: measured 2026-10-30 on ``claude-opus-5-5`` at
+#: its seeded ``medium`` effort, 22 of 71 live screens ended ``stop=length`` at
+#: exactly 256 output tokens with no verdict line, mostly ordinary messages
+#: whose screen needed 220-350 tokens (xhigh peaked at 715). Those
+#: truncations were what opened the account breaker in issue #3195. 1024 clears
+#: the measured peak with headroom; the visible text stays bounded by
+#: ``_SCREEN_TEXT_CAP`` and the strict two-line grammar either way, and output
+#: is billed as used, not as reserved.
+_SCREEN_MAX_TOKENS = 1024
 #: Bound on consumed reply text (defence against a runaway stream).
 _SCREEN_TEXT_CAP = 4096
 #: The screening wall deadline, per the frozen contract — NOT the ordinary
@@ -68,12 +79,46 @@ _SCREEN_CONNECT_TIMEOUT_S = 10.0
 _SANITIZED_WIRE_ERROR = "screening provider call failed"
 
 
+#: Stream refusals that mean the provider DID answer -- the route is healthy,
+#: the reply just cannot admit -- mapped to the closed hold code the pipeline
+#: records for each. Anything not listed (``error``/``aborted`` terminals, a
+#: stream that ended without its end event, a pre-dispatch refusal) stays a
+#: provider failure. See ``ScreenModelRunner._drive`` for where each is raised.
+_ANSWERED_REFUSAL_HOLDS: dict[str, str] = {
+    # The model's own safety stop on the screening prompt. A hostile message
+    # is exactly what provokes it, so counting it as a route failure let a
+    # sender trip the account breaker (#3195).
+    "refusal": "model_refused",
+    # The reply hit ``max_tokens`` before the verdict was complete.
+    "length": "reply_truncated",
+    # Replies that break the strict grammar in a way the parser never sees.
+    # ``tool_use`` is the runner's own reason (a tool-call delta, or tool
+    # content in a clean end's payload); ``toolUse`` is a ``StreamEndEvent``'s
+    # stop reason passed through verbatim (``harness.types.StreamEndEvent``).
+    "tool_use": "parse_failed",
+    "toolUse": "parse_failed",
+    "over_cap": "parse_failed",
+}
+
+
 class _ScreeningStreamRefused(Exception):
     """A typed refusal inside a screening stream (never carries prose)."""
 
     def __init__(self, reason: str) -> None:
         super().__init__(reason)
         self.reason = reason
+
+    @property
+    def answered_hold_code(self) -> str | None:
+        """The hold code when the provider answered, else ``None``.
+
+        Non-``None`` means a completed provider RESPONSE that is not an
+        admissible verdict: the pipeline records a provider success (it must
+        not advance the account breaker) and holds under this code.
+        ``None`` means the route itself failed and the breaker counts it.
+        """
+
+        return _ANSWERED_REFUSAL_HOLDS.get(self.reason)
 
 
 @dataclass(frozen=True)
