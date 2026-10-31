@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import httpx
 import pytest
@@ -13,6 +14,7 @@ from local_operator.harness.types import (
     AgentTool,
     Message,
     ModelSpec,
+    ToolContext,
     ToolResult,
 )
 from local_operator.providers.clients import OpenAICompatClient
@@ -122,7 +124,10 @@ async def exercise_lifecycle(source, *, prefix=False, conflict=False):
     payloads.append(
         {
             "type": "response.completed",
-            "response": {"id": "synthetic-response", "output": [item]},
+            "response": {
+                "id": "synthetic-response",
+                "output": [{"type": "reasoning", "id": "r", "encrypted_content": "opaque"}, item],
+            },
         }
     )
     if source == "late_delta":
@@ -204,3 +209,151 @@ async def exercise_lifecycle(source, *, prefix=False, conflict=False):
         assert len(calls) == 1
         assert calls[0].raw_arguments == arguments
         assert calls[0].arguments == json.loads(arguments)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "case",
+    [
+        "done_replacement",
+        "terminal_replacement",
+        "explicit_empty",
+        "reasoning_only",
+        "partial_membership",
+        "changed_identity",
+        "invalid_output",
+        "omitted_output",
+        "reverse_event_order",
+        "delta_control",
+    ],
+)
+async def test_terminal_batch_authority_precedes_all_approvals_and_effects(case):
+    """Two pending writes prove a contradiction retires the WHOLE batch.
+
+    Executors only append to a list; no filesystem or network writes occur.
+    Output indices are stable protocol positions, not arrival-order indices.
+    """
+    calls = [
+        {
+            "type": "function_call",
+            "id": f"fc-{index}",
+            "call_id": f"call-{index}",
+            "name": "write",
+            "arguments": json.dumps({"path": f"synthetic-{index}"}),
+        }
+        for index in range(2)
+    ]
+    reasoning = {"type": "reasoning", "id": "reasoning-synthetic", "encrypted_content": "opaque"}
+    payloads = []
+    slots = [2, 0] if case == "reverse_event_order" else [0, 2]
+    for item, slot in zip(calls, slots):
+        payloads.append(
+            {
+                "type": "response.output_item.added",
+                "output_index": slot,
+                "item": {**item, "arguments": "" if case == "delta_control" else item["arguments"]},
+            }
+        )
+        if case == "delta_control":
+            payloads.append(
+                {
+                    "type": "response.function_call_arguments.delta",
+                    "item_id": item["id"],
+                    "output_index": slot,
+                    "delta": item["arguments"],
+                }
+            )
+        payloads.append({"type": "response.output_item.done", "output_index": slot, "item": item})
+    payloads.append({"type": "response.output_item.done", "output_index": 1, "item": reasoning})
+    terminal: dict[str, Any] = {
+        "id": "terminal-synthetic",
+        "output": [calls[0], reasoning, calls[1]],
+    }
+    if case == "reverse_event_order":
+        terminal["output"] = [calls[1], reasoning, calls[0]]
+    elif case == "done_replacement":
+        payloads.append({"type": "response.output_item.done", "output_index": 2, "item": reasoning})
+    elif case == "terminal_replacement":
+        terminal["output"] = [calls[0], reasoning, reasoning]
+    elif case == "explicit_empty":
+        terminal["output"] = []
+    elif case == "reasoning_only":
+        terminal["output"] = [reasoning]
+    elif case == "partial_membership":
+        terminal["output"] = [calls[0], reasoning]
+    elif case == "changed_identity":
+        terminal["output"] = [calls[0], reasoning, {**calls[1], "call_id": "different-call"}]
+    elif case == "invalid_output":
+        terminal["output"] = None
+    elif case == "omitted_output":
+        terminal.pop("output")
+    payloads.append({"type": "response.completed", "response": terminal})
+    executed = []
+    approvals = []
+    requests = []
+
+    async def execute(call_id, args, signal, on_update, context):
+        executed.append(args)
+        return ToolResult(tool_call_id=call_id, content=[])
+
+    async def approve(*args, **kwargs):
+        approvals.append(args)
+        return True
+
+    def handler(request):
+        requests.append(request.url.path)
+        events = (
+            payloads
+            if len(requests) == 1
+            else [
+                {"type": "response.output_text.delta", "delta": "Finished."},
+                {"type": "response.completed", "response": {"id": "finished", "output": []}},
+            ]
+        )
+        return httpx.Response(
+            200,
+            content="".join(f"data: {json.dumps(event)}\n\n" for event in events).encode(),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    tool = AgentTool(
+        name="write",
+        parameters={
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+        },
+        execute=execute,
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = OpenAICompatClient(
+            "https://synthetic.invalid/v1", http_client=http, openai_api="responses"
+        )
+
+        def stream(request, signal):
+            return client.stream(request, "synthetic-token")
+
+        context = LoopContext(
+            system_blocks=["Synthetic terminal-authority test"],
+            tools=[tool],
+            tool_context=ToolContext(request_approval=approve),
+        )
+        config = make_config(
+            stream,
+            model=ModelSpec(provider="openai", model_id="gpt-4.1", supports_responses_api=True),
+        )
+        events = [
+            event
+            async for event in AgentLoop().run([Message.user("Synthetic writes")], context, config)
+        ]
+    end = next(event for event in reversed(events) if isinstance(event, AgentEndEvent))
+    if case in ("omitted_output", "reverse_event_order", "delta_control"):
+        assert end.error is None
+        assert executed == [{"path": "synthetic-0"}, {"path": "synthetic-1"}]
+        assert len(approvals) == 2
+        assert len(requests) == 2
+    else:
+        assert executed == []
+        assert approvals == []
+        assert len(requests) == 1
+        assert end.error is not None and "responses_tool_arguments_conflict" in end.error

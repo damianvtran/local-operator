@@ -4013,6 +4013,11 @@ class OpenAICompatClient:
         ) -> list[StreamToolCallDelta]:
             nonlocal tool_call_count
             if item.get("type") != "function_call":
+                # A completed message/reasoning item cannot erase a call that
+                # already owns this output slot. Partial deltas are pending,
+                # not permission to execute a call contradicted by its final.
+                if output_index in output_call_indexes:
+                    raise conflicting_call()
                 return []
             call_id = item.get("call_id") or item.get("id") or ""
             item_id = item.get("id") or ""
@@ -4144,21 +4149,44 @@ class OpenAICompatClient:
                     response_obj = payload.get("response") or {}
                     if response_obj.get("id"):
                         provider_payload = {"id": response_obj["id"]}
-                    native = response_obj.get("output")
-                    if not isinstance(native, list) or not native:
+                    expected_call_positions = set(output_call_indexes)
+                    explicit_output = "output" in response_obj
+                    if not explicit_output:
+                        # Compatible endpoints may omit the FIELD and rely on
+                        # item.done snapshots. An explicit [] is authoritative,
+                        # not an invitation to resurrect earlier pending calls.
                         native_indexes = sorted(output_items)
                         native = [output_items[index] for index in native_indexes]
                     else:
+                        native = response_obj["output"]
+                        if not isinstance(native, list):
+                            raise conflicting_call()
                         native_indexes = list(range(len(native)))
                     envelope.check(
                         _responses_output_bytes(
                             [item for item in native if isinstance(item, Mapping)]
                         )
                     )
+                    final_call_positions: set[int] = set()
+                    final_call_indices: set[int] = set()
                     for output_index, item in zip(native_indexes, native):
                         if isinstance(item, Mapping):
                             for event in reconcile_item(item, output_index, final=True):
                                 yield event
+                            if item.get("type") == "function_call":
+                                index = output_call_indexes[output_index]
+                                if index in final_call_indices:
+                                    raise conflicting_call()
+                                final_call_indices.add(index)
+                                final_call_positions.add(output_index)
+                    # Never dispatch survivors of an explicitly contradictory
+                    # batch. An absent field is not a membership assertion:
+                    # legacy delta-only streams and length truncation retain
+                    # their existing completion/partial-call handling.
+                    if explicit_output and not expected_call_positions.issubset(
+                        final_call_positions
+                    ):
+                        raise conflicting_call()
                     # Terminal output is authoritative; .done events cover
                     # compatible endpoints whose terminal omits output.
                     replay_text: list[str] = []
