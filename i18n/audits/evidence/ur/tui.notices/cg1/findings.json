@@ -1,0 +1,39 @@
+{
+  "locale": "ur",
+  "namespace": "tui.notices",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 2,
+    "nit": 0
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 1,
+      "id": "UR-005",
+      "severity": "MINOR",
+      "namespace": "tui.notices",
+      "key": "tui.notices.effort_default_changed",
+      "english": "reasoning effort default changed for new sessions ({effort}); /model saved adopts it here",
+      "current": "نئے سیشنز کے لیے reasoning effort کا ڈیفالٹ بدل گیا ({effort})؛ /model saved اسے یہاں اپنا لیتا ہے",
+      "problem": "'effort'/'reasoning effort' left in Latin in prose (also reasoning_echo_filled, budget_exhausted_retry, effort_default_changed_headline 'Effort کا ڈیفالٹ بدل گیا'). It is a concept, not a token; ur relay surface uses «استدلال کی شدت» (relay.chrome.model.effort). Mixed-case Latin 'Effort' mid-RTL headline is especially jarring.",
+      "suggested": "نئے سیشنز کے لیے استدلال کی شدت کا ڈیفالٹ بدل گیا ({effort})؛ /model saved اسے یہاں اپنا لیتا ہے · headline: استدلال کی شدت کا ڈیفالٹ بدل گیا",
+      "disposition": "fixed (remediation core-fix, session be04c022ebd4)"
+    },
+    {
+      "round": 1,
+      "id": "UR-006",
+      "severity": "MINOR",
+      "namespace": "tui.notices",
+      "key": "tui.notices.unsaved_asides",
+      "english": "{count} aside(s) you added to the conversation",
+      "current": "{count} ضمنی نوٹ(س) جو آپ نے گفتگو میں شامل کیے",
+      "problem": "'aside' rendered «ضمنی نوٹ(س)» here but «سائیڈ نوٹ» in tui.small.aside.title — two names for one surface. Also the Latin '(س)' plural hack is not Urdu morphology.",
+      "suggested": "{count} ضمنی نوٹ جو آپ نے گفتگو میں شامل کیے (and align tui.small.aside.title to the same term)",
+      "disposition": "fixed (remediation core-fix, session be04c022ebd4)"
+    }
+  ]
+}

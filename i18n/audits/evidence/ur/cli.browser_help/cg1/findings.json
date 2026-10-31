@@ -1,0 +1,27 @@
+{
+  "locale": "ur",
+  "namespace": "cli.browser_help",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 1,
+    "nit": 0
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 2,
+      "id": "UR2-001",
+      "severity": "MINOR",
+      "namespace": "cli.browser_help",
+      "key": "cli.browser_help.status_repair",
+      "english": "Reconcile advertised state against reality: drop tabs that no longer exist and republish a fresh heartbeat. Safe while sessions are live.",
+      "current": "اعلان شدہ حالت کو حقیقت سے ہم آہنگ کریں: موجود نہ رہنے والے ٹیبز ہٹائیں اور نیا ہارٹ بیٹ دوبارہ شائع کریں۔ سیشنز فعال ہونے پر بھی محفوظ۔",
+      "problem": "Sweep recurrence of the UR-009 class: a bare predicate «محفوظ۔» ('Safe.') after a sentence about republishing state can be read as 'saved' (this locale uses محفوظ for Save/stored). It is not a consent string, so this is MINOR, not MAJOR.",
+      "suggested": "…دوبارہ شائع کریں۔ سیشنز فعال ہوں تب بھی چلانا بے خطر ہے۔",
+      "disposition": "open at PASS: minor/nit accepted, value unchanged"
+    }
+  ]
+}

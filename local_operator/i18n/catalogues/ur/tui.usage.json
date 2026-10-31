@@ -1,0 +1,23 @@
+{
+  "tui.usage.paid.continue": "شامل کوٹا ختم؛ کریڈٹس جاری رہیں گے",
+  "tui.usage.paid.family_caps": "ماڈل فیملی کی حدیں اب بھی لاگو ہیں",
+  "tui.usage.paid.blocked": "خرچ دستیاب نہیں",
+  "tui.usage.paid.eligibility_unknown": "خرچ کی اہلیت نامعلوم",
+  "tui.usage.paid.unlimited": "لامحدود ادا شدہ الاؤنس",
+  "tui.usage.windows_count": "{count, plural, one {{shown} ونڈو} other {{shown} ونڈوز}}",
+  "tui.usage.exhausted": "{value} ختم",
+  "tui.usage.near_limit": "{value} حد کے قریب",
+  "tui.usage.reported_balance": "{count, plural, one {{shown} رپورٹ شدہ بیلنس} other {{shown} رپورٹ شدہ بیلنسز}}",
+  "tui.usage.not_reported": "{value} رپورٹ نہیں ہوا",
+  "tui.usage.unavailable": "  ·  استعمال دستیاب نہیں",
+  "tui.usage.resets_in": "، {value} میں ری سیٹ",
+  "tui.usage.no_windows": "  کوئی ونڈو رپورٹ نہیں ہوئی",
+  "tui.usage.fetching": "حاصل کیا جا رہا ہے…",
+  "tui.usage.title": "استعمال",
+  "tui.usage.sign_in_expired": "{value} کا سائن اِن ختم ہو گیا",
+  "tui.usage.stale": "{value} پرانا",
+  "tui.usage.refreshing": "تازہ کیا جا رہا ہے…",
+  "tui.usage.refresh_failed": "تازہ کاری ناکام — آخری معلوم اعداد دکھائے جا رہے ہیں",
+  "tui.usage.showing_prefix": "دکھایا جا رہا ہے ",
+  "tui.usage.of_separator": " از "
+}

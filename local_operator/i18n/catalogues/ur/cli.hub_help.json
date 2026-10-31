@@ -1,0 +1,14 @@
+{
+  "cli.hub_help.hub": "Agent Hub اپ ڈیٹ کی حالت",
+  "cli.hub_help.status": "دکھائیں کون سے pull کیے گئے ایجنٹس اور ٹیموں کے لیے ہب اپ ڈیٹس ہیں",
+  "cli.hub_help.status_json": "ڈیسک ٹاپ روٹ پے لوڈ جاری کریں",
+  "cli.hub_help.links": "ہر ہب لنک (صحت مند یا نہیں) اس کے ماخذ، اسکوپ اور پالیسی کے ساتھ دکھائیں",
+  "cli.hub_help.links_json": "ڈیسک ٹاپ لنکس پے لوڈ جاری کریں",
+  "cli.hub_help.link": "ایک ہب لنک کی آزاد پالیسی میں ترمیم کریں",
+  "cli.hub_help.link_set": "اس لنک کی subscribe اور/یا auto_push پالیسی سیٹ کریں",
+  "cli.hub_help.link_set_link_id": "`lop hub links` سے لنک id",
+  "cli.hub_help.link_set_subscribe": "اس لنک کے لیے بغیر نگرانی آنے والی ہم آہنگی",
+  "cli.hub_help.link_set_auto_push": "اس لنک کے لیے بغیر نگرانی جانے والی اشاعت",
+  "cli.hub_help.link_set_expected_revision": "پالیسی کا وہ ریویژن جو آپ نے آخری بار دیکھا (CAS)؛ چھوڑنے پر پہلے تازہ پڑھتا ہے",
+  "cli.hub_help.link_set_confirm_public_egress": "تحریر کردہ تبدیلیاں عوامی ماخذ پر شائع کرنے کی واضح رضامندی"
+}

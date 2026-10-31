@@ -1,0 +1,27 @@
+{
+  "locale": "ur",
+  "namespace": "cli.exec_help",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 1,
+    "nit": 0
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 1,
+      "id": "UR-024",
+      "severity": "MINOR",
+      "namespace": "cli.exec_help",
+      "key": "cli.exec_help.effort",
+      "english": "Set reasoning effort; validated against the selected model",
+      "current": "reasoning effort سیٹ کریں؛ منتخب ماڈل کے مقابل توثیق ہوتی ہے",
+      "problem": "'reasoning effort' left in Latin in a help sentence; same concept as UR tui.notices finding, ur relay uses «استدلال کی شدت».",
+      "suggested": "استدلال کی شدت سیٹ کریں؛ منتخب ماڈل کے مقابل توثیق ہوتی ہے",
+      "disposition": "fixed (remediation core-fix, session be04c022ebd4)"
+    }
+  ]
+}

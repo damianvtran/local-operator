@@ -1,0 +1,27 @@
+{
+  "locale": "ur",
+  "namespace": "mobile.setup",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 1
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 1,
+      "id": "UR-016",
+      "severity": "NIT",
+      "namespace": "mobile.setup",
+      "key": "mobile.setup.quote_changed",
+      "english": "The current price is USD {current}/month, not the USD {accepted} you accepted. Your submitted amount was not accepted; check the current quote before trying again.",
+      "current": "موجودہ قیمت USD {current}/ماہ ہے، وہ USD {accepted} نہیں جو آپ نے قبول کی تھی۔ آپ کی جمع کردہ رقم قبول نہیں ہوئی؛ دوبارہ کوشش سے پہلے موجودہ قیمت چیک کریں۔",
+      "problem": "«آپ کی جمع کردہ رقم قبول نہیں ہوئی» is accurate; but «وہ USD {accepted} نہیں جو آپ نے قبول کی تھی» uses fem. agreement with masculine «USD … ». Minor grammar; meaning intact.",
+      "suggested": "موجودہ قیمت USD {current}/ماہ ہے، نہ کہ آپ کی قبول کردہ USD {accepted}۔ …",
+      "disposition": "fixed (remediation core-fix, session be04c022ebd4)"
+    }
+  ]
+}
