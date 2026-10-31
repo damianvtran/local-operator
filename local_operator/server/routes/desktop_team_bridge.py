@@ -2982,6 +2982,9 @@ _NOTIFICATION_AVATAR_PHOTO = frozenset({"v", "avatar_account_id"})
 #: shape (not a value of ``avatar_account_id``) so a person can never be drawn
 #: from an endpoint and an agent never from an account.
 _NOTIFICATION_AVATAR_AGENT = frozenset({"v", "avatar_endpoint_id"})
+#: Set on a composite when the agent's own picture was requested but the glyph
+#: was drawn. The desktop main process reads it (local-operator-ui #1544).
+_AVATAR_FALLBACK_HEADER = "X-Avatar-Fallback"
 
 
 @router.get("/v1/desktop/team-bridge/accounts/{target_account_id}/notification-avatar")
@@ -3010,8 +3013,10 @@ async def get_notification_avatar(
       initials placeholder is drawn and no network is touched.
     * ``v`` + ``avatar_endpoint_id`` (``person_agent`` only, capability
       ``team_bridge_endpoint_avatar``): the agent's OWN picture, read through
-      the closed endpoint relay and drawn under the badge and agent marker. A
-      failed or undecodable read draws the agent glyph instead (a banner never
+      the closed endpoint relay and drawn under the badge and agent marker.
+      Core first checks the tenant directory publishes exactly that picture for
+      the path account's agent. An unbound, failed or undecodable read draws
+      the agent glyph and answers ``X-Avatar-Fallback: glyph`` (a banner never
       waits on, or loses, a cosmetic picture); a changed login still refuses.
       Exactly one of the two photo shapes; a ``person`` naming an endpoint is
       refused.
@@ -3069,6 +3074,7 @@ async def get_notification_avatar(
         or (photo_names and query["avatar_account_id"] != target_account_id)
     ):
         _raise_read("invalid_request")
+    fell_back: list[bool] = []
     try:
         data = await _conversation_reply(
             _conversation_client(config_manager).notification_avatar(
@@ -3081,6 +3087,7 @@ async def get_notification_avatar(
                 v=query["v"] if photo_names else None,
                 expected_account_id=query["expected_account_id"],
                 endpoint=(query["avatar_endpoint_id"], query["v"]) if agent_names else None,
+                on_fallback=lambda: fell_back.append(True),
             )
         )
     except na.RendererBusy:
@@ -3096,6 +3103,11 @@ async def get_notification_avatar(
             "X-Content-Type-Options": "nosniff",
             "Content-Security-Policy": "default-src 'none'; sandbox",
             "Cache-Control": "private, no-store",
+            # An agent picture was asked for and the glyph was drawn instead
+            # (code review round 1, F1). The desktop keeps this answer for its
+            # short failure TTL, not the photo lease, so a hub blip does not pin
+            # the glyph for 15 minutes. Absent on every other answer.
+            **({_AVATAR_FALLBACK_HEADER: "glyph"} if fell_back else {}),
         },
     )
 

@@ -531,6 +531,7 @@ def compose(
     account_id: str,
     photo: bytes | None,
     agent_picture: bytes | None = None,
+    on_fallback: Callable[[], None] | None = None,
 ) -> bytes:
     """Render one notification PNG. Pure and synchronous; call off-loop.
 
@@ -550,11 +551,15 @@ def compose(
         # Never the owner's photo or initials (module docstring). A supplied
         # photo is not even decoded: those bytes are the owner's, not the agent's.
         face = _agent_face(side, colour)
+        drawn = False
         if agent_picture is not None:
             try:
                 face = _cover(decode_source(agent_picture), side)
+                drawn = True
             except AvatarImageRejected:
                 pass  # the glyph stays: a bad agent picture is not a lost banner image
+        if not drawn and on_fallback is not None:
+            on_fallback()
     elif photo is not None:
         face = _cover(decode_source(photo), side)
     else:
@@ -593,6 +598,7 @@ async def render(
     photo: bytes | None,
     agent_picture: bytes | None = None,
     check_owner: Callable[[], None] = lambda: None,
+    on_fallback: Callable[[], None] | None = None,
 ) -> bytes:
     """Concurrency-bounded :func:`compose` off the event loop. Stores nothing.
 
@@ -616,6 +622,7 @@ async def render(
                     account_id=account_id,
                     photo=photo,
                     agent_picture=agent_picture,
+                    on_fallback=on_fallback,
                 )
                 check_owner()
                 return data
