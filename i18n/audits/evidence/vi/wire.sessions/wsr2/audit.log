@@ -1,0 +1,28 @@
+# wire.sessions / vi — verification re-run by the implementer at the ledger commit
+# revision 9d4bed5504093b63c6ff59a87fce63246d7e6226  (round-1 audited revision b3b1c2aec56fdc615f16e57fadfd606eb3cefe96)
+# this is the mechanical half re-executed here; the linguistic verdicts are the two
+# auditor comments on PR #3102, quoted in report.md and record.json.
+SHA256 local_operator/i18n/catalogues/en/wire.sessions.json ad2c68cbc8dc98f81875b0c1b3960be4cdfed27113bc326ae26045d93d75585a
+SHA256 local_operator/i18n/catalogues/en/wire.sessions.context.json 1604fc3efe1d6aedf054c948324de3629df8c942744cf1c37a89ddf8de346e2f
+SHA256 local_operator/i18n/catalogues/vi/wire.sessions.json 2c93c1f6fa81ff7e5acd38440f2b3b6037eb9034cd955f2d5ee56eb840df0044
+KEYS locale=vi count=9 en=9 equal=True
+PASS wire.sessions.approval_stop_local args=['address'] cells=127
+  RENDER dừng worker-7 nếu phiên đang rảnh: giải phóng lease của phiên và không bao giờ gửi tín hiệu; bị từ chối khi phiên đang làm việc
+PASS wire.sessions.approval_stop_peer args=['address', 'peer'] cells=72
+  RENDER dừng worker-7 trên build-box: bản dựng này luôn từ chối, sẽ không gửi gì
+PASS wire.sessions.stop_pending args=['name', 'seconds'] cells=140
+  RENDER “review-loop” đã chấp nhận lệnh dừng, nhưng chưa thoát sau 10 s. Không có tín hiệu nào được gửi — hãy xem danh sách phiên trước khi thử lại.
+PASS wire.sessions.stop_refused_busy args=['name'] cells=171
+  RENDER “review-loop” đang làm việc (một lượt, một phê duyệt, một tác nhân con hoặc một tác vụ), nên không có gì bị dừng và không có tín hiệu nào được gửi. Thử lại khi phiên rảnh.
+PASS wire.sessions.stop_refused_old_owner args=['name'] cells=226
+  RENDER “review-loop” đang chạy bản dựng cũ hơn, bản dựng đó không thể cam kết chỉ dừng khi phiên rảnh, nên không có gì bị dừng và không có tín hiệu nào được gửi. Thử lại sẽ không thay đổi điều đó — hãy đề nghị người vận hành dừng nó.
+PASS wire.sessions.stop_refused_unanswered args=['name'] cells=174
+  RENDER “review-loop” không trả lời, nên không thể xác nhận việc chỉ dừng khi phiên rảnh và không có tín hiệu nào được gửi. Hãy xem danh sách phiên trước — có thể phiên đã không còn.
+PASS wire.sessions.stop_refused_wake args=['name'] cells=180
+  RENDER “review-loop” đang rảnh, nhưng một lần thức dậy theo lịch sắp đến trong cửa sổ giữ, nên không có gì bị dừng và không có tín hiệu nào được gửi. Thử lại sau khi lần thức dậy đó chạy.
+PASS wire.sessions.stop_remote_refused args=[] cells=212
+  RENDER Không thể dừng một phiên trên thiết bị khác từ đây bằng bản dựng này: không thể bảo đảm thoát mà không gửi tín hiệu và chỉ khi phiên rảnh, nên không có gì được gửi. Người vận hành có thể dừng nó trên thiết bị đó.
+PASS wire.sessions.stop_self_refused args=[] cells=103
+  RENDER Mục tiêu đó chính là phiên này, và một phiên không thể tự dừng chính nó. Hãy dừng nó từ một phiên khác.
+WIDTH locale=vi min=72 max=226; plural: none of the nine keys is an ICU plural message; nfc=ok controls=none quotes=verified-by-audit
+RESULT vi: mechanical PASS

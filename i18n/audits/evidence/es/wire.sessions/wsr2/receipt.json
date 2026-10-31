@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "audit_id": "wsr2",
+  "locale": "es",
+  "namespace": "wire.sessions",
+  "record": "i18n/audits/evidence/es/wire.sessions/wsr2/record.json",
+  "provenance": "Bundle assembled by the PR #3102 implementer (coder, lopdev team, actual model radient/auto) from the two independent audits' posted verdicts: round 1 by translation-auditor on radient/auto at b3b1c2aec56 (5 pass / 2 reject), round 2 by a different translation-auditor session on radient/alpha at 9d4bed55040 (7 PASS / 0 REJECT, safety-copy gate closed). audit.log is the mechanical check re-run by the implementer at this revision, not the auditors' own execution.",
+  "hashes": {
+    "record.json": "a30a3892951cc9a3ba8af598114e8aa240b9d9a9bbbbdfd326089ddcc49a3189",
+    "audit.log": "0098bafd552366915ba95098e1ade57332859520ed9b6b13aac93446e71d0eb4",
+    "report.md": "459cd10a3f648155a003e7480710fbf1a54926c2652e68dd4c5cf794259ebe80"
+  }
+}
