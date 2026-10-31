@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING, Any, Final, Literal, cast
 from anyio import CancelScope
 from fastapi import HTTPException
 
+from local_operator.agent_avatar import session_row_fields
 from local_operator.harness.jobs import TRAJECTORY_SEQ_KEY
 
 # The row-visibility predicate lives in ``harness/rows.py`` beside the three row
@@ -9222,6 +9223,8 @@ class DesktopSessions:
                             "agent": stored.agent or None if stored else None,
                             "team": stored.team or None if stored else None,
                         },
+                        # Picture identity for the row (see ``SessionRow.agent_id``).
+                        **session_row_fields(self.root, entry.id, stored.agent if stored else ""),
                         "preview": session_preview(self.root / "sessions" / entry.id),
                         # WHEN THE PERSON LAST SENT THIS SESSION A MESSAGE, for
                         # the Running section's order — and computed ONLY for

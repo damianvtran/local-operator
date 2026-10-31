@@ -413,6 +413,13 @@ export type MessageParams = {
   "wire.console.title": undefined;
   "wire.console.user_reserved.help": undefined;
   "wire.console.user_reserved.label": undefined;
+  "wire.errors.agent_avatar.empty_body": undefined;
+  "wire.errors.agent_avatar.imaging_unavailable": undefined;
+  "wire.errors.agent_avatar.not_found": undefined;
+  "wire.errors.agent_avatar.too_large": { "limit_mib": string };
+  "wire.errors.agent_avatar.too_many_pixels": { "limit_mp": string };
+  "wire.errors.agent_avatar.undecodable": undefined;
+  "wire.errors.agent_avatar.unsupported_type": undefined;
   "wire.errors.agents.agent_not_found": undefined;
   "wire.errors.agents.agent_not_found_id": { "agent_id": string };
   "wire.errors.agents.agent_not_found_wrapped": { "error": string };

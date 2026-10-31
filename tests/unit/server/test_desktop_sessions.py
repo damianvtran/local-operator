@@ -10633,3 +10633,41 @@ async def test_two_creates_back_to_back_are_one_real_hub_check(hub_runner_api, m
 
     assert len(calls) == 1
     assert st.StatusStore(root).load()["items"][f"agent:{row.id}"]["last_checked_at"]
+
+
+@pytest.mark.asyncio
+async def test_a_local_row_carries_its_agents_picture_identity(draft_api) -> None:
+    """``agent_id``/``avatar_sha256`` ride every local row, ``null`` when unbound.
+
+    The agent picture contract (``local_operator.agent_avatar``): the sidebar
+    draws ``/v1/agents/{agent_id}/avatar?v=<avatar_sha256>`` straight from the
+    row, so the attachment's agent NAME must be resolved to the registry id here,
+    and a picture change must move the sha the row carries.
+    """
+    import io
+
+    from PIL import Image
+
+    from local_operator.agents import AgentEditFields, AgentRegistry
+
+    client, root = draft_api
+    registry = AgentRegistry(config_dir=root, refresh_interval=0.0)
+    agent = registry.create_agent(AgentEditFields(name="coder"))
+    _bound_session(root, "chat0000001", agent="coder")
+    _bound_session(root, "chat0000002", created=2_000.0)
+
+    async def rows() -> dict[str, dict]:
+        answer = await client.get("/v1/desktop/sessions?limit=5")
+        assert answer.status_code == 200, answer.text
+        return {row["id"]: row for row in answer.json()["result"]["sessions"]}
+
+    first = await rows()
+    assert first["chat0000001"]["agent_id"] == agent.id
+    assert first["chat0000001"]["avatar_sha256"] is None
+    assert first["chat0000002"]["agent_id"] is None
+    assert "avatar_sha256" in first["chat0000002"], "absent is not a claim; null is"
+
+    image = io.BytesIO()
+    Image.new("RGB", (32, 32), (1, 2, 3)).save(image, "PNG")
+    meta = registry.set_agent_avatar(agent.id, image.getvalue())
+    assert (await rows())["chat0000001"]["avatar_sha256"] == meta.sha256

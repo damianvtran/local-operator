@@ -1,0 +1,9 @@
+{
+  "wire.errors.agent_avatar.empty_body": "Изображение не отправлено. Передайте байты изображения в теле запроса.",
+  "wire.errors.agent_avatar.imaging_unavailable": "Для изображений нужна поддержка графики, но она не установлена. Переустановите Local Operator с дополнением images.",
+  "wire.errors.agent_avatar.not_found": "У этого агента нет изображения.",
+  "wire.errors.agent_avatar.too_large": "Изображение слишком большое. Выберите файл меньше {limit_mib} МБ.",
+  "wire.errors.agent_avatar.too_many_pixels": "В изображении слишком много пикселей. Выберите файл меньше {limit_mp} мегапикселей.",
+  "wire.errors.agent_avatar.undecodable": "Не удалось прочитать изображение. Возможно, файл повреждён.",
+  "wire.errors.agent_avatar.unsupported_type": "Это изображение нельзя использовать. Выберите файл PNG, JPEG, WebP, GIF или HEIC."
+}

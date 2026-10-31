@@ -4560,3 +4560,50 @@ def test_the_inbox_failure_warning_is_rate_limited(tmp_path: Path, caplog: Any) 
             assert feed._notifications_state_or_none() is None
     lines = [r for r in caplog.records if "notifications store could not be read" in r.message]
     assert len(lines) == 1, [r.message for r in lines]
+
+
+def _avatar_frames(frames: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [frame for frame in frames if frame["type"] == "agent.avatar.changed"]
+
+
+def test_a_picture_set_and_removal_each_publish_one_avatar_frame(tmp_path):
+    """``agent.avatar.changed {agent_id, sha256|null}`` per change, none on connect.
+
+    The write goes through ``AgentRegistry`` exactly as the CLI's separate process
+    does, so the frame here comes from the ``agent.yml`` probe and not from the
+    in-process hook -- the cross-process path the contract requires.
+    """
+    import io
+
+    from PIL import Image
+
+    root = tmp_path
+    registry = AgentRegistry(root)
+    agent = registry.create_agent(_edit_fields(name="probe-role", description="first"))
+    image = io.BytesIO()
+    Image.new("RGB", (16, 16), (5, 5, 5)).save(image, "PNG")
+    registry.set_agent_avatar(agent.id, image.getvalue())  # predates the connection
+    feed = _feed(root)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+
+    feed._avatar_probed_at = 0.0
+    _tick(feed)
+    assert _avatar_frames(_queued(subscription)) == [], "no replay of a prior picture"
+
+    other = io.BytesIO()
+    Image.new("RGB", (16, 16), (250, 5, 5)).save(other, "PNG")
+    meta = registry.set_agent_avatar(agent.id, other.getvalue())
+    feed._avatar_probed_at = 0.0
+    _tick(feed)
+    registry.clear_agent_avatar(agent.id)
+    feed._avatar_probed_at = 0.0
+    _tick(feed)
+    frames = _avatar_frames(_queued(subscription))
+    asyncio.run(feed.close())
+
+    assert [frame["payload"] for frame in frames] == [
+        {"agent_id": agent.id, "sha256": meta.sha256},
+        {"agent_id": agent.id, "sha256": None},
+    ], frames
+    assert all("session_id" not in frame for frame in frames)

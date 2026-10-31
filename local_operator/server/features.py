@@ -1063,6 +1063,12 @@ def static_feature_flags() -> dict[str, Any]:
         # row (an additive field) rather than bump this key — a renderer that can read
         # link-only rows can read a fuller one.
         "code_requests": 1,
+        # AGENT PROFILE PICTURES: `GET/PUT/DELETE /v1/agents/{id}/avatar`, the `avatar`
+        # block on agent rows, `agent_id`/`avatar_sha256` on session rows and the
+        # `agent.avatar.changed` desktop-feed frame (contract: `local_operator.agent_avatar`).
+        # ADDITIVE; the key is how a renderer learns the editor's PUT exists before it
+        # offers an upload that would 404/405 on an older backend. Absent: glyph only.
+        "agent_avatar": 1,
         # THE PER-SESSION FILE INDEX: `GET /v1/desktop/sessions/{id}/files` (the files this
         # conversation and its subagents produced: written, edited, command outputs,
         # screenshots, downloads, generated images/videos and Highlights callouts, derived

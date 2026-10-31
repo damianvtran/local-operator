@@ -900,6 +900,11 @@ class SessionTable:
         #: then, and an unread count is a read of ``attention.db``.
         self._unread_snapshot: dict[str, Any] | None = None
         self._creation_dates: dict[str, float] = {}
+        #: ``{session_id: {"agent_id", "avatar_sha256"}}``, resolved OFF the loop
+        #: beside ``_creation_dates`` (the resolver reads ``attachment.json`` and
+        #: the agent index, which is disk work the row merge must not pay on the
+        #: event loop). A row absent from it carries the two ``None``s.
+        self._avatar_fields: dict[str, dict[str, str | None]] = {}
         #: The sidebar's durable pinned session ids, newest pin first, read by
         #: ``_merge_summaries``. Kept as table state rather than read per row so
         #: a pin change made in the terminal reaches the phone through exactly
@@ -1029,6 +1034,16 @@ class SessionTable:
             for session_id in live_ids - rows.keys():
                 if session_id not in ("", ".", "..") and Path(session_id).name == session_id:
                     dates[session_id] = session_created_at(directory / "sessions" / session_id)
+            # Picture identity for every row this listing can draw (durable AND
+            # live-only), off the loop with the dates. Assigned whole, so the
+            # merge never reads a half-built map.
+            from local_operator.agent_avatar import session_row_fields
+
+            self._avatar_fields = {
+                session_id: session_row_fields(directory, session_id)
+                for session_id in set(rows) | live_ids
+                if session_id not in ("", ".", "..") and Path(session_id).name == session_id
+            }
             # THE PINS ARE DELIBERATELY *NOT* READ HERE. This load runs off the
             # loop and unannounced whenever something wants a listing — a second
             # client's first frame is enough — so a pins read here landed on
@@ -1618,6 +1633,15 @@ class SessionTable:
                     # the row is still not the operator's own conversation
                     # (the 2026-09-18 confusion class).
                     "opened_by": (row.opened_by if row else None),
+                    # The bound agent's id and picture sha (``agent_avatar``
+                    # contract), resolved off-loop in ``_refresh_durable_rows``.
+                    # BOTH keys always: the phone's merge treats an absent key as
+                    # no claim, so a removed picture must arrive as ``null``. The
+                    # image itself is ``GET /v1/agents/{agent_id}/avatar?v=<sha>``
+                    # on THIS relay (``api_agent_avatar``).
+                    **self._avatar_fields.get(
+                        session_id, {"agent_id": None, "avatar_sha256": None}
+                    ),
                     "todos_open": sum(
                         1
                         for phase in (p.todos if p else [])
@@ -6127,6 +6151,51 @@ def build_app(daemon: MobileDaemon):
             return denied
         return JSONResponse(await _list_frame(include_peers=_query_flag(request, "include_peers")))
 
+    async def api_agent_avatar(request: Request) -> Response:
+        """``GET /v1/agents/{agent_id}/avatar`` -- an agent's picture, on the relay.
+
+        THE PHONE REACHES ONLY THIS RELAY, never the core server, so the session
+        rows' ``agent_id``/``avatar_sha256`` would be undrawable without the bytes
+        served here. Mounted at the SAME path as the core route on purpose: a
+        client builds one URL shape (``/v1/agents/{id}/avatar?v=<sha>``) on every
+        surface. Same semantics as core: strong ETag = metadata sha256,
+        ``Cache-Control: no-cache``, 304 on a matching ``If-None-Match`` (decided
+        from the memoised index, no file read), 404 when unset or unknown.
+
+        Behind relay auth; an unauthenticated read is a 401, never the login
+        redirect the HTML pages get, because an ``<img>`` cannot follow a login.
+        Reads the store directly (``agent_avatar.read_stored``); there is no
+        write route here -- the phone has no editor in this scope.
+        """
+        origin_denied = cross_origin_mutation(request)
+        if origin_denied is not None:
+            return origin_denied
+        if not authed(request):
+            return JSONResponse({"error": "authentication required"}, status_code=401)
+        from local_operator import agent_avatar
+        from local_operator.i18n.http import etag_matches
+        from local_operator.paths import config_dir
+
+        agent_id = str(request.path_params["agent_id"])
+        root = config_dir()
+        known = await asyncio.to_thread(agent_avatar.stored_sha, root, agent_id)
+        if known and etag_matches(request.headers.get("if-none-match", ""), known):
+            return Response(
+                status_code=304,
+                headers={"ETag": agent_avatar.etag(known), "Cache-Control": "no-cache"},
+            )
+        try:
+            data, mime, sha = await asyncio.to_thread(agent_avatar.read_stored, root, agent_id)
+        except agent_avatar.AvatarError as exc:
+            return JSONResponse(
+                {"error": exc.reason, "code": exc.reason},
+                status_code=agent_avatar.HTTP_STATUS.get(exc.reason, 404),
+            )
+        headers = {"ETag": agent_avatar.etag(sha), "Cache-Control": "no-cache"}
+        if etag_matches(request.headers.get("if-none-match", ""), sha):
+            return Response(status_code=304, headers=headers)
+        return Response(content=data, media_type=mime, headers=headers)
+
     async def api_attention_unread(request: Request) -> Response:
         """The badge number: conversations with unread completions, one read.
 
@@ -10169,6 +10238,7 @@ def build_app(daemon: MobileDaemon):
         Route("/login", login_submit, methods=["POST"]),
         Route("/logout", logout),
         Route("/api/sessions", api_sessions),
+        Route("/v1/agents/{agent_id:str}/avatar", api_agent_avatar),
         Route("/api/i18n/catalogues/{locale:str}/{namespace:str}", api_i18n_catalogue),
         # The badge read (push/ack-sync S1): the same aggregate the list payload
         # carries as its top-level ``unread`` block, served on its own so a
