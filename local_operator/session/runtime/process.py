@@ -1616,6 +1616,76 @@ def _note_exit_record(
         return False
 
 
+def _boot_cost() -> dict[str, Any] | None:
+    """What getting to "addressable" cost THIS boot, for the run record.
+
+    WHY: a cold start's wall can be 150 s while its stages attribute to ~2-4 s of
+    CPU; this says where the rest went. ``session.runtime.boot_cost`` owns the
+    sources and the reasoning; the fields, as a person debugging a slow boot reads
+    them:
+
+    * ``window`` — what the numbers below cover: ``"since-exec"`` for a cold
+      spawn (process start, including interpreter start-up and imports, to this
+      record), ``"since-adoption"`` for an adopted standby (the instant the spare
+      became this session's runtime, to this record). An adopted spare may have
+      idled for up to its 900 s idle window first; that is never charged here.
+    * ``wall_s`` — elapsed time over the window.
+    * ``cpu_s`` — CPU this process spent over the window.
+    * ``waited_for_cpu_s`` — ready to run but not on a core: starvation.
+    * ``blocked_s`` — not ready to run at all: waiting on I/O, a lock, a timer,
+      a socket or another process.
+      For a boot doing its work on one thread the three add up to ``wall_s``;
+      CPU and ready time are summed over threads, so parallel threads can push
+      ``cpu_s`` past ``wall_s`` (``boot_cost.window`` says why that is allowed).
+      BOTH ARE ``null`` when the split cannot be trusted: the ready-to-run time
+      is unreadable, or (Linux) the kernel reports zero run-queue wait while wall
+      materially exceeds CPU (schedstats off, sandboxed ``/proc``). Then no bucket
+      absorbs the gap — ``wall_s - cpu_s`` is simply unattributed. On Linux a
+      thread that exits during the scan is skipped, so ``waited_for_cpu_s`` can
+      read low by that thread's share rather than vanish.
+    * ``voluntary_switches`` / ``involuntary_switches`` — raw ``getrusage``
+      counts over the window. Evidence only: on macOS blocking waits are booked as
+      involuntary too, so their ratio does NOT distinguish starved from blocked.
+    * ``load_1m`` — the host's 1-minute load at this instant.
+    * ``standby`` — ``true`` when a pre-warmed spare (``session.runtime.standby``)
+      was adopted, ``false`` for a cold spawn. When true, ``before_adoption``
+      holds the same breakdown for the spare's own life (exec to adoption: its
+      warm-up plus however long it idled), so the warm is visible but separate.
+
+    COST, measured on this Mac (macOS 27, arm64, load 28-31; #3226 round 1): ~6 us
+    per call steady state. The FIRST call in a cold child is ~1 ms (median of 9,
+    range 0.4-6.9 ms: building the ctypes struct and resolving ``proc_pid_rusage``);
+    after the standby warm-up's own ``boot_cost.sample()`` it is ~0.04 ms. Not
+    counted here: importing ``journal`` (5-22 ms on a loaded host), which this
+    call site already paid before ``boot`` existed. No subprocess, lock or
+    directory walk on macOS (Linux lists ``/proc/self/task``). Never raises —
+    the record is written without it.
+    """
+    try:
+        from local_operator.session.runtime import boot_cost, journal
+
+        now = boot_cost.sample()
+        if now is None:
+            return None
+        adopted = journal.adoption_snapshot()
+        cost: dict[str, Any] = {
+            "window": "since-adoption" if adopted is not None else "since-exec",
+            **boot_cost.window(now, adopted),
+            "load_1m": None,
+            "standby": adopted is not None,
+        }
+        try:
+            cost["load_1m"] = round(os.getloadavg()[0], 2)
+        except OSError:
+            pass
+        if adopted is not None:
+            cost["before_adoption"] = boot_cost.window(adopted)
+        return cost
+    except Exception:  # noqa: BLE001 — boot must not fail over an instrument
+        logger.debug("session runtime: could not measure its boot cost", exc_info=True)
+        return None
+
+
 def _note_run_start(handle: object, runtime: object) -> None:
     """Announce this run in the conversation directory. Best-effort, never raises.
 
@@ -1654,6 +1724,9 @@ def _note_run_start(handle: object, runtime: object) -> None:
             conversation_dir=directory,
             pid=pid,
             started_at=started_at,
+            # Measured here because this is the latest point that still precedes
+            # the serving plane: it is the cost of getting to "addressable".
+            boot=_boot_cost(),
         )
     except Exception:  # noqa: BLE001 — boot must not fail over an instrument
         logger.debug("session runtime: could not write its run record", exc_info=True)

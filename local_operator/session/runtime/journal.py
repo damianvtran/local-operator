@@ -921,9 +921,16 @@ class RunRecord:
     pid: int
     started_at: float
     at: float = field(default_factory=_now)
+    #: What this boot COST the process, measured when the record was written
+    #: (``process._boot_cost``): CPU, wall, context switches and whether a warm
+    #: standby was adopted. Purely narrative — nothing compares it, which is why
+    #: it is an optional nested object rather than a version bump: every reader
+    #: of ``v: 1`` (including older installed builds) ignores a key it does not
+    #: know, and ``covers_run`` stays the only thing this record is read for.
+    boot: dict[str, Any] | None = None
 
     def to_json(self) -> dict[str, Any]:
-        return {
+        data: dict[str, Any] = {
             "v": RUN_RECORD_VERSION,
             "kind": RUN_RECORD_KIND,
             "session_id": self.session_id,
@@ -931,6 +938,11 @@ class RunRecord:
             "started_at": self.started_at,
             "at": self.at,
         }
+        # Absent rather than null when unmeasured, so a record written without
+        # it is byte-identical to the shape this artifact always had.
+        if self.boot is not None:
+            data["boot"] = self.boot
+        return data
 
     @classmethod
     def from_json(cls, data: Any) -> "RunRecord | None":
@@ -949,11 +961,13 @@ class RunRecord:
             return None
         if pid <= 0 or started_at < 0:
             return None
+        boot = data.get("boot")
         return cls(
             session_id=str(data.get("session_id") or ""),
             pid=pid,
             started_at=started_at,
             at=at,
+            boot=boot if isinstance(boot, dict) else None,
         )
 
     def covers_run(self, pid: int, started_at: float) -> bool:
@@ -969,12 +983,46 @@ class RunRecord:
         return abs(self.started_at - float(started_at)) < EXIT_RUN_KEY_TOLERANCE_S
 
 
+#: The adopted standby's ``boot_cost.sample()`` at the instant it became a
+#: runtime, or ``None`` in a cold child. Set once by :func:`note_adoption`.
+#:
+#: WHY IT LIVES HERE: the adopting process re-executes ``process`` through
+#: ``runpy`` as a fresh ``__main__`` and runs ``standby`` as its own
+#: ``__main__``, so neither module object can carry a value across the handoff.
+#: This module is imported BY NAME on both sides and survives in
+#: ``sys.modules``, which makes it the one place the boot-cost reader can find
+#: what the standby measured before handing over.
+_ADOPTION: dict[str, float] | None = None
+
+
+def note_adoption() -> None:
+    """Record that this process is a warm standby becoming a runtime NOW.
+
+    Called by ``standby._commit_adoption`` before the environment swap. One
+    ``getrusage`` and one ``proc_pid_rusage`` (macOS), never raises: an
+    instrument must not be the reason an adoption fails.
+    """
+    global _ADOPTION
+    try:
+        from local_operator.session.runtime import boot_cost
+
+        _ADOPTION = boot_cost.sample()
+    except Exception:  # noqa: BLE001 — instrumentation, never an adoption gate
+        logger.debug("could not snapshot the standby's resource usage", exc_info=True)
+
+
+def adoption_snapshot() -> dict[str, float] | None:
+    """The snapshot :func:`note_adoption` took, or ``None`` for a cold child."""
+    return _ADOPTION
+
+
 def write_run_record(
     session_id: str,
     *,
     conversation_dir: Path | None,
     pid: int | None = None,
     started_at: float = 0.0,
+    boot: dict[str, Any] | None = None,
 ) -> Path | None:
     """Publish this run's run record at boot. Returns where it landed, or ``None``.
 
@@ -993,6 +1041,7 @@ def write_run_record(
             session_id=str(session_id),
             pid=os.getpid() if pid is None else int(pid),
             started_at=float(started_at or 0.0),
+            boot=boot,
         )
         target = run_record_path(directory)
         registry._staged_write(target, record.to_json(), prefix=f".{RUN_RECORD_NAME}.")
