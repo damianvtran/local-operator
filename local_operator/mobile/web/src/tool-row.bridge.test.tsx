@@ -243,6 +243,9 @@ describe("the phone's bridge tool row", () => {
 		const inboxChip = inbox.querySelector("[data-bridge-outcome]")!;
 		const word = [...inboxChip.querySelectorAll("span")].find((n) => n.textContent === "not posted to a conversation")!;
 		expect(word.className).toContain("@max-[18rem]:sr-only");
+		/* D11: on 360/390 rows the chip cap drops so the freed width reaches
+		   the summary. */
+		expect(inboxChip.className).toContain("@max-[24rem]:max-w-[40%]");
 		const refusedChip = refused.querySelector("[data-bridge-outcome]")!;
 		const parts = [...refusedChip.children].map((n) => [n.textContent, n.className]);
 		/* `refused` has no mark, so its word never collapses; only the code sheds. */
@@ -277,6 +280,12 @@ describe("the phone's bridge tool row", () => {
 		["Couldn't post in a conversation · rolling back · refused · not_m…", "not_member", "Couldn't post in a conversation · rolling back"],
 		["Couldn't post in a conversation · rolling back · ref…", "not_member", "Couldn't post in a conversation · rolling back"],
 		["Couldn't post in a conversation · rolling back · …", "not_member", "Couldn't post in a conversation · rolling back"],
+		/* QA round 3, Q6: the cap at the code's first letter when the code
+		   starts like the word, the cap right after the inner separator, and
+		   the cap inside the separator itself. */
+		["Couldn't post in a conversation · rrrr · refused · r…", "rate_limited", "Couldn't post in a conversation · rrrr"],
+		["Couldn't post in a conversation · nnnn · refused · …", "not_member", "Couldn't post in a conversation · nnnn"],
+		["Couldn't post in a conversation · dddd ·…", "not_member", "Couldn't post in a conversation · dddd"],
 	])("strips a refusal's two-segment outcome once: %s", (summary, code, kept) => {
 		const { container } = render(
 			<ToolRow entry={entry({ tool_state: "failed", summary }, { ...POST, outcome: "refused", code })} />,

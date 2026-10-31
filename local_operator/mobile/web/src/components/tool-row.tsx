@@ -238,17 +238,23 @@ function bridgeSummary(summary: string, outcome: { text: string; word: string } 
 	const full = ` · ${outcome.text}`;
 	if (text.endsWith(full)) return text.slice(0, -full.length);
 	if (!text.endsWith("…")) return text;
-	const capped = text.slice(0, -1);
-	/* A cap that left nothing of the tail: `… · …` (QA O2). */
-	if (capped.endsWith(" · ")) return text.slice(0, -" · …".length);
+	/* The cap can land anywhere in ` · <word> · <code>`, including inside the
+	   separator itself (`… ·…`). Normalise a trailing ` ·` to ` · ` so every
+	   cut shape reads as a separator followed by a (possibly empty) stub. */
+	let capped = text.slice(0, -1);
+	if (capped.endsWith(" ·")) capped += " ";
+	/* Walk the separators from the end and keep the OUTERMOST one whose tail is
+	   empty or a prefix of the outcome (QA round 3, Q6): the innermost match
+	   is wrong when the code starts like the word (`refused · r…` matched `r`
+	   and kept `· refused`), and an empty last stub (`· refused · …`) must not
+	   stop the walk. Stop once a tail is longer than the outcome itself. */
+	let cut = -1;
 	for (let sep = capped.lastIndexOf(" · "); sep >= 0; sep = capped.lastIndexOf(" · ", sep - 1)) {
-		const tail = capped.slice(sep + 3);
-		if (tail === "" || outcome.text.startsWith(tail)) return text.slice(0, sep);
-		/* Only the trailing segments can be the outcome; stop once the tail is
-		   longer than the outcome itself. */
+		const tail = capped.slice(sep + 3).trimEnd();
 		if (tail.length > outcome.text.length) break;
+		if (tail === "" || outcome.text.startsWith(tail)) cut = sep;
 	}
-	return text;
+	return cut >= 0 ? text.slice(0, cut) : text;
 }
 
 const OUTCOME_INK: Record<OutcomeTone, string> = {
@@ -470,7 +476,12 @@ export function ToolRow({
 					<span
 						data-bridge-outcome={facts?.outcome ?? undefined}
 						className={cn(
-							"min-w-0 max-w-[55%] shrink truncate rounded-sm px-1 text-mono-sm",
+							/* Below a 24rem row (360/390 phones) the cap drops to 40%: the
+							   chip has auto basis and the summary flex-1 (basis 0), so the
+							   width D10 freed went to the long inbox chip, not the summary
+							   (design round 3, D11 / QA O3). The chip still shows its mark
+							   and the start of its word; the full sentence is one tap away. */
+							"min-w-0 max-w-[55%] shrink truncate rounded-sm px-1 text-mono-sm @max-[24rem]:max-w-[40%]",
 							outcome.tone === "warning" && "border border-warning-border/40 bg-warning-wash text-warning",
 							outcome.tone === "danger" && "border border-danger-border/40 bg-danger-wash text-danger",
 							outcome.tone === "pending" && "text-warning",
