@@ -904,10 +904,25 @@ async def test_settings_projection_carries_the_bounded_duration_contract(desktop
     ) == ("int", 1, 3650, "days")
     assert compression_age["default"] == 30
     assert compression_age["gated_by"] == "session.compression.enabled"
-    unit_rows = {hours["key"], scratchpad["key"], compression_age["key"]}
+    # The status command interval is the fourth: "every 30" is only renderable
+    # as seconds, and its bounds are the runner's own clamp.
+    command_interval = rows["display.composer.command_interval"]
+    assert (
+        command_interval["kind"],
+        command_interval["minimum"],
+        command_interval["maximum"],
+        command_interval["unit"],
+    ) == ("int", 5, 3600, "seconds")
+    assert command_interval["default"] == 30
+    unit_rows = {
+        hours["key"],
+        scratchpad["key"],
+        compression_age["key"],
+        command_interval["key"],
+    }
     assert all(
         row["unit"] == "" for key, row in rows.items() if key not in unit_rows
-    ), "only the hours, bytes and days rows declare a unit"
+    ), "only the hours, bytes, days and seconds rows declare a unit"
 
 
 async def test_a_patch_of_a_desktop_hotkey_dispatches_to_the_desktop_rules(desktop):

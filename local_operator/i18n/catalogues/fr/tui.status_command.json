@@ -1,0 +1,3 @@
+{
+  "tui.status_command.failed": "Échec de la commande d’état ({error}). Vérifiez display.composer.command."
+}

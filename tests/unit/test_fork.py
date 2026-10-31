@@ -1519,6 +1519,9 @@ def _band():
     # list caught the omission on CI rather than in a frame).
     band._last_rate = ""
     band._conversation_name = ""
+    # The painter reads both status-command fields even in this widget-free double.
+    band._custom = ""
+    band._custom_stale = False
     band._forked = False
     band._fork_pending = False
     band._mcp = McpStatus()
