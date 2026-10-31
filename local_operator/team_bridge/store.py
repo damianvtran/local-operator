@@ -350,6 +350,12 @@ CREATE TABLE IF NOT EXISTS screening_schedule (
 -- answer of a hold has to be readable without spending a second dispatch. Only
 -- a MODEL answer is ever written here; a route failure never is (a provider
 -- outage must recover through the retry schedule).
+--
+-- ONE row per key tuple, and the row is REPLACEABLE exactly when a read would
+-- refuse to serve it (a different epoch, creator generation or engine
+-- version). Keeping an unservable row was a silent way to disable the cache:
+-- a policy rollback or an epoch bump left the old row in place, the insert
+-- could not overwrite it, and every later pass re-drew the body forever.
 CREATE TABLE IF NOT EXISTS screening_answer_holds (
     owner_key TEXT NOT NULL,
     body_sha256 TEXT NOT NULL,
@@ -359,6 +365,13 @@ CREATE TABLE IF NOT EXISTS screening_answer_holds (
     envelope_digest TEXT NOT NULL,
     hold_code TEXT NOT NULL,
     prompt_version TEXT NOT NULL,
+    -- The screening ENGINE version: a code stamp for the parser, the token
+    -- ceiling and the prompt renderer (``client.SCREENING_ENGINE_VERSION``).
+    -- It is part of what a cached answer is valid UNDER — a code fix that
+    -- clears a miscoded artefact (a parser that mistook trailing spaces for a
+    -- cut reply) must invalidate the artefact it produced, and no republish is
+    -- involved in that kind of fix.
+    engine_version TEXT NOT NULL DEFAULT '',
     -- The closed failure class the receiver status shows for this hold
     -- (``stream_refused`` for an answered refusal). Without it a replay would
     -- have to re-derive a class from a failure it no longer has.
@@ -521,6 +534,7 @@ _SCREENING_HOLD_ADDED = (
     "owner_key TEXT NOT NULL, body_sha256 TEXT NOT NULL, template_sha256 TEXT NOT NULL, "
     "model TEXT NOT NULL, admission_revision TEXT NOT NULL, envelope_digest TEXT NOT NULL, "
     "hold_code TEXT NOT NULL, prompt_version TEXT NOT NULL, failure_class TEXT, "
+    "engine_version TEXT NOT NULL DEFAULT '', "
     "policy_epoch INTEGER NOT NULL, "
     "creator_generation INTEGER NOT NULL, created_at REAL NOT NULL, "
     "PRIMARY KEY (owner_key, body_sha256, template_sha256, model, "
@@ -537,10 +551,30 @@ def _ensure_answer_hold_table(conn: sqlite3.Connection) -> None:
     authority, so creating it empty cannot reset or launder anything — the only
     consequence of a lost row is that the next screen draws again, which is the
     behaviour every retry had before this table existed.
+
+    It is also safe under the CALLER's write lock: both callers open ONE
+    ``BEGIN IMMEDIATE`` transaction so the authority checks and the row they
+    act on cannot interleave with another writer, and the DDL inside it is
+    idempotent — a store that already carries the table pays only the catalogue
+    read, and one that predates it gets it inside the same linearized snapshot
+    that then reads or writes it. Creating a table takes no authority away from
+    anyone, so it is the one DDL that belongs on this path rather than in a
+    migration.
+
+    A table created by an earlier build of this table gets the engine-version
+    column added in place: rows written before it carry ``''``, which can never
+    equal the running engine version, so they are replaced (never served) by the
+    next answered hold for that key.
     """
 
     for statement in _SCREENING_HOLD_ADDED:
         conn.execute(statement)
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(screening_answer_holds)")}
+    if "engine_version" not in columns:
+        conn.execute(
+            "ALTER TABLE screening_answer_holds "
+            "ADD COLUMN engine_version TEXT NOT NULL DEFAULT ''"
+        )
 
 
 def _ensure_producer_table(conn: sqlite3.Connection) -> None:
@@ -5142,6 +5176,7 @@ class Store:
         model: str,
         admission_revision: str,
         envelope_digest: str,
+        engine_version: str,
     ) -> tuple[str, str | None] | None:
         """The model ANSWER already cached for this screening tuple, or None.
 
@@ -5158,8 +5193,10 @@ class Store:
 
         Authority is re-verified in the same linearized transaction a cached
         verdict gets — live committed generation, the published policy row, and
-        the row's own epoch/generation — and any mismatch is a MISS, never a
-        stale answer replayed under someone else's authority.
+        the row's own epoch/generation/engine version — and any mismatch is a
+        MISS, never a stale answer replayed under someone else's authority. The
+        writer replaces exactly the rows this read would refuse to serve, so a
+        miss here is always a row that the next answered hold can overwrite.
         """
 
         try:
@@ -5176,7 +5213,8 @@ class Store:
                 if policy is None:
                     return None
                 row = conn.execute(
-                    "SELECT hold_code, failure_class, policy_epoch, creator_generation "
+                    "SELECT hold_code, failure_class, policy_epoch, creator_generation, "
+                    "engine_version "
                     "FROM screening_answer_holds WHERE owner_key = ? AND body_sha256 = ? "
                     "AND template_sha256 = ? AND model = ? AND admission_revision = ? "
                     "AND envelope_digest = ?",
@@ -5190,12 +5228,14 @@ class Store:
                     or policy["revision"] != admission_revision
                     or int(policy["epoch"]) != int(row["policy_epoch"])
                     or int(row["creator_generation"]) != owner.enrollment_generation
+                    or row["engine_version"] != engine_version
                 ):
                     return None
                 # The CALLER decides whether this code is a model answer it may
-                # replay (``screening._ANSWER_HOLD_CODES``): classification lives
-                # in one place, so a row written by another build is re-screened
-                # rather than replayed as an answer it does not recognise.
+                # replay (``screening._ANSWER_HOLD_CACHEABLE``): classification
+                # lives in one place, so a row written by another build is
+                # re-screened rather than replayed as an answer it does not
+                # recognise.
                 code = row["hold_code"]
                 if not isinstance(code, str):
                     return None
@@ -5217,15 +5257,25 @@ class Store:
         envelope_digest: str,
         hold_code: str,
         prompt_version: str,
+        engine_version: str,
         expected_epoch: int,
         failure_class: str | None = None,
     ) -> None:
         """Cache ONE model-answer hold under the verdict cache's own key.
 
-        WRITE-ONCE per tuple: the first answered hold for a body is the one every
-        retry re-reads. A later draw must never rewrite the answer a message was
-        already parked on, or the cached outcome would depend on draw order — the
-        exact non-determinism this table exists to remove.
+        REPLACEABLE, not write-once: a row is overwritten exactly when a read
+        would refuse to serve it — a different policy epoch, a different creator
+        generation, or a different screening engine version. Write-once was the
+        first shape and it silently disabled the cache: a policy rollback, an
+        epoch bump caused only by an approved-serving-model edit, or a
+        re-enrollment left an UNSERVABLE row occupying the key, so every later
+        pass re-drew the body and this table made no difference at all. Within
+        one (epoch, generation, engine) the first answer still wins, which is
+        what keeps the outcome from depending on draw order.
+
+        The same statement prunes every other row for this body whose epoch or
+        generation is stale, so a republished policy does not leave unreadable
+        rows growing behind it.
 
         Never call this for a provider/route failure. A cached outage outcome
         would keep the message held for as long as the key matched, which is the
@@ -5260,9 +5310,20 @@ class Store:
                 conn.execute(
                     "INSERT INTO screening_answer_holds (owner_key, body_sha256, template_sha256, "
                     "model, admission_revision, envelope_digest, hold_code, prompt_version, "
-                    "failure_class, policy_epoch, creator_generation, created_at) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?) "
-                    "ON CONFLICT DO NOTHING",
+                    "failure_class, engine_version, policy_epoch, creator_generation, created_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                    "ON CONFLICT (owner_key, body_sha256, template_sha256, model, "
+                    "admission_revision, envelope_digest) DO UPDATE SET "
+                    "hold_code = excluded.hold_code, "
+                    "prompt_version = excluded.prompt_version, "
+                    "failure_class = excluded.failure_class, "
+                    "engine_version = excluded.engine_version, "
+                    "policy_epoch = excluded.policy_epoch, "
+                    "creator_generation = excluded.creator_generation, "
+                    "created_at = excluded.created_at "
+                    "WHERE screening_answer_holds.policy_epoch <> excluded.policy_epoch "
+                    "OR screening_answer_holds.creator_generation <> excluded.creator_generation "
+                    "OR screening_answer_holds.engine_version <> excluded.engine_version",
                     (
                         key,
                         body_sha256,
@@ -5273,10 +5334,20 @@ class Store:
                         hold_code,
                         prompt_version,
                         _closed_failure_class(failure_class),
+                        engine_version,
                         expected_epoch,
                         owner.enrollment_generation,
                         time.time(),
                     ),
+                )
+                # EVICT every row of this body that no read can serve under the
+                # policy just written (an older epoch, another generation): the
+                # key tuple is per policy generation, so a republish would
+                # otherwise leave one dead row per template behind forever.
+                conn.execute(
+                    "DELETE FROM screening_answer_holds WHERE owner_key = ? "
+                    "AND body_sha256 = ? AND (policy_epoch <> ? OR creator_generation <> ?)",
+                    (key, body_sha256, expected_epoch, owner.enrollment_generation),
                 )
         except sqlite3.Error as error:
             raise StoreRefused("state_busy", str(error)) from None

@@ -293,6 +293,19 @@ SCREENING_TEMPLATE_V3 = (
 )
 SCREENING_TEMPLATE_V3_SHA256 = hashlib.sha256(SCREENING_TEMPLATE_V3.encode("utf-8")).hexdigest()
 
+#: The screening ENGINE version: bump ONLY when code that turns a model reply
+#: into a hold changes — the parser (``parse_verdict``), the token/byte ceiling
+#: that produces ``reply_truncated``, or the prompt renderer.
+#:
+#: WHY it exists: cached answers are keyed by it. A code fix for a parsing
+#: artefact (the trailing-whitespace case, 784463e92c8) must clear the artefacts
+#: the OLD code recorded, and no policy republish accompanies a code fix — so a
+#: cache keyed on served policy alone would keep replaying the bug's own answer
+#: forever. Bumping this is a data decision, not cosmetic: every cached answer
+#: hold is re-drawn once after the bump, which is the intended cost of fixing a
+#: coder artefact rather than an admission rule.
+SCREENING_ENGINE_VERSION = "bridge-screen-engine-1"
+
 #: version -> embedded template. The served version SELECTS bytes; it never supplies them.
 SCREENING_TEMPLATES = {
     SCREENING_VERSION_V1: SCREENING_TEMPLATE_V1,

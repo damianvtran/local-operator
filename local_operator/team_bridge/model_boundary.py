@@ -1331,7 +1331,14 @@ class ScreenChainRunner:
                         images=list(images) if images is not None else None,
                     )
                 )
-            except _ScreeningStreamRefused:
+            except _ScreeningStreamRefused as refusal:
+                # The hop that ANSWERED owns the answer: the pipeline caches a
+                # model-answer hold under the REQUESTED model's key, so a
+                # fallback's refusal must not be remembered as the primary's —
+                # a cached fallback answer would park the message even after the
+                # primary recovered, turning a route failure into an answer.
+                # Typed attribute, never prose.
+                setattr(refusal, "serving_model", hop.model_id)
                 raise
             except Exception as failure:  # noqa: BLE001 — classified below; control flow propagates
                 # A wire failure was classified on its RAW form by the guard
