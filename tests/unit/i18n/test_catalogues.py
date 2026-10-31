@@ -104,6 +104,11 @@ def test_shipped_wire_namespaces_exist() -> None:
         # Its own namespace so no audited catalogue's hash moves; the
         # translation wave lands its seven locales in a follow-up.
         "wire.tool_rows.bridge",
+        # The sessions tool's own operator-visible stop receipts (agent review
+        # round 1 R2). Its own namespace, the `wire.host_speed` shape: the
+        # receipts are new copy, and adding them to a namespace fr/hi/vi CARRY
+        # would invalidate those locales' ledger rows.
+        "wire.sessions",
     }
     for namespace in _PENDING_EXTRACTION:
         assert catalogues.load_catalogue("en", namespace) == {}
@@ -299,6 +304,14 @@ def test_wave3_hindi_carries_its_namespace_snapshot_with_parity(i18n_check) -> N
         # current en bytes; it sorts before wire.remote_compute.
         "wire.radient_saver",
         "wire.remote_compute",
+        # The sessions tool's nine operator-visible stop receipts. Carried on
+        # the same terms as every namespace above, and the terms bite harder
+        # here because the copy is safety copy: these lines state whether a
+        # termination signal was sent, so they take the two independent audits
+        # (round 1 found majors, round 2 reads the remediation) before their
+        # fresh ledger rows land in this PR's audit commit at the current en
+        # bytes. It sorts before wire.settings.
+        "wire.sessions",
         "wire.settings",
         "wire.slash",
         "wire.slash.notifications_page",

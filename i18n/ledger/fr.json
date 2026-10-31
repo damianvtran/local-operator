@@ -2222,6 +2222,26 @@
       },
       "status": "passed",
       "note": "Independent audit of PR #3203 (Team Bridge tool row) at source_sha256 58e76cb3bf5872c644ad83502f9efd0e5ca304d738cfe5f430c6a04ca192ef1c (catalogues.catalogue_sha256 and raw sha256 agree); target fr bytes after fixes sha256 0f6ab8df6da26a7a0f551a0030e896abee1e13ad31db25953cc0d58f115e93e6. New namespace, all 85 keys read against the English source and its context sidecar, and composed through bridge_copy.bridge_row_line for every action in running/settled/failed. Mechanical: key parity 85/85; 100 sentinel renders through messages.render, 0 lost or extra placeholders; plural arms at 0/1/2/5/1000000/1500000 (one/many/other, '1 000 000 de membres'); no Cf/bidi controls; NFC; U+2019 apostrophes. Findings fixed by the auditor (4 minor, 1 nit): FR-B1 minor channel_thread verbs dropped 'thread' ('Lu dans'/'Lecture dans'/'Impossible de lire') so a thread read was indistinguishable from a channel read -> 'Fil lu dans'/'Lecture du fil dans'/'Impossible de lire le fil dans', matching the UI twin; FR-B2 minor verb_failed.channels 'Impossible de lister' had no object (complete phrase per sidecar) -> 'Impossible de lister les conversations'; FR-B3 minor verb_settled.shared_history 'Conversation partagée lue :' left a dangling colon before a count when unlabelled ('lue : (3 messages)') -> 'Lu dans la conversation partagée'; FR-B4 minor expanded.failed_error/refused_error used U+0020 before ':' -> U+202F per fr.md. Accepted as is: 'Créé :'/'Réservé :'/'Libéré :'/'Pris en charge :' label-colon register for verbs whose object follows (no idiomatic French past participle takes a bare following object); 'cette conversation' fallback (demonstrative reads naturally after 'dans'). Translators: round 1 radient/auto fallback, delta round 2 anthropic/claude-opus-5-5 (from the brief, not observed). Auditor distinct agent and context, same model family as round-2 translator (disclosed). Unresolved blocker/major: 0. Not verified: native-speaker review, rendered TUI/phone fit."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.sessions",
+      "source_sha256": "ad2c68cbc8dc98f81875b0c1b3960be4cdfed27113bc326ae26045d93d75585a",
+      "translator": {
+        "agent": "coder (lopdev team) — PR #3102 i18n wave implementer",
+        "model": "radient/auto — actual; requested anthropic/claude-opus-5-5, moved by provider quota failures through openai/gpt-6-astra and kimi/k3.1-pro",
+        "date": "2026-10-30"
+      },
+      "auditor": {
+        "agent": "translation-auditor (round 1, distinct session) + translation-auditor (round 2, a different session again) — neither is the translator",
+        "model": "round 1 radient/auto · round 2 radient/alpha — actual models, not the requested anthropic/claude-opus-5-5; see note for the fallback chain",
+        "date": "2026-10-30",
+        "result": "passed",
+        "findings": 7,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Two independent audits, as safety copy requires (docs/I18N.md, Add or extend a locale, step 3): round 1 by translation-auditor on radient/auto at b3b1c2aec56 — 5 pass / 2 reject (fr + vi majors) with 6 minors and 5 nits, all answered in the PR's round-1 remediation comment, fr and vi fixed at 6f3b8e3, TA9 (quoting of {name}) fixed at 9d4bed5; round 2 by a different translation-auditor session on radient/alpha at 9d4bed55040 — 7 PASS / 0 REJECT, 0 blocker, 1 minor, 6 nit, safety-copy gate closed for these nine keys. Both rounds' actual models are the fallback chain, not the requested anthropic/claude-opus-5-5 (gpt-6-astra → kimi/k3.1-pro → radient/auto | radient/alpha). Accepted, non-gating dispositions deferred to the locale work: F1 (hi 'idle': wire.sessions says निष्क्रिय, relay.chrome.session.subtitle.idle ships आइडल — hi-guide call), F2/F3 ({seconds} unit: zh-CN 秒 and vi giây are the shipped conventions, this wave keeps s), F4 (fr stop_self_refused repeats 'cette'), F5 (hi approval-line tails), F6 ('hold window' mechanism word reads as data retention; needs a glossary row + seven guides), F7 (ru style guide records «в простой», copy ships «в простое»). Evidence: i18n/audits/evidence/fr/wire.sessions/wsr2/. Unresolved blocker/major: 0. This row is fresh only at en source ad2c68cbc8dc98f81875b0c1b3960be4cdfed27113bc326ae26045d93d75585a; any English byte change lapses it."
     }
   ]
 }

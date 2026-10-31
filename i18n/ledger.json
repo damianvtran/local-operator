@@ -2281,6 +2281,26 @@
       "note": "PR #3203 Team Bridge tool rows: all 85 keys of wire.tool_rows.bridge read against en + context sidecar, glossary and es style guide, and against the desktop's ui.chat.canonical.tool_row.bridge.* es copy. Findings (all fixed in these bytes; target hash is the fixed file): ES-B1 MINOR verb_settled/running/failed.channel_thread 'Leído en'/'Leyendo en'/'No se pudo leer en' dropped 'thread' and rendered identically to channel_history -> 'Leído el hilo en'/'Leyendo el hilo en'/'No se pudo leer el hilo en'. ES-B2 MINOR outcome.inbox_only 'sin publicar en ninguna conversación' was 36 cells against maxCells 32 -> 'sin publicar en conversaciones' (30). ES-B3 NIT verb_settled.react 'Reaccionado en' (absolute participle of an intransitive verb, a calque) -> 'Reacción añadida en', matching expanded.reacted and verb_settled.react_remove. Recorded, not changed: claim -> 'reclamar' follows the shipped es desktop-claim copy; 'Usó Team Bridge' keeps the preterite (participle 'Usado Team Bridge' reads worse). Mechanical: key parity and order 85/85; ICU argument parity; 103 sentinel renders through local_operator.i18n.runtime with es rules, 0 lost/extra args or stray braces; plural arms one/many/other (+=0) rendered at 0/1/2/5/21/1e6/1.5e6 ('1.000.000 de miembros', '1.500.000 miembros'); every maxCells key within budget (rich cell_len); NFC, no Cf/bidi, no BOM. tú register not exercised except expanded.inbox_only 'Usa', consistent. Unresolved blocker/major: 0."
     },
     {
+      "locale": "es",
+      "namespace": "wire.sessions",
+      "source_sha256": "ad2c68cbc8dc98f81875b0c1b3960be4cdfed27113bc326ae26045d93d75585a",
+      "translator": {
+        "agent": "coder (lopdev team) — PR #3102 i18n wave implementer",
+        "model": "radient/auto — actual; requested anthropic/claude-opus-5-5, moved by provider quota failures through openai/gpt-6-astra and kimi/k3.1-pro",
+        "date": "2026-10-30"
+      },
+      "auditor": {
+        "agent": "translation-auditor (round 1, distinct session) + translation-auditor (round 2, a different session again) — neither is the translator",
+        "model": "round 1 radient/auto · round 2 radient/alpha — actual models, not the requested anthropic/claude-opus-5-5; see note for the fallback chain",
+        "date": "2026-10-30",
+        "result": "passed",
+        "findings": 7,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Two independent audits, as safety copy requires (docs/I18N.md, Add or extend a locale, step 3): round 1 by translation-auditor on radient/auto at b3b1c2aec56 — 5 pass / 2 reject (fr + vi majors) with 6 minors and 5 nits, all answered in the PR's round-1 remediation comment, fr and vi fixed at 6f3b8e3, TA9 (quoting of {name}) fixed at 9d4bed5; round 2 by a different translation-auditor session on radient/alpha at 9d4bed55040 — 7 PASS / 0 REJECT, 0 blocker, 1 minor, 6 nit, safety-copy gate closed for these nine keys. Both rounds' actual models are the fallback chain, not the requested anthropic/claude-opus-5-5 (gpt-6-astra → kimi/k3.1-pro → radient/auto | radient/alpha). Accepted, non-gating dispositions deferred to the locale work: F1 (hi 'idle': wire.sessions says निष्क्रिय, relay.chrome.session.subtitle.idle ships आइडल — hi-guide call), F2/F3 ({seconds} unit: zh-CN 秒 and vi giây are the shipped conventions, this wave keeps s), F4 (fr stop_self_refused repeats 'cette'), F5 (hi approval-line tails), F6 ('hold window' mechanism word reads as data retention; needs a glossary row + seven guides), F7 (ru style guide records «в простой», copy ships «в простое»). Evidence: i18n/audits/evidence/es/wire.sessions/wsr2/. Unresolved blocker/major: 0. This row is fresh only at en source ad2c68cbc8dc98f81875b0c1b3960be4cdfed27113bc326ae26045d93d75585a; any English byte change lapses it."
+    },
+    {
       "locale": "fr",
       "namespace": "tui.status",
       "source_sha256": "2403f9c4f37b40264f575929627b99a0bcabb0baf1bcb6a0b951c6c31ec6843a",
@@ -4502,6 +4522,26 @@
       "note": "Independent audit of PR #3203 (Team Bridge tool row) at source_sha256 58e76cb3bf5872c644ad83502f9efd0e5ca304d738cfe5f430c6a04ca192ef1c (catalogues.catalogue_sha256 and raw sha256 agree); target fr bytes after fixes sha256 0f6ab8df6da26a7a0f551a0030e896abee1e13ad31db25953cc0d58f115e93e6. New namespace, all 85 keys read against the English source and its context sidecar, and composed through bridge_copy.bridge_row_line for every action in running/settled/failed. Mechanical: key parity 85/85; 100 sentinel renders through messages.render, 0 lost or extra placeholders; plural arms at 0/1/2/5/1000000/1500000 (one/many/other, '1 000 000 de membres'); no Cf/bidi controls; NFC; U+2019 apostrophes. Findings fixed by the auditor (4 minor, 1 nit): FR-B1 minor channel_thread verbs dropped 'thread' ('Lu dans'/'Lecture dans'/'Impossible de lire') so a thread read was indistinguishable from a channel read -> 'Fil lu dans'/'Lecture du fil dans'/'Impossible de lire le fil dans', matching the UI twin; FR-B2 minor verb_failed.channels 'Impossible de lister' had no object (complete phrase per sidecar) -> 'Impossible de lister les conversations'; FR-B3 minor verb_settled.shared_history 'Conversation partagée lue :' left a dangling colon before a count when unlabelled ('lue : (3 messages)') -> 'Lu dans la conversation partagée'; FR-B4 minor expanded.failed_error/refused_error used U+0020 before ':' -> U+202F per fr.md. Accepted as is: 'Créé :'/'Réservé :'/'Libéré :'/'Pris en charge :' label-colon register for verbs whose object follows (no idiomatic French past participle takes a bare following object); 'cette conversation' fallback (demonstrative reads naturally after 'dans'). Translators: round 1 radient/auto fallback, delta round 2 anthropic/claude-opus-5-5 (from the brief, not observed). Auditor distinct agent and context, same model family as round-2 translator (disclosed). Unresolved blocker/major: 0. Not verified: native-speaker review, rendered TUI/phone fit."
     },
     {
+      "locale": "fr",
+      "namespace": "wire.sessions",
+      "source_sha256": "ad2c68cbc8dc98f81875b0c1b3960be4cdfed27113bc326ae26045d93d75585a",
+      "translator": {
+        "agent": "coder (lopdev team) — PR #3102 i18n wave implementer",
+        "model": "radient/auto — actual; requested anthropic/claude-opus-5-5, moved by provider quota failures through openai/gpt-6-astra and kimi/k3.1-pro",
+        "date": "2026-10-30"
+      },
+      "auditor": {
+        "agent": "translation-auditor (round 1, distinct session) + translation-auditor (round 2, a different session again) — neither is the translator",
+        "model": "round 1 radient/auto · round 2 radient/alpha — actual models, not the requested anthropic/claude-opus-5-5; see note for the fallback chain",
+        "date": "2026-10-30",
+        "result": "passed",
+        "findings": 7,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Two independent audits, as safety copy requires (docs/I18N.md, Add or extend a locale, step 3): round 1 by translation-auditor on radient/auto at b3b1c2aec56 — 5 pass / 2 reject (fr + vi majors) with 6 minors and 5 nits, all answered in the PR's round-1 remediation comment, fr and vi fixed at 6f3b8e3, TA9 (quoting of {name}) fixed at 9d4bed5; round 2 by a different translation-auditor session on radient/alpha at 9d4bed55040 — 7 PASS / 0 REJECT, 0 blocker, 1 minor, 6 nit, safety-copy gate closed for these nine keys. Both rounds' actual models are the fallback chain, not the requested anthropic/claude-opus-5-5 (gpt-6-astra → kimi/k3.1-pro → radient/auto | radient/alpha). Accepted, non-gating dispositions deferred to the locale work: F1 (hi 'idle': wire.sessions says निष्क्रिय, relay.chrome.session.subtitle.idle ships आइडल — hi-guide call), F2/F3 ({seconds} unit: zh-CN 秒 and vi giây are the shipped conventions, this wave keeps s), F4 (fr stop_self_refused repeats 'cette'), F5 (hi approval-line tails), F6 ('hold window' mechanism word reads as data retention; needs a glossary row + seven guides), F7 (ru style guide records «в простой», copy ships «в простое»). Evidence: i18n/audits/evidence/fr/wire.sessions/wsr2/. Unresolved blocker/major: 0. This row is fresh only at en source ad2c68cbc8dc98f81875b0c1b3960be4cdfed27113bc326ae26045d93d75585a; any English byte change lapses it."
+    },
+    {
       "locale": "hi",
       "namespace": "tui.status",
       "source_sha256": "2403f9c4f37b40264f575929627b99a0bcabb0baf1bcb6a0b951c6c31ec6843a",
@@ -5756,6 +5796,26 @@
       "note": "Independent hi audit of PR #3203 (Team Bridge tool rows) at source_sha256 58e76cb3bf5872c644ad83502f9efd0e5ca304d738cfe5f430c6a04ca192ef1c (catalogues.catalogue_sha256 = raw sha256 of en/wire.tool_rows.bridge.json); target catalogue_sha256 of the auditor-fixed hi bytes = 380a0ee68d5efca97ccd819819a33095701016f7bdf24a167ccf4f3a2fa06cb5 (the core ledger schema has no target field). All 85 keys read against en + .context.json. Mechanical: key parity 85/85; placeholder sets identical; 197 sentinel renders through local_operator.i18n.runtime.render_message at counts 0/1/2/3/5/11/21/22/1000000, 0 lost; one covers 0 and 1 ('(1 सदस्य)', '(कोई संदेश नहीं)', '(10,00,000 संदेश)'); NFC; no Cf/bidi controls; all 8 maxCells budgets met (outcome ≤10/32 cells, outcome_short ≤10/14). Every hi verb, outcome and fallback value is byte-identical to the matching ui.chat.canonical.tool_row.bridge value in local-operator-ui#1529. One MINOR found and fixed by the auditor (glossary): outcome.awaiting_acceptance, outcome_short.awaiting_acceptance 'स्वीकृति बाकी' → 'स्वीकार होना बाकी', and expanded.awaiting_acceptance '…मालिक को स्वीकृति देनी होगी।' → '…मालिक को इसे स्वीकार करना होगा।'. The hi style guide and glossary fix स्वीकृति as 'approval' (approvals → स्वीकृतियाँ; 15/15 core and 47 UI 'approval' strings use it), so 'awaiting acceptance' read as 'approval pending' — a different Local Operator concept (tool approvals) — on a warning-ink status word. The fix uses the verb स्वीकार already shipped for 'accept' (wire.errors.desktop.effort_not_in_levels; the sibling expanded note '…यह बातचीत स्वीकार करनी होगी'). Accepted as is: the SOV verb-first log-line register (verb with the object after it, e.g. 'भेजा Dana') is the team's deferred decision, not reopened; 'take up' → 'कार्य लिया' and 'DM' kept Latin are consistent across both repos. Translator provenance is from the manager brief (round 1 radient/auto fallback, delta round 2 anthropic/claude-opus-5-5); translator session ids were not recorded in the commits. Auditor and translators share the Claude model family (disclosed). Not verified: native-speaker naturalness, a rendered frame at narrow width. Unresolved blocker/major: 0."
     },
     {
+      "locale": "hi",
+      "namespace": "wire.sessions",
+      "source_sha256": "ad2c68cbc8dc98f81875b0c1b3960be4cdfed27113bc326ae26045d93d75585a",
+      "translator": {
+        "agent": "coder (lopdev team) — PR #3102 i18n wave implementer",
+        "model": "radient/auto — actual; requested anthropic/claude-opus-5-5, moved by provider quota failures through openai/gpt-6-astra and kimi/k3.1-pro",
+        "date": "2026-10-30"
+      },
+      "auditor": {
+        "agent": "translation-auditor (round 1, distinct session) + translation-auditor (round 2, a different session again) — neither is the translator",
+        "model": "round 1 radient/auto · round 2 radient/alpha — actual models, not the requested anthropic/claude-opus-5-5; see note for the fallback chain",
+        "date": "2026-10-30",
+        "result": "passed",
+        "findings": 7,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Two independent audits, as safety copy requires (docs/I18N.md, Add or extend a locale, step 3): round 1 by translation-auditor on radient/auto at b3b1c2aec56 — 5 pass / 2 reject (fr + vi majors) with 6 minors and 5 nits, all answered in the PR's round-1 remediation comment, fr and vi fixed at 6f3b8e3, TA9 (quoting of {name}) fixed at 9d4bed5; round 2 by a different translation-auditor session on radient/alpha at 9d4bed55040 — 7 PASS / 0 REJECT, 0 blocker, 1 minor, 6 nit, safety-copy gate closed for these nine keys. Both rounds' actual models are the fallback chain, not the requested anthropic/claude-opus-5-5 (gpt-6-astra → kimi/k3.1-pro → radient/auto | radient/alpha). Accepted, non-gating dispositions deferred to the locale work: F1 (hi 'idle': wire.sessions says निष्क्रिय, relay.chrome.session.subtitle.idle ships आइडल — hi-guide call), F2/F3 ({seconds} unit: zh-CN 秒 and vi giây are the shipped conventions, this wave keeps s), F4 (fr stop_self_refused repeats 'cette'), F5 (hi approval-line tails), F6 ('hold window' mechanism word reads as data retention; needs a glossary row + seven guides), F7 (ru style guide records «в простой», copy ships «в простое»). Evidence: i18n/audits/evidence/hi/wire.sessions/wsr2/. Unresolved blocker/major: 0. This row is fresh only at en source ad2c68cbc8dc98f81875b0c1b3960be4cdfed27113bc326ae26045d93d75585a; any English byte change lapses it."
+    },
+    {
       "locale": "ru",
       "namespace": "tui.status",
       "source_sha256": "2403f9c4f37b40264f575929627b99a0bcabb0baf1bcb6a0b951c6c31ec6843a",
@@ -7008,6 +7068,26 @@
       "note": "Independent ru audit of PR #3203 (Team Bridge tool rows) at source_sha256 58e76cb3bf5872c644ad83502f9efd0e5ca304d738cfe5f430c6a04ca192ef1c (catalogues.catalogue_sha256 = raw sha256 of en/wire.tool_rows.bridge.json); target catalogue_sha256 of the auditor-fixed ru bytes = 30f76a743fbb05175982637d0ee72af8557d3abc1754589d1a7d3a5dd62dceee. All 85 keys read against en + .context.json and the composer (harness/bridge_copy.py). Mechanical: key parity 85/85; ICU argument sets identical; 127 sentinel renders through the ICU runtime (messages._runtime.render_message, locale ru) at counts 0/1/2/3/4/5/11/12/14/21/22/25/101/111/1000000, 0 lost/extra; plurals one/few/many/other on count.members and count.messages (1 участник, 2 участника, 5/11 участников, 21 участник, 22 участника; =0 'нет сообщений' kept); NFC; no Cf/bidi controls; all 8 maxCells met (outcome ≤27/32, outcome_short ≤14/14). Findings, all fixed by the auditor (0 blocker, 0 major, 4 minor, 1 nit): RU-C1 MINOR verb_*.react / react_remove 'Поставил реакцию в' + fallback 'разговор' / '#name' composed a wrong case and no preposition fits both a channel and a DM name ('в Дане'); now colon-introduced 'Поставил реакцию:' / 'Убрал реакцию:', the same pattern the translators already used for dm/send/reply. RU-C2 MINOR verb_*.channel_thread 'Прочитал ветку в' + 'разговор' = accusative after locative 'в' ('ветку в разговор'); now 'Прочитал ветку:'. RU-C3 MINOR verb_*.take_up 'Принял' collided with 'принять/принятия' = owner acceptance on the awaiting_acceptance rows of this namespace, and take_up is a FETCH (tool.py); now 'Получил/Получает/Не удалось получить'. RU-C4 MINOR verb_*.ack_working 'Забрал' (= took away/collected) misstates a working-claim ack; now 'Взял в работу/Берёт в работу/Не удалось взять в работу' (Освободил for ack_done kept). RU-C5 MINOR outcome_short.inbox_only 'не опубликовано' / outcome_short.unconfirmed 'не подтверждено' — the short forms were the full forms' tails and dropped the distinguishing half; 'не в разговоре' (14/14) keeps 'not in a conversation', 'под вопросом' (12/14) keeps 'may or may not have landed' without saying failed. RU-N1 NIT expanded.details 'Детали' → 'Подробности', the heading the ru catalogues use for a details disclosure (ui.agents.skills.detail.section.details, ui.chat.run_details). Accepted as is: 'Опубликовал в' + 'разговор' (accusative after 'в' reads as motion into; idiomatic for posting); 'ветке {label}' (prepositional after 'в', composes 'Опубликовал в ветке #general'); 'личное сообщение' for DM; masculine past-tense agent verbs (agent as subject, consistent across the namespace). Every ru verb, outcome and fallback value is byte-identical to its ui.chat.canonical.tool_row.bridge twin in local-operator-ui#1529 (65 pairs). Translator provenance from the manager brief (round 1 radient/auto fallback, delta round 2 anthropic/claude-opus-5-5); translator and auditor share the Claude model family (disclosed). Not verified: native-speaker naturalness, a rendered frame at narrow width. Unresolved blocker/major: 0."
     },
     {
+      "locale": "ru",
+      "namespace": "wire.sessions",
+      "source_sha256": "ad2c68cbc8dc98f81875b0c1b3960be4cdfed27113bc326ae26045d93d75585a",
+      "translator": {
+        "agent": "coder (lopdev team) — PR #3102 i18n wave implementer",
+        "model": "radient/auto — actual; requested anthropic/claude-opus-5-5, moved by provider quota failures through openai/gpt-6-astra and kimi/k3.1-pro",
+        "date": "2026-10-30"
+      },
+      "auditor": {
+        "agent": "translation-auditor (round 1, distinct session) + translation-auditor (round 2, a different session again) — neither is the translator",
+        "model": "round 1 radient/auto · round 2 radient/alpha — actual models, not the requested anthropic/claude-opus-5-5; see note for the fallback chain",
+        "date": "2026-10-30",
+        "result": "passed",
+        "findings": 7,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Two independent audits, as safety copy requires (docs/I18N.md, Add or extend a locale, step 3): round 1 by translation-auditor on radient/auto at b3b1c2aec56 — 5 pass / 2 reject (fr + vi majors) with 6 minors and 5 nits, all answered in the PR's round-1 remediation comment, fr and vi fixed at 6f3b8e3, TA9 (quoting of {name}) fixed at 9d4bed5; round 2 by a different translation-auditor session on radient/alpha at 9d4bed55040 — 7 PASS / 0 REJECT, 0 blocker, 1 minor, 6 nit, safety-copy gate closed for these nine keys. Both rounds' actual models are the fallback chain, not the requested anthropic/claude-opus-5-5 (gpt-6-astra → kimi/k3.1-pro → radient/auto | radient/alpha). Accepted, non-gating dispositions deferred to the locale work: F1 (hi 'idle': wire.sessions says निष्क्रिय, relay.chrome.session.subtitle.idle ships आइडल — hi-guide call), F2/F3 ({seconds} unit: zh-CN 秒 and vi giây are the shipped conventions, this wave keeps s), F4 (fr stop_self_refused repeats 'cette'), F5 (hi approval-line tails), F6 ('hold window' mechanism word reads as data retention; needs a glossary row + seven guides), F7 (ru style guide records «в простой», copy ships «в простое»). Evidence: i18n/audits/evidence/ru/wire.sessions/wsr2/. Unresolved blocker/major: 0. This row is fresh only at en source ad2c68cbc8dc98f81875b0c1b3960be4cdfed27113bc326ae26045d93d75585a; any English byte change lapses it."
+    },
+    {
       "locale": "ur",
       "namespace": "cli.exec_remote_help",
       "source_sha256": "c555648c19dd25af507951dc828f3fffbedc44feb579192c9c3fa7c6952e365e",
@@ -8040,6 +8120,26 @@
       },
       "status": "passed",
       "note": "Independent audit (PR #3203, Team Bridge tool rows) at source_sha256 58e76cb3bf5872c644ad83502f9efd0e5ca304d738cfe5f430c6a04ca192ef1c (catalogues.catalogue_sha256 and raw sha256 agree); target_sha256 df49edd0a9ad8443c16163ead4b58fb7079adce319322c8c498a0e714617405f is the post-fix ur file. All 85 keys read against en + context sidecar. Mechanical: key parity 85/85; 109 sentinel renders through the ICU runtime (i18n._runtime.render_message, locale ur — public render() coerces ur->en on this branch because shipped.json is en-only until regeneration), counts 0/1/2/3/5/11/21/22/1000000, 0 placeholders lost/extra; no Cf/bidi controls; NFC; outcome cells 5-23/32, short 5-9/14 (rich cell_len). Findings, all fixed in this commit (auditor-applied, 0 unresolved): UR-W1 MAJOR accept/approval collision — outcome.awaiting_acceptance «منظوری کا انتظار» and expanded.awaiting_acceptance «منظوری دینی» reused منظوری, the glossary approvals term (pending tool approvals); now «قبولیت کا انتظار» / «قبول کرنا ہو گا», matching ui.teamBridge.invitations.accept «قبول کریں». UR-W2 MINOR expanded.dm_headline «{label} کو ڈی ایم» -> «{label} کو براہ راست پیغام»: the Team Bridge UI names DMs براہ راست پیغام (ui.teamBridge.kind.dm); headline has room for the full form, the bare row fallbacks keep ڈی ایم. UR-W3 MINOR refused family «رد کر دیا گیا» -> «مسترد» (outcome.refused, expanded.refused*, 5 keys): the ur catalogues' settled refusal word is مسترد (ui.agents hub refusals, relay.approvals); 13 -> 5 cells on the status slot. Not findings: target.person «ایک ساتھی ایجنٹ» (sidecar: an agent teammate) accepted; count.conversations is a bare number by design. Translators: round 1 radient/auto, delta round 2 anthropic/claude-opus-5-5; auditor same model family, separate agent/context (disclosed)."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.sessions",
+      "source_sha256": "ad2c68cbc8dc98f81875b0c1b3960be4cdfed27113bc326ae26045d93d75585a",
+      "translator": {
+        "agent": "coder (lopdev team) — PR #3102 i18n wave implementer",
+        "model": "radient/auto — actual; requested anthropic/claude-opus-5-5, moved by provider quota failures through openai/gpt-6-astra and kimi/k3.1-pro",
+        "date": "2026-10-30"
+      },
+      "auditor": {
+        "agent": "translation-auditor (round 1, distinct session) + translation-auditor (round 2, a different session again) — neither is the translator",
+        "model": "round 1 radient/auto · round 2 radient/alpha — actual models, not the requested anthropic/claude-opus-5-5; see note for the fallback chain",
+        "date": "2026-10-30",
+        "result": "passed",
+        "findings": 7,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Two independent audits, as safety copy requires (docs/I18N.md, Add or extend a locale, step 3): round 1 by translation-auditor on radient/auto at b3b1c2aec56 — 5 pass / 2 reject (fr + vi majors) with 6 minors and 5 nits, all answered in the PR's round-1 remediation comment, fr and vi fixed at 6f3b8e3, TA9 (quoting of {name}) fixed at 9d4bed5; round 2 by a different translation-auditor session on radient/alpha at 9d4bed55040 — 7 PASS / 0 REJECT, 0 blocker, 1 minor, 6 nit, safety-copy gate closed for these nine keys. Both rounds' actual models are the fallback chain, not the requested anthropic/claude-opus-5-5 (gpt-6-astra → kimi/k3.1-pro → radient/auto | radient/alpha). Accepted, non-gating dispositions deferred to the locale work: F1 (hi 'idle': wire.sessions says निष्क्रिय, relay.chrome.session.subtitle.idle ships आइडल — hi-guide call), F2/F3 ({seconds} unit: zh-CN 秒 and vi giây are the shipped conventions, this wave keeps s), F4 (fr stop_self_refused repeats 'cette'), F5 (hi approval-line tails), F6 ('hold window' mechanism word reads as data retention; needs a glossary row + seven guides), F7 (ru style guide records «в простой», copy ships «в простое»). Evidence: i18n/audits/evidence/ur/wire.sessions/wsr2/. Unresolved blocker/major: 0. This row is fresh only at en source ad2c68cbc8dc98f81875b0c1b3960be4cdfed27113bc326ae26045d93d75585a; any English byte change lapses it."
     },
     {
       "locale": "vi",
@@ -9293,6 +9393,26 @@
       },
       "status": "passed",
       "note": "PR #3203 Team Bridge tool rows: all 85 keys of wire.tool_rows.bridge read against en + context sidecar, glossary and vi style guide, and against the desktop's ui.chat.canonical.tool_row.bridge.* vi copy (65 paired keys byte-identical after the fixes). Findings (both fixed in these bytes, same fix applied in the desktop catalogue; target hash is the fixed file): VI-B1 MINOR outcome.unconfirmed, expanded.unconfirmed, expanded.unconfirmed_bare 'chưa xác nhận gửi' reads as 'have not confirmed sending' (a pending confirm step), not 'delivery not confirmed' -> 'chưa xác nhận đã gửi' (20 cells, budget 32; outcome_short stays 'chưa xác nhận'). VI-B2 MINOR verb_*.ack_done 'trả lại' means 'return/give back' (reads as bouncing the message to its sender); the op releases this session's own claim -> 'Đã nhả'/'Đang nhả'/'Không thể nhả', the lock-release verb, pairing with claim 'nhận xử lý'. Recorded, not changed: target.dm 'một người' (zh-CN '对方' does the same; 'Đã nhắn cho một người' is idiomatic where 'một tin nhắn trực tiếp' would not take 'nhắn cho'); take_up 'mở' (fetch/open the body; 'nhận' is taken by claim); directory 'danh sách thành viên'; thread 'luồng' and reaction 'cảm xúc' match ui.teamBridge. Mechanical: key parity 85/85; ICU argument parity via runtime.message_arguments, 0 mismatches; 109 sentinel renders through local_operator.i18n.runtime with vi rules, 0 lost args; plurals other-only (+=0 kept) at 0/1/2/3/5/11/21/22/1e6 ('1.000.000 tin nhắn'); all maxCells keys within budget (rich cell_len); NFC, no Cf/bidi. bạn register not exercised; no pronoun drift. check.py --catalogues-only: 0 problems. Unresolved blocker/major: 0."
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.sessions",
+      "source_sha256": "ad2c68cbc8dc98f81875b0c1b3960be4cdfed27113bc326ae26045d93d75585a",
+      "translator": {
+        "agent": "coder (lopdev team) — PR #3102 i18n wave implementer",
+        "model": "radient/auto — actual; requested anthropic/claude-opus-5-5, moved by provider quota failures through openai/gpt-6-astra and kimi/k3.1-pro",
+        "date": "2026-10-30"
+      },
+      "auditor": {
+        "agent": "translation-auditor (round 1, distinct session) + translation-auditor (round 2, a different session again) — neither is the translator",
+        "model": "round 1 radient/auto · round 2 radient/alpha — actual models, not the requested anthropic/claude-opus-5-5; see note for the fallback chain",
+        "date": "2026-10-30",
+        "result": "passed",
+        "findings": 7,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Two independent audits, as safety copy requires (docs/I18N.md, Add or extend a locale, step 3): round 1 by translation-auditor on radient/auto at b3b1c2aec56 — 5 pass / 2 reject (fr + vi majors) with 6 minors and 5 nits, all answered in the PR's round-1 remediation comment, fr and vi fixed at 6f3b8e3, TA9 (quoting of {name}) fixed at 9d4bed5; round 2 by a different translation-auditor session on radient/alpha at 9d4bed55040 — 7 PASS / 0 REJECT, 0 blocker, 1 minor, 6 nit, safety-copy gate closed for these nine keys. Both rounds' actual models are the fallback chain, not the requested anthropic/claude-opus-5-5 (gpt-6-astra → kimi/k3.1-pro → radient/auto | radient/alpha). Accepted, non-gating dispositions deferred to the locale work: F1 (hi 'idle': wire.sessions says निष्क्रिय, relay.chrome.session.subtitle.idle ships आइडल — hi-guide call), F2/F3 ({seconds} unit: zh-CN 秒 and vi giây are the shipped conventions, this wave keeps s), F4 (fr stop_self_refused repeats 'cette'), F5 (hi approval-line tails), F6 ('hold window' mechanism word reads as data retention; needs a glossary row + seven guides), F7 (ru style guide records «в простой», copy ships «в простое»). Evidence: i18n/audits/evidence/vi/wire.sessions/wsr2/. Unresolved blocker/major: 0. This row is fresh only at en source ad2c68cbc8dc98f81875b0c1b3960be4cdfed27113bc326ae26045d93d75585a; any English byte change lapses it."
     },
     {
       "locale": "zh-CN",
@@ -11333,6 +11453,26 @@
       },
       "status": "passed",
       "note": "Independent audit of PR #3203 (Team Bridge tool row), new namespace, all 85 keys read against en + .context.json, glossary and zh-CN guide. Target sha256 after fixes f6e58cc76c47dcd71aa9cb1dc90e131395a10461f20338a5dade2edb9780575c. Mechanical: key parity 85/85; 109 sentinel renders through i18n.runtime.render_message (plural counts 0/1/2/3/5/11/21/22/1000000), 0 lost placeholders; =0 arm and other-only plural with 条/名 classifiers; no Cf/bidi, NFC, no BOM. 2 minor, both fixed: ZH-1 channel_thread settled/running/failed rendered as bare 已读取/正在读取/无法读取, dropping 'thread' and colliding with channel_history -> 已读取讨论串 etc. (讨论串 per target.thread and ui.teamBridge.replies.*); ZH-2 react/react_remove verbs and expanded.reacted/reaction_removed used 加表情/移除表情, drifting from the Team Bridge app's 表情回应 term -> 已添加表情回应/已移除表情回应 etc. Same fixes applied to the UI mirror keys (local-operator-ui#1529). 你 register not exercised; no pronoun drift. Unresolved blocker/major: 0."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.sessions",
+      "source_sha256": "ad2c68cbc8dc98f81875b0c1b3960be4cdfed27113bc326ae26045d93d75585a",
+      "translator": {
+        "agent": "coder (lopdev team) — PR #3102 i18n wave implementer",
+        "model": "radient/auto — actual; requested anthropic/claude-opus-5-5, moved by provider quota failures through openai/gpt-6-astra and kimi/k3.1-pro",
+        "date": "2026-10-30"
+      },
+      "auditor": {
+        "agent": "translation-auditor (round 1, distinct session) + translation-auditor (round 2, a different session again) — neither is the translator",
+        "model": "round 1 radient/auto · round 2 radient/alpha — actual models, not the requested anthropic/claude-opus-5-5; see note for the fallback chain",
+        "date": "2026-10-30",
+        "result": "passed",
+        "findings": 7,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Two independent audits, as safety copy requires (docs/I18N.md, Add or extend a locale, step 3): round 1 by translation-auditor on radient/auto at b3b1c2aec56 — 5 pass / 2 reject (fr + vi majors) with 6 minors and 5 nits, all answered in the PR's round-1 remediation comment, fr and vi fixed at 6f3b8e3, TA9 (quoting of {name}) fixed at 9d4bed5; round 2 by a different translation-auditor session on radient/alpha at 9d4bed55040 — 7 PASS / 0 REJECT, 0 blocker, 1 minor, 6 nit, safety-copy gate closed for these nine keys. Both rounds' actual models are the fallback chain, not the requested anthropic/claude-opus-5-5 (gpt-6-astra → kimi/k3.1-pro → radient/auto | radient/alpha). Accepted, non-gating dispositions deferred to the locale work: F1 (hi 'idle': wire.sessions says निष्क्रिय, relay.chrome.session.subtitle.idle ships आइडल — hi-guide call), F2/F3 ({seconds} unit: zh-CN 秒 and vi giây are the shipped conventions, this wave keeps s), F4 (fr stop_self_refused repeats 'cette'), F5 (hi approval-line tails), F6 ('hold window' mechanism word reads as data retention; needs a glossary row + seven guides), F7 (ru style guide records «в простой», copy ships «в простое»). Evidence: i18n/audits/evidence/zh-CN/wire.sessions/wsr2/. Unresolved blocker/major: 0. This row is fresh only at en source ad2c68cbc8dc98f81875b0c1b3960be4cdfed27113bc326ae26045d93d75585a; any English byte change lapses it."
     }
   ]
 }

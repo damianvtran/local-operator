@@ -1255,6 +1255,26 @@
       },
       "status": "passed",
       "note": "Independent hi audit of PR #3203 (Team Bridge tool rows) at source_sha256 58e76cb3bf5872c644ad83502f9efd0e5ca304d738cfe5f430c6a04ca192ef1c (catalogues.catalogue_sha256 = raw sha256 of en/wire.tool_rows.bridge.json); target catalogue_sha256 of the auditor-fixed hi bytes = 380a0ee68d5efca97ccd819819a33095701016f7bdf24a167ccf4f3a2fa06cb5 (the core ledger schema has no target field). All 85 keys read against en + .context.json. Mechanical: key parity 85/85; placeholder sets identical; 197 sentinel renders through local_operator.i18n.runtime.render_message at counts 0/1/2/3/5/11/21/22/1000000, 0 lost; one covers 0 and 1 ('(1 सदस्य)', '(कोई संदेश नहीं)', '(10,00,000 संदेश)'); NFC; no Cf/bidi controls; all 8 maxCells budgets met (outcome ≤10/32 cells, outcome_short ≤10/14). Every hi verb, outcome and fallback value is byte-identical to the matching ui.chat.canonical.tool_row.bridge value in local-operator-ui#1529. One MINOR found and fixed by the auditor (glossary): outcome.awaiting_acceptance, outcome_short.awaiting_acceptance 'स्वीकृति बाकी' → 'स्वीकार होना बाकी', and expanded.awaiting_acceptance '…मालिक को स्वीकृति देनी होगी।' → '…मालिक को इसे स्वीकार करना होगा।'. The hi style guide and glossary fix स्वीकृति as 'approval' (approvals → स्वीकृतियाँ; 15/15 core and 47 UI 'approval' strings use it), so 'awaiting acceptance' read as 'approval pending' — a different Local Operator concept (tool approvals) — on a warning-ink status word. The fix uses the verb स्वीकार already shipped for 'accept' (wire.errors.desktop.effort_not_in_levels; the sibling expanded note '…यह बातचीत स्वीकार करनी होगी'). Accepted as is: the SOV verb-first log-line register (verb with the object after it, e.g. 'भेजा Dana') is the team's deferred decision, not reopened; 'take up' → 'कार्य लिया' and 'DM' kept Latin are consistent across both repos. Translator provenance is from the manager brief (round 1 radient/auto fallback, delta round 2 anthropic/claude-opus-5-5); translator session ids were not recorded in the commits. Auditor and translators share the Claude model family (disclosed). Not verified: native-speaker naturalness, a rendered frame at narrow width. Unresolved blocker/major: 0."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.sessions",
+      "source_sha256": "ad2c68cbc8dc98f81875b0c1b3960be4cdfed27113bc326ae26045d93d75585a",
+      "translator": {
+        "agent": "coder (lopdev team) — PR #3102 i18n wave implementer",
+        "model": "radient/auto — actual; requested anthropic/claude-opus-5-5, moved by provider quota failures through openai/gpt-6-astra and kimi/k3.1-pro",
+        "date": "2026-10-30"
+      },
+      "auditor": {
+        "agent": "translation-auditor (round 1, distinct session) + translation-auditor (round 2, a different session again) — neither is the translator",
+        "model": "round 1 radient/auto · round 2 radient/alpha — actual models, not the requested anthropic/claude-opus-5-5; see note for the fallback chain",
+        "date": "2026-10-30",
+        "result": "passed",
+        "findings": 7,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Two independent audits, as safety copy requires (docs/I18N.md, Add or extend a locale, step 3): round 1 by translation-auditor on radient/auto at b3b1c2aec56 — 5 pass / 2 reject (fr + vi majors) with 6 minors and 5 nits, all answered in the PR's round-1 remediation comment, fr and vi fixed at 6f3b8e3, TA9 (quoting of {name}) fixed at 9d4bed5; round 2 by a different translation-auditor session on radient/alpha at 9d4bed55040 — 7 PASS / 0 REJECT, 0 blocker, 1 minor, 6 nit, safety-copy gate closed for these nine keys. Both rounds' actual models are the fallback chain, not the requested anthropic/claude-opus-5-5 (gpt-6-astra → kimi/k3.1-pro → radient/auto | radient/alpha). Accepted, non-gating dispositions deferred to the locale work: F1 (hi 'idle': wire.sessions says निष्क्रिय, relay.chrome.session.subtitle.idle ships आइडल — hi-guide call), F2/F3 ({seconds} unit: zh-CN 秒 and vi giây are the shipped conventions, this wave keeps s), F4 (fr stop_self_refused repeats 'cette'), F5 (hi approval-line tails), F6 ('hold window' mechanism word reads as data retention; needs a glossary row + seven guides), F7 (ru style guide records «в простой», copy ships «в простое»). Evidence: i18n/audits/evidence/hi/wire.sessions/wsr2/. Unresolved blocker/major: 0. This row is fresh only at en source ad2c68cbc8dc98f81875b0c1b3960be4cdfed27113bc326ae26045d93d75585a; any English byte change lapses it."
     }
   ]
 }
