@@ -207,3 +207,57 @@ def test_overload_is_a_transient_503_not_a_bad_image(proxy, monkeypatch):
     assert response.json()["detail"]["code"] == "renderer_busy"
     assert "retry-after" not in response.headers
     assert not calls
+
+
+AGENT_Q = (
+    BASE_Q.replace("kind=person", "kind=person_agent")
+    + "&v=fedcba9876543210&avatar_endpoint_id=bep_0123456789abcdef0123456789abcdef"
+)
+
+
+def _blue_jpeg() -> bytes:
+    out = io.BytesIO()
+    Image.new("RGB", (64, 64), (30, 60, 210)).save(out, format="JPEG")
+    return out.getvalue()
+
+
+def test_agent_composite_reads_only_the_endpoint_route(proxy):
+    client, calls, state = proxy
+    state.update(serve_type="image/jpeg", serve=_blue_jpeg())
+    image = _png(client.get(f"{URL}?{AGENT_Q}"))
+    pixel = image.getpixel((16, 32))
+    assert isinstance(pixel, tuple)
+    assert pixel[:3] == pytest.approx((30, 60, 210), abs=16)
+    assert [c[1] for c in calls] == [
+        "/v1/messaging/endpoints/bep_0123456789abcdef0123456789abcdef/avatar"
+        "?v=fedcba9876543210&size=64"
+    ]
+
+
+def test_agent_composite_falls_back_to_the_glyph_on_a_stale_version(proxy):
+    client, calls, state = proxy
+    glyph = client.get(f"{URL}?{BASE_Q.replace('kind=person', 'kind=person_agent')}")
+    state["error"] = (404, "not_found")
+    fallback = client.get(f"{URL}?{AGENT_Q}")
+    _png(fallback)
+    assert fallback.content == glyph.content
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        # A person never wears an endpoint picture.
+        AGENT_Q.replace("kind=person_agent", "kind=person"),
+        # Both photo shapes at once, or a half of either.
+        AGENT_Q + "&avatar_account_id=acc_2",
+        AGENT_Q.replace("&v=fedcba9876543210", ""),
+        AGENT_Q.replace("fedcba9876543210", "FEDCBA9876543210"),
+        AGENT_Q.replace("bep_0123456789abcdef0123456789abcdef", "bep%2F..%2Facc_2"),
+        AGENT_Q.replace("bep_0123456789abcdef0123456789abcdef", "b" * 129),
+    ],
+)
+def test_agent_picture_query_is_closed(proxy, query):
+    client, calls, _ = proxy
+    assert client.get(f"{URL}?{query}").status_code == 422
+    assert not calls
