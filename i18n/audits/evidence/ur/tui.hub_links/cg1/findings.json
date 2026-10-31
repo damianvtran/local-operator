@@ -22,6 +22,20 @@
       "problem": "«محفوظ ہونے پر» is ambiguous between 'when safe' and 'when saved' — and this locale uses «محفوظ کریں» for Save (style guide), with tui.hub_links.policy.saving «محفوظ ہو رہا ہے…» on the same screen. A user can read it as 'publish local changes automatically whenever they are saved', broadening an auto-publish consent string.",
       "suggested": "جب ایسا کرنا بے خطر ہو تو مقامی تبدیلیاں خودکار طور پر {source} پر شائع کریں۔ (or: جب شائع کرنا محفوظ ہو، …)",
       "disposition": "fixed (remediation core-fix, session be04c022ebd4)"
+    },
+    {
+      "round": "targeted-argorder",
+      "auditor_session": "b15ab322fa0f",
+      "id": "UR-ARG-1",
+      "severity": "MINOR",
+      "namespace": "tui.hub_links",
+      "key": "tui.hub_links.mark.retry",
+      "english": "Retry {direction} for {item} at {source}",
+      "current": "{direction} دوبارہ کریں: {item}، {source} پر",
+      "problem": "Meaning intact (retry direction, for item, at source; nothing inverted), but the colon+comma list drops the 'for' relation and reads like a terse label list rather than a sentence; slightly stilted.",
+      "suggested": "{direction} دوبارہ کریں — {item} کے لیے، {source} پر",
+      "disposition": "accepted unchanged"
     }
-  ]
+  ],
+  "counts_scope": "counts, result and gate_status describe locale-wide rounds 1-2 as recorded in the ledger; findings with round \"targeted-argorder\" come from session b15ab322fa0f (read only the rephrased keys) and are not in those counts"
 }
