@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "audit_id": "cg1",
+  "locale": "ur",
+  "namespace": "cli.wake_help",
+  "source_sha256": "eff6775fe3ad39c228dd4c360b22011d9a95c887fa5b7839744f4b532a31ac8a",
+  "target_sha256": "e0f44840b2d9793009c92773b75ba085c738ee802da94620f8f5be1871ef7634",
+  "hashes": {
+    "audit.log": "f1dc7b38d4c67d75124cae7b5d73f477d4cf26e73c6c9a64a1340274897cda4f",
+    "findings.json": "d5001099504edf23a0fc138d72ff23c0cec0e6c89e88122b5544859029a96329",
+    "record.json": "3d6c8e27fcd7c82f1c55773337c3c9a81d71dcdc7bc14cca7b4c0650e44762b9",
+    "report.md": "6c78386d5a83caeb82026ac90cac10115c9ee8e928db06e14da0ec5f0da4ce34"
+  }
+}
