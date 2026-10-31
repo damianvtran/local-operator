@@ -520,8 +520,9 @@ def test_a_strip_memo_returns_the_plain_strip_and_strips_each_row_once(monkeypat
 
     monkeypatch.setattr(of, "strip_entry", counted)
     memo = of.StripMemo()
-    for _ in range(3):  # the hunt re-cuts the whole page on every attempt
-        kept, reached = of.align_page(rows, 3, extra_rows=2, memo=memo)
+    kept, reached = of.align_page(rows, 3, extra_rows=2, memo=memo)
+    for _ in range(2):  # the hunt re-cuts the whole page on every attempt
+        assert of.align_page(rows, 3, extra_rows=2, memo=memo) == (kept, reached)
         assert of.paintable(rows, memo=memo) == plain_paintable
     frame = of.build_frame(kept, has_more=True, memo=memo)
     assert (kept, reached) == (plain_kept, plain_reached)

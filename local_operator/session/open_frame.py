@@ -811,11 +811,7 @@ def build_frame(
     # exceeds the cap by itself is still served, because a page with no rows is
     # not a smaller page, it is a blank transcript, and today's reader serves
     # that row too.
-    painted = [
-        stripped
-        for stripped in (strip(raw) for raw in ordered)
-        if stripped is not None
-    ]
+    painted = [stripped for stripped in (strip(raw) for raw in ordered) if stripped is not None]
     sizes = [len(json.dumps(entry, separators=(",", ":"))) for entry in painted]
     anchor_index = None
     if anchor_id is not None:
