@@ -557,7 +557,9 @@ def test_an_adopted_standby_reports_its_adoption_counters(tmp_path: Path, monkey
     directory = _session_dir(tmp_path)
     process._note_run_start(_Handle("abc123", directory), _Runtime("abc123", 42.0))
 
-    boot = journal.read_run_record(directory).boot
+    record = journal.read_run_record(directory)
+    assert record is not None and record.boot is not None
+    boot = record.boot
     assert boot["standby"] is True
     adopted = boot["at_adoption"]
     assert adopted["cpu_s"] <= boot["cpu_s"]
@@ -578,7 +580,8 @@ def test_an_unmeasurable_boot_still_writes_the_run_record(tmp_path: Path, monkey
 
     raw = json.loads(journal.run_record_path(directory).read_text())
     assert "boot" not in raw, "absent, so the record is the shape it always was"
-    assert journal.read_run_record(directory).covers_run(os.getpid(), 42.0)
+    record = journal.read_run_record(directory)
+    assert record is not None and record.covers_run(os.getpid(), 42.0)
 
 
 def test_a_record_without_boot_cost_still_reads(tmp_path: Path) -> None:
