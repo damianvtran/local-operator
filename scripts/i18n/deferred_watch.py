@@ -283,7 +283,7 @@ def unwrapped_key_calls(
                 continue
             wrapper = _call_parent_name(node, parents)
             if wrapper not in RENDER_WRAPPERS:
-                problems.append(
+                problems.append(  # i18n: ignore dev-tool diagnostic (English-only)
                     f"{relative}:{node.lineno}: {node.func.value.id}.{node.func.attr}() "
                     f"({modules[module]}) is not inside a render wrapper ({wrapper})"
                 )
