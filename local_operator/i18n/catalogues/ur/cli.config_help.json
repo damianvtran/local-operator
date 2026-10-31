@@ -1,0 +1,11 @@
+{
+  "cli.config_help.config": "کنفیگریشن کی ترتیبات منظم کریں",
+  "cli.config_help.open": "کنفیگریشن فائل کو ڈیفالٹ ایڈیٹر میں کھولیں",
+  "cli.config_help.edit": "کنفیگ فائل میں کسی مخصوص کنفیگریشن ویلیو میں ترمیم کریں",
+  "cli.config_help.edit_key": "اپ ڈیٹ کی جانے والی کنفیگریشن کلید (مثلاً hosting, model_name, conversation_length, detail_length, max_learnings_history, auto_save_conversation)",
+  "cli.config_help.edit_value": "کنفیگریشن کلید کی نئی ویلیو (قسم کلید کے مطابق خودکار طور پر تبدیل ہوتی ہے)",
+  "cli.config_help.list": "دستیاب کنفیگریشن آپشنز اور ان کی وضاحتیں دکھائیں",
+  "cli.config_help.create": "نئی کنفیگریشن فائل بنائیں",
+  "cli.config_help.instructions": "دکھائیں کہ سیشن کن حسبِ ضرورت ہدایات کی فائلیں، کس ترتیب سے جمع کرتا ہے (صرف پاتھ اور سائز، مواد کبھی نہیں)",
+  "cli.config_help.instructions_description": "دکھائیں کہ سیشن کن حسبِ ضرورت ہدایات کی فائلیں، کس ترتیب سے جمع کرتا ہے، ہر ایک نے کتنا سائز دیا، اور آیا اسے نقل کے طور پر سمیٹا گیا، کاٹا گیا، یا پچھلے ماخذ سے ٹکرایا۔ صرف پاتھ اور سائز، مواد کبھی نہیں۔"
+}

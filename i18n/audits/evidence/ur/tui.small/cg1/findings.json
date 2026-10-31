@@ -1,0 +1,75 @@
+{
+  "locale": "ur",
+  "namespace": "tui.small",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 3,
+    "nit": 2
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 1,
+      "id": "UR-001",
+      "severity": "MINOR",
+      "namespace": "tui.small",
+      "key": "tui.small.model_picker.effort",
+      "english": "effort {value}",
+      "current": "effort {value}",
+      "problem": "Label word 'effort' left in English; it is not a token (the {value} list is). The ur relay surface already names this concept «استدلال کی شدت» (relay.chrome.model.effort).",
+      "suggested": "استدلال کی شدت {value}",
+      "disposition": "fixed (remediation core-fix, session be04c022ebd4)"
+    },
+    {
+      "round": 1,
+      "id": "UR-002",
+      "severity": "MINOR",
+      "namespace": "tui.small",
+      "key": "tui.small.session_picker.all_archived",
+      "english": "all {total} conversation(s) are archived",
+      "current": "تمام {total} گفتگو(ئیں) محفوظ شدہ (آرکائیو) ہیں",
+      "problem": "«محفوظ شدہ» reads as 'saved', not 'archived', so the parenthetical gloss is needed to rescue it; «گفتگو(ئیں)» is an awkward slash-plural. Neighbour wire.slash.archive frames archiving as hidden from lists.",
+      "suggested": "تمام {total} گفتگوئیں آرکائیو شدہ ہیں",
+      "disposition": "fixed (remediation core-fix, session be04c022ebd4)"
+    },
+    {
+      "round": 1,
+      "id": "UR-003",
+      "severity": "MINOR",
+      "namespace": "tui.small",
+      "key": "tui.small.network_panel.identity_row",
+      "english": "  identity:   {identity}\n",
+      "current": "  شناخت:   {identity}\n",
+      "problem": "The English rows (relay/installed/identity) pad labels so every value starts at the same column (14). The ur padding was copied per-row without re-aligning: values start at col 13 (ریلے), 15 (انسٹال شدہ), 11 (شناخت), so the panel's column is ragged. Same for installed_row/relay_* rows.",
+      "suggested": "Re-pad as a set to a common column, e.g. '  شناخت:      {identity}' / '  انسٹال شدہ: {value}' / '  ریلے:       …'",
+      "disposition": "fixed (remediation core-fix, session be04c022ebd4)"
+    },
+    {
+      "round": 1,
+      "id": "UR-004",
+      "severity": "NIT",
+      "namespace": "tui.small",
+      "key": "tui.small.aside.superseded",
+      "english": "(superseded)",
+      "current": "(منسوخ شدہ)",
+      "problem": "«منسوخ شدہ» = 'cancelled'; the marker means replaced by a newer question. Acceptable per sidecar, but «بدل دیا گیا» states the actual reason.",
+      "suggested": "(بدل دیا گیا)",
+      "disposition": "fixed (remediation core-fix, session be04c022ebd4)"
+    },
+    {
+      "round": 2,
+      "id": "UR2-005",
+      "severity": "NIT",
+      "namespace": "tui.small",
+      "key": "tui.small.session_picker.all_archived",
+      "english": "all {total} conversation(s) are archived",
+      "current": "تمام {total} گفتگوئیں آرکائیو شدہ ہیں",
+      "problem": "The value is now always plural, so it reads «تمام 1 گفتگوئیں» when total=1. The English '(s)' has the same problem and there is no ICU arm, so this is acceptable.",
+      "suggested": "Optional: «تمام گفتگوئیں ({total}) آرکائیو شدہ ہیں»",
+      "disposition": "open at PASS: minor/nit accepted, value unchanged"
+    }
+  ]
+}

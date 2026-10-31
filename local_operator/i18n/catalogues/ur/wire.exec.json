@@ -1,0 +1,19 @@
+{
+  "wire.exec.approval_advisory": "انتباہ: یہ رن منظوری نہیں مانگ سکتا (کوئی ٹرمینل منسلک نہیں)، اس لیے منظوری کی ضرورت والی ہر ٹول کال مسترد ہو گی۔\n  حل: --control کارڈز کو سپروائزر کے لیے روکے رکھتا ہے؛ --yolo ہر درجے کی خودکار منظوری دیتا ہے؛ --tools NAME[,NAME] درج ٹولز کی پیشگی منظوری دیتا ہے اور اس رن کی رسائی انہی تک محدود کرتا ہے؛ کنفیگ میں tool_approval_mode: auto ہر رن کی ہر کال کا ایک ہی جواب دیتا ہے۔",
+  "wire.exec.clear_goal_needs_start": "--clear-goal رن کو ایڈجسٹ کرتا ہے، شروع نہیں کرتا۔ اسے --resume SESSION_ID اور پرامپٹ یا --loop کے ساتھ جوڑیں۔",
+  "wire.exec.error_line": "خرابی: {error}",
+  "wire.exec.error_preflight": "خرابی: پری فلائٹ ناکام: {error}",
+  "wire.exec.exec_epilog": "مثالیں:\n  lop exec 'Review the change' --team release --background\n  printf 'Inspect this report' | lop exec --profile reviewer\n  lop exec --goal 'Finish the checklist' --loop 3 --name 'Night audit'\n  lop exec --resume SESSION_ID --loop-goal 'Verify every acceptance criterion'\n  lop exec --status JOB_ID\n\nدوبارہ شروع کرنے (--resume) پر پہلے ٹرانسکرپٹ، ٹیم، پروفائل، ہدف اور نام بحال ہوتے ہیں؛ واضح\nآغاز کے فلیگز اپنے اپنے سلاٹ کو اوور رائڈ کرتے ہیں۔ ٹیم اور پروفائل ساتھ رہ سکتے ہیں۔\nلوپ اختیاری ابتدائی پرامپٹ کے بعد چلتا ہے؛ --loop N صرف تسلسل گنتا ہے۔\nمحفوظ شدہ لوپ کی پیش رفت دوبارہ شروع کرنے پر نظر آتی ہے، لیکن تکرارات خودکار طور پر دوبارہ نہیں چلتیں۔\nصرف ہدف ماڈل نہیں چلاتا۔ پرامپٹس لفظی ہیں، سلیش کمانڈز نہیں۔\n--goal صرف مقصد مقرر کرتا ہے؛ TUI کے /goal کے برعکس یہ متن کو\nپیغام کے طور پر نہیں بھیجتا، کیونکہ پرامپٹ exec کا پیغام چینل ہے۔\n--agent/--agent-id پرانے ایجنٹ ڈیٹا کا انتخاب کرتے ہیں اور باہم مانع ہیں۔\nڈیفالٹ غیر TTY منظوریاں مسترد ہوتی ہیں۔ --control سپروائزر کا انتظار کر سکتا ہے؛ --yolo\nواضح اوور رائڈ ہے، --background یا --team سے کبھی مفروضہ نہیں ہوتا۔\n--tools طے کرتا ہے کہ رن کیا حاصل کر سکتا ہے: خارج شدہ ٹولز ناقابلِ رسائی ہیں۔\nفورگراؤنڈ ایونٹس/متن stdout استعمال کرتے ہیں؛ رسیدیں stderr۔ الگ کیے گئے رنز دونوں\nاسٹریمز لاگ کرتے ہیں اور الگ الگ جاب/سیشن IDs چھاپتے ہیں۔ lop --resume SESSION_ID\nلائیو رن دیکھنے یا مکمل ہوئے رن کو دوبارہ شروع کرنے کے لیے استعمال کریں؛ exec لائیو مالک کو مسترد کرتا ہے۔",
+  "wire.exec.exec_help": "TUI شروع کیے بغیر محفوظ سیشن میں ٹاسک یا ہدف کا لوپ چلائیں",
+  "wire.exec.goal_only_sets_objective": "--goal مقصد سیٹ کرتا ہے لیکن کام شروع نہیں کرتا (TUI کے /goal کے برعکس)۔ پرامپٹ شامل کریں، stdin پر پائپ کریں (یا '-')، یا --loop N کے ساتھ لوپ چلائیں۔",
+  "wire.exec.log_pointer": "لاگ: {log_path}",
+  "wire.exec.no_exec_job": "کوئی exec جاب {job_id} نہیں؛ جاب IDs --background چھاپتا ہے اور {jobs_path} میں درج ہوتے ہیں",
+  "wire.exec.no_prompt": "کوئی پرامپٹ نہیں۔ آرگومنٹ کے طور پر دیں، stdin پر پائپ کریں (یا '-')، یا --loop/--loop-goal کے ساتھ لوپ چلائیں",
+  "wire.exec.receipt_failure_suffix": " (ایگزیکیوشن رسید) — {failure}",
+  "wire.exec.receipt_suffix": " (ایگزیکیوشن رسید)",
+  "wire.exec.session_pointer": "سیشن: {session_id} (گفتگو) — منسلک ہوں یا دوبارہ شروع کریں: lop --resume {session_id}",
+  "wire.exec.status_pointer": "حالت: lop exec --status {job_id}",
+  "wire.exec.tools_unreachable": "انتباہ: --tools کسی ایسے ٹول کا نام نہیں لیتا جس تک یہ رن پہنچ سکے: {names}۔ سیشن {count} ٹول(ز) تک پہنچا۔",
+  "wire.exec.turn_did_not_complete": "ٹرن مکمل نہیں ہوا",
+  "wire.exec.waiting_on_you": "آپ کا انتظار ہے؟ lop sessions دکھاتا ہے کہ رن کو کیا چاہیے"
+}

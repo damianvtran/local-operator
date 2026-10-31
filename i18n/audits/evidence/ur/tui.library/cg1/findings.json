@@ -1,0 +1,28 @@
+{
+  "locale": "ur",
+  "namespace": "tui.library",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 1
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 1,
+      "id": "UR-013",
+      "severity": "NIT",
+      "namespace": "tui.library",
+      "key": "tui.library.librarian_error",
+      "english": "The Librarian could not answer: {error}",
+      "current": "Librarian جواب نہیں دے سکا: {error}",
+      "problem": "Gender for the Librarian is masculine here («جواب نہیں دے سکا») but feminine in the neighbour wire.settings.librarian.description («Librarian … منظم رکھتی ہے»). Pick one across the locale.",
+      "suggested": "Librarian جواب نہیں دے سکی: {error} (or switch the neighbour to masculine)",
+      "disposition": "fixed (remediation core-fix, session be04c022ebd4)"
+    }
+  ],
+  "counts_scope": "counts, result and gate_status describe locale-wide rounds 1-2 as recorded in the ledger; findings with round \"targeted-argorder\" come from session b15ab322fa0f (read only the rephrased keys) and are not in those counts"
+}
