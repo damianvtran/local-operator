@@ -365,7 +365,7 @@ _ADVANCE_ATTR = "tb_screen_advance"
 #: ``ProviderError.kind`` values a refusal can carry while NOTHING has been
 #: sent — each one a fact about the ROUTE, never the submission: the hop's
 #: credential is unusable (``auth``), the credential store rate-limited us
-#: (``quota``), a connect/read timeout fired ( ``timeout``), or our own client
+#: (``quota``), a connect/read timeout fired (``timeout``), or our own client
 #: raised before dispatch (``transport``). Deliberately absent: ``request``
 #: (the guard's own fail-closed refusals — owner moved, policy stale, route
 #: changed, budget exhausted — which must keep stopping the walk) and a bare
@@ -446,7 +446,24 @@ def _sender_cannot_cause(failure: BaseException) -> bool:
         return False
 
 
-def _prewire_refusal_advances(failure: BaseException, *, sent: bool) -> bool:
+def _producer_stated_prewire(failure: BaseException) -> bool:
+    """Whether the layer that EMITTED this refusal stated nothing was dispatched.
+
+    WHY A SECOND PROVER (B1, PR #3212): the guard can only classify failures
+    that pass through it, and the live refusal is raised one layer ABOVE it —
+    the failover dispatch loop answers a hop with no usable bearer
+    (``providers/failover.py::_no_credential_error``) and breaks BEFORE calling
+    the guarded client, so no send count exists to consult. The emitter knows
+    the fact and stamps it on the error, the same invariant stated by the
+    other prover: nothing left the wire.
+    """
+
+    from local_operator.providers.failover import PREWIRE_REFUSAL_ATTR
+
+    return bool(getattr(failure, PREWIRE_REFUSAL_ATTR, False))
+
+
+def _prewire_refusal_advances(failure: BaseException, *, sent: bool, prewire: bool = False) -> bool:
     """Whether a refusal raised with NOTHING sent may advance the walk.
 
     WHY (live defect, 0.93.3): every ``anthropic:oauth`` credential was inside
@@ -469,6 +486,14 @@ def _prewire_refusal_advances(failure: BaseException, *, sent: bool) -> bool:
     ``fail_closed`` local refusals are excluded by KIND, not by flag: the
     guard builds them as ``kind="request"``, which is not in
     :data:`_PREWIRE_FAILURE_KINDS`.
+
+    ``prewire`` is the EMITTER's statement of the same fact for a refusal made
+    outside the guard (:func:`_producer_stated_prewire`). It beats the KIND
+    allow-list deliberately: ``_no_credential_error`` emits three shapes and
+    two of them are ``kind="unknown"`` — an unconfigured provider and a
+    borrowed credential whose owner device is offline — which are the same
+    "this hop cannot serve" fact (M1, PR #3212). The allow-list stays for raw
+    wire failures, where kind is all a scrubbed error has left.
     """
 
     if sent:
@@ -479,6 +504,8 @@ def _prewire_refusal_advances(failure: BaseException, *, sent: bool) -> bool:
 
     if not isinstance(failure, ProviderError):
         return False
+    if prewire:
+        return True
     return getattr(failure, "kind", None) in _PREWIRE_FAILURE_KINDS
 
 
@@ -1267,7 +1294,16 @@ class ScreenChainRunner:
                 # credential cascade, a local defect) is still raw here.
                 advance = getattr(failure, _ADVANCE_ATTR, None)
                 if advance is None:
-                    advance = _sender_cannot_cause(failure)
+                    # No guard verdict: this hop refused ABOVE the guarded
+                    # client (the failover layer's credential cascade). Only the
+                    # EMITTER's pre-dispatch stamp may advance here — the kind
+                    # allow-list stays on the scrubbed wire path, where a send
+                    # count has already ruled, so an unscrubbed failure can
+                    # never be promoted by its own `kind`. (B1, PR #3212)
+                    advance = _sender_cannot_cause(failure) or (
+                        _producer_stated_prewire(failure)
+                        and _prewire_refusal_advances(failure, sent=False, prewire=True)
+                    )
                 if not advance:
                     raise
                 last_failure = failure

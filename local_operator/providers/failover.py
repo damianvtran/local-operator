@@ -5912,6 +5912,38 @@ def _request_has_rotated(state: AuthRetryKeyState) -> bool:
     return len(state.attempted_keys) > 1
 
 
+#: Typed provenance on a route refusal made BEFORE any request byte existed for
+#: the hop. Set only by :func:`_mark_prewire_refusal`, whose every caller is a
+#: credential-cascade answer — the reader is the screening chain walk
+#: (``team_bridge/model_boundary.py``), which may try the next configured hop
+#: when the refusal proves nothing was dispatched. Spelled once here because
+#: the emitter owns the fact; a downstream layer must not guess it from ``kind``
+#: (two shapes are ``unknown``) or from ``request_sent`` (a spend claim).
+PREWIRE_REFUSAL_ATTR = "tb_screen_prewire"
+
+
+def _mark_prewire_refusal(error: ProviderError) -> ProviderError:
+    """Stamp a pre-dispatch route refusal with the fact the emitter knows.
+
+    WHY AN ATTRIBUTE (B1/M1, PR #3212): the screening chain walk may fall over
+    to another hop only when nothing left the wire, and these refusals are made
+    one layer ABOVE the wire guard, so the guard's physical-send count cannot
+    see them. Neither field can stand in for it: two of the three shapes below
+    classify as ``kind="unknown"`` (a provider with no credential at all, a
+    borrowed credential whose owner device is offline), and ``request_sent``
+    is a spend claim read elsewhere (``supplements/generator.py`` accounting),
+    so it is left as it was rather than repurposed as a routing signal.
+
+    All three emissions are facts about the ROUTE, taken before any request
+    byte existed for this hop (no bearer resolved, a blocked pool, a missing
+    configuration, an offline owner) — none of them can be produced by the
+    content a sender submitted, which is what makes advancing safe.
+    """
+
+    setattr(error, PREWIRE_REFUSAL_ATTR, True)
+    return error
+
+
 def _no_credential_error(auth: FailoverAuthStore, provider: str) -> ProviderError:
     """Say WHY no bearer could be resolved, distinguishing two opposite causes.
 
@@ -5945,7 +5977,9 @@ def _no_credential_error(auth: FailoverAuthStore, provider: str) -> ProviderErro
             # "rate limit or quota exceeded:" label in front would be the lie this
             # branch exists to remove. Retryable, like a block: the owner coming
             # back is exactly the kind of change the loop-back sweep can find.
-            return ProviderError(None, reason, retryable=True, kind="unknown")
+            return _mark_prewire_refusal(
+                ProviderError(None, reason, retryable=True, kind="unknown")
+            )
     rows: list["StoredCredential"] = []
     if isinstance(auth, CredentialLister):
         try:
@@ -5953,8 +5987,8 @@ def _no_credential_error(auth: FailoverAuthStore, provider: str) -> ProviderErro
         except Exception:  # noqa: BLE001 - diagnosis must never mask the real failure
             rows = []
     if not rows:
-        return ProviderError(
-            None, f"No API key configured for provider '{provider}'", retryable=False
+        return _mark_prewire_refusal(
+            ProviderError(None, f"No API key configured for provider '{provider}'", retryable=False)
         )
     kinds = {row.credential_type for row in rows}
     what = "OAuth sign-in" if "oauth" in kinds else "API key"
@@ -5974,17 +6008,19 @@ def _no_credential_error(auth: FailoverAuthStore, provider: str) -> ProviderErro
     # true, and it hides the real fix (sign in again). Naming the third cause
     # costs a clause and stops the message actively misdirecting; the rate-limit
     # case, which is the common one, still reads first.
-    return ProviderError(
-        None,
-        (
-            f"{subject} not usable right now (rate limited, a token refresh "
-            "failed, or the stored credential could not be read). The "
-            "credentials are still configured; retry once the limit resets, or "
-            "sign in again to replace them."
-        ),
-        retryable=True,
-        kind="quota",
-        request_sent=False,
+    return _mark_prewire_refusal(
+        ProviderError(
+            None,
+            (
+                f"{subject} not usable right now (rate limited, a token refresh "
+                "failed, or the stored credential could not be read). The "
+                "credentials are still configured; retry once the limit resets, or "
+                "sign in again to replace them."
+            ),
+            retryable=True,
+            kind="quota",
+            request_sent=False,
+        )
     )
 
 

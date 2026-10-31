@@ -5679,29 +5679,39 @@ class Store:
 
         ``last_failure_class`` is the closed class of the failure that most
         recently advanced the breaker, so a ``breaker_open`` hold can name
-        what broke instead of only when it reopens. The read takes the write
-        lock to run the guarded ``ALTER`` first (same shape as
-        :meth:`body_card_status`): a store last opened by an older binary has
-        no such column, and a missing column must never turn into a None
-        breaker — that would silently serve through an OPEN breaker.
+        what broke instead of only when it reopens.
+
+        READ PATH IS LOCK-FREE (m1, PR #3212). This runs on every screening
+        cycle, and taking the write lock here to run the first-touch ``ALTER``
+        meant a contended store escaped ``_screen_core`` step 7 as
+        ``StoreRefused("busy")`` instead of a hold -- a read refused by a
+        schema upgrade it does not need. The column is therefore PROBED, never
+        added: a file last written by an older binary answers with
+        ``last_failure_class: None`` ("class unknown") while the breaker itself
+        is still enforced, because a missing column must never turn into a
+        None breaker — that would silently serve through an OPEN breaker. The
+        ``ALTER`` happens on the WRITE path (:meth:`record_screening_failure`),
+        which already holds the lock for it.
         """
 
         try:
             with self._connect() as conn:
                 self._init(conn)
-                if not self._breaker_has_class_column(conn):
-                    # Additive column, added on first touch by a new binary. A
-                    # missing column must NEVER turn into a None breaker (that
-                    # would serve straight through an OPEN one), so the ALTER
-                    # runs here rather than the read failing soft.
-                    self._begin_write(conn)
-                    self._ensure_breaker_class_column(conn)
+                columns = "failures, open_until, updated_at"
+                if self._breaker_has_class_column(conn):
+                    columns = f"{columns}, last_failure_class"
+                # Fixed projection built from two literals; the only value is
+                # the bound parameter. No caller text reaches the SQL.
                 row = conn.execute(
-                    "SELECT failures, open_until, updated_at, last_failure_class "
-                    "FROM screening_breaker WHERE account_scope = ?",
+                    f"SELECT {columns} FROM screening_breaker WHERE account_scope = ?",
                     (self._account_scope(owner),),
                 ).fetchone()
-                return dict(row) if row is not None else None
+                if row is None:
+                    return None
+                state = dict(row)
+                # Pre-upgrade row: the breaker is real, only its class is unknown.
+                state.setdefault("last_failure_class", None)
+                return state
         except sqlite3.Error:
             return None
 
