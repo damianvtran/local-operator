@@ -1,0 +1,6 @@
+{
+  "wire.errors.sdk_startup.attach_hosting_unconfigured": "không có runtime đang chạy nào phục vụ {resume}, và thư mục gốc này không thể khởi động một runtime: {error} Hãy cấu hình hosting cho thư mục gốc này (config.yml của nó), rồi kích hoạt id bằng spawn_session()/deliver() và attach khi đã có runtime.",
+  "wire.errors.sdk_startup.attach_runtime_missing": "không có runtime đang chạy nào phục vụ {resume}; hãy mở nó với mode=''own'' để chạy trong tiến trình này, hoặc kích hoạt nó trước bằng spawn_session()/deliver() và attach khi đã có runtime.",
+  "wire.errors.sdk_startup.profile_attach_failed": "Không gắn được hồ sơ {profile}",
+  "wire.errors.sdk_startup.tool_inventory_mismatch": "spec.tools {spec_tools} và ApprovalPolicy.declared({policy_tools}) nêu các danh mục khác nhau; hãy nêu phạm vi của lần chạy một lần duy nhất"
+}

@@ -1,0 +1,14 @@
+{
+  "cli.hub_help.hub": "Trạng thái cập nhật Agent Hub",
+  "cli.hub_help.status": "Hiển thị tác nhân và nhóm đã pull nào có cập nhật trên hub",
+  "cli.hub_help.status_json": "Phát payload tuyến của desktop",
+  "cli.hub_help.links": "Liệt kê mọi liên kết hub (khỏe hay không) cùng nguồn, phạm vi và chính sách",
+  "cli.hub_help.links_json": "Phát payload liên kết của desktop",
+  "cli.hub_help.link": "Sửa chính sách độc lập của một liên kết hub",
+  "cli.hub_help.link_set": "Đặt chính sách subscribe và/hoặc auto_push của liên kết này",
+  "cli.hub_help.link_set_link_id": "Id liên kết từ `lop hub links`",
+  "cli.hub_help.link_set_subscribe": "Đồng bộ chiều vào không giám sát cho liên kết này",
+  "cli.hub_help.link_set_auto_push": "Xuất bản chiều ra không giám sát cho liên kết này",
+  "cli.hub_help.link_set_expected_revision": "Bản sửa đổi chính sách bạn thấy gần nhất (CAS); bỏ qua thì đọc mới trước",
+  "cli.hub_help.link_set_confirm_public_egress": "Đồng ý rõ ràng việc xuất bản các thay đổi do bạn soạn tới nguồn CÔNG KHAI"
+}

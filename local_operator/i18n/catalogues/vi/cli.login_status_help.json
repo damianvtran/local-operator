@@ -1,0 +1,4 @@
+{
+  "cli.login_status_help.login_status": "Liệt kê thông tin xác thực nhà cung cấp đã lưu và trạng thái của chúng",
+  "cli.login_status_help.status_alias": "Bí danh của login-status: liệt kê thông tin xác thực nhà cung cấp đã lưu"
+}

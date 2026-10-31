@@ -1,0 +1,7 @@
+{
+  "cli.qwencloud_help.qwencloud_ticket": "Lưu cookie phiên console QwenCloud mà /usage đọc",
+  "cli.qwencloud_help.set": "Lưu cookie; giá trị được đọc từ STDIN, không bao giờ từ argv",
+  "cli.qwencloud_help.status": "Cookie đã được lưu chưa và cũ đến đâu; không bao giờ hiện giá trị",
+  "cli.qwencloud_help.rm": "Xóa cookie đã lưu",
+  "cli.qwencloud_help.migrate": "Chuyển ticket dạng văn bản thuần vào kho bí mật được mã hóa"
+}
