@@ -42,7 +42,18 @@ from tests.unit.team_bridge.test_discipline import (
 
 pytestmark = pytest.mark.asyncio
 
-PNG = b"\x89PNG\r\n\x1a\n" + b"pixels" * 8
+
+def _canonical_png() -> bytes:
+    from io import BytesIO
+    from PIL import Image
+    from local_operator import agent_avatar
+
+    buffer = BytesIO()
+    Image.new("RGBA", (512, 512), (100, 20, 80, 255)).save(buffer, format="PNG")
+    return agent_avatar.normalise(buffer.getvalue()).data
+
+
+PNG = _canonical_png()
 WEBP = b"RIFF\x00\x00\x00\x00WEBPVP8 " + b"pixels" * 8
 PNG_SHA = hashlib.sha256(PNG).hexdigest()
 WEBP_SHA = hashlib.sha256(WEBP).hexdigest()
@@ -1117,21 +1128,14 @@ async def test_the_plan_repr_never_carries_the_picture_bytes_or_a_path(tmp_path:
     preconditions pin that this cell is looking at real bytes.
     """
 
-    pixels = b"\x89PNG\r\n\x1a\nSECRETPIXELS"
-    digest = hashlib.sha256(pixels).hexdigest()
-    _enrolled(tmp_path)
-    _agent(
-        tmp_path,
-        block=_png_block(sha=digest, size=len(pixels)),
-        files={"avatar.png": pixels},
-    )
-    agent = published_agent(tmp_path)
-    assert agent is not None and agent.avatar_data == pixels
+    # Repr safety applies even to arbitrary bytes held by these dataclasses;
+    # image validation is independently pinned at the resolver boundary.
+    from local_operator.team_bridge.cos_name import PublishedAgent
 
-    plan = avatar_publish.plan_avatar(
-        SimpleNamespace(payload=_endpoint_payload("active"), account_id="acc_1"), "tnt_1", tmp_path
-    )
-    assert plan.data == pixels
+    pixels = b"SECRETPIXELS"
+    agent = PublishedAgent(local_agent_id="aida", avatar_data=pixels)
+    plan = avatar_publish.AvatarPlan(data=pixels)
+    assert agent.avatar_data == pixels and plan.data == pixels
 
     assert "SECRETPIXELS" not in repr(agent)
     assert str(tmp_path) not in repr(agent)
@@ -1234,3 +1238,73 @@ def test_a_nul_in_the_stored_name_is_a_doubt(tmp_path: Path):
 
     assert _stored_avatar_bytes(agent_dir, block) is None
     assert _stored_avatar_bytes(agent_dir, {**block, "filename": "avatar.png"}) == PNG
+
+
+@pytest.mark.parametrize(
+    "kind",
+    ["text", "png-tail", "jpeg-tail", "png-text", "jpeg-exif", "png", "jpeg", "mime-mismatch"],
+)
+async def test_only_normalized_pixels_can_leave_the_publisher(tmp_path: Path, kind: str):
+    """Q1: matching metadata is not proof of an image; no ancillary bytes leave."""
+    from io import BytesIO
+    from PIL import Image, PngImagePlugin
+    from local_operator import agent_avatar
+
+    sentinel = b"PRIVATE_PROMPT_SENTINEL"
+    image = Image.new("RGB", (512, 512), (20, 40, 80))
+    buffer = BytesIO()
+    jpeg = kind.startswith("jpeg")
+    mime = "image/jpeg" if jpeg else "image/png"
+    name = "avatar.jpg" if jpeg else "avatar.png"
+    options: dict[str, Any] = {}
+    if kind == "png-text":
+        info = PngImagePlugin.PngInfo()
+        info.add_text("prompt", sentinel.decode())
+        options["pnginfo"] = info
+    if kind == "jpeg-exif":
+        exif = Image.Exif()
+        exif[270] = sentinel.decode()
+        options["exif"] = exif
+    image.save(buffer, format="JPEG" if jpeg else "PNG", **options)
+    data = buffer.getvalue()
+    if kind.endswith("tail"):
+        data += sentinel
+    if kind == "text":
+        data = sentinel
+    if kind == "mime-mismatch":
+        mime, name = "image/jpeg", "avatar.jpg"
+    sha = hashlib.sha256(data).hexdigest()
+    block = _png_block(filename=name, sha=sha, size=len(data)).replace("image/png", mime)
+    _enrolled(tmp_path)
+    _agent(tmp_path, block=block, files={name: data})
+    client = FakeClient(_status(hub_sha="0" * 64).payload)
+    await avatar_publish.reconcile(client, _status(hub_sha="0" * 64), "tnt_1", tmp_path)
+    if kind in {"text", "mime-mismatch"}:
+        assert client.puts == [] and client.deletes == []
+        return
+    expected = agent_avatar.normalise(data).data
+    assert client.puts == [("bep_1", expected, hashlib.sha256(expected).hexdigest())]
+    assert sentinel not in expected
+    # The hub echoes the WIRE digest, not the pre-normalization file's digest.
+    client.puts.clear()
+    await avatar_publish.reconcile(
+        client, _status(hub_sha=hashlib.sha256(expected).hexdigest()), "tnt_1", tmp_path
+    )
+    assert client.puts == [] and client.deletes == []
+
+
+@pytest.mark.parametrize(
+    "code", ["injected\nFAKE_LOG_ENTRY", "x" * 1000, "", "a\x1b[31m", None, 12]
+)
+async def test_malformed_hub_codes_are_generic_at_the_shared_parser(code: Any):
+    from local_operator.team_bridge.client import _refusal
+
+    refusal = _refusal(httpx.Response(403, json={"code": code, "error": "refused"}))
+    assert refusal.code == "bridge_error"
+
+
+async def test_normal_hub_codes_survive_the_shared_parser():
+    from local_operator.team_bridge.client import _refusal
+
+    for code in ["avatar_type_unsupported", "rate_limited", "endpoint_avatar_not_found"]:
+        assert _refusal(httpx.Response(403, json={"code": code})).code == code

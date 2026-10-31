@@ -364,17 +364,16 @@ def _stored_avatar_bytes(agent_dir: Path, block: Mapping[str, Any]) -> bytes | N
     makes a file edited behind the block's digest a doubt (R3-F2) rather than an
     upload under a digest that does not describe it.
 
-    The bytes it returns are the ones published: re-opening a path after the
-    store vetted it would reopen the window the store closed.
+    Read once through the store, then validate and normalize that buffer without
+    reopening a path: a second open would reopen the window the store closed.
 
-    What this does NOT establish: the digest check is INTEGRITY (the file is the
-    one the block describes), not AUTHENTICITY. Whoever can write ``agent.yml``
-    can write a block and a file that agree with each other, so the digest stops
-    an accident or a stale record, not a hostile pair (security review R3-S3,
-    accepted residual). The control for that is on the hub: it sniffs the
-    upload's real type and re-encodes it server-side, so the published picture is
-    a freshly encoded image and never the uploaded bytes verbatim — a text file
-    renamed ``avatar.png`` and given a matching digest is refused there.
+    A matching digest proves only integrity, not that the bytes are an image.
+    Before any transmission, sniff the SAME bounded buffer, require agreement
+    with the block's type, then run the store's pixel-only normalizer. Its fresh
+    image construction strips text/EXIF/ICC and trailing data. Never forward the
+    original buffer: hub rejection is too late to prevent disclosure (QA Q1).
+    The resulting wire bytes are hashed by the plan and compared with the hub's
+    source_sha256, so deterministic normalization does not cause endless PUTs.
     """
 
     from local_operator import agent_avatar
@@ -382,7 +381,13 @@ def _stored_avatar_bytes(agent_dir: Path, block: Mapping[str, Any]) -> bytes | N
 
     try:
         meta = AgentAvatarMeta.model_validate(dict(block))
-        data, _mime, _sha = agent_avatar.read(agent_dir, meta)
+        data, mime, _sha = agent_avatar.read(agent_dir, meta)
+        from local_operator.media import sniff_image
+
+        info = sniff_image(data)
+        if info is None or info.mime_type != mime or mime not in {"image/png", "image/jpeg"}:
+            return None
+        data = agent_avatar.normalise(data).data
     except Exception:  # noqa: BLE001 — a doubt of any kind publishes nothing and deletes nothing
         return None
     if not data or len(data) > AVATAR_MAX_BYTES:
@@ -429,10 +434,10 @@ class PublishedAgent:
 
     local_agent_id: str
     name: str | None = None
-    #: The picture the local store serves, as bytes (``None`` means "no picture").
+    #: Pixel-only wire bytes derived from the stored picture (None means no picture).
     #: ``repr=False``: a dataclass that gets logged must never print an image.
     avatar_data: bytes | None = field(default=None, repr=False)
-    #: Digest of ``avatar_data``, verified against ``agent.yml`` by the store.
+    #: Digest of normalized wire bytes; may differ from the local storage digest.
     avatar_sha256: str | None = None
     #: An ``avatar`` block is present but yields no usable file — a DOUBT, which
     #: publishes nothing and never deletes.
