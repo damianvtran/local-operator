@@ -750,14 +750,33 @@ def test_undecodable_agent_picture_falls_back_to_the_glyph(bad):
     assert _agent(agent_picture=bad) == _agent()
 
 
-def _directory(account="acc_2", endpoint="bep_1", v="fedcba9876543210", url=True):
-    """The hub's tenant directory, as ``TeamBridgeClient.directory`` reads it."""
+def _directory(
+    account="acc_2",
+    endpoint="bep_1",
+    v="fedcba9876543210",
+    url=True,
+    structured=True,
+    hash=None,
+    url_shape=None,
+):
+    """The hub's tenant directory, as ``TeamBridgeClient.directory`` reads it.
+
+    The live hub publishes BOTH halves of a picture: ``agent.avatar.hash`` (the
+    16-hex value ``?v=`` carries) and the rendered ``avatar_url``.
+    ``structured=False`` models a hub that renders only the URL, which the
+    client still binds through as a fallback; ``hash`` overrides the structured
+    value alone, and ``url_shape`` re-renders the URL, so a test can hold one
+    half fixed while moving the other (security review round 2, S-3).
+    """
 
     import httpx
 
     agent: dict[str, Any] = {"endpoint_id": endpoint, "name": "Aida", "state": "active"}
+    if structured:
+        agent["avatar"] = {"hash": hash or v, "updated_at": "2026-10-01"}
     if url:
-        agent["avatar_url"] = f"/v1/messaging/endpoints/{endpoint}/avatar?v={v}"
+        shape = url_shape or "/v1/messaging/endpoints/{endpoint}/avatar?v={v}"
+        agent["avatar_url"] = shape.format(endpoint=endpoint, v=v)
     members = [{"account_id": account, "display_label": "Damian", "agent": agent}]
     return httpx.Response(200, json={"msg": "ok", "result": {"members": members}})
 
@@ -909,6 +928,9 @@ async def test_agent_picture_request_is_closed(tmp_path, kind, endpoint):
 # -- Security review round 1, S-2: the endpoint is bound to the SENDER --------
 
 
+# -- Security review round 2, S-3: bind on the documented hash, not the URL ---
+
+
 def _blue_picture_upstream(reads):
     import httpx
 
@@ -931,8 +953,12 @@ def _blue_picture_upstream(reads):
         lambda: _directory(account="acc_2", endpoint="bep_other"),
         # Right endpoint, but the hub publishes a different version.
         lambda: _directory(v="0000000000000000"),
-        # Right endpoint, no published picture at all.
-        lambda: _directory(url=False),
+        # Right endpoint, no published picture at all: neither half says so.
+        lambda: _directory(url=False, structured=False),
+        # A structured hash that disagrees, while the rendered URL is EXACTLY
+        # the string the old binding compared: a URL string alone must no longer
+        # bind a picture (S-3).
+        lambda: _directory(hash="0000000000000000"),
     ],
 )
 async def test_a_composite_for_a_never_wears_another_endpoints_picture(
@@ -965,6 +991,54 @@ async def test_a_composite_for_a_never_wears_another_endpoints_picture(
         account_id="acc_2",
         photo=None,
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "url_shape",
+    [
+        # A reshaped URL is agent-server's business, not this client's: the same
+        # picture must keep painting when the documented hash agrees.
+        "/v1/messaging/endpoints/{endpoint}/avatar?v={v}&s=1",
+        "/v2/messaging/endpoints/{endpoint}/picture/{v}",
+    ],
+)
+async def test_a_reshaped_avatar_url_does_not_glyph_an_agent_with_a_matching_hash(
+    tmp_path, monkeypatch, url_shape
+):
+    """S-3: the binding follows ``agent.avatar.hash``, so a change to how the
+    hub renders ``avatar_url`` cannot silently turn every agent face into a
+    glyph (which is what keying on the URL string would do, fail-closed)."""
+
+    monkeypatch.setattr(avatar_cache, "AVATAR_CACHE", avatar_cache.AvatarCache())
+    reads: list[str] = []
+    client = _endpoint_client(
+        tmp_path,
+        _blue_picture_upstream(reads),
+        lambda: _directory(url_shape=url_shape),
+    )
+    data = await _agent_banner(client)
+    assert reads == ["/v1/messaging/endpoints/bep_1/avatar"]
+    image = Image.open(io.BytesIO(data)).convert("RGBA")
+    assert _rgb(image, (16, 32)) == pytest.approx((30, 60, 210), abs=16)
+
+
+@pytest.mark.asyncio
+async def test_a_url_only_hub_still_binds_through_an_exactly_equal_url(tmp_path, monkeypatch):
+    """The fallback half: a hub that publishes no structured hash is bound by an
+    exactly equal ``avatar_url``, which pins the same version."""
+
+    monkeypatch.setattr(avatar_cache, "AVATAR_CACHE", avatar_cache.AvatarCache())
+    reads: list[str] = []
+    client = _endpoint_client(
+        tmp_path,
+        _blue_picture_upstream(reads),
+        lambda: _directory(structured=False),
+    )
+    data = await _agent_banner(client)
+    assert reads == ["/v1/messaging/endpoints/bep_1/avatar"]
+    image = Image.open(io.BytesIO(data)).convert("RGBA")
+    assert _rgb(image, (16, 32)) == pytest.approx((30, 60, 210), abs=16)
 
 
 @pytest.mark.asyncio

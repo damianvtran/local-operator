@@ -4247,9 +4247,21 @@ class TeamBridgeClient:
         """Whether the tenant directory publishes THIS picture for THIS sender.
 
         The directory is the same hub answer the desktop derived the endpoint
-        from, read under the same viewer fence. Exact equality on the published
-        ``avatar_url`` binds endpoint AND version to the sender's own agent; a
-        malformed or missing directory is "not bound" (the glyph), never a pass.
+        from, read under the same viewer fence. Binding key is
+        ``(sender account, agent.endpoint_id, agent.avatar.hash)``: three fields
+        of ONE row, so naming another agent's endpoint — even with its correct
+        current version — cannot paint it, and a malformed or missing directory
+        is "not bound" (the glyph), never a pass.
+
+        The version is read from ``agent.avatar.hash``, the documented field the
+        hub itself renders into ``?v=``, and NOT from the ``avatar_url`` string
+        (security review round 2, S-3): the URL is agent-server's rendering
+        detail, so keying on it makes any future reshuffle there silently glyph
+        every agent face — fail-closed, and invisible to both repos' tests. A
+        hub that publishes no structured hash still binds through an exactly
+        equal ``avatar_url``, which pins the same version; a row that publishes
+        a structured hash is judged on it alone, so the two can never disagree
+        about whether this is the picture.
         """
 
         directory = await self.directory(tenant_id, expected_account_id=expected_account_id)
@@ -4261,11 +4273,14 @@ class TeamBridgeClient:
             if not isinstance(member, dict) or member.get("account_id") != sender_account_id:
                 continue
             agent = member.get("agent")
-            if (
-                isinstance(agent, dict)
-                and agent.get("endpoint_id") == endpoint[0]
-                and agent.get("avatar_url") == expected_url
-            ):
+            if not isinstance(agent, dict) or agent.get("endpoint_id") != endpoint[0]:
+                continue
+            avatar = agent.get("avatar")
+            if isinstance(avatar, dict) and isinstance(avatar.get("hash"), str):
+                if avatar["hash"] == endpoint[1]:
+                    return True
+                continue
+            if isinstance(agent.get("avatar_url"), str) and agent["avatar_url"] == expected_url:
                 return True
         return False
 
