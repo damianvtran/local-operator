@@ -137,6 +137,25 @@ def card_directed(metadata: ConversationCardMetadata) -> str:
     return "none"
 
 
+def wake_is_addressed(metadata: ConversationCardMetadata) -> bool:
+    """True when this wake was ADDRESSED to the agent: a mention, or a followed reply.
+
+    THE BRAKE'S predicate, deliberately NARROWER than the card's ``directed:``
+    value (round 6, M1/M2). The card may still derive ``directed: thread`` from a
+    thread root on an older server, because that is the reader's best guess and
+    the cost of a wrong guess is one wasted paragraph. The reply brake is
+    different: it LIFTS an agent-to-agent cool-down, so a wrong guess hands the
+    agents a fresh run. Without the server's ``thread_follower`` bit an ambient
+    reply in a thread the agent never joined is indistinguishable from a followed
+    one — so on an older server only a mention lifts it.
+
+    ``thread_follower is True`` requires the server to say so explicitly; absent
+    (``None``) therefore never counts, and neither does ``False``.
+    """
+
+    return bool(metadata.mention or metadata.thread_follower is True)
+
+
 def build_conversation_card(metadata: ConversationCardMetadata) -> str:
     """Render the METADATA-ONLY card.
 
@@ -159,7 +178,10 @@ def build_conversation_card(metadata: ConversationCardMetadata) -> str:
     if metadata.conversation_kind == "dm" and not metadata.thread_root_id:
         header = f"Direct message · from {sender} ({metadata.sender_kind}, same tenant)"
     elif metadata.conversation_kind == "dm":
-        header = f"{kind} · from {sender} ({metadata.sender_kind}, same tenant)"
+        # A DM thread reply keeps the thread framing AND says it is a direct
+        # message (round 6, n1): dropping the conversation entirely left nothing
+        # in the header to distinguish it from a channel thread.
+        header = f"{kind} · Direct message · from {sender} ({metadata.sender_kind}, same tenant)"
     else:
         header = f"{kind} · {label} · from {sender} ({metadata.sender_kind}, same tenant)"
     lines = [
@@ -646,11 +668,11 @@ async def _hand_off_card(
         conversation_id=ref.conversation_id,
         sender_kind=metadata.sender_kind,
         mention=metadata.mention,
-        # The guard's "a person asked ME" exemption is the card's own
-        # directedness predicate (E2E round 1, Q-1): a reply in a thread this
-        # agent follows is addressed to it, so a human posting there is asking it
-        # directly even without an @-mention.
-        directed=card_directed(metadata) in ("mention", "thread"),
+        # The brake's exemption wants the STRICTER predicate (round 6, M2): an
+        # explicit mention, or a reply the server says this endpoint follows.
+        # Deriving it from the thread root would let any human reply in any
+        # thread lift an agent-to-agent cool-down on an older server.
+        directed=wake_is_addressed(metadata),
     )
     coalescer = active_coalescer()
     if coalescer is None:

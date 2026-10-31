@@ -478,6 +478,8 @@ class Msg:
     kind: str = "channel"
     #: The server's own follower bit for a thread reply; ``None`` = not stated.
     thread_follower: bool | None = None
+    #: The thread root a reply answers (``/events`` ``ids.thread_root_id``).
+    thread_root: str | None = None
 
     @property
     def sender_kind(self) -> str:
@@ -511,10 +513,22 @@ class Hub:
         mentions: frozenset[str] = frozenset(),
         *,
         kind: str = "channel",
+        thread_root: str | None = None,
+        thread_follower: bool | None = None,
     ) -> Msg:
         self.run = 0 if sender_endpoint is None else self.run + 1
         seq = len(self.messages) + 1
-        msg = Msg(f"bcmsg_m{seq:04d}", seq, sender_endpoint, body, mentions, self.run, kind)
+        msg = Msg(
+            f"bcmsg_m{seq:04d}",
+            seq,
+            sender_endpoint,
+            body,
+            mentions,
+            self.run,
+            kind,
+            thread_follower,
+            thread_root,
+        )
         self.messages[msg.id] = msg
         for endpoint in self.members:
             if endpoint == sender_endpoint or not self._wakes(endpoint, msg):
@@ -530,6 +544,8 @@ class Hub:
                 ids["mention"] = True
             if msg.agent_run:
                 ids["agent_run"] = msg.agent_run
+            if msg.thread_root is not None:
+                ids["thread_root_id"] = msg.thread_root
             self.feeds.setdefault(endpoint, []).append(
                 {"type": "message_available", "ids": ids, "at": "2026-10-30T00:00:00Z"}
             )
@@ -1346,9 +1362,9 @@ def test_a_dm_card_reads_as_a_direct_message():
     assert "conversation_id: bcv_abc12345" in card
 
 
-def test_a_dm_thread_reply_still_says_thread_reply():
+def test_a_dm_thread_reply_says_thread_reply_and_direct_message():
     card = _card(conversation_kind="dm", conversation_label="", thread_root_id=ROOT)
-    assert card.splitlines()[0] == "Thread reply · from Ada (human, same tenant)"
+    assert card.splitlines()[0] == "Thread reply · Direct message · from Ada (human, same tenant)"
 
 
 def test_a_channel_card_keeps_its_name_label():
@@ -1422,3 +1438,56 @@ def test_an_ambient_human_line_does_not_lift_the_cool_down(tmp_path: Path) -> No
     # The answer TO that line is exempt (m2), but the line unlocked nothing:
     _trigger(tmp_path, "agent", now + 6)
     assert isinstance(_reserve(tmp_path, now + 6), reply_guard.Refusal)
+
+
+def _captured_directed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, thread_follower: bool | None
+) -> Any:
+    """Run one human thread reply through the REAL iteration; return the brake's bit."""
+
+    a, dirs, hub, wakes = _one_message_rig(tmp_path, monkeypatch)
+    captured: dict[str, Any] = {}
+
+    def fake_record(config_dir: Path, **kwargs: Any) -> None:
+        captured.update(kwargs)
+
+    monkeypatch.setattr(reply_guard, "record_trigger", fake_record)
+    hub.post(
+        None,
+        "a reply in a thread",
+        thread_root="bcmsg_root0001",
+        thread_follower=thread_follower,
+    )
+    _iterate(a, dirs["a"])
+    assert len(wakes) == 1, "the card still goes out"
+    return captured
+
+
+def test_a_followed_thread_reply_lifts_the_brake(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 6, M2: the predicate is wired into the trigger record."""
+
+    captured = _captured_directed(tmp_path, monkeypatch, thread_follower=True)
+    assert captured["directed"] is True
+    assert captured["mention"] is False
+
+
+def test_a_reply_without_the_bit_does_not_lift_the_brake(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An older server sends no bit: the card derives `thread`, the brake does not.
+
+    This is the regression the review found: `directed=card_directed(...)` made
+    any human reply in any thread lift an agent-to-agent cool-down.
+    """
+
+    captured = _captured_directed(tmp_path, monkeypatch, thread_follower=None)
+    assert captured["directed"] is False
+
+
+def test_an_unfollowed_thread_reply_does_not_lift_the_brake(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured = _captured_directed(tmp_path, monkeypatch, thread_follower=False)
+    assert captured["directed"] is False

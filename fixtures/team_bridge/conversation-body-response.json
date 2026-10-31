@@ -1,0 +1,72 @@
+{
+  "provenance": {
+    "kind": "synthetic",
+    "server_ref": "radient-ml/agent-server@2501f5b1 (origin/feat/bridge-wake-all-members)",
+    "server_struct": "internal/responses/bridge_conversation.go BridgeConversationBodyResponse",
+    "server_route": "GET /v1/messaging/conversations/{conversation_id}/messages/{message_id}/body",
+    "sections": [
+      "TEAM-BRIDGE-CONVERSATION-DELIVERY.md feed subject",
+      "E2E round 1 Q-1",
+      "round 6 M1"
+    ],
+    "how": "constructed from the Go struct's json tags at the pinned ref (message_id/body/body_hash always; conversation_name/sender_label/sender_kind/attachments/attachments_hash/thread_follower/conversation_kind omitempty), and cross-checked against the connector's own reader (_card_metadata) in tests/unit/team_bridge/test_body_response_contract.py; not captured from a running server, because #255's body-response fields are landing in the same window as this file",
+    "thread_follower_note": "a POINTER on the wire: false is emitted (this wake is not a followed-thread reply), nil omits the key entirely, and the server computes it for the CALLING endpoint only - a root row carries no key at all",
+    "conversation_kind_note": "set on every conversation row (dm|group|channel), omitted on pair rows",
+    "thread_root_note": "the thread root is NOT part of this response: it rides the feed ref (message_available ids.thread_root_id) and the card binds the two together"
+  },
+  "shape": "conversation-body-response",
+  "method": "GET",
+  "payload_required": {
+    "message_id": "str",
+    "body": "str",
+    "body_hash": "str"
+  },
+  "payload_optional": {
+    "conversation_name": "str",
+    "sender_label": "str",
+    "sender_kind": "str (human|agent)",
+    "attachments": "list[object]",
+    "attachments_hash": "str",
+    "thread_follower": "bool (pointer: false emitted, absent on a root)",
+    "conversation_kind": "str (dm|group|channel)"
+  },
+  "cases": {
+    "followed_thread_reply": {
+      "message_id": "bcmsg_replyfollow1",
+      "body": "following up in the thread",
+      "body_hash": "c0f0fcb2a6dcb4c2d2ee88bb0e5b4a84f0b0e2b3f7e6b1b2c3d4e5f60718293a",
+      "conversation_name": "#agents",
+      "sender_label": "Ada",
+      "sender_kind": "human",
+      "thread_follower": true,
+      "conversation_kind": "channel"
+    },
+    "unfollowed_thread_reply": {
+      "message_id": "bcmsg_replyambient",
+      "body": "same thread, recipient never joined it",
+      "body_hash": "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90",
+      "conversation_name": "#agents",
+      "sender_label": "Bea's agent",
+      "sender_kind": "agent",
+      "thread_follower": false,
+      "conversation_kind": "channel"
+    },
+    "root_message": {
+      "message_id": "bcmsg_root0001",
+      "body": "kicking this off",
+      "body_hash": "b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1",
+      "conversation_name": "#agents",
+      "sender_label": "Ada",
+      "sender_kind": "human",
+      "conversation_kind": "channel"
+    },
+    "dm_root_message": {
+      "message_id": "bcmsg_dmroot001",
+      "body": "hi, just you and me",
+      "body_hash": "d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3",
+      "sender_label": "Ada",
+      "sender_kind": "human",
+      "conversation_kind": "dm"
+    }
+  }
+}

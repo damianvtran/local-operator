@@ -133,8 +133,11 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE posts ADD COLUMN human_prompted INTEGER NOT NULL DEFAULT 0")
     trigger_columns = {row[1] for row in conn.execute("PRAGMA table_info(triggers)")}
     if "directed" not in trigger_columns:
-        # A row written before the bit existed falls back to its ``mention``
-        # column (see ``record_trigger``): the pre-existing exemption, unchanged.
+        # A DIAGNOSTIC record, not a read path: the brake's decision is taken in
+        # ``record_trigger`` from the value its caller passed, and no query reads
+        # this column back (round 6, m1 — the earlier comment described a read
+        # that does not exist). An older row therefore defaults to 0 and nothing
+        # depends on the value.
         conn.execute("ALTER TABLE triggers ADD COLUMN directed INTEGER NOT NULL DEFAULT 0")
 
 
@@ -208,12 +211,16 @@ def record_trigger(
     Called by the connector for every admitted message it hands to the agent
     (coalesced or not, oldest → newest, so the newest wins). A HUMAN message that
     was DIRECTED at this agent resets the agent-to-agent run and lifts a
-    cool-down: ``directed`` is the card's own predicate (an @-mention, or a reply
-    in a thread the agent follows), so a person answering in a followed thread
-    counts exactly like a mention (E2E round 1, Q-1). ``directed=None`` keeps the
-    mention-only rule for a caller that predates the bit. Never raises: a trigger
-    that cannot be recorded leaves the previous one, and the post side still
-    fails closed on its own.
+    cool-down: ``directed`` is the connector's STRICT addressedness predicate (an
+    @-mention, or a reply the server states this endpoint FOLLOWS), so a person
+    answering in a followed thread counts exactly like a mention — while an
+    ambient reply, or any thread reply on a server that sends no follower bit,
+    does not (round 6, M2). ``directed=None`` keeps the mention-only rule for a
+    caller that predates the bit. The value is ALSO written to the trigger row as
+    a diagnostic record of what the brake decided; nothing reads it back — the
+    brake decides here, from the argument. Never raises: a trigger that cannot be
+    recorded leaves the previous one, and the post side still fails closed on its
+    own.
     """
 
     now = time.time() if now is None else now
