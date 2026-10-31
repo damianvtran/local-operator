@@ -4774,7 +4774,13 @@ def test_bridge_expansion_order_headline_body_outcome_then_details() -> None:
     value_ink = bindings.style("tool.args.value")
     styles = {content.plain[span.start : span.end]: span.style for span in content.spans}
     assert styles["Posted at seq 42"] == value_ink
-    assert styles["Details"].bold
+    # `Span.style` is typed `str | Style` (rich accepts a style NAME as readily
+    # as a resolved Style), so the boldness check narrows first rather than
+    # assuming the resolved arm — pyright rejects `.bold` on the union's `str`
+    # arm, and CI runs it over this test file.
+    details_style = styles["Details"]
+    assert not isinstance(details_style, str), "the heading style is resolved, not a name"
+    assert details_style.bold
 
 
 def test_bridge_details_elide_a_read_payload_and_spell_booleans_as_json() -> None:
