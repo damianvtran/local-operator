@@ -3657,7 +3657,6 @@ class OpenAICompatClient:
                             input_tokens=int(raw.get("prompt_tokens", 0)),
                             output_tokens=int(raw.get("completion_tokens", 0)),
                             cache_read_tokens=cache_read if cache_read is not None else 0,
-                            cache_read_reported=cache_read is not None,
                             cache_write_tokens=cache_write,
                             # The thinking slice of the completion, when the wire
                             # separates it. A SUBSET of ``completion_tokens`` (see
@@ -3687,6 +3686,7 @@ class OpenAICompatClient:
                             # in (see ``model/tariff.moment_for``).
                             at_ms=tariff.now_ms(),
                         )
+                        usage._cache_read_reported = cache_read is not None
                         yield StreamUsageEvent(usage=usage)
                     choices = chunk.get("choices") or []
                     if not choices:

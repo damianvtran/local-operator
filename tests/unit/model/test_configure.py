@@ -4279,7 +4279,9 @@ def test_a_fresh_delegated_fork_does_not_inherit_the_pin() -> None:
 
 def _warm_usage(cached: int = 0, prompt: int = 30_000) -> Usage:
     """A prefix big enough for "no reuse" to carry information."""
-    return Usage(input_tokens=prompt, cache_read_tokens=cached, cache_read_reported=True)
+    usage = Usage(input_tokens=prompt, cache_read_tokens=cached)
+    usage._cache_read_reported = True
+    return usage
 
 
 async def _score(
@@ -4306,31 +4308,38 @@ async def _score(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("reported,retired", [(None, False), (0, True), (29000, False)])
-async def test_wire_cache_evidence_controls_affinity(reported: int | None, retired: bool) -> None:
+@pytest.mark.parametrize(
+    "reports,retired",
+    [([None, None], False), ([0, 0], True), ([29000, 29000], False), ([0, None, 0], False)],
+)
+async def test_wire_cache_evidence_controls_affinity(
+    reports: list[int | None], retired: bool
+) -> None:
     """Exercise the real adapter and session wrapper, not just the score helper."""
     from local_operator.providers.clients import OpenAICompatClient
 
     model_id = "deepseek/deepseek-v4.1-flash"
-    usage: dict[str, Any] = {"prompt_tokens": 30000, "completion_tokens": 10}
-    if reported is not None:
-        usage["prompt_tokens_details"] = {"cached_tokens": reported}
-    chunks = [
-        {"provider": "SiliconFlow", "choices": [{"delta": {}, "finish_reason": "stop"}]},
-        {"choices": [], "usage": usage},
-    ]
-    payload = "".join(f"data: {json.dumps(chunk)}\n\n" for chunk in chunks) + "data: [DONE]\n\n"
-    transport = httpx.MockTransport(
-        lambda request: httpx.Response(
-            200, text=payload, headers={"content-type": "text/event-stream"}
-        )
-    )
+    remaining = iter(reports)
+
+    def reply(request: httpx.Request) -> httpx.Response:
+        reported = next(remaining)
+        usage: dict[str, Any] = {"prompt_tokens": 30000, "completion_tokens": 10}
+        if reported is not None:
+            usage["prompt_tokens_details"] = {"cached_tokens": reported}
+        chunks = [
+            {"provider": "SiliconFlow", "choices": [{"delta": {}, "finish_reason": "stop"}]},
+            {"choices": [], "usage": usage},
+        ]
+        payload = "".join(f"data: {json.dumps(chunk)}\n\n" for chunk in chunks) + "data: [DONE]\n\n"
+        return httpx.Response(200, text=payload, headers={"content-type": "text/event-stream"})
+
+    transport = httpx.MockTransport(reply)
     stream = _affinity_stream()
     stream._provider_affinity[model_id] = "SiliconFlow"
     stream._provider_last_turn_at[model_id] = time.monotonic()
     async with httpx.AsyncClient(transport=transport) as http:
         client = OpenAICompatClient("https://openrouter.ai/api/v1", http_client=http)
-        for _ in range(2):
+        for _ in reports:
             request = stream._apply_cache_affinity(_affinity_request())
             await _collect_stream(
                 stream._record_stream(request, client.stream(request, "synthetic-key"))
@@ -4713,17 +4722,11 @@ async def test_strikes_follow_the_served_model_too() -> None:
     served_id = "moonshotai/kimi-k2"
 
     async def cold_fallback() -> AsyncIterator[StreamEvent]:
-        yield StreamEndEvent(
-            stop_reason="stop",
-            served_provider="SiliconFlow",
-            usage=Usage(
-                input_tokens=30_000,
-                cache_read_tokens=0,
-                cache_read_reported=True,
-                provider="openrouter",
-                model_id=served_id,
-            ),
+        usage = Usage(
+            input_tokens=30_000, cache_read_tokens=0, provider="openrouter", model_id=served_id
         )
+        usage._cache_read_reported = True
+        yield StreamEndEvent(stop_reason="stop", served_provider="SiliconFlow", usage=usage)
 
     # An established conversation on the SERVED model, pinned to the host that
     # is about to answer — the only shape that can strike.

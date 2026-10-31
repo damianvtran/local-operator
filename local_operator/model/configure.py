@@ -4462,12 +4462,14 @@ class SessionStreamFn:
         prompt_tokens = usage.input_tokens if usage else 0
         if prompt_tokens < self.PROVIDER_STRIKE_MIN_PROMPT_TOKENS:
             return
-        # Serialized legacy Usage always contains a numeric zero, even if the
-        # provider omitted the counter. Only an explicit receipt can establish a
-        # zero miss; positive legacy counts can still establish a cache hit.
+        # Unknown evidence cannot establish consecutive misses: the intervening
+        # turn could have hit. Discard this host's pending strike without treating
+        # the unknown as a measured hit. Replayed receipts safely remain unknown.
         if usage is None or (
-            usage.cache_read_reported is not True and usage.cache_read_tokens == 0
+            usage._cache_read_reported is not True and usage.cache_read_tokens == 0
         ):
+            self._provider_strikes.get(model_id, {}).pop(served, None)
+            self._provider_strike_at.get(model_id, {}).pop(served, None)
             return
         cached = usage.cache_read_tokens
         floor = max(

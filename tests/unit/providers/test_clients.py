@@ -349,10 +349,16 @@ async def test_openai_compat_preserves_cache_counter_presence(
         )
     usage = [event.usage for event in events if isinstance(event, StreamUsageEvent)][-1]
     assert usage.cache_read_tokens == (expected or 0)
-    assert usage.cache_read_reported is (expected is not None)
-    assert type(usage).model_validate(usage.model_dump()).cache_read_reported is (
-        expected is not None
-    )
+    assert usage._cache_read_reported is (expected is not None)
+    assert usage.model_copy()._cache_read_reported is (expected is not None)
+    assert usage.model_copy(deep=True)._cache_read_reported is (expected is not None)
+    from local_operator.providers.failover import _stamp_serving_spec
+
+    stamped = _stamp_serving_spec(StreamUsageEvent(usage=usage), _spec())
+    assert stamped.usage._cache_read_reported is (expected is not None)
+    assert "cache_read_reported" not in usage.model_dump()
+    # Replayed numeric zero has no reliable provenance and must stay unknown.
+    assert type(usage).model_validate(usage.model_dump())._cache_read_reported is None
 
 
 async def test_openai_compat_prefers_standard_cache_detail_over_alias() -> None:

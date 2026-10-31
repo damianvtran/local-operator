@@ -1272,7 +1272,7 @@ def _omit_unset_usage_stamp(data: dict[str, Any]) -> dict[str, Any]:
     invisibly, until the attach frame crosses its 1 MiB socket line limit again
     (review round 1, MINOR 2).
     """
-    for field in ("at_ms", "billing_basis", "cache_read_reported"):
+    for field in ("at_ms", "billing_basis"):
         if data.get(field) is None:
             data.pop(field, None)
     return data
@@ -1318,6 +1318,10 @@ class Usage(BaseModel):
     #: zero-frame-bytes reason as the decode window; the transcript encoder is
     #: the one writer that puts it on disk.
     _cache_diagnostics_id: str | None = PrivateAttr(default=None)
+    # This is live routing evidence, not durable billing data. Repeating even a
+    # tiny field across hundreds of receipts breaks the bounded attach frame.
+    # model_copy retains it; a serialized/replayed receipt safely becomes unknown.
+    _cache_read_reported: bool | None = PrivateAttr(default=None)
 
     @model_serializer(mode="wrap")
     def _serialize_usage_without_unset_stamp(
@@ -1333,11 +1337,6 @@ class Usage(BaseModel):
     input_tokens: int = 0
     output_tokens: int = 0
     cache_read_tokens: int = 0
-    # Numeric defaults are used throughout pricing and rendering, but zero alone
-    # cannot prove a provider measured a miss. Preserve that distinction across
-    # copies and serialization without changing the established numeric contract.
-    # None is legacy/unspecified; explicit False means the wire omitted a counter.
-    cache_read_reported: bool | None = None
     cache_write_tokens: int = 0
     # The TTL split of ``cache_write_tokens`` when the provider reports one
     # (Anthropic's ``usage.cache_creation.ephemeral_5m_input_tokens`` /
