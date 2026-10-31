@@ -1170,7 +1170,19 @@ class VerifiedAdapterSession:
             ),
         )
         assert isinstance(result, RunCommandResult)
-        return result
+        # Capability negotiation trusts the adapter to execute, not to enforce
+        # our context budget. Cap each UTF-8 stream again at the host boundary.
+        from local_operator.evaluation.adapters.api import cap_command_output
+
+        updates: dict[str, Any] = {}
+        for stream in ("stdout", "stderr"):
+            text, byte_count, truncated = cap_command_output(
+                getattr(result, stream), params.max_output_bytes
+            )
+            updates[stream] = text
+            updates[f"{stream}_bytes"] = max(getattr(result, f"{stream}_bytes"), byte_count)
+            updates[f"{stream}_truncated"] = getattr(result, f"{stream}_truncated") or truncated
+        return result.model_copy(update=updates)
 
     async def execute(
         self,

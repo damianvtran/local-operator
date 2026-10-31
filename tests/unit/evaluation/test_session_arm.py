@@ -5655,3 +5655,162 @@ class TestBridgeCommand:
             await bridge.stop()
         assert calls == []
         assert all(reply["is_error"] is True for reply in replies)
+
+
+@pytest.mark.asyncio
+async def test_pending_command_serializes_finish(tmp_path: Path) -> None:
+    admitted, release = asyncio.Event(), asyncio.Event()
+    mutation_ends = []
+    bridge = _bridge(tmp_path, completion_challenges=0)
+
+    async def run(command: str, timeout: float) -> Any:
+        admitted.set()
+        await release.wait()
+        mutation_ends.append(bridge.end_requested)
+        return _command_result()
+
+    bridge.run_command = run
+    command = asyncio.create_task(bridge.call_command({"command": "mutate"}))
+    await admitted.wait()
+    finish = asyncio.create_task(
+        bridge.call({"actions": [{"kind": "finish", "status": "done", "reason": "done"}]})
+    )
+    try:
+        await asyncio.sleep(0)
+        assert not finish.done(), "finish accepted before the pending mutation"
+    finally:
+        release.set()
+        await command
+        await finish
+    assert mutation_ends == [None]
+    refused = await bridge.call_command({"command": "too late"})
+    assert refused["is_error"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("native", [False, True])
+@pytest.mark.parametrize("late_error", [False, True])
+async def test_mcp_cancellation_seals_unknown_even_after_late_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, native: bool, late_error: bool
+) -> None:
+    from mcp import types
+
+    from local_operator.evaluation.action_server import (
+        COMMAND_TOOL_NAME,
+        build_mcp_server,
+    )
+
+    admitted, cancelled, release, completed, recorded = (asyncio.Event() for _ in range(5))
+    rows = []
+
+    def record(kind: str, payload: dict[str, Any]) -> None:
+        rows.append((kind, payload))
+        if kind == "command":
+            recorded.set()
+
+    bridge = _bridge(tmp_path, record=record)
+
+    async def http_target(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            await reader.readuntil(b"\r\n\r\n")
+            admitted.set()
+            await release.wait()
+            writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+            await writer.drain()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    target = await asyncio.start_server(http_target, "127.0.0.1", 0)
+    port = target.sockets[0].getsockname()[1]
+
+    async def http_request() -> Any:
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        try:
+            writer.write(b"POST /execute HTTP/1.1\r\nContent-Length: 0\r\n\r\n")
+            await writer.drain()
+            response = await reader.read()
+            assert response.startswith(b"HTTP/1.1 200 OK")
+            completed.set()
+            if late_error:
+                raise ValueError("late reply could not be decoded")
+            return _command_result()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    async def run(command: str, timeout: float) -> Any:
+        remote = asyncio.create_task(http_request())
+        try:
+            return await asyncio.shield(remote)
+        except asyncio.CancelledError:
+            cancelled.set()
+            # A dispatched HTTP request may still return despite cancellation.
+            return await remote
+
+    bridge.run_command = run
+    await bridge.start()
+    server = build_mcp_server(str(bridge.endpoint), ActionSurface(), timeout=5, command=True)
+    entry = server.get_request_handler("tools/call")
+    assert entry is not None
+    handler = entry.handler
+    manager = None
+    if native:
+        config = tmp_path / "config"
+        config.mkdir()
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+        decl = declare_action_server(
+            config_dir=config,
+            endpoint=bridge.endpoint,
+            surface=ActionSurface(),
+            python_executable=sys.executable,
+            cwd=Path(__file__).resolve().parents[3],
+            command=True,
+        )
+        manager = McpManager(str(tmp_path))
+        await manager.discover_and_connect()
+        await manager.wait_settled(20)
+        tool = next(t for t in manager.get_tools() if t.name == decl.command_tool_name)
+        call = tool.execute("cancel-test", {"command": "late success"}, None, None, ToolContext())
+    else:
+        call = handler(
+            None,
+            types.CallToolRequestParams(
+                name=COMMAND_TOOL_NAME, arguments={"command": "late success"}
+            ),
+        )
+    task = asyncio.create_task(call)
+    try:
+        await admitted.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        # MCP cancellation is a notification across a subprocess transport,
+        # not a synchronous remote ACK. Hold the actual HTTP reply until
+        # cancellation reaches the operation, then deliver its late success.
+        await asyncio.wait_for(cancelled.wait(), 2)
+        release.set()
+        await asyncio.wait_for(completed.wait(), 2)
+        await asyncio.wait_for(recorded.wait(), 2)
+        assert cancelled.is_set(), "caller cancellation never reached the bridge operation"
+        row = [p for k, p in rows if k == "command"][0]
+        assert row == {
+            "call_id": row["call_id"],
+            "command": "late success",
+            "timeout_s": 60.0,
+            "cancelled": True,
+            "outcome": "cancelled_after_dispatch",
+            "target_may_have_run": True,
+            "exit_code": None,
+            "timed_out": None,
+            "stdout_truncated": None,
+            "stderr_truncated": None,
+            "error": "CancelledError: command outcome unknown",
+        }
+    finally:
+        release.set()
+        if manager is not None:
+            await manager.disconnect_all()
+        await bridge.stop()
+        target.close()
+        await target.wait_closed()

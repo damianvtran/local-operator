@@ -1715,6 +1715,13 @@ class ActionBridge:
         Transport failures remain errors, not synthetic exit statuses. Recording
         metadata excludes output: sealed artifacts still identify exactly what ran.
         """
+        # Screen actions, terminal admission and commands share ONE mutation
+        # lane. Keep the ended-state check inside it so queued calls cannot run
+        # after a finish accepted while they were waiting.
+        async with self._lock:
+            return await self._call_command_locked(arguments)
+
+    async def _call_command_locked(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
         from local_operator.evaluation.action_server import (
             COMMAND_DEFAULT_TIMEOUT_S,
             COMMAND_MAX_TIMEOUT_S,
@@ -1750,10 +1757,12 @@ class ActionBridge:
         # not erase the fact that a potentially mutating command was offered.
         if self.record is not None:
             self.record("command_started", dict(row))
-        try:
-            result = await self.run_command(command, float(timeout))
-        except asyncio.CancelledError:
+
+        def record_cancellation() -> None:
             row.update(
+                cancelled=True,
+                outcome="cancelled_after_dispatch",
+                target_may_have_run=True,
                 exit_code=None,
                 timed_out=None,
                 stdout_truncated=None,
@@ -1762,8 +1771,23 @@ class ActionBridge:
             )
             if self.record is not None:
                 self.record("command", row)
+
+        try:
+            result = await self.run_command(command, float(timeout))
+            # Some transports cannot stop an already dispatched HTTP request
+            # and may swallow cancellation while collecting its late reply.
+            # That reply must NEVER turn the caller's cancelled attempt green.
+            task = asyncio.current_task()
+            if task is not None and task.cancelling():
+                raise asyncio.CancelledError
+        except asyncio.CancelledError:
+            record_cancellation()
             raise
         except Exception as error:
+            task = asyncio.current_task()
+            if task is not None and task.cancelling():
+                record_cancellation()
+                raise asyncio.CancelledError from error
             row.update(
                 exit_code=None,
                 timed_out=None,
@@ -1797,7 +1821,30 @@ class ActionBridge:
             line = await reader.readline()
             request = decode_call(line)
             if request["tool"] == "run_command":
-                reply = await self.call_command(request.get("arguments") or {})
+                operation = asyncio.create_task(self.call_command(request.get("arguments") or {}))
+                disconnect = asyncio.create_task(reader.read(1))
+                try:
+                    done, _ = await asyncio.wait(
+                        (operation, disconnect), return_when=asyncio.FIRST_COMPLETED
+                    )
+                    if disconnect in done:
+                        # The command client half-closes on cancellation. ACK
+                        # only after forwarding cancellation, so a caller that
+                        # releases a delayed HTTP reply cannot race this signal.
+                        operation.cancel()
+                        writer.write(encode_response([], is_error=True))
+                        await writer.drain()
+                        try:
+                            await operation
+                        except asyncio.CancelledError:
+                            pass
+                        return
+                    reply = await operation
+                finally:
+                    disconnect.cancel()
+                    if not operation.done():
+                        operation.cancel()
+                    await asyncio.gather(operation, disconnect, return_exceptions=True)
             else:
                 reply = await self.call(request.get("arguments") or {})
             writer.write(encode_response(**reply))

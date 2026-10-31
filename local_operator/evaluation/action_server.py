@@ -342,6 +342,17 @@ async def forward_call(
             line = await reader.readline()
         else:
             line = await asyncio.wait_for(reader.readline(), timeout)
+    except asyncio.CancelledError:
+        if tool == COMMAND_TOOL_NAME:
+            # Half-close keeps the response half open for the bridge's cancel
+            # ACK. No retry: the target may already have executed the command.
+            # Bound the ACK wait because a dead bridge cannot answer it.
+            try:
+                writer.write_eof()
+                await asyncio.wait_for(reader.readline(), 1.0)
+            except (OSError, asyncio.TimeoutError):
+                pass
+        raise
     except asyncio.TimeoutError as error:
         raise ActionBridgeUnreachable(
             f"the episode's action bridge did not answer within {timeout}s"
