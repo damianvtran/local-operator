@@ -11,7 +11,7 @@ import pytest
 from local_operator.harness.render import _default_convert_to_llm
 from local_operator.harness.types import CustomMessage, Message, TextContent
 from local_operator.session.transcript import Transcript
-from local_operator.team_bridge.card_projection import EARLIER_CARD, PENDING_CARD
+from local_operator.team_bridge.card_projection import PENDING_CARD
 from local_operator.team_bridge.connector.conversation import (
     ConversationCardMetadata,
     build_conversation_card,
@@ -129,7 +129,7 @@ async def test_raw_persisted_card_never_leaks_in_any_render_or_cold_replay(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_completed_admission_has_only_earlier_marker_and_never_cached_envelope(tmp_path):
+async def test_completed_admission_history_is_always_pending_without_an_envelope(tmp_path):
     cfg = tmp_path / "cfg"
     store = _store(cfg)
     _reserve(store, config_dir=cfg)
@@ -142,15 +142,12 @@ async def test_completed_admission_has_only_earlier_marker_and_never_cached_enve
         _, candidate = await _complete(session, cfg, card)
         assert json.dumps(card.model_dump(), sort_keys=True) == original, "no journal mutation"
         raw = session._transcript.build_llm_history()
-        assert EARLIER_CARD in _text(session._render_history(raw))
+        assert PENDING_CARD in _text(session._render_history(raw))
         assert "mention: no" not in _text(session._render_history(raw))
         assert BODY not in _text(session._render_history(raw))
-        # A new owner binding cannot reuse either a historical or live copy.
-        from local_operator.team_bridge.card_projection import project_history
-
-        cached = project_history(raw, runtime=lambda: session.bridge_runtime)
+        # Runtime changes cannot turn history into a completion-status oracle.
         session.bridge_runtime = SimpleNamespace(**{**vars(runtime), "tenant_id": "foreign"})
-        _assert_pending(_text(_default_convert_to_llm(cached)))
+        _assert_pending(_text(_default_convert_to_llm(raw)))
         _assert_pending(_text(session._render_history(raw)))
         # Removing the live frame leaves only a content-free card marker.
         _assert_pending(_text(_default_convert_to_llm(candidate[:-1])))
@@ -201,13 +198,13 @@ async def test_completed_metadata_never_authorizes_any_envelope_bytes(tmp_path, 
         with sqlite3.connect(state_db_path(cfg)) as conn:
             conn.execute(f"UPDATE body_reservations SET {column} = ?", (value,))
         text = _text(session._render_history([card]))
-        assert text in (PENDING_CARD, EARLIER_CARD), text
+        assert text == PENDING_CARD, text
     finally:
         await session.dispose()
 
 
 @pytest.mark.asyncio
-async def test_coalesced_card_requires_every_independent_completed_admission(tmp_path):
+async def test_coalesced_card_never_discloses_per_id_completion(tmp_path):
     cfg = tmp_path / "cfg"
     store = _store(cfg)
     _reserve(store, config_dir=cfg)
@@ -221,7 +218,7 @@ async def test_coalesced_card_requires_every_independent_completed_admission(tmp
         _assert_pending(_text(session._render_history([grouped])))
         await _complete(session, cfg, _card(session, message_id=second))
         rendered = _text(session._render_history([grouped]))
-        assert rendered == EARLIER_CARD, rendered
+        assert rendered == PENDING_CARD, rendered
     finally:
         await session.dispose()
 
@@ -258,7 +255,7 @@ async def test_crash_without_completion_stays_pending_and_restart_can_retry(tmp_
             assert _row(cfg)["attempts"] == before["attempts"], "render must not claim/ack"
             await _complete(restarted, cfg, raw[0])
             assert _row(cfg)["state"] == "completed"
-            assert EARLIER_CARD in _text(restarted._render_history(raw))
+            assert PENDING_CARD in _text(restarted._render_history(raw))
             assert "mention: no" not in _text(restarted._render_history(raw))
             assert _row(cfg)["card_posted_at"] is None
         finally:
@@ -391,7 +388,7 @@ async def test_r1_unrelated_in_window_assistant_never_authorizes_history(tmp_pat
         with sqlite3.connect(state_db_path(cfg)) as conn:
             conn.execute("UPDATE body_reservations SET completed_entry_id = ?", (unrelated.id,))
         rendered = _text(session._render_history([card]))
-        assert rendered == EARLIER_CARD, rendered
+        assert rendered == PENDING_CARD, rendered
         assert "mention:" not in rendered and "name-canary" not in rendered, rendered
     finally:
         await session.dispose()
@@ -443,6 +440,41 @@ async def test_s1_new_same_id_envelope_after_completion_stays_marker(tmp_path):
         rendered = _text(session._render_history(raw))
         assert "UNSCREENED-REPLAY-CANARY" not in rendered, rendered
         assert "mention:" not in rendered and "name-canary" not in rendered, rendered
-        assert rendered.count(EARLIER_CARD) == 2, rendered
+        assert rendered.count(PENDING_CARD) == 2, rendered
     finally:
         await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_s2_unauthorized_fresh_reader_cannot_distinguish_completed_from_missing(tmp_path):
+    from local_operator.team_bridge.authority import authority_fence
+
+    cfg = tmp_path / "cfg"
+    store = _store(cfg)
+    _reserve(store, config_dir=cfg)
+    source = _session(tmp_path / "source", CapturingStream([]), _runtime(cfg, FakeBridgeClient()))
+    reader_runtime = _runtime(cfg, FakeBridgeClient())
+    reader_runtime.session_id = "synthetic-unrelated-reader"
+    reader = _session(tmp_path / "reader", CapturingStream([]), reader_runtime)
+    try:
+        await _complete(source, cfg, _card(source))
+        refusal = authority_fence(reader_runtime)
+        assert refusal is not None and refusal["code"] == "not_designated", refusal
+        assert reader._transcript.entries() == [], "the probing reader must start with no history"
+        outputs = []
+        for message_id in (MESSAGE_ID, "bcmsg_abcdef99"):
+            probe = _card(reader, message_id=message_id)
+            await reader.receive_peer_message(
+                probe.details["body"],
+                mode="mailbox",
+                wake=False,
+                sender={"source": "team_bridge"},
+                custom_type="team_bridge_message",
+            )
+            raw = reader._transcript.build_llm_history()
+            outputs.append(_text(reader._render_history([raw[-1]])))
+        assert outputs == [PENDING_CARD, PENDING_CARD], outputs
+        assert _row(cfg)["state"] == "completed", "projection must not mutate the reservation"
+    finally:
+        await reader.dispose()
+        await source.dispose()

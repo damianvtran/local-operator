@@ -5367,19 +5367,8 @@ class Session:
         the same reason: every path that reaches a provider has to be free of
         them.
         """
-        from local_operator.team_bridge.card_projection import project_history
-
-        # A persisted wake envelope is human-visible immediately, but its
-        # journal boundary is not proof that a model read the admitted body.
-        # Historical status is re-read here for every provider/aside/compaction
-        # render. Completion chooses a content-free earlier-delivery marker;
-        # no historical envelope bytes can bypass the shared renderer.
-        projected = project_history(
-            messages,
-            runtime=lambda: getattr(self, "bridge_runtime", None),
-        )
         rendered = self._convert_to_llm(
-            self._live_project_reminders(self._live_todo_reminders(projected))
+            self._live_project_reminders(self._live_todo_reminders(messages))
         )
         # Immediately after the conversion and before any other pass, so EVERY
         # caller of this method is covered by one application: the turn path,
