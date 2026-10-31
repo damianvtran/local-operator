@@ -848,7 +848,7 @@ def test_alias_shared_paint_and_ledger_pricing(provider, model_id, usage, expect
         cache_write_tokens=usage.cache_write_tokens,
         cache_write_1h_tokens=usage.cache_write_1h_tokens,
         reasoning_tokens=0,
-        context_tokens=None,
+        context_tokens=0,
         openai_long_context=usage.openai_long_context,
     )
     with (
@@ -861,15 +861,17 @@ def test_alias_shared_paint_and_ledger_pricing(provider, model_id, usage, expect
 
 def test_custom_openai_gateway_does_not_inherit_openai_long_context_tariff() -> None:
     from local_operator.harness.types import ModelSpec, StreamUsageEvent
-    from local_operator.providers.clients import client_for_spec
+    from local_operator.providers.clients import OpenAICompatClient, client_for_spec
     from local_operator.providers.failover import _stamp_serving_spec
 
     spec = ModelSpec(
         provider="openai", model_id="gpt-6-astra", base_url="https://gateway.example/v1"
     )
     client = client_for_spec(spec)
+    assert isinstance(client, OpenAICompatClient)
     assert client._base_url == "https://gateway.example/v1"
     event = _stamp_serving_spec(StreamUsageEvent(usage=Usage(input_tokens=300_000)), spec)
+    assert isinstance(event, StreamUsageEvent)
     assert cost_for_usage(
         "openai", _priced(id="gpt-6-astra", input_price=10), event.usage
     ) == pytest.approx(3.0)
