@@ -1,0 +1,25 @@
+{
+  "proposal_only": true,
+  "actual_ledger_modified": false,
+  "target_shard": "i18n/ledger/zh-CN.json",
+  "required_before_application": "Separate independent second high-visibility audit passes these exact target bytes and canonical evidence bundle is tracked. This first-pass proposal does not complete that gate.",
+  "row": {
+    "locale": "zh-CN",
+    "namespace": "wire.errors.session_host",
+    "source_sha256": "b7d6561be15577c118ec333586f7c809e65471c5dfd0dd839abee700b2ed1ba0",
+    "translator": {
+      "agent": "i18n-translator",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-10-31"
+    },
+    "auditor": {
+      "agent": "i18n-auditor",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-10-31",
+      "result": "passed",
+      "findings": 0
+    },
+    "status": "passed",
+    "note": "First independent pass; separate high-visibility second pass required. Evidence: i18n/audits/evidence/zh-CN/wire.errors.session_host/zh31a1/record.json"
+  }
+}

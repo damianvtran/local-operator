@@ -1,0 +1,79 @@
+import hashlib, json, os, pathlib, subprocess, sys, unicodedata
+repo = pathlib.Path('/Users/damian/local-operator')
+fixture = pathlib.Path('/Users/damian/.local-operator/sessions/26368bfbce62/scratchpad/host-copy-vi/validation-tree')
+candidate = fixture.parent / 'wire.errors.session_host.json'
+commit = '9c979a03d551020ce6ff1b16c8066aa69ce7bb2a'
+namespace = 'wire.errors.session_host'
+root = pathlib.Path(__file__).resolve().parent
+sha = lambda b: hashlib.sha256(b).hexdigest()
+def committed(path):
+    return subprocess.check_output(['git', '-C', str(repo), 'show', f'{commit}:{path}'])
+paths = {
+    'en': 'local_operator/i18n/catalogues/en/wire.errors.session_host.json',
+    'context': 'local_operator/i18n/catalogues/en/wire.errors.session_host.context.json',
+}
+expected = {
+    'en': 'b7d6561be15577c118ec333586f7c809e65471c5dfd0dd839abee700b2ed1ba0',
+    'context': 'd26acd5a6357a0c54bbd5ed409b4ad2c060ee52b9bd76670679397c4b464f724',
+    'vi': 'd1ce1cbd3daa26c04bf01122319e7e8adec63050477c8dd8bc84ff61f16003ba',
+}
+inputs = {}
+for name, path in paths.items():
+    data = committed(path)
+    assert sha(data) == expected[name], (name, sha(data))
+    assert (fixture / path).read_bytes() == data, path
+    inputs[name] = {'path': path, 'sha256': sha(data)}
+vi_data = candidate.read_bytes()
+assert sha(vi_data) == expected['vi']
+assert (fixture / 'local_operator/i18n/catalogues/vi/wire.errors.session_host.json').read_bytes() == vi_data
+inputs['vi'] = {'path': 'local_operator/i18n/catalogues/vi/wire.errors.session_host.json', 'sha256': sha(vi_data), 'audited_candidate_path': str(candidate)}
+# Verify the reused fixture's validator, parser, catalogue loader and plural data
+# against the requested commit, rather than trusting the translator's run.
+tracked = ['scripts/i18n/check.py', 'scripts/i18n/login.py', 'local_operator/i18n/__init__.py', 'local_operator/i18n/catalogues.py', 'local_operator/i18n/runtime.py', 'local_operator/i18n/format.py', 'local_operator/i18n/data/plural_rules.json']
+verified = []
+for path in tracked:
+    if path.endswith('.py') or path == 'local_operator/i18n/data/plural_rules.json':
+        assert (fixture / path).read_bytes() == committed(path), path
+        verified.append(path)
+print(f'PASS pinned fixture validator/parser/loader inputs: {len(verified)} files byte-identical to {commit}', flush=True)
+print('PASS English/context/candidate SHA-256 and reused fixture input bytes', flush=True)
+home = root / 'isolated-home'
+home.mkdir(exist_ok=True)
+env = {k: v for k, v in os.environ.items() if not k.startswith('CMUX_') and k not in {'XPC_FLAGS', 'PYTHONPATH', 'PYTHONHOME'}}
+env.update(HOME=str(home), LOCAL_OPERATOR_CONFIG_DIR=str(home / 'config'), PYTHONDONTWRITEBYTECODE='1', GIT_CONFIG_SYSTEM='/dev/null', GIT_TERMINAL_PROMPT='0', GIT_ASKPASS='/bin/false')
+command = [str(repo / '.venv/bin/python'), 'scripts/i18n/check.py', '--catalogues-only']
+print('COMMAND: ' + ' '.join(command), flush=True)
+print('CWD: ' + str(fixture), flush=True)
+result = subprocess.run(command, cwd=fixture, env=env, text=True, capture_output=True)
+print(result.stdout, end='', flush=True)
+print(result.stderr, end='', flush=True)
+print(f'EXIT: {result.returncode}', flush=True)
+assert result.returncode == 0
+sys.path.insert(0, str(fixture))
+from local_operator.i18n.runtime import message_arguments, render_message
+from rich.cells import cell_len
+source = json.loads(committed(paths['en']))
+context = json.loads(committed(paths['context']))
+# Detect duplicate JSON object names instead of allowing last-value-wins.
+def unique(pairs):
+    d = {}
+    for k, v in pairs:
+        assert k not in d, k
+        d[k] = v
+    return d
+translated = json.loads(vi_data, object_pairs_hook=unique)
+assert set(source) == set(context) == set(translated)
+checks = []
+for key, text in translated.items():
+    assert message_arguments(text) == message_arguments(source[key]) == ()
+    assert unicodedata.normalize('NFC', text) == text
+    assert not any(unicodedata.category(c) == 'Cf' for c in text)
+    assert all(t not in text for t in ('`', '<', '>'))
+    rendered = render_message(text, {}, locale='vi')
+    assert rendered == text
+    for literal in ['logs/session-host.log', 'Local Operator']:
+        assert text.count(literal) == source[key].count(literal), (key, literal)
+    checks.append({'key': key, 'chars': len(text), 'cells': cell_len(text), 'en_cells': cell_len(source[key]), 'maxCells': context[key].get('maxCells'), 'maxChars': context[key].get('maxChars'), 'argument_signature': [], 'icu_plural_select': 'none', 'NFC': True, 'format_round_trip': True})
+print('PASS independent JSON/key/ICU-placeholder parity, literal preservation, NFC, control-character and format round-trip checks: 3/3 keys', flush=True)
+print(json.dumps(checks, ensure_ascii=False, indent=2), flush=True)
+(root / 'mechanical.json').write_text(json.dumps({'source_commit': commit, 'input_hashes': inputs, 'verified_fixture_code_files': len(verified), 'validator_command': command, 'validator_cwd': str(fixture), 'validator_exit_code': result.returncode, 'checks': checks}, ensure_ascii=False, indent=2) + '\n')

@@ -1,0 +1,41 @@
+{
+  "record_reference": "i18n/audits/evidence/hi/wire.errors.session_host/h31-39a4b/record.json",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "39a4a8de4f1c",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "d2959affe186",
+    "actual_model_source": "Host model-switch messages: provider-quota fallback from anthropic/claude-sonnet-5-5 via anthropic/claude-opus-5-5 to openai/gpt-6.1-sol; audit reasoning and execution on openai/gpt-6.1-sol.",
+    "fallback_used": true
+  },
+  "audit_date": "2026-10-31",
+  "status": "passed",
+  "files": [
+    {
+      "path": "i18n/audits/evidence/hi/wire.errors.session_host/h31-39a4b/record.json",
+      "sha256": "9661c5db3830f910e377669e7abb47abe6ada502cf60dbd171356b52a9244f8f"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/wire.errors.session_host/h31-39a4b/report.md",
+      "sha256": "c6b467f240f7d5ef1f545c12fdbf4f14ac50df9070c2a9fe372c711f1e0e1874"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/wire.errors.session_host/h31-39a4b/audit.log",
+      "sha256": "90f635f40947802214faa11b050d762c39d3aa511b4504726cd3fef83a290f0e"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/wire.errors.session_host/h31-39a4b/ledger-proposal.json",
+      "sha256": "42fc6bc4ce41bfaf908e35c6cee2d3f8515574523c7a4003c09b5f702f8ed60b"
+    }
+  ],
+  "retention": "Scratch handoff only; canonical tracked paths are future destinations, not a claim of commit or merge.",
+  "integration": {
+    "integrated_from_session": "39a4a8de4f1c",
+    "original_record_sha256": "9661c5db3830f910e377669e7abb47abe6ada502cf60dbd171356b52a9244f8f",
+    "original_receipt_sha256": "ae655894d130fa065382df85ddee0de09f7e612c3aaf0b8f14172a932efb2d22",
+    "canonical_record": "i18n/audits/evidence/hi/wire.errors.session_host/h31-39a4b/record.json",
+    "canonical_translator_provenance": "i18n/audits/evidence/hi/wire.errors.session_host/h31-39a4b/translator/provenance.json",
+    "retention": "Retained in this PR; not claimed merged or on main. Historical commands/cwd/scratch input paths are preserved as executed, not claimed tracked.",
+    "integration_judgment": "No new audit; semantic pass/finding facts copied from independent original records."
+  }
+}

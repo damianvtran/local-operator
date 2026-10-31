@@ -1,0 +1,10 @@
+{
+  "locale": "fr",
+  "forced_english_fallback": false,
+  "error": "L’hôte de sessions en arrière-plan a refusé de démarrer cette session. La session n’a pas été démarrée. Consultez logs/session-host.log dans votre dossier de configuration Local Operator avant de réessayer.",
+  "css_path": "local_operator.tcss",
+  "screen_size": [
+    100,
+    32
+  ]
+}

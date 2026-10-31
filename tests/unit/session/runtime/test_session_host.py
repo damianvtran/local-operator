@@ -1087,15 +1087,17 @@ def test_the_host_does_not_plant_an_inheritable_sighup_ignore(
 
 
 @pytest.mark.parametrize("code", ["unsupported", "refused"])
+@pytest.mark.parametrize("locale", ["en", "fr", "es", "zh-CN", "hi", "ru", "vi", "ur"])
 @pytest.mark.asyncio
 async def test_terminal_host_refusal_is_truthful_at_the_cold_facade_boundary(
-    host_route: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, code: str
+    host_route: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, code: str, locale: str
 ) -> None:
     """The real facade must not turn 'no runtime started' into 'reconnecting'."""
     from local_operator.session.attached import AttachedSession
     from local_operator.session.runtime.launch import ActionableConnectionError
 
     forks = _arm_fork_counters(monkeypatch)
+    monkeypatch.setenv("LOP_LANG", locale)
 
     def refuse(*args: Any, **kwargs: Any) -> Any:
         raise session_host.SessionHostUnavailable(code, "synthetic terminal refusal")
@@ -1109,8 +1111,12 @@ async def test_terminal_host_refusal_is_truthful_at_the_cold_facade_boundary(
             await facade._ensure_bound()
         from local_operator.i18n.messages import render
 
-        assert str(raised.value) == render(f"wire.errors.session_host.{code}", {}, locale="en")
-        assert "not started" in str(raised.value)
+        expected = render(f"wire.errors.session_host.{code}", {}, locale=locale)
+        assert str(raised.value) == expected
+        if locale == "en":
+            assert "not started" in expected
+        else:
+            assert expected != render(f"wire.errors.session_host.{code}", {}, locale="en")
         assert "reconnecting" not in str(raised.value)
         assert "synthetic terminal refusal" not in str(raised.value)
         assert isinstance(raised.value.__cause__, SessionHostStartupError)

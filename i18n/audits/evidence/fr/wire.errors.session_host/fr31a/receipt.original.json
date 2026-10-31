@@ -1,0 +1,61 @@
+{
+  "record_reference": "i18n/audits/evidence/fr/wire.errors.session_host/fr31a/record.json",
+  "command": [
+    "/Users/damian/local-operator/.venv/bin/python",
+    "/Users/damian/.local-operator/sessions/829abca97a25/scratchpad/host-copy-fr/validation-tree/scripts/i18n/check.py",
+    "--catalogues-only"
+  ],
+  "cwd": "/Users/damian/.local-operator/sessions/0a66628c58a2/scratchpad/host-fr-audit-a",
+  "exit_code": 0,
+  "stdout": "check.py: catalogue checks: 0 problem(s)\n",
+  "stderr": "",
+  "validator_sha256": "98dee7f1112848163c7a3365c39668118caa4bfe13e3afee4b137478d0bf39fb",
+  "validation_tree_matches": {
+    "en": true,
+    "context": true,
+    "candidate": true,
+    "validator_committed_source": true
+  },
+  "mechanical_checks": [
+    {
+      "key": "wire.errors.session_host.unsupported",
+      "codepoints": 195,
+      "placeholders": [],
+      "plural_select": "not present; no category requirements applicable",
+      "markup": "none",
+      "nfc": true,
+      "format_controls": false,
+      "maxCells": null,
+      "maxChars": null
+    },
+    {
+      "key": "wire.errors.session_host.unavailable",
+      "codepoints": 129,
+      "placeholders": [],
+      "plural_select": "not present; no category requirements applicable",
+      "markup": "none",
+      "nfc": true,
+      "format_controls": false,
+      "maxCells": null,
+      "maxChars": null
+    },
+    {
+      "key": "wire.errors.session_host.refused",
+      "codepoints": 206,
+      "placeholders": [],
+      "plural_select": "not present; no category requirements applicable",
+      "markup": "none",
+      "nfc": true,
+      "format_controls": false,
+      "maxCells": null,
+      "maxChars": null
+    }
+  ],
+  "width_cells": {
+    "wire.errors.session_host.unsupported": 195,
+    "wire.errors.session_host.unavailable": 129,
+    "wire.errors.session_host.refused": 206
+  },
+  "translator_provenance_verified": true,
+  "style_guide_delta": "Working checkout removes only an unrelated relay.chrome width-exception paragraph. Pinned style guide verified against translator hash; applicable rules identical."
+}

@@ -1,0 +1,13 @@
+{
+  "locale": "hi",
+  "namespace": "wire.errors.session_host",
+  "source_sha256": "b7d6561be15577c118ec333586f7c809e65471c5dfd0dd839abee700b2ed1ba0",
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "d2959affe186",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-10-31"
+  },
+  "status": "translated",
+  "note": "3/3 keys translated; independent audit pending. Actual model openai/gpt-6.1-sol after provider-quota fallbacks; catalogue checks: 0 problems."
+}

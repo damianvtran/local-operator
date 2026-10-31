@@ -1,0 +1,10 @@
+{
+  "locale": "en",
+  "forced_english_fallback": false,
+  "error": "The background session host declined to start this session. The session was not started. Check logs/session-host.log in your Local Operator config folder before trying again.",
+  "css_path": "local_operator.tcss",
+  "screen_size": [
+    100,
+    32
+  ]
+}

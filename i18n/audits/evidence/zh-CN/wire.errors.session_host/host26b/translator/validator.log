@@ -1,0 +1,4 @@
+Command: /Users/damian/local-operator/.venv/bin/python scripts/i18n/check.py --catalogues-only
+Scope: isolated committed validator/runtime; en + zh-CN wire.errors.session_host only
+check.py: catalogue checks: 0 problem(s)
+Exit code: 0

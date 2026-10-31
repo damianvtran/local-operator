@@ -1,0 +1,63 @@
+{
+  "locale": "ur",
+  "namespace": "wire.errors.session_host",
+  "audit_id": "u31h8b",
+  "audit_date": "2026-10-31",
+  "key_count": 3,
+  "audit_kind": "independent_second_semantic_pass",
+  "source_audit_revision": "9c979a03d551020ce6ff1b16c8066aa69ce7bb2a",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "8a79664ef0c5",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "50b1205a23e1",
+    "actual_model_source": "Host model-switch messages: anthropic/claude-sonnet-5-5 -> anthropic/claude-opus-5-5 -> openai/gpt-6.1-sol; provider failure quota. Substantive audit performed under openai/gpt-6.1-sol.",
+    "date": "2026-10-31"
+  },
+  "translator_provenance": {
+    "path": "/Users/damian/.local-operator/sessions/50b1205a23e1/scratchpad/host-copy-ur/provenance.json",
+    "sha256": "057a4932bec8959edefb6c879e0c69101c4f163adff9dd6f16558a9831afe3c9",
+    "source": "Translator sibling provenance.json; not independently inferred identity"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.errors.session_host.json",
+      "sha256": "b7d6561be15577c118ec333586f7c809e65471c5dfd0dd839abee700b2ed1ba0"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/wire.errors.session_host.context.json",
+      "sha256": "d26acd5a6357a0c54bbd5ed409b4ad2c060ee52b9bd76670679397c4b464f724"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/ur/wire.errors.session_host.json",
+      "sha256": "311ea5428af42db26ff461969d40d5e0198907a5c21d24da643c11cf64c35622",
+      "audited_candidate_path": "/Users/damian/.local-operator/sessions/50b1205a23e1/scratchpad/host-copy-ur/wire.errors.session_host.json"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/ur/wire.errors.session_host/u31h8b/report.md",
+      "sha256": "efc5660cdf44067a1eb15ec830c7a6b7753031ffd55137b197bcf557ee270751"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/wire.errors.session_host/u31h8b/audit.log",
+      "sha256": "652bd3b0cb790ece1b28736b65cd97887f0d8389e741d3bfd756aaecb29c3850"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/wire.errors.session_host/u31h8b/run_audit.py",
+      "sha256": "fa7ca6772e13d075e640c677c885ef0bf3658466e57aee6d3486cfe907df7b05"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "audit_notes_not_execution_log": "i18n/audits/evidence/ur/wire.errors.session_host/u31h8b/report.md",
+  "execution_log": "i18n/audits/evidence/ur/wire.errors.session_host/u31h8b/audit.log",
+  "rendered_fit_proof": false,
+  "rendered_rtl_proof": false,
+  "retention_status": "Scratch only; canonical paths are proposed future retention locations, not yet tracked",
+  "blind_to_first_audit": true,
+  "shared_ledger_written": false
+}

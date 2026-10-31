@@ -1,0 +1,103 @@
+{
+  "locale": "fr",
+  "namespace": "wire.errors.session_host",
+  "audit_date": "2026-10-31",
+  "key_count": 3,
+  "audit_id": "fr31a",
+  "audit_pass": "A; second separate independent high-visibility pass still required",
+  "source_commit": "9c979a03d551020ce6ff1b16c8066aa69ce7bb2a",
+  "auditor": {
+    "agent": "i18n-auditor (host-fr-audit-a)",
+    "session": "0a66628c58a2",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "829abca97a25",
+    "actual_model_source": "Latest explicit model-switch message before substantive audit work: openai/gpt-6.1-sol; provider failure: quota",
+    "fallback": true,
+    "fallback_history": [
+      "anthropic/claude-sonnet-5-5",
+      "anthropic/claude-opus-5-5",
+      "openai/gpt-6.1-sol"
+    ]
+  },
+  "translator": {
+    "agent": "i18n-translator (host-copy-fr)",
+    "session": "829abca97a25",
+    "actual_model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Latest model-switch notice before reading inputs and translating",
+    "fallback": true,
+    "fallback_history": [
+      "anthropic/claude-sonnet-5-5",
+      "anthropic/claude-opus-5-5",
+      "openai/gpt-6.1-sol"
+    ],
+    "fallback_reason": "provider failure: quota"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.errors.session_host.json",
+      "sha256": "b7d6561be15577c118ec333586f7c809e65471c5dfd0dd839abee700b2ed1ba0"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/wire.errors.session_host.context.json",
+      "sha256": "d26acd5a6357a0c54bbd5ed409b4ad2c060ee52b9bd76670679397c4b464f724"
+    },
+    "fr": {
+      "path": "local_operator/i18n/catalogues/fr/wire.errors.session_host.json",
+      "candidate_read_path": "/Users/damian/.local-operator/sessions/829abca97a25/scratchpad/host-copy-fr/wire.errors.session_host.json",
+      "sha256": "87cb0f0affb5c0a98298ca1e09fd72287c53b605968af4f92ba194fc54e27ad2"
+    },
+    "style_guide": {
+      "path": "i18n/style-guides/fr.md",
+      "sha256": "5315e1ac10c2ce57aac631ba653d08de680ee70c9a022ed3a8345ce2f9902ee7"
+    },
+    "glossary": {
+      "path": "i18n/glossary.md",
+      "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/fr/wire.errors.session_host/fr31a/report.md",
+      "sha256": "18fbfc75d5038e227528b7252591b77e75330325178bafddddf9c13e4e15e3d8"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.errors.session_host/fr31a/audit.log",
+      "sha256": "f68be5614850b9e0caeefcb7703b91be4865774982e011589487c32837ca4f69"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.errors.session_host/fr31a/receipt.json",
+      "sha256": "f42bd05d3f43f76b8a267a36af7b814a20a65207624d6e70f4a2ec64ba337e34"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "per_key": [
+    {
+      "key": "wire.errors.session_host.unsupported",
+      "status": "passed",
+      "finding_ids": [],
+      "suggested_wording": null
+    },
+    {
+      "key": "wire.errors.session_host.unavailable",
+      "status": "passed",
+      "finding_ids": [],
+      "suggested_wording": null
+    },
+    {
+      "key": "wire.errors.session_host.refused",
+      "status": "passed",
+      "finding_ids": [],
+      "suggested_wording": null
+    }
+  ],
+  "audit_notes_not_execution_log": "i18n/audits/evidence/fr/wire.errors.session_host/fr31a/report.md",
+  "actual_execution_log": "i18n/audits/evidence/fr/wire.errors.session_host/fr31a/audit.log",
+  "planned_canonical_tracked_record": "i18n/audits/evidence/fr/wire.errors.session_host/fr31a/record.json",
+  "retention_status": "Scratch handoff only; manager must retain in canonical tracked path. Not claimed committed or on main.",
+  "ledger_write_performed": false,
+  "second_independent_pass_pending": true
+}

@@ -1,0 +1,64 @@
+"""Read-only scoped validator execution; writes no source or translator artifacts."""
+import hashlib, json, os, runpy, subprocess, sys
+from pathlib import Path
+sys.dont_write_bytecode = True
+repo = Path.home() / 'local-operator'
+revision = '9c979a03d551020ce6ff1b16c8066aa69ce7bb2a'
+candidate_root = Path('/Users/damian/.local-operator/sessions/056852035b33/scratchpad/host-copy-es')
+snapshot = candidate_root / 'validation'
+def committed(path):
+    return subprocess.check_output(['git', '-C', str(repo), 'show', f'{revision}:{path}'])
+def sha(data):
+    return hashlib.sha256(data).hexdigest()
+source_paths = {'en': 'local_operator/i18n/catalogues/en/wire.errors.session_host.json', 'context': 'local_operator/i18n/catalogues/en/wire.errors.session_host.context.json'}
+expected = {'en': 'b7d6561be15577c118ec333586f7c809e65471c5dfd0dd839abee700b2ed1ba0', 'context': 'd26acd5a6357a0c54bbd5ed409b4ad2c060ee52b9bd76670679397c4b464f724'}
+inputs = {}
+for label, path in source_paths.items():
+    data = committed(path)
+    assert sha(data) == expected[label]
+    fixture = snapshot / 'catalogues' / 'en' / Path(path).name
+    assert fixture.read_bytes() == data
+    inputs[label] = {'path': path, 'sha256': sha(data)}
+    print(f'VERIFIED committed {label} SHA256 {sha(data)}')
+target = candidate_root / 'wire.errors.session_host.json'
+assert (snapshot / 'catalogues/es/wire.errors.session_host.json').read_bytes() == target.read_bytes()
+inputs['es'] = {'path': 'local_operator/i18n/catalogues/es/wire.errors.session_host.json', 'sha256': sha(target.read_bytes()), 'candidate_path': str(target)}
+# Verify validator and its potential Python dependencies before importing the existing fixture.
+checked = []
+for relative in ['scripts/i18n/check.py', 'scripts/i18n/login.py']:
+    assert (snapshot / relative).read_bytes() == committed(relative), relative
+    checked.append(relative)
+for path in (snapshot / 'local_operator/i18n').glob('*.py'):
+    relative = str(path.relative_to(snapshot))
+    assert path.read_bytes() == committed(relative), relative
+    checked.append(relative)
+relative = 'local_operator/i18n/data/plural_rules.json'
+assert (snapshot / relative).read_bytes() == committed(relative)
+checked.append(relative)
+print('VERIFIED existing snapshot validator/dependency bytes:', json.dumps(checked))
+sys.path.insert(0, str(snapshot))
+checker = runpy.run_path(str(snapshot / 'scripts/i18n/check.py'))
+cat = checker['catalogues']
+cat._CATALOGUES = snapshot / 'catalogues'
+problems = checker['check_catalogues']()
+print('EXECUTED committed scripts/i18n/check.py::check_catalogues() on read-only isolated en/es namespace fixture')
+print('ACTUAL problems:', json.dumps(problems, ensure_ascii=False))
+assert not problems
+source = json.loads(committed(source_paths['en']))
+context = json.loads(committed(source_paths['context']))
+translated = json.loads(target.read_text())
+assert set(source) == set(context) == set(translated)
+for key in source:
+    en_args = checker['msg_runtime'].message_arguments(source[key])
+    es_args = checker['msg_runtime'].message_arguments(translated[key])
+    assert en_args == es_args
+    assert not en_args
+    assert not any(character in translated[key] for character in '{}<>`')
+    assert '\n' not in translated[key]
+    if key.endswith('.refused'):
+        assert translated[key].count('logs/session-host.log') == 1
+        assert translated[key].count('Local Operator') == 1
+    print(f'KEY PASS {key}: arguments={es_args!r}; chars={len(translated[key])}; no ICU plurals/selects, markup or code spans; no declared width limit')
+print('PASS: 3/3 keys; valid JSON, exact keys, empty placeholder sets, preserved path/product literal; ICU plural/category checks vacuous for these nonplural messages.')
+print('SCOPE: static/scoped catalogue validation, not whole-repository CLI, rendered fit or release approval.')
+print('INPUT_HASHES ' + json.dumps(inputs, sort_keys=True))

@@ -1,0 +1,41 @@
+{
+  "record_reference": "i18n/audits/evidence/vi/wire.errors.session_host/261031-host-9d47b/record.json",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "9d47bf14cd92",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "26368bfbce62",
+    "actual_model_source": "Runtime model-switch notice: openai/gpt-6.1-sol after provider quota fallback from anthropic/claude-sonnet-5-5 via anthropic/claude-opus-5-5; semantic audit performed after final switch.",
+    "date": "2026-10-31"
+  },
+  "created_at": "2026-10-31T18:08:54.737982+00:00",
+  "status": "scratch handoff; no shared ledger mutation or commit",
+  "canonical_future_tracked_root": "i18n/audits/evidence/vi/wire.errors.session_host/261031-host-9d47b",
+  "companions": [
+    {
+      "path": "i18n/audits/evidence/vi/wire.errors.session_host/261031-host-9d47b/record.json",
+      "sha256": "d3c3a098df5b394e5fd7f566fbc35394f5e762a7ee13a40ec5a89fdb24e018d6"
+    },
+    {
+      "path": "i18n/audits/evidence/vi/wire.errors.session_host/261031-host-9d47b/report.md",
+      "sha256": "0acf68f2fa0bf12f95abc5d107a8eafeb0a2250dc8213fb5dba29863d2fd4cbb"
+    },
+    {
+      "path": "i18n/audits/evidence/vi/wire.errors.session_host/261031-host-9d47b/audit.log",
+      "sha256": "dc3f68fc1b0bcc2257be4fd9bdbcaef60ffdb029ed69bf92b069206c65554534"
+    },
+    {
+      "path": "i18n/audits/evidence/vi/wire.errors.session_host/261031-host-9d47b/ledger-row.proposal.json",
+      "sha256": "65f7614c4254917be7c34fe5c07f6fc76d4a9cc8d9fcd22a35362601eafd093e"
+    }
+  ],
+  "integration": {
+    "integrated_from_session": "9d47bf14cd92",
+    "original_record_sha256": "d3c3a098df5b394e5fd7f566fbc35394f5e762a7ee13a40ec5a89fdb24e018d6",
+    "original_receipt_sha256": "67d8e4ae5c871e5902e06925be71a85172648d362d1b6ebea2bd61ceb925a371",
+    "canonical_record": "i18n/audits/evidence/vi/wire.errors.session_host/261031-host-9d47b/record.json",
+    "canonical_translator_provenance": "i18n/audits/evidence/vi/wire.errors.session_host/261031-host-9d47b/translator/provenance.json",
+    "retention": "Retained in this PR; not claimed merged or on main. Historical commands/cwd/scratch input paths are preserved as executed, not claimed tracked.",
+    "integration_judgment": "No new audit; semantic pass/finding facts copied from independent original records."
+  }
+}

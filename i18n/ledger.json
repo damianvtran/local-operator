@@ -2446,6 +2446,48 @@
       "note": "Status band command, review round 2 copy delta (notice drops the held-reading clause). Independent audit round 4: 0 finding(s) (none) applied verbatim; delta re-audit at these en bytes PASS, 0 unresolved blocker/major. Read route: git show HEAD blob at 6c1828881 and b5f6328d1 (read_public_copy unreachable: session cwd was a different repo). Same model family as translator (disclosed)."
     },
     {
+      "locale": "es",
+      "namespace": "wire.errors.session_host",
+      "source_sha256": "b7d6561be15577c118ec333586f7c809e65471c5dfd0dd839abee700b2ed1ba0",
+      "translator": {
+        "agent": "i18n-translator",
+        "session": "056852035b33",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "1436c962e633",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Dual blind passes: i18n/audits/evidence/es/wire.errors.session_host/es31a/record.json; i18n/audits/evidence/es/wire.errors.session_host/es3222b/record.json. Both pass, 0 findings; actual quota fallback model recorded."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.errors.session_host",
+      "source_sha256": "b7d6561be15577c118ec333586f7c809e65471c5dfd0dd839abee700b2ed1ba0",
+      "translator": {
+        "agent": "i18n-translator",
+        "session": "056852035b33",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "f784eae73c69",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Dual blind passes: i18n/audits/evidence/es/wire.errors.session_host/es31a/record.json; i18n/audits/evidence/es/wire.errors.session_host/es3222b/record.json. Both pass, 0 findings; actual quota fallback model recorded."
+    },
+    {
       "locale": "fr",
       "namespace": "tui.status",
       "source_sha256": "2403f9c4f37b40264f575929627b99a0bcabb0baf1bcb6a0b951c6c31ec6843a",
@@ -4832,6 +4874,48 @@
       "note": "Status band command, review round 2 copy delta (notice drops the held-reading clause). Independent audit round 4: 0 finding(s) (none) applied verbatim; delta re-audit at these en bytes PASS, 0 unresolved blocker/major. Read route: git show HEAD blob at 6c1828881 and b5f6328d1 (read_public_copy unreachable: session cwd was a different repo). Same model family as translator (disclosed)."
     },
     {
+      "locale": "fr",
+      "namespace": "wire.errors.session_host",
+      "source_sha256": "b7d6561be15577c118ec333586f7c809e65471c5dfd0dd839abee700b2ed1ba0",
+      "translator": {
+        "agent": "i18n-translator (host-copy-fr)",
+        "session": "829abca97a25",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (host-fr-audit-a)",
+        "session": "0a66628c58a2",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Dual blind passes: i18n/audits/evidence/fr/wire.errors.session_host/fr31a/record.json; i18n/audits/evidence/fr/wire.errors.session_host/h3222b/record.json. Both pass, 0 findings; actual quota fallback model recorded."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.errors.session_host",
+      "source_sha256": "b7d6561be15577c118ec333586f7c809e65471c5dfd0dd839abee700b2ed1ba0",
+      "translator": {
+        "agent": "i18n-translator (host-copy-fr)",
+        "session": "829abca97a25",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (host-fr-audit-b)",
+        "session": "83a2be80f6af",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Dual blind passes: i18n/audits/evidence/fr/wire.errors.session_host/fr31a/record.json; i18n/audits/evidence/fr/wire.errors.session_host/h3222b/record.json. Both pass, 0 findings; actual quota fallback model recorded."
+    },
+    {
       "locale": "hi",
       "namespace": "tui.status",
       "source_sha256": "2403f9c4f37b40264f575929627b99a0bcabb0baf1bcb6a0b951c6c31ec6843a",
@@ -6251,6 +6335,48 @@
       "note": "Status band command, review round 2 copy delta (notice drops the held-reading clause). Independent audit round 4: 0 finding(s) (none) applied verbatim; delta re-audit at these en bytes PASS, 0 unresolved blocker/major. Read route: git show HEAD blob at 6c1828881 and b5f6328d1 (read_public_copy unreachable: session cwd was a different repo). Same model family as translator (disclosed)."
     },
     {
+      "locale": "hi",
+      "namespace": "wire.errors.session_host",
+      "source_sha256": "b7d6561be15577c118ec333586f7c809e65471c5dfd0dd839abee700b2ed1ba0",
+      "translator": {
+        "agent": "i18n-translator",
+        "session": "d2959affe186",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "b2f3bfde5529",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Dual blind passes: i18n/audits/evidence/hi/wire.errors.session_host/h31a/record.json; i18n/audits/evidence/hi/wire.errors.session_host/h31-39a4b/record.json. Both pass, 0 findings; actual quota fallback model recorded."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.errors.session_host",
+      "source_sha256": "b7d6561be15577c118ec333586f7c809e65471c5dfd0dd839abee700b2ed1ba0",
+      "translator": {
+        "agent": "i18n-translator",
+        "session": "d2959affe186",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "39a4a8de4f1c",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Dual blind passes: i18n/audits/evidence/hi/wire.errors.session_host/h31a/record.json; i18n/audits/evidence/hi/wire.errors.session_host/h31-39a4b/record.json. Both pass, 0 findings; actual quota fallback model recorded."
+    },
+    {
       "locale": "ru",
       "namespace": "tui.status",
       "source_sha256": "2403f9c4f37b40264f575929627b99a0bcabb0baf1bcb6a0b951c6c31ec6843a",
@@ -7666,6 +7792,48 @@
       },
       "status": "passed",
       "note": "Status band command, review round 2 copy delta (notice drops the held-reading clause). Independent audit round 4: 1 finding(s) (nit) applied verbatim; delta re-audit at these en bytes PASS, 0 unresolved blocker/major. Read route: git show HEAD blob at 6c1828881 and b5f6328d1 (read_public_copy unreachable: session cwd was a different repo). Same model family as translator (disclosed)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.errors.session_host",
+      "source_sha256": "b7d6561be15577c118ec333586f7c809e65471c5dfd0dd839abee700b2ed1ba0",
+      "translator": {
+        "agent": "i18n-translator (lopdev, host-copy-ru)",
+        "session": "bd43602aa8db",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "af28bb46bcc2",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Dual blind passes: i18n/audits/evidence/ru/wire.errors.session_host/host-ru-a1/record.json; i18n/audits/evidence/ru/wire.errors.session_host/host3222b/record.json. Both pass, 0 findings; actual quota fallback model recorded."
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.errors.session_host",
+      "source_sha256": "b7d6561be15577c118ec333586f7c809e65471c5dfd0dd839abee700b2ed1ba0",
+      "translator": {
+        "agent": "i18n-translator (lopdev, host-copy-ru)",
+        "session": "bd43602aa8db",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev, host-ru-audit-b)",
+        "session": "df0e9229eed3",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Dual blind passes: i18n/audits/evidence/ru/wire.errors.session_host/host-ru-a1/record.json; i18n/audits/evidence/ru/wire.errors.session_host/host3222b/record.json. Both pass, 0 findings; actual quota fallback model recorded."
     },
     {
       "locale": "ur",
@@ -9987,6 +10155,48 @@
       "note": "Status band command, review round 2 copy delta (notice drops the held-reading clause). Independent audit round 4: 0 finding(s) (none) applied verbatim; delta re-audit at these en bytes PASS, 0 unresolved blocker/major. Read route: git show HEAD blob at 6c1828881 and b5f6328d1 (read_public_copy unreachable: session cwd was a different repo). Same model family as translator (disclosed)."
     },
     {
+      "locale": "ur",
+      "namespace": "wire.errors.session_host",
+      "source_sha256": "b7d6561be15577c118ec333586f7c809e65471c5dfd0dd839abee700b2ed1ba0",
+      "translator": {
+        "agent": "i18n-translator",
+        "session": "50b1205a23e1",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "a8ce9efa0b57",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Dual blind passes: i18n/audits/evidence/ur/wire.errors.session_host/hura1/record.json; i18n/audits/evidence/ur/wire.errors.session_host/u31h8b/record.json. Both pass, 0 findings; actual quota fallback model recorded."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.errors.session_host",
+      "source_sha256": "b7d6561be15577c118ec333586f7c809e65471c5dfd0dd839abee700b2ed1ba0",
+      "translator": {
+        "agent": "i18n-translator",
+        "session": "50b1205a23e1",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "8a79664ef0c5",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Dual blind passes: i18n/audits/evidence/ur/wire.errors.session_host/hura1/record.json; i18n/audits/evidence/ur/wire.errors.session_host/u31h8b/record.json. Both pass, 0 findings; actual quota fallback model recorded."
+    },
+    {
       "locale": "vi",
       "namespace": "tui.status",
       "source_sha256": "2403f9c4f37b40264f575929627b99a0bcabb0baf1bcb6a0b951c6c31ec6843a",
@@ -11403,6 +11613,48 @@
       },
       "status": "passed",
       "note": "Status band command, review round 2 copy delta (notice drops the held-reading clause). Independent audit round 4: 0 finding(s) (none) applied verbatim; delta re-audit at these en bytes PASS, 0 unresolved blocker/major. Read route: git show HEAD blob at 6c1828881 and b5f6328d1 (read_public_copy unreachable: session cwd was a different repo). Same model family as translator (disclosed)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.errors.session_host",
+      "source_sha256": "b7d6561be15577c118ec333586f7c809e65471c5dfd0dd839abee700b2ed1ba0",
+      "translator": {
+        "agent": "i18n-translator",
+        "session": "26368bfbce62",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "393a054d09f7",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Dual blind passes: i18n/audits/evidence/vi/wire.errors.session_host/vh31a1/record.json; i18n/audits/evidence/vi/wire.errors.session_host/261031-host-9d47b/record.json. Both pass, 0 findings; actual quota fallback model recorded."
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.errors.session_host",
+      "source_sha256": "b7d6561be15577c118ec333586f7c809e65471c5dfd0dd839abee700b2ed1ba0",
+      "translator": {
+        "agent": "i18n-translator",
+        "session": "26368bfbce62",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "9d47bf14cd92",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Dual blind passes: i18n/audits/evidence/vi/wire.errors.session_host/vh31a1/record.json; i18n/audits/evidence/vi/wire.errors.session_host/261031-host-9d47b/record.json. Both pass, 0 findings; actual quota fallback model recorded."
     },
     {
       "locale": "zh-CN",
@@ -13608,6 +13860,48 @@
       },
       "status": "passed",
       "note": "Status band command, review round 2 copy delta (notice drops the held-reading clause). Independent audit round 4: 0 finding(s) (none) applied verbatim; delta re-audit at these en bytes PASS, 0 unresolved blocker/major. Read route: git show HEAD blob at 6c1828881 and b5f6328d1 (read_public_copy unreachable: session cwd was a different repo). Same model family as translator (disclosed)."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.errors.session_host",
+      "source_sha256": "b7d6561be15577c118ec333586f7c809e65471c5dfd0dd839abee700b2ed1ba0",
+      "translator": {
+        "agent": "i18n-translator (lopdev; host-copy-zh)",
+        "session": "d90daece65d4",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "45153dd07ae1",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Dual blind passes: i18n/audits/evidence/zh-CN/wire.errors.session_host/zh31a1/record.json; i18n/audits/evidence/zh-CN/wire.errors.session_host/host26b/record.json. Both pass, 0 findings; actual quota fallback model recorded."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.errors.session_host",
+      "source_sha256": "b7d6561be15577c118ec333586f7c809e65471c5dfd0dd839abee700b2ed1ba0",
+      "translator": {
+        "agent": "i18n-translator (lopdev; host-copy-zh)",
+        "session": "d90daece65d4",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev; host-zh-CN-audit-b)",
+        "session": "3d31f5998c79",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Dual blind passes: i18n/audits/evidence/zh-CN/wire.errors.session_host/zh31a1/record.json; i18n/audits/evidence/zh-CN/wire.errors.session_host/host26b/record.json. Both pass, 0 findings; actual quota fallback model recorded."
     }
   ]
 }

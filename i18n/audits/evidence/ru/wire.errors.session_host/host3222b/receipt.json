@@ -1,0 +1,45 @@
+{
+  "record_reference": "i18n/audits/evidence/ru/wire.errors.session_host/host3222b/record.json",
+  "actual_record_path": "/Users/damian/.local-operator/sessions/df0e9229eed3/scratchpad/host-ru-audit-b/record.json",
+  "auditor": {
+    "agent": "i18n-auditor (lopdev, host-ru-audit-b)",
+    "session": "df0e9229eed3",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "bd43602aa8db",
+    "actual_model_source": "Host model-switch notices: anthropic/claude-sonnet-5-5 quota failure, temporary anthropic/claude-opus-5-5 switch, subsequent openai/gpt-6.1-sol quota fallback. Substantive input reading, semantic judgment, validation and artifacts performed under openai/gpt-6.1-sol. Initial design-qa skill read preceded switches."
+  },
+  "audit_date": "2026-10-31",
+  "status": "passed",
+  "files": [
+    {
+      "path": "i18n/audits/evidence/ru/wire.errors.session_host/host3222b/record.json",
+      "actual_path": "/Users/damian/.local-operator/sessions/df0e9229eed3/scratchpad/host-ru-audit-b/record.json",
+      "sha256": "5b9740ed2abc8207f34fb9ddbba2ee23ec86dfd436b233b7f7975b2a8d119a4d"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/wire.errors.session_host/host3222b/report.md",
+      "actual_path": "/Users/damian/.local-operator/sessions/df0e9229eed3/scratchpad/host-ru-audit-b/report.md",
+      "sha256": "8a3e1a53d05a7fe048d9719844f1b3905f7afc39a99d8dc5884ccb4239221fa1"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/wire.errors.session_host/host3222b/audit.log",
+      "actual_path": "/Users/damian/.local-operator/sessions/df0e9229eed3/scratchpad/host-ru-audit-b/audit.log",
+      "sha256": "24bdcbbf7c99039d0f869c1fe96ce8c9e972e2e51c36d1aba5a42c0e2a28f1c5"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/wire.errors.session_host/host3222b/ledgerproposal.json",
+      "actual_path": "/Users/damian/.local-operator/sessions/df0e9229eed3/scratchpad/host-ru-audit-b/ledgerproposal.json",
+      "sha256": "09187761ed1af8c701bb8d19a0d1ce77946fca020622503332a1254dba760c3a"
+    }
+  ],
+  "retention_status": "scratch_pending_integrator_tracking; no tracked bundle or shared ledger write claimed",
+  "integration": {
+    "integrated_from_session": "df0e9229eed3",
+    "original_record_sha256": "5b9740ed2abc8207f34fb9ddbba2ee23ec86dfd436b233b7f7975b2a8d119a4d",
+    "original_receipt_sha256": "a917f6eab9ea826a6450f2e5d6a89a1b15a2f0b8d55e0f8667d7a34004a4c9ab",
+    "canonical_record": "i18n/audits/evidence/ru/wire.errors.session_host/host3222b/record.json",
+    "canonical_translator_provenance": "i18n/audits/evidence/ru/wire.errors.session_host/host3222b/translator/provenance.json",
+    "retention": "Retained in this PR; not claimed merged or on main. Historical commands/cwd/scratch input paths are preserved as executed, not claimed tracked.",
+    "integration_judgment": "No new audit; semantic pass/finding facts copied from independent original records."
+  }
+}

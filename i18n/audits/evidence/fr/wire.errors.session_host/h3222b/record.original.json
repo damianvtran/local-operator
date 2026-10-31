@@ -1,0 +1,122 @@
+{
+  "locale": "fr",
+  "namespace": "wire.errors.session_host",
+  "audit_id": "h3222b",
+  "audit_date": "2026-10-31",
+  "key_count": 3,
+  "audit_kind": "second_independent_semantic_audit",
+  "source_audit_revision": "9c979a03d551020ce6ff1b16c8066aa69ce7bb2a",
+  "auditor": {
+    "agent": "i18n-auditor (host-fr-audit-b)",
+    "session": "83a2be80f6af",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "829abca97a25",
+    "actual_model_source": "Latest host model-switch notice in this session: openai/gpt-6.1-sol after provider quota failures; actual semantic audit and execution performed after that notice.",
+    "fallback": true,
+    "fallback_history": [
+      "anthropic/claude-sonnet-5-5",
+      "anthropic/claude-opus-5-5",
+      "openai/gpt-6.1-sol"
+    ],
+    "fallback_reason": "provider failure: quota"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.errors.session_host.json",
+      "sha256": "b7d6561be15577c118ec333586f7c809e65471c5dfd0dd839abee700b2ed1ba0"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/wire.errors.session_host.context.json",
+      "sha256": "d26acd5a6357a0c54bbd5ed409b4ad2c060ee52b9bd76670679397c4b464f724"
+    },
+    "fr": {
+      "path": "local_operator/i18n/catalogues/fr/wire.errors.session_host.json",
+      "candidate_path": "/Users/damian/.local-operator/sessions/829abca97a25/scratchpad/host-copy-fr/wire.errors.session_host.json",
+      "sha256": "87cb0f0affb5c0a98298ca1e09fd72287c53b605968af4f92ba194fc54e27ad2"
+    },
+    "style_guide": {
+      "path": "i18n/style-guides/fr.md",
+      "sha256": "5315e1ac10c2ce57aac631ba653d08de680ee70c9a022ed3a8345ce2f9902ee7",
+      "revision": "9c979a03d551020ce6ff1b16c8066aa69ce7bb2a"
+    },
+    "style_guide_worktree_read": {
+      "path": "i18n/style-guides/fr.md",
+      "sha256": "ae1519ab7617d19aa826918d607de1d018595094166edbc18aa58f6a8f0a4226",
+      "note": "Worktree omits only an unrelated relay.chrome width-exception paragraph relative to committed style. Reviewed diff; no rules applicable to session-host copy changed."
+    },
+    "glossary": {
+      "path": "i18n/glossary.md",
+      "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8"
+    },
+    "translator_provenance": {
+      "path": "/Users/damian/.local-operator/sessions/829abca97a25/scratchpad/host-copy-fr/provenance.json",
+      "sha256": "7e2eb017148c5e20eb62fb5c85b52f3e7977958359150351879bee07dd7e824f"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/fr/wire.errors.session_host/h3222b/report.md",
+      "sha256": "d80fce4bb62cd3426f56700324bcf6403cee6179ce89da3a153eb290c2b4aa36"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.errors.session_host/h3222b/audit.log",
+      "sha256": "11c4415c30db61588da8a3945e97f32a1ae4375bd3f349d8da2f9714e5254c1d"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.errors.session_host/h3222b/ledger-row.proposal.json",
+      "sha256": "59e210b9cc1fe8b29c58cbcd670e1a89a9db13577f2b9c7173c1e28f506132ed"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "per_key_checks": [
+    {
+      "key": "wire.errors.session_host.unsupported",
+      "characters": 195,
+      "source_characters": 145,
+      "placeholders": [],
+      "plural_select": "not present",
+      "literal_parity": "passed",
+      "maxCells": null,
+      "maxChars": null
+    },
+    {
+      "key": "wire.errors.session_host.unavailable",
+      "characters": 129,
+      "source_characters": 110,
+      "placeholders": [],
+      "plural_select": "not present",
+      "literal_parity": "passed",
+      "maxCells": null,
+      "maxChars": null
+    },
+    {
+      "key": "wire.errors.session_host.refused",
+      "characters": 206,
+      "source_characters": 174,
+      "placeholders": [],
+      "plural_select": "not present",
+      "literal_parity": "passed",
+      "maxCells": null,
+      "maxChars": null
+    }
+  ],
+  "audit_notes_not_execution_log": {
+    "path": "i18n/audits/evidence/fr/wire.errors.session_host/h3222b/report.md",
+    "explanation": "Semantic reasoning and limitations; actual validator command execution is in audit.log."
+  },
+  "execution_log": "i18n/audits/evidence/fr/wire.errors.session_host/h3222b/audit.log",
+  "rendered_fit_proven": false,
+  "shared_ledger_written": false,
+  "retention": {
+    "status": "scratch_handoff_not_tracked",
+    "future_canonical_root": "i18n/audits/evidence/fr/wire.errors.session_host/h3222b",
+    "manager_action": "Retain bundle under canonical root before citing as tracked evidence."
+  },
+  "new_report_is_original": true,
+  "new_report_is_historical_R2_recreation": false,
+  "backdated": false
+}

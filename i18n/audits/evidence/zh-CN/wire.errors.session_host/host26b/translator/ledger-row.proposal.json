@@ -1,0 +1,14 @@
+{
+  "locale": "zh-CN",
+  "namespace": "wire.errors.session_host",
+  "source_sha256": "b7d6561be15577c118ec333586f7c809e65471c5dfd0dd839abee700b2ed1ba0",
+  "translator": {
+    "agent": "i18n-translator (lopdev; host-copy-zh)",
+    "session": "d90daece65d4",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-10-31",
+    "actual_model_source": "Explicit runtime model-switch notice: temporary fallback to openai/gpt-6.1-sol after provider quota failure; prior notice named anthropic/claude-opus-5-5; requested primary anthropic/claude-sonnet-5-5. Translation authored after gpt-6.1-sol switch."
+  },
+  "status": "translated",
+  "note": "Translation proposal only; independent audit pending. Source/context pinned to 9c979a03d55; logs/session-host.log preserved. Never started/reconnect ambiguity avoided. Not passed."
+}

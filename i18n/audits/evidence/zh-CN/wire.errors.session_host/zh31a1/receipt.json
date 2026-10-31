@@ -1,0 +1,40 @@
+{
+  "record_reference": "i18n/audits/evidence/zh-CN/wire.errors.session_host/zh31a1/record.json",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "45153dd07ae1",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "d90daece65d4",
+    "actual_model_source": "Explicit runtime model-switch user notice: temporary fallback openai/gpt-6.1-sol after provider quota failure; audit performed after that notice. Earlier primary anthropic/claude-sonnet-5-5 and intermediate anthropic/claude-opus-5-5 were not the substantive audit model.",
+    "fallback": true
+  },
+  "audit_date": "2026-10-31",
+  "status": "scratch-only; not committed; ledger proposal unapplied",
+  "files": [
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.errors.session_host/zh31a1/record.json",
+      "sha256": "6d287fad7b2f7beeb3698929171dc483e32d915e3f2380d898515b5490e6af8c"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.errors.session_host/zh31a1/report.md",
+      "sha256": "3294dcf52701f5cb1b745db43397f420d90dfb97a49b2e769e29e0992735ac83"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.errors.session_host/zh31a1/audit.log",
+      "sha256": "a11d373e50a7de749e6a00a27156aa0f77cdb19cd096c87fff6b7ac62c493930"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.errors.session_host/zh31a1/ledger-proposal.json",
+      "sha256": "6fad6e56e9e466d79935b87d7523a4ace16c96bdf92b248bb6310ba6331c0bb3"
+    }
+  ],
+  "integration": {
+    "integrated_from_session": "45153dd07ae1",
+    "original_record_sha256": "6d287fad7b2f7beeb3698929171dc483e32d915e3f2380d898515b5490e6af8c",
+    "original_receipt_sha256": "326c224783637b73d45937ab6baa17c50850bcb39a55ba035aba8b861cf30512",
+    "canonical_record": "i18n/audits/evidence/zh-CN/wire.errors.session_host/zh31a1/record.json",
+    "canonical_translator_provenance": "i18n/audits/evidence/zh-CN/wire.errors.session_host/zh31a1/translator/provenance.json",
+    "retention": "Retained in this PR; not claimed merged or on main. Historical commands/cwd/scratch input paths are preserved as executed, not claimed tracked.",
+    "integration_judgment": "No new audit; semantic pass/finding facts copied from independent original records."
+  }
+}

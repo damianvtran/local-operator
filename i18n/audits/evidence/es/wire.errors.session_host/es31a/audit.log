@@ -1,0 +1,11 @@
+VERIFIED committed en SHA256 b7d6561be15577c118ec333586f7c809e65471c5dfd0dd839abee700b2ed1ba0
+VERIFIED committed context SHA256 d26acd5a6357a0c54bbd5ed409b4ad2c060ee52b9bd76670679397c4b464f724
+VERIFIED existing snapshot validator/dependency bytes: ["scripts/i18n/check.py", "scripts/i18n/login.py", "local_operator/i18n/resolve.py", "local_operator/i18n/boot.py", "local_operator/i18n/__init__.py", "local_operator/i18n/format.py", "local_operator/i18n/cli_help.py", "local_operator/i18n/display.py", "local_operator/i18n/runtime.py", "local_operator/i18n/frames.py", "local_operator/i18n/http.py", "local_operator/i18n/text.py", "local_operator/i18n/messages.py", "local_operator/i18n/catalogues.py", "local_operator/i18n/data/plural_rules.json"]
+EXECUTED committed scripts/i18n/check.py::check_catalogues() on read-only isolated en/es namespace fixture
+ACTUAL problems: []
+KEY PASS wire.errors.session_host.unsupported: arguments=(); chars=178; no ICU plurals/selects, markup or code spans; no declared width limit
+KEY PASS wire.errors.session_host.unavailable: arguments=(); chars=143; no ICU plurals/selects, markup or code spans; no declared width limit
+KEY PASS wire.errors.session_host.refused: arguments=(); chars=211; no ICU plurals/selects, markup or code spans; no declared width limit
+PASS: 3/3 keys; valid JSON, exact keys, empty placeholder sets, preserved path/product literal; ICU plural/category checks vacuous for these nonplural messages.
+SCOPE: static/scoped catalogue validation, not whole-repository CLI, rendered fit or release approval.
+INPUT_HASHES {"context": {"path": "local_operator/i18n/catalogues/en/wire.errors.session_host.context.json", "sha256": "d26acd5a6357a0c54bbd5ed409b4ad2c060ee52b9bd76670679397c4b464f724"}, "en": {"path": "local_operator/i18n/catalogues/en/wire.errors.session_host.json", "sha256": "b7d6561be15577c118ec333586f7c809e65471c5dfd0dd839abee700b2ed1ba0"}, "es": {"candidate_path": "/Users/damian/.local-operator/sessions/056852035b33/scratchpad/host-copy-es/wire.errors.session_host.json", "path": "local_operator/i18n/catalogues/es/wire.errors.session_host.json", "sha256": "b27376785fe2c4bc4e3ca302e3f34097dad93bf483ccef5a921177ac6e8a00b8"}}

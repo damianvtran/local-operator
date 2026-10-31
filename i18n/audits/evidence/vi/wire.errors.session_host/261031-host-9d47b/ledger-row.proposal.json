@@ -1,0 +1,20 @@
+{
+  "locale": "vi",
+  "namespace": "wire.errors.session_host",
+  "source_sha256": "b7d6561be15577c118ec333586f7c809e65471c5dfd0dd839abee700b2ed1ba0",
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "26368bfbce62",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-10-31"
+  },
+  "auditor": {
+    "agent": "i18n-auditor",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-10-31",
+    "result": "passed",
+    "findings": 0
+  },
+  "status": "passed",
+  "note": "Second independent semantic pass b; 3/3 keys; no unresolved blocker/major. Record: i18n/audits/evidence/vi/wire.errors.session_host/261031-host-9d47b/record.json. No rendered fit claim."
+}

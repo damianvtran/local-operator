@@ -1,0 +1,64 @@
+"""Render the real TUI prompt-error path using an actual cold-facade refusal."""
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path.cwd()))
+from scripts.visual_capture import isolate_capture, save_capture
+isolate_capture()  # Before any application import: CSS-loaded real app, isolated roots.
+import asyncio
+import json
+import os
+from unittest.mock import patch
+from local_operator import memory_guard
+from local_operator.session.attached import AttachedSession
+from local_operator.session.runtime import session_host
+from local_operator.tui.app import OperatorApp
+from local_operator.tui.widgets.editor import Editor
+from tests.unit.tui.test_app_pilot import FakeSession, _factory
+from tests.unit.tui.conftest import await_session_boot
+
+out=Path(sys.argv[1]); out.mkdir(parents=True,exist_ok=True)
+
+async def capture(locale, fallback=False):
+    os.environ['LOP_LANG']=locale
+    os.environ['LOP_SESSION_HOST']='1'
+    if fallback: os.environ['LOP_I18N']='0'
+    else: os.environ.pop('LOP_I18N',None)
+    config=Path(os.environ['LOCAL_OPERATOR_CONFIG_DIR'])
+    facade=await AttachedSession.cold('visual3222',config_dir=config,cwd=str(config),takeover_factory=lambda:None)
+    class RefusedSession(FakeSession):
+        observed=None
+        async def prompt(self,text,images=None,**kwargs):
+            self.prompts.append(text)
+            try: await facade._ensure_bound()
+            except ConnectionError as error:
+                self.observed=str(error)
+                raise
+    session=RefusedSession()
+    app=OperatorApp(lambda:_factory(session))
+    def refuse(*args,**kwargs):
+        raise session_host.SessionHostUnavailable('refused','synthetic private detail -- must not render')
+    with patch.object(session_host,'request_spawn',refuse), patch.object(memory_guard,'admission_check',lambda what:memory_guard.Admission(True,0,0,0,'')), patch.object(OperatorApp,'_check_for_update',lambda self:None):
+        async with app.run_test(size=(100,32)) as pilot:
+            await await_session_boot(app)
+            editor=app.query_one(Editor); editor.focus()
+            await pilot.press('h','i','enter')
+            deadline=asyncio.get_running_loop().time()+15
+            while session.observed is None:
+                assert asyncio.get_running_loop().time()<deadline,'prompt did not reach the real facade'
+                await pilot.pause()
+            await pilot.pause()
+            tag=locale+('-fallback' if fallback else '')
+            save_capture(app,out/(tag+'-first.svg'))
+            await pilot.pause()
+            save_capture(app,out/(tag+'-settled.svg'))
+            assert 'reconnecting' not in session.observed
+            assert 'synthetic private' not in session.observed
+            info={'locale':locale,'forced_english_fallback':fallback,'error':session.observed,'css_path':str(app.CSS_PATH),'screen_size':[app.size.width,app.size.height]}
+            (out/(tag+'-receipt.json')).write_text(json.dumps(info,ensure_ascii=False,indent=2)+'\n')
+            print(json.dumps(info,ensure_ascii=False),flush=True)
+    await facade.dispose()
+
+async def main():
+    for locale,fallback in [('en',False),('fr',False),('ur',False),('ur',True)]:
+        await capture(locale,fallback)
+asyncio.run(main())

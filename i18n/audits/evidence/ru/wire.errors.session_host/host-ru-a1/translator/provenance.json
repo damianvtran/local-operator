@@ -1,0 +1,62 @@
+{
+  "locale": "ru",
+  "namespace": "wire.errors.session_host",
+  "key_count": 3,
+  "source_commit": "9c979a03d551020ce6ff1b16c8066aa69ce7bb2a",
+  "date": "2026-10-31",
+  "translator": {
+    "agent": "i18n-translator (lopdev, host-copy-ru)",
+    "session": "bd43602aa8db",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Session model-switch notice: openai/gpt-6.1-sol; temporary fallback after anthropic/claude-sonnet-5-5 quota failure and anthropic/claude-opus-5-5 switch. All three translations authored under openai/gpt-6.1-sol.",
+    "date": "2026-10-31"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.errors.session_host.json",
+      "sha256": "b7d6561be15577c118ec333586f7c809e65471c5dfd0dd839abee700b2ed1ba0"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/wire.errors.session_host.context.json",
+      "sha256": "d26acd5a6357a0c54bbd5ed409b4ad2c060ee52b9bd76670679397c4b464f724"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/ru/wire.errors.session_host.json",
+      "sha256": "232cdecfca4bd8018b47046cfc9ca0060980d476fb8fa01759ddb6b6d9192983"
+    },
+    "glossary": {
+      "path": "i18n/glossary.md",
+      "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8"
+    },
+    "style_guide": {
+      "path": "i18n/style-guides/ru.md",
+      "sha256": "f20e1cafaf70578c17ce072c71725628808d228e4be5604329f8da30386f1fb5"
+    },
+    "howto": {
+      "path": "docs/I18N.md",
+      "sha256": "3253eac7c2cfe0955ab5f80cccd09ca2377ccb477526c7d8fe745009c762cc63"
+    }
+  },
+  "status": "translated",
+  "independent_audit": "not performed; required from a separate auditor",
+  "glossary_proposals": {
+    "background session host": "фоновая служба сессий",
+    "background service manager": "диспетчер фоновых служб"
+  },
+  "ambiguity_notes": [
+    "Host is rendered as a background service rather than хост: it is a local session-hosting process, not a network computer. This preserves the startup failure without exposing internal details.",
+    "Unsupported is terminal on this computer. Unavailable says the session was not started and asks for a manual retry after waiting, never reconnecting to a running session.",
+    "No maxCells/maxChars constraints occur in the committed context sidecar."
+  ],
+  "validation": {
+    "command": ".venv/bin/python <scratch>/host-copy-ru/validation-tree/scripts/i18n/check.py --catalogues-only",
+    "scope": "Committed 9c979a03d55 local_operator/i18n and scripts/i18n snapshot, overlaid only with proposed ru catalogue; isolated scratch tree; no shared worktree edits.",
+    "exit_code": 0,
+    "actual_output": "check.py: catalogue checks: 0 problem(s)\n",
+    "log": {
+      "path": "/Users/damian/.local-operator/sessions/bd43602aa8db/scratchpad/host-copy-ru/validator.log",
+      "sha256": "a9bba4cb0f66a924b430b9b34380bf12a842d7cb2a12639f6b3e4891729056b1"
+    },
+    "additional_checks": "3 keys in source order; target hash matches; literal path and product preserved; NFC; no Cf controls."
+  }
+}

@@ -1,0 +1,113 @@
+{
+  "locale": "vi",
+  "namespace": "wire.errors.session_host",
+  "audit_id": "261031-host-9d47b",
+  "audit_date": "2026-10-31",
+  "audit_kind": "second_independent_semantic_pass",
+  "key_count": 3,
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "9d47bf14cd92",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "26368bfbce62",
+    "actual_model_source": "Runtime model-switch notice: openai/gpt-6.1-sol after provider quota fallback from anthropic/claude-sonnet-5-5 via anthropic/claude-opus-5-5; semantic audit performed after final switch.",
+    "date": "2026-10-31"
+  },
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "26368bfbce62",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-10-31"
+  },
+  "source_audit_revision": "9c979a03d551020ce6ff1b16c8066aa69ce7bb2a",
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.errors.session_host.json",
+      "sha256": "b7d6561be15577c118ec333586f7c809e65471c5dfd0dd839abee700b2ed1ba0",
+      "revision": "9c979a03d551020ce6ff1b16c8066aa69ce7bb2a"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/wire.errors.session_host.context.json",
+      "sha256": "d26acd5a6357a0c54bbd5ed409b4ad2c060ee52b9bd76670679397c4b464f724",
+      "revision": "9c979a03d551020ce6ff1b16c8066aa69ce7bb2a"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/vi/wire.errors.session_host.json",
+      "sha256": "d1ce1cbd3daa26c04bf01122319e7e8adec63050477c8dd8bc84ff61f16003ba",
+      "actual_input_path": "/Users/damian/.local-operator/sessions/26368bfbce62/scratchpad/host-copy-vi/wire.errors.session_host.json"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/vi/wire.errors.session_host/261031-host-9d47b/report.md",
+      "sha256": "0acf68f2fa0bf12f95abc5d107a8eafeb0a2250dc8213fb5dba29863d2fd4cbb"
+    },
+    {
+      "path": "i18n/audits/evidence/vi/wire.errors.session_host/261031-host-9d47b/audit.log",
+      "sha256": "dc3f68fc1b0bcc2257be4fd9bdbcaef60ffdb029ed69bf92b069206c65554534"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "audit_notes_not_execution_log": "report.md contains semantic review notes; audit.log contains the actual validator execution and executed supplementary assertion results.",
+  "mechanical_validation": {
+    "command": [
+      "/Users/damian/local-operator/.venv/bin/python",
+      "scripts/i18n/check.py",
+      "--catalogues-only"
+    ],
+    "cwd": "/Users/damian/.local-operator/sessions/26368bfbce62/scratchpad/host-copy-vi/validation-tree",
+    "exit_code": 0,
+    "stdout": "check.py: catalogue checks: 0 problem(s)\n",
+    "stderr": ""
+  },
+  "static_width_measurements": {
+    "wire.errors.session_host.unsupported": {
+      "characters": 145,
+      "rich_cells_unwrapped": 145,
+      "nfc": true,
+      "placeholders": [],
+      "plural_select": false,
+      "literal_parity": true,
+      "width_hint": null
+    },
+    "wire.errors.session_host.unavailable": {
+      "characters": 101,
+      "rich_cells_unwrapped": 101,
+      "nfc": true,
+      "placeholders": [],
+      "plural_select": false,
+      "literal_parity": true,
+      "width_hint": null
+    },
+    "wire.errors.session_host.refused": {
+      "characters": 173,
+      "rich_cells_unwrapped": 173,
+      "nfc": true,
+      "placeholders": [],
+      "plural_select": false,
+      "literal_parity": true,
+      "width_hint": null
+    }
+  },
+  "rendered_fit_proof": false,
+  "first_auditor_findings_inspected": false,
+  "mt_services_used": false,
+  "canonical_future_tracked_root": "i18n/audits/evidence/vi/wire.errors.session_host/261031-host-9d47b",
+  "retention_status": "scratch handoff pending manager canonical tracked integration; not on main",
+  "translator_provenance": {
+    "path": "/Users/damian/.local-operator/sessions/26368bfbce62/scratchpad/host-copy-vi/provenance.json",
+    "sha256": "1743bc9ea9a1ba752ba9c82322b6c260aae450d4cf8c8f9922972dffff4184c8"
+  },
+  "translator_validation_log": {
+    "path": "/Users/damian/.local-operator/sessions/26368bfbce62/scratchpad/host-copy-vi/validator.log",
+    "sha256": "a9bba4cb0f66a924b430b9b34380bf12a842d7cb2a12639f6b3e4891729056b1",
+    "source": "translator-provided prior run, independently rerun in this audit"
+  },
+  "new_report_is_original": true,
+  "new_report_is_historical_R2_recreation": false,
+  "backdated": false
+}
