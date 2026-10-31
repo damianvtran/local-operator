@@ -88,9 +88,16 @@ from local_operator.providers.radient_credentials import (
     org_oauth_destination_allowed,
 )
 from local_operator.team_bridge import availability
+
+# V2/V3 are re-exported: callers and tests have always imported the consent
+# version names from ``client``.
+from local_operator.team_bridge.consent_versions import (  # noqa: F401
+    CONSENT_VERSION_V2,
+    CONSENT_VERSION_V3,
+    DEFAULT_ON_CONSENT_VERSIONS,
+)
 from local_operator.team_bridge.settings import (
     DEFAULT_ENROLLMENT_DONE,
-    DEFAULT_ON_CONSENT_VERSION,
     TeamBridgeSettings,
     parse_pending_default_enrollment,
     pending_default_enrollment,
@@ -129,11 +136,16 @@ TEXT_CAP_BYTES = 2048
 SEED_HEAD_TIMEOUT_S = 3.0
 
 CONSENT_VERSION_V1 = "bridge_consent_v1"
-#: The opt-out disclosure. Only a hub SERVING it (and listing it as accepted)
-#: lets the status discipline enrol anybody automatically; see
-#: :func:`default_on_in_force`. An explicit enable is version-agnostic and
-#: echoes whatever the hub served.
-CONSENT_VERSION_V2 = DEFAULT_ON_CONSENT_VERSION
+# ``CONSENT_VERSION_V2`` / ``CONSENT_VERSION_V3`` (the opt-out disclosures) and
+# ``DEFAULT_ON_CONSENT_VERSIONS`` come from ``consent_versions``. Only a hub SERVING a
+# member of that set (and listing it as accepted) lets the status discipline
+# enrol anybody automatically; see :func:`default_on_in_force`. An explicit
+# enable is version-agnostic and echoes whatever the hub served.
+#
+# Served consent TEXT has no per-version byte pin here (only v1 is embedded,
+# for the offline dialog fallback): v2 and v3 bytes are accepted per version by
+# :class:`AcceptedTexts` (monotonic, immutable once versioned, 2 KiB cap), and
+# every default-on decision requires the served bytes to equal that record.
 SCREENING_VERSION_V1 = "bridge-screen-v1"
 GUIDANCE_VERSION_V1 = "bridge-guidance-v1"
 
@@ -891,6 +903,9 @@ LOCAL_ENROLLMENT_CODES = (
     "endpoint_not_active",
     "store_failed",
     "vetoed",
+    # Commit-only recovery only: the hub record cites a version other than the
+    # one the default-on POST echoed (#3225). Terminal, like no_consent_echo.
+    "consent_version_mismatch",
 )
 _LOCAL_ENROLLMENT_COMMITTED = frozenset({"committed", "already_owned"})
 #: The outcomes after a default-on POST that a COMMIT-ONLY retry may still fix
@@ -933,7 +948,11 @@ def _consent_on_record(endpoint: Mapping[str, Any]) -> str | None:
     if not isinstance(consent, Mapping) or consent.get("current") is not True:
         return None
     version = consent.get("version")
-    return version if version in (CONSENT_VERSION_V1, CONSENT_VERSION_V2) else None
+    # Exact membership: v1, or a default-on version (v2, v3) whose text this
+    # client knows; anything else (v4, v10, garbage) is not a known consent.
+    if version == CONSENT_VERSION_V1 or version in DEFAULT_ON_CONSENT_VERSIONS:
+        return version
+    return None
 
 
 VALID_STATES = ("active", "paused", "disabled")
@@ -2011,14 +2030,22 @@ class TeamBridgeClient:
         *,
         tenant_id: str,
         expected_account_id: str,
+        consent_version: str,
         may_commit_local: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
         """``POST /messaging/enrollment``: the hub's default-on enrolment.
 
-        WHY A ROUTE OF ITS OWN. Under ``bridge_consent_v2`` the hub enrols an
-        eligible member with no endpoint and records the provenance itself
-        (``consented_via = default_on``). The body therefore carries ONLY
-        ``consent_version`` (always v2) and the tenant: there is deliberately no
+        WHY A ROUTE OF ITS OWN. Under a default-on consent (``bridge_consent_v2``
+        or ``v3``) the hub enrols an eligible member with no endpoint and records
+        the provenance itself (``consented_via = default_on``). The body
+        therefore carries ONLY ``consent_version`` and the tenant.
+
+        ``consent_version`` is REQUIRED and must be the version the hub SERVED
+        (the one :func:`default_on_in_force` proved): the hub refuses an echo
+        that is not its served version, and claiming v2 when v3 bytes were
+        shown would record consent to text the member never saw. A version
+        outside :data:`DEFAULT_ON_CONSENT_VERSIONS` raises ``ValueError`` before
+        any I/O. There is deliberately no
         ``consented_via`` parameter anywhere on this path, because provenance is
         a fact the server establishes by which route wrote it, never a claim the
         client makes (pinned by a test that fails if the key ever appears).
@@ -2031,9 +2058,10 @@ class TeamBridgeClient:
 
         THE LOCAL COMMIT. The native owner + receipt are committed through the
         same machinery as an explicit enable, but ONLY when the hub's answer
-        proves THIS call created an active, v2, ``default_on`` endpoint. The hub
+        proves THIS call created an active ``default_on`` endpoint citing the
+        echoed version. The hub
         answers a no-op (200, current settings) when an endpoint already exists
-        in any state; committing a v2 receipt for a consent that was actually
+        in any state; committing a receipt for a consent that was actually
         collected as ``dialog``/``settings`` on another machine would invent a
         consent record this one never saw. Errors (404/405 from an older hub, a
         409 ``consent_version_unknown``, transport failures) propagate as
@@ -2052,7 +2080,9 @@ class TeamBridgeClient:
         member's next Turn off (or the unchanged explicit OFF) governs.
         """
 
-        body: dict[str, Any] = {"consent_version": CONSENT_VERSION_V2, "tenant_id": tenant_id}
+        if consent_version not in DEFAULT_ON_CONSENT_VERSIONS:
+            raise ValueError("default-on enrolment needs a default-on consent version")
+        body: dict[str, Any] = {"consent_version": consent_version, "tenant_id": tenant_id}
         _require_body_within(body, SETTINGS_BODY_MAX_BYTES)
         access = await self._guarded_access(expected_account_id)
         head = await self._pre_enable_head(tenant_id=tenant_id, access=access)
@@ -2062,7 +2092,7 @@ class TeamBridgeClient:
         if not (
             isinstance(consent, Mapping)
             and consent.get("consented_via") == "default_on"
-            and consent.get("version") == CONSENT_VERSION_V2
+            and consent.get("version") == consent_version
         ):
             # The hub's no-op: nothing was created here, so there is no local
             # enrolment to report on either.
@@ -2073,7 +2103,7 @@ class TeamBridgeClient:
             local_enrollment = await self._commit_explicit_enable(
                 state="active",
                 tenant_id=tenant_id,
-                consent_version=CONSENT_VERSION_V2,
+                consent_version=consent_version,
                 result=result,
                 access=access,
                 head=head,
@@ -2081,14 +2111,15 @@ class TeamBridgeClient:
         if local_enrollment is not None and local_enrollment["code"] in _RETRYABLE_COMMIT_CODES:
             # D1/R3: the endpoint now exists, so the surface reads state C and
             # default-on never runs again. Record what a commit-only retry needs:
-            # the endpoint THIS POST created and the PRE-POST head (R2-1).
+            # the endpoint THIS POST created, the PRE-POST head (R2-1) and the
+            # version this POST echoed (the text the member was shown).
             endpoint_id = endpoint.get("id") if isinstance(endpoint, Mapping) else None
             if self._config_dir is not None and isinstance(endpoint_id, str) and endpoint_id:
                 try:
                     record_default_enrollment(
                         self._config_dir,
                         expected_account_id,
-                        pending_default_enrollment(endpoint_id, head),
+                        pending_default_enrollment(endpoint_id, head, consent_version),
                     )
                 except Exception:  # noqa: BLE001 - bookkeeping; the outcome still says so
                     logger.warning("team_bridge: could not record the pending local commit")
@@ -2102,6 +2133,7 @@ class TeamBridgeClient:
         tenant_id: str,
         endpoint_id: str,
         head: int,
+        consent_version: str,
         expected_account_id: str,
         may_commit_local: Callable[[], bool],
     ) -> dict[str, Any]:
@@ -2113,9 +2145,14 @@ class TeamBridgeClient:
         This NEVER POSTs again: it reads the caller's settings (``GET``, the one
         answer carrying the endpoint's consent record) and commits the owner
         only when that record still proves this machine's default-on consent —
-        the SAME endpoint id the marker names, ``default_on`` + v2, current,
-        active. An endpoint consented elsewhere (dialog/settings) never matches,
-        so the consent hold is not widened into state C (R2-6).
+        the SAME endpoint id the marker names, ``default_on``, current, active,
+        and a version EQUAL to ``consent_version`` — the version the original
+        POST echoed, i.e. the text the member was shown (stored in the marker).
+        A record citing any other version commits nothing and answers
+        ``consent_version_mismatch``, exactly as the fresh enrol path commits
+        nothing when the hub's record does not cite the echo (review m1 / QA Q2
+        on #3225). An endpoint consented elsewhere (dialog/settings) never
+        matches, so the consent hold is not widened into state C (R2-6).
 
         ``head`` is the PRE-POST head the marker stored (0 for a brand-new
         endpoint), never one read now: the endpoint has been live since the POST,
@@ -2124,6 +2161,8 @@ class TeamBridgeClient:
         outcome; refusals and transport failures propagate to the caller.
         """
 
+        if consent_version not in DEFAULT_ON_CONSENT_VERSIONS:
+            raise ValueError("commit-only recovery needs a default-on consent version")
         access = await self._guarded_access(expected_account_id)
         answer = await self._send(
             "GET", "/messaging/settings", params={"tenant_id": tenant_id}, access=access
@@ -2135,18 +2174,21 @@ class TeamBridgeClient:
             and endpoint.get("id") == endpoint_id
             and isinstance(consent, Mapping)
             and consent.get("consented_via") == "default_on"
-            and consent.get("version") == CONSENT_VERSION_V2
             # Fail closed like ``_consent_on_record`` (review R1-3): a recovery
             # that commits consent needs the hub to SAY the record still binds.
             and consent.get("current") is True
         ):
             return _local_enrollment("no_consent_echo")
+        if consent.get("version") != consent_version:
+            # The hub binds this endpoint to a text other than the one shown:
+            # never a receipt for bytes the member did not see.
+            return _local_enrollment("consent_version_mismatch")
         if not may_commit_local():
             return _local_enrollment("vetoed")
         outcome = await self._commit_explicit_enable(
             state="active",
             tenant_id=tenant_id,
-            consent_version=CONSENT_VERSION_V2,
+            consent_version=consent_version,
             result=answer,
             access=access,
             head=head,
@@ -4499,15 +4541,16 @@ def default_on_in_force(check: StatusCheck) -> bool:
     """Whether this answer proves the hub's opt-out default is in force for the caller.
 
     ALL of: a READY answer; an eligible selected organization (the hub omits
-    ``consent`` for everyone else); the served ``consent.version`` is EXACTLY
-    ``bridge_consent_v2`` (the disclosure whose copy offers the opt-out) AND the
-    hub lists it in ``consent.accepted_versions``; and this client ACCEPTED those
+    ``consent`` for everyone else); the served ``consent.version`` is EXACTLY a
+    member of :data:`DEFAULT_ON_CONSENT_VERSIONS` (``bridge_consent_v2`` or
+    ``bridge_consent_v3``, the disclosures whose copy offers the opt-out) AND the
+    hub lists that same version in ``consent.accepted_versions``; and this client ACCEPTED those
     bytes on this answer (a refused text — backwards, changed-in-place, oversized
     — is in ``check.rejected`` and never authorises anything).
 
     A missing or malformed accepted set reads False, never "anything goes":
     that is also what a hub predating the set looks like, and such a hub must
-    keep the consent hold. Exact string membership, never version ordering: v3
+    keep the consent hold. Exact string membership, never version ordering: v4
     would be a new disclosure this build has not been taught to default on.
     """
 
@@ -4520,19 +4563,17 @@ def default_on_in_force(check: StatusCheck) -> bool:
     if not isinstance(consent, Mapping):
         return False
     accepted = consent.get("accepted_versions")
+    served = consent.get("version")
     if (
-        consent.get("version") != CONSENT_VERSION_V2
+        not isinstance(served, str)
+        or served not in DEFAULT_ON_CONSENT_VERSIONS
         or not isinstance(accepted, list)
-        or CONSENT_VERSION_V2 not in accepted
+        or served not in accepted
         or "consent" in check.rejected
     ):
         return False
     record = check.texts.get("consent")
-    return (
-        record is not None
-        and record.version == CONSENT_VERSION_V2
-        and record.text == consent.get("text")
-    )
+    return record is not None and record.version == served and record.text == consent.get("text")
 
 
 class StatusDiscipline:
@@ -4866,21 +4907,23 @@ class StatusDiscipline:
         access: OAuthAccess,
         texts: AcceptedTexts,
     ) -> StatusCheck:
-        """The ONE automatic enrolment: ``bridge_consent_v2``, opt-out, nothing fired.
+        """The ONE automatic enrolment: a default-on consent (v2/v3), opt-out, nothing fired.
 
         WHY IT EXISTS. The consent hold (#2712) forbade a status read from
-        enrolling under v1, whose copy never offered an opt-out. v2 is the
-        disclosure that says "on by default, turn it off in Settings", so once
-        the hub SERVES it an eligible member with no endpoint is enrolled here,
-        with nothing sent at enrolment: the endpoint and the native owner +
-        receipt are created, and the member then sees a dismissible notice with
-        Turn off. Enrolling is not sending — every send, receive and wake path
-        still needs the committed owner and a current receipt.
+        enrolling under v1, whose copy never offered an opt-out. v2 and v3
+        (``DEFAULT_ON_CONSENT_VERSIONS``) are the disclosures that say "on by
+        default, turn it off in Settings", so once the hub SERVES one an
+        eligible member with no endpoint is enrolled here, with nothing sent at
+        enrolment: the endpoint and the native owner + receipt are created,
+        and the member then sees a dismissible notice with Turn off. Enrolling
+        is not sending — every send, receive and wake path still needs the
+        committed owner and a current receipt.
 
         EVERY gate must hold, each failing individually means ZERO writes (a
         table test pins each):
 
-        1. v2 is served AND accepted by the hub (:func:`default_on_in_force`);
+        1. a default-on version (v2 or v3) is served AND accepted by the hub
+           (:func:`default_on_in_force`);
         2. the surface state is exactly B — eligible, NO endpoint. Never C/D/E
            (an endpoint in any state, so an opt-out is never reversed by a
            default) and never A/F/G;
@@ -4913,6 +4956,16 @@ class StatusDiscipline:
             return check
         tenant_id = selected_tenant_id(check.payload)
         if tenant_id is None:
+            return check
+        # The version ``default_on_in_force`` just proved served+accepted with
+        # matching bytes: the enrolment echoes exactly what was shown.
+        served_consent = (
+            check.payload.get("consent") if isinstance(check.payload, Mapping) else None
+        )
+        served_version = (
+            served_consent.get("version") if isinstance(served_consent, Mapping) else None
+        )
+        if not isinstance(served_version, str):
             return check
         local = _local_settings_snapshot(config_dir)
         if local is None or (local.enabled_is_set and not local.enabled):
@@ -4958,6 +5011,7 @@ class StatusDiscipline:
             result = await self._client.enroll_default_on(
                 tenant_id=tenant_id,
                 expected_account_id=account_id,
+                consent_version=served_version,
                 may_commit_local=_local_still_open,
             )
         except (BridgeRefusal, BridgeSignInRequired, ValueError):
@@ -5064,7 +5118,7 @@ class StatusDiscipline:
         pending = parse_pending_default_enrollment(local.default_enrollment.get(access.account_id))
         if pending is None:
             return
-        endpoint_id, head = pending
+        endpoint_id, head, consent_version = pending
         selected = select_tenant(check.payload)
         tenant_id = selected_tenant_id(check.payload)
         endpoint = selected.get("endpoint") if isinstance(selected, Mapping) else None
@@ -5103,6 +5157,7 @@ class StatusDiscipline:
                 tenant_id=tenant_id,
                 endpoint_id=endpoint_id,
                 head=head,
+                consent_version=consent_version,
                 expected_account_id=account_id,
                 may_commit_local=_still_pending,
             )
@@ -5110,7 +5165,12 @@ class StatusDiscipline:
             logger.warning("team_bridge: pending local enrolment deferred (%s)", type(exc).__name__)
             return
         code = outcome.get("code")
-        if outcome.get("committed") is True or code == "no_consent_echo":
+        # Both refusals are terminal: retrying cannot change the hub's record,
+        # so the marker becomes ``done`` (no loop, and never a second POST).
+        if outcome.get("committed") is True or code in (
+            "no_consent_echo",
+            "consent_version_mismatch",
+        ):
             try:
                 record_default_enrollment(config_dir, account_id)
             except Exception:  # noqa: BLE001 - bookkeeping only
@@ -5154,11 +5214,11 @@ class StatusDiscipline:
 
         A STATUS READ IS NOT AN ENROLLMENT PATH (consent hold, #2712), with ONE
         gated exception that runs BEFORE this (:meth:`_default_enroll`, only
-        under a served+accepted ``bridge_consent_v2``). This method itself never
+        under a served+accepted default-on consent, v2 or v3). This method itself never
         performs the settings PUT and never writes an ``OwnerReceipt``: an
         active endpoint in a server answer can come from another surface or an
         older build, so only the user's explicit settings write (or that gated
-        v2 enrolment, which the hub itself created) may enroll.
+        default-on enrolment, which the hub itself created) may enroll.
 
         The one local write left here is the designation for an ALREADY
         committed owner: the setting the user chose must reach the native record
