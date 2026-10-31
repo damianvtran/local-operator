@@ -169,23 +169,123 @@ def test_an_unarmed_signal_captures_nothing() -> None:
     assert siginfo.disarm(signal.SIGUSR2) is False
 
 
+def _header_siginfo(signo: int, pid: int, uid: int, code: int = 0) -> Any:
+    """A ``siginfo_t`` laid out by the PLATFORM'S HEADER, independent of ``_LAYOUTS``.
+
+    The fixture must not be built from the table under test: that would make the
+    decode agree with itself whatever the offsets. These are the two real headers,
+    spelled as ``ctypes`` structures:
+
+    * Darwin (``sys/signal.h``): ``si_signo, si_errno, si_code, si_pid, si_uid``.
+    * Linux, 64-bit (glibc ``bits/types/siginfo_t.h``): the same three ints, then
+      ``int __pad0`` (explicit padding, ``__WORDSIZE == 64``) so the ``_sifields``
+      union is 8-aligned, then ``_kill.si_pid, _kill.si_uid`` — bytes 16 and 20.
+
+    The first version of this test used a Darwin-shaped buffer on every platform
+    and was red on the Linux shard (decode read pid 501 / uid 0 from a buffer with
+    pid in word 3): the decoder's Linux offsets were right and the fixture was not.
+    """
+    import ctypes
+
+    fields: list[tuple[str, Any]] = [
+        ("si_signo", ctypes.c_int32),
+        ("si_errno", ctypes.c_int32),
+        ("si_code", ctypes.c_int32),
+    ]
+    if sys.platform == "linux":
+        fields.append(("__pad0", ctypes.c_int32))
+    fields += [
+        ("si_pid", ctypes.c_int32),
+        ("si_uid", ctypes.c_int32),
+        ("rest", ctypes.c_int32 * 26),
+    ]
+    cls = type("SigInfo", (ctypes.Structure,), {"_fields_": fields})
+    info = cls()
+    info.si_signo, info.si_code, info.si_pid, info.si_uid = signo, code, pid, uid
+    return info
+
+
+@pytest.mark.skipif(
+    sys.platform not in ("darwin", "linux"), reason="only these two layouts are written down"
+)
 def test_a_siginfo_that_disagrees_with_its_own_delivery_is_refused() -> None:
     """``si_signo`` is the structural check: a buffer that fails it is not a ``siginfo_t``.
 
     This is the guard that makes a wrong offset degrade to "no facts" instead of a
     confident wrong pid: word 0 is the one field every layout agrees on, so if it
     does not name the signal being delivered, nothing else read from that pointer
-    is reported.
+    is reported. The fixture is the host platform's REAL header layout (see
+    :func:`_header_siginfo`), so the byte offsets in ``_LAYOUTS`` are checked
+    against the header and not against themselves.
     """
     import ctypes
 
-    buffer = (ctypes.c_int32 * 6)(int(signal.SIGUSR1), 0, 0, 1234, 501, 0)
-    pointer = ctypes.cast(buffer, ctypes.c_void_p).value
-    assert pointer is not None
+    info = _header_siginfo(int(signal.SIGUSR1), pid=1234, uid=501, code=7)
+    pointer = ctypes.addressof(info)
     ok = siginfo._read(pointer, int(signal.SIGUSR1))
-    assert ok is not None and ok["pid"] == 1234 and ok["uid"] == 501
+    assert ok == {"signo": int(signal.SIGUSR1), "pid": 1234, "uid": 501, "code": 7}, ok
     assert siginfo._read(pointer, int(signal.SIGUSR2)) is None
     assert siginfo._read(None, int(signal.SIGUSR1)) is None
+
+
+def test_the_linux_decode_reads_a_linux_shaped_buffer_on_any_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_read`` with the Linux table decodes a glibc-shaped buffer, whatever the host.
+
+    The offsets-only test above proves the numbers; this one runs the DECODER with
+    them, so a Linux CI shard and this macOS host exercise the same code on the
+    same bytes. ``sys.platform`` is patched only for the lookup inside ``_read``.
+    """
+    import ctypes
+
+    class LinuxSigInfo64(ctypes.Structure):
+        _fields_ = [
+            ("si_signo", ctypes.c_int32),
+            ("si_errno", ctypes.c_int32),
+            ("si_code", ctypes.c_int32),
+            ("__pad0", ctypes.c_int32),
+            ("si_pid", ctypes.c_int32),
+            ("si_uid", ctypes.c_int32),
+            ("rest", ctypes.c_int32 * 26),
+        ]
+
+    info = LinuxSigInfo64(si_signo=int(signal.SIGTERM), si_code=0, si_pid=4242, si_uid=1000)
+    monkeypatch.setattr(sys, "platform", "linux")
+    got = siginfo._read(ctypes.addressof(info), int(signal.SIGTERM))
+    assert got == {"signo": int(signal.SIGTERM), "pid": 4242, "uid": 1000, "code": 0}, got
+    # And the Darwin-shaped read of the SAME bytes is the wrong answer this guards against.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    wrong = siginfo._read(ctypes.addressof(info), int(signal.SIGTERM))
+    assert wrong is not None and wrong["pid"] != 4242
+
+
+def test_the_linux_sender_offsets_are_the_64_bit_header_offsets() -> None:
+    """Linux ``si_pid``/``si_uid`` sit at bytes 16 and 20 (words 4 and 5), on any host.
+
+    Derived from glibc's ``siginfo_t`` (three ints, ``int __pad0`` under
+    ``__WORDSIZE == 64``, then the ``_sifields`` union whose ``_kill`` member
+    starts ``si_pid, si_uid``). Checked here with a structure built from that
+    declaration so it runs on every platform. 32-bit Linux has no ``__pad0`` and is
+    NOT covered by ``_LAYOUTS``; Linux is unarmed, so nothing reads this table in
+    production, and the table is what a future arming change must prove on a real
+    kernel first.
+    """
+    import ctypes
+
+    class LinuxSigInfo64(ctypes.Structure):
+        _fields_ = [
+            ("si_signo", ctypes.c_int32),
+            ("si_errno", ctypes.c_int32),
+            ("si_code", ctypes.c_int32),
+            ("__pad0", ctypes.c_int32),
+            ("si_pid", ctypes.c_int32),
+            ("si_uid", ctypes.c_int32),
+        ]
+
+    layout = siginfo._LAYOUTS["linux"]
+    assert layout["pid"] * 4 == LinuxSigInfo64.si_pid.offset == 16
+    assert layout["uid"] * 4 == LinuxSigInfo64.si_uid.offset == 20
 
 
 @_DARWIN_ONLY
