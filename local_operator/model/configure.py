@@ -3963,6 +3963,13 @@ class SessionStreamFn:
 
         self._auth_store = auth_store
         self._settings = settings
+        # Bound by Session after construction; keeping these on the stream lets
+        # every turn read the latest CLI/resolver state without rebuilding
+        # clients. Only the parent's spawn value lives here: the session choice
+        # and the agent pin are the SESSION's own fields, named (with this one)
+        # by ``saver/command.py::saver_choices`` — the two stream copies that
+        # nothing assigned are gone (review M1/m1).
+        self._saver_parent_value: bool | None = None
         self._session_id = session_id
         self._parent_session_id: str | None = None
         # The Anthropic response id of this conversation's last DIAGNOSED turn,
@@ -5286,6 +5293,22 @@ class SessionStreamFn:
             or not request.messages
         )
 
+    def bind_saver_session(self, session: Any) -> None:
+        """Read the owning session's live choice without sharing stream state.
+
+        Forks bind their own child session, so a parent's slash command cannot
+        silently change a child's upload decision.
+        """
+        self._saver_session = session
+
+    def _saver_choices(self) -> tuple[bool | None, bool | None, bool | None]:
+        from local_operator.saver.command import saver_choices
+
+        # The SESSION's three inputs are named in ONE place (review M1/m1): a
+        # second reader here once read a field nothing assigned, so this path
+        # spliced while `/saver status` reported off for the same session.
+        return saver_choices(getattr(self, "_saver_session", None), stream=self)
+
     async def _apply_saver(self, request: ChatRequest) -> ChatRequest:
         """Splice this conversation's Saver epochs into ``request``, or return it unchanged.
 
@@ -5340,8 +5363,23 @@ class SessionStreamFn:
         # gate instead of duplicating it: in LO1 `auto` is refused
         # (`auto_unavailable`) and `opt_in` has no session choice wired, so
         # neither reaches the network.
-        if not resolve_saver(self._settings, Availability(True, True)).on:
-            if mode == "opt_in":
+        session_choice, agent_pin, parent_value = self._saver_choices()
+
+        def resolved(best: Availability | None) -> Any:
+            return resolve_saver(
+                self._settings,
+                best,
+                session_choice=session_choice,
+                agent_pin=agent_pin,
+                parent_value=parent_value,
+            )
+
+        if not resolved(Availability(True, True)).on:
+            # The opt-out guard reads the SAME choice the resolver just used
+            # (review m1): it read a field nothing assigned, so `is not False`
+            # was always true and a user who typed `/saver off` still got the
+            # sign-out notice on every turn.
+            if mode == "opt_in" and session_choice is not False:
                 await self._saver_signed_out_notice()
             return request
         # The availability read is NEVER awaited on the turn (R-1/S-4/Q1): it
@@ -5351,7 +5389,16 @@ class SessionStreamFn:
         if availability is None or availability.expired():
             availability = start_availability_read()
             self._saver_availability_read = availability
-        decision = resolve_saver(self._settings, availability.result())
+        answered = availability.result()
+        owner = getattr(self, "_saver_session", None)  # unbound before Session binds it
+        if answered is not None and owner is not None:
+            # Publish what the read answered so the badge's cached view converges
+            # within one turn. Written as two attribute writes rather than a call
+            # into ``saver.command`` on purpose: this is the per-turn path, and an
+            # import there pulled the i18n runtime into it.
+            owner._saver_availability = answered
+            owner._saver_signed_in = answered.signed_in
+        decision = resolved(availability.result())
         if not decision.on:
             return request
         chain = self._ensure_saver_chain()

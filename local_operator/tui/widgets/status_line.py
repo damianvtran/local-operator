@@ -105,6 +105,15 @@ ICON_EFFORT = "▴"
 #: is ``›``, and ``high › » fast`` read as two separators in a row (design
 #: D1).
 ICON_FAST = "↯"
+#: Saver's compression mark: one cell, distinct from the speed lightning.
+#:
+#: NOT ``≡`` (design round 2, D3): that is ``PLAIN_TOOL_ICONS["read"]``, the
+#: lines-of-text mark on the very same screen, and ``glyphs.py`` states the rule
+#: an icon may not break — it must not echo the shape of a different meaning. It
+#: also reads as a hamburger menu, which this band has no concept of. ``⊖`` (a
+#: minus inside a circle) says the one thing the feature does — FEWER tokens in
+#: the request — and collides with no tool icon, no separator and no verdict.
+ICON_SAVER = "⊖"
 ICON_CWD = "⌂"
 #: Active ``/agent`` profile governing THIS session (U2). A CATEGORY marker like
 #: every other icon here — the value is the profile name beside it (`◉ auditor`),
@@ -449,6 +458,18 @@ _DROP_LADDER: tuple[str, ...] = (
     # whole word. A band tight enough to drop one static dial should keep the
     # expensive one visible.
     "fast",
+    # Beside `fast` and shed just AFTER it — later in this tuple means kept
+    # longer (design round 1, D2; the rung's direction was written backwards
+    # until design round 2's D7 caught it). The old placement put Saver directly
+    # under `duration`, so it survived to 96 columns while `fast` survived to 66:
+    # at 80 columns the indicator this feature exists to provide was gone and the
+    # dial next to it stayed. The old reason ("already visible in /saver status")
+    # separated nothing — `/fast status` is equally recoverable — and `fast`'s own
+    # stated reason ("the one segment COSTING MONEY while it shows") is equally
+    # true of Saver, which bills Radient credits per token removed. Saver now
+    # outlives `fast`: it is the CONSENT mark for sending history off the machine,
+    # so it is the last of the two a narrow band should drop.
+    "saver",
     # The active /team roster and /agent profile (U2). Both are STATIC session
     # settings the user chose — like `effort`, they do not change while the user
     # watches — so they belong in this static-settings band ahead of the live
@@ -1252,7 +1273,14 @@ class StatusLine:
         #: band never reaches into the session, so the source of truth stays the
         #: session's own spec and the app pushes the reading through ``update``.
         self._fast: str = ""
-        # The active /agent profile name and /team roster name governing this
+        # The localized word, or "" when this session is not occupying Saver.
+        # Off paints NOTHING (design round 1, D1): the reserved-five-cells
+        # version this replaced painted a dim glyph with an empty value in every
+        # band for every user, so presence stopped carrying information — and
+        # the reservation bought one 7-cell shift at a command the user typed, at
+        # the cost of a permanent hole. Every other segment in this band is
+        # gated on a non-empty reading; this is the one that was not.
+        self._saver: str = ""
         # session (U2), "" when unattached — the band's two static-identity
         # segments. Held as plain strings the app pushes through `update`, the
         # same shape as `effort`: the band never reaches into the session, so
@@ -1633,6 +1661,7 @@ class StatusLine:
         model_name: str | None = None,
         effort: str | None = None,
         fast: str | None = None,
+        saver: str | None = None,
         agent_profile: str | None = None,
         team: str | None = None,
         cwd: str | None = None,
@@ -1666,6 +1695,8 @@ class StatusLine:
             self._effort = effort
         if fast is not None:
             self._fast = fast
+        if saver is not None:
+            self._saver = saver
         # "" is a MEANINGFUL value here (detach), so these follow the same
         # None-means-leave-alone contract as every other segment: the app passes
         # "" to clear the segment on /agent clear or team detach, and None to
@@ -2415,6 +2446,19 @@ class StatusLine:
                 # colour a user already reads as "this is costing you". It also
                 # separates the two adjacent dials at a glance.
                 (ICON_FAST, self._fast, Style(color=theme_mod.semantic_color("warning")), None)
+            )
+        # Value-gated exactly like `/effort` and `/fast` above: absent when off,
+        # which is what makes its presence the whole message. A subagent overlay
+        # suppresses it for the same reason `/fast` is suppressed — the parent's
+        # upload policy is not the child's request.
+        if self._saver and self._subagent is None and "saver" not in dropped:
+            parts.append(
+                (
+                    ICON_SAVER,
+                    self._saver,
+                    Style(color=theme_mod.semantic_color("label")),
+                    None,
+                )
             )
         # Active /team roster, then /agent profile (U2). Both are the SESSION's
         # own settings, never a subagent's: the overlay describes a CHILD's

@@ -43,9 +43,15 @@ def exec_server(tmp_path, monkeypatch):
             pass
 
         def do_GET(self):
-            body = json.dumps(
-                {"object": "list", "data": [{"id": "exec-fixture", "object": "model"}]}
-            ).encode()
+            if self.path.endswith("/tunnels/billing"):
+                # The Radient account half of the Saver gate (`saver.gate.
+                # read_availability`): a positive fresh balance. Only a test that
+                # points RADIENT_API_BASE_URL here ever reads it.
+                body = json.dumps({"result": {"balance_usd": "5.00"}}).encode()
+            else:
+                body = json.dumps(
+                    {"object": "list", "data": [{"id": "exec-fixture", "object": "model"}]}
+                ).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
@@ -203,6 +209,7 @@ def exec_server(tmp_path, monkeypatch):
         return result
 
     setattr(run, "release", release)
+    setattr(run, "port", server.server_port)
     setattr(run, "env", env)
     setattr(run, "cwd", tmp_path)
     try:
@@ -393,6 +400,124 @@ def test_exec_team_count_loop_and_resume(exec_server):
     assert '"status": "completed"' in json.dumps(
         [json.loads(line) for line in persisted.splitlines()]
     )
+
+
+def _saver_choices(directory: Path) -> list[object]:
+    """Every journaled Saver choice in a session's transcript, in order."""
+    from local_operator.saver.command import SAVER_CUSTOM_TYPE
+
+    rows = [
+        json.loads(line)
+        for line in (directory / "transcript.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    return [
+        row["payload"]["details"]["enabled"]
+        for row in rows
+        if row.get("type") == "custom"
+        and row.get("payload", {}).get("custom_type") == SAVER_CUSTOM_TYPE
+    ]
+
+
+def _enable_can_run(run: Any, root: Path) -> None:
+    """Build the world in which the Saver gate HONOURS an enable.
+
+    WHY THIS EXISTS (PR #3143 rebase, bisected): ``fc32046`` made ``--saver on``
+    go through the real gate (``saver.command.set_saver_choice``), which refuses
+    and journals nothing unless every step of ``resolve_saver`` passes. The
+    fixture's fresh config fails the first step (``radient.saver.mode`` defaults
+    to ``off``), so the journaled-and-resumes test had been asserting a state the
+    product deliberately refuses to enter. The refusal is correct and has its own
+    test below; this sets up each step for real instead of patching the gate:
+
+    1. ``radient.saver.mode: opt_in`` in the isolated config (the setting a user
+       turns on in /settings);
+    2. one Radient OAuth row in the isolated ``auth.db`` (what ``lop login
+       radient`` leaves; ``tunnels.api.credential_id`` is the sign-in test);
+    3. the billing read answered by this fixture's loopback server with a
+       positive balance, which needs ``RADIENT_API_BASE_URL`` pointed at it and
+       ``RADIENT_ORG_ALLOW_NONCANONICAL_BASE=1`` — the documented opt-in for the
+       account bearer to travel to a non-canonical host (QA rigs, 127.0.0.1).
+    """
+    import secrets
+    import time
+
+    from local_operator.providers.auth_store import AuthStore
+
+    # `classification.auto: false` is not part of the gate: a Radient login
+    # makes the (default-on) classification layer call the PRODUCTION decisions
+    # route with this synthetic bearer, and a test must never reach production.
+    ConfigManager(root).update_config(
+        {
+            "radient": {"saver": {"mode": "opt_in"}},
+            "classification": {"auto": False},
+        }
+    )
+    store = AuthStore(db_path=root / "auth.db", config_dir=root)
+    try:
+        store.upsert_credential(
+            "radient",
+            {
+                "type": "oauth",
+                "access": secrets.token_hex(16),
+                "refresh": secrets.token_hex(16),
+                "expires": int(time.time() * 1000) + 3_600_000,
+            },
+        )
+    finally:
+        store.close()
+    run.env["RADIENT_API_BASE_URL"] = f"http://127.0.0.1:{run.port}/v1"
+    run.env["RADIENT_ORG_ALLOW_NONCANONICAL_BASE"] = "1"
+
+
+def test_exec_saver_on_is_refused_and_says_why_when_the_setting_is_off(exec_server):
+    """The half the journaling test was silently missing: global off + ``--saver on``.
+
+    The gate's first step refuses the enable, so nothing may be journaled (a
+    stored ``True`` would turn Saver on the moment the setting flips, without the
+    user asking again), and exec — which has no transcript notice — must say why
+    on stderr in the gate's own sentence, the one that names the setting.
+    """
+    from local_operator.saver.command import refusal_text
+    from local_operator.saver.gate import SaverDecision
+
+    run, _requests, root = exec_server
+    first = run("exec", "Turn Saver on", "--saver", "on", "--json", stdin="")
+    assert first.returncode == 0, "a refused enable is reported, not a failed run"
+    assert refusal_text(SaverDecision(False, "gate")) in first.stderr
+    session_id = first.stderr.split("session_id=", 1)[1].split()[0]
+    assert _saver_choices(root / "sessions" / session_id) == []
+
+
+def test_exec_saver_flag_is_journaled_and_resumes(exec_server):
+    """``--saver`` through the real CLI, a real session and a real transcript.
+
+    The unit half (``tests/unit/test_exec_startup.py``) only proves the flag
+    reaches a session object. What a headless runner needs is that the choice
+    SURVIVES, because an exec session is the one nobody watches turn by turn:
+    the run must journal it, and a later ``--resume`` with no flag must still
+    read it back.
+    """
+    run, _requests, root = exec_server
+    _enable_can_run(run, root)
+
+    choices = _saver_choices
+
+    first = run("exec", "Turn Saver on", "--saver", "on", "--json", stdin="")
+    assert first.returncode == 0
+    session_id = first.stderr.split("session_id=", 1)[1].split()[0]
+    directory = root / "sessions" / session_id
+    assert choices(directory) == [True], "the exec run journals the explicit choice"
+
+    resumed = run("exec", "--resume", session_id, "Still on?", "--json", stdin="")
+    assert resumed.returncode == 0
+    assert choices(directory) == [True], "a resume with no flag keeps the stored choice"
+
+    cleared = run(
+        "exec", "--resume", session_id, "Back to global", "--saver", "inherit", "--json", stdin=""
+    )
+    assert cleared.returncode == 0
+    assert choices(directory) == [True, None], "inherit is a durable decision, not an absence"
 
 
 def test_exec_team_with_a_profile_is_refused_at_preflight(exec_server):

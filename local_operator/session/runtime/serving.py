@@ -8537,6 +8537,39 @@ class ServingSessionHandle(SessionHandle):
             return await self._effort_slash(session, args, SlashResult)
         if command == "fast":
             return self._fast_slash(session, args, SlashResult)
+        # ONE BRANCH PER WORD, spelled `command ==`, not a set membership: the
+        # dispatch-surface guard reads this body for `command == "<name>"` and a
+        # tuple membership is invisible to it, which is how `/saver` came to be
+        # advertised as authoritative_session while the reader believed nothing
+        # dispatched it (measured: `test_the_runtime_dispatches_every_slash_command
+        # _it_advertises`).
+        if command == "saver":
+            from local_operator.saver.command import saver_slash
+
+            result = await saver_slash(session, args, SlashResult)
+            self._notify()
+            return result
+        if command == "radient":
+            from local_operator.i18n.keys import wire_radient_saver
+            from local_operator.i18n.text import tr
+            from local_operator.saver.command import saver_slash
+
+            word, _, rest = args.partition(" ")
+            if word != "saver":
+                return SlashResult(
+                    kind="notice",
+                    text=str(tr("wire.radient_saver")(wire_radient_saver.command_usage())),
+                    style="warning",
+                )
+            # Same rule as the app host: a bare `/radient saver` REPORTS rather
+            # than toggles, so a namespace command completed by return keys cannot
+            # change state (QA round 3, Q1). STRIPPED, because this host forwards
+            # `body.args` verbatim (desktop_sessions.py) and `rest or "status"` is a
+            # TRUTHINESS test: a whitespace-only argument is truthy, so `/radient
+            # saver␣␣` reported in the app and WROTE Saver on here (round 4).
+            result = await saver_slash(session, (rest or "").strip() or "status", SlashResult)
+            self._notify()
+            return result
         if command == "approvals":
             # ``may_loosen`` (issue #1310; design round 2 D10, UX round 2 U9):
             # whether THIS connection could carry `/approvals auto`, as the seam
