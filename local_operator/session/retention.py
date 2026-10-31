@@ -39,6 +39,7 @@ import sys
 from pathlib import Path
 
 from local_operator import procstate
+from local_operator.session.runtime.artefact_names import SIGNAL_REFUSALS_NAME
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +116,12 @@ _SIDECAR_NAMES = frozenset(
         # target-side twin of the marker above, bookkeeping ABOUT a run for the same
         # reason, so it moves neither the activity clock nor the size budget.
         "runtime-signal.json",
+        # The runtime's own refusal record (``registry.SIGNAL_REFUSALS_NAME``): the
+        # same class as the receipt above — bookkeeping ABOUT a run, so it moves
+        # neither the activity clock nor the size budget. Listed through the constant
+        # rather than as a literal so a rename cannot leave ``cleanup._dir_bytes``
+        # counting evidence as content.
+        SIGNAL_REFUSALS_NAME,
         # The runtime's own turn journal (``registry.TURN_JOURNAL_NAME``),
         # rewritten at every turn boundary in the session's directory. It lands
         # here for the same reason the stop marker does — this list exists so

@@ -20,7 +20,7 @@ import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -2280,16 +2280,24 @@ def _reap_batch(workers: list[Any]) -> list[int]:
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="SIGTERM semantics are POSIX")
-def test_a_sigterm_batch_with_no_marker_yields_n_unattributed_interrupted_rows(
+def test_a_sigterm_batch_with_no_marker_is_refused_and_the_workers_keep_their_turns(
     monkeypatch, tmp_path: Path
 ) -> None:
-    """The 18:14 wave in miniature: three workers, one external sender, nothing staged.
+    """The 18:14 wave in miniature, under the sanction gate: three workers, nothing staged.
 
-    Each worker leaves an arrival row (no ``status``) and a terminal row that says
-    ``interrupted`` / ``unattributed-signal`` — NOT ``cancelled``, which is what all of
-    the real wave's twelve rows said — with distinct pids and no sweep record.
+    BEFORE SLICE 1 this cell asserted the incident itself — three exit-130 runs and three
+    ``interrupted`` / ``unattributed-signal`` rows — which is precisely the old
+    unconditional rule ("any SIGTERM ends the worker"). That assertion is what the gate
+    changes, so it is restated rather than deleted: the victim now REFUSES, every worker
+    keeps its turn, and the ledger carries the ATTEMPT (an arrival row with
+    ``action: refused``) and no terminal row at all.
+
+    The second half is the honest killability: a sender that does not care about
+    cooperation escalates to SIGKILL, and the reconcile verdict for that shape is
+    ``unattributed-death`` — no receipt, no sender, no evidence a signal was handled.
     """
     import signal as signal_module
+    import time
 
     from local_operator import siginfo
     from local_operator.session.runtime import stop_ledger
@@ -2298,26 +2306,37 @@ def test_a_sigterm_batch_with_no_marker_yields_n_unattributed_interrupted_rows(
     try:
         for proc, *_rest in workers:
             os.kill(proc.pid, signal_module.SIGTERM)
+        # THE REFUSAL: nothing staged means nothing obeyed, so every turn survives.
+        deadline = time.monotonic() + 15.0
+        while time.monotonic() < deadline:
+            if any(proc.poll() is not None for proc, *_ in workers):
+                break
+            time.sleep(0.1)
+        assert all(
+            proc.poll() is None for proc, *_ in workers
+        ), "a worker obeyed an unsanctioned SIGTERM"
     finally:
+        # SIGKILL, because a refusing worker will not leave on its own: that is the
+        # property under test, not a flake.
+        for proc, *_rest in workers:
+            if proc.poll() is None:
+                proc.kill()
         codes = _reap_batch(workers)
-    assert codes == [130, 130, 130]
+    assert codes == [-signal_module.SIGKILL] * 3
 
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
     records = exec_mode.read_job_records()
-    pids = set()
-    for proc, job_id, _sid, _dir in workers:
+    for _proc, job_id, _sid, _dir in workers:
         mine = [r for r in records if r["id"] == job_id]
         arrivals = [r for r in mine if "signal" in r]
         assert len(arrivals) == 1 and "status" not in arrivals[0], mine
         assert arrivals[0]["signal"]["number"] == 15
-        # THE SENDER IS NAMED WHERE THE PLATFORM CAN CAPTURE IT (2026-10-30). This
-        # row used to be pinned to ``unavailable`` because that was the only thing
-        # the product could say; twelve such rows are what the 2026-10-30 21:57
-        # fleet kill left behind. ``siginfo`` now arms a one-shot SA_SIGINFO
-        # sensor in the worker, so the sender here is THIS process — the test sent
-        # the SIGTERM — and that is the assertion that makes this cell a
-        # real-path proof of the change rather than a shape check. On a platform
-        # that cannot capture, the old sentence is still the whole truth.
+        assert arrivals[0]["signal"]["sanction"] == "none"
+        assert arrivals[0]["signal"]["action"] == "refused", arrivals[0]["signal"]
+        # THE SENDER IS STILL NAMED ON A REFUSED ARRIVAL (#3214 x the sanction gate): the
+        # worker's sensor is armed, the test sent the SIGTERM, so the arrival row names
+        # THIS process — refusing the signal must not cost the fact of who tried. On a
+        # platform that cannot capture, the old sentence is still the whole truth.
         sender = arrivals[0]["signal"]["sender"]
         if siginfo.supported():
             assert sender["state"] == "known", sender
@@ -2325,13 +2344,12 @@ def test_a_sigterm_batch_with_no_marker_yields_n_unattributed_interrupted_rows(
             assert sender["uid"] == os.getuid(), sender
         else:
             assert sender["state"] == "unavailable", sender
-        final = exec_mode.job_status(job_id, reconcile=False)
+        # THE START ROW IS THERE (``status: running``); what must NOT be there is a
+        # TERMINAL row, because this worker never ended a run — it was killed.
+        assert not [r for r in mine if "exit_code" in r], "a refused worker wrote a terminal row"
+        final = exec_mode.job_status(job_id)
         assert final["status"] == "interrupted", final
-        assert final["stop_class"] == "unattributed-signal", final
-        assert final["exit_code"] == 130
-        assert final["stop"]["signal"]["sanction"] == "none"
-        pids.add(final["pid"])
-    assert len(pids) == 3
+        assert final["stop_class"] == "unattributed-death", final
     assert stop_ledger.read_sweeps(tmp_path / "config") == [], "an unsanctioned wave has no sweep"
 
 
@@ -2501,6 +2519,153 @@ def test_the_latest_signal_decides_when_a_run_is_signalled_twice(tmp_path: Path)
     assert facts["signal"]["sanction"] == "marker", "the latest arrival must win"
     status, detail = exec_mode.classify_exit(130, facts)
     assert status == "cancelled" and detail["stop_class"] == "deliberate", detail
+
+
+# --- the victim-side sanction gate: nothing staged, nothing ends -------------
+
+
+def _worker_handler(
+    directory: Path | None, *, job_id: str, facts: dict[str, Any]
+) -> tuple[Any, Any, asyncio.Event]:
+    """Install the REAL SIGTERM handler on a loop double; return (session, handler, event).
+
+    The same shape ``test_the_latest_signal_decides_when_a_run_is_signalled_twice``
+    uses: ``_install_sigterm_handler`` is driven directly and the signal is delivered
+    by hand, so a cell can say exactly what arrived and what had been staged.
+    """
+
+    class _Session:
+        session_id = "gates0000001"
+        active_team_name = None
+        aborted: str = ""
+
+        class _T:
+            pass
+
+        _transcript = _T()
+
+        def subscribe(self, handler):  # noqa: ANN001
+            return lambda: None
+
+        def abort(self, reason: str) -> None:
+            self.aborted = reason
+
+    class _Recorder:
+        """A loop double: the handler only ever calls ``add_signal_handler``."""
+
+        def __init__(self) -> None:
+            self.callbacks: dict[Any, Any] = {}
+
+        def add_signal_handler(self, sig: Any, callback: Any) -> None:
+            self.callbacks[sig] = callback
+
+    _Session._transcript.directory = directory  # type: ignore[attr-defined]
+    session = _Session()
+    loop = _Recorder()
+    interrupted = asyncio.Event()
+    sessions: list[Any] = [session]
+    exec_worker._install_sigterm_handler(cast(Any, loop), sessions, interrupted, facts, job_id)
+    return session, loop.callbacks[exec_worker.signal.SIGTERM], interrupted
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="SIGTERM semantics are POSIX")
+def test_an_unsanctioned_sigterm_is_refused_and_the_worker_keeps_running(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The largest population the 2026-10-30 sweep took: nothing staged, exit 130.
+
+    Under the gate the handler records the arrival, says so, and ends NOTHING: the
+    turn is not aborted and ``interrupted`` is never set, so ``async_main`` keeps
+    racing the real lifetime instead of cancelling it.
+    """
+    _redirect_logs_dir(monkeypatch, tmp_path)
+    directory = tmp_path / "sessions" / "gates0000001"
+    directory.mkdir(parents=True)
+    facts: dict[str, Any] = {}
+    session, handler, interrupted = _worker_handler(directory, job_id="gate-job-1", facts=facts)
+
+    handler()
+
+    assert not interrupted.is_set(), "an unsanctioned SIGTERM ended the worker's turn"
+    assert session.aborted == "", "an unsanctioned SIGTERM aborted a live turn"
+    assert facts["signal"]["sanction"] == "none"
+    assert facts["signal"]["action"] == "refused", facts["signal"]
+    assert facts["refused"] == 1
+    # THE DURABLE ROW: the ledger is this worker's receipt, and the arrival is on it.
+    rows = [r for r in exec_mode.read_job_records() if r["id"] == "gate-job-1"]
+    assert rows and rows[-1]["signal"]["action"] == "refused", rows[-1:]
+    # The evidence still classifies this arrival for what it is, not as a cancellation.
+    status, detail = exec_mode.classify_exit(130, facts)
+    assert status == "interrupted" and detail["stop_class"] == "unattributed-signal", detail
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="SIGTERM semantics are POSIX")
+def test_a_sanctioned_sigterm_still_ends_the_worker_with_130(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The sanctioned path is unchanged: abort, set the event, exit 130 ``cancelled``.
+
+    The marker is the one ``control.stop_session`` stages (its own payload builder),
+    so this is the ladder's shape rather than a hand-written dict.
+    """
+    _redirect_logs_dir(monkeypatch, tmp_path)
+    directory = tmp_path / "sessions" / "gates0000001"
+    directory.mkdir(parents=True)
+    import time as _time
+
+    from local_operator.session.runtime import registry
+
+    registry.write_stop_marker(
+        directory,
+        {
+            "session_id": "gates0000001",
+            "pid": os.getpid(),
+            "started_at": None,
+            "at": _time.time() - 1.0,
+            "rung": "sigterm",
+            "deliberate": True,
+            "killer": {"pid": 1, "argv0": "lop", "command": "lop stop"},
+        },
+    )
+    facts: dict[str, Any] = {}
+    session, handler, interrupted = _worker_handler(directory, job_id="gate-job-2", facts=facts)
+
+    handler()
+
+    assert interrupted.is_set(), "a sanctioned SIGTERM no longer ends the worker"
+    assert session.aborted == "terminated"
+    assert facts["signal"]["sanction"] == "marker"
+    status, detail = exec_mode.classify_exit(130, facts)
+    assert status == "cancelled" and detail["stop_class"] == "deliberate", detail
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="SIGTERM semantics are POSIX")
+def test_the_discovery_window_keeps_todays_behaviour_and_records_the_attempt(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """No conversation directory yet means no run key, so the gate cannot ask.
+
+    The contract's own carve-out (design §7 step 4 at ``3ba837e6d9e``): during provider
+    discovery a worker has no marker store, so nothing could have sanctioned the run
+    and nothing could record a refusal. It keeps today's behaviour — abort, exit 130 —
+    and the arrival is recorded with ``sanction: none`` exactly as before, so the
+    attempt is evidence rather than silence. CLOSING THIS WINDOW IS A SEPARATE CHANGE:
+    it needs a run key the worker holds before its session exists, which makes the job
+    ledger a second sanction store.
+    """
+    _redirect_logs_dir(monkeypatch, tmp_path)
+    facts: dict[str, Any] = {}
+    session, handler, interrupted = _worker_handler(None, job_id="gate-job-3", facts=facts)
+
+    handler()
+
+    assert interrupted.is_set(), "the discovery window must keep today's exit"
+    assert session.aborted == "terminated"
+    assert facts["signal"]["sanction"] == "none"
+    assert facts["signal"]["action"] == "stop", "the refusal word leaked into discovery"
+    assert "refused" not in facts
+    rows = [r for r in exec_mode.read_job_records() if r["id"] == "gate-job-3"]
+    assert rows and rows[-1]["signal"]["sanction"] == "none", rows[-1:]
 
 
 # --- the waiters' ledger reader: the appended bytes, and only those ---------

@@ -299,6 +299,11 @@ def test_sidecar_list_names_every_bookkeeping_file_the_harness_writes() -> None:
         registry.STOP_MARKER_NAME,
         # Its target-side twin, the runtime's signal receipt: same class.
         registry.SIGNAL_RECEIPT_NAME,
+        # The record of terminating signals the runtime REFUSED (sanction gate): the
+        # same class again. Its name is declared in the stdlib-only leaf
+        # ``artefact_names`` (retention sits below ``registry`` in the import graph),
+        # and ``registry`` re-exports it, so this pins the one spelling both share.
+        registry.SIGNAL_REFUSALS_NAME,
         # The runtime's turn journal, written into the same directory and
         # registered for the same reason: bookkeeping rather than content, so it
         # must not be billed against the cleanup size budget. Its canonical name

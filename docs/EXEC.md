@@ -583,7 +583,16 @@ out of the kernel's `siginfo_t`, restores the saved action and re-raises so the
 platform's own delivery runs unchanged. That is armed on macOS today; on a
 platform whose layout this build cannot execute against a real kernel, and for a
 kernel-originated delivery, the receipt still says "unidentified sender" rather
-than naming a party. An unsanctioned wave therefore yields one receipt per victim
+than naming a party. **The sender is named ONCE per process, on the first terminating signal
+it receives.** The sensor is spent by that delivery and is deliberately never
+re-armed: re-installing it per signal measured self-attributed receipts (the
+runtime's own pid as "sender"), hangs and SIGSEGVs inside the ctypes callback
+under 1–3 ms bursts, turning a once-per-process risk into a once-per-signal one.
+Under the victim-side sanction gate a signal no durable stop marker covers is
+*refused* — recorded in `runtime-signal-refusals.json` and the process keeps
+serving — so a later delivery, refused or sanctioned, is recorded `no-siginfo`;
+a sanctioned stop after a refusal is attributed by its staged stop marker, not
+by siginfo. An unsanctioned wave therefore yields one receipt per victim
 and **no** sweep row — never a fabricated one, and never a sender the receipt did
 not observe. SIGKILL, a
 crash and power loss leave nothing target-side. The TUI and `serve`/mobile

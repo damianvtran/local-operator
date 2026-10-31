@@ -1403,24 +1403,74 @@ def _bind_boot_instrumentation(
         return None
 
 
-def _record_signal_receipt(
-    handle: object, runtime: object, sig: signal.Signals, *, draining: bool
-) -> dict[str, Any] | None:
-    """Write the target-side receipt for a termination signal that just arrived.
+@dataclass(frozen=True)
+class _Arrival:
+    """One terminating signal: the pairing entry AND the run key it was paired for.
 
-    CALLED AS THE FIRST STATEMENT OF ``_on_signal``, before ``stop.set()`` or the
-    drain, because every later step can lose the evidence: a drain can be
-    SIGKILLed mid-wait, and the turn journal is written at exit only (and not at
-    all for an idle runtime). The 2026-09-30 18:14 wave left two runtimes whose
-    only record was one journal row a later boot overwrote. See
-    ``signal_receipt`` for what the receipt can say (and that the SENDER is
-    unavailable on this platform) and ``registry.SIGNAL_RECEIPT_NAME`` for why it
-    is a file of its own.
+    Both halves are produced by ONE read of the stop marker, which is why they travel
+    together. The entry is the receipt ``signals``/``refusals`` row (name, number,
+    time, sender, pairing, spawn chain); the run key is the receipt's identity
+    (kind, session, pid, start time) and is NOT put inside the entry, because an
+    entry carrying its own run key would be a second, divergent copy of the field
+    ``covers_run`` pairs on.
+    """
+
+    entry: dict[str, Any]
+    run_key: dict[str, Any]
+
+
+def _stop_signal_routes(
+    route: Callable[[signal.Signals], None],
+) -> dict[int, Callable[[], None]]:
+    """Every signal a sender can END this runtime with, mapped to ONE router.
+
+    THE LIST IS EXPLICIT, AND THAT IS THE POINT. ``SIGTERM`` and ``SIGINT`` are the two
+    a sender has always used. ``SIGQUIT``, ``SIGUSR2`` and ``SIGALRM`` are the residual
+    levers a sender that knows the pids would otherwise still hold: all three are
+    default-fatal, and NOTHING in-tree sends them to a runtime — so routing them costs
+    no functionality and closes the lever. Installing a handler is what makes a signal
+    non-fatal; taking the same route is what makes it obey the sanction gate.
+
+    THREE SIGNALS ARE ABSENT ON PURPOSE, and each for a different reason:
+
+    * ``SIGKILL`` cannot be handled at all. It is the escape hatch, every ladder's last
+      rung, and ``lop stop --force``. Adding it would be a category error.
+    * ``SIGUSR1`` is the task-stack EVIDENCE DUMP (``_install_usr1_dump``). It is
+      non-fatal precisely BECAUSE that handler is installed, so the dump must keep its
+      own route; folding it into the stop path would trade a diagnostic for a stop.
+    * ``SIGHUP`` is already a no-op for a detached runtime (``_install_sighup_ignore``),
+      so it needs no gate: it cannot end anything.
+
+    Absent platform members are dropped rather than named: ``signal.SIGALRM`` does not
+    exist on Windows and a bare attribute reference would be a NameError at boot.
+    """
+    routes: dict[int, Callable[[], None]] = {
+        signal.SIGTERM: lambda: route(signal.SIGTERM),
+        signal.SIGINT: lambda: route(signal.SIGINT),
+    }
+    for name in ("SIGQUIT", "SIGUSR2", "SIGALRM"):
+        member = getattr(signal, name, None)
+        if member is not None:
+            routes[int(member)] = lambda _sig=member: route(_sig)
+    return routes
+
+
+def _signal_arrival(
+    handle: object, runtime: object, sig: signal.Signals, *, draining: bool
+) -> _Arrival | None:
+    """OBSERVE a terminating arrival — pair it with any marker — writing nothing.
+
+    ONE PAIRING PASS FOR THE DECISION AND THE ROW. The gate (:func:`_route_signal`)
+    has to know whether a marker covers this run BEFORE it writes anything, because
+    a refused arrival must not enter the receipt's ``signals`` list (see
+    ``signal_receipt.merge_refusal``), and the row it does write must come from the
+    same evaluation the decision used — a second marker read a few statements later
+    could disagree with it.
 
     Runs on the loop thread as a loop callback, not in the C-level handler, so one
-    small staged write is legal here. BEST-EFFORT AND NEVER RAISES: a signal path
-    must not be delayed or failed by an instrument. ``draining`` says a drain was
-    already in force, which is how a REPEAT signal is told from the first.
+    read is legal here. BEST-EFFORT AND NEVER RAISES: a signal path must not be
+    delayed or failed by an instrument. ``draining`` says a drain was already in
+    force, which is how a REPEAT signal is told from the first.
     """
     try:
         from local_operator.session.runtime import signal_receipt
@@ -1431,19 +1481,28 @@ def _record_signal_receipt(
         session_id = str(
             getattr(session, "session_id", "") or getattr(server_record, "session_id", "") or ""
         )
-        started_at = getattr(server_record, "started_at", None)
+        raw_started = getattr(server_record, "started_at", None)
+        started_at = raw_started if isinstance(raw_started, (int, float)) else None
         in_flight = _work_in_flight(handle)
         action = "repeat-absorbed" if draining else ("drain" if in_flight else "stop")
-        return signal_receipt.record(
+        entry = signal_receipt.observe(
             Path(directory) if directory is not None else None,
-            kind="runtime",
             session_id=session_id,
             pid=os.getpid(),
-            started_at=started_at if isinstance(started_at, (int, float)) else None,
+            started_at=started_at,
             name=sig.name,
             number=int(sig.value),
             in_flight=in_flight,
             action=action,
+        )
+        return _Arrival(
+            entry=entry,
+            run_key={
+                "kind": "runtime",
+                "session_id": session_id,
+                "pid": os.getpid(),
+                "started_at": started_at,
+            },
         )
     except Exception:  # noqa: BLE001 — see the docstring: never fail a signal path
         logger.debug("signal receipt unavailable", exc_info=True)
@@ -4160,30 +4219,257 @@ class _SignalState:
         #: The receipts written on this path (latest last), kept ONLY so the exit
         #: log can name the signal's pairing; the file on disk is the artifact.
         self.receipts: list[dict[str, Any] | None] = []
+        #: How many terminating signals this run REFUSED (see :func:`_refuse_signal`).
+        #: Counted rather than merely logged because the run can outlive the whole
+        #: attempt on it: without the count, the only evidence a refused signal ever
+        #: happened is a WARNING in a log file nobody greps, and an operator asking
+        #: "did anything try to stop this session" gets silence from the process that
+        #: is still running. The receipt file holds the arrivals; this holds the tally
+        #: the exit line can print without re-reading it.
+        self.refusals: int = 0
+        #: Log coalescing for :func:`_refuse_signal` (review R-4): the refusals FILE is
+        #: one coalesced entry per run, so the LOG must not be the unbounded half. The
+        #: monotonic stamp of the last WARNING written, and how many refusals have been
+        #: counted since it, so the next line can carry the number it stood in for.
+        self.refusal_logged_at: float | None = None
+        self.refusals_unlogged: int = 0
+
+
+def _signal_is_sanctioned(entry: dict[str, Any] | None) -> bool:
+    """Whether a durable stop marker covered THIS arrival — the gate's one question.
+
+    Asked of the entry ``_signal_arrival`` just built, whose pairing was decided at
+    write time by reading the marker. The predicate is
+    ``signal_receipt.is_sanctioned`` — ``stop_class_of`` ∈ {deliberate,
+    attributed-involuntary} — so both kinds of marker pass: a deliberate stop a
+    person asked for, and an involuntary act that named itself (``reclaim``'s sweep,
+    the wake supervisor's). The case the gate refuses is the one with NO marker at
+    all; see :func:`_route_signal` for the measurement.
+
+    NOT ``cut_off_verdict``. That function answers "what does a signal-cut turn
+    say", so a covering involuntary marker returns a ``runtime-killed`` verdict and
+    a gate keyed on it would refuse the sanctioned sweeps this design certifies.
+    """
+    try:
+        from local_operator.session.runtime import signal_receipt
+
+        return bool(signal_receipt.is_sanctioned(entry))
+    except Exception:  # noqa: BLE001 — a gate must not raise on the signal path
+        logger.debug("could not read the signal's sanction", exc_info=True)
+        return False
+
+
+def _signal_run_key(handle: object) -> tuple[Path | None, str]:
+    """The run key the gate needs to ask: a session id AND a writable conversation.
+
+    WHERE THE GATE CANNOT ASK IT MUST NOT ACT (the contract's own rule): a runtime
+    whose session has no directory yet has no marker store, so nothing could have
+    sanctioned this run and nothing can record a refusal either. Those windows —
+    before the handlers are armed at all (default disposition applies then), and a
+    warm spare before adoption (it runs ``-m ...standby`` with no runtime handlers)
+    — keep today's behaviour. This function is what draws that line for the router.
+    """
+    session = getattr(handle, "_session", None)
+    session_id = str(getattr(session, "session_id", "") or "")
+    directory = getattr(getattr(session, "_transcript", None), "directory", None)
+    if not session_id or directory is None:
+        return None, session_id
+    target = Path(directory)
+    if not target.is_dir():
+        return None, session_id
+    return target, session_id
+
+
+def _record_signal(directory: Path | None, arrival: _Arrival | None) -> dict[str, Any] | None:
+    """Write an ACCEPTED arrival into the receipt's ``signals`` list (today's write).
+
+    ``None`` means the arrival could not even be observed; the caller has already
+    decided to behave as today, so this is a no-op that says nothing.
+    """
+    if arrival is None:
+        return None
+    from local_operator.session.runtime import signal_receipt
+
+    return signal_receipt.record_signal(
+        directory,
+        kind=str(arrival.run_key.get("kind") or "runtime"),
+        session_id=str(arrival.run_key.get("session_id") or ""),
+        pid=int(arrival.run_key.get("pid") or 0),
+        started_at=arrival.run_key.get("started_at"),
+        entry=arrival.entry,
+    )
+
+
+def _record_refusal(directory: Path, arrival: _Arrival) -> dict[str, Any] | None:
+    """Write a REFUSED arrival into its OWN file, coalesced per run.
+
+    Never into ``runtime-signal.json``, and the reason is a measured reader: a
+    signals-less receipt makes ``rescue._death_class_receipt`` answer
+    ``unclassified/receipt-no-signals``, which is TERMINAL and refuses recovery — and a
+    run that refused an anonymous signal and was then SIGKILLed is exactly a run whose
+    recovery matters. See ``registry.SIGNAL_REFUSALS_NAME``.
+    """
+    from local_operator.session.runtime import signal_receipt
+
+    return signal_receipt.record_refusal(
+        directory,
+        kind=str(arrival.run_key.get("kind") or "runtime"),
+        session_id=str(arrival.run_key.get("session_id") or ""),
+        pid=int(arrival.run_key.get("pid") or 0),
+        started_at=arrival.run_key.get("started_at"),
+        entry=arrival.entry,
+    )
+
+
+#: The most often a REFUSED signal may write a WARNING after the first (review R-4).
+#: Sixty seconds: a looping sender is still named within a minute, and a runtime log
+#: that outlives a day of it grows by ~1.4k lines at worst rather than by one per signal.
+_REFUSAL_LOG_INTERVAL_S = 60.0
+
+
+def _refuse_signal(
+    handle: object,
+    sig: signal.Signals,
+    entry: dict[str, Any] | None,
+    *,
+    state: _SignalState,
+) -> None:
+    """Keep serving after a terminating signal nothing sanctioned, and say so loudly.
+
+    THE REFUSAL MUST BE OBSERVABLE, not merely "ignored". Three separate facts,
+    because a silent refusal is a worse failure than the sweep it defends against
+    — a runtime that can never be stopped and never says why is indistinguishable,
+    from outside, from one that is fine:
+
+    * the REFUSAL row on disk, written by ``_record_refusal`` from this same arrival
+      into the receipt's ``refusals`` list with ``disposition: refused``;
+    * this WARNING, one per arrival, naming the signal, the pid, the session and the
+      fact that nothing staged a stop; it lands in the runtime's own log, which is
+      where every stop-attribution fact in this file is read from;
+    * ``state.refusals``, so the exit line can report that this run was signalled and
+      survived even when the exit itself is an idle one.
+
+    WHAT IS DELIBERATELY NOT DONE HERE. No ``stop``, no drain, no trigger and no
+    cut-off note: the turn is not being cut, and arming a cause for it would brand a
+    turn that goes on to finish normally. Nor is a stop marker written or withdrawn
+    — a refusal is not an act on the conversation, it is the absence of one.
+
+    HOW AN OPERATOR LEARNS, and how a legitimate stop still gets through: the log
+    line and the receipt are the record; the fleet surfaces show the session as
+    alive because it is. The stop ladder stages its marker before every rung
+    (``control.stop_session``: socket, then identity-confirmed SIGTERM, then
+    SIGKILL), so "``lop stop`` still works" is not a claim about this code — it is
+    the reason the marker is the gate's key. ``lop stop --force``, and ``kill -9``,
+    remain unrefusable: SIGKILL is deliberately absent from every handler here.
+
+    A REFUSED SIGNAL IS NOT ESCALATED BY US and there is no timeout after which the
+    refusal turns into compliance. That is the point: the runtime's life must not
+    depend on a clock a sender can wait out.
+    """
+    state.refusals += 1
+    # The sender is named ONCE per process, on the FIRST terminating signal (the sensor
+    # is one-shot, #3214). This runtime keeps running, so a later refusal — and the
+    # sanctioned stop that eventually ends the run — is recorded ``no-siginfo``; that
+    # stop is attributed by its staged marker. Nothing re-arms the sensor: re-arming
+    # per refusal measured self-attribution, hangs and SIGSEGVs under burst delivery.
+    session_id = str((entry or {}).get("session_id") or "")
+    if not session_id:
+        session_id = str(getattr(getattr(handle, "_session", None), "session_id", "") or "")
+    # THE FIRST REFUSAL IS ALWAYS LOUD; a LOOP IS NOT. One WARNING per arrival let a
+    # sender that retried SIGTERM grow ``runtime.log`` without bound (review R-4, QA
+    # Q4: 100 signals -> 100 lines) while the refusals file stayed one entry. So after
+    # the first line at most one more is written per ``_REFUSAL_LOG_INTERVAL_S``, and
+    # it carries how many arrivals it stands in for. The tally (``state.refusals``,
+    # the exit line) and the durable file still count every one.
+    now = time.monotonic()
+    last = state.refusal_logged_at
+    if last is not None and now - last < _REFUSAL_LOG_INTERVAL_S:
+        state.refusals_unlogged += 1
+        return
+    suppressed, state.refusals_unlogged = state.refusals_unlogged, 0
+    state.refusal_logged_at = now
+    logger.warning(
+        "session runtime: %s REFUSED (pid %d, session %s): no stop marker covers this "
+        "run, so this runtime keeps serving its turn. A sanctioned stop stages a marker "
+        "first (the stop ladder does); SIGKILL is unrefusable. Arrival recorded in this "
+        "session's refusal record.%s",
+        sig.name,
+        os.getpid(),
+        session_id or "<unknown>",
+        f" ({suppressed} more refused since the last line.)" if suppressed else "",
+    )
 
 
 def _route_signal(
     handle: object, runtime: object, sig: signal.Signals, *, state: _SignalState
 ) -> None:
-    """Route ONE termination signal: record it, name its effect, then leave.
+    """Route ONE termination signal: observe it, sanction it, then act on it.
 
-    THE ORDER IS THE CONTRACT, and every step of it is here rather than in the
-    loop callback so a test can drive the real thing:
+    THE ORDER IS THE CONTRACT, and every step of it is here rather than in the loop
+    callback so a test can drive the real thing (``docs/design-surface-independence``
+    §7, at ``3ba837e6d9e``, states the numbered form):
 
-    1. the receipt (``_record_signal_receipt``) — the durable fact that the
-       signal arrived at all, written before anything else can set ``stop``;
-    2. the turn's cause (``_note_signal_cut_off``) — written on BOTH branches,
-       see that function for why the drain branch is not exempt;
-    3. the branch: an idle runtime leaves now, a busy one drains to its
-       boundary (bounded by ``SIGNAL_DRAIN_S``), and a repeat during a drain is
-       absorbed and logged.
+    1. OBSERVE (``_signal_arrival``) — pair this arrival with any stop marker and
+       build the entry, WITHOUT writing: the gate must decide before anything
+       durable is written, because a refused arrival may not enter ``signals``;
+    2. THE SANCTION GATE — where a run key exists (:func:`_signal_run_key`), an
+       arrival whose ``stop_class`` is neither deliberate nor attributed is REFUSED
+       (:func:`_refuse_signal`): written to the receipt's ``refusals`` list, said out
+       loud, and otherwise inert. No cause, no trigger, no drain, ``stop`` unset.
+       Where there is no run key — no session directory to hold a marker — the
+       arrival behaves exactly as today and is recorded (:func:`_signal_run_key`);
+    3. THE RECEIPT (``_record_signal``) — the durable fact that the signal arrived,
+       written before anything else can set ``stop``;
+    4. the turn's cause (``_note_signal_cut_off``) — written on BOTH branches of
+       step 5, see that function for why the drain branch is not exempt;
+    5. the branch: an idle runtime leaves now, a busy one drains to its boundary
+       (bounded by ``SIGNAL_DRAIN_S``), and a repeat during a drain is absorbed and
+       logged.
+
+    WHY THE GATE EXISTS AT ALL (2026-10-30 21:57:52, measured): twelve background
+    exec workers and at least five session runtimes were ended by SIGTERM inside
+    1.33 s while the operator force-quit a frozen desktop app. Every receipt said
+    ``sender: unavailable`` (macOS exposes no ``siginfo``), nothing had staged a stop
+    for any of them, and no ``logs/stop-sweeps.jsonl`` existed — so no in-product
+    stop was ever asked for and the sender cannot be named. The defence therefore
+    cannot be "the sender is different"; it has to hold at the victim: **no
+    terminating signal ends this runtime unless a durable sanction covers the run.**
+    That makes the measured class — an automated tree or store walk, which stages
+    nothing — inert by construction, without waiting for the fleet to turn over.
+
+    THE SANCTIONED PATH IS BYTE-IDENTICAL to what it was: a covered signal runs
+    steps 3-5 exactly as before.
+
+    WHAT THIS IS NOT, said plainly because claiming more would be false: it is
+    attribution plus inertia, NOT authentication. A same-uid process can write the
+    marker itself (the model's own ``bash`` tool runs as this uid), so a determined
+    sender still wins. What changes is that an anonymous mass sweep becomes a
+    durable, attributable act that no longer works.
     """
-    state.receipts.append(
-        _record_signal_receipt(handle, runtime, sig, draining=state.draining is not None)
-    )
-    # BEFORE THE BRANCH, deliberately: see :func:`_note_signal_cut_off`. The
-    # drain branch is not exempt — it waits for the BOUNDARY, and the turn it
-    # waits for can be ended by somebody else first.
+    directory, _session_id = _signal_run_key(handle)
+    arrival = _signal_arrival(handle, runtime, sig, draining=state.draining is not None)
+    if arrival is None:
+        # THE INSTRUMENT FAILED, NOT THE RUN. With nothing to classify, this is the
+        # "the gate cannot ask" case and the arrival behaves as today; refusing on a
+        # broken instrument would make an unkillable runtime out of a bug.
+        logger.warning(
+            "session runtime: %s arrived and could not be paired (pid %d); no sanction "
+            "could be evaluated, so this arrival is handled as before",
+            sig.name,
+            os.getpid(),
+        )
+    elif directory is not None and not _signal_is_sanctioned(arrival.entry):
+        # NOT appended to ``state.receipts``: that list is described by
+        # ``signal_receipt.describe`` as a RECEIPT at exit, and a refusal is a
+        # different document (see registry.SIGNAL_REFUSALS_NAME) with a different
+        # shape. The exit line reports the tally from ``state.refusals`` instead.
+        _record_refusal(directory, arrival)
+        _refuse_signal(handle, sig, arrival.run_key, state=state)
+        return
+    state.receipts.append(_record_signal(directory, arrival))
+    # BEFORE THE BRANCH, deliberately: see :func:`_note_signal_cut_off`. The drain
+    # branch is not exempt — it waits for the BOUNDARY, and the turn it waits for
+    # can be ended by somebody else first.
     _note_signal_cut_off(handle, state.receipts[-1])
     state.trigger.setdefault("why", sig.name)
     if not _work_in_flight(handle):
@@ -5608,13 +5894,17 @@ async def amain(operator_cap: bytes | None = None) -> int:
     # THE ORDER IS PINNED IN SOURCE: see
     # tests/unit/session/runtime/test_signal_drain.py, which fails if this call
     # ever moves back below ``start()``.
-    install_loop_signal_handlers(
-        loop,
-        {
-            signal.SIGTERM: lambda: _on_signal(signal.SIGTERM),
-            signal.SIGINT: lambda: _on_signal(signal.SIGINT),
-        },
-    )
+    # EVERY DEFAULT-FATAL STOP SIGNAL TAKES THE SAME ROUTE, and the list is explicit
+    # rather than derived: SIGTERM and SIGINT are the two a sender has always used,
+    # and SIGQUIT/SIGUSR2/SIGALRM are the residual levers a sender that knows the pids
+    # would otherwise still hold (all three are default-fatal, and NOTHING in-tree
+    # sends them). Installing a handler is what makes a signal non-fatal, so routing
+    # them here is the fix, not a wrapper around one. SIGKILL stays unreachable by
+    # construction (no handler can exist) — it is the escape hatch and every ladder's
+    # last rung. SIGUSR1 is NOT here: it is the task-stack evidence dump, and
+    # ``_install_usr1_dump`` owns it — installing it is what keeps it non-fatal, so
+    # swallowing it into the stop path would trade a diagnostic for a stop.
+    install_loop_signal_handlers(loop, _stop_signal_routes(_on_signal))
     # WHO SENT THIS SIGNAL, armed the moment the handler that answers it exists.
     # ORDER IS THE CONTRACT (see ``siginfo.arm``): `add_signal_handler` and the
     # fallback `signal.signal` both install through ``sigaction``, so arming
@@ -5788,8 +6078,14 @@ async def amain(operator_cap: bytes | None = None) -> int:
     # One signal after it is the whole probe. (The #116008 all-threads walk is a
     # constraint on the FATAL path added beside this one, not on this asyncio dump:
     # see ``stall_watchdog._enable_fatal_report``.)
+    # THE LIST IS NAMED BECAUSE IT IS A BEHAVIOUR: every name in ``_stop_signal_routes``
+    # is gated (a signal nothing sanctioned is refused), and the two that are absent
+    # are absent for stated reasons (SIGKILL unhandleable, SIGUSR1 the evidence dump,
+    # SIGHUP already ignored). A reader asking "can something end this runtime with a
+    # signal I have not thought about" answers it from this line.
     logger.info(
-        "signal handlers ready: clean stop on SIGTERM/SIGINT; SIGUSR1 evidence signal %s; "
+        "signal handlers ready: gated clean stop on SIGTERM/SIGINT/SIGQUIT/SIGUSR2/"
+        "SIGALRM; SIGKILL unhandleable by design; SIGUSR1 evidence signal %s; "
         "task-dump callback %s",
         "installed" if stall_watchdog.evidence_signal() is not None else "not installed",
         "installed" if task_dump_installed else "disabled",
@@ -5843,6 +6139,12 @@ async def amain(operator_cap: bytes | None = None) -> int:
 
             described = _receipt.describe(routing.receipts[-1])
             receipt_line = f"; signal receipt: {described}" if described else ""
+        # A RUN THAT SURVIVED A SIGNAL SAYS SO HERE, on whichever exit it finally
+        # takes. Without this the refused arrivals are only in a log line written
+        # at arrival and in the receipt file, and the exit — the moment somebody
+        # reads for an answer — would not mention that anything tried.
+        if routing.refusals:
+            receipt_line += f"; {routing.refusals} refused signal(s)"
         logger.info(
             "session runtime: exiting (%s, pid %d, %s)%s",
             trigger.get("why") or "unknown",
