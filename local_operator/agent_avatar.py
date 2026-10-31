@@ -375,7 +375,11 @@ def read(agent_dir: Path, meta: Any) -> tuple[bytes, str, str]:
     path = stored_path(agent_dir, meta)
     if path is None or not sha or not mime:
         raise AvatarError(NOT_FOUND, "picture file missing")
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    # O_NONBLOCK: a FIFO swapped in after ``stored_path``'s lstat (the agent can
+    # write its own directory) would otherwise block this open forever, never
+    # reaching the ``S_ISREG`` fstat check below, which then refuses it. It has no
+    # effect on a regular-file read.
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     try:
         fd = os.open(path, flags)
         with os.fdopen(fd, "rb") as handle:
@@ -557,7 +561,7 @@ def _build_index(agents_dir: Path) -> dict[str, AgentIdentity]:
         return index
     for name in dirs:
         try:
-            payload = yaml.safe_load((agents_dir / name / "agent.yml").read_text("utf-8"))
+            payload = yaml.safe_load(_read_manifest_text(agents_dir / name / "agent.yml"))
         except (OSError, UnicodeDecodeError, yaml.YAMLError):
             continue
         if not isinstance(payload, dict):
@@ -666,6 +670,24 @@ def session_row_fields(
     }
 
 
+def _read_manifest_text(path: Path) -> str:
+    """Text of an ``agent.yml`` that is a regular file; ``OSError`` otherwise.
+
+    ``agent.yml`` sits in a directory the agent itself can write, and
+    ``Path.read_text`` opens a FIFO planted there with a blocking ``open(2)`` that
+    never returns, wedging the relay request or the row index forever.
+    ``O_NONBLOCK`` makes the open return at once and the ``fstat`` refuses
+    anything that is not a regular file (FIFO, device). Symlinks are still
+    followed, as ``read_text`` always did: a linked ``agent.yml`` is a layout the
+    registry tolerates, and only the picture itself must never follow one.
+    """
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+    with os.fdopen(fd, "rb") as handle:
+        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+            raise OSError(f"{path} is not a regular file")
+        return handle.read().decode("utf-8")
+
+
 def read_stored(config_root: Path, agent_id: str) -> tuple[bytes, str, str]:
     """``(bytes, mime, sha256)`` for ``agent_id`` read straight from its ``agent.yml``.
 
@@ -680,7 +702,7 @@ def read_stored(config_root: Path, agent_id: str) -> tuple[bytes, str, str]:
         raise AvatarError(NOT_FOUND, "not an agent id")
     agent_dir = Path(config_root) / "agents" / agent_id
     try:
-        payload = yaml.safe_load((agent_dir / "agent.yml").read_text("utf-8"))
+        payload = yaml.safe_load(_read_manifest_text(agent_dir / "agent.yml"))
     except (OSError, UnicodeDecodeError, yaml.YAMLError, ValueError) as exc:
         raise AvatarError(NOT_FOUND, "no such agent") from exc
     block = payload.get("avatar") if isinstance(payload, dict) else None
