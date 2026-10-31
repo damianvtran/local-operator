@@ -259,7 +259,7 @@ STRING is safe: the renderer is in-process, reads the catalogue file directly,
 and the wire only ever carries the rendered sentence. Each entry records that
 render point, and `tests/unit/i18n/test_deferred_references.py` ratchets a
 per-file reference census against
-`local_operator/i18n/data/deferred_wire_inventory.json`, so the first new
+`local_operator/i18n/deferred_wire_inventory.json`, so the first new
 render point in a deferred namespace fails a test instead of shipping English
 to every non-English client.
 
@@ -274,12 +274,12 @@ bridge rows:
 | `wire.settings` | `settings_io._t` — registry labels/help as plain strings |
 | `wire.settings.hub_defaults` | `settings_io._t` — hub default labels |
 | `wire.console` | `settings_io._t` — console section and rows |
-| `wire.memory` | `settings_io._t` — memory rows |
+| `wire.memory` | `settings_io._t`; `slash_commands.py::_desc` for `/memory` |
 | `wire.host_speed` | `settings_io._t` — host-speed threshold |
 | `wire.radient_saver` | `settings_io._t`; `saver/chain.py::notice_message` (a `Msg` its caller prints) |
 | `wire.aida_cadence` | `settings_io._t` — AIDA cadence label |
-| `wire.exec` | `exec_mode._t`, `exec_session._t` — printed sentences |
-| `wire.remote_compute` | `remote_compute/cli.py::_t` — `_refuse`/`print` |
+| `wire.exec` | `exec_mode._t`, `exec_session._t`, `cli._t`, `exec_startup._t` — printed sentences and argparse help |
+| `wire.remote_compute` | `remote_compute/cli.py::_t`, `remote_compute/config.py::_t` — `_refuse`/`print` |
 | `wire.slash` | `slash_commands.py::_desc` / `::describe` — `render()` per row |
 | `wire.slash.library` | `slash_commands.py::_desc` |
 | `wire.slash.notifications_page` | `slash_commands.py::_desc` |
@@ -299,19 +299,30 @@ zh-CN 44,842 → 19,059, ru 45,743 → 16,379, vi 37,214 → 13,254, ur 43,145 �
 
 **The gate is a raw structural guard, not a transfer budget.** The route serves
 raw UTF-8 with `content-encoding=None` (no `GZipMiddleware`), so the ceiling is
-about what the bundle carries, not what a client downloads. The same eager
-bodies gzip to roughly a quarter of their size — en 15,678 B and hi 13,631 B
-gzipped against 52,291 B and 62,298 B raw — and hi, the LARGEST raw payload,
-gzipped SMALLER than en. A compression ceiling would therefore invert the guard
-the deferral policy exists to express, which is one more reason not to add
-compression to this route.
+about what the bundle carries, not what a client downloads. Compressed, the
+eager bodies land somewhere between a fifth and a third of their raw size
+depending on the script — and hi, the LARGEST raw payload, compresses SMALLER
+than en. A compression ceiling would therefore invert the ordering the deferral
+policy exists to express, which is one more reason not to add compression to
+this route. No exact transfer figure is recorded here: the numbers depend on
+the serializer and the gzip level, and this doc will not pin a figure it does
+not recompute.
 
 **No client fetches the bundle today, so there is no boot-timing claim here.**
-The desktop has no caller (the loader PR #1279 was closed unmerged); the mobile
-relay web fetches per namespace; the TUI renders in-process from the same
-catalogues. The numbers above are catalogue bytes, not transfer bytes, and the
-deferral changes nothing an in-process renderer reads — it changes only what a
-future bundle client would have to hold.
+The desktop has no caller (its loader PR #1279 was closed unmerged). The mobile
+relay web has a per-namespace loader (`mobile/web/src/i18n/wire-cache.ts`, used
+from `store.ts:123`), but nothing calls its `request()` outside tests, so the
+bundle still has no production consumer. The TUI renders in-process from the
+same catalogues. The numbers above are catalogue bytes, not transfer bytes, and
+the deferral changes nothing an in-process renderer reads — it changes only what
+a future bundle client would have to hold.
+
+That client owes two things this route already provides: it fetches any DEFERRED
+namespace it needs through the per-namespace route (the bundle's `deferred`
+manifest names them with their own `content_sha256`), and it keeps the bundle's
+membership digest — `content_sha256` covers eager/deferred membership as well
+as file bytes, so a namespace moving between the two sets changes the validator
+and a cached client must re-register rather than trust a `304`.
 
 **The size policy is a gate, not a measurement.**
 `tests/unit/i18n/test_catalogue_sizes.py` fails when (a) any eager `wire.*`

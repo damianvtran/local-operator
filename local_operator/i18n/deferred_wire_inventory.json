@@ -1,5 +1,5 @@
 {
-  "note": "Reviewed inventory of every namespace in catalogues.DEFERRED_NAMESPACES: its reason, the render points a human verified as plain-string consumers (no envelope identity), and the per-file reference census that tests/unit/i18n/test_deferred_references.py ratchets. Counts may only fall; a rise or an unlisted file means a deferred namespace gained references, and the namespace returns to the eager set, the new use moves to a listed render point, or a reviewer re-verifies it as a plain-string consumer and refreshes the census with `python scripts/i18n/deferred_watch.py --write`.",
+  "note": "Reviewed inventory of every namespace in catalogues.DEFERRED_NAMESPACES: its reason, the render points a human verified as plain-string consumers (no envelope identity), and the per-file reference census that tests/unit/i18n/test_deferred_references.py ratchets. Counts may only fall; a rise or an unlisted file means a deferred namespace gained references. A NEW render point is not automatically a defect: it is an expected, deliberate re-measure — re-verify that the new use is a plain-string consumer, then record it with `python scripts/i18n/deferred_watch.py --write` (the same drift is what `--check` reports). The first such re-measure is core #3143 (`/saver`), which adds wire.radient_saver render points in saver/command.py, exec_startup.py, tui/app.py and slash_commands.py; its counts are NOT recorded here until that code is on main. The alternative outcomes are unchanged: remove the namespace from DEFERRED_NAMESPACES (its catalogue returns to the eager set), or move the use to a listed render point.",
   "namespaces": {
     "wire.settings": {
       "reason": "settings registry labels/help, consumed as plain strings by the settings surface; no desktop envelope identity uses this namespace",
@@ -15,7 +15,7 @@
       }
     },
     "wire.settings.hub_defaults": {
-      "reason": "hub default labels/help rendered in-process by settings_io._t into plain strings served by /v1/settings",
+      "reason": "hub settings keys rendered in-process by settings_io._t as plain strings",
       "render_points": [
         {
           "path": "local_operator/settings_io.py",
@@ -28,7 +28,7 @@
       }
     },
     "wire.console": {
-      "reason": "console section title/description and row labels rendered by settings_io._t (settings_io.py) as plain strings",
+      "reason": "console section title/description and row labels rendered by settings_io._t",
       "render_points": [
         {
           "path": "local_operator/settings_io.py",
@@ -41,12 +41,17 @@
       }
     },
     "wire.memory": {
-      "reason": "memory section rows rendered by settings_io._t (settings_io.py) as plain label/help strings",
+      "reason": "memory section rows rendered by settings_io._t as plain label/help strings",
       "render_points": [
         {
           "path": "local_operator/settings_io.py",
           "symbol": "settings_io._t",
           "note": "memory section rows rendered as plain label/help strings"
+        },
+        {
+          "path": "local_operator/slash_commands.py",
+          "symbol": "slash_commands._desc",
+          "note": "the /memory command description rendered via render()"
         }
       ],
       "references": {
@@ -55,7 +60,7 @@
       }
     },
     "wire.host_speed": {
-      "reason": "host-speed threshold label/help rendered by settings_io._t (settings_io.py)",
+      "reason": "host-speed threshold label/help rendered by settings_io._t",
       "render_points": [
         {
           "path": "local_operator/settings_io.py",
@@ -68,7 +73,7 @@
       }
     },
     "wire.radient_saver": {
-      "reason": "radient-saver section and mode choices rendered by settings_io._t (settings_io.py); saver/chain.py::notice_message returns a Msg its caller renders into a printed notice",
+      "reason": "radient-saver section and mode choices rendered by settings_io._t; saver/chain.py::notice_message returns a Msg its caller prints",
       "render_points": [
         {
           "path": "local_operator/settings_io.py",
@@ -87,7 +92,7 @@
       }
     },
     "wire.aida_cadence": {
-      "reason": "AIDA cadence label rendered by settings_io._t (settings_io.py) as a plain string",
+      "reason": "AIDA cadence label rendered by settings_io._t as a plain string",
       "render_points": [
         {
           "path": "local_operator/settings_io.py",
@@ -100,7 +105,7 @@
       }
     },
     "wire.exec": {
-      "reason": "exec CLI/TUI copy printed by exec_mode.py and exec_session.py (_t = tr(\"wire.exec\") at module level); only the rendered sentence is printed",
+      "reason": "exec CLI/TUI copy printed by exec_mode.py and exec_session.py (_t = tr(\"wire.exec\") at module level); the sentence is printed",
       "render_points": [
         {
           "path": "local_operator/exec_mode.py",
@@ -111,6 +116,16 @@
           "path": "local_operator/exec_session.py",
           "symbol": "exec_session._t",
           "note": "renders the turn-did-not-complete sentence into a printed/ledger string"
+        },
+        {
+          "path": "local_operator/cli.py",
+          "symbol": "cli._t",
+          "note": "renders exec_help/exec_epilog (argparse help) and no_exec_job (printed line)"
+        },
+        {
+          "path": "local_operator/exec_startup.py",
+          "symbol": "exec_startup._t",
+          "note": "renders the tools-unreachable notice into a printed line"
         }
       ],
       "references": {
@@ -121,12 +136,17 @@
       }
     },
     "wire.remote_compute": {
-      "reason": "remote-run CLI copy printed by remote_compute/cli.py (_t = tr(\"wire.remote_compute\"), printed through _refuse/print); no envelope is emitted",
+      "reason": "remote-run CLI copy printed by remote_compute/cli.py (_t = tr(\"wire.remote_compute\") printed through _refuse/print)",
       "render_points": [
         {
           "path": "local_operator/remote_compute/cli.py",
           "symbol": "remote_compute.cli._t",
           "note": "_t = tr(\"wire.remote_compute\"); _refuse/print emit the sentence only"
+        },
+        {
+          "path": "local_operator/remote_compute/config.py",
+          "symbol": "remote_compute.config._t",
+          "note": "prints the api-override hint; the sentence only"
         }
       ],
       "references": {
@@ -135,7 +155,7 @@
       }
     },
     "wire.slash": {
-      "reason": "slash registry descriptions rendered by slash_commands.py::_desc through render(); the row's Msg stays in-process and the catalogue route serves the finished description string",
+      "reason": "slash registry descriptions rendered by slash_commands.py::_desc via render()",
       "render_points": [
         {
           "path": "local_operator/slash_commands.py",
@@ -153,7 +173,7 @@
       }
     },
     "wire.slash.library": {
-      "reason": "the /library page descriptions rendered by slash_commands.py::_desc through render()",
+      "reason": "the /library page descriptions rendered by slash_commands.py::_desc",
       "render_points": [
         {
           "path": "local_operator/slash_commands.py",
@@ -166,7 +186,7 @@
       }
     },
     "wire.slash.notifications_page": {
-      "reason": "the notifications page description rendered by slash_commands.py::_desc through render()",
+      "reason": "the notifications page description rendered by slash_commands.py::_desc",
       "render_points": [
         {
           "path": "local_operator/slash_commands.py",
@@ -179,7 +199,7 @@
       }
     },
     "wire.tool_rows.bridge": {
-      "reason": "bridge transcript rows reach the phone as already-rendered text (harness/bridge_copy.py, _t = tr(\"wire.tool_rows.bridge\")); no message id crosses",
+      "reason": "bridge rows reach the phone as already-rendered text (harness/bridge_copy.py, _t = tr(\"wire.tool_rows.bridge\"))",
       "render_points": [
         {
           "path": "local_operator/harness/bridge_copy.py",

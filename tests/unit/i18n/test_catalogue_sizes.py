@@ -18,11 +18,11 @@ Three classes, deliberately explicit:
 The totals are RAW UTF-8 catalogue bytes, not transfer bytes: the route serves
 them with no content encoding today (``content-encoding=None``; no
 ``GZipMiddleware``), so this is a structural guard on what the bundle carries,
-not a compression budget. The same bytes gzip to roughly a quarter of that
-(measured on the eager bodies: en 15,646 B, hi 13,593 B gzipped against
-52,291 B / 62,298 B raw), and hi — the largest raw payload of the two — gzips
-SMALLER than en, which is exactly why a compression ceiling cannot express
-this policy.
+not a compression budget. Compressed, the eager bodies land somewhere between
+a fifth and a third of their raw size depending on the script, and hi — the
+largest raw payload — compresses SMALLER than en, which is why a compression
+ceiling cannot express this policy. No exact transfer figure is asserted here:
+it would pin a serializer and a gzip level this test does not control.
 
 A failure here names the two legitimate fixes (split the namespace, or defer it
 with a review), because the next person will meet it while adding copy, not

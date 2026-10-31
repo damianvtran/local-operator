@@ -28,6 +28,18 @@ enforced byte-for-byte by `generate.py --check`. Counting them would conflate
 "a key was added" with "a screen renders it", and only the second is the event
 the guard exists to catch.
 
+BLIND SPOTS, stated here so a future reviewer does not read this census as
+more than it is:
+
+* it counts REFERENCES, not what they do — a key called and returned as an
+  envelope still counts once. That gap is closed by the separate AST check
+  (`unwrapped_key_calls`), which requires every call of a deferred key to sit
+  inside a render wrapper (`_t`, `_desc`, `render`, ...);
+* it reads TEXT, so a key module reached through a dynamic name
+  (`getattr(keys, name)()`) or a name concatenated at runtime is invisible;
+* it scans `*.py` under the package directory only — a render point in a
+  template, a JS client, a generated file or another repository is out of view.
+
 `--write` refreshes the recorded counts in the inventory (reasons and verified
 render points are review data and are left alone); `--check` reports a live
 census that differs without writing.
@@ -36,10 +48,12 @@ census that differs without writing.
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import re
 import sys
 from pathlib import Path
+from typing import Any
 
 REPO = Path(__file__).resolve().parents[2]
 # Scripts under scripts/ read the tree they live in regardless of which venv
@@ -82,16 +96,16 @@ def _aliases(text: str, module: str) -> set[str]:
     return names
 
 
-def _longer_key_modules(root: Path, module: str) -> tuple[str, ...]:
-    """Sibling key modules whose name starts with ``module`` (its children).
+def _longer_key_modules(known: set[str], module: str) -> tuple[str, ...]:
+    """Key modules whose name starts with ``module`` (its children).
 
     ``wire_settings_account_policy`` contains ``wire_settings`` as a substring,
     and a plain count would charge the parent for a child's render point. The
-    key directory is the authority for which modules exist, so a namespace
-    added later is covered without editing this rule.
+    caller passes every module it knows — the namespace set it was asked about
+    plus whatever the key directory holds — so a scratch tree with no generated
+    key directory still gets the exclusion right.
     """
-    stems = {path.stem for path in (root / GENERATED_KEY_MODULES).glob("*.py")}
-    return tuple(sorted(stem for stem in stems if stem.startswith(module) and stem != module))
+    return tuple(sorted(stem for stem in known if stem.startswith(module) and stem != module))
 
 
 def _text_count(
@@ -127,8 +141,10 @@ def census(
     """
     namespaces = namespaces or tuple(catalogues.DEFERRED_NAMESPACES)
     counts: dict[str, dict[str, int]] = {namespace: {} for namespace in namespaces}
+    known = {key_module(namespace) for namespace in namespaces}
+    known.update(path.stem for path in (root / GENERATED_KEY_MODULES).glob("*.py"))
     longer = {
-        namespace: _longer_key_modules(root, key_module(namespace)) for namespace in namespaces
+        namespace: _longer_key_modules(known, key_module(namespace)) for namespace in namespaces
     }
     generated = root / GENERATED_KEY_MODULES
     policy = root / POLICY_MODULE
@@ -189,12 +205,111 @@ def new_references(
     ]
 
 
-def recorded_references(data: dict) -> dict[str, dict[str, int]]:
-    """The census the inventory records, as the comparison inputs it."""
-    return {
-        namespace: dict(entry["references"])
-        for namespace, entry in data["namespaces"].items()
-    }
+#: Wrappers that turn a ``Msg`` into a rendered string. A deferred key call
+#: must sit inside one of these; returning the ``Msg`` for a caller to render
+#: is fine too (the reference is then not a call and never reaches this check).
+RENDER_WRAPPERS = frozenset({"_t", "_tr", "_desc", "render", "describe", "tr"})
+
+_KEYS_IMPORT_ANY = re.compile(
+    r"^from\s+local_operator\.i18n\.keys\s+import\s+(?:\(([^)]*)\)|([^\n]+))", re.MULTILINE
+)
+
+
+def _all_aliases(text: str, modules: set[str]) -> dict[str, str]:
+    """Local name -> key-module name, for imports of any of ``modules``."""
+    found: dict[str, str] = {}
+    for match in _KEYS_IMPORT_ANY.finditer(text):
+        listing = (match.group(1) or match.group(2)).replace("(", " ").replace(")", " ")
+        for part in listing.split(","):
+            fields = part.split()
+            if len(fields) >= 1 and fields[0] in modules:
+                local = fields[2] if len(fields) == 3 and fields[1] == "as" else fields[0]
+                found[local] = fields[0]
+    return found
+
+
+def _call_parent_name(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> str:
+    """The name of the call that consumes ``node``, or the parent's kind.
+
+    The key call is often the VALUE of an attribute (``_k.key().envelope()``),
+    so climb the attribute/subscript wrappers before judging: the failure this
+    check exists for is the key's value being carried onward, not wrapped.
+    """
+    parent = parents.get(node)
+    for _ in range(6):
+        if isinstance(parent, ast.keyword):
+            parent = parents.get(parent)
+            continue
+        if isinstance(parent, (ast.Attribute, ast.Subscript, ast.Starred, ast.JoinedStr)):
+            parent = parents.get(parent)
+            continue
+        break
+    func = getattr(parent, "func", None)
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return type(parent).__name__
+
+
+def unwrapped_key_calls(
+    references: dict[str, dict[str, int]],
+    root: Path = PACKAGE,
+    namespaces: tuple[str, ...] | None = None,
+) -> list[str]:
+    """Deferred key calls NOT wrapped in a render resolver, one line each.
+
+    ``references`` is a census (its keys are the files worth parsing), so this
+    adds no directory walk. The check is the second half of the policy: the
+    census catches a NEW render point, this catches a render point edited to
+    hand the ``Msg``/envelope on instead of rendering it.
+
+    A call whose value is used as an attribute or passed through unchanged is
+    reported, because that is how an envelope identity reaches a client. A key
+    that is merely RETURNED (``_k.verb``) is not a call and is left to the
+    caller's own wrapper.
+    """
+    namespaces = namespaces or tuple(catalogues.DEFERRED_NAMESPACES)
+    modules = {key_module(namespace): namespace for namespace in namespaces}
+    problems: list[str] = []
+    for relative in sorted({path for counts in references.values() for path in counts}):
+        text = (root / relative).read_text(encoding="utf-8", errors="replace")
+        aliases = _all_aliases(text, set(modules))
+        if not aliases:
+            continue
+        tree = ast.parse(text)
+        parents: dict[ast.AST, ast.AST] = {}
+        for node in ast.walk(tree):
+            for child in ast.iter_child_nodes(node):
+                parents[child] = node
+        for node in ast.walk(tree):
+            if not (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+            ):
+                continue
+            module = aliases.get(node.func.value.id)
+            if module is None:
+                continue
+            wrapper = _call_parent_name(node, parents)
+            if wrapper not in RENDER_WRAPPERS:
+                problems.append(
+                    f"{relative}:{node.lineno}: {node.func.value.id}.{node.func.attr}() "
+                    f"({modules[module]}) is not inside a render wrapper ({wrapper})"
+                )
+    return problems
+
+
+def recorded_references(data: dict[str, Any]) -> dict[str, dict[str, int]]:
+    """The census the inventory records, as the comparison inputs it.
+
+    ``Any`` is the JSON document's real shape: the top-level mapping is
+    heterogeneous by design — a ``note`` string beside the per-namespace
+    entries — and a TypedDict for a dev tool's file would be more ceremony
+    than clarity.
+    """
+    return {namespace: dict(entry["references"]) for namespace, entry in data["namespaces"].items()}
 
 
 def main(argv: list[str]) -> int:

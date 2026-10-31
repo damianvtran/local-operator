@@ -88,57 +88,32 @@ DEFERRED_NAMESPACES: dict[str, str] = {
         "settings surface; no desktop envelope identity uses this namespace"
     ),
     "wire.settings.hub_defaults": (
-        "hub default labels/help rendered in-process by settings_io._t into "
-        "plain strings served by /v1/settings"
+        "hub settings keys rendered in-process by settings_io._t as plain strings"
     ),
-    "wire.console": (
-        "console section title/description and row labels rendered by "
-        "settings_io._t (settings_io.py) as plain strings"
-    ),
-    "wire.memory": (
-        "memory section rows rendered by settings_io._t (settings_io.py) as "
-        "plain label/help strings"
-    ),
-    "wire.host_speed": (
-        "host-speed threshold label/help rendered by settings_io._t "
-        "(settings_io.py)"
-    ),
+    "wire.console": "console section title/description and row labels rendered by settings_io._t",
+    "wire.memory": "memory section rows rendered by settings_io._t as plain label/help strings",
+    "wire.host_speed": "host-speed threshold label/help rendered by settings_io._t",
     "wire.radient_saver": (
-        "radient-saver section and mode choices rendered by settings_io._t "
-        "(settings_io.py); saver/chain.py::notice_message returns a Msg its "
-        "caller renders into a printed notice"
+        "radient-saver section and mode choices rendered by settings_io._t; "
+        "saver/chain.py::notice_message returns a Msg its caller prints"
     ),
-    "wire.aida_cadence": (
-        "AIDA cadence label rendered by settings_io._t (settings_io.py) as a "
-        "plain string"
-    ),
+    "wire.aida_cadence": "AIDA cadence label rendered by settings_io._t as a plain string",
     "wire.exec": (
         "exec CLI/TUI copy printed by exec_mode.py and exec_session.py "
-        "(_t = tr(\"wire.exec\") at module level); only the rendered sentence "
-        "is printed"
+        '(_t = tr("wire.exec") at module level); the sentence is printed'
     ),
     "wire.remote_compute": (
         "remote-run CLI copy printed by remote_compute/cli.py "
-        "(_t = tr(\"wire.remote_compute\"), printed through _refuse/print); no "
-        "envelope is emitted"
+        '(_t = tr("wire.remote_compute") printed through _refuse/print)'
     ),
-    "wire.slash": (
-        "slash registry descriptions rendered by slash_commands.py::_desc "
-        "through render(); the row's Msg stays in-process and the catalogue "
-        "route serves the finished description string"
-    ),
-    "wire.slash.library": (
-        "the /library page descriptions rendered by slash_commands.py::_desc "
-        "through render()"
-    ),
+    "wire.slash": "slash registry descriptions rendered by slash_commands.py::_desc via render()",
+    "wire.slash.library": "the /library page descriptions rendered by slash_commands.py::_desc",
     "wire.slash.notifications_page": (
-        "the notifications page description rendered by "
-        "slash_commands.py::_desc through render()"
+        "the notifications page description rendered by slash_commands.py::_desc"
     ),
     "wire.tool_rows.bridge": (
-        "bridge transcript rows reach the phone as already-rendered text "
-        "(harness/bridge_copy.py, _t = tr(\"wire.tool_rows.bridge\")); no "
-        "message id crosses"
+        "bridge rows reach the phone as already-rendered text "
+        '(harness/bridge_copy.py, _t = tr("wire.tool_rows.bridge"))'
     ),
 }
 
