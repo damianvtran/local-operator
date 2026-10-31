@@ -1218,6 +1218,119 @@ def _status_timestamp(value: Any) -> float | None:
     return number if math.isfinite(number) else None
 
 
+#: The closed vocabularies the hub accepts on a per-recipient delivery state
+#: (contract v1, "Team Bridge per-recipient delivery state"). The hub validates
+#: them too; they are closed HERE so nothing outside them is ever sent.
+DELIVERY_HOLD_CLASSES = ("screening_unavailable", "awaiting_review", "delivery_pending")
+REFUSAL_CLASSES = ("manipulation", "personal_info", "abusive", "unsafe_content", "out_of_scope")
+
+#: Family-collapsed hold codes (see :func:`_status_hold_code`) that mean "the
+#: screener could not run or answer yet": transient, retried without the owner.
+#: ``screening_unavailable`` is the connector's own code for "no screening
+#: result at all" (``screen_item`` answered ``None``), which is the same fact.
+_HOLD_CLASS_SCREENING_UNAVAILABLE = frozenset(
+    {
+        "provider_error",
+        "breaker_open",
+        "parse_failed",
+        "runner_unavailable",
+        "retry_later",
+        "policy_stale",
+        "template_mismatch",
+        "model_identity_mismatch",
+        "model_identity_unknown",
+        "owner_changed",
+        "stale_generation",
+        "busy",
+        "budget_exhausted",
+        "screening_unavailable",
+        # The provider ANSWERED but the reply cannot admit (#3200, #3195): the
+        # screening model's own safety refusal, or a reply cut off at the
+        # output ceiling. Neither is the sender's fault and neither is
+        # terminal — the message is re-screened on the next drain exactly like
+        # a provider error — so the sender is told screening is temporarily
+        # unavailable, never that their message was judged and held for review.
+        # Named EXPLICITLY rather than left to the fallback: the conservative
+        # class would claim a human is reviewing it, which is not what happens.
+        "model_refused",
+        "reply_truncated",
+    }
+)
+
+#: Codes written AFTER screening admitted the message: delivery, not moderation,
+#: is what is pending.
+_HOLD_CLASS_DELIVERY_PENDING = frozenset({"delivery_failed", "bridge_off", "phase_refused"})
+
+#: Screening category → the ONE coarse class that may leave this machine.
+#: Keyed by the closed :data:`SCREENING_CATEGORIES`; a category added there
+#: without a row here maps to no class (the hub shows a generic "refused"),
+#: never to a guessed one — the table test pins full coverage.
+_REFUSAL_CLASS_BY_CATEGORY = {
+    "prompt_injection": "manipulation",
+    "social_engineering": "manipulation",
+    "personal_info_request": "personal_info",
+    "harassment": "abusive",
+    "malicious_link": "unsafe_content",
+    "spam": "unsafe_content",
+    "out_of_scope_work": "out_of_scope",
+    "new_work_request": "out_of_scope",
+}
+
+
+def delivery_hold_class(hold_code: Any) -> str:
+    """The coarse ``hold_class`` a recipient may publish for one held message.
+
+    WHY THIS EXISTS. The sender of a held message (and the recipient's owner on
+    the hub) is told THAT it is held and, for the owner, roughly why — never
+    the hold code itself: a code such as ``model_hold`` or
+    ``bounce_without_category`` is a screener outcome, and publishing it would
+    turn the hub into an oracle for probing the recipient's moderation. So the
+    code is collapsed to one of three classes.
+
+    CONSTRAINTS. The code first goes through #3189's closed whitelist and
+    family collapse (:func:`_status_hold_code`): a free-text or hub-supplied
+    detail (``phase_refused:<hub code>``) never reaches the mapping, and
+    anything unrecognised — including a non-string — is ``awaiting_review``,
+    the conservative class that promises nothing about when it clears.
+    """
+
+    from local_operator.team_bridge.screening import HOLD_CODES
+
+    code = _status_hold_code(hold_code, frozenset(HOLD_CODES) | _DELIVERY_HOLD_CODES)
+    if code in _HOLD_CLASS_SCREENING_UNAVAILABLE:
+        return "screening_unavailable"
+    if code in _HOLD_CLASS_DELIVERY_PENDING:
+        return "delivery_pending"
+    return "awaiting_review"
+
+
+def refusal_class(categories: Any) -> str | None:
+    """The ONE coarse ``refusal_class`` for a rejected message, or ``None``.
+
+    WHY. The raw screening categories never leave this machine (contract v1):
+    eight fine categories would let a sender map the recipient's moderation
+    one probe at a time. Five coarse classes, one per refusal, are the most
+    that may be published — and the hub additionally withholds even that from
+    a sender it suspects of probing.
+
+    CONSTRAINTS. Only exact members of the closed :data:`SCREENING_CATEGORIES`
+    count; a bare string (free text, or one category passed unwrapped) is
+    refused rather than iterated character by character. Several categories
+    resolve to the FIRST in :data:`SCREENING_CATEGORIES` order, so the answer
+    is deterministic and a single class. No known category → ``None``.
+    """
+
+    if isinstance(categories, (str, bytes)) or not isinstance(
+        categories, (list, tuple, frozenset, set)
+    ):
+        return None
+    present = {name for name in categories if isinstance(name, str)}
+    for name in SCREENING_CATEGORIES:
+        if name in present:
+            return _REFUSAL_CLASS_BY_CATEGORY.get(name)
+    return None
+
+
 def read_screening_status(config_dir: Path) -> dict[str, Any] | None:
     """The screening status for the live owner of ``config_dir``, or ``None``.
 

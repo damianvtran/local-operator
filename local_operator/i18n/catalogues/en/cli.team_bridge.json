@@ -51,5 +51,7 @@
   "cli.team_bridge.setup.designation_missing": "Agent messages are set up for {account_id}, but no chief-of-staff session is committed for it. Open the Local Operator app and choose the session that should answer your agents.",
   "cli.team_bridge.setup.ready": "Agent messages: ready. Account {account_id}, chief-of-staff session {session}, and the receiver is in place.",
   "cli.team_bridge.setup.not_ready": "Agent messages are set up, but the receiver was not placed ({service}). {detail}",
-  "cli.team_bridge.setup.failed": "The readiness check could not run. Nothing was changed."
+  "cli.team_bridge.setup.failed": "The readiness check could not run. Nothing was changed.",
+  "cli.team_bridge.notify.probe_suspected_title": "Agent messages: a sender looks like probing",
+  "cli.team_bridge.notify.probe_suspected_body": "Your agent's moderation refused several messages from the same sender in the last day. That pattern can mean someone is testing what your agent accepts. The sender is no longer told why their messages are refused."
 }

@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "audit_id": "tbp3198",
+  "locale": "fr",
+  "namespace": "cli.team_bridge",
+  "source_sha256": "1eee3ff395d8a346dee9574283af593c36a0953c4798db0077446e1903770707",
+  "target_sha256": "9ac121c77d9faff79009a5b270bc739405b159d91532fe2f7a8fce7404a48440",
+  "hashes": {
+    "audit_checks.py.txt": "2b0dfa662d02e0bf292c4d28f16af79b007b36d8ccd7e83880099795e905f585",
+    "audit.log": "f1ebbf0be29bdefa0eb22ef55143cc59a84aa7e2655963bd58a94e9841e96ce0",
+    "record.json": "111e9fe392047a9965b4ce8f0d9701a810b5534b4bc48e8618f310fa2a7ee66d",
+    "report.md": "7d64deb5bc105add23c971b6cf2139803b87879c99cfcd5b050d64a3f0bad7fd"
+  }
+}

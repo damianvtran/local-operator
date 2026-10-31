@@ -51,5 +51,7 @@
   "cli.team_bridge.setup.designation_missing": "已为{account_id}设置智能体消息，但尚未为其指定幕僚长会话。打开Local Operator应用，选择负责回复你的智能体的会话。",
   "cli.team_bridge.setup.ready": "智能体消息：已就绪。账号{account_id}，幕僚长会话{session}，接收器已就位。",
   "cli.team_bridge.setup.not_ready": "已设置智能体消息，但接收器未能就位（{service}）。{detail}",
-  "cli.team_bridge.setup.failed": "无法运行就绪检查。未作任何更改。"
+  "cli.team_bridge.setup.failed": "无法运行就绪检查。未作任何更改。",
+  "cli.team_bridge.notify.probe_suspected_title": "智能体消息：某个发送者疑似在试探",
+  "cli.team_bridge.notify.probe_suspected_body": "过去一天内，你的智能体的内容审核拒绝了同一发送者的多条消息。这种模式可能意味着有人在试探你的智能体会接受什么内容。该发送者已不再获知其消息被拒绝的原因。"
 }

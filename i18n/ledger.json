@@ -2240,6 +2240,26 @@
       "note": "21 keys; round 1: 1 major (`cuota` vs relay `Asignación` for one money object) + 3 minor; aligned, counters made count-neutral; rounds 2–3 passed. Paid annotations kept relay-identical: width exception in the es guide."
     },
     {
+      "locale": "es",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "1eee3ff395d8a346dee9574283af593c36a0953c4798db0077446e1903770707",
+      "translator": {
+        "agent": "coder (lopdev) — PR #3198 implementer",
+        "model": "unrecorded — PR #3198 does not name the implementer's model; not inferred",
+        "date": "2026-10-30"
+      },
+      "auditor": {
+        "agent": "task (lopdev, i18n-audit-3198, session 709e5957cc3c), independent of the translator",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback)",
+        "date": "2026-10-30",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent audit of PR #3198 (team-bridge probe_suspected owner notification) at source_sha256 1eee3ff395d8a346dee9574283af593c36a0953c4798db0077446e1903770707 (catalogue_sha256 and raw sha256 agree). Copy change: 2 keys added (notify.probe_suspected_title, notify.probe_suspected_body); 0 deleted, 0 updated; the other 53 keys are unchanged since the PR #3189 passed row and were not re-audited. Checked against the en context notes: same sender, last day, possibly across conversations; testing what the agent accepts; sender no longer told why; no claim the sender was notified/blocked; no conversation named. Mechanical: key parity 55/55; no placeholders; NFC; no Cf/bidi controls; rendered through messages.render after regeneration. Translator (PR #3198 coder) and auditor are distinct agents in separate sessions, same model family (disclosed). es: 0 findings. 'Mensajes de agentes' matches the namespace product name; tú register per guide; 'en las últimas 24 horas' preserves 'last day'. Unresolved blocker/major: 0. Evidence: i18n/audits/evidence/es/cli.team_bridge/tbp3198/record.json"
+    },
+    {
       "locale": "fr",
       "namespace": "tui.status",
       "source_sha256": "2403f9c4f37b40264f575929627b99a0bcabb0baf1bcb6a0b951c6c31ec6843a",
@@ -4421,6 +4441,26 @@
       "note": "Independent audit of PR #3189 (team-bridge screening status line) at source_sha256 97aa224ed22d209a8eb84860bea6694f5c47fc531887d80270cbb1eee71e74fe (verified with catalogues.catalogue_sha256 and a raw sha256 of en/cli.team_bridge.json). Copy change: 8 keys added (status.screening, screening_healthy, screening_held, screening_held_class, screening_held_none, screening_breaker, screening_rejected, screening_rejected_none); 0 deleted, 0 updated. The whole carried namespace (53 keys) was read against the English source. Mechanical checks: key parity 53/53; every placeholder and select arm survives in all locales (2226 sentinel renders through messages.render, 0 lost or extra); plural arms rendered at counts 0/1/2/3/5/11/21/22/1000000; no Cf/bidi control characters; NFC. Translator and auditor are distinct agents in separate contexts; both run the same model family (disclosed). fr: 1 minor, fixed: status.screening, screening_healthy, screening_held and screening_held_class used a plain U+0020 before ':' and ';' where the fr guide and the rest of this namespace use U+202F; replaced with U+202F. one/many/other present; 'en attente' is invariant, so the identical arms are correct. Unresolved blocker/major: 0."
     },
     {
+      "locale": "fr",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "1eee3ff395d8a346dee9574283af593c36a0953c4798db0077446e1903770707",
+      "translator": {
+        "agent": "coder (lopdev) — PR #3198 implementer",
+        "model": "unrecorded — PR #3198 does not name the implementer's model; not inferred",
+        "date": "2026-10-30"
+      },
+      "auditor": {
+        "agent": "task (lopdev, i18n-audit-3198, session 709e5957cc3c), independent of the translator",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback)",
+        "date": "2026-10-30",
+        "result": "passed",
+        "findings": 3,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent audit of PR #3198 (team-bridge probe_suspected owner notification) at source_sha256 1eee3ff395d8a346dee9574283af593c36a0953c4798db0077446e1903770707 (catalogue_sha256 and raw sha256 agree). Copy change: 2 keys added (notify.probe_suspected_title, notify.probe_suspected_body); 0 deleted, 0 updated; the other 53 keys are unchanged since the PR #3189 passed row and were not re-audited. Checked against the en context notes: same sender, last day, possibly across conversations; testing what the agent accepts; sender no longer told why; no claim the sender was notified/blocked; no conversation named. Mechanical: key parity 55/55; no placeholders; NFC; no Cf/bidi controls; rendered through messages.render after regeneration. Translator (PR #3198 coder) and auditor are distinct agents in separate sessions, same model family (disclosed). fr: 1 major + 2 minor, fixed. Major: title used 'Messages d’agents' where the namespace's established product name is 'Messages des agents'. Minor: plain U+0020 before ':' (guide requires U+202F); ASCII apostrophes (guide requires U+2019). Also 'Ce schéma peut signifier' -> 'Ce comportement peut indiquer' (calque). Unresolved blocker/major: 0. Evidence: i18n/audits/evidence/fr/cli.team_bridge/tbp3198/record.json"
+    },
+    {
       "locale": "hi",
       "namespace": "tui.status",
       "source_sha256": "2403f9c4f37b40264f575929627b99a0bcabb0baf1bcb6a0b951c6c31ec6843a",
@@ -5635,6 +5675,26 @@
       "note": "Independent audit of PR #3189 (team-bridge screening status line) at source_sha256 97aa224ed22d209a8eb84860bea6694f5c47fc531887d80270cbb1eee71e74fe (verified with catalogues.catalogue_sha256 and a raw sha256 of en/cli.team_bridge.json). Copy change: 8 keys added (status.screening, screening_healthy, screening_held, screening_held_class, screening_held_none, screening_breaker, screening_rejected, screening_rejected_none); 0 deleted, 0 updated. The whole carried namespace (53 keys) was read against the English source. Mechanical checks: key parity 53/53; every placeholder and select arm survives in all locales (2226 sentinel renders through messages.render, 0 lost or extra); plural arms rendered at counts 0/1/2/3/5/11/21/22/1000000; no Cf/bidi control characters; NFC. Translator and auditor are distinct agents in separate contexts; both run the same model family (disclosed). hi: clean, 0 findings. one covers 0 and 1 (rendered '0 रोका गया'); आप register not exercised; nukta (ज़्यादातर) is consistent. Unresolved blocker/major: 0."
     },
     {
+      "locale": "hi",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "1eee3ff395d8a346dee9574283af593c36a0953c4798db0077446e1903770707",
+      "translator": {
+        "agent": "coder (lopdev) — PR #3198 implementer",
+        "model": "unrecorded — PR #3198 does not name the implementer's model; not inferred",
+        "date": "2026-10-30"
+      },
+      "auditor": {
+        "agent": "task (lopdev, i18n-audit-3198, session 709e5957cc3c), independent of the translator",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback)",
+        "date": "2026-10-30",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent audit of PR #3198 (team-bridge probe_suspected owner notification) at source_sha256 1eee3ff395d8a346dee9574283af593c36a0953c4798db0077446e1903770707 (catalogue_sha256 and raw sha256 agree). Copy change: 2 keys added (notify.probe_suspected_title, notify.probe_suspected_body); 0 deleted, 0 updated; the other 53 keys are unchanged since the PR #3189 passed row and were not re-audited. Checked against the en context notes: same sender, last day, possibly across conversations; testing what the agent accepts; sender no longer told why; no claim the sender was notified/blocked; no conversation named. Mechanical: key parity 55/55; no placeholders; NFC; no Cf/bidi controls; rendered through messages.render after regeneration. Translator (PR #3198 coder) and auditor are distinct agents in separate sessions, same model family (disclosed). hi: 0 findings. 'एजेंट संदेश' matches the namespace product name; मॉडरेशन, प्रेषक consistent; three facts preserved. Unresolved blocker/major: 0. Evidence: i18n/audits/evidence/hi/cli.team_bridge/tbp3198/record.json"
+    },
+    {
       "locale": "ru",
       "namespace": "tui.status",
       "source_sha256": "2403f9c4f37b40264f575929627b99a0bcabb0baf1bcb6a0b951c6c31ec6843a",
@@ -6847,6 +6907,26 @@
       "note": "Independent audit of PR #3189 (team-bridge screening status line) at source_sha256 97aa224ed22d209a8eb84860bea6694f5c47fc531887d80270cbb1eee71e74fe (verified with catalogues.catalogue_sha256 and a raw sha256 of en/cli.team_bridge.json). Copy change: 8 keys added (status.screening, screening_healthy, screening_held, screening_held_class, screening_held_none, screening_breaker, screening_rejected, screening_rejected_none); 0 deleted, 0 updated. The whole carried namespace (53 keys) was read against the English source. Mechanical checks: key parity 53/53; every placeholder and select arm survives in all locales (2226 sentinel renders through messages.render, 0 lost or extra); plural arms rendered at counts 0/1/2/3/5/11/21/22/1000000; no Cf/bidi control characters; NFC. Translator and auditor are distinct agents in separate contexts; both run the same model family (disclosed). ru: 1 minor, fixed: 'Проверка' for Screening collided with 'проверка' = check elsewhere in this namespace (status.last_check, setup.failed), so one word carried two concepts on adjacent status lines; now 'Фильтрация'. screening_healthy also tightened from 87 to 79 cells ('за 24 ч'). one/few/many/other genitives verified at 1/2/5/21; 'N задержано/отклонено' is the invariant impersonal construction, which is idiomatic with a count. Unresolved blocker/major: 0."
     },
     {
+      "locale": "ru",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "1eee3ff395d8a346dee9574283af593c36a0953c4798db0077446e1903770707",
+      "translator": {
+        "agent": "coder (lopdev) — PR #3198 implementer",
+        "model": "unrecorded — PR #3198 does not name the implementer's model; not inferred",
+        "date": "2026-10-30"
+      },
+      "auditor": {
+        "agent": "task (lopdev, i18n-audit-3198, session 709e5957cc3c), independent of the translator",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback)",
+        "date": "2026-10-30",
+        "result": "passed",
+        "findings": 3,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent audit of PR #3198 (team-bridge probe_suspected owner notification) at source_sha256 1eee3ff395d8a346dee9574283af593c36a0953c4798db0077446e1903770707 (catalogue_sha256 and raw sha256 agree). Copy change: 2 keys added (notify.probe_suspected_title, notify.probe_suspected_body); 0 deleted, 0 updated; the other 53 keys are unchanged since the PR #3189 passed row and were not re-audited. Checked against the en context notes: same sender, last day, possibly across conversations; testing what the agent accepts; sender no longer told why; no claim the sender was notified/blocked; no conversation named. Mechanical: key parity 55/55; no placeholders; NFC; no Cf/bidi controls; rendered through messages.render after regeneration. Translator (PR #3198 coder) and auditor are distinct agents in separate sessions, same model family (disclosed). ru: 1 major, fixed: title 'отправитель похож на зондирование' ('the sender resembles probing') is ungrammatical; now 'похоже, отправитель прощупывает агента'. Minor: 'отклонены' -> 'отклоняются' (ongoing), 'что принимает' -> 'что готов принять'. Unresolved blocker/major: 0. Evidence: i18n/audits/evidence/ru/cli.team_bridge/tbp3198/record.json"
+    },
+    {
       "locale": "ur",
       "namespace": "cli.exec_remote_help",
       "source_sha256": "c555648c19dd25af507951dc828f3fffbedc44feb579192c9c3fa7c6952e365e",
@@ -7838,6 +7918,26 @@
       },
       "status": "passed",
       "note": "Independent audit of PR #3189 (team-bridge screening status line) at source_sha256 97aa224ed22d209a8eb84860bea6694f5c47fc531887d80270cbb1eee71e74fe (verified with catalogues.catalogue_sha256 and a raw sha256 of en/cli.team_bridge.json). Copy change: 8 keys added (status.screening, screening_healthy, screening_held, screening_held_class, screening_held_none, screening_breaker, screening_rejected, screening_rejected_none); 0 deleted, 0 updated. The whole carried namespace (53 keys) was read against the English source. Mechanical checks: key parity 53/53; every placeholder and select arm survives in all locales (2226 sentinel renders through messages.render, 0 lost or extra); plural arms rendered at counts 0/1/2/3/5/11/21/22/1000000; no Cf/bidi control characters; NFC. Translator and auditor are distinct agents in separate contexts; both run the same model family (disclosed). ur: clean, 0 findings. one/other present; Urdu ؛ used, Latin tokens ({codes}, {age}, {failure_class}) left as LTR islands with no manual bidi controls, per the RTL guide (render-layer isolation is the TUI's job). آپ register not exercised. Unresolved blocker/major: 0."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "1eee3ff395d8a346dee9574283af593c36a0953c4798db0077446e1903770707",
+      "translator": {
+        "agent": "coder (lopdev) — PR #3198 implementer",
+        "model": "unrecorded — PR #3198 does not name the implementer's model; not inferred",
+        "date": "2026-10-30"
+      },
+      "auditor": {
+        "agent": "task (lopdev, i18n-audit-3198, session 709e5957cc3c), independent of the translator",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback)",
+        "date": "2026-10-30",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent audit of PR #3198 (team-bridge probe_suspected owner notification) at source_sha256 1eee3ff395d8a346dee9574283af593c36a0953c4798db0077446e1903770707 (catalogue_sha256 and raw sha256 agree). Copy change: 2 keys added (notify.probe_suspected_title, notify.probe_suspected_body); 0 deleted, 0 updated; the other 53 keys are unchanged since the PR #3189 passed row and were not re-audited. Checked against the en context notes: same sender, last day, possibly across conversations; testing what the agent accepts; sender no longer told why; no claim the sender was notified/blocked; no conversation named. Mechanical: key parity 55/55; no placeholders; NFC; no Cf/bidi controls; rendered through messages.render after regeneration. Translator (PR #3198 coder) and auditor are distinct agents in separate sessions, same model family (disclosed). ur: 1 minor, fixed: title prefix 'ایجنٹ پیغامات' differed from the namespace product name 'ایجنٹ کے پیغامات'; aligned. Body accurate; no bidi controls (RTL ordering left to paint boundary). Unresolved blocker/major: 0. Evidence: i18n/audits/evidence/ur/cli.team_bridge/tbp3198/record.json"
     },
     {
       "locale": "vi",
@@ -9050,6 +9150,26 @@
       },
       "status": "passed",
       "note": "Independent audit of PR #3189 (team-bridge screening status line) at source_sha256 97aa224ed22d209a8eb84860bea6694f5c47fc531887d80270cbb1eee71e74fe (verified with catalogues.catalogue_sha256 and a raw sha256 of en/cli.team_bridge.json). Copy change: 8 keys added (status.screening, screening_healthy, screening_held, screening_held_class, screening_held_none, screening_breaker, screening_rejected, screening_rejected_none); 0 deleted, 0 updated. The whole carried namespace (53 keys) was read against the English source. Mechanical checks: key parity 53/53; every placeholder and select arm survives in all locales (2226 sentinel renders through messages.render, 0 lost or extra); plural arms rendered at counts 0/1/2/3/5/11/21/22/1000000; no Cf/bidi control characters; NFC. Translator and auditor are distinct agents in separate contexts; both run the same model family (disclosed). vi: 1 nit, fixed: screening_breaker open arm 'mở thêm {remaining}' read as 'opened an extra {remaining}'; now 'còn mở {remaining} nữa' (still open for {remaining} more). other-only plural, NFC. Unresolved blocker/major: 0."
+    },
+    {
+      "locale": "vi",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "1eee3ff395d8a346dee9574283af593c36a0953c4798db0077446e1903770707",
+      "translator": {
+        "agent": "coder (lopdev) — PR #3198 implementer",
+        "model": "unrecorded — PR #3198 does not name the implementer's model; not inferred",
+        "date": "2026-10-30"
+      },
+      "auditor": {
+        "agent": "task (lopdev, i18n-audit-3198, session 709e5957cc3c), independent of the translator",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback)",
+        "date": "2026-10-30",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent audit of PR #3198 (team-bridge probe_suspected owner notification) at source_sha256 1eee3ff395d8a346dee9574283af593c36a0953c4798db0077446e1903770707 (catalogue_sha256 and raw sha256 agree). Copy change: 2 keys added (notify.probe_suspected_title, notify.probe_suspected_body); 0 deleted, 0 updated; the other 53 keys are unchanged since the PR #3189 passed row and were not re-audited. Checked against the en context notes: same sender, last day, possibly across conversations; testing what the agent accepts; sender no longer told why; no claim the sender was notified/blocked; no conversation named. Mechanical: key parity 55/55; no placeholders; NFC; no Cf/bidi controls; rendered through messages.render after regeneration. Translator (PR #3198 coder) and auditor are distinct agents in separate sessions, same model family (disclosed). vi: 1 major, fixed: 'tác tử' used for agent; glossary and this namespace use 'tác nhân' (title prefix 'Tin nhắn tác nhân'); replaced in title and body. Unresolved blocker/major: 0. Evidence: i18n/audits/evidence/vi/cli.team_bridge/tbp3198/record.json"
     },
     {
       "locale": "zh-CN",
@@ -11050,6 +11170,26 @@
       },
       "status": "passed",
       "note": "Independent audit of PR #3189 (team-bridge screening status line) at source_sha256 97aa224ed22d209a8eb84860bea6694f5c47fc531887d80270cbb1eee71e74fe (verified with catalogues.catalogue_sha256 and a raw sha256 of en/cli.team_bridge.json). Copy change: 8 keys added (status.screening, screening_healthy, screening_held, screening_held_class, screening_held_none, screening_breaker, screening_rejected, screening_rejected_none); 0 deleted, 0 updated. The whole carried namespace (53 keys) was read against the English source. Mechanical checks: key parity 53/53; every placeholder and select arm survives in all locales (2226 sentinel renders through messages.render, 0 lost or extra); plural arms rendered at counts 0/1/2/3/5/11/21/22/1000000; no Cf/bidi control characters; NFC. Translator and auditor are distinct agents in separate contexts; both run the same model family (disclosed). zh-CN: 1 minor, fixed: six of the new keys put spaces between Han and digits/placeholders ('24 小时', '# 条', '等待 {age}'), against the zh-CN guide's no-space rule and the namespace's existing keys; the spaces are removed. other-only plural with the 条/次 classifiers; 你 register not exercised. Unresolved blocker/major: 0."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "1eee3ff395d8a346dee9574283af593c36a0953c4798db0077446e1903770707",
+      "translator": {
+        "agent": "coder (lopdev) — PR #3198 implementer",
+        "model": "unrecorded — PR #3198 does not name the implementer's model; not inferred",
+        "date": "2026-10-30"
+      },
+      "auditor": {
+        "agent": "task (lopdev, i18n-audit-3198, session 709e5957cc3c), independent of the translator",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback)",
+        "date": "2026-10-30",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent audit of PR #3198 (team-bridge probe_suspected owner notification) at source_sha256 1eee3ff395d8a346dee9574283af593c36a0953c4798db0077446e1903770707 (catalogue_sha256 and raw sha256 agree). Copy change: 2 keys added (notify.probe_suspected_title, notify.probe_suspected_body); 0 deleted, 0 updated; the other 53 keys are unchanged since the PR #3189 passed row and were not re-audited. Checked against the en context notes: same sender, last day, possibly across conversations; testing what the agent accepts; sender no longer told why; no claim the sender was notified/blocked; no conversation named. Mechanical: key parity 55/55; no placeholders; NFC; no Cf/bidi controls; rendered through messages.render after regeneration. Translator (PR #3198 coder) and auditor are distinct agents in separate sessions, same model family (disclosed). zh-CN: 1 minor, fixed: '智能体审核' read as 'agent review' (approval), not content moderation; now '智能体的内容审核'. '将不再' -> '已不再' (state already in effect). 你 register per guide. Unresolved blocker/major: 0. Evidence: i18n/audits/evidence/zh-CN/cli.team_bridge/tbp3198/record.json"
     }
   ]
 }
