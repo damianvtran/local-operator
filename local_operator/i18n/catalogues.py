@@ -48,21 +48,97 @@ WIRE_NAMESPACE_PREFIX = "wire."
 #: Wire namespaces excluded from the EAGER per-locale bundle and served on
 #: demand through the existing per-namespace route instead.
 #:
-#: The set is a deliberate, reviewed policy rather than a size heuristic for
-#: two reasons. (1) `wire.settings` is the settings registry's label/help copy
-#: (804 keys, 80,658 B in `en`, 133,641 B in `hi`); the desktop settings surface
-#: receives those as plain `label`/`help` strings from `/v1/settings`, not as
-#: `{code, params, text}` envelope identities, so no envelope renderer needs
-#: them at startup. (2) Re-splitting the file into child namespaces would move
-#: already-audited translated content into new namespaces and invalidate the
-#: translation ledger's per-namespace `source_sha256` records; deferral keeps
-#: that audit trail intact while removing the same bytes from the eager load.
-#: A per-namespace ceiling test (`tests/unit/i18n/test_catalogue_sizes.py`)
-#: asserts this set exactly, so a new large namespace cannot join it silently.
+#: THE CRITERION, which every entry here had to satisfy in review: no producer
+#: returns the namespace's messages as an ENVELOPE IDENTITY. An envelope is
+#: ``{code, params, text}`` (see :func:`local_operator.i18n.messages.envelope`),
+#: and it is the ``code`` — the catalogue key itself — that a client resolves,
+#: so a namespace whose keys cross the boundary must stay eager: deferring it
+#: would leave a released client holding a code it has nothing to resolve
+#: (that is why every ``wire.errors.*`` plane stays eager). A namespace whose
+#: copy crosses as a FINISHED STRING is safe to defer: the renderer is
+#: in-process — it reads the catalogue file directly, never the bundle — and
+#: the wire only ever carries the rendered sentence: a printed CLI line, a
+#: registry ``label``/``help`` string, an already-rendered bridge row.
+#:
+#: Deferral is also chosen over RE-SPLITTING these files into child
+#: namespaces: a split would move already-audited translated content into new
+#: namespaces and invalidate the translation ledger's per-namespace
+#: ``source_sha256`` records, while deferral keeps that audit trail intact and
+#: removes the same bytes from the eager load.
+#:
+#: The set is a reviewed policy, not a size heuristic. Two tests pin it:
+#: ``tests/unit/i18n/test_catalogue_sizes.py`` asserts the exact key set, and
+#: ``tests/unit/i18n/test_deferred_references.py`` refuses a new reference — a
+#: new render point — to any namespace listed here. That census, each entry's
+#: verified render points and its reason live in
+#: ``local_operator/i18n/deferred_wire_inventory.json``; the reason is
+#: asserted equal to the one below, so the two cannot drift. A namespace with
+#: an envelope producer therefore cannot be parked here quietly: the inventory
+#: has no plain-string render point to record for it, and both tests name the
+#: two legitimate fixes (make it eager again, or split it).
+#:
+#: Ordered by family, then roughly by size: the settings registry and the small
+#: child namespaces ``settings_io._CHILD_SETTINGS_NAMESPACES`` merges into it,
+#: the two CLI surfaces (``exec``, ``remote_compute``), the slash registry, and
+#: the bridge rows. A new entry goes at the end of its family — a reviewer reads
+#: families, not collation.
 DEFERRED_NAMESPACES: dict[str, str] = {
     "wire.settings": (
         "settings registry labels/help, consumed as plain strings by the "
         "settings surface; no desktop envelope identity uses this namespace"
+    ),
+    "wire.settings.hub_defaults": (
+        "hub default labels/help rendered in-process by settings_io._t into "
+        "plain strings served by /v1/settings"
+    ),
+    "wire.console": (
+        "console section title/description and row labels rendered by "
+        "settings_io._t (settings_io.py) as plain strings"
+    ),
+    "wire.memory": (
+        "memory section rows rendered by settings_io._t (settings_io.py) as "
+        "plain label/help strings"
+    ),
+    "wire.host_speed": (
+        "host-speed threshold label/help rendered by settings_io._t "
+        "(settings_io.py)"
+    ),
+    "wire.radient_saver": (
+        "radient-saver section and mode choices rendered by settings_io._t "
+        "(settings_io.py); saver/chain.py::notice_message returns a Msg its "
+        "caller renders into a printed notice"
+    ),
+    "wire.aida_cadence": (
+        "AIDA cadence label rendered by settings_io._t (settings_io.py) as a "
+        "plain string"
+    ),
+    "wire.exec": (
+        "exec CLI/TUI copy printed by exec_mode.py and exec_session.py "
+        "(_t = tr(\"wire.exec\") at module level); only the rendered sentence "
+        "is printed"
+    ),
+    "wire.remote_compute": (
+        "remote-run CLI copy printed by remote_compute/cli.py "
+        "(_t = tr(\"wire.remote_compute\"), printed through _refuse/print); no "
+        "envelope is emitted"
+    ),
+    "wire.slash": (
+        "slash registry descriptions rendered by slash_commands.py::_desc "
+        "through render(); the row's Msg stays in-process and the catalogue "
+        "route serves the finished description string"
+    ),
+    "wire.slash.library": (
+        "the /library page descriptions rendered by slash_commands.py::_desc "
+        "through render()"
+    ),
+    "wire.slash.notifications_page": (
+        "the notifications page description rendered by "
+        "slash_commands.py::_desc through render()"
+    ),
+    "wire.tool_rows.bridge": (
+        "bridge transcript rows reach the phone as already-rendered text "
+        "(harness/bridge_copy.py, _t = tr(\"wire.tool_rows.bridge\")); no "
+        "message id crosses"
     ),
 }
 

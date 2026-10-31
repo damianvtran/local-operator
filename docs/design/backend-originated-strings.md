@@ -230,7 +230,9 @@ The desktop surface needs only the backend-owned `wire.*` set, which measures
 namespace dominates both: `wire.settings` is 80,658 B of the English wire set
 (69%) and 92,304 B of French (92%), and reaches 133,641 B in Hindi. A loader costed from
 the all-catalogue total is therefore pessimistic about the eager payload and
-blind to the one file that actually dominates it.
+blind to the one file that actually dominates it. These are the figures the
+DECISION was taken on; the deferral policy below has since moved those bytes
+out of the eager set, and its own measurements are stated there.
 
 **Decision: one per-locale eager bundle, `wire.*` only.**
 `GET /v1/i18n/catalogues/{locale}` serves every `wire.*` namespace of the
@@ -243,24 +245,83 @@ truth for strings another client already ships. The active locale is fetched at
 startup; a locale switch fetches that locale; the client caches valid bundles
 persistently (two most recent locales).
 
-**`wire.settings` is deferred, not re-split.** Re-splitting the 804-key file
-into child namespaces would move already-audited translated content into new
-namespaces and invalidate the translation ledger's per-namespace
-`source_sha256` records. The file carries settings-registry labels/help that the
-desktop settings surface receives as plain `label`/`help` strings from
-`GET /v1/settings`; no desktop envelope identity uses the namespace (verified by
-`grep` over `.envelope()` producers). It is therefore listed in the bundle's
-`deferred` manifest and fetched on demand through the existing per-namespace
-route if a future surface needs it. Eager payload: 36,191 B English, 7,953 B
-French.
+**Deferral is a policy with one criterion: no envelope identity.** A namespace
+in `DEFERRED_NAMESPACES` (`local_operator/i18n/catalogues.py`) is left out of
+the eager message map and described instead in the bundle's `deferred`
+manifest (`namespace`, `content_sha256`, `bytes`, `keys`); a client that needs
+it fetches the existing per-namespace route. The criterion for getting there is
+not size, it is the BOUNDARY: an envelope is `{code, params, text}` and it is
+the `code` — the catalogue key — that a client resolves, so a namespace whose
+keys cross as envelope identities must stay eager (deferral would leave a
+released client holding a code it cannot resolve, which is why every
+`wire.errors.*` plane is eager). A namespace whose copy crosses as a FINISHED
+STRING is safe: the renderer is in-process, reads the catalogue file directly,
+and the wire only ever carries the rendered sentence. Each entry records that
+render point, and `tests/unit/i18n/test_deferred_references.py` ratchets a
+per-file reference census against
+`local_operator/i18n/data/deferred_wire_inventory.json`, so the first new
+render point in a deferred namespace fails a test instead of shipping English
+to every non-English client.
+
+Thirteen namespaces meet the criterion today. `wire.settings` is the settings
+registry's label/help copy (the desktop settings surface receives plain
+`label`/`help` strings from `GET /v1/settings`); the rest render as printed CLI
+lines, registry strings, rendered slash descriptions, or already-rendered
+bridge rows:
+
+| namespace | render point (verified) |
+| --- | --- |
+| `wire.settings` | `settings_io._t` — registry labels/help as plain strings |
+| `wire.settings.hub_defaults` | `settings_io._t` — hub default labels |
+| `wire.console` | `settings_io._t` — console section and rows |
+| `wire.memory` | `settings_io._t` — memory rows |
+| `wire.host_speed` | `settings_io._t` — host-speed threshold |
+| `wire.radient_saver` | `settings_io._t`; `saver/chain.py::notice_message` (a `Msg` its caller prints) |
+| `wire.aida_cadence` | `settings_io._t` — AIDA cadence label |
+| `wire.exec` | `exec_mode._t`, `exec_session._t` — printed sentences |
+| `wire.remote_compute` | `remote_compute/cli.py::_t` — `_refuse`/`print` |
+| `wire.slash` | `slash_commands.py::_desc` / `::describe` — `render()` per row |
+| `wire.slash.library` | `slash_commands.py::_desc` |
+| `wire.slash.notifications_page` | `slash_commands.py::_desc` |
+| `wire.tool_rows.bridge` | `harness/bridge_copy.py::_t` — rows leave as rendered text |
+
+Deferral, not re-splitting, is what keeps the translation ledger honest:
+splitting a file into child namespaces would move already-audited translated
+content into new namespaces and invalidate the ledger's per-namespace
+`source_sha256` records, while deferral leaves the files and their audit trail
+untouched and removes the same bytes from the eager load.
+
+**Measured effect.** Raw UTF-8 catalogue bytes of the eager set, before → after
+this policy: en 51,711 → 25,897 B, fr 50,480 → 23,389, es 53,054 → 24,475,
+zh-CN 44,842 → 19,059, ru 45,743 → 16,379, vi 37,214 → 13,254, ur 43,145 →
+15,523, hi 62,265 → 19,600. The largest remaining eager file is
+`wire.errors.desktop` at 9,534 B (en), which is what the per-file ceiling guards.
+
+**The gate is a raw structural guard, not a transfer budget.** The route serves
+raw UTF-8 with `content-encoding=None` (no `GZipMiddleware`), so the ceiling is
+about what the bundle carries, not what a client downloads. The same eager
+bodies gzip to roughly a quarter of their size — en 15,678 B and hi 13,631 B
+gzipped against 52,291 B and 62,298 B raw — and hi, the LARGEST raw payload,
+gzipped SMALLER than en. A compression ceiling would therefore invert the guard
+the deferral policy exists to express, which is one more reason not to add
+compression to this route.
+
+**No client fetches the bundle today, so there is no boot-timing claim here.**
+The desktop has no caller (the loader PR #1279 was closed unmerged); the mobile
+relay web fetches per namespace; the TUI renders in-process from the same
+catalogues. The numbers above are catalogue bytes, not transfer bytes, and the
+deferral changes nothing an in-process renderer reads — it changes only what a
+future bundle client would have to hold.
 
 **The size policy is a gate, not a measurement.**
 `tests/unit/i18n/test_catalogue_sizes.py` fails when (a) any eager `wire.*`
 namespace exceeds 32 KiB, (b) the deferred set is anything other than exactly
-`{wire.settings}` (with a recorded reason), (c) a deferred namespace exceeds
-160 KiB, or (d) a locale's total eager wire payload exceeds 64 KiB. A total
-budget alone is satisfied by many small files plus one monster; the per-file
-ceiling is what makes the next growth visible in review.
+the thirteen reviewed namespaces (each with a recorded reason), (c) a deferred
+namespace exceeds 160 KiB, or (d) a locale's total eager wire payload exceeds
+64 KiB. A total budget alone is satisfied by many small files plus one monster;
+the per-file ceiling is what makes the next growth visible in review. The total
+ceiling is itself exercised on a synthetic locale one byte over it, so the
+guard is shown to bite on data that is not today's (comfortably smaller) tree.
 
 **Failure, empty and RTL.** The bundle adds no failure behaviour: unreachable
 endpoint, 404 for an unshipped locale, or a `200` with an empty message map all

@@ -398,6 +398,11 @@ def test_context_sidecar_is_not_a_namespace_and_reads_when_present(
     assert catalogues.context("en", "missing") == {}
 
 
+#: The deferred set as committed: the test below promotes everything into the
+#: eager bundle, so it needs the set it started from independent of the dict.
+DEFERRED_AT_IMPORT = dict(catalogues.DEFERRED_NAMESPACES)
+
+
 def test_the_bundle_identity_covers_the_eager_set(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -414,8 +419,10 @@ def test_the_bundle_identity_covers_the_eager_set(
     eager = catalogues.wire_bundle("en")
 
     assert len(eager["messages"]) > len(deferred["messages"])
-    assert len(eager["messages"]) - len(deferred["messages"]) == len(
-        catalogues.load_catalogue("en", "wire.settings")
+    assert len(eager["messages"]) - len(deferred["messages"]) == sum(
+        len(catalogues.load_catalogue("en", namespace))
+        for namespace in catalogues.wire_namespaces("en")
+        if namespace in DEFERRED_AT_IMPORT
     )
     # Identical file bytes, different split: the identity must still differ.
     assert eager["content_sha256"] != deferred["content_sha256"]

@@ -35,3 +35,8 @@ def i18n_check() -> ModuleType:
 @pytest.fixture(scope="session")
 def i18n_generate() -> ModuleType:
     return _load("i18n_generate_under_test", REPO / "scripts" / "i18n" / "generate.py")
+
+
+@pytest.fixture(scope="session")
+def i18n_deferred_watch() -> ModuleType:
+    return _load("i18n_deferred_watch_under_test", REPO / "scripts" / "i18n" / "deferred_watch.py")

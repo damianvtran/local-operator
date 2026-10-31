@@ -226,7 +226,7 @@ async def test_the_per_locale_bundle_serves_eager_wire_messages_and_a_deferred_m
         "en", "wire.errors.desktop"
     )
     deferred = {entry["namespace"]: entry for entry in result["deferred"]}
-    assert set(deferred) == {"wire.settings"}
+    assert set(deferred) == set(catalogues.DEFERRED_NAMESPACES)
     assert deferred["wire.settings"]["content_sha256"] == catalogues.catalogue_sha256(
         "en", "wire.settings"
     )
