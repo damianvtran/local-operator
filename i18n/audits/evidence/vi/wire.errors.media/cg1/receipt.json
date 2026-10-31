@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "audit_id": "cg1",
+  "locale": "vi",
+  "namespace": "wire.errors.media",
+  "source_sha256": "1c109f63b8d3ce00657a47836199ce8ff924bb8e4bd999fda9f1d64f760a823b",
+  "target_sha256": "6b5e17172cceead9a34bbc5ec51f49c63822f3333409fa54ee82f4bd3de14240",
+  "hashes": {
+    "audit.log": "2531320908aed009f2f6ad1cca453a33441779c459c3bd1f1160ff4f0cf31388",
+    "findings.json": "dc9894daa451c1fa4dfd642e59452b480039cb4ce16805b5b55e915584d26ac9",
+    "record.json": "b5ec3e3092af8e224e3aec5f9dce64bd859d23fc782ed4335bd9b5c9cfec8707",
+    "report.md": "e95b51652e61242b410a1ff933ef1aa7443e02f60ca4d4135e47241ba3c2f598"
+  }
+}

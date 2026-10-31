@@ -1,0 +1,14 @@
+{
+  "locale": "vi",
+  "namespace": "wire.errors.media",
+  "result": "CLEAN",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 0
+  },
+  "unresolved_blocker_major": 0,
+  "findings": []
+}

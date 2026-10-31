@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "audit_id": "cg1",
+  "locale": "vi",
+  "namespace": "mobile.setup",
+  "source_sha256": "6249b10379beb9b2433746416fa7baff061265a1b9315d47465140cd5fcf61e9",
+  "target_sha256": "8578a9567ee326af42d3eca11b68a43f4380df27faae8182e386c47ac61687e2",
+  "hashes": {
+    "audit.log": "b732043f1f0cf8629e93e1f1b1106ba8c75f18baa9ac36fd42ba0c94bf22a65c",
+    "findings.json": "baeb6349addfd2601321e3a57b19c6b1e8bd1ff0c045b480d66f1a5d40533896",
+    "record.json": "7fec6afb67b87be8d25c4217c68a9660586b403957331e68dea044aaa4bb0ae3",
+    "report.md": "fb3706be245b75b2cff593501407920513d2edc04b0e7bb3704c1fc5d902c527"
+  }
+}

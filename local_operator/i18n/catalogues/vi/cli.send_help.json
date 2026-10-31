@@ -1,0 +1,9 @@
+{
+  "cli.send_help.send": "Gửi tin nhắn tới một phiên lop cục bộ khác (không cần cmux)",
+  "cli.send_help.target": "tên cuộc trò chuyện / id phiên / chuỗi con của cwd (không phân biệt hoa thường). Bỏ qua khi chọn bằng --pid/--session; truyền cả hai sẽ bị từ chối.",
+  "cli.send_help.message": "nội dung tin nhắn; bỏ qua để đọc nội dung từ stdin. Với --pid/--session, một đối số vị trí duy nhất CHÍNH LÀ tin nhắn, và gõ một đối số trong khi vẫn truyền nội dung qua pipe sẽ bị từ chối.",
+  "cli.send_help.pid": "chọn theo đúng pid",
+  "cli.send_help.session": "chọn theo đúng id phiên",
+  "cli.send_help.steer": "chèn vào giữa lượt (steer) thay vì hộp thư mặc định",
+  "cli.send_help.wake": "nếu mục tiêu đang rảnh, chạy một lượt ngay (chỉ ở chế độ hộp thư)"
+}

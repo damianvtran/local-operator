@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "audit_id": "cg1",
+  "locale": "vi",
+  "namespace": "tui.projects",
+  "source_sha256": "aeb473eb7de44143822962b44b6be239d63f930710e754ce5205781ca4b4ae91",
+  "target_sha256": "7a70153b03c0d9606fdf869d2f3445c3f5f3af80e41d07cfec34a3a10aa8600d",
+  "hashes": {
+    "audit.log": "570d8d9f921cb6116e9058217dae7f3388f5fbbc2098cfa97c41f577a6029cab",
+    "findings.json": "4b17bdc94ee4f90a7783e6723404d2e1b9f7b69dfd5055114bab88a65adcfe39",
+    "record.json": "26bfe0c6b9bfbc4935e2e627851b5373ec95029f59ac208c16c173fb60f0c4b9",
+    "report.md": "76f1a0f1409a75882f2bddc5e27977ba3b54cca735dbd583d0a2dd0c87cb6d97"
+  }
+}

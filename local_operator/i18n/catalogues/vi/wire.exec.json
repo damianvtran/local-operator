@@ -1,0 +1,19 @@
+{
+  "wire.exec.approval_advisory": "Cảnh báo: lần chạy này không thể xin phê duyệt (không có terminal gắn kèm), nên mọi lệnh gọi công cụ cần phê duyệt sẽ bị từ chối.\n  Cách khắc phục: --control tạm giữ các thẻ cho người giám sát; --yolo tự động phê duyệt mọi bậc; --tools NAME[,NAME] phê duyệt trước các công cụ được liệt kê và giới hạn phạm vi của lần chạy này trong đó; tool_approval_mode: auto trong cấu hình trả lời mọi lệnh gọi theo cùng một cách cho mọi lần chạy.",
+  "wire.exec.clear_goal_needs_start": "--clear-goal điều chỉnh một lần chạy chứ không bắt đầu nó. Hãy kết hợp với --resume SESSION_ID cùng một prompt hoặc --loop.",
+  "wire.exec.error_line": "Lỗi: {error}",
+  "wire.exec.error_preflight": "Lỗi: kiểm tra trước khi chạy thất bại: {error}",
+  "wire.exec.exec_epilog": "Ví dụ:\n  lop exec 'Review the change' --team release --background\n  printf 'Inspect this report' | lop exec --profile reviewer\n  lop exec --goal 'Finish the checklist' --loop 3 --name 'Night audit'\n  lop exec --resume SESSION_ID --loop-goal 'Verify every acceptance criterion'\n  lop exec --status JOB_ID\n\nResume khôi phục bản ghi, nhóm, hồ sơ, mục tiêu và tên trước; các cờ khởi động\ntường minh ghi đè phần của chúng. Nhóm và hồ sơ có thể cùng tồn tại. Vòng lặp\nchạy sau prompt ban đầu tùy chọn; --loop N chỉ đếm các lần tiếp tục.\nTiến độ vòng lặp đã lưu hiển thị khi resume, nhưng các lần lặp không bao giờ tự phát lại.\nMột mục tiêu đơn lẻ không chạy mô hình. Prompt là nguyên văn, không phải lệnh slash.\n--goal chỉ ĐẶT mục tiêu; khác với /goal của TUI, nó không gửi văn bản đó như\nmột tin nhắn, vì prompt là kênh tin nhắn của exec.\n--agent/--agent-id chọn dữ liệu tác nhân kiểu cũ và loại trừ lẫn nhau.\nPhê duyệt không-TTY mặc định bị từ chối. --control có thể chờ người giám sát; --yolo\nlà ghi đè tường minh, không bao giờ được ngầm hiểu bởi --background hay --team.\n--tools giới hạn phạm vi lần chạy tiếp cận được: công cụ bị loại là không thể tiếp cận.\nSự kiện/văn bản tiền cảnh dùng stdout; biên nhận dùng stderr. Lần chạy tách rời ghi\ncả hai luồng và in các ID tác vụ/phiên riêng biệt. Dùng lop --resume SESSION_ID\nđể xem lần chạy đang hoạt động hoặc tiếp tục lần đã kết thúc; exec từ chối chủ sở hữu đang hoạt động.",
+  "wire.exec.exec_help": "Thực thi một tác vụ hoặc vòng lặp mục tiêu trong một phiên được lưu mà không khởi động TUI",
+  "wire.exec.goal_only_sets_objective": "--goal đặt mục tiêu nhưng không bắt đầu công việc (khác với /goal của TUI). Hãy thêm một prompt, truyền một prompt qua stdin (hoặc '-'), hoặc chạy vòng lặp với --loop N.",
+  "wire.exec.log_pointer": "Nhật ký: {log_path}",
+  "wire.exec.no_exec_job": "Không có tác vụ exec {job_id}; ID tác vụ được in bởi --background và ghi trong {jobs_path}",
+  "wire.exec.no_prompt": "không có prompt. Hãy truyền một prompt làm đối số, truyền qua stdin (hoặc '-'), hoặc chạy vòng lặp với --loop/--loop-goal",
+  "wire.exec.receipt_failure_suffix": " (biên nhận thực thi) — {failure}",
+  "wire.exec.receipt_suffix": " (biên nhận thực thi)",
+  "wire.exec.session_pointer": "Phiên: {session_id} (cuộc trò chuyện) — gắn kèm hoặc tiếp tục: lop --resume {session_id}",
+  "wire.exec.status_pointer": "Trạng thái: lop exec --status {job_id}",
+  "wire.exec.tools_unreachable": "Cảnh báo: --tools không nêu công cụ nào mà lần chạy này có thể tiếp cận: {names}. Phiên đã tiếp cận {count} công cụ.",
+  "wire.exec.turn_did_not_complete": "lượt chưa hoàn tất",
+  "wire.exec.waiting_on_you": "Đang chờ bạn? lop sessions cho biết một lần chạy cần gì"
+}
