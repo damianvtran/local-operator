@@ -89,6 +89,11 @@ _SCREENING_UNAVAILABLE = {
     "budget_exhausted",
     # The connector's own "screen_item answered nothing" (see the helper's note).
     "screening_unavailable",
+    # #3200/#3195: the provider answered but the reply cannot admit (the
+    # model's own safety stop, or a reply cut off at the output ceiling).
+    # Transient, so screening is "unavailable", not "awaiting review".
+    "model_refused",
+    "reply_truncated",
 }
 _DELIVERY_PENDING = {"delivery_failed", "bridge_off", "phase_refused"}
 

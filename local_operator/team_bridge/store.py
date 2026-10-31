@@ -1243,6 +1243,16 @@ _HOLD_CLASS_SCREENING_UNAVAILABLE = frozenset(
         "busy",
         "budget_exhausted",
         "screening_unavailable",
+        # The provider ANSWERED but the reply cannot admit (#3200, #3195): the
+        # screening model's own safety refusal, or a reply cut off at the
+        # output ceiling. Neither is the sender's fault and neither is
+        # terminal — the message is re-screened on the next drain exactly like
+        # a provider error — so the sender is told screening is temporarily
+        # unavailable, never that their message was judged and held for review.
+        # Named EXPLICITLY rather than left to the fallback: the conservative
+        # class would claim a human is reviewing it, which is not what happens.
+        "model_refused",
+        "reply_truncated",
     }
 )
 
