@@ -183,146 +183,18 @@ def test_exact_wire_namespace_contract_rejects_mutations(
                 test_shipped_wire_namespaces_exist()
 
 
-def test_wave3_hindi_carries_its_namespace_snapshot_with_parity(i18n_check) -> None:
-    # Pin only the original ten Hindi groups plus each later reviewed slice.
-    # Analytics/desktop backfill is explicitly unfinished; mechanical parity is
-    # not full-surface coverage. `tui.review` is the LOH-19 slice's audited
-    # namespace, added here with its own ledger row; `tui.schedule` is P1's,
-    # carried only now that its audit row exists (the carried-namespace gate
-    # un-ships a locale for an unaudited file); `tui.projects_edit` is P2's
-    # audited namespace, carried the same way on top of the union. P3a adds
-    # `tui.authoring` only after its independent 40-key audit passed. P3b adds
-    # `tui.team_authoring` after its independent 35-key audit passed. P4a adds
-    # `tui.viewer` after its independent audit and keyboard-hint audit refresh.
-    # The wire.memory slice adds the independently audited `wire.memory`
-    # namespace, whose ledger row is what un-ships it. The LOH-11 relay-web
-    # tag slice adds `relay.session.tags` on the same terms: one audited
-    # namespace with its own fresh ledger row. The remote-compute wave (S3e)
-    # adds `cli.exec_remote_help` and `wire.remote_compute`, each carried only
-    # once its independent audit row passed against the current en bytes.
-    # The R5 stale-ask wave (2026-10-23) adds the two ask-surface namespaces,
-    # `relay.ask` and `tui.asks`, on the same terms: independently audited
-    # (round 1 raised 12 findings, round 2 passed all seven locales), one fresh
-    # ledger row each against the current en bytes. P5 adds `tui.palette` on
-    # the same terms: a 7-key namespace whose fresh, independently audited
-    # ledger row is what lets the locale carry it. The fast-mode fix adds
-    # `tui.notices` and `wire.errors.desktop`: Hindi had no file for either
-    # namespace, so the refusal notices fell back to English; now each carries
-    # a 30-key / 84-key catalogue with its own audited ledger row (see
-    # i18n/ledger.json), which is the same condition every namespace above was
-    # admitted on. The relay.asks slice adds the SPA's ask cards/sheet/dock
-    # namespace `relay.asks` on the same terms — it is a DIFFERENT namespace
-    # from R5's `relay.ask` (the dismiss reasons and stale-ask line), and
-    # `namespaces()` returns the files sorted, so `relay.asks` sorts before
-    # `relay.session.tags` rather than where the slice landed. The approvals
-    # slice adds `relay.approvals` (17 keys, the approval-scope copy main added
-    # as literals) on the same terms: carried only now that its independent
-    # audit row exists against the current en bytes. It sorts before
-    # `relay.ask`. The notifications-inbox wave adds `tui.notifications` (the
-    # inbox page's 72 keys) on exactly the same terms: six locales carry it
-    # only because their independent audit bundles and fresh ledger rows landed
-    # with the files in the same commit, and the seventh (ru) is still absent
-    # for want of its round-2 delta audit. Mechanical parity is asserted below
-    # for every namespace in this tuple, so the new one is checked too.
-    # `relay.ask`. The phone inbox adds `relay.notifications` (77 keys) with
-    # the other seven locales; it sorts after `relay.chrome`. Carrying it
-    # pins key/placeholder parity here, while shipping still waits on its
-    # independent audit row, exactly as each namespace above did.
-    # The relay catalogue translation wave adds the four namespaces hi had never
-    # carried — `relay.account_policy` (13 keys, en from #2453),
-    # `relay.library` (1, a64e332b996), `relay.session` (17, #2329) and
-    # `relay.shell` (44, ec55a9f2bd9): account-routing settings, the library
-    # count, the session list/view and the shell chrome. Each has been in en
-    # since its own extraction slice but went untranslated here, and each joins
-    # on the same terms as everything above: its own passed independent audit
-    # row against the current en bytes (i18n/ledger/hi.json).
+def test_hindi_carried_namespaces_follow_tree_with_parity(i18n_check) -> None:
+    # Catalogue additions are not regressions. Keep loader inventory and parity
+    # coverage, but derive the census from files instead of a wave-sized snapshot.
+    # Audit eligibility remains the generated shipment/ledger tests' contract.
     locale = "hi"
-    namespaces = (
-        # `lop agents picture set|remove|show`: 11 keys, carried in all seven
-        # locales with its audited ledger row at the current en bytes. Sorted
-        # first: `namespaces()` returns files sorted and this one precedes
-        # cli.exec_remote_help.
-        "cli.agents_picture",
-        "cli.exec_remote_help",
-        # The serve-supervision slice's 14-key namespace, carried in every locale
-        # only with its independently audited ledger row at the current en bytes;
-        # it sorts after cli.exec_remote_help.
-        "cli.services_status",
-        # The Team Bridge receiver's 45-key namespace (``lop team-bridge setup``
-        # and ``receiver <verb>``), carried in all seven locales only with its
-        # independently audited ledger row at the current en bytes; the receiver
-        # ships cross-platform, so Hindi carries it like the rest. It sorts
-        # after cli.services_status.
-        "cli.team_bridge",
-        "relay.account_policy",
-        # The phone's agent-picture copy (alt text, the header control's label
-        # and the change-it-on-the-desktop hint), carried in all seven locales
-        # only with its independently audited ledger row at the current en
-        # bytes; it sorts before relay.approvals.
-        "relay.agent_avatar",
-        "relay.approvals",
-        "relay.ask",
-        "relay.asks",
-        # Borderless phone chrome carries its own audited namespace; existing
-        # English labels stay untouched while all seven locales join the wave.
-        "relay.chrome",
-        # The session status dot's 9-key namespace (round 2 added the
-        # reconnecting/dropped/quiet/ended copy), carried only with its
-        # doubly audited ledger row; it keeps relay.chrome's English bytes
-        # frozen, and sorts between relay.chrome and relay.session.tags.
-        "relay.health",
-        # The library page's pluralized count; it sorts between the relay
-        # health dot and the notifications inbox.
-        "relay.library",
-        "relay.notifications",
-        # `relay.session` is the session list/view copy — a DISTINCT namespace
-        # from `relay.session.tags` below, not a parent of it.
-        "relay.session",
-        "relay.session.tags",
-        # The team bridge's shell setting (main #3189).
-        "relay.shell",
-        # The composer's `$skill` picker (SKM-D6): 3 keys, carried in every
-        # locale only with a fresh, independently audited ledger row at the
-        # current en bytes. Sorts between relay.shell and relay.transcript.
-        "relay.skills",
-        # Audited relay condensation copy adds 19 keys; keep this census exact.
-        "relay.transcript",
-        "tui.asks",
-        "tui.authoring",
-        "tui.notices",
-        "tui.notifications",
-        "tui.palette",
-        "tui.projects_edit",
-        "tui.review",
-        "tui.schedule",
-        "tui.status",
-        "tui.tags",
-        "tui.team_authoring",
-        "tui.transcript",
-        "tui.viewer",
-        "tui.welcome",
-        "wire.errors",
-        "wire.errors.agent_avatar",
-        "wire.errors.desktop",
-        "wire.errors.notifications",
-        "wire.errors.settings",
-        "wire.exec",
-        "wire.incidents",
-        "wire.memory",
-        "wire.notices",
-        # Radient Saver LO1 (PR #3078): the 17-key settings and fail-open notice
-        # copy, carried with its independently audited ledger row at the
-        # current en bytes; it sorts before wire.remote_compute.
-        "wire.radient_saver",
-        "wire.remote_compute",
-        "wire.settings",
-        "wire.slash",
-        "wire.slash.notifications_page",
-        # The Team Bridge tool row (TUI card + phone projection). Carried with
-        # the seven-locale translation wave; key/placeholder parity is pinned
-        # here like every namespace above, and shipping still waits on its
-        # independent audit row. It sorts after wire.slash.notifications_page.
-        "wire.tool_rows.bridge",
+    directory = catalogues.catalogue_root() / locale
+    namespaces = tuple(
+        sorted(
+            path.stem
+            for path in directory.glob("*.json")
+            if not path.name.endswith(".context.json")
+        )
     )
     assert catalogues.namespaces(locale) == namespaces
     for namespace in namespaces:
