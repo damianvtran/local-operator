@@ -26,7 +26,11 @@ from lop_osworld_v2_adapter.providers.base import (
     GUEST_TYPE_MS_PER_CHAR,
 )
 
-from local_operator.computer_input import drag_source, paste_text_source
+from local_operator.computer_input import (
+    drag_source,
+    held_keys_source,
+    paste_text_source,
+)
 from local_operator.evaluation.action_surface import ActionSurface
 from local_operator.evaluation.protocol import (
     ActionBatch,
@@ -129,8 +133,8 @@ def _native_point(geometry: FrameGeometry, x: int, y: int) -> tuple[int, int]:
     return point.x, point.y
 
 
-def compile_action(action: ComputerAction, geometry: FrameGeometry | None = None) -> str | None:
-    """Compile one action to one pyautogui statement (or an OSWorld special).
+def _compile_unheld(action: ComputerAction, geometry: FrameGeometry | None = None) -> str | None:
+    """Compile one action, ignoring ``modifiers``, to one pyautogui statement.
 
     Returns ``None`` for actions the guest does not execute as pyautogui:
     ``FinishAction`` (mapped to OSWorld's ``DONE``/``FAIL`` step tokens by the
@@ -217,6 +221,27 @@ def compile_action(action: ComputerAction, geometry: FrameGeometry | None = None
         return None
 
     raise CompilationError(f"unhandled action kind {type(action).__name__!r}")
+
+
+def compile_action(action: ComputerAction, geometry: FrameGeometry | None = None) -> str | None:
+    """Compile one action to one guest statement (or an OSWorld special).
+
+    Per-kind contract (``None`` returns, geometry) is ``_compile_unheld``'s. A
+    pointer action carrying ``modifiers`` compiles to that unmodified statement
+    wrapped in the held-keys guest helper, so the keys are down for exactly
+    that action and released after it, even if it raises. An action holding
+    nothing returns the unmodified statement itself, byte-identical to before
+    the field existed.
+    """
+
+    statement = _compile_unheld(action, geometry)
+    modifiers = getattr(action, "modifiers", ())
+    if not modifiers:
+        return statement
+    assert statement is not None  # only pointer actions carry modifiers
+    # Mapped through the SAME table ``key`` uses (META -> "win" on the Linux
+    # guest), so a modifier can never name a key the key compiler would not.
+    return held_keys_source([_key_name(key) for key in modifiers], statement)
 
 
 def compile_batch(batch: ActionBatch, geometry: FrameGeometry) -> list[str]:

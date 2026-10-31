@@ -1064,6 +1064,11 @@ def _example_action(
     for name, field in fields.items():
         if name == "kind" or name in shape.omitted_action_fields:
             continue
+        if not field.is_required() and field.default == ():
+            # An optional EMPTY array (``modifiers``) has no placeholder that
+            # parses: ``"<value>"`` is not an array and ``[]`` is not canonical.
+            # Its absence is the default, so the example states it by omission.
+            continue
         action[name] = _example_field_value(name, field, observation)
     return action
 
@@ -1805,6 +1810,12 @@ name all require typing.
   not "return":
 
 {_named_keys_line(surface)}
+
+* "modifiers" on a pointer action holds keys DOWN for that one action and
+  releases them after it: "modifiers": ["shift"] on a "click" is a shift-click
+  (range select), ["ctrl"] a ctrl-click. A "key" action cannot do this -- its
+  keys are released before the next action runs. Only shift, ctrl, alt and
+  meta can be held.
 
 A batch may contain SEVERAL actions and they execute in order against the
 screen you are looking at, with one new observation at the end. That is how a

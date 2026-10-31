@@ -1280,3 +1280,82 @@ def test_finish_behind_a_wait_is_still_refused_with_both_repairs() -> None:
     message = str(caught.value)
     assert "finish and ask_user must be the only action in their batch" in message
     assert "send the finish alone" in message
+
+
+# ---------------------------------------------------------------------------
+# Held modifiers on pointer actions. Sealed evidence (osworld-21 t25k3c-t004
+# steps 5-6, t25k3c-t022): a model wanting a shift-click range selection could
+# only send ``[click][key SHIFT][click]``; the standalone key is pressed and
+# released before the second click, so one item was selected.
+
+
+@pytest.mark.parametrize(
+    "action",
+    [
+        ClickAction(observation_id="observation-7", frame_id="f", x=1, y=2, button="right"),
+        DoubleClickAction(observation_id="observation-7", frame_id="f", x=1, y=2),
+        DragAction(
+            observation_id="observation-7", frame_id="f", start_x=1, start_y=2, end_x=3, end_y=4
+        ),
+        ScrollAction(observation_id="observation-7", frame_id="f", x=1, y=2, delta_y=-3),
+    ],
+    ids=["click", "double_click", "drag", "scroll"],
+)
+def test_an_action_without_modifiers_keeps_its_exact_canonical_bytes(action: object) -> None:
+    """No ``modifiers`` key appears unless one was held.
+
+    Sealed records are compared byte-for-byte, so the field must be absent --
+    not ``[]`` -- from every action that holds nothing, and a canonical payload
+    spelling the empty default is not canonical.
+    """
+
+    assert action.modifiers == ()  # type: ignore[attr-defined]
+    dumped = action.model_dump(mode="json")  # type: ignore[attr-defined]
+    assert "modifiers" not in dumped
+    encoded = _batch(action).to_canonical_json()
+    assert b"modifiers" not in encoded
+    assert ActionBatch.from_canonical_json(encoded) == _batch(action)
+    spelled = encoded.replace(b'"kind"', b'"modifiers":[],"kind"', 1)
+    with pytest.raises(ValueError, match="not canonical"):
+        ActionBatch.from_canonical_json(spelled)
+
+
+def test_modifiers_reuse_the_key_vocabulary_and_round_trip() -> None:
+    click = ClickAction.model_validate(
+        {
+            "observation_id": "observation-7",
+            "frame_id": "f",
+            "x": 1,
+            "y": 2,
+            "modifiers": ["Shift", "control_l", "super"],
+        }
+    )
+    # The SAME canonicalisation as ``KeyAction.keys``: aliases resolve, order
+    # is kept because it is the press order.
+    assert click.modifiers == ("SHIFT", "CTRL", "META")
+    encoded = _batch(click).to_canonical_json()
+    assert b'"modifiers":["SHIFT","CTRL","META"]' in encoded
+    assert ActionBatch.from_canonical_json(encoded) == _batch(click)
+
+
+@pytest.mark.parametrize(
+    ("modifiers", "message"),
+    [
+        (["hyper"], "unknown modifier: 'hyper'"),
+        (["a"], "not a modifier: 'a'"),
+        (["enter"], "not a modifier: 'enter'"),
+        (["shift", "SHIFT"], "duplicate"),
+        ("shift", "tuple"),
+    ],
+)
+def test_an_unusable_modifier_is_refused_at_admission(modifiers: object, message: str) -> None:
+    with pytest.raises(ValidationError, match=message):
+        ClickAction.model_validate(
+            {
+                "observation_id": "observation-7",
+                "frame_id": "f",
+                "x": 1,
+                "y": 2,
+                "modifiers": modifiers,
+            }
+        )
