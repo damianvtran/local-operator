@@ -1,0 +1,59 @@
+PASS
+BLOCKER 0, MAJOR 0, MINOR 0, NIT 0
+
+Locale: es
+Agent: i18n-auditor (Audit core literals es)
+Session: d3db31d3a75d
+Actual audit model: openai/gpt-6.1-sol
+Model provenance: initially anthropic/claude-sonnet-5-5; host reported quota-provider fallback to anthropic/claude-opus-5-5, then openai/gpt-6.1-sol before substantive audit execution. The substantive Spanish audit ran on openai/gpt-6.1-sol; no translation/MT service was used.
+Date: 2026-10-31
+Worktree: /Users/damian/local-operator/.worktrees/lit-translate
+Scope: all 16 keys (cli.failures 4; cli.group_help 10; tui.setup_cues 2).
+
+Read glossary and Spanish style guide first, then all English source strings and context sidecars, then all target strings. This is one independent audit pass, not a claim that a second independent high-visibility auditor has run.
+
+Mechanical execution:
+PYTHONDONTWRITEBYTECODE=1 /Users/damian/local-operator/.venv/bin/python scripts/i18n/check.py --catalogues-only
+Actual output: check.py: catalogue checks: 0 problem(s)
+Exit: 0.
+An additional Python probe parsed the six source/target JSON files, checked exact key parity and ordered placeholder-token equality for every key, and rendered the error wrapper, invalid-choice example and no-provider cue. All assertions passed. No ICU plural/select forms, Rich tags, backticks or flag literals occur in the target inputs. No placeholder is embedded inside a word.
+
+Width execution:
+rich.cells.cell_len('Conecta primero una cuenta de IA: escribe /login radient') = 56 cells.
+Declared budget: 74 cells; headroom: 18 cells. The slash command is byte-identical.
+The measured string is Spanish ASCII text plus an ASCII command, so combining-mark or CJK width ambiguities do not affect this result. No live-terminal rendering was performed or claimed.
+
+Meaning/register assessment, every key:
+cli.failures.error_line: exact {prog}: error: {message} wrapper survives; error is also the Spanish word.
+cli.failures.required: natural terse impersonal error fragment; argument names remain verbatim. Plural los siguientes argumentos is acceptable for a list containing one or several names, as in the English diagnostic; no numeric plural selector is needed.
+cli.failures.invalid_choice: natural terse diagnostic; elige is the guide's tu register. Input/choice quoting remains entirely inside the verbatim placeholders.
+cli.failures.invalid_command: preserves group and command tokens, including a supplied literal None; natural adjective placement in Spanish.
+cli.group_help.skills: infinitive action list; hacer pull and habilidades follow the binding terminology, with hub and paquetes preserving the intended concepts.
+cli.group_help.skills_description: preserves both refusal of any execute bit and the guarantee that installation never executes code; execution-bit wording is understandable Unix terminology.
+cli.group_help.tunnel: Radient and harnesses retained according to the guide; remote access and local targets preserved.
+cli.group_help.secret: long-term encryption/retrieval meaning retained; sin preguntarte expresses without asking the user, as the context explicitly requires, not the technical model-input sense of prompt.
+cli.group_help.network: redes malladas is normal Spanish networking terminology; pair devices and control sessions across them are preserved.
+cli.group_help.disk: tools concern disk space; measure-first order and proven-safe-only deletion are both retained. Borrar names the actual reclaim action identified in the context, without broadening permission to delete unsafe data.
+cli.group_help.operator: operator authority and a key's ability to relax an active approval control are preserved; no claim of bypassing all approvals.
+cli.group_help.pair: phone/operator-device pairing, the user's signature and once-only authorization retained; tu matches the guide.
+cli.group_help.search: infinitives and balanceo de carga are idiomatic developer Spanish; configuration and testing both retained.
+cli.group_help.fetch: obtención de contenido web with a windowless browser accurately communicates headless fetching as defined by the sidecar; both actions retained.
+tui.setup_cues.setup_placeholder: natural tu imperative; command stays verbatim and action remains begin.
+tui.setup_cues.no_provider_cue: natural tu imperative, account-first ordering and actionable command preserved. Initial lowercase composition also reads naturally.
+
+Plural assessment: no numeric plural/select message occurs in scope, and none requires a missing Spanish one/many/other branch. Generic plurals for sessions/devices/skills and the required-argument list are acceptable without introducing selectors.
+Glossary assessment: no divergence found. Product names, commands, pull, harnesses, habilidades, agente, sesiones and the tu register are consistent with the supplied glossary and locale guide. Group summaries use infinitives; error diagnostics remain fragments rather than expanded conversational prose. No declared width hint exists for the other 15 keys; potential help wrapping is not an undeclared hard-budget violation.
+
+Input SHA-256 pins:
+en/cli.failures.json b2fdec07146b26ad5bb43f3acf3fa8f1ab527c4bf94d9065ca715c16be2eec44
+en/cli.failures.context.json b8f5e700bcdaf46fbeefc6c40269c7fe7cd4c91d7069f7f6dfcc8f813823b97d
+es/cli.failures.json dca45de2d87b581ea365803751794fc645e2d40749b15847861a682f49067bc3
+en/cli.group_help.json b819cbdf879a9f0b6567f8a555eceec4d1c7210b8ddab9beb665e2c21e3b7e88
+en/cli.group_help.context.json 10ebe588116f331251985812a8a959aec5bf13cb2f9a57406aaadd01679b598c
+es/cli.group_help.json 79f99f664032b253f8463bbc9d1b225d6076f4c9f8a6b618b4c52961933eeaba
+en/tui.setup_cues.json 9028bb3883b7f60d6fe7cdeac21495e307279ad3eb959b53bc62add500cedce0
+en/tui.setup_cues.context.json 96a124500c8c523e3d0e1fb5de9f8f486c4050441c81ea458b3d9f782cf4d6bc
+es/tui.setup_cues.json 07324e324270110190120a852967f4e0fdbeb451f08eefddbb397afa3b3cd362
+Paths above are relative to local_operator/i18n/catalogues/.
+
+Artifact status: findings.jsonl is intentionally empty (zero findings). This verdict is audit notes containing actual command results, not a raw execution log. No repository/catalogue/ledger file was edited: the explicit read-only assignment overrides the generic instruction to record ledger/tracked evidence. The requesting manager must retain/record these artifacts through the authorized integration workflow; no tracked evidence or ledger registration is claimed here.

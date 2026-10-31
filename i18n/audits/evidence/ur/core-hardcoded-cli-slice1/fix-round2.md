@@ -1,0 +1,2 @@
+Before (`cli.group_help.disk`): ڈسک کی جگہ کے ٹول: پہلے پیمائش کریں، صرف وہ جگہ خالی کریں جسے خالی کرنا ثابت شدہ محفوظ ہو
+After: ڈسک کی جگہ کے ٹول: پہلے پیمائش کریں، صرف وہ جگہ خالی کریں جسے خالی کرنا محفوظ ثابت ہو — Reason: «محفوظ ثابت ہو» is the natural Urdu predicate for “proves safe”; it retains measurement first and reclamation only when safety is established, matching the actual English/context, and shortens 89 characters to 85. Translator: 61efc26064e2; actual model openai/gpt-6.1-sol (quota fallback).

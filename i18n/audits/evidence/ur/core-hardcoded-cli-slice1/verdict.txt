@@ -1,0 +1,37 @@
+CHANGES_REQUESTED
+BLOCKER: 0
+MAJOR: 1
+MINOR: 0
+NIT: 0
+Agent: i18n-auditor (Urdu), session 6c1c9ef5c2c3
+Actual audit model: openai/gpt-6.1-sol (temporary provider-quota fallback; initially anthropic/claude-sonnet-5-5, with an intervening anthropic/claude-opus-5-5 switch notification). Semantic audit and mechanical verification were completed after the openai/gpt-6.1-sol switch.
+
+Scope: all 16 keys: cli.failures (4), cli.group_help (10), tui.setup_cues (2), in /Users/damian/local-operator/.worktrees/lit-translate.
+Read Urdu style guide and glossary, then English catalogues/context sidecars, then Urdu values. No translation service used. Translator-independent session; no repository file edited.
+
+Finding: UR-001, cli.group_help.disk, MAJOR: unnatural Urdu predicate in the safety clause. See findings.jsonl for exact text and replacement. Meaning remains recoverable; no wrong-safety-meaning BLOCKER claimed. The other 15 keys pass semantic, grammatical, terminology and token checks.
+
+Executed validator: /Users/damian/local-operator/.venv/bin/python scripts/i18n/check.py --catalogues-only, from the assigned worktree. Exit 0; actual output: check.py: catalogue checks: 0 problem(s).
+Independent JSON/key/placeholder/control/digit checks also completed successfully across all 16 keys. No ICU plural/select structures occur. No key requires an unavailable numeric plural form; the generic required-arguments list is acceptable with one or several argument tokens.
+
+Width measured here with rich.cells.cell_len after substituting /login radient:
+- tui.setup_cues.no_provider_cue: 47 cells, including the command, against maxCells 74: PASS (27 cells spare).
+- tui.setup_cues.setup_placeholder: 37 cells.
+No hard maxCells/maxChars was supplied for group-help rows. The longest is skills_description at 143 cells; disk is 89 cells. These are wrapping-risk observations, not invented budget failures; skills_description is the expanded help body per its context sidecar, not a one-line menu summary.
+
+RTL: no manual RLM/LRM/ALM, embedding/override or isolate bidi controls found in any of the 16 stored values. Logical-order Latin command/flag islands and quote characters were preserved in samples: /login radient, --name, --json, --mode, 'bad', 'one', 'two', config and None. No Arabic-Indic or Persian digits occur; Latin-digit v1 policy is not contradicted. error_line preserves {prog}: خرابی: {message}. No arrows or mirrored directional glyphs occur. Stored-text and interpolation checks pass; terminal-specific visual bidi/shaping was not exercised and is not claimed. The style guide explicitly accepts best-effort TUI rendering.
+
+Reader: ordinary file reads via bash returned every value, including cli.group_help.secret, without redaction. The public-copy reader fallback was unnecessary.
+
+Read-only scope honored: no ledger command, tracked evidence bundle, commit or repository edit was made, because this task explicitly requests verdict-only files outside the repository. The requesting manager must retain these results in the canonical tracked evidence root and record the ledger if needed. A separate high-visibility second independent audit is not supplied by this session.
+
+Input SHA-256 (relative to worktree):
+local_operator/i18n/catalogues/en/cli.failures.json b2fdec07146b26ad5bb43f3acf3fa8f1ab527c4bf94d9065ca715c16be2eec44
+local_operator/i18n/catalogues/en/cli.failures.context.json b8f5e700bcdaf46fbeefc6c40269c7fe7cd4c91d7069f7f6dfcc8f813823b97d
+local_operator/i18n/catalogues/ur/cli.failures.json a48c6e12dcb2c9fea6d76233ec681b8805d89752903e1c89906197d9ec7dac4b
+local_operator/i18n/catalogues/en/cli.group_help.json b819cbdf879a9f0b6567f8a555eceec4d1c7210b8ddab9beb665e2c21e3b7e88
+local_operator/i18n/catalogues/en/cli.group_help.context.json 10ebe588116f331251985812a8a959aec5bf13cb2f9a57406aaadd01679b598c
+local_operator/i18n/catalogues/ur/cli.group_help.json f5d9f4b27f54a8ace27ddd37a71630721e487e942a6d381f28a07a5183308097
+local_operator/i18n/catalogues/en/tui.setup_cues.json 9028bb3883b7f60d6fe7cdeac21495e307279ad3eb959b53bc62add500cedce0
+local_operator/i18n/catalogues/en/tui.setup_cues.context.json 96a124500c8c523e3d0e1fb5de9f8f486c4050441c81ea458b3d9f782cf4d6bc
+local_operator/i18n/catalogues/ur/tui.setup_cues.json 4c64e8d7fa1fdca6e45065678f2a3e01b3392eebc8ebe467da1ed6764646eef2
