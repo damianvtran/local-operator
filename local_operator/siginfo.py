@@ -458,7 +458,18 @@ def arm(sig: int) -> bool:
                 mask=int(saved.mask),
                 flags=flags,
             )
+            # PUBLISH BEFORE INSTALLING, NEVER AFTER. The sensor's last act is
+            # ``_restore`` + ``_redeliver``; with no saved action to restore it
+            # re-raises at itself forever (a process spinning at ~91% CPU that
+            # ignores even a sanctioned stop until SIGKILL — measured with 0.2 ms
+            # arrivals). A signal can land the instant ``sigaction`` returns, so
+            # the saved action has to exist BEFORE the sensor can run. The failure
+            # paths below withdraw it again, while the sensor is not live.
+            _SAVED[number] = saved
+            _CALLBACKS[number] = callback
             if lib.sigaction(number, ctypes.byref(sensor), None) != 0:
+                _SAVED.pop(number, None)
+                _CALLBACKS.pop(number, None)
                 logger.debug("siginfo: could not install the sensor for %s", number)
                 return False
             verified = struct()
@@ -470,9 +481,9 @@ def arm(sig: int) -> bool:
                 # trust (a plain sa_handler called with three arguments would read
                 # the siginfo pointer as a ``frame`` object).
                 lib.sigaction(number, ctypes.byref(saved), None)
+                _SAVED.pop(number, None)
+                _CALLBACKS.pop(number, None)
                 return False
-            _CALLBACKS[number] = callback
-            _SAVED[number] = saved
             _FACTS.pop(number, None)
             logger.debug("siginfo: sender sensor armed for signal %s", number)
             return True
@@ -494,14 +505,81 @@ def disarm(sig: int) -> bool:
     except Exception:  # noqa: BLE001
         return False
     with _LOCK:
-        _CALLBACKS.pop(number, None)
-        _FACTS.pop(number, None)
-        saved = _SAVED.pop(number, None)
+        # RESTORE FIRST, FORGET AFTER — the mirror of :func:`arm`'s publish-before-
+        # install. While the sensor is the live action its saved action must stay
+        # published: forgetting first opens a window in which a delivery runs the
+        # sensor with nothing to restore and re-raises at itself forever.
+        saved = _SAVED.get(number)
         lib = _libc()
-        if saved is None or lib is None:
+        restored = False
+        if saved is not None and lib is not None:
+            try:
+                restored = lib.sigaction(number, ctypes.byref(saved), None) == 0
+            except Exception:  # noqa: BLE001
+                logger.debug("siginfo: disarming raised", exc_info=True)
+        _CALLBACKS.pop(number, None)
+        _SAVED.pop(number, None)
+        _FACTS.pop(number, None)
+        return restored
+
+
+def rearm(sig: int) -> bool:
+    """Put the sensor back after it fired, WITHOUT EVER UN-PUBLISHING ITS STATE. Never raises.
+
+    The sensor is one-shot: it restores the platform's action on its first delivery
+    and :func:`arm` on an already-armed signal is a no-op. That cost nothing while the
+    first terminating signal ended the process; under the victim-side sanction gate a
+    REFUSED signal leaves the process running, so the sensor has to be reinstated for
+    the signal that matters (the sanctioned stop). ``disarm`` + ``arm`` was the first
+    spelling and it was WRONG: it un-published the saved action, and a delivery landing
+    in that window ran the sensor with nothing to restore, which re-raises at the
+    process forever (measured: 0.2 ms arrivals hung 4 of 8 runs). Here ``_SAVED`` and
+    ``_CALLBACKS`` stay published for the whole operation, so a sensor can never be live
+    without its saved action.
+
+    What is saved is whatever Python-level action is installed NOW (the product's own
+    handler, which the spent sensor restored — or a replacement, if somebody installed
+    one since): that is exactly what the sensor's next delivery must hand back.
+
+    Returns ``True`` when the sensor is live afterwards (already live counts), ``False``
+    when it cannot be — a signal this module never armed, a ``SIG_DFL``/``SIG_IGN``
+    action, or a failed syscall. A ``False`` leaves the platform's own action in place,
+    so the only cost is that the NEXT receipt says ``no-siginfo``.
+
+    A signal landing in the gap between reading the current action and installing the
+    sensor takes the ordinary path (the product's handler) and is recorded
+    ``no-siginfo`` — a true statement about that receipt's own evidence, and the ONLY
+    outcome that window can have.
+    """
+    try:
+        number = int(sig)
+    except Exception:  # noqa: BLE001
+        return False
+    with _LOCK:
+        callback = _CALLBACKS.get(number)
+        lib = _libc()
+        struct = _struct_type()
+        if callback is None or lib is None or struct is None or number not in _SAVED:
             return False
         try:
-            return lib.sigaction(number, ctypes.byref(saved), None) == 0
+            current = struct()
+            if lib.sigaction(number, None, ctypes.byref(current)) != 0:
+                return False
+            sensor_address = ctypes.cast(callback, ctypes.c_void_p).value
+            if int(current.handler or 0) == sensor_address:
+                return True  # the sensor never fired (or is already back): nothing to do
+            if int(current.handler or 0) in (_SIG_DFL, _SIG_IGN):
+                return False  # nobody would read a capture: see ``arm``
+            sensor = struct(
+                handler=sensor_address,
+                mask=int(current.mask),
+                flags=(int(current.flags) | SA_SIGINFO | SA_RESTART) & ~(SA_RESETHAND | SA_NODEFER),
+            )
+            # Publish the (possibly new) saved action BEFORE installing: the sensor is
+            # not live here, so this write is unobservable until the install below.
+            _SAVED[number] = current
+            _FACTS.pop(number, None)
+            return lib.sigaction(number, ctypes.byref(sensor), None) == 0
         except Exception:  # noqa: BLE001
-            logger.debug("siginfo: disarming raised", exc_info=True)
+            logger.debug("siginfo: re-arming the sensor raised", exc_info=True)
             return False

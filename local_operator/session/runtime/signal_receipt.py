@@ -370,37 +370,39 @@ def rearm_sender_capture(number: int) -> bool:
     """Put ``siginfo``'s one-shot sensor back after a REFUSED arrival spent it. Never raises.
 
     WHY A REFUSAL HAS TO DO THIS (sanction gate x ``local_operator.siginfo``). The
-    sensor is spent by the FIRST delivery: it restores the platform's action before
-    re-raising, and ``siginfo.arm`` on an already-armed signal is a no-op that does
-    NOT re-install it (measured: ``arm`` answers True and the next delivery's
-    ``take`` is ``None``). On the old path the first terminating signal ended the
-    process, so a spent sensor cost nothing. Under the gate a REFUSED signal leaves
-    the process running, so without this the sensor is gone for the rest of its life
-    and the signal that eventually matters — the sanctioned stop, whose receipt is
-    the one an incident is reconstructed from — would say ``no-siginfo`` about a
-    sender that was perfectly capturable. A refused loop would likewise name only its
-    first sender.
+    sensor is spent by the FIRST delivery (it restores the platform's action before
+    re-raising) and ``siginfo.arm`` on an already-armed signal does not re-install it.
+    On the old path the first terminating signal ended the process, so a spent sensor
+    cost nothing. Under the gate a REFUSED signal leaves the process running, so
+    without this the sensor is gone for the rest of its life and the sanctioned stop,
+    whose receipt is the one an incident is reconstructed from, would say
+    ``no-siginfo`` about a capturable sender.
 
-    Only a signal this process ARMED is re-armed (``siginfo.armed`` stays true after
-    the sensor fires): SIGINT and the residual levers are not armed by anyone, so
-    this is a no-op for them rather than a new sensor nobody asked for. Called AFTER
-    the arrival has claimed its capture (``observe``), so it can never take the
-    capture the arrival it follows is still owed.
+    ONLY ``siginfo.rearm`` IS SAFE HERE, never ``disarm`` + ``arm``: that pair
+    un-publishes the saved action for a moment, and a delivery inside the window runs
+    the sensor with nothing to restore, which re-raises at the process forever (0.2 ms
+    arrivals hung 4 of 8 runs in review). ``rearm`` keeps the state published, so the
+    worst a racing signal can suffer is the ordinary path and a ``no-siginfo`` receipt.
 
-    ``disarm`` then ``arm`` is the only spelling that re-installs, and it is safe on
-    this path: the callback runs on the loop thread, not in the C frame, and
-    ``disarm`` restores the saved action (which the spent sensor already put back)
-    before ``arm`` saves it again and re-installs. A signal landing in that
-    microsecond gap takes the ordinary path and is recorded ``no-siginfo`` — a true
-    statement about that receipt's own evidence, which is the module's rule.
+    Only a signal this process ARMED is re-armed: SIGINT and the residual levers are
+    not armed by anyone, so this is a no-op for them. Called AFTER the arrival has
+    claimed its capture (``observe``), so it can never take the capture that arrival
+    is still owed. A failed re-arm is LOGGED (debug) because the receipt it degrades
+    is otherwise silent.
     """
     try:
         from local_operator import siginfo
 
         if not siginfo.armed(int(number)):
             return False
-        siginfo.disarm(int(number))
-        return bool(siginfo.arm(int(number)))
+        ok = bool(siginfo.rearm(int(number)))
+        if not ok:
+            logger.debug(
+                "sender capture for signal %s could not be re-armed after a refusal; "
+                "the next receipt will say no-siginfo",
+                number,
+            )
+        return ok
     except Exception:  # noqa: BLE001 — an instrument must never fail a signal path
         return False
 
@@ -473,10 +475,12 @@ def merge_refusal(
         previous["at"] = fresh["at"]
         previous["name"] = fresh["name"]
         previous["number"] = fresh["number"]
-        # ``sender`` stays the FIRST arrival's (who tried first), and the LATEST is kept
-        # beside it: with the sensor re-armed after each refusal a repeat can name its
-        # own sender, and a second party signalling the same run is exactly the fact a
-        # coalesced entry would otherwise lose.
+        # SCHEMA: ``sender`` is the FIRST refused arrival's (who tried first) and never
+        # changes; ``last_sender`` is the LATEST's and is ABSENT while ``count`` is 1.
+        # With the sensor re-armed after each refusal a repeat can name its own
+        # sender, and a second party signalling the same run is exactly the fact a
+        # coalesced entry would otherwise lose. ``describe()`` and the incident
+        # renderers read the signal receipt, not this file, so they show neither.
         previous["last_sender"] = fresh["sender"]
         refusals = [previous]
     else:
