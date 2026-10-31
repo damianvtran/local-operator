@@ -3512,6 +3512,7 @@ async def test_stop_puts_the_outcome_above_the_wait_lines(
     Design round 1 D4: the TUI paints ``mark_failed(_first_line(text), text)``, so
     a wait line first hid the outcome behind an expand.
     """
+
     class _Outcome:
         pid = 4243
         session_id = "aaaa00000002"
