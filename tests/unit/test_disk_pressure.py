@@ -149,7 +149,7 @@ def test_clean_pushed_worktree_is_reclaimed(fx: Fx) -> None:
     item = by_path(plan, wt)
     assert item.action == dp.ACTION_RECLAIM, item.reason
     assert item.evidence["basis"] == "pushed" and item.allocated_bytes
-    result = dp.apply(plan, fx.cfg)
+    result = dp.apply(plan, fx.cfg, confirmation=dp.CONFIRMATION_TYPED)
     assert result.exit_code == 0 and not wt.exists()
     assert fx.primary.exists() and (fx.primary / "README").exists()
     assert str(wt) not in git(fx.primary, "worktree", "list")
@@ -172,7 +172,10 @@ def test_dirty_worktree_is_kept(fx: Fx) -> None:
     fx.idle(wt)
     item = by_path(plan_for(fx), wt)
     assert (item.action, item.code) == (dp.ACTION_KEEP, "dirty")
-    assert dp.apply(plan_for(fx), fx.cfg).exit_code == 0 and wt.exists()
+    assert (
+        dp.apply(plan_for(fx), fx.cfg, confirmation=dp.CONFIRMATION_TYPED).exit_code == 0
+        and wt.exists()
+    )
 
 
 def test_modified_tracked_file_is_kept(fx: Fx) -> None:
@@ -312,7 +315,7 @@ def test_missing_registration_is_kept_not_deleted(fx: Fx) -> None:
     shutil.rmtree(wt)  # fixture teardown of a temp tree, simulating a vanished dir
     item = next(i for i in plan_for(fx).items if i.path.endswith("/gone"))
     assert (item.action, item.code) == (dp.ACTION_KEEP, "invalid-registration")
-    result = dp.apply(plan_for(fx), fx.cfg)
+    result = dp.apply(plan_for(fx), fx.cfg, confirmation=dp.CONFIRMATION_TYPED)
     assert result.exit_code == 0
     # The registration is still there: this command never prunes.
     assert "gone" in git(fx.primary, "worktree", "list")
@@ -339,7 +342,7 @@ def test_primary_checkout_is_never_a_candidate_even_when_named_via_a_worktree(fx
     primary_item = next(i for i in plan.items if i.path == os.path.realpath(fx.primary))
     assert primary_item.code == "primary"
     assert by_path(plan, wt).code == "cwd"
-    dp.apply(plan, fx.cfg)
+    dp.apply(plan, fx.cfg, confirmation=dp.CONFIRMATION_TYPED)
     assert fx.primary.exists() and wt.exists()
 
 
@@ -410,6 +413,10 @@ def test_apply_with_a_typed_yes_removes_and_writes_the_receipt(
     assert reclaim_command(_args(str(fx.primary), apply=True)) == 0
     assert not wt.exists()
     assert "previewed" in capsys.readouterr().out or True
+    # The typed path is the one an auditor most needs to tell apart from --yes,
+    # and it is recorded in the FILE, not only in the stdout payload.
+    on_disk = json.loads(list((fx.cfg / dp.RECEIPT_DIRNAME).glob("*.json"))[0].read_text())
+    assert on_disk["confirmed"] is True and on_disk["confirmation"] == "typed"
 
 
 def test_apply_json_receipt_shape_and_file(fx: Fx, capsys: Any) -> None:
@@ -433,6 +440,10 @@ def test_apply_json_receipt_shape_and_file(fx: Fx, capsys: Any) -> None:
     assert len(files) == 1
     on_disk = json.loads(files[0].read_text())
     assert on_disk["status"] == "complete" and on_disk["disk_usage_after"]
+    # QA round 2 Q1: the durable file must carry the confirmation evidence the
+    # stdout receipt carries — it is written by the receipt writer, not patched
+    # onto the payload after the file was already finalised.
+    assert on_disk["confirmed"] is True and on_disk["confirmation"] == "--yes"
     # Temp gone (sanctioned writer names its temp `.<target>.tmp`, not `.receipt-*`).
     assert not list((fx.cfg / dp.RECEIPT_DIRNAME).glob(".*.tmp"))
     # No 0o600 assertion: the shared manifest writer's temp inherits the umask
@@ -452,16 +463,29 @@ def test_receipt_is_written_before_the_first_removal(fx: Fx, monkeypatch: Any) -
         return real(item)
 
     monkeypatch.setattr(dp, "remove_worktree", spy)
-    dp.apply(plan_for(fx), fx.cfg)
+    dp.apply(plan_for(fx), fx.cfg, confirmation=dp.CONFIRMATION_TYPED)
     assert seen and seen[0]["status"] == "intent"
+    # The INTENT is the record that survives a crash mid-sweep, so it must name
+    # the authorisation too; stamping only the final write would leave the most
+    # dangerous window unrecorded.
+    assert seen[0]["confirmed"] is True and seen[0]["confirmation"] == "typed"
     assert all(i["outcome"] == "planned" for i in seen[0]["items"] if i["action"] == "reclaim")
+
+
+def test_apply_requires_a_known_confirmation(fx: Fx) -> None:
+    """No default and no guessing: an unrecognised provenance is refused."""
+    wt = fx.worktree("bogus-confirm")
+    fx.idle(wt)
+    with pytest.raises(ValueError, match="confirmation must be one of"):
+        dp.apply(plan_for(fx), fx.cfg, confirmation="sure-whatever")
+    assert wt.exists() and not (fx.cfg / dp.RECEIPT_DIRNAME).exists()
 
 
 def test_unwritable_receipt_directory_refuses_before_any_removal(fx: Fx) -> None:
     wt = fx.worktree("noreceipt")
     fx.idle(wt)
     (fx.cfg / dp.RECEIPT_DIRNAME).write_text("a file where the directory should be")
-    result = dp.apply(plan_for(fx), fx.cfg)
+    result = dp.apply(plan_for(fx), fx.cfg, confirmation=dp.CONFIRMATION_TYPED)
     assert result.exit_code == 2 and wt.exists()
 
 
@@ -470,7 +494,7 @@ def test_a_candidate_that_stopped_qualifying_is_skipped(fx: Fx) -> None:
     fx.idle(wt)
     plan = plan_for(fx)
     (wt / "late-edit.txt").write_text("someone started working here")
-    result = dp.apply(plan, fx.cfg)
+    result = dp.apply(plan, fx.cfg, confirmation=dp.CONFIRMATION_TYPED)
     item = next(i for i in result.payload["items"] if i["path"].endswith("/changed"))
     assert item["outcome"] == "skipped" and "no longer qualifies" in item["detail"]
     assert wt.exists() and result.exit_code == 1
@@ -485,7 +509,7 @@ def test_head_moved_since_preview_is_skipped(fx: Fx) -> None:
     git(wt, "commit", "-qm", "more")
     git(wt, "push", "-q", "origin", "moved")
     fx.idle(wt)
-    result = dp.apply(plan, fx.cfg)
+    result = dp.apply(plan, fx.cfg, confirmation=dp.CONFIRMATION_TYPED)
     assert wt.exists() and result.exit_code == 1
 
 
@@ -497,7 +521,7 @@ def test_git_refusal_is_the_last_word_and_reported(fx: Fx, monkeypatch: Any) -> 
     # Lock it AFTER revalidation by wrapping revalidate to return the old verdict.
     git(fx.primary, "worktree", "lock", str(wt))
     monkeypatch.setattr(dp, "revalidate_worktree", lambda item, min_idle_minutes: item)
-    result = dp.apply(plan, fx.cfg)
+    result = dp.apply(plan, fx.cfg, confirmation=dp.CONFIRMATION_TYPED)
     item = next(i for i in result.payload["items"] if i["path"].endswith("/gitrefuses"))
     assert item["outcome"] == "failed" and "refused" in item["detail"]
     assert wt.exists() and result.exit_code == 1
@@ -554,7 +578,7 @@ def test_ignored_env_file_keeps_the_worktree_and_survives_apply(fx: Fx) -> None:
     item = by_path(plan, wt)
     assert (item.action, item.code) == (dp.ACTION_KEEP, "ignored-content"), item.reason
     assert ".env" in item.reason and item.hint
-    result = dp.apply(plan, fx.cfg)
+    result = dp.apply(plan, fx.cfg, confirmation=dp.CONFIRMATION_TYPED)
     assert result.exit_code == 0 and (wt / ".env").read_text() == "SECRET=1\n"
 
 
@@ -574,7 +598,7 @@ def test_ignored_nested_repo_with_unpushed_commit_is_kept(fx: Fx) -> None:
     fx.idle(wt)
     plan = plan_for(fx)
     assert by_path(plan, wt).code == "ignored-content"
-    dp.apply(plan, fx.cfg)
+    dp.apply(plan, fx.cfg, confirmation=dp.CONFIRMATION_TYPED)
     assert (nested / "important.txt").read_text() == "irreplaceable"
 
 
@@ -611,7 +635,7 @@ def test_duplicate_and_overlapping_repo_args_collapse_to_one_item(fx: Fx) -> Non
     plan = dp.plan(sel, fx.cfg)
     assert [i.path for i in plan.items].count(os.path.realpath(wt)) == 1
     assert len({i.id for i in plan.items}) == len(plan.items)
-    result = dp.apply(plan, fx.cfg)
+    result = dp.apply(plan, fx.cfg, confirmation=dp.CONFIRMATION_TYPED)
     assert result.exit_code == 0 and result.payload["status"] == "complete"
     assert not wt.exists() and not other.exists()
 
@@ -628,7 +652,7 @@ def test_go_clean_ignores_goflags_modcache(
     plan = dp.plan(dp.Selection(go_build_cache=True), fx_cfg)
     item = next(i for i in plan.items if i.category == dp.CATEGORY_GO_CACHE)
     assert item.action == dp.ACTION_RECLAIM, item.reason
-    assert dp.apply(plan, fx_cfg).exit_code == 0
+    assert dp.apply(plan, fx_cfg, confirmation=dp.CONFIRMATION_TYPED).exit_code == 0
     assert (modcache / "keep.txt").read_text() == "module cache"
 
 
@@ -650,7 +674,7 @@ def test_idle_floor_is_enforced_below_the_cli(fx: Fx) -> None:
     with pytest.raises(ValueError, match="at least 60"):
         dp.plan(selection, fx.cfg)
     with pytest.raises(ValueError, match="at least 60"):
-        dp.apply(plan, fx.cfg)
+        dp.apply(plan, fx.cfg, confirmation=dp.CONFIRMATION_TYPED)
     assert not (fx.cfg / dp.RECEIPT_DIRNAME).exists()
 
 
@@ -660,7 +684,7 @@ def test_refused_category_outranks_an_item_failure(fx: Fx, monkeypatch: pytest.M
     fx.idle(wt)
     monkeypatch.setattr(dp, "remove_worktree", lambda item: "git refused")
     sel = dp.Selection(repos=(str(fx.primary), str(fx.root / "not-a-repo")))
-    result = dp.apply(dp.plan(sel, fx.cfg), fx.cfg)
+    result = dp.apply(dp.plan(sel, fx.cfg), fx.cfg, confirmation=dp.CONFIRMATION_TYPED)
     assert result.payload["status"] == "partial" and result.exit_code == 2
 
 
@@ -736,7 +760,7 @@ def test_mid_rebase_worktree_is_kept(fx: Fx) -> None:
     plan = plan_for(fx)
     item = by_path(plan, wt)
     assert (item.action, item.code) == (dp.ACTION_KEEP, "operation-in-progress")
-    assert dp.apply(plan, fx.cfg).exit_code == 0
+    assert dp.apply(plan, fx.cfg, confirmation=dp.CONFIRMATION_TYPED).exit_code == 0
     assert wt.exists() and (admin / "rebase-merge").is_dir()
 
 
@@ -836,7 +860,7 @@ def test_go_cache_dry_run_measures_and_apply_cleans_it(gocache: Path, fx_cfg: Pa
     assert item.action == dp.ACTION_RECLAIM and item.path == os.path.realpath(gocache)
     assert item.allocated_bytes and gocache.exists()
     entries_before = sum(1 for _ in gocache.rglob("*"))
-    result = dp.apply(plan, fx_cfg)
+    result = dp.apply(plan, fx_cfg, confirmation=dp.CONFIRMATION_TYPED)
     assert result.exit_code == 0
     # `go clean -cache` empties the cache but keeps Go's own README marker (and
     # trim.txt): measured 457 entries -> 2. Pinning the exact survivors means a
@@ -862,7 +886,10 @@ def test_go_cache_without_the_marker_is_refused(
     monkeypatch.setenv("GOCACHE", str(bogus))
     plan = dp.plan(dp.Selection(go_build_cache=True), fx_cfg)
     assert plan.reclaimable == [] and "marker" in plan.refusals[0]["reason"]
-    assert dp.apply(plan, fx_cfg).exit_code == 2 or (bogus / "precious.txt").exists()
+    assert (
+        dp.apply(plan, fx_cfg, confirmation=dp.CONFIRMATION_TYPED).exit_code == 2
+        or (bogus / "precious.txt").exists()
+    )
     assert (bogus / "precious.txt").exists()
 
 

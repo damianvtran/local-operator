@@ -298,10 +298,15 @@ def reclaim_command(args: argparse.Namespace) -> int:
             tail = f" -- {item.detail}" if item.detail else ""
             _err(f"  {item.outcome:<8} {item.path or item.id}{tail}")
 
-    result = dp.apply(plan_, root, on_progress=progress)
+    result = dp.apply(
+        plan_,
+        root,
+        # Stamped by the receipt writer itself, so the durable file and stdout
+        # agree instead of the file omitting what the JSON claimed.
+        confirmation=dp.CONFIRMATION_YES if yes else dp.CONFIRMATION_TYPED,
+        on_progress=progress,
+    )
     payload = result.payload
-    payload["confirmed"] = True
-    payload["confirmation"] = "--yes" if yes else "typed"
     # Even JSON callers get a visible warning on stderr; stdout remains one
     # receipt document, and the warning also survives in that document.
     for warning in payload.get("receipt_warnings") or []:

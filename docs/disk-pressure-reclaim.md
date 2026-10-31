@@ -19,7 +19,11 @@ lop disk reclaim [--repo PATH]... [--go-build-cache] [--scratchpads]
 * **`--json`** prints the receipt document for either mode. Apply also writes it
   to `<config>/disk-reclaim-receipts/<timestamp>-<pid>.json` — first as an
   *intent* before the first removal, then updated after each item — with
-  `shutil.disk_usage` readings before and after.
+  `shutil.disk_usage` readings before and after. Every write records
+  `confirmed: true` and the `confirmation` that authorised the run (`"--yes"` or
+  `"typed"`), including the intent, so the file alone says how the removal was
+  approved even if the process died mid-sweep. `apply()` refuses a provenance it
+  does not recognise rather than writing one that guesses.
 * Exit codes, in precedence order: `2` usage error, a **refused category**
   (a dry run that refuses a requested category also exits 2, so a script cannot
   mistake a half-answered preview for a full one) or confirmation

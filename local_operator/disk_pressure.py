@@ -90,6 +90,17 @@ GO_CACHE_MARKER = "This directory holds cached build artifacts from the Go build
 RECEIPT_DIRNAME = "disk-reclaim-receipts"
 RECEIPT_SCHEMA = 1
 
+#: How a removal was authorised, stamped into EVERY receipt this module writes
+#: (intent, checkpoints, final). It lives here, next to the schema, because it is
+#: part of the durable audit record rather than a CLI-only detail: the whole point
+#: of the receipt is that the run can be reconstructed from the FILE, so the file
+#: must say whether a typed prompt was answered or ``--yes`` bypassed it. There is
+#: deliberately no default — a caller that cannot say how removal was authorised
+#: is refused (see :func:`apply`) instead of writing a receipt that guesses.
+CONFIRMATION_TYPED = "typed"
+CONFIRMATION_YES = "--yes"
+CONFIRMATION_KINDS = (CONFIRMATION_YES, CONFIRMATION_TYPED)
+
 #: Printed in every receipt and every preview: the one sentence that stops a
 #: reader from treating a measurement as a result.
 MEASUREMENT_NOTE = (
@@ -1402,9 +1413,17 @@ def apply(
     plan_: Plan,
     config_root: Path,
     *,
+    confirmation: str,
     on_progress: Callable[[Item], None] | None = None,
 ) -> ApplyResult:
     """Apply the previewed reclaim items, re-validating each at removal time.
+
+    ``confirmation`` is one of :data:`CONFIRMATION_KINDS` and REQUIRED, not
+    defaulted: it is stamped into every receipt write below, including the
+    INTENT written before the first removal, so the audit record says how the run
+    was authorised even if the process dies mid-sweep. The CLI passes ``--yes``
+    or ``typed``; a caller that cannot say which applies gets ``ValueError``
+    rather than a receipt that claims the wrong provenance.
 
     ORDER OF EFFECTS: (1) take the before reading, (2) write the receipt as an
     INTENT (every item still ``planned``) — if that fails nothing is touched and
@@ -1421,31 +1440,49 @@ def apply(
     # A caller may change Selection after preview. Reject before even writing
     # an intent, not only when a worktree happens to reach revalidation.
     plan_.selection.validate()
+    if confirmation not in CONFIRMATION_KINDS:
+        raise ValueError(
+            f"confirmation must be one of {CONFIRMATION_KINDS} (got {confirmation!r}); "
+            "the receipt records it"
+        )
     started = time.time()
+
+    def recorded(payload: dict[str, Any]) -> dict[str, Any]:
+        # Stamped on the document itself, not only on the value the CLI prints
+        # afterwards, so the file on disk and stdout cannot disagree about how
+        # the removal was confirmed.
+        payload["confirmed"] = True
+        payload["confirmation"] = confirmation
+        return payload
+
     path = config_root / RECEIPT_DIRNAME / f"{utc_stamp(started)}-{os.getpid()}.json"
     before = disk_readings(plan_.probe_paths)
     try:
         write_receipt_atomic(
             path,
-            _receipt_payload(
-                plan_,
-                mode="apply",
-                status="intent",
-                started_at=started,
-                before=before,
-                after=None,
-                finished_at=None,
+            recorded(
+                _receipt_payload(
+                    plan_,
+                    mode="apply",
+                    status="intent",
+                    started_at=started,
+                    before=before,
+                    after=None,
+                    finished_at=None,
+                )
             ),
         )
     except OSError as exc:
-        payload = _receipt_payload(
-            plan_,
-            mode="apply",
-            status="refused",
-            started_at=started,
-            before=before,
-            after=None,
-            finished_at=time.time(),
+        payload = recorded(
+            _receipt_payload(
+                plan_,
+                mode="apply",
+                status="refused",
+                started_at=started,
+                before=before,
+                after=None,
+                finished_at=time.time(),
+            )
         )
         payload["error"] = f"could not write the intent receipt ({exc}); nothing was removed"
         return ApplyResult(payload, None, 2)
@@ -1460,14 +1497,16 @@ def apply(
         try:
             write_receipt_atomic(
                 path,
-                _receipt_payload(
-                    plan_,
-                    mode="apply",
-                    status=status,
-                    started_at=started,
-                    before=before,
-                    after=None,
-                    finished_at=None,
+                recorded(
+                    _receipt_payload(
+                        plan_,
+                        mode="apply",
+                        status=status,
+                        started_at=started,
+                        before=before,
+                        after=None,
+                        finished_at=None,
+                    )
                 ),
             )
         except OSError as exc:
@@ -1522,14 +1561,16 @@ def apply(
     failed = failed or bool(receipt_warnings)
     status = "partial" if failed else "complete"
     finished = time.time()
-    payload = _receipt_payload(
-        plan_,
-        mode="apply",
-        status=status,
-        started_at=started,
-        before=before,
-        after=disk_readings(plan_.probe_paths),
-        finished_at=finished,
+    payload = recorded(
+        _receipt_payload(
+            plan_,
+            mode="apply",
+            status=status,
+            started_at=started,
+            before=before,
+            after=disk_readings(plan_.probe_paths),
+            finished_at=finished,
+        )
     )
     payload["receipt_path"] = os.fspath(path)
     if receipt_warnings:
