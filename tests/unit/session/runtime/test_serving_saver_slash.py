@@ -54,7 +54,9 @@ def _journal(tmp_path: Path) -> list[bool | None]:
 def _serve(session: Any, command: str, args: str) -> SlashResult:
     fake = SimpleNamespace(_session=session, _notify=lambda: None)
     return asyncio.run(
-        ServingSessionHandle._slash_result(fake, command, args, SlashResult)  # type: ignore[arg-type]
+        ServingSessionHandle._slash_result(
+            fake, command, args, SlashResult  # type: ignore[arg-type]
+        )
     )
 
 

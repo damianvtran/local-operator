@@ -33,20 +33,23 @@ async def main() -> None:
         refresh_frontend_state=lambda: None,
     )
     command.signed_in = lambda: True
+    # `saver_slash` is a coroutine since review M2 (the answer is published only
+    # after the journal write lands), so every call is awaited; the bare calls
+    # this script started with printed a coroutine's missing `.text` and died.
     print("$ /saver")
-    print(command.saver_slash(session, "", Result).text)
+    print((await command.saver_slash(session, "", Result)).text)
     await asyncio.sleep(0)
     print("$ /saver on")
-    print(command.saver_slash(session, "on", Result).text)
+    print((await command.saver_slash(session, "on", Result)).text)
     await asyncio.sleep(0)
     print("$ /saver status")
-    print(command.saver_slash(session, "status", Result).text)
+    print((await command.saver_slash(session, "status", Result)).text)
     print("$ /radient saver off")
-    print(command.saver_slash(session, "off", Result).text)
+    print((await command.saver_slash(session, "off", Result)).text)
     await asyncio.sleep(0)
     command.signed_in = lambda: False
     print("$ /saver  # signed out")
-    print(command.saver_slash(session, "", Result).text)
+    print((await command.saver_slash(session, "", Result)).text)
     print("journal rows:", len(session._transcript.rows))
 
 

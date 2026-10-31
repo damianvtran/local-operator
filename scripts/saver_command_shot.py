@@ -11,23 +11,40 @@ import asyncio
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
+# ORDER IS LOAD-BEARING, hence the E402 waivers below: the repo root must be on
+# sys.path before `scripts.`/`tests.` resolve, and `isolate_capture()` must
+# redirect HOME/config BEFORE any local_operator module is imported (an import
+# reads the config dir), or the capture would touch the operator's real config.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from scripts.visual_capture import isolate_capture, save_capture
+from scripts.visual_capture import isolate_capture, save_capture  # noqa: E402
 
 isolate_capture()
 
-from rich.cells import cell_len
+from rich.cells import cell_len  # noqa: E402
 
-from local_operator.saver import command
-from local_operator.tui.app import OperatorApp, _saver_label
-from local_operator.tui.widgets.status_line import ICON_SAVER
-from tests.unit.tui.test_app_pilot import FakeSession, _factory
+from local_operator.saver import command  # noqa: E402
+from local_operator.tui.app import OperatorApp, _saver_label  # noqa: E402
+from local_operator.tui.widgets.status_line import ICON_SAVER  # noqa: E402
+from tests.unit.tui.test_app_pilot import FakeSession, _factory  # noqa: E402
 
 #: The Saver segment's reserved VALUE width, in cells (``badge`` is 5 in en).
 RESERVED_VALUE_CELLS = 5
 MODEL_LABEL = "openai/gpt-5.4"
+
+
+class SaverFakeSession(FakeSession):
+    """The shared pilot fake plus the three Saver fields this capture drives.
+
+    Declared here rather than on ``FakeSession``: only this capture reads them,
+    and the shared fake is pinned to ``SessionProtocol`` by its own suite.
+    """
+
+    routing_settings: dict[str, Any] | None = None
+    radient_saver_choice: bool | None = None
+    _transcript: Any = None
 
 
 async def _settle(app: OperatorApp, pilot) -> None:
@@ -50,7 +67,7 @@ async def main() -> None:
     out.mkdir(parents=True, exist_ok=True)
     # A signed-in, opted-in owner is the only state the badge can appear in.
     command.signed_in = lambda: True
-    session = FakeSession()
+    session = SaverFakeSession()
     session.routing_settings = {"radient": {"saver": {"mode": "opt_in"}}}
     session.radient_saver_choice = False
     session._transcript = type(
