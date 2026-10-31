@@ -1,0 +1,27 @@
+{
+  "locale": "ru",
+  "namespace": "cli.browser",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 1,
+    "nit": 0
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 1,
+      "id": "RU-020",
+      "severity": "MINOR",
+      "namespace": "cli.browser",
+      "key": "cli.browser.revoke_no_match",
+      "english": "\u001b[1;31mno single authorised extension matches ''{target}''.\u001b[0m",
+      "current": "\u001b[1;31mНи одно авторизованное расширение не соответствует ''{target}''.\u001b[0m",
+      "problem": "Drops 'single': English covers both zero and several matches (ambiguous target); «Ни одно … не соответствует» tells a user with two matching installs that none matched. Sibling drive_no_single correctly adds «однозначно».",
+      "suggested": "\\x1b[1;31mНи одно авторизованное расширение однозначно не соответствует ''{target}''.\\x1b[0m",
+      "disposition": "fixed (remediation core-fix, session ef4f00143d56)"
+    }
+  ]
+}

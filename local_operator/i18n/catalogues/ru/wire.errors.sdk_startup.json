@@ -1,0 +1,6 @@
+{
+  "wire.errors.sdk_startup.attach_hosting_unconfigured": "ни один живой рантайм не обслуживает {resume}, и этот корень не может запустить его: {error} Настройте размещение для этого корня (его config.yml), затем задействуйте id через spawn_session()/deliver() и подключитесь, когда рантайм появится.",
+  "wire.errors.sdk_startup.attach_runtime_missing": "ни один живой рантайм не обслуживает {resume}; откройте его с mode=''own'', чтобы запустить в этом процессе, либо сначала задействуйте через spawn_session()/deliver() и подключитесь, когда рантайм появится.",
+  "wire.errors.sdk_startup.profile_attach_failed": "Не удалось подключить профиль {profile}",
+  "wire.errors.sdk_startup.tool_inventory_mismatch": "spec.tools {spec_tools} и ApprovalPolicy.declared({policy_tools}) называют разные наборы; укажите доступ запуска один раз"
+}

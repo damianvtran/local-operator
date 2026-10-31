@@ -1,0 +1,51 @@
+{
+  "locale": "ru",
+  "namespace": "mobile.setup",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 3,
+    "nit": 0
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 1,
+      "id": "RU-013",
+      "severity": "MINOR",
+      "namespace": "mobile.setup",
+      "key": "mobile.setup.activated",
+      "english": "Existing tunnel activation saved; owning credential unchanged.",
+      "current": "Активация существующего туннеля сохранена; учётные данные-владельца не изменились.",
+      "problem": "«учётные данные-владельца» is a hyphenation error (an attributive genitive is not hyphenated); reads as a broken compound.",
+      "suggested": "Активация существующего туннеля сохранена; учётные данные владельца не изменились.",
+      "disposition": "fixed (remediation core-fix, session ef4f00143d56)"
+    },
+    {
+      "round": 1,
+      "id": "RU-014",
+      "severity": "MINOR",
+      "namespace": "mobile.setup",
+      "key": "mobile.setup.identity_unavailable",
+      "english": "identity unavailable — check your signed-in accounts",
+      "current": "идентификатор недоступен — проверьте выполненные входы в учётные записи",
+      "problem": "'identity' here is the (masked) account identity shown in `account`; «идентификатор» means an identifier/ID and collides with the separate credential id. Also «выполненные входы» is stilted.",
+      "suggested": "учётная запись не определена — проверьте, в какие учётные записи выполнен вход",
+      "disposition": "fixed (remediation core-fix, session ef4f00143d56)"
+    },
+    {
+      "round": 2,
+      "id": "RU2-002",
+      "severity": "MINOR",
+      "namespace": "mobile.setup",
+      "key": "mobile.setup.owner_missing",
+      "english": "Run lop login-status; restore the owning login. Setup will not repoint an existing tunnel or pending request.",
+      "current": "Выполните lop login-status и восстановите вход в учётную запись-владельца. Настройка не будет перенаправлять существующий туннель или ожидающий запрос.",
+      "problem": "Same class as RU-013 (hyphenated 'owning' compound). This key, mobile.setup.login («войти в учётную запись-владельца») and mobile.setup.checking («Проверка учётной записи-владельца») hyphenate a feminine noun to the masculine «владелец». That reads as a broken compound or a forced apposition. English 'owning login/account' means the account that owns the tunnel.",
+      "suggested": "owner_missing: «Выполните lop login-status и восстановите вход в учётную запись — владелицу туннеля. …», or use «…в учётную запись, которой принадлежит туннель…». Apply the relative-clause form to login: «…чтобы войти в учётную запись, которой принадлежит туннель, затем повторите.» and checking: «Проверка учётной записи-владельца…» → «Проверка учётной записи, которой принадлежит туннель, локальных требований и мобильного маршрута…»",
+      "disposition": "open at PASS: minor/nit accepted, value unchanged"
+    }
+  ]
+}
