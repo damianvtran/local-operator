@@ -4877,6 +4877,19 @@ def test_pending_stop_does_not_paint_as_a_completed_stop() -> None:
     assert pending._promoted_lead() == receipt
     assert pending._captured_output() == []
 
+    # U12 / design D6: the EXPANDED body's `!` must carry the SAME ink as the
+    # header's. A text-only assertion is exactly why this slipped — the glyph was
+    # right and the colour was not, so the lead line contradicted the row it
+    # belongs to. The ink comes off the painted spans, not the theme, because the
+    # defect was the choice of token rather than the token's value.
+    amber = _triplet(bindings.style("tool.status.partial_glyph").color)
+    danger = _triplet(bindings.style("tool.status.error_glyph").color)
+    pending.toggle_expanded()
+    body = pending._build_content(80)
+    assert _triplet(_style_at(pending._build_row(80), "stop unconfirmed").color) == amber
+    assert _triplet(_style_at(body, "! stop accepted").color) == amber, "body lead must agree"
+    assert _triplet(_style_at(body, "! stop accepted").color) != danger
+
     # A stop that LANDED is untouched: the completed `✓` and no state word.
     stopped = ToolCard("t", "sessions", {"session": "payments-audit"})
     stopped.mark_done('stopped "payments-audit"', {"op": "stop", "method": "socket"})
@@ -4896,3 +4909,7 @@ def test_pending_stop_does_not_paint_as_a_completed_stop() -> None:
     assert "stop unconfirmed" not in refused_row, refused_row
     assert ICON_ATTENTION not in refused_row, refused_row
     assert refused._promoted_lead() == receipt
+    # The negative control for the amber above: a refusal's lead stays `danger`,
+    # so the fix ambers the attention glyph and nothing else.
+    refused.toggle_expanded()
+    assert _triplet(_style_at(refused._build_content(80), "✗ stop accepted").color) == danger

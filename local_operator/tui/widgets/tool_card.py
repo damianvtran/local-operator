@@ -4242,9 +4242,18 @@ class ToolCard(ExpandableActionBlock):
         # result and for a reset notice — the notice's glyph is the success `✓`
         # because the call ran, but the sentence it opens is a session-state
         # warning (design review round 1, D1/D2).
+        #
+        # ``ICON_ATTENTION`` BELONGS IN THIS TUPLE FOR THE SAME REASON (UX round
+        # 3 U12 / design round 3 D6): the pending-stop card paints its `!` amber
+        # in the collapsed row, so a lead that fell through to `danger` put a red
+        # `!` at the head of the very sentence the amber header promises, inside
+        # ONE card — the state disagreeing with itself, which is exactly what
+        # this rule exists to prevent. The tuple is the whole fix: the glyph is
+        # already passed in by `_promoted_paint`, and its ink was the only thing
+        # out of step.
         lead_ink = bindings.style(
             "tool.status.partial_glyph"
-            if glyph in (ICON_PARTIAL, ICON_SUCCESS)
+            if glyph in (ICON_PARTIAL, ICON_SUCCESS, ICON_ATTENTION)
             else "tool.status.error_glyph"
         )
         wrapped = wrap_cells(text, line_width)
