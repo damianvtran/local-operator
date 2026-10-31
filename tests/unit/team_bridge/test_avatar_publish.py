@@ -859,16 +859,46 @@ async def test_a_bounded_multipart_publish_still_carries_its_body():
 
 
 async def test_an_oversized_publish_answer_is_refused_while_it_streams():
-    """R1-S1/F7: the bound is applied at DISPATCH, not after parsing."""
+    """R1-S1/F7, R2-F1: the bound is applied at DISPATCH, not after parsing.
 
-    client = _make_client(
-        lambda request: httpx.Response(
-            200, content=b'{"msg": "ok", "result": "' + b"x" * (70 * 1024) + b'"}'
-        )
-    )
+    The answer must be a VALID house envelope that is merely too big, or the
+    cell would pass for the wrong reason: a ``result`` that is not an object is
+    refused by ``_envelope_result`` at any size, so it proves nothing about the
+    bound (round-2 review measured exactly that). Here the envelope parses and
+    only ``max_response_bytes`` can stop it — drop that argument and this cell
+    fails with no refusal raised at all.
+    """
+
+    oversized = json.dumps({"msg": "ok", "result": {"blob": "x" * (70 * 1024)}}).encode()
+    assert len(oversized) > 64 * 1024
+    client = _make_client(lambda request: httpx.Response(200, content=oversized))
 
     with pytest.raises(BridgeRefusal) as info:
         await client.put_endpoint_avatar("bep_1", PNG, PNG_SHA, expected_account_id="acc_1")
+
+    assert info.value.code == "bridge_invalid_response"
+    # The same envelope under the cap is accepted: the bound, not the shape, is
+    # what this cell is measuring.
+    small = json.dumps({"msg": "ok", "result": {"blob": "x" * 32}}).encode()
+    ok_client = _make_client(lambda request: httpx.Response(200, content=small))
+    result = await ok_client.put_endpoint_avatar("bep_1", PNG, PNG_SHA, expected_account_id="acc_1")
+    assert result == {"blob": "x" * 32}
+
+
+async def test_an_oversized_clear_answer_carries_the_avatar_code():
+    """R2-F2: the clear is bounded too, and with this route's own refusal class.
+
+    Inheriting ``attachment_too_large`` named a class the caller cannot act on
+    and pointed at the wrong feature.
+    """
+
+    oversized = json.dumps(
+        {"error": "no", "code": "not_found", "details": {"x": "y" * (40 * 1024)}}
+    )
+    client = _make_client(lambda request: httpx.Response(404, content=oversized.encode()))
+
+    with pytest.raises(BridgeRefusal) as info:
+        await client.delete_endpoint_avatar("bep_1", expected_account_id="acc_1")
 
     assert info.value.code == "bridge_invalid_response"
 
