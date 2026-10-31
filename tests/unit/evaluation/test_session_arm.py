@@ -1030,6 +1030,125 @@ class TestCompletionGate:
         assert bridge.completion_challenges_fired == 1
 
     @pytest.mark.asyncio
+    async def test_a_done_challenge_does_not_stop_the_next_claim_being_premature(
+        self, tmp_path: Path
+    ) -> None:
+        """The EXECUTED counter, not the epoch counter, decides premise.
+
+        Step-0 ``done`` challenged (one epoch spent, ``_steps`` = 1, NOTHING
+        executed), then answered ``failed``: the episode still has no action
+        behind it, so that claim is premature and the rule fires. Reading
+        ``_steps`` here would accept it silently -- the two counters differ by
+        exactly the challenged epoch, which is why this pin exists (mutation
+        ``executed_steps=self._steps`` used to pass the whole suite).
+        """
+
+        events: list[tuple[str, dict[str, Any]]] = []
+        bridge = _bridge(tmp_path, record=lambda kind, payload: events.append((kind, payload)))
+        done = {"actions": [{"kind": "finish", "status": "done", "reason": "done"}]}
+        assert (await bridge.call(done))["details"]["terminal"] == "completion-challenged"
+        failed = {"actions": [{"kind": "finish", "status": "failed", "reason": "cannot"}]}
+        second = await bridge.call(failed)
+        assert second["details"]["terminal"] == "completion-challenged"
+        triggers = [
+            payload.get("trigger") for kind, payload in events if kind == "completion_challenged"
+        ]
+        # None is the historical ``done`` row (no trigger key).
+        assert triggers == [None, "premature-terminal"]
+        # The re-declaration is still accepted, status untouched.
+        assert (await bridge.call(failed))["details"]["terminal"] == "finish"
+        assert bridge.terminal is True
+
+    @pytest.mark.asyncio
+    async def test_a_batch_refused_at_admission_is_not_an_executed_action(
+        self, tmp_path: Path
+    ) -> None:
+        """The s20a shape: a refused batch is not an executed one.
+
+        In ``runs/s20a-t001-20261028-071043`` call #1 was
+        ``[wait, finish(infeasible)]``, refused before admission because a
+        finish must be alone in its batch. Nothing ran, so the ``failed``
+        declaration that followed was still a zero-executed-actions claim and
+        the gate has to challenge it; counting the refused batch would accept
+        it silently, which is the shape that lost the episode.
+        """
+
+        events: list[tuple[str, dict[str, Any]]] = []
+        bridge = _bridge(tmp_path, record=lambda kind, payload: events.append((kind, payload)))
+        mixed = await bridge.call(
+            {
+                "actions": [
+                    {"kind": "wait", "duration_ms": 50},
+                    {"kind": "finish", "status": "infeasible", "reason": "no app"},
+                ]
+            }
+        )
+        assert mixed["is_error"] is True
+        # A refusal before admission spends no epoch, so the ledger has nothing
+        # yet -- and in particular no executed batch for the gate to count.
+        assert [kind for kind, _ in events] == []
+        reply = await bridge.call(
+            {"actions": [{"kind": "finish", "status": "failed", "reason": "gave up"}]}
+        )
+        assert reply["details"]["terminal"] == "completion-challenged"
+        assert [kind for kind, _ in events if kind == "completion_challenged"] == [
+            "completion_challenged"
+        ]
+        assert events[-1][1]["trigger"] == "premature-terminal"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("status", ["infeasible", "failed"])
+    async def test_a_one_step_budget_still_records_the_declaration(
+        self, tmp_path: Path, status: str
+    ) -> None:
+        """At ``max_steps == 1`` the challenge would cost the only epoch.
+
+        The challenge is a re-ask, so its answer needs an epoch of its own; a
+        budget of one can hold the challenge or the declaration, never both.
+        Spending it on the challenge lost the model's own ``infeasible`` -- the
+        declaration OSWorld scores an impossible task on -- to
+        ``truncated / max-steps`` (QA round 1, Q1). The gate therefore declines
+        and the claim is recorded, with the decline durable in the ledger.
+        """
+
+        events: list[tuple[str, dict[str, Any]]] = []
+        bridge = _bridge(
+            tmp_path, max_steps=1, record=lambda kind, payload: events.append((kind, payload))
+        )
+        claim = {"actions": [{"kind": "finish", "status": status, "reason": "no app"}]}
+        reply = await bridge.call(claim)
+        assert reply["details"]["terminal"] == "finish"
+        assert reply["is_error"] is False
+        assert bridge.terminal is True
+        assert bridge.end_requested == "finish"
+        # The decline is recorded BEFORE the accepted proposal's own epoch:
+        # the gate decides first, then the accepted finish is admitted.
+        assert [kind for kind, _ in events] == [
+            "premature_gate_skipped",
+            "output_epoch",
+            "finish",
+        ]
+        assert events[0][1] == {"reason": "step-budget", "steps": 0, "max_steps": 1}
+        assert events[1][1] == {"epoch_kind": "finish", "steps": 1}
+        assert events[2][1]["status"] == status
+
+    @pytest.mark.asyncio
+    async def test_two_steps_are_enough_for_the_challenge_and_the_reply(
+        self, tmp_path: Path
+    ) -> None:
+        """The guard is a budget floor, not a blanket disable.
+
+        At ``max_steps == 2`` the challenge (epoch 1) and the re-declaration
+        (epoch 2) both fit, so the gate fires and the status survives.
+        """
+
+        bridge = _bridge(tmp_path, max_steps=2)
+        claim = {"actions": [{"kind": "finish", "status": "infeasible", "reason": "no app"}]}
+        assert (await bridge.call(claim))["details"]["terminal"] == "completion-challenged"
+        assert (await bridge.call(claim))["details"]["terminal"] == "finish"
+        assert bridge.terminal is True
+
+    @pytest.mark.asyncio
     async def test_the_premature_gate_can_be_disabled_for_a_control_arm(
         self, tmp_path: Path
     ) -> None:

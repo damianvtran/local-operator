@@ -1244,6 +1244,28 @@ class ActionBridge:
 
         return self._attempted_groups
 
+    def _challenge_epoch_pair_fits(self) -> bool:
+        """Whether this channel's clocks can hold a challenge AND its reply.
+
+        The runner charges a challenge to the model's retry allowance; this
+        channel charges every admitted output group, the re-ask included, and
+        ``max_steps`` bounds those epochs (blueprint §3). A challenge spends one
+        epoch, so the model's answer needs a second one: where the budget cannot
+        hold both, challenging CONSUMES the episode's last epoch and the
+        declaration it asked about never arrives. Measured by QA at
+        ``max_steps == 1``: a step-0 ``finish(infeasible)`` -- the declaration a
+        genuinely infeasible task is scored on -- ended ``truncated / max-steps``
+        with no ``finish`` row at all, where the control arm recorded it.
+
+        So the gate DECLINES when the exchange does not fit, instead of spending
+        a budget that cannot complete what it starts. Both clocks are checked
+        because ``max_steps`` is enforced on both: ``_steps`` (admitted epochs)
+        and ``_attempted_groups`` (reserved at admission, so a refused group is
+        still spent).
+        """
+
+        return self._steps + 2 <= self.max_steps and self._attempted_groups + 1 <= self.max_steps
+
     def _group_key(self) -> str:
         """The canonical key of the output group being served.
 
@@ -1791,6 +1813,23 @@ class ActionBridge:
                         and self._premature_fired < PREMATURE_TERMINAL_CHALLENGES
                     ),
                 )
+                if kind == "premature-terminal" and not self._challenge_epoch_pair_fits():
+                    # A challenge the budget cannot see through is worse than no
+                    # challenge: it would spend the last epoch and lose the very
+                    # declaration the gate exists to protect (see
+                    # ``_challenge_epoch_pair_fits``). Accept the claim and say
+                    # so in the ledger -- a silently skipped gate reads exactly
+                    # like one that never fired.
+                    if self.record is not None:
+                        self.record(
+                            "premature_gate_skipped",
+                            {
+                                "reason": "step-budget",
+                                "steps": self._steps,
+                                "max_steps": self.max_steps,
+                            },
+                        )
+                    kind = None
                 if kind is not None:
                     # The runner's completion gate (``runner/completion.py``),
                     # enforced on this channel: the FIRST ``done`` claim is
@@ -1801,11 +1840,14 @@ class ActionBridge:
                     # ``action_batch`` is written -- but the claim ITSELF is an
                     # admitted output decision and consumes one external output
                     # epoch (blueprint §3), exactly as the runner's challenge
-                    # does at the official clock. A ``failed`` claim is
-                    # NOT challenged (there is no completion to confirm; the
-                    # runner's rule), and a claim is only ever challenged if the
-                    # shared text can name the task back, which is why the
-                    # instruction rides on the bridge.
+                    # does at the official clock. A ``failed``/``infeasible``
+                    # claim IS challenged once when NO action has executed yet
+                    # (the premature rule); one made after an action is not,
+                    # because there is no reasoning turn to re-open -- the
+                    # model already reported what the environment showed it.
+                    # A claim is only ever challenged if the shared text can
+                    # name the task back, which is why the instruction rides
+                    # on the bridge.
                     # The proposal is ADMITTED here: one epoch, consumed
                     # before the challenge is built and recorded (blueprint §3).
                     self._consume_output_epoch("finish-challenged")

@@ -71,7 +71,11 @@ that keep it honest:
 Default ON is safe for the same structural reason as the ``done`` gate: the
 second declaration is always accepted, so the worst case is one extra model
 cycle; the episode can never be driven into ``_ModelFailure`` or an unscored
-seal by it. ``EpisodeConfig.premature_terminal_gate`` (driver flag
+seal by it, because a claim that is still waiting on its re-check is settled
+when the re-decide ends the episode instead of answering
+(``episode._settle_on_challenged_claim`` -- review round 1, R1: the retry
+ceiling used to reach the zero-step handler and seal unscored exactly what the
+control arm scores). ``EpisodeConfig.premature_terminal_gate`` (driver flag
 ``--no-premature-terminal-gate``) is the control arm.
 """
 

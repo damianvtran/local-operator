@@ -399,6 +399,132 @@ async def test_the_premature_gate_off_ends_on_the_first_non_done_finish(
 
 
 @pytest.mark.parametrize("status", ["failed", "infeasible"])
+@pytest.mark.asyncio
+async def test_a_challenged_claim_still_ends_the_episode_when_the_re_decide_exhausts(
+    tmp_path: Path, episode_id: str, status: str
+) -> None:
+    """A dead re-prompt must not turn the scored run into an unscored one.
+
+    The challenge is not a veto: with the gate off, this episode is one call
+    and a scored ``failed``. If a re-decide that exhausts its corrections took
+    the step-zero branch of the ``_ModelFailure`` handler, the gate alone would
+    turn that same model into an unscored ``model_failure`` -- the treatment
+    arm's denominator would shrink, and only in the arm being measured. So the
+    claim the gate refused stands: it is the terminal declaration, sealed once
+    and scored.
+    """
+
+    adapter = FakeAdapter(tmp_path, episode_id)
+    model = GatedModel(["finish"] + ["reject"] * 8, finish_status=status)
+    runner = _run_episode(tmp_path, episode_id, adapter=adapter, model=model)
+
+    outcome = await runner.run()
+
+    assert outcome.status == "completed"
+    assert outcome.bundle_root is not None
+    assert outcome.score is not None and outcome.score.status == "scored"
+    assert outcome.reportability_label == "reportable"
+    report = verify_bundle(outcome.bundle_root)
+    assert report.valid, [issue.code for issue in report.issues]
+    # The gate did fire, and only once: the settlement is the first claim, not
+    # a second challenge.
+    assert len(model.challenges) == 1
+    assert len(_challenges(outcome.bundle_root, PREMATURE)) == 1
+    assert len(_challenges(outcome.bundle_root)) == 0
+    # The episode ends ONCE, on the declaration the gate refused, with the
+    # status the model chose -- byte-identical to the claimed batch.
+    terminal = [
+        payload
+        for payload in payloads(outcome.bundle_root, ActionBatchPayload)
+        if payload.terminal == "finish"
+    ]
+    assert len(terminal) == 1
+    from local_operator.evaluation.adapters.supervisor import verify_artifact
+
+    sealed = verify_artifact(outcome.bundle_root / "artifacts", terminal[0].action_artifact)
+    assert sealed == model.challenges[0][0].to_canonical_json()
+    assert json.loads(sealed)["actions"][0]["status"] == status
+    # No agent_stop: the episode ended on a declaration, not on a stop. A stop
+    # row would say the rollout was cut off, which is the reading this fix
+    # exists to prevent.
+    kinds = [event.kind for event in verify_bundle(outcome.bundle_root).events]
+    assert kinds.count("agent_stop") == 0
+
+
+@pytest.mark.asyncio
+async def test_a_challenged_done_claim_survives_the_same_exhaustion(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """The ``done`` rule had the same hole and gets the same settlement.
+
+    A step-zero ``done`` claim is challenged too, so an exhausting re-decide
+    before that claim could equally seal unscored what the gate-off arm scores.
+    Rare, since a ``done`` claim normally follows work, but the handler branch
+    it reached was identical.
+    """
+
+    adapter = FakeAdapter(tmp_path, episode_id)
+    model = GatedModel(["finish"] + ["reject"] * 8)
+    runner = _run_episode(tmp_path, episode_id, adapter=adapter, model=model)
+
+    outcome = await runner.run()
+
+    assert outcome.status == "completed"
+    assert outcome.bundle_root is not None
+    assert outcome.score is not None and outcome.score.status == "scored"
+    assert verify_bundle(outcome.bundle_root).valid
+    assert len(_challenges(outcome.bundle_root)) == 1
+    terminal = [
+        payload
+        for payload in payloads(outcome.bundle_root, ActionBatchPayload)
+        if payload.terminal == "finish"
+    ]
+    assert len(terminal) == 1
+    from local_operator.evaluation.adapters.supervisor import verify_artifact
+
+    sealed = verify_artifact(outcome.bundle_root / "artifacts", terminal[0].action_artifact)
+    assert sealed == model.challenges[0][0].to_canonical_json()
+    assert json.loads(sealed)["actions"][0]["status"] == "done"
+
+
+@pytest.mark.parametrize("max_steps", [1, 2])
+@pytest.mark.asyncio
+async def test_the_runner_challenge_costs_no_step_so_a_one_step_budget_still_declares(
+    tmp_path: Path, episode_id: str, max_steps: int
+) -> None:
+    """A budget of ONE must still record a genuine ``infeasible``.
+
+    The runner charges the challenge to the model's retry allowance, not to
+    ``max_steps``, so the re-declaration fits whatever the budget was. This is
+    the contract the session arm has to match (its channel charges an output
+    epoch -- ``session_arm.ActionBridge``), and the reason the two arms are
+    pinned separately: a fix on one is not evidence for the other.
+    """
+
+    adapter = FakeAdapter(tmp_path, episode_id)
+    model = GatedModel(["finish"], finish_status="infeasible")
+    config = build_config(tmp_path, max_steps=max_steps)
+    runner = _run_episode(tmp_path, episode_id, adapter=adapter, model=model, config=config)
+
+    outcome = await runner.run()
+
+    assert outcome.status == "completed"
+    assert outcome.bundle_root is not None
+    assert outcome.score is not None and outcome.score.status == "scored"
+    assert len(_challenges(outcome.bundle_root, PREMATURE)) == 1
+    terminal = [
+        payload
+        for payload in payloads(outcome.bundle_root, ActionBatchPayload)
+        if payload.terminal == "finish"
+    ]
+    assert len(terminal) == 1
+    from local_operator.evaluation.adapters.supervisor import verify_artifact
+
+    sealed = verify_artifact(outcome.bundle_root / "artifacts", terminal[0].action_artifact)
+    assert json.loads(sealed)["actions"][0]["status"] == "infeasible"
+
+
+@pytest.mark.parametrize("status", ["failed", "infeasible"])
 def test_the_premature_challenge_is_neutral_and_names_both_replies(status: str) -> None:
     """Restates the task and that nothing ran; never asserts feasibility."""
 
@@ -762,7 +888,9 @@ async def test_the_driver_refuses_a_gate_run_its_model_client_cannot_challenge(
     monkeypatch.setattr(script, "_ScriptedFinish", _Blind)
 
     code = await script.run(
-        script.build_parser().parse_args(_driver_args(tmp_path, durable_run_root))
+        script.build_parser().parse_args(
+            _driver_args(tmp_path, durable_run_root, "--model-client", "scripted-finish")
+        )
     )
 
     assert code == script.EXIT_PREFLIGHT
@@ -771,3 +899,75 @@ async def test_the_driver_refuses_a_gate_run_its_model_client_cannot_challenge(
     # refusal in the same spot.
     evidence = durable_run_root / "evidence"
     assert not evidence.exists() or not list(evidence.iterdir())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("flags", "refused", "named"),
+    [
+        # Both gates on: the historical case.
+        ((), True, "--no-completion-gate"),
+        # ``--no-completion-gate`` alone still stamps ``premature_terminal_gate``
+        # -- that arm was on, so the refusal has to fire for it too, and the
+        # remedy has to name ITS flag rather than the one already passed.
+        (("--no-completion-gate",), True, "--no-premature-terminal-gate"),
+        # Only a run with BOTH off claims no gate at all.
+        (("--no-completion-gate", "--no-premature-terminal-gate"), False, ""),
+    ],
+)
+async def test_the_preflight_covers_every_gate_the_manifest_stamps(
+    tmp_path: Path,
+    durable_run_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    flags: tuple[str, ...],
+    refused: bool,
+    named: str,
+) -> None:
+    """A gate the driver cannot exercise must not be stamped on the manifest.
+
+    The preflight used to test only the ``done`` gate's flag, so
+    ``--no-completion-gate`` against a client that cannot challenge sailed
+    through and stamped ``premature_terminal_gate: true`` on a bundle in which
+    that gate could never fire -- the same dishonesty the check exists to
+    prevent, one flag over. The control row is the deliberate both-off arm: it
+    must still be allowed, so the fix is a widened condition and not a blanket
+    refusal.
+    """
+
+    from scripts import run_episode as script
+
+    class _Blind:
+        """A model client with decisions but no way to re-present the end state."""
+
+        def __init__(self, route: Any) -> None:
+            self._route = route
+
+    class _ReachedRunner(Exception):
+        """Raised where the runner is CONSTRUCTED: proof the preflight passed."""
+
+    def _reached(*args: Any, **kwargs: Any) -> Any:
+        raise _ReachedRunner
+
+    monkeypatch.setattr(script, "_ScriptedFinish", _Blind)
+    monkeypatch.setattr(script, "EpisodeRunner", _reached)
+
+    # ``scripted-finish`` is the arm that reaches the gate preflight with a REAL
+    # client instance; the default provider client is refused EARLIER for
+    # ``--no-store`` and would make every row below pass for the wrong reason.
+    args = script.build_parser().parse_args(
+        _driver_args(tmp_path, durable_run_root, "--model-client", "scripted-finish", *flags)
+    )
+
+    if refused:
+        assert await script.run(args) == script.EXIT_PREFLIGHT
+        stderr = capsys.readouterr().err
+        assert named in stderr
+        # Nothing was allocated: the refusal is a preflight, like the
+        # effort-level refusal in the same spot.
+        evidence = durable_run_root / "evidence"
+        assert not evidence.exists() or not list(evidence.iterdir())
+    else:
+        with pytest.raises(_ReachedRunner):
+            await script.run(args)
+        assert "cannot re-present" not in capsys.readouterr().err

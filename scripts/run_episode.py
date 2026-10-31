@@ -2144,19 +2144,34 @@ async def run(
             print(str(error), file=sys.stderr)
             return EXIT_PREFLIGHT
 
-    if config.completion_gate and not _can_challenge_completion(model_client):
-        # A DEAD INSTRUMENT MUST NOT RETURN A READING. The gate refuses to fire
-        # for a client that cannot re-present the end state, so carrying on
-        # would seal a bundle whose manifest says the gate was on while no
+    # Either gate being on means the manifest claims a gate, and one shared
+    # method feeds both.
+    any_terminal_gate = config.completion_gate or config.premature_terminal_gate
+    if any_terminal_gate and not _can_challenge_completion(model_client):
+        # A DEAD INSTRUMENT MUST NOT RETURN A READING. Both terminal-claim gates
+        # refuse to fire for a client that cannot re-present the end state (one
+        # shared ``CompletionChallenger`` method feeds both), so carrying on
+        # would seal a bundle whose manifest says a gate was on while no
         # challenge was ever made -- a run that cannot be told apart from a
         # gate-off run by anything except reading its code. Fail with the
-        # remedy named instead; ``--no-completion-gate`` is how an operator says
-        # they meant it.
+        # remedy named instead; the corresponding ``--no-…-gate`` flag is how an
+        # operator says they meant it. The condition names BOTH gates, because a
+        # run with ``--no-completion-gate`` still stamps
+        # ``premature_terminal_gate: true`` and would be sealed claiming a gate
+        # that could never fire.
+        flags = [
+            flag
+            for flag, enabled in (
+                ("--no-completion-gate", config.completion_gate),
+                ("--no-premature-terminal-gate", config.premature_terminal_gate),
+            )
+            if enabled
+        ]
         print(
             f"--model-client {args.model_client} cannot re-present the end state "
-            "(no challenge_completion), so the completion gate cannot fire and "
+            "(no challenge_completion), so no terminal-claim gate can fire and "
             "this bundle would claim a gate that never ran; pass "
-            "--no-completion-gate to run without it deliberately",
+            f"{' or '.join(flags)} to run without it deliberately",
             file=sys.stderr,
         )
         return EXIT_PREFLIGHT
