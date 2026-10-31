@@ -1,0 +1,6 @@
+{
+  "relay.login.page.title": "local operator — साइन इन",
+  "relay.login.password.label": "पासवर्ड",
+  "relay.login.submit.label": "साइन इन",
+  "relay.login.error.password": "गलत पासवर्ड।"
+}

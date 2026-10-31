@@ -1,0 +1,23 @@
+{
+  "wire.errors.sdk_spec.agent_identity_conflict": "agent_name और agent_id एक साथ नहीं दिए जा सकते",
+  "wire.errors.sdk_spec.approval_callback_gate_required": "ApprovalPolicy.callback() के लिए कॉल करने योग्य गेट चाहिए",
+  "wire.errors.sdk_spec.approval_declared_tools_empty": "ApprovalPolicy.declared() को कम से कम एक टूल नामित करना होगा; बिना घोषित बाउंड सत्र को अस्वीकार करने के लिए ApprovalPolicy.refuse() का उपयोग करें",
+  "wire.errors.sdk_spec.approval_handler_wrong_mode": "ApprovalPolicy.handler केवल मोड ''callback'' के लिए सार्थक है, {mode} के लिए नहीं",
+  "wire.errors.sdk_spec.approval_tools_wrong_mode": "ApprovalPolicy.tools केवल मोड ''declared'' के लिए सार्थक है, {mode} के लिए नहीं",
+  "wire.errors.sdk_spec.attach_fields_unsupported": "mode=''attach'' spec.resume के लिए एक व्यूअर खोलता है; यह टीम, प्रोफ़ाइल, टूल, नाम, लक्ष्य या स्वीकृति नीतियाँ अटैच नहीं करता — वह स्वामी का पक्ष है। इस spec पर केवल resume सेट करें (या mode=''own'' उपयोग करें)। समस्या वाले फ़ील्ड: {fields}।",
+  "wire.errors.sdk_spec.attach_output_unsupported": "अटैच किए गए सत्र पर आउटपुट प्रवर्तन सेट नहीं किया जा सकता; स्वामी रनटाइम तय करता है",
+  "wire.errors.sdk_spec.attach_resume_required": "mode=''attach'' के लिए spec.resume चाहिए: व्यूअर एक id से अटैच होता है",
+  "wire.errors.sdk_spec.mode_invalid": "mode ''own'' या ''attach'' होना चाहिए, {mode} नहीं",
+  "wire.errors.sdk_spec.output_format_invalid": "output_format इनमें से एक होना चाहिए: {formats}",
+  "wire.errors.sdk_spec.output_retries_range": "output_retries 0 और 5 के बीच होना चाहिए",
+  "wire.errors.sdk_spec.output_retries_requires_format": "output_retries के लिए output_format चाहिए",
+  "wire.errors.sdk_spec.output_schema_requires_format": "output_schema के लिए output_format चाहिए",
+  "wire.errors.sdk_spec.resume_empty": "resume सत्र id या \"@latest\" होना चाहिए, खाली स्ट्रिंग नहीं",
+  "wire.errors.sdk_spec.spawn_birth_effort_pair_required": "नए स्पॉन किए सत्र का birth_effort जन्म नमूने के साथ चलता है और उसके साथ hosting/model जोड़ी चाहिए; तीनों बताएँ, या मॉडल जोड़ी के बिना जन्म स्तर सेट करने के लिए सत्र को इन-प्रोसेस (open_session) खोलें।",
+  "wire.errors.sdk_spec.spawn_fields_unsupported": "spawn_session() नए रनटाइम चाइल्ड तक खुलने के बाद की स्थिति नहीं पहुँचा सकता; इस spec पर असमर्थित फ़ील्ड: {fields}। सत्र को इन-प्रोसेस (open_session) खोलें, जो चाहिए अटैच करें, dispose करें, फिर उसी id पर spawn_session() चलाएँ — resume अटैचमेंट बहाल करता है; या इन फ़ील्ड के बिना स्पॉन करें।",
+  "wire.errors.sdk_spec.spawn_model_pair_required": "spawn_session() hosting/model को नए रनटाइम तक एक जन्म नमूने के रूप में भेजता है; दोनों बताएँ, या कोई नहीं (तब चाइल्ड अपना मॉडल रूट के कॉन्फ़िग से हल करता है)।",
+  "wire.errors.sdk_spec.spawn_output_unsupported": "spawn_session() आउटपुट प्रवर्तन ({fields}) नहीं ले जा सकता; सत्र को open_session(..., mode=''own'') से खोलें और बाद में उसे एंगेज करें",
+  "wire.errors.sdk_spec.tools_empty": "tools को कम से कम एक टूल नामित करना होगा; अप्रतिबंधित रहने के लिए इसे None छोड़ें",
+  "wire.errors.sdk_spec.world_root_empty": "सेट होने पर world_root गैर-खाली पाथ होना चाहिए",
+  "wire.errors.sdk_spec.yolo_approval_unreachable": "yolo=True ApprovalPolicy.{approval_mode}() गेट को अप्राप्य बना देता है; इसके बजाय ApprovalPolicy.auto() उपयोग करें (या yolo हटाएँ)"
+}

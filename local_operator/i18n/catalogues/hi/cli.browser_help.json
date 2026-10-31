@@ -1,0 +1,22 @@
+{
+  "cli.browser_help.browser": "ब्राउज़र टूल को Chromium एक्सटेंशन से जोड़ें",
+  "cli.browser_help.install": "ब्रिज डेमन इंस्टॉल करें",
+  "cli.browser_help.status": "डेमन, एक्सटेंशन और पेयरिंग की स्थिति दिखाएँ",
+  "cli.browser_help.status_repair": "विज्ञापित स्थिति को वास्तविकता से मिलाएँ: जो टैब अब मौजूद नहीं उन्हें हटाएँ और नया हीटबीट फिर प्रकाशित करें। सत्र लाइव होने पर भी सुरक्षित।",
+  "cli.browser_help.json": "मशीन-पठनीय आउटपुट",
+  "cli.browser_help.cleanup": "पुनः सत्यापन के बाद एक प्रमाणित-टर्मिनल ब्राउज़र स्वामी बंद करें",
+  "cli.browser_help.cleanup_yes": "इसी सटीक क्लीनअप को स्वीकृत करें",
+  "cli.browser_help.daemon_action": "{action, select, start{डेमन शुरू करें} stop{डेमन रोकें} restart{डेमन फिर शुरू करें} other{{action}: डेमन}}",
+  "cli.browser_help.pair": "एक्सटेंशन पेयरिंग कोड दिखाएँ",
+  "cli.browser_help.pair_reset": "पहले पेयर किया ब्राउज़र रद्द करें",
+  "cli.browser_help.pair_list": "अधिकृत ब्राउज़र एक्सटेंशन सूचीबद्ध करें, और बताएँ कौन-सा नियंत्रित कर रहा है",
+  "cli.browser_help.pair_revoke": "केवल एक अधिकृत एक्सटेंशन रद्द करें (उसकी id, असंदिग्ध id उपसर्ग, या उसके लेबल का हिस्सा), बाकी सब पेयर रहें",
+  "cli.browser_help.drive": "चुनें कि कौन-सा अधिकृत एक्सटेंशन ब्राउज़र नियंत्रित करे",
+  "cli.browser_help.drive_target": "एक्सटेंशन id (या असंदिग्ध उपसर्ग), या उसके लेबल का हिस्सा",
+  "cli.browser_help.logs": "डेमन लॉग का अंतिम भाग दिखाएँ",
+  "cli.browser_help.uninstall": "ब्रिज डेमन हटाएँ",
+  "cli.browser_help.uninstall_purge": "पेयरिंग स्थिति भी हटाएँ",
+  "cli.browser_help.serve": "ब्रिज डेमन चलाएँ (फ़ोरग्राउंड)",
+  "cli.browser_help.tabs": "टिकाऊ स्वामित्व रिकॉर्ड और लाइव टैब सूचीबद्ध करें (केवल पढ़ने योग्य)",
+  "cli.browser_help.reconcile": "'tabs' का उपनाम: कुछ बंद किए बिना स्वामित्व जाँचें"
+}
