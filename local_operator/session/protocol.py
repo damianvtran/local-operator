@@ -757,7 +757,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     paint path.
 
     It is deliberately not used for dispatch, and the reason is measured rather
-    than stylistic. This protocol carries 148 public members and a POSITIVE
+    than stylistic. This protocol carries 149 public members and a POSITIVE
     ``isinstance`` walks every one of them; measured on an arm64 host, CPython
     3.12.13, min-of-seven over 2,000 iterations:
 
@@ -835,7 +835,10 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     ``history_peer_cycle_display_records`` on the viewer contract — the remote
     reader holds an attached facade, so the optional member belongs here and
     not on the owner-side protocol, one member on
-    the queued-ask rung), so recompute it
+    the queued-ask rung, 149 once the TUI's retirement notice needed
+    ``pending_move_cwd`` — a cwd move restarts the session elsewhere, and the
+    facade is the only side holding the destination at that instant), so
+    recompute it
     rather
     than adjusting it by the size of your own change.
 
@@ -1581,6 +1584,22 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         route resolves a relative target against this value and compares against
         it to decide a no-op, so a rename on the facade must be a type error
         rather than a silently stale base for every path a user types.
+        """
+        ...
+
+    @property
+    def pending_move_cwd(self) -> str:
+        """The directory a self-move is about to restart this session in, or ``""``.
+
+        Non-empty only between the runtime's cwd-move ``retiring`` frame and the
+        successor's bind. What a viewer does with it: the host reads it at the
+        instant a retirement lands (the refresh callback) and, when it is set,
+        tells the operator the session is restarting in that directory rather
+        than treating the departure as a silent build refresh. Declared because
+        that read is a duck-probe in ``tui/app.py``: a rename on the facade
+        would otherwise degrade to a session that moved and said nothing.
+        Viewer-only — an owner ``Session`` IS the runtime that retires, so it
+        has no pending destination to report.
         """
         ...
 

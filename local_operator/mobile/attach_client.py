@@ -935,6 +935,7 @@ class AttachClient:
         display_window: bool = False,
         supplements: bool = False,
         locality: str = "local",
+        cwd_adoption: bool = False,
         slash_consumers: Sequence[str] | None = None,
         on_frontend_sync: Callable[[dict[str, Any]], None] | None = None,
         on_frontend_update: Callable[[dict[str, Any]], None] | None = None,
@@ -944,6 +945,11 @@ class AttachClient:
         on_operator_prompt: Callable[[str], None] | None = None,
     ) -> None:
         self._surface = surface
+        #: Whether the host behind this client ADOPTS the directory a ``retiring``
+        #: frame names (the own-cwd move). Declared to the owner in the auth frame
+        #: and defaulted FALSE so an embedder that never grows adoption cannot
+        #: inherit the promise: see ``_ClientConn.cwd_adoption`` at the owning end.
+        self._cwd_adoption = cwd_adoption
         self._on_projection = on_projection
         self._on_disconnected = on_disconnected
         if locality not in ("local", "remote"):
@@ -1233,6 +1239,14 @@ class AttachClient:
             "client": "attach",
             "locality": self._locality,
         }
+        # THE VIEWER'S HALF OF THE CWD-MOVE SUCCESSOR GUARANTEE. An owner will only
+        # retire a session toward a destination it can prove will be adopted, and
+        # this declaration is that proof: the facade on the other end of THIS
+        # client spawns the successor from the frame's ``cwd``. An owner built
+        # before the key simply ignores it, and a client that does not send it
+        # keeps catching every other retirement exactly as before.
+        if self._cwd_adoption:
+            auth["cwd_adoption"] = True
         if self._surface == "desktop":
             auth["surface"] = "desktop"
         if self._events:

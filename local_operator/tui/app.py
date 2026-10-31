@@ -24920,6 +24920,16 @@ class OperatorApp(App[None]):
         """
         logger.debug("runtime retired for a newer build; re-engaging")
         session = self._session
+        # A CWD MOVE ARRIVES HERE TOO, and it is the one retirement the operator
+        # must be told about: the session is about to restart in a different
+        # directory, so the conversation they are reading is the same one running
+        # somewhere else afterwards. Painted from the frame's own destination —
+        # the same string the successor will adopt — because by the time the
+        # successor binds, the band already shows the new directory and a notice
+        # would only repeat it (UX round 1, U3).
+        moved_to = str(getattr(session, "pending_move_cwd", "") or "")
+        if moved_to:
+            self._announce_cwd_move(moved_to)
         version = str(getattr(session, "runtime_version", "") or "")
         if version:
             from local_operator.update import BuildStamp
@@ -25007,6 +25017,24 @@ class OperatorApp(App[None]):
         )
         self._notice_for(self._interaction, notice, "note")
         self._announce_queued_elsewhere(self._interaction)
+
+    def _announce_cwd_move(self, destination: str) -> None:
+        """Say the session is restarting in ``destination`` as its runtime leaves.
+
+        The move itself was requested by an agent tool call, so the operator's own
+        screen is the only place the consequence is visible: everything else about
+        this retirement looks like a build refresh. Best-effort like every other
+        pump-time notice — no interaction attached means nobody is looking.
+        """
+        if self._interaction is None:
+            return
+        from local_operator.tui.move_targets import format_label
+
+        self._notice_for(
+            self._interaction,
+            f"this session is moving to {format_label(destination)} — it restarts there now",
+            "note",
+        )
 
     def _announce_queued_elsewhere(self, source: SessionInteraction) -> None:
         """Name the messages this session has queued that THIS surface did not send.
@@ -63348,7 +63376,7 @@ def _is_viewer(session: Any) -> TypeGuard[ViewerSessionProtocol]:
 
     **Why a predicate and not ``isinstance(session, ViewerSessionProtocol)``.**
     The obvious conversion is the honest-looking one and it costs three orders
-    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 148
+    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 149
     public members, and a positive ``isinstance`` walks every one of them.
     (The figure is RECOMPUTED with ``len(typing._get_protocol_attrs(...))`` at
     the time of measurement rather than adjusted by the size of one's own
