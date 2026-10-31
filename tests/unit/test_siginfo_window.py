@@ -95,9 +95,7 @@ SIG = int(signal.SIGUSR2)
 
 def test_a_signal_landing_right_after_the_sensor_goes_live_still_returns() -> None:
     """Deliver a signal in the exact gap after ``sigaction(sensor)`` returns."""
-    body = (
-        _HOOK
-        + """
+    body = _HOOK + """
 hook.fire = True
 # ``arm`` MAY answer False here: the signal ran the sensor, which restored the action,
 # and arm's own verify step then (correctly) refuses to call that a live sensor. What
@@ -107,7 +105,6 @@ import time
 time.sleep(0.2)
 print("returned", ran, siginfo.take(SIG))
 """
-    )
     out, verdict = _run(body)
     assert verdict is None, f"the process wedged on a signal in the arm window:\n{out}"
     assert "returned" in out and "python handler ran" in out, out
@@ -225,10 +222,18 @@ def test_a_burst_of_refused_signals_neither_hangs_nor_crashes_nor_self_attribute
             sent += 1
             time.sleep(rng.uniform(0.001, 0.003))
         flag.write_text("stage")  # the ladder's marker, in miniature
-        deadline = time.monotonic() + 20.0
-        while child.poll() is None and time.monotonic() < deadline:
-            os.kill(child.pid, signal.SIGTERM)  # a coalesced signal can be lost: keep asking
-            time.sleep(0.05)
+        # ONE sanctioned SIGTERM, then wait. Re-sending on a timer raced the child's
+        # exit: a late signal landing after ``loop.close()`` restored SIG_DFL killed it
+        # (-15) under heavy CPU load. The burst's last signals are still being drained
+        # when the flag appears, so the sanctioned stop is any arrival that sees the
+        # flag; if the burst was fully drained already, this one signal is that arrival.
+        time.sleep(0.2)
+        if child.poll() is None:
+            os.kill(child.pid, signal.SIGTERM)
+        try:
+            child.wait(timeout=20.0)
+        except subprocess.TimeoutExpired:
+            pass
         code = child.poll()
         assert code is not None, "the sanctioned stop did not end the child (hung or deaf)"
         assert code == 0, f"the child crashed (exit {code}; -11 is SIGSEGV)"

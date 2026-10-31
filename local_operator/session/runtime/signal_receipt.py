@@ -438,8 +438,8 @@ def merge_refusal(
         # changes; ``last_sender`` is the LATEST's and is ABSENT while ``count`` is 1.
         # The sensor is one-shot per process (``siginfo``), so only the FIRST
         # terminating signal can carry a named sender; ``last_sender`` is then
-        # ``no-siginfo`` unless a different mechanism named it. It stays so a reader
-        # can tell "the latest arrival was unnamed" from "there was no later arrival".
+        # ``no-siginfo``. It stays so a reader can tell "the latest arrival was
+        # unnamed" from "there was no later arrival".
         # ``describe()`` and the incident renderers read the signal receipt, not this
         # file, so they show neither.
         previous["last_sender"] = fresh["sender"]
