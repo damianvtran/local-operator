@@ -402,9 +402,7 @@ def _still_owed(group: _Group) -> list[_Pending]:
             # values only: never a body, an id or a label. The store is NOT
             # extended for this: its schema is a migration-versioned surface and
             # another lane is mid-change there (wake contract, hotfix lane).
-            logger.info(
-                "bridge: coalesced card dropped code=card_not_owed status=%s", status
-            )
+            logger.info("bridge: coalesced card dropped code=card_not_owed status=%s", status)
             try:
                 store.delete_hold(group.owner, item.ref_key)
             except StoreRefused:
