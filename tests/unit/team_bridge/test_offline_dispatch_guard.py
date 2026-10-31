@@ -10,9 +10,9 @@ from local_operator.evaluation.team_bridge_moderation.agent import RecordingClie
 from local_operator.team_bridge import reply_guard
 from local_operator.team_bridge.tool import execute_bridge
 from tests.unit.team_bridge.test_exact_reply_destination import (  # noqa: F401
+    A,
     bound_runtime,
 )
-from tests.unit.team_bridge.test_exact_reply_destination import A
 
 
 @pytest.mark.asyncio

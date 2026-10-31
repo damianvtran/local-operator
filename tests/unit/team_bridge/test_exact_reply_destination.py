@@ -290,7 +290,7 @@ async def test_thread_root_is_not_reply_authority(bound_runtime, extra):
 async def test_direct_user_and_explicit_new_post_control(bound_runtime, bridge_input, new_post):
     runtime, client, _ = bound_runtime
     runtime.bridge_input_presented = bridge_input
-    args = {"op": "channel_post", "channel_id": B, "body": "new topic"}
+    args: dict[str, Any] = {"op": "channel_post", "channel_id": B, "body": "new topic"}
     if new_post:
         args["new_post"] = True
     out = await execute_bridge(runtime, args)

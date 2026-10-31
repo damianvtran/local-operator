@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from typing import Any, cast
 
 import pytest
 
@@ -14,6 +15,7 @@ from local_operator.harness.types import (
     StreamToolCallDelta,
     ToolContext,
 )
+from local_operator.team_bridge.client import TeamBridgeClient
 from local_operator.team_bridge.tool import BridgeRuntime, build_bridge_tool
 
 # Import the autouse fixture to isolate analytics in these session flows.
@@ -59,7 +61,11 @@ async def test_actual_body_dispatch_binds_destination_and_resets(
     store = _store(config)
     _reserve(store, config_dir=config)
     client = ControlledHub()
-    runtime = BridgeRuntime(client, config, TENANT, _owner(), SESSION_ID, admission="admitted")
+    # The controlled hub implements only the production client methods this
+    # flow exercises; the nominal client annotation intentionally stays real.
+    runtime = BridgeRuntime(
+        cast(TeamBridgeClient, client), config, TENANT, _owner(), SESSION_ID, admission="admitted"
+    )
     args = {
         "op": "channel_post",
         "channel_id": CONVERSATION_ID if correct_destination else "bcv_other001",
@@ -100,7 +106,7 @@ async def test_actual_body_dispatch_binds_destination_and_resets(
 
     tool = build_bridge_tool(ToolContext(bridge_runtime=runtime))
     assert tool is not None
-    session = _session(tmp_path, provider, runtime, tools=[tool])
+    session = _session(tmp_path, cast(Any, provider), runtime, tools=[tool])
     try:
         if two_proofs:
             # Produce a second descriptor through real reservation admission and
@@ -115,7 +121,12 @@ async def test_actual_body_dispatch_binds_destination_and_resets(
                     ("bcv_second01",),
                 )
             runtime_b = BridgeRuntime(
-                ControlledHub(), cfg_b, TENANT, _owner(), SESSION_ID, admission="admitted"
+                cast(TeamBridgeClient, ControlledHub()),
+                cfg_b,
+                TENANT,
+                _owner(),
+                SESSION_ID,
+                admission="admitted",
             )
             secondary = _session(tmp_path / "secondary", CapturingStream([]), runtime_b)
             turn_b = await _claim(secondary, cfg_b)
@@ -164,7 +175,12 @@ async def test_missing_rendered_text_cannot_carry_admitted_proof(tmp_path):
     store = _store(config)
     _reserve(store, config_dir=config)
     runtime = BridgeRuntime(
-        ControlledHub(), config, TENANT, _owner(), SESSION_ID, admission="admitted"
+        cast(TeamBridgeClient, ControlledHub()),
+        config,
+        TENANT,
+        _owner(),
+        SESSION_ID,
+        admission="admitted",
     )
     session = _session(tmp_path, CapturingStream([]), runtime)
     try:
@@ -193,7 +209,12 @@ async def test_actual_dispatch_latch_clears_on_abnormal_run_exit(tmp_path, endin
     store = _store(config)
     _reserve(store, config_dir=config)
     runtime = BridgeRuntime(
-        ControlledHub(), config, TENANT, _owner(), SESSION_ID, admission="admitted"
+        cast(TeamBridgeClient, ControlledHub()),
+        config,
+        TENANT,
+        _owner(),
+        SESSION_ID,
+        admission="admitted",
     )
     entered = asyncio.Event()
 
@@ -208,7 +229,7 @@ async def test_actual_dispatch_latch_clears_on_abnormal_run_exit(tmp_path, endin
 
         return events()
 
-    session = _session(tmp_path, provider, runtime)
+    session = _session(tmp_path, cast(Any, provider), runtime)
     task = None
     try:
         turn = await _claim(session, config)
