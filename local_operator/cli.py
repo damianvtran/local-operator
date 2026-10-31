@@ -160,7 +160,7 @@ _t = tr("wire.exec")
 _bt = tr("cli.browser")
 
 
-def build_cli_parser() -> argparse.ArgumentParser:
+def build_cli_parser() -> LocalizedArgumentParser:
     """
     Build and return the CLI argument parser.
 
@@ -169,7 +169,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
     subcommands are additive only (docs/REWRITE.md section E).
 
     Returns:
-        argparse.ArgumentParser: The CLI argument parser
+        LocalizedArgumentParser: The CLI argument parser with keyed usage failures
     """
     from local_operator.i18n.cli_help import help_locale as resolve_help_locale
     from local_operator.update import installed_version

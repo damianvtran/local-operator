@@ -19,6 +19,7 @@ import pytest
 
 from local_operator.i18n import cli_failures
 from local_operator.i18n.cli_failures import LocalizedArgumentParser, localise_failure
+from local_operator.i18n.messages import Msg
 
 
 def _stock_and_localised(argv: list[str]) -> tuple[str, str]:
@@ -48,9 +49,11 @@ def test_english_is_byte_identical_to_stock_argparse(argv: list[str]) -> None:
 
 
 def test_recognised_shapes_route_through_the_catalogue(monkeypatch: pytest.MonkeyPatch) -> None:
-    seen: list[tuple[str, dict]] = []
+    # Msg parameters can carry strings, numbers and selectors, not only counts;
+    # object keeps this recording honest without propagating an untyped dict.
+    seen: list[tuple[str, dict[str, object]]] = []
 
-    def marker(message, locale=None):
+    def marker(message: Msg, locale: str | None = None) -> str:
         seen.append((message.code, dict(message.params)))
         return f"<{message.code}>"
 
@@ -75,7 +78,13 @@ def test_unrecognised_shapes_pass_through() -> None:
 def test_python_314_quoted_choices_are_captured_verbatim() -> None:
     # CPython 3.14 renders the choices as 'a', 'b'; the tail is passed through, not rebuilt.
     text = "argument --hosting: invalid choice: 'z' (choose from 'a', 'b')"
-    assert localise_failure(text) == text
+    rendered = localise_failure(text, locale="fr")
+    # English byte identity cannot distinguish the keyed path from pass-through.
+    # French copy must appear while the technical choices retain their quotes.
+    assert "choix invalide" in rendered
+    assert "invalid choice" not in rendered
+    assert "'z'" in rendered
+    assert "'a', 'b'" in rendered
 
 
 def test_invalid_command_helper_is_english_stable() -> None:
