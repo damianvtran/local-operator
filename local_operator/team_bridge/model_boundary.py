@@ -407,6 +407,16 @@ _CONTENT_VERDICT_MARKERS = (
 #: the RAW failure was on the allow-list below; the walk reads nothing else.
 _ADVANCE_ATTR = "tb_screen_advance"
 
+#: ``ProviderError.kind`` values a refusal can carry while NOTHING has been
+#: sent — each one a fact about the ROUTE, never the submission: the hop's
+#: credential is unusable (``auth``), the credential store rate-limited us
+#: (``quota``), a connect/read timeout fired (``timeout``), or our own client
+#: raised before dispatch (``transport``). Deliberately absent: ``request``
+#: (the guard's own fail-closed refusals — owner moved, policy stale, route
+#: changed, budget exhausted — which must keep stopping the walk) and a bare
+#: ``retryable`` flag, which provider text can set.
+_PREWIRE_FAILURE_KINDS = frozenset({"auth", "quota", "timeout", "transport"})
+
 
 def _sender_cannot_cause(failure: BaseException) -> bool:
     """Whether the next hop may screen after THIS raw failure (S-1/S-2).
@@ -479,6 +489,69 @@ def _sender_cannot_cause(failure: BaseException) -> bool:
         return isinstance(failure.__cause__, httpx.ConnectError)
     except ImportError:  # pragma: no cover
         return False
+
+
+def _producer_stated_prewire(failure: BaseException) -> bool:
+    """Whether the layer that EMITTED this refusal stated nothing was dispatched.
+
+    WHY A SECOND PROVER (B1, PR #3212): the guard can only classify failures
+    that pass through it, and the live refusal is raised one layer ABOVE it —
+    the failover dispatch loop answers a hop with no usable bearer
+    (``providers/failover.py::_no_credential_error``) and breaks BEFORE calling
+    the guarded client, so no send count exists to consult. The emitter knows
+    the fact and stamps it on the error, the same invariant stated by the
+    other prover: nothing left the wire.
+    """
+
+    from local_operator.providers.failover import PREWIRE_REFUSAL_ATTR
+
+    return bool(getattr(failure, PREWIRE_REFUSAL_ATTR, False))
+
+
+def _prewire_refusal_advances(failure: BaseException, *, sent: bool, prewire: bool = False) -> bool:
+    """Whether a refusal raised with NOTHING sent may advance the walk.
+
+    WHY (live defect, 0.93.3): every ``anthropic:oauth`` credential was inside
+    the auth store's block window, so the screening hop refused BEFORE a
+    request byte existed — a status-less ``ProviderError(kind="quota")``.
+    :func:`_sender_cannot_cause` requires a status or typed transport
+    provenance, so it answered "hold" for a failure no sender can cause or
+    steer: no content was ever sent. Every message parked (29 of them) behind
+    a hop whose credential was merely unusable, while usable hops sat behind
+    it unused. Advancing here is safe for the same reason S-1/S-5 hold
+    elsewhere: the threat model is a sender who controls BODY BYTES, and a
+    pre-wire refusal never carried any.
+
+    THE INVARIANT IS THE SEND, NOT THE STATUS: ``sent`` is the guard's own
+    count of physical sends for THIS hop. A status-less failure raised after
+    the request left the wire (an in-band error chunk on a 200 stream, which
+    a crafted body CAN steer) therefore still holds, and this can never
+    become a second, looser copy of the status allow-list.
+
+    ``fail_closed`` local refusals are excluded by KIND, not by flag: the
+    guard builds them as ``kind="request"``, which is not in
+    :data:`_PREWIRE_FAILURE_KINDS`.
+
+    ``prewire`` is the EMITTER's statement of the same fact for a refusal made
+    outside the guard (:func:`_producer_stated_prewire`). It beats the KIND
+    allow-list deliberately: ``_no_credential_error`` emits three shapes and
+    two of them are ``kind="unknown"`` — an unconfigured provider and a
+    borrowed credential whose owner device is offline — which are the same
+    "this hop cannot serve" fact (M1, PR #3212). The allow-list stays for raw
+    wire failures, where kind is all a scrubbed error has left.
+    """
+
+    if sent:
+        return False
+    if isinstance(failure, (asyncio.TimeoutError, TimeoutError)):
+        return True
+    from local_operator.providers.failover import ProviderError
+
+    if not isinstance(failure, ProviderError):
+        return False
+    if prewire:
+        return True
+    return getattr(failure, "kind", None) in _PREWIRE_FAILURE_KINDS
 
 
 def screening_failure_class(failure: BaseException) -> str:
@@ -554,7 +627,7 @@ class _ChargingAsyncTransport:
         return getattr(self._inner, name)
 
 
-def _scrub_wire_failure(failure: BaseException) -> BaseException:
+def _scrub_wire_failure(failure: BaseException, *, sent: bool = True) -> BaseException:
     """A content-free replacement for ANY wire-layer failure.
 
     Preserves only typed flags; substitutes the message; clears BOTH
@@ -563,6 +636,12 @@ def _scrub_wire_failure(failure: BaseException) -> BaseException:
     body), and drops transport metadata. An UNKNOWN send stays conservative:
     ``request_sent`` is never False unless the refusal happened provably
     before any dispatch.
+
+    ``sent`` is the guard's own physical-send count for this hop (never the
+    failure's own claim): ``False`` lets a PRE-WIRE route refusal advance
+    (:func:`_prewire_refusal_advances`). The default is the conservative
+    "assume something was sent", so a caller that cannot prove a count keeps
+    today's behaviour.
     """
 
     from local_operator.providers.failover import ProviderError
@@ -589,8 +668,11 @@ def _scrub_wire_failure(failure: BaseException) -> BaseException:
     scrub.__cause__ = None
     scrub.__context__ = None
     # The ONE fact the chain walk needs, decided on the raw failure before its
-    # evidence is erased (S-1): a typed boolean, never prose.
-    setattr(scrub, _ADVANCE_ATTR, _sender_cannot_cause(failure))
+    # evidence is erased (S-1): a typed boolean, never prose. A pre-wire route
+    # refusal is added on the guard's OWN send count, so the distinction is
+    # "did anything leave the wire", not "did the error carry a status".
+    advance = _sender_cannot_cause(failure) or _prewire_refusal_advances(failure, sent=sent)
+    setattr(scrub, _ADVANCE_ATTR, advance)
     return scrub
 
 
@@ -632,6 +714,11 @@ class ScreeningWireGuard:
         self._fingerprint = fingerprint or f"job|{_owner_key_text(owner)}|{message_id}"
         self._expected_epoch = expected_epoch
         self._transport_patched = False
+        # Physical sends this hop has actually made. The charging proxy below
+        # increments it at the ONE boundary httpx crosses per POST, so a
+        # failure can be classified by what happened on the wire rather than
+        # by what its own message claims (see _prewire_refusal_advances).
+        self._sends = 0
         # Pin the job's policy identity where the guard is BUILT: a trusted
         # publisher moving the row afterwards (any direction) refuses every
         # later charge with zero handler calls, and a missing/unreadable row
@@ -793,6 +880,9 @@ class ScreeningWireGuard:
             )
         except StoreRefused as failure:
             raise self._refuse(f"screening dispatch refused ({failure.code})") from None
+        # Counted only AFTER the reservation holds: a refusal above means no
+        # request will be sent, and must never read as "the wire was used".
+        self._sends += 1
 
     def _refuse(self, reason: str) -> BaseException:
         from local_operator.providers.failover import ProviderError
@@ -845,7 +935,7 @@ class ScreeningWireGuard:
             # request_sent=False hold).
             raise
         except BaseException as failure:  # noqa: BLE001 - sanitize EVERYTHING here
-            pending = _scrub_wire_failure(failure)  # noqa: F841 - used below
+            pending = _scrub_wire_failure(failure, sent=self._sends > 0)  # noqa: F841
         if pending is not None:
             # Raised OUTSIDE the except block on purpose: ``raise`` inside an
             # except suite re-attaches the raw failure as ``__context__``
@@ -1249,7 +1339,16 @@ class ScreenChainRunner:
                 # credential cascade, a local defect) is still raw here.
                 advance = getattr(failure, _ADVANCE_ATTR, None)
                 if advance is None:
-                    advance = _sender_cannot_cause(failure)
+                    # No guard verdict: this hop refused ABOVE the guarded
+                    # client (the failover layer's credential cascade). Only the
+                    # EMITTER's pre-dispatch stamp may advance here — the kind
+                    # allow-list stays on the scrubbed wire path, where a send
+                    # count has already ruled, so an unscrubbed failure can
+                    # never be promoted by its own `kind`. (B1, PR #3212)
+                    advance = _sender_cannot_cause(failure) or (
+                        _producer_stated_prewire(failure)
+                        and _prewire_refusal_advances(failure, sent=False, prewire=True)
+                    )
                 if not advance:
                     raise
                 last_failure = failure

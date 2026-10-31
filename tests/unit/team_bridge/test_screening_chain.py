@@ -78,6 +78,13 @@ class _Wire:
         #           | ("end", stop_reason): a completed stream with that terminal
         self.script = script
         self.sends: list[dict[str, Any]] = []
+        # Model ids the hop runner asked the GUARDED client for, and model ids
+        # the fake failover layer refused without ever reaching it. Both lists
+        # exist so a test can prove WHICH failure shape it exercised: the
+        # production refusal is raised above the guard, so a test that reaches
+        # the guard is not testing production's layering (B1, PR #3212).
+        self.guard_entries: list[str] = []
+        self.failover_entries: list[str] = []
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         import json
@@ -94,8 +101,27 @@ class _Wire:
         return httpx.Response(200, json={"text": action[1]})
 
 
-def _install_wire(monkeypatch: pytest.MonkeyPatch, wire: _Wire) -> None:
-    """Fake ONLY the vendor client and the physical transport."""
+def _install_wire(
+    monkeypatch: pytest.MonkeyPatch,
+    wire: _Wire,
+    *,
+    prewire: dict[str, BaseException] | None = None,
+    postwire: dict[str, BaseException] | None = None,
+    failover: dict[str, BaseException] | None = None,
+) -> None:
+    """Fake ONLY the vendor client, the physical transport and, optionally, the
+    failover dispatch loop.
+
+    ``failover`` raises for a model id from a STAND-IN FOR THE FAILOVER LAYER —
+    the hop runner's stream fn answers before the guarded client is entered,
+    which is where production refuses: the dispatch loop calls
+    ``_no_credential_error`` and breaks, so the guard never runs and its send
+    count has no verdict to offer (B1, PR #3212). ``prewire`` raises inside the
+    guarded client instead (the guard's own shape), ``postwire`` AFTER the POST
+    returned (a status-less failure classified from provider text). The three
+    provenances stay distinguishable through ``wire.failover_entries`` and
+    ``wire.guard_entries``.
+    """
 
     from local_operator.model import configure as _configure
 
@@ -122,6 +148,14 @@ def _install_wire(monkeypatch: pytest.MonkeyPatch, wire: _Wire) -> None:
             _http = http_client
 
             def stream(self, request: Any, api_key: Any, oauth_access: Any = None) -> Any:
+                mid = request.model.model_id
+                refusal = (prewire or {}).get(mid)
+                if refusal is not None:
+                    # PRODUCTION SHAPE: the auth store refuses while the
+                    # request is being built, so NO byte ever reaches the
+                    # transport (the guard's send count stays 0).
+                    raise refusal
+
                 async def gen() -> Any:
                     # Through the dedicated GUARDED client: route check at
                     # selection, then the charging proxy, then the mock wire.
@@ -136,6 +170,10 @@ def _install_wire(monkeypatch: pytest.MonkeyPatch, wire: _Wire) -> None:
                     )
                     if response.status_code >= 400:
                         raise ProviderError(response.status_code, VENDOR_CANARY)
+                    after = (postwire or {}).get(mid)
+                    if after is not None:
+                        # AFTER the send: in-band provider text, status-less.
+                        raise after
                     body = response.json()
                     served = request.model.model_copy(
                         update={"provider": body.get("provider", request.model.provider)}
@@ -151,6 +189,16 @@ def _install_wire(monkeypatch: pytest.MonkeyPatch, wire: _Wire) -> None:
 
         class StreamFn:
             def __call__(self, request: Any, signal: Any) -> Any:
+                mid = request.model.model_id
+                refusal = (failover or {}).get(mid)
+                if refusal is not None:
+                    # PRODUCTION SHAPE (B1): the failover dispatch loop refuses
+                    # the hop from its credential cascade and breaks BEFORE the
+                    # guarded client is called. Raising here — not inside the
+                    # guard — is what makes this a failover-layer test.
+                    wire.failover_entries.append(mid)
+                    raise refusal
+                wire.guard_entries.append(mid)
                 return guard.stream(request, "k")
 
             async def close(self) -> None:
@@ -900,3 +948,359 @@ def test_damaged_serving_set_is_repaired_by_the_next_cycle(tmp_path, monkeypatch
     # An undamaged row is NOT republished (no epoch churn per cycle).
     _cycle(tmp_path, owner, message_id="bmsg_3")
     assert _rows(tmp_path, "SELECT epoch FROM screening_policy") == [(repaired[0][1],)]
+
+
+# -- 0.93.3 LIVE DEFECT: a PRE-WIRE credential refusal must advance -----------
+#
+# MEASURED (this machine, 2026-10-30): all five ``anthropic:oauth`` credentials
+# sat inside the auth store's block window. The connector made ONE screening
+# dispatch, hop 0 refused while BUILDING the request (no byte sent), the
+# breaker advanced, and 29 messages parked while usable hops sat behind hop 0.
+# The refusal is a status-less ``ProviderError(kind="quota")``, so
+# ``_sender_cannot_cause`` (which needs a status or typed transport
+# provenance) said "hold" for a failure no sender can cause: no content was
+# ever sent. These tests pin the distinction that fixes it — the guard's own
+# SEND COUNT, not whether the error carried a status.
+
+_PRE_CHANGE_BREAKER_DDL = """
+CREATE TABLE screening_breaker (
+    account_scope TEXT PRIMARY KEY,
+    failures INTEGER NOT NULL,
+    open_until REAL NOT NULL,
+    updated_at REAL NOT NULL
+)
+"""
+
+
+def _blocked_credential() -> "ProviderError":
+    """The EXACT live failure, from the production factory.
+
+    Built through ``_no_credential_error`` rather than by hand, so this suite
+    fails if the real refusal ever stops being a status-less ``kind="quota"``
+    (the shape ``_sender_cannot_cause`` cannot see) or stops carrying the
+    emitter's pre-dispatch marker the walk reads.
+    """
+
+    from local_operator.providers.auth_store import StoredCredential
+    from local_operator.providers.failover import (
+        PREWIRE_REFUSAL_ATTR,
+        _no_credential_error,
+    )
+
+    class BlockedStore:
+        """An auth store whose only anthropic row is inside its block window."""
+
+        def list_credentials(self, provider: str) -> list[StoredCredential]:
+            return [
+                StoredCredential(id=1, provider=provider, credential_type="oauth", data={}),
+            ]
+
+    error = _no_credential_error(BlockedStore(), "anthropic")  # type: ignore[arg-type]
+    assert error.status is None and error.kind == "quota" and error.request_sent is False
+    assert getattr(error, PREWIRE_REFUSAL_ATTR, False) is True
+    return error
+
+
+def test_prewire_quota_refusal_advances_to_hop1_and_serves(tmp_path, monkeypatch) -> None:
+    """(a) The LIVE shape: hop 0's credential is unusable before any send, and
+    the refusal is raised by the FAILOVER LAYER above the guard.
+
+    ``failover=`` is the difference that matters (B1, PR #3212): production
+    answers the hop from the credential cascade and breaks before the guarded
+    client is called, so ``wire.guard_entries == []`` is the assertion that
+    this test exercises the layering the incident took."""
+
+    store, owner = _setup(tmp_path)
+    _config(tmp_path, chain=["deepseek/deepseek-flash"])
+    wire = _Wire({"deepseek-flash": ("reply", DELIVER)})
+    _install_wire(monkeypatch, wire, failover={"gpt-5.4": _blocked_credential()})
+
+    result = _cycle(tmp_path, owner)
+
+    assert result is not None and result.disposition == "deliver"
+    assert result.receipt is not None and result.receipt.model == "deepseek-flash"
+    # Hop 0 was refused by the failover layer BEFORE the guard; hop 1 served.
+    assert wire.failover_entries == ["gpt-5.4"]
+    assert wire.guard_entries == ["deepseek-flash"], "hop 0 must never reach the guard"
+    assert [s["model"] for s in wire.sends] == ["deepseek-flash"]
+    assert _rows(
+        tmp_path,
+        "SELECT model, verdict FROM screening_receipts WHERE owner_key = ? AND message_id = ?",
+        _owner_key(owner),
+        "bmsg_1",
+    ) == [("deepseek-flash", "allow")]
+    # A pre-wire refusal is weather on the ROUTE, not a screening failure.
+    assert store.screening_breaker_state(owner) is None
+    assert store.screening_hold(owner, "bmsg_1") is None
+
+
+def test_failover_refusal_advances_and_a_wire_403_still_holds(tmp_path, monkeypatch) -> None:
+    """(a2) BOTH halves from the same fake failover layer: hop 0 refused by the
+    cascade (advances), hop 1 answering 403 THROUGH the wire (holds).
+
+    The pair is the security property in one cycle: an emitter-stated
+    pre-dispatch refusal leaves the walk free to try a usable hop, while a
+    status the provider itself returned — how OpenRouter reports a moderation
+    verdict — still parks the message."""
+
+    store, owner = _setup(tmp_path)
+    _config(tmp_path, chain=["deepseek/deepseek-flash"])
+    wire = _Wire({"deepseek-flash": ("fail", 403)})
+    _install_wire(monkeypatch, wire, failover={"gpt-5.4": _blocked_credential()})
+
+    result = _cycle(tmp_path, owner)
+
+    assert result is not None and result.disposition == "hold"
+    assert result.hold_code == "provider_error"
+    assert wire.failover_entries == ["gpt-5.4"]
+    assert wire.guard_entries == ["deepseek-flash"]
+    # Hop 1 was really sent and its 403 came from the provider: no hop 2 exists.
+    assert [s["model"] for s in wire.sends] == ["deepseek-flash"]
+    assert store.screening_hold(owner, "bmsg_1") is not None
+
+
+def test_failover_refusal_without_a_configuration_advances(tmp_path, monkeypatch) -> None:
+    """(b) M1: a hop whose provider has NO credential configured.
+
+    The production factory emits it as ``kind="unknown"`` with
+    ``request_sent=True`` (a claim left alone: another subsystem reads it for
+    usage accounting), so neither the kind allow-list nor a send-count rule can
+    see it. The emission site is the signal — the cascade saying "this hop
+    cannot serve", before any byte."""
+
+    from local_operator.providers.failover import (
+        PREWIRE_REFUSAL_ATTR,
+        _no_credential_error,
+    )
+
+    class UnconfiguredStore:
+        def list_credentials(self, provider: str) -> list[Any]:
+            return []
+
+    refusal = _no_credential_error(UnconfiguredStore(), "anthropic")  # type: ignore[arg-type]
+    assert refusal.kind == "unknown" and refusal.status is None
+    assert getattr(refusal, PREWIRE_REFUSAL_ATTR, False) is True
+
+    store, owner = _setup(tmp_path)
+    _config(tmp_path, chain=["deepseek/deepseek-flash"])
+    wire = _Wire({"deepseek-flash": ("reply", DELIVER)})
+    _install_wire(monkeypatch, wire, failover={"gpt-5.4": refusal})
+
+    result = _cycle(tmp_path, owner)
+
+    assert result.disposition == "deliver" and result.receipt.model == "deepseek-flash"
+    assert wire.failover_entries == ["gpt-5.4"], "hop 0 was refused above the guard"
+    assert wire.guard_entries == ["deepseek-flash"]
+    assert store.screening_breaker_state(owner) is None
+
+
+def test_failover_refusal_with_an_offline_credential_owner_advances(tmp_path, monkeypatch) -> None:
+    """(b2) M1: the mesh branch — a borrowed credential whose owner device is
+    offline. Also ``kind="unknown"``, and also the identical outcome if it
+    parked every message behind usable hops."""
+
+    from local_operator.providers.auth_store import StoredCredential
+    from local_operator.providers.failover import (
+        PREWIRE_REFUSAL_ATTR,
+        _no_credential_error,
+    )
+
+    class MeshStore:
+        """The mesh-aware store: one synthetic borrowed row plus its reason."""
+
+        def no_credential_reason(self, provider: str) -> str:
+            return (
+                f"The credential for provider '{provider}' is borrowed from a device "
+                "that is offline. Bring that device online to screen again."
+            )
+
+        def list_credentials(self, provider: str) -> list[StoredCredential]:
+            return [
+                StoredCredential(id=7, provider=provider, credential_type="oauth", data={}),
+            ]
+
+    refusal = _no_credential_error(MeshStore(), "anthropic")  # type: ignore[arg-type]
+    assert refusal.kind == "unknown" and refusal.status is None and refusal.retryable is True
+    assert getattr(refusal, PREWIRE_REFUSAL_ATTR, False) is True
+
+    store, owner = _setup(tmp_path)
+    _config(tmp_path, chain=["deepseek/deepseek-flash"])
+    wire = _Wire({"deepseek-flash": ("reply", DELIVER)})
+    _install_wire(monkeypatch, wire, failover={"gpt-5.4": refusal})
+
+    result = _cycle(tmp_path, owner)
+
+    assert result.disposition == "deliver" and result.receipt.model == "deepseek-flash"
+    assert wire.failover_entries == ["gpt-5.4"], "hop 0 was refused above the guard"
+    assert wire.guard_entries == ["deepseek-flash"]
+    assert store.screening_breaker_state(owner) is None
+
+
+def test_prewire_auth_kind_advances_at_the_guard_seam() -> None:
+    """(b3) NIT n2: the ``auth`` allow-list entry, named against its REAL shape.
+
+    The production pre-dispatch ``auth`` emission is
+    ``meta_muse_client._headers`` (``ProviderError(401, …, kind="auth",
+    fail_closed=True)``), which carries a STATUS and therefore already advances
+    through :func:`_sender_cannot_cause`. A status-less ``auth`` is what this
+    predicate covers: a client refusing on its credential before dispatch with
+    no status to report. Asserted on the predicate itself rather than through a
+    fabricated cycle, so no hand-built error is pinned as production."""
+
+    from local_operator.team_bridge.model_boundary import (
+        _prewire_refusal_advances,
+        _sender_cannot_cause,
+    )
+
+    prewire_auth = ProviderError(
+        None, "credential unusable", retryable=True, kind="auth", request_sent=False
+    )
+    assert _sender_cannot_cause(prewire_auth) is False, "the status-less shape is why this exists"
+    assert _prewire_refusal_advances(prewire_auth, sent=False) is True
+    # The invariant: the SAME error after a physical send must hold.
+    assert _prewire_refusal_advances(prewire_auth, sent=True) is False
+
+
+def test_wire_403_still_holds_the_walk(tmp_path, monkeypatch) -> None:
+    """(c) Unchanged: a 403 that REACHED the wire is how OpenRouter reports a
+    moderation/guardrail verdict, so it holds (never falls over)."""
+
+    store, owner = _setup(tmp_path)
+    _config(tmp_path, chain=["deepseek/deepseek-flash"])
+    wire = _Wire({"gpt-5.4": ("fail", 403), "deepseek-flash": ("reply", DELIVER)})
+    _install_wire(monkeypatch, wire)
+
+    result = _cycle(tmp_path, owner)
+
+    assert result.disposition == "hold" and result.hold_code == "provider_error"
+    assert [s["model"] for s in wire.sends] == ["gpt-5.4"], "hop 1 must never be sent"
+
+
+def test_wire_400_with_a_content_body_still_holds(tmp_path, monkeypatch) -> None:
+    """(d) Unchanged: a content-filter 400 CREATED BY the body must hold."""
+
+    store, owner = _setup(tmp_path)
+    _config(tmp_path, chain=["deepseek/deepseek-flash"])
+    wire = _BodyWire(400, "content policy violation: input flagged by guardrail")
+    _install_body_wire(monkeypatch, wire)
+
+    result = _cycle(tmp_path, owner)
+
+    assert result.disposition == "hold" and result.hold_code == "provider_error"
+    assert [s["model"] for s in wire.sends] == ["gpt-5.4"], "hop 1 must never be sent"
+    assert _rows(tmp_path, "SELECT failure_class FROM screening_holds") == [("other",)]
+
+
+def test_statusless_failure_after_a_send_still_holds(tmp_path, monkeypatch) -> None:
+    """(e) THE GUARD ON THE FIX: the same status-less ``kind="quota"`` failure,
+    but raised AFTER the request left the wire (an in-band error chunk a
+    crafted body CAN steer) must still hold. Proves the branch keys on "was
+    anything sent", not on "did the error carry a status"."""
+
+    store, owner = _setup(tmp_path)
+    _config(tmp_path, chain=["deepseek/deepseek-flash"])
+    # Hop 0 answers 200 (one real send), THEN the stream fails status-lessly —
+    # the in-band-error shape failover classifies from provider text.
+    wire = _Wire({"gpt-5.4": ("reply", HOLD), "deepseek-flash": ("reply", DELIVER)})
+    after = ProviderError(None, "quota exceeded", retryable=True, kind="quota")
+    _install_wire(monkeypatch, wire, postwire={"gpt-5.4": after})
+
+    result = _cycle(tmp_path, owner)
+
+    assert result.disposition == "hold" and result.hold_code == "provider_error"
+    # The POST happened (one physical send) and hop 1 was never built.
+    assert [s["model"] for s in wire.sends] == ["gpt-5.4"]
+    assert _rows(tmp_path, "SELECT failure_class FROM screening_holds") == [("quota",)]
+
+
+def test_old_breaker_table_gains_last_failure_class_and_keeps_its_row(tmp_path) -> None:
+    """(f) migration: a ``screening_breaker`` that predates the column.
+
+    ADDITIVE and nullable, so no schema stamp moves; an old-shape row reads
+    NULL ("class unknown") — and crucially still reads as a BREAKER, because
+    a missing column must never turn into "no breaker" (that would serve
+    through an open one)."""
+
+    store, owner = _setup(tmp_path)
+    scope = store._account_scope(owner)
+    with sqlite3.connect(state_db_path(tmp_path)) as db:
+        db.execute("DROP TABLE screening_breaker")
+        db.execute(_PRE_CHANGE_BREAKER_DDL)
+        db.execute("INSERT INTO screening_breaker VALUES (?,?,?,?)", (scope, 2, 1e12, 100.0))
+    columns = {r[1] for r in _rows(tmp_path, "PRAGMA table_info(screening_breaker)")}
+    assert "last_failure_class" not in columns
+
+    reopened = Store(tmp_path)
+    # A READ on the old shape works before any writer has touched it.
+    state = reopened.screening_breaker_state(owner)
+    assert state is not None and state["failures"] == 2 and state["last_failure_class"] is None
+    # ...and the READ does not ALTER: the migration belongs to the write path,
+    # so a read can never be the thing that needs the write lock (m1, #3212).
+    columns = {r[1] for r in _rows(tmp_path, "PRAGMA table_info(screening_breaker)")}
+    assert "last_failure_class" not in columns
+
+    reopened.record_screening_failure(owner, failure_class="auth_unusable")
+
+    columns = {r[1] for r in _rows(tmp_path, "PRAGMA table_info(screening_breaker)")}
+    assert "last_failure_class" in columns
+    state = reopened.screening_breaker_state(owner)
+    assert state is not None and state["last_failure_class"] == "auth_unusable"
+    assert _rows(tmp_path, "SELECT value FROM schema_meta WHERE key = 'schema_version'") == [("8",)]
+
+
+def test_breaker_read_never_takes_the_write_lock(tmp_path, monkeypatch) -> None:
+    """(g) m1: the breaker READ must not take the write lock.
+
+    Step 7 of ``_screen_core`` reads the breaker on every screening cycle, and
+    the first touch after an upgrade used to ``BEGIN IMMEDIATE`` there to run
+    the ``ALTER`` — so a store a writer was holding escaped as
+    ``StoreRefused("busy")`` instead of a hold, and the message waited for a
+    later cycle with no row saying why. Asserted at the mechanism rather than by
+    contending (a timing assertion passes or fails with the machine's load):
+    ``_begin_write`` is replaced with a hard failure, so a read that reaches for
+    the lock fails this test by name.
+    """
+
+    store, owner = _setup(tmp_path)
+    scope = store._account_scope(owner)
+    # The ONLY case that ever asked for the lock: a file with no column yet.
+    with sqlite3.connect(state_db_path(tmp_path)) as db:
+        db.execute("DROP TABLE screening_breaker")
+        db.execute(_PRE_CHANGE_BREAKER_DDL)
+        db.execute("INSERT INTO screening_breaker VALUES (?,?,?,?)", (scope, 2, 1e12, 100.0))
+
+    def _locked(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("the breaker READ took the write lock")
+
+    monkeypatch.setattr(Store, "_begin_write", staticmethod(_locked))
+
+    state = Store(tmp_path).screening_breaker_state(owner)
+
+    assert state is not None and state["failures"] == 2
+    assert state["last_failure_class"] is None, "a pre-upgrade row is class-unknown, not absent"
+    columns = {r[1] for r in _rows(tmp_path, "PRAGMA table_info(screening_breaker)")}
+    assert "last_failure_class" not in columns, "the READ must not migrate the file either"
+
+
+def test_prewire_marker_never_outranks_the_guard_send_count() -> None:
+    """The invariant QA's flakiness report is about: ``sent`` wins.
+
+    A refusal the EMITTER marked pre-wire must still hold once a physical send
+    exists for that hop. Pinned here at the scrub, where the two provenances
+    meet, because the failure mode — ``sent`` reading False for a request that
+    actually went out — would let a wire 403 fall over to a weaker screener.
+    """
+
+    from local_operator.team_bridge.model_boundary import (
+        _ADVANCE_ATTR,
+        _scrub_wire_failure,
+    )
+
+    refusal = _blocked_credential()
+    # Nothing dispatched: the emitter's marker is the whole answer.
+    pre_wire = _scrub_wire_failure(refusal, sent=False)
+    assert getattr(pre_wire, _ADVANCE_ATTR) is True
+    # The SAME error after ONE physical send: the count wins, whatever the
+    # emitter said, and the scrubbed copy carries no marker of its own.
+    after_send = _scrub_wire_failure(refusal, sent=True)
+    assert getattr(after_send, _ADVANCE_ATTR) is False
