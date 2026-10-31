@@ -1048,9 +1048,10 @@ class SessionHostStartupError(RuntimeStartupError):
     generic for an un-vetted startup failure (``attached._unavailable_reason``, which
     is itself still an unkeyed English literal today -- a pre-existing gap this
     slice neither widens nor closes). A dedicated catalogue sentence would be seven
-    translations of a message the person cannot act on any differently. ``code`` (``unsupported`` / ``unavailable`` / ``refused``) is for
-    tests and logs. Being a subclass, every existing handler of
-    ``RuntimeStartupError`` (fail-fast, no respawn) treats it as before.
+    translations of a message the person cannot act on any differently.
+    ``code`` (``unsupported`` / ``unavailable`` / ``refused``) is for tests and logs.
+    Being a subclass, every existing handler of ``RuntimeStartupError`` (fail-fast,
+    no respawn) treats it as before.
     """
 
     def __init__(self, session_id: str, code: str, detail: str = "") -> None:
