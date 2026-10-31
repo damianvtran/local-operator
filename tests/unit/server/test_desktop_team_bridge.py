@@ -26,6 +26,7 @@ import pytest
 import pytest_asyncio
 import yaml
 from fastapi import FastAPI
+from fastapi.routing import APIRoute
 from httpx import ASGITransport, AsyncClient
 
 from local_operator.config import ConfigManager
@@ -4406,5 +4407,11 @@ async def test_agent_notify_is_advertised_with_its_required_receipt():
     assert fields["expected_account_id"].is_required()
     assert fields["tenant_id"].is_required()
     assert "endpoint_id" not in fields
-    paths = {route.path for route in desktop_team_bridge.router.routes}
+    # ``router.routes`` is typed as ``BaseRoute``, which has no ``path``; only
+    # APIRoute does (the same narrowing ``test_desktop_controls`` uses). The
+    # comprehension is filtered rather than ``# type: ignore``-d so CI's
+    # type-check stays honest about it (QA round 1, Q1).
+    paths = {
+        route.path for route in desktop_team_bridge.router.routes if isinstance(route, APIRoute)
+    }
     assert "/v1/desktop/team-bridge/conversations/{conversation_id}/agent-notify" in paths
