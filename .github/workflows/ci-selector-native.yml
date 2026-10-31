@@ -1,0 +1,56 @@
+name: CI selector native diagnostic
+
+# Inert on the implementation branch and on PRs. Only the manager's explicit
+# post-review, tree-identical activation commit on this ref starts it;
+# unlike a new workflow_dispatch, a push workflow need not exist on main.
+on:
+  push:
+    branches: [diag/ci-selector-native-activate]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-selector-native-diagnostic
+  cancel-in-progress: false
+
+jobs:
+  serial-native-pair:
+    # Match the failing job's actual label; driver refuses any image other than
+    # Ubuntu 26.04 instead of silently accepting a moving latest alias.
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12.15'
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Preserve reviewed driver and install once at base
+        timeout-minutes: 8
+        run: |
+          cp .github/diagnostics/ci_selector_native.py "$RUNNER_TEMP/ci_selector_native.py"
+          git rev-parse HEAD > "$RUNNER_TEMP/diagnostic-source-sha"
+          git checkout --detach 87a3741ceb062979989d134acd18d3320c372313
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev]'
+      - name: Base then head, exact selector only
+        timeout-minutes: 22
+        run: |
+          python "$RUNNER_TEMP/ci_selector_native.py" \
+            --repo "$GITHUB_WORKSPACE" --out "$RUNNER_TEMP/selector-evidence"
+      - name: Upload raw diagnostic evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-selector-native-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/selector-evidence
+            ${{ runner.temp }}/diagnostic-source-sha
+          if-no-files-found: error
+          retention-days: 7
+          include-hidden-files: true
