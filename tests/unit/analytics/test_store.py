@@ -825,14 +825,17 @@ def test_cache_write_1h_tokens_is_recorded_and_migrated(tmp_path):
     store = AnalyticsStore(db)
     import dataclasses
 
-    snap = dataclasses.replace(_snap(cache_write=300), cache_write_1h_tokens=120)
+    snap = dataclasses.replace(
+        _snap(cache_write=300), cache_write_1h_tokens=120, openai_long_context=True
+    )
     assert store.record_batch([snap]) == 1
     conn = store._connect()
     assert conn is not None
     rows = conn.execute(
-        "SELECT session_id, cache_write_tokens, cache_write_1h_tokens FROM calls ORDER BY id"
+        "SELECT session_id, cache_write_tokens, cache_write_1h_tokens, "
+        "openai_long_context FROM calls ORDER BY id"
     ).fetchall()
-    assert rows == [("old", 500, 0), ("s1", 300, 120)]
+    assert rows == [("old", 500, 0, 0), ("s1", 300, 120, 1)]
     store.close()
 
 

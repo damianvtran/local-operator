@@ -94,7 +94,7 @@ def test_stamp_serialization_and_validation():
 
 
 def test_mixed_child_components_reconcile():
-    grouped: dict[tuple[str | None, str | None, str, str | None], Usage] = {}
+    grouped: dict[tuple[str | None, str | None, str, str | None, bool], Usage] = {}
     for basis, cost in [("subscription_api_equivalent", 11.62), ("billed", 0.79)]:
         _merge_accounting_component(
             grouped,

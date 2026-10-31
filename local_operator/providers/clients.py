@@ -328,6 +328,24 @@ def _compat_cache_usage(raw_usage: Mapping[str, Any]) -> tuple[int, int]:
     return cache_read, cache_write
 
 
+def _openai_long_context_receipt(request: ChatRequest, url: str, input_tokens: int) -> bool:
+    """Only the actual first-party destination can establish a billable tier."""
+    from local_operator.model.configure import _OPENAI_LONG_CONTEXT_MODELS
+    from local_operator.providers.registry import credential_provider_id
+
+    return bool(
+        credential_provider_id(request.model.provider) == "openai"
+        and url
+        in {
+            "https://api.openai.com/v1/chat/completions",
+            "https://api.openai.com/v1/responses",
+            CODEX_RESPONSES_URL,
+        }
+        and input_tokens > 272_000
+        and _OPENAI_LONG_CONTEXT_MODELS.fullmatch(request.model.model_id)
+    )
+
+
 def _usd_cost(raw_usage: Mapping[str, Any] | None) -> float | None:
     """A provider's own precomputed dollar cost for one request, or ``None``.
 
@@ -3638,6 +3656,9 @@ class OpenAICompatClient:
                         completion_details = raw.get("completion_tokens_details") or {}
                         usage = Usage(
                             input_tokens=int(raw.get("prompt_tokens", 0)),
+                            openai_long_context=_openai_long_context_receipt(
+                                request, url, int(raw.get("prompt_tokens", 0))
+                            ),
                             output_tokens=int(raw.get("completion_tokens", 0)),
                             cache_read_tokens=cache_read,
                             cache_write_tokens=cache_write,
@@ -4095,6 +4116,9 @@ class OpenAICompatClient:
                         output_details = raw.get("output_tokens_details") or {}
                         usage = Usage(
                             input_tokens=int(raw.get("input_tokens", 0)),
+                            openai_long_context=_openai_long_context_receipt(
+                                request, url, int(raw.get("input_tokens", 0))
+                            ),
                             output_tokens=int(raw.get("output_tokens", 0)),
                             cache_read_tokens=_usage_token(details, "cached_tokens"),
                             cache_write_tokens=_usage_token(details, "cache_write_tokens"),

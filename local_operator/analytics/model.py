@@ -205,6 +205,8 @@ class CallSnapshot:
     # still prices ALL writes at the 5m rate; splitting the rate is a
     # follow-up, and this column is what makes it possible.
     cache_write_1h_tokens: int = 0
+    # Explicit per-call provenance; missing legacy data never implies a tier.
+    openai_long_context: bool = False
     # Provider-reported dollar cost for this call (OpenRouter ``usage.cost``,
     # any compat provider that precomputes billing). Copied off ``Usage.usd_cost``
     # at record time so ``price_snapshot`` can prefer it over the registry table

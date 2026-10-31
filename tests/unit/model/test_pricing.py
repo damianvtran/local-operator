@@ -595,6 +595,288 @@ def test_anthropic_cache_tokens_are_billed_alongside_input_not_within_it() -> No
     assert cost_for_usage("anthropic", _priced(), usage) == pytest.approx(10.0 + 1.0 + 12.5)
 
 
+@pytest.mark.parametrize(
+    "one_hour,expected", [(0, 12.5), (250_000, 14.375), (1_000_000, 20.0), (2_000_000, 20.0)]
+)
+def test_anthropic_duration_prices_only_measured_write_subset(
+    one_hour: int, expected: float
+) -> None:
+    usage = Usage(cache_write_tokens=1_000_000, cache_write_1h_tokens=one_hour)
+    assert cost_for_usage("anthropic", _priced(), usage) == pytest.approx(expected)
+
+
+def test_folded_anthropic_overflow_is_clamped_per_receipt() -> None:
+    from local_operator.session.frontend_state import _folded_components
+
+    usages = [
+        Usage(
+            provider="anthropic",
+            model_id="claude-test",
+            cache_write_tokens=100,
+            cache_write_1h_tokens=200,
+        ),
+        Usage(
+            provider="anthropic",
+            model_id="claude-test",
+            cache_write_tokens=100,
+            cache_write_1h_tokens=0,
+        ),
+    ]
+    before = sum(cost_for_usage("anthropic", _priced(), usage) for usage in usages)
+    after = sum(
+        cost_for_usage("anthropic", _priced(), usage) for usage in _folded_components(usages)
+    )
+    assert after == pytest.approx(before)
+
+
+@pytest.mark.parametrize("count,expected", [(272_000, 0.97), (272_001, 1.69002), (300_000, 2.25)])
+def test_openai_astra_long_context_prices_entire_request(count: int, expected: float) -> None:
+    """The long-context rates apply to all input and output, not only excess."""
+    model = _priced(
+        id="gpt-6-astra", name="gpt-6-astra", input_price=10, output_price=50, cache_reads_price=1
+    )
+    usage = Usage(
+        input_tokens=count,
+        output_tokens=10_000,
+        cache_read_tokens=250_000,
+        openai_long_context=count > 272_000,
+    )
+    assert cost_for_usage("openai", model, usage) == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("counts", [(200_000, 200_000), (300_000, 100_000)])
+def test_unpriced_folded_receipts_keep_each_request_tier(counts: tuple[int, int]) -> None:
+    from local_operator.session.frontend_state import _folded_components
+
+    model = _priced(id="gpt-6-astra", input_price=10, output_price=50, cache_reads_price=1)
+    usages = [
+        Usage(
+            provider="openai",
+            model_id="gpt-6-astra",
+            input_tokens=n,
+            output_tokens=1000,
+            openai_long_context=n > 272_000,
+        )
+        for n in counts
+    ]
+    before = sum(cost_for_usage("openai", model, usage) for usage in usages)
+    after = sum(cost_for_usage("openai", model, usage) for usage in _folded_components(usages))
+    assert after == pytest.approx(before)
+
+
+def test_crowded_diagnostic_tail_yields_without_changing_accounting(monkeypatch) -> None:
+    from copy import deepcopy
+
+    from local_operator.session import frontend_state as frontend
+
+    receipts = [
+        Usage(input_tokens=n, openai_long_context=n > 272_000).model_dump(mode="json")
+        for n in (1, 300_000, 2)
+    ]
+    snapshot = {
+        "usage_components": deepcopy(receipts),
+        "parent_cost": 7.0,
+        "basis": {"billed": 7.0},
+        "jobs": [{"usage": {"cost_components": deepcopy(receipts)}}],
+    }
+    payload = {"snapshot": snapshot}
+    source = deepcopy(snapshot)
+    original = frontend._frame_line_bytes(payload)
+    monkeypatch.setattr(
+        frontend,
+        "_MODEL_CATALOGUE_LINE_LIMIT",
+        original - len(__import__("json").dumps(receipts[0]).encode()) - 1,
+    )
+    frontend._bound_usage_diagnostics_in_place(payload, snapshot)
+    assert snapshot["usage_components"] == receipts[1:]
+    assert snapshot["jobs"] == source["jobs"]
+    assert snapshot["parent_cost"] == 7.0 and snapshot["basis"] == source["basis"]
+    assert source["usage_components"] == receipts
+    assert frontend._frame_line_bytes(payload) < frontend._MODEL_CATALOGUE_LINE_LIMIT
+
+    # If even an empty diagnostic tail cannot fit, do not pretend it did.
+    monkeypatch.setattr(frontend, "_MODEL_CATALOGUE_LINE_LIMIT", 1)
+    frontend._bound_usage_diagnostics_in_place(payload, snapshot)
+    assert snapshot["usage_components"] == []
+    assert frontend._frame_line_bytes(payload) >= frontend._MODEL_CATALOGUE_LINE_LIMIT
+
+
+def test_accounting_fold_separates_tiers_and_clamps_each_anthropic_subset() -> None:
+    from local_operator.harness.jobs import _merge_accounting_component
+
+    grouped = {}
+    for count in (300_000, 100_000):
+        _merge_accounting_component(
+            grouped,
+            Usage(
+                provider="openai",
+                model_id="gpt-6-astra",
+                input_tokens=count,
+                openai_long_context=count > 272_000,
+            ),
+        )
+    assert len(grouped) == 2
+    model = _priced(id="gpt-6-astra", input_price=10)
+    assert sum(cost_for_usage("openai", model, item) for item in grouped.values()) == pytest.approx(
+        7.0
+    )
+    grouped = {}
+    for hour in (200, 0):
+        _merge_accounting_component(
+            grouped,
+            Usage(
+                provider="anthropic",
+                model_id="claude-test",
+                cache_write_tokens=100,
+                cache_write_1h_tokens=hour,
+            ),
+        )
+    assert sum(
+        cost_for_usage("anthropic", _priced(), item) for item in grouped.values()
+    ) == pytest.approx(0.00325)
+
+
+def test_openai_long_context_uses_canonical_id_not_display_name() -> None:
+    model = _priced(
+        id="gpt-6-astra", name="GPT-6 Astra", input_price=10, output_price=50, cache_reads_price=1
+    )
+    usage = Usage(
+        input_tokens=300_000,
+        output_tokens=10_000,
+        cache_read_tokens=250_000,
+        openai_long_context=True,
+    )
+    assert cost_for_usage("openai", model, usage) == pytest.approx(2.25)
+
+
+@pytest.mark.parametrize(
+    "model_id",
+    [
+        "gpt-6-astra",
+        "gpt-6.1-sol",
+        "gpt-6.1-terra",
+        "gpt-6-luna",
+        "gpt-6-sol",
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+        "gpt-5.5",
+        "gpt-5.5-pro",
+        "gpt-5.4",
+        "gpt-5.4-pro",
+        "gpt-6-astra-2026-10-01",
+    ],
+)
+def test_openai_long_context_documented_ids(model_id: str) -> None:
+    usage = Usage(
+        input_tokens=300_000,
+        output_tokens=10_000,
+        cache_read_tokens=250_000,
+        openai_long_context=True,
+    )
+    model = _priced(id=model_id, input_price=10, output_price=50, cache_reads_price=1)
+    assert cost_for_usage("openai", model, usage) == pytest.approx(2.25)
+
+
+@pytest.mark.parametrize(
+    "provider,model_id,receipt,expected",
+    [
+        ("openrouter", "gpt-6-astra", None, 1.25),
+        ("openai", "gpt-6-astra-mini", None, 1.25),
+        ("openai", "openai/gpt-6-astra", None, 1.25),
+        ("openai", "gpt-6-astra", 0.123, 0.123),
+    ],
+)
+def test_long_context_never_guesses_other_models_routes_or_receipts(
+    provider, model_id, receipt, expected
+) -> None:
+    usage = Usage(
+        input_tokens=300_000, output_tokens=10_000, cache_read_tokens=250_000, usd_cost=receipt
+    )
+    model = _priced(id=model_id, input_price=10, output_price=50, cache_reads_price=1)
+    assert cost_for_usage(provider, model, usage) == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("provider", ["openai-device", "openai-api-key"])
+def test_openai_flavours_price_as_the_canonical_provider(provider: str) -> None:
+    model = _priced(id="gpt-6-astra", input_price=10)
+    usage = Usage(input_tokens=300_000, openai_long_context=True)
+    assert cost_for_usage(provider, model, usage) == pytest.approx(6.0)
+
+
+def test_anthropic_key_prices_one_hour_as_the_canonical_provider() -> None:
+    usage = Usage(cache_write_tokens=1_000_000, cache_write_1h_tokens=1_000_000)
+    assert cost_for_usage("anthropic-key", _priced(), usage) == pytest.approx(20.0)
+
+
+@pytest.mark.parametrize(
+    "provider,model_id,usage,expected",
+    [
+        (
+            "openai-device",
+            "gpt-6-astra",
+            Usage(input_tokens=300_000, openai_long_context=True),
+            6.0,
+        ),
+        (
+            "openai-api-key",
+            "gpt-6-astra",
+            Usage(input_tokens=300_000, openai_long_context=True),
+            6.0,
+        ),
+        (
+            "anthropic-key",
+            "claude-test",
+            Usage(cache_write_tokens=1_000_000, cache_write_1h_tokens=1_000_000),
+            20.0,
+        ),
+    ],
+)
+def test_alias_shared_paint_and_ledger_pricing(provider, model_id, usage, expected) -> None:
+    from local_operator.analytics.model import CallSnapshot, price_snapshot
+    from local_operator.model import costs
+
+    model = _priced(id=model_id, input_price=10)
+    snapshot = CallSnapshot(
+        ts_ms=1,
+        session_id="synthetic",
+        provider=provider,
+        model_id=model_id,
+        input_tokens=usage.input_tokens,
+        output_tokens=0,
+        cache_read_tokens=0,
+        cache_write_tokens=usage.cache_write_tokens,
+        cache_write_1h_tokens=usage.cache_write_1h_tokens,
+        reasoning_tokens=0,
+        context_tokens=0,
+        openai_long_context=usage.openai_long_context,
+    )
+    with (
+        patch.object(costs, "_resolve_for_paint", return_value=model),
+        patch("local_operator.model.configure.resolve_model_info", return_value=model),
+    ):
+        assert costs.turn_cost(f"{provider}/{model_id}", usage) == pytest.approx(expected)
+        assert price_snapshot(snapshot) == (round(expected * 1_000_000), True)
+
+
+def test_custom_openai_gateway_does_not_inherit_openai_long_context_tariff() -> None:
+    from local_operator.harness.types import ModelSpec, StreamUsageEvent
+    from local_operator.providers.clients import OpenAICompatClient, client_for_spec
+    from local_operator.providers.failover import _stamp_serving_spec
+
+    spec = ModelSpec(
+        provider="openai", model_id="gpt-6-astra", base_url="https://gateway.example/v1"
+    )
+    client = client_for_spec(spec)
+    assert isinstance(client, OpenAICompatClient)
+    assert client._base_url == "https://gateway.example/v1"
+    event = _stamp_serving_spec(StreamUsageEvent(usage=Usage(input_tokens=300_000)), spec)
+    assert isinstance(event, StreamUsageEvent)
+    assert cost_for_usage(
+        "openai", _priced(id="gpt-6-astra", input_price=10), event.usage
+    ) == pytest.approx(3.0)
+
+
 def test_openai_usage_carves_cache_tokens_out_of_input() -> None:
     """OpenAI reports cached tokens as a SUBSET of ``input_tokens``.
 
