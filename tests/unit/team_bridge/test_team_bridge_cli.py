@@ -342,10 +342,13 @@ def test_the_enrolment_carries_her_own_name_when_one_is_designated(
     import asyncio
 
     asyncio.get_event_loop_policy().new_event_loop().run_until_complete(
-        client.enroll_default_on(tenant_id="tnt_1", expected_account_id="acc_1")
+        client.enroll_default_on(
+            tenant_id="tnt_1", expected_account_id="acc_1", consent_version="bridge_consent_v3"
+        )
     )
 
     assert bodies and bodies[0]["agent_name"] == "Aida"
+    assert bodies[0]["consent_version"] == "bridge_consent_v3"
 
 
 def test_the_enrolment_omits_the_name_when_nothing_is_designated(
@@ -375,7 +378,10 @@ def test_the_enrolment_omits_the_name_when_nothing_is_designated(
     )
 
     asyncio.get_event_loop_policy().new_event_loop().run_until_complete(
-        client.enroll_default_on(tenant_id="tnt_1", expected_account_id="acc_1")
+        client.enroll_default_on(
+            tenant_id="tnt_1", expected_account_id="acc_1", consent_version="bridge_consent_v3"
+        )
     )
 
     assert bodies and "agent_name" not in bodies[0]
+    assert bodies[0]["consent_version"] == "bridge_consent_v3"
