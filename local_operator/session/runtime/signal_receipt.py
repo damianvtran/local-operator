@@ -366,47 +366,6 @@ def merge_into(
     return receipt
 
 
-def rearm_sender_capture(number: int) -> bool:
-    """Put ``siginfo``'s one-shot sensor back after a REFUSED arrival spent it. Never raises.
-
-    WHY A REFUSAL HAS TO DO THIS (sanction gate x ``local_operator.siginfo``). The
-    sensor is spent by the FIRST delivery (it restores the platform's action before
-    re-raising) and ``siginfo.arm`` on an already-armed signal does not re-install it.
-    On the old path the first terminating signal ended the process, so a spent sensor
-    cost nothing. Under the gate a REFUSED signal leaves the process running, so
-    without this the sensor is gone for the rest of its life and the sanctioned stop,
-    whose receipt is the one an incident is reconstructed from, would say
-    ``no-siginfo`` about a capturable sender.
-
-    ONLY ``siginfo.rearm`` IS SAFE HERE, never ``disarm`` + ``arm``: that pair
-    un-publishes the saved action for a moment, and a delivery inside the window runs
-    the sensor with nothing to restore, which re-raises at the process forever (0.2 ms
-    arrivals hung 4 of 8 runs in review). ``rearm`` keeps the state published, so the
-    worst a racing signal can suffer is the ordinary path and a ``no-siginfo`` receipt.
-
-    Only a signal this process ARMED is re-armed: SIGINT and the residual levers are
-    not armed by anyone, so this is a no-op for them. Called AFTER the arrival has
-    claimed its capture (``observe``), so it can never take the capture that arrival
-    is still owed. A failed re-arm is LOGGED (debug) because the receipt it degrades
-    is otherwise silent.
-    """
-    try:
-        from local_operator import siginfo
-
-        if not siginfo.armed(int(number)):
-            return False
-        ok = bool(siginfo.rearm(int(number)))
-        if not ok:
-            logger.debug(
-                "sender capture for signal %s could not be re-armed after a refusal; "
-                "the next receipt will say no-siginfo",
-                number,
-            )
-        return ok
-    except Exception:  # noqa: BLE001 — an instrument must never fail a signal path
-        return False
-
-
 def _named_sender_text(sender: object) -> str:
     """``"pid 7 (uid 0)"`` for a sender that names a process, ``""`` otherwise.
 
@@ -477,10 +436,12 @@ def merge_refusal(
         previous["number"] = fresh["number"]
         # SCHEMA: ``sender`` is the FIRST refused arrival's (who tried first) and never
         # changes; ``last_sender`` is the LATEST's and is ABSENT while ``count`` is 1.
-        # With the sensor re-armed after each refusal a repeat can name its own
-        # sender, and a second party signalling the same run is exactly the fact a
-        # coalesced entry would otherwise lose. ``describe()`` and the incident
-        # renderers read the signal receipt, not this file, so they show neither.
+        # The sensor is one-shot per process (``siginfo``), so only the FIRST
+        # terminating signal can carry a named sender; ``last_sender`` is then
+        # ``no-siginfo`` unless a different mechanism named it. It stays so a reader
+        # can tell "the latest arrival was unnamed" from "there was no later arrival".
+        # ``describe()`` and the incident renderers read the signal receipt, not this
+        # file, so they show neither.
         previous["last_sender"] = fresh["sender"]
         refusals = [previous]
     else:

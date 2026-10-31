@@ -592,9 +592,10 @@ async def test_a_signal_loop_cannot_grow_the_log(
 #
 # Both live in the signal router and both change what a record says. The sensor
 # (``local_operator.siginfo``) names WHO sent a signal; the gate decides whether it is
-# obeyed. These cells pin how they compose: the sender survives a refusal, the sensor's
-# one-shot claim is not lost to a refusal, a refusal never overwrites the receipt of a
-# later sanctioned stop, and a kernel-originated signal stays unattributed in both files.
+# obeyed. These cells pin how they compose: the sender survives a refusal, the sensor is
+# one-shot per process (first terminating signal named, later ones `no-siginfo`), a
+# refusal never overwrites the receipt of a later sanctioned stop, and a
+# kernel-originated signal stays unattributed in both files.
 
 
 def _capture(monkeypatch: pytest.MonkeyPatch, *facts: dict[str, int] | None) -> None:
@@ -675,21 +676,17 @@ async def test_a_kernel_originated_signal_stays_unattributed_in_both_files(
     os.name == "nt" or sys.platform != "darwin", reason="the sensor is armed on Darwin only"
 )
 @pytest.mark.asyncio
-@pytest.mark.parametrize("rearm", [True, False], ids=["rearmed", "control-not-rearmed"])
-async def test_a_refusal_does_not_spend_the_sensor_a_later_sanctioned_stop_needs(
-    directory: Path, monkeypatch: pytest.MonkeyPatch, rearm: bool
+async def test_the_sensor_names_the_first_signal_only_and_a_later_stop_is_attributed_by_its_marker(
+    directory: Path,
 ) -> None:
-    """(3) The one-shot claim, on a REAL kernel capture (SIGUSR2, so SIGTERM is never armed here).
+    """(3) The one-shot contract on a REAL kernel capture (SIGUSR2; SIGTERM is never armed here).
 
-    ``siginfo`` restores the platform's action on its first delivery and ``arm`` on an
-    already-armed signal does not re-install it, so a REFUSED signal — which leaves the
-    process running — would otherwise blind the sanctioned stop that follows: its
-    receipt, the one an incident is reconstructed from, would say ``no-siginfo``. Two
-    real signals from this process, refusal then sanction, and the second receipt must
-    name its sender while the first stays in the refusals file and is never written over.
-
-    The ``control-not-rearmed`` arm turns the fix off and asserts the loss, so the cell
-    cannot pass for the wrong reason.
+    ``siginfo`` is spent by the FIRST delivery and nothing re-arms it: re-installing it
+    per refusal measured self-attributed receipts, hangs and SIGSEGVs under bursts. So
+    the first terminating signal is named (here, a refusal); a sanctioned stop that
+    follows is recorded ``no-siginfo`` and is attributed by its staged marker
+    (``sanction: marker``) — and it still PROCEEDS. A refusal never overwrites a
+    receipt, and the receipt never absorbs a refusal.
     """
     from local_operator import siginfo
 
@@ -697,8 +694,6 @@ async def test_a_refusal_does_not_spend_the_sensor_a_later_sanctioned_stop_needs
     previous = signal.signal(signal.SIGUSR2, lambda *_: None)
     try:
         assert siginfo.arm(number), "the sensor could not arm on this host"
-        if not rearm:
-            monkeypatch.setattr(signal_receipt, "rearm_sender_capture", lambda _n: False)
 
         os.kill(os.getpid(), signal.SIGUSR2)
         await asyncio.sleep(0.2)
@@ -713,19 +708,47 @@ async def test_a_refusal_does_not_spend_the_sensor_a_later_sanctioned_stop_needs
         os.kill(os.getpid(), signal.SIGUSR2)
         await asyncio.sleep(0.2)
         accepted, receipt = await _drive(_Session(directory, busy=True), signal.SIGUSR2)
-        assert accepted.refusals == 0 and receipt is not None
+        assert accepted.refusals == 0 and receipt is not None, "the sanctioned stop must proceed"
         sender = receipt["signals"][0]["sender"]
-        if rearm:
-            assert sender["state"] == "known" and sender["pid"] == os.getpid(), sender
-        else:
-            assert sender == signal_receipt.SENDER_UNAVAILABLE, "the control did not lose it"
+        assert sender == signal_receipt.SENDER_UNAVAILABLE, sender
+        assert receipt["signals"][0]["sanction"] == "marker"
 
         # A REFUSAL NEVER OVERWRITES A RECEIPT, and the receipt never absorbs a refusal.
         after = registry.read_signal_refusals(directory)
         assert after is not None and after["refusals"][0]["count"] == 1
         assert after["refusals"][0]["sender"]["pid"] == os.getpid()
-        assert len(receipt["signals"]) == 1 and receipt["signals"][0]["sanction"] == "marker"
+        assert len(receipt["signals"]) == 1
         await _settle(accepted)
+    finally:
+        siginfo.disarm(number)
+        signal.signal(signal.SIGUSR2, previous)
+
+
+@pytest.mark.skipif(
+    os.name == "nt" or sys.platform != "darwin", reason="the sensor is armed on Darwin only"
+)
+@pytest.mark.asyncio
+async def test_a_second_refused_signal_is_refused_and_recorded_unnamed(directory: Path) -> None:
+    """(3) Two real refused signals: the first names the sender, the second is refused and
+    recorded ``no-siginfo`` — coalesced into the one refusal entry, ``last_sender`` unnamed."""
+    from local_operator import siginfo
+
+    number = int(signal.SIGUSR2)
+    previous = signal.signal(signal.SIGUSR2, lambda *_: None)
+    try:
+        assert siginfo.arm(number), "the sensor could not arm on this host"
+        for _ in range(2):
+            os.kill(os.getpid(), signal.SIGUSR2)
+            await asyncio.sleep(0.2)
+            state, receipt = await _drive(_Session(directory, busy=True), signal.SIGUSR2)
+            assert state.refusals == 1 and receipt is None
+            await _settle(state)
+        recorded = registry.read_signal_refusals(directory)
+        assert recorded is not None
+        entry = recorded["refusals"][0]
+        assert entry["count"] == 2
+        assert entry["sender"]["pid"] == os.getpid()
+        assert entry["last_sender"] == signal_receipt.SENDER_UNAVAILABLE, entry
     finally:
         siginfo.disarm(number)
         signal.signal(signal.SIGUSR2, previous)

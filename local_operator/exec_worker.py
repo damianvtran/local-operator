@@ -311,9 +311,6 @@ def _refuse_unsanctioned(facts: dict[str, Any], job_id: str | None = None) -> bo
         if signal_receipt.is_sanctioned(entry):
             return False
         facts["refused"] = int(facts.get("refused") or 0) + 1
-        # The arrival already claimed its sender; the sensor is spent and this worker
-        # keeps running, so re-arm it (see ``signal_receipt.rearm_sender_capture``).
-        signal_receipt.rearm_sender_capture(int(signal.SIGTERM))
         logging.getLogger(__name__).warning(
             "exec worker: SIGTERM REFUSED (pid %d, job %s, session %s): no stop marker "
             "covers this run, so the turn keeps running. A sanctioned stop stages a "

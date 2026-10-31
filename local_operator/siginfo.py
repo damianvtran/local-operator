@@ -207,24 +207,6 @@ _SAVED: dict[int, Any] = {}
 #: memory on the next delivery.
 _CALLBACKS: dict[int, Any] = {}
 
-#: Re-raises a sensor has sent at ITS OWN pid and that have not yet been seen arrive,
-#: per signal. A sensor ends by restoring the product's action and re-raising; if a
-#: sensor was RE-INSTALLED before that re-raise is delivered (the sanction gate re-arms
-#: after every refusal), the re-raise lands on the new sensor and would be captured as
-#: an ordinary delivery whose sender is this process or pid 0 — a wrong pid in an
-#: incident report, which this module rates worse than "unavailable" (QA round 3
-#: measured it 1-2 times per 40-60 bursts). The sensor that finds a pending count
-#: consumes it and captures nothing. ``take`` clears the count: a delivery that
-#: reached the product's handler has no re-raise left to skip, so a quiet re-armed
-#: sensor can never swallow the NEXT real signal's sender.
-#:
-#: WHAT THIS CANNOT DO, stated because the mask is the reason it is a counter and not a
-#: flag: a signal is blocked while its own handler runs, so a same-thread re-raise is
-#: delivered only AFTER the sensor returned — an "in flight" marker would already be
-#: gone. A real second signal arriving inside the same instant as a re-armed sensor
-#: with a pending count is consumed instead of captured: a missing fact, never a wrong one.
-_SELF_RERAISES: dict[int, int] = {}
-
 #: ``libc``, resolved once. ``None`` means "no ctypes/libc on this host", which
 #: every caller treats as "cannot capture".
 _LIBC: Any | None = None
@@ -338,7 +320,6 @@ def take(sig: int) -> dict[str, int] | None:
     """
     try:
         facts = _FACTS.pop(int(sig), None)
-        _SELF_RERAISES.pop(int(sig), None)
     except Exception:  # noqa: BLE001
         return None
     if not isinstance(facts, dict):
@@ -395,24 +376,15 @@ def _handler(expected_signo: int) -> Any:
     """
 
     def sensor(signo: int, info: int, _ucontext: int) -> None:
-        number = int(signo)
         try:
-            pending = _SELF_RERAISES.get(number, 0)
-            if pending > 0:
-                # A predecessor sensor's own re-raise, not a delivery from anybody:
-                # consume it, capture nothing (see ``_SELF_RERAISES``). Restore and
-                # redeliver below still run, so the product's handler gets the signal.
-                _SELF_RERAISES[number] = pending - 1
-            else:
-                facts = _read(info, expected_signo)
-                if facts is not None and number not in _FACTS:
-                    _FACTS[number] = facts
-                _SELF_RERAISES[number] = 1
+            facts = _read(info, expected_signo)
+            if facts is not None and int(signo) not in _FACTS:
+                _FACTS[int(signo)] = facts
         except Exception:  # noqa: BLE001 — never propagate out of a signal frame
             pass
         finally:
-            _restore(number)
-            _redeliver(number)
+            _restore(int(signo))
+            _redeliver(int(signo))
 
     return _CALLBACK(sensor)
 
@@ -513,7 +485,6 @@ def arm(sig: int) -> bool:
                 _CALLBACKS.pop(number, None)
                 return False
             _FACTS.pop(number, None)
-            _SELF_RERAISES.pop(number, None)
             logger.debug("siginfo: sender sensor armed for signal %s", number)
             return True
         except Exception:  # noqa: BLE001 — arming must never fail a boot
@@ -549,67 +520,4 @@ def disarm(sig: int) -> bool:
         _CALLBACKS.pop(number, None)
         _SAVED.pop(number, None)
         _FACTS.pop(number, None)
-        _SELF_RERAISES.pop(number, None)
         return restored
-
-
-def rearm(sig: int) -> bool:
-    """Put the sensor back after it fired, WITHOUT EVER UN-PUBLISHING ITS STATE. Never raises.
-
-    The sensor is one-shot: it restores the platform's action on its first delivery
-    and :func:`arm` on an already-armed signal is a no-op. That cost nothing while the
-    first terminating signal ended the process; under the victim-side sanction gate a
-    REFUSED signal leaves the process running, so the sensor has to be reinstated for
-    the signal that matters (the sanctioned stop). ``disarm`` + ``arm`` was the first
-    spelling and it was WRONG: it un-published the saved action, and a delivery landing
-    in that window ran the sensor with nothing to restore, which re-raises at the
-    process forever (measured: 0.2 ms arrivals hung 4 of 8 runs). Here ``_SAVED`` and
-    ``_CALLBACKS`` stay published for the whole operation, so a sensor can never be live
-    without its saved action.
-
-    What is saved is whatever Python-level action is installed NOW (the product's own
-    handler, which the spent sensor restored — or a replacement, if somebody installed
-    one since): that is exactly what the sensor's next delivery must hand back.
-
-    Returns ``True`` when the sensor is live afterwards (already live counts), ``False``
-    when it cannot be — a signal this module never armed, a ``SIG_DFL``/``SIG_IGN``
-    action, or a failed syscall. A ``False`` leaves the platform's own action in place,
-    so the only cost is that the NEXT receipt says ``no-siginfo``.
-
-    A signal landing in the gap between reading the current action and installing the
-    sensor takes the ordinary path (the product's handler) and is recorded
-    ``no-siginfo`` — a true statement about that receipt's own evidence, and the ONLY
-    outcome that window can have.
-    """
-    try:
-        number = int(sig)
-    except Exception:  # noqa: BLE001
-        return False
-    with _LOCK:
-        callback = _CALLBACKS.get(number)
-        lib = _libc()
-        struct = _struct_type()
-        if callback is None or lib is None or struct is None or number not in _SAVED:
-            return False
-        try:
-            current = struct()
-            if lib.sigaction(number, None, ctypes.byref(current)) != 0:
-                return False
-            sensor_address = ctypes.cast(callback, ctypes.c_void_p).value
-            if int(current.handler or 0) == sensor_address:
-                return True  # the sensor never fired (or is already back): nothing to do
-            if int(current.handler or 0) in (_SIG_DFL, _SIG_IGN):
-                return False  # nobody would read a capture: see ``arm``
-            sensor = struct(
-                handler=sensor_address,
-                mask=int(current.mask),
-                flags=(int(current.flags) | SA_SIGINFO | SA_RESTART) & ~(SA_RESETHAND | SA_NODEFER),
-            )
-            # Publish the (possibly new) saved action BEFORE installing: the sensor is
-            # not live here, so this write is unobservable until the install below.
-            _SAVED[number] = current
-            _FACTS.pop(number, None)
-            return lib.sigaction(number, ctypes.byref(sensor), None) == 0
-        except Exception:  # noqa: BLE001
-            logger.debug("siginfo: re-arming the sensor raised", exc_info=True)
-            return False
