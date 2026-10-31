@@ -409,6 +409,15 @@ class _HoldsModifiers(ProtocolModel):
     field lines and every JSON-schema ``required`` list).
     """
 
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_explicit_empty_modifiers(cls, value: Any) -> Any:
+        # Defaults remain empty for historic byte identity; explicitly supplying
+        # [] must not silently turn a requested hold into an ordinary click.
+        if isinstance(value, dict) and "modifiers" in value and value["modifiers"] in ([], ()):
+            raise ValueError("modifiers must not be empty; omit the field for an unmodified action")
+        return value
+
     @field_validator("modifiers", mode="before", check_fields=False)
     @classmethod
     def _freeze_json_modifiers(cls, modifiers: Any) -> Any:

@@ -1316,7 +1316,7 @@ def test_an_action_without_modifiers_keeps_its_exact_canonical_bytes(action: obj
     assert b"modifiers" not in encoded
     assert ActionBatch.from_canonical_json(encoded) == _batch(action)
     spelled = encoded.replace(b'"kind"', b'"modifiers":[],"kind"', 1)
-    with pytest.raises(ValueError, match="not canonical"):
+    with pytest.raises(ValueError, match="modifiers must not be empty"):
         ActionBatch.from_canonical_json(spelled)
 
 
@@ -1359,3 +1359,11 @@ def test_an_unusable_modifier_is_refused_at_admission(modifiers: object, message
                 "modifiers": modifiers,
             }
         )
+
+
+def test_explicit_empty_modifiers_are_refused_at_both_admission_surfaces() -> None:
+    from local_operator.evaluation.protocol import ClickAction
+
+    payload = dict(observation_id="obs", frame_id="screen", x=1, y=2, button="left", modifiers=[])
+    with pytest.raises(ValueError, match="modifiers must not be empty"):
+        ClickAction.model_validate(payload)

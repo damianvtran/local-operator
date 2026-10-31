@@ -2346,6 +2346,9 @@ def public_reply_schema(
             "public_observations": {"type": "string", "maxLength": MAX_PUBLIC_OBSERVATIONS_CHARS},
         },
     }
+    if action_surface is not None:
+        for member in schema["properties"]["actions"]["items"]["anyOf"]:
+            action_surface.project_action_schema(member)
     return (
         _compact_action_schema(schema, models)
         if action_binding == COMPACT_ACTION_BINDING

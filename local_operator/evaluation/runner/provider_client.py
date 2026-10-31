@@ -273,7 +273,7 @@ def _action_schema_lines(surface: ActionSurface = LEGACY_ACTION_SURFACE) -> list
     for action in surface.models:
         fields: list[str] = []
         for name, field in action.model_fields.items():
-            if name in ("kind", "observation_id"):
+            if name in ("kind", "observation_id") or not surface.offers_field(name):
                 continue
             choices = get_args(field.annotation)
             if choices and all(isinstance(choice, str) for choice in choices):
@@ -1388,7 +1388,9 @@ def _action_line(surface: ActionSurface, kind: str, shape: HintShape = HintShape
             fields = [
                 f'"{name}": {_field_shape(field, name=name)}'
                 for name, field in model.model_fields.items()
-                if name != "kind" and name not in shape.omitted_action_fields
+                if name != "kind"
+                and name not in shape.omitted_action_fields
+                and surface.offers_field(name)
             ]
             return "{" + ", ".join(fields) + "}"
     return 'a JSON object whose "kind" is one of the accepted action kinds'
@@ -1745,6 +1747,15 @@ def build_system_prompt(
         if compact
         else '{"actions": [ ... ], "public_observations": ""}'
     )
+    modifier_text = (
+        '\n\n* "modifiers" on a pointer action holds keys DOWN for that one action and\n'
+        '  releases them after it: "modifiers": ["shift"] on a "click" is a shift-click\n'
+        '  (range select), ["ctrl"] a ctrl-click. A "key" action cannot do this -- its\n'
+        "  keys are released before the next action runs. Only shift, ctrl, alt and\n"
+        "  meta can be held."
+        if surface.modifiers
+        else ""
+    )
     return f"""You are operating a computer to complete one task.
 
 Each user message is one observation of the screen: its text, and a screenshot
@@ -1809,13 +1820,7 @@ name all require typing.
   synonym is rejected -- "ctrl" not "control", "esc" not "escape", "enter"
   not "return":
 
-{_named_keys_line(surface)}
-
-* "modifiers" on a pointer action holds keys DOWN for that one action and
-  releases them after it: "modifiers": ["shift"] on a "click" is a shift-click
-  (range select), ["ctrl"] a ctrl-click. A "key" action cannot do this -- its
-  keys are released before the next action runs. Only shift, ctrl, alt and
-  meta can be held.
+{_named_keys_line(surface)}{modifier_text}
 
 A batch may contain SEVERAL actions and they execute in order against the
 screen you are looking at, with one new observation at the end. That is how a

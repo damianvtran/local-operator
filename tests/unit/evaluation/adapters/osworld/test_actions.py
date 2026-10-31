@@ -450,3 +450,19 @@ def test_an_unobservable_release_is_reported_not_laundered(tmp_path) -> None:
     assert "could not be released" in result.stderr
     # Every release is attempted even after the first one fails.
     assert [call[1] for call in calls if call[0] == "keyUp"] == ["shift", "ctrl"]
+
+
+def test_adapter_advertises_the_modifier_translator_it_ships() -> None:
+    assert actions.ACTION_SURFACE.modifiers is True
+    action = ClickAction(observation_id="o", frame_id="screen", x=1, y=2, modifiers=("shift",))
+    from local_operator.evaluation.protocol import ActionBatch
+
+    batch = ActionBatch(
+        protocol_version="1.0",
+        task_id="task",
+        episode_id="episode",
+        observation_id="o",
+        actions=(action,),
+    )
+    actions.ACTION_SURFACE.validate_batch(batch)
+    assert "shift" in actions.compile_action(action, _geo())

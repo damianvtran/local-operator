@@ -50,6 +50,18 @@ class ActionSurface:
     #: implement the helper — never acquires the action merely because the core
     #: union grew; only the backend that actually executes drags advertises it.
     drag: bool = False
+    #: Opt in only when the translator executes held keys; older translators
+    #: ignore unfamiliar fields, so neutral protocol parsing is not admission.
+    modifiers: bool = False
+
+    def project_action_schema(self, schema: dict[str, Any]) -> dict[str, Any]:
+        """Remove unsupported pointer fields from each freshly generated schema."""
+        if not self.modifiers:
+            schema.get("properties", {}).pop("modifiers", None)
+        return schema
+
+    def offers_field(self, name: str) -> bool:
+        return name != "modifiers" or self.modifiers
 
     @property
     def models(self) -> tuple[Any, ...]:
@@ -69,7 +81,9 @@ class ActionSurface:
         # Include the execution restriction in the identity: the same neutral
         # field schema on a lossy keyboard is not the same admitted action surface.
         return {
-            "actions": [model.model_json_schema() for model in self.models],
+            "actions": [
+                self.project_action_schema(model.model_json_schema()) for model in self.models
+            ],
             "type_text_mode": self.type_text_mode,
             "max_type_chars": self.max_type_chars,
             "drag": self.drag,
@@ -80,6 +94,8 @@ class ActionSurface:
         for action in batch.actions:
             if type(action) not in self.models:
                 raise ActionAdmissionError("action kind is not supported by this adapter")
+            if getattr(action, "modifiers", ()) and not self.modifiers:
+                raise ActionAdmissionError("adapter did not advertise the modifiers capability")
             if isinstance(action, TypeAction) and self.type_text_mode == "ascii":
                 if not action.text.isascii():
                     raise ActionAdmissionError(

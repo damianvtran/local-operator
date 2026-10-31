@@ -70,13 +70,15 @@ MAX_TYPE_CHARS = int(
 # silently lossy Unicode TypeAction. The adapter metadata uses this same surface.
 # ``drag=True`` is advertised here because this adapter ships the guest helper
 # and its release tests; a backend without that translator must leave it false
-# and will then refuse drag batches at admission.
+# and will then refuse drag batches at admission. Held modifiers use the same
+# opt-in: a core upgrade must never grant an old translator a silent plain click.
 ACTION_SURFACE = ActionSurface(
     paste_text=True,
     type_text_mode="ascii",
     ask_user=True,
     max_type_chars=MAX_TYPE_CHARS,
     drag=True,
+    modifiers=True,
 )
 
 # Our named keys (protocol._NAMED_KEYS) -> pyautogui key names. pyautogui

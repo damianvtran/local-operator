@@ -331,13 +331,16 @@ class AdapterCapabilities(ProtocolModel):
     #: in ``computer_input`` plus the adapter's compile branch). The default
     #: lets a NEW parent accept an OLD worker that predates the field — it
     #: simply advertises no drag, which is the behaviour it already had.
-    #: Serialization OMITS this key while it is false (``_omit_disabled_drag``),
+    #: Serialization OMITS this key while it is false (``_omit_disabled_pointer_capabilities``),
     #: so a worker without the capability keeps its exact old hello bytes and an
     #: old parent's ``extra="forbid"`` handshake cannot see them; a worker that
     #: advertises ``true`` rides the wire and is refused by an old parent at
     #: hello, fail-closed before prepare/reset allocate — the same documented
     #: direction as ``max_type_chars``, not a downgrade compatibility claim.
     drag: bool = False
+    #: Same opt-in/fail-closed handshake as drag: false is absent on the wire,
+    #: true is refused by old strict cores before any environment allocation.
+    modifiers: bool = False
 
     def action_surface(self) -> "ActionSurface":
         return ActionSurface(
@@ -346,23 +349,24 @@ class AdapterCapabilities(ProtocolModel):
             ask_user=self.ask_user,
             max_type_chars=self.max_type_chars,
             drag=self.drag,
+            modifiers=self.modifiers,
         )
 
     @model_serializer(mode="wrap")
-    def _omit_disabled_drag(self, handler: Any, info: Any) -> Any:
-        """Omit ``drag`` from the wire while it is false.
+    def _omit_disabled_pointer_capabilities(self, handler: Any, info: Any) -> Any:
+        """Omit disabled opt-in pointer capabilities from the hello wire.
 
-        Mirror of ``AdapterSelector._omit_absent_core_source``: only THIS
-        key's false is dropped, so a worker that does not carry the drag
-        translator emits hello bytes byte-identical to the ones it emitted
-        before the field existed. A worker that advertises ``true`` still
-        rides the wire, and an old parent refuses it at hello (the documented
-        fail-closed direction).
+        Mirror of ``AdapterSelector._omit_absent_core_source``: only these
+        capabilities' false values are dropped, preserving pre-capability hello
+        bytes. Advertising either translator rides the wire, so a strict old
+        parent refuses it at hello rather than allocating an incompatible guest.
         """
 
         data = handler(self)
         if isinstance(data, dict) and data.get("drag") is False:
             data.pop("drag", None)
+        if isinstance(data, dict) and data.get("modifiers") is False:
+            data.pop("modifiers", None)
         return data
 
     @field_validator("routes", mode="before")

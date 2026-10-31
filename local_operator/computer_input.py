@@ -306,7 +306,7 @@ def _hold_x11(keys: tuple[str, ...], body: str) -> None:
                 for key in reversed(pressed):
                     try:
                         pyautogui.keyUp(key)
-                    except Exception as exc:
+                    except BaseException as exc:
                         if release_failure is None:
                             release_failure = exc
             finally:
@@ -315,8 +315,12 @@ def _hold_x11(keys: tuple[str, ...], body: str) -> None:
             # Truthful failure, raised from finally so it also replaces a body
             # failure (chained as context): never report success, nor only the
             # pointer failure, while a key may still be held.
+            if not isinstance(release_failure, Exception):
+                # Cancellation is deferred, never swallowed: every release and
+                # FAILSAFE restoration must finish before it resumes unwinding.
+                raise release_failure
             raise RuntimeError(
-                "held modifier keys could not be released; " "the guest may still be holding a key"
+                "held modifier keys could not be released; the guest may still be holding a key"
             ) from release_failure
 
 

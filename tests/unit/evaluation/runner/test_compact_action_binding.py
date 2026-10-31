@@ -86,12 +86,10 @@ def test_compact_schema_and_prompt_omit_repeated_action_ids() -> None:
     # no work behind it -- the repair the note-only and empty-object refusals
     # kept paying a round trip for. This movement was verified as a prompt diff
     # against the base (exactly that one sentence), not re-pinning whatever a
-    # run printed. It moved a fourth time for held pointer modifiers: the
-    # click/double_click/scroll shape lines gained ``"modifiers": [str, ...]
-    # (optional)`` and one bullet after the named-key list says what holding
-    # means -- verified the same way, as a prompt diff against the base.
+    # run printed. Held modifiers are opt-in: the default prompt keeps the
+    # pre-modifier bytes, while negotiated surfaces offer the field and bullet.
     assert hashlib.sha256(build_system_prompt().encode()).hexdigest() == (
-        "dec261640d83aaa6f3a8c836be5304d45cab865e678c08185a070be054d1d1fa"
+        "068de08db33e14fc84ab62f6aabd126ddf3686306b2a1baf58caab54dc16d648"
     )
     assert '"observation_id": "<current observation id>"' in build_system_prompt(
         action_binding=COMPACT_ACTION_BINDING
