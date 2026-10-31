@@ -168,6 +168,9 @@ class _RecordingInner:
         return {"message": {"text": "hello from the hub"}}
 
     async def conversation_send(self, *args: Any, **kwargs: Any) -> Any:
+        guard = kwargs.get("pre_http_guard")
+        if guard is not None:
+            guard()
         return {"message": {"id": "bmsg_conv"}}
 
 
