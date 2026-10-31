@@ -1,0 +1,27 @@
+{
+  "locale": "ru",
+  "namespace": "wire.errors.media",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 1
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 1,
+      "id": "RU-017",
+      "severity": "NIT",
+      "namespace": "wire.errors.media",
+      "key": "wire.errors.media.speech_upstream_responded",
+      "english": "Speech generation failed upstream: Upstream responded {status}: {error}",
+      "current": "Ошибка генерации речи на стороне источника: источник ответил {status}: {error}",
+      "problem": "'upstream' rendered «источник» (source) across the speech_upstream_* trio; in ru tech copy «вышестоящий сервис» is the usual term, «источник» could be read as the user's input source.",
+      "suggested": "Ошибка генерации речи у вышестоящего сервиса: сервис ответил {status}: {error}",
+      "disposition": "fixed (remediation core-fix, session ef4f00143d56)"
+    }
+  ]
+}

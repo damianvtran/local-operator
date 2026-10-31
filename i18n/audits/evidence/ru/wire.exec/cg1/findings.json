@@ -1,0 +1,39 @@
+{
+  "locale": "ru",
+  "namespace": "wire.exec",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 1,
+    "nit": 1
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 1,
+      "id": "RU-018",
+      "severity": "MINOR",
+      "namespace": "wire.exec",
+      "key": "wire.exec.waiting_on_you",
+      "english": "Waiting on you? lop sessions shows what a run needs",
+      "current": "Ждёте ответа? lop sessions показывает, что нужно запуску",
+      "problem": "Reverses who is waiting: English asks whether the RUN is waiting on the user; «Ждёте ответа?» asks whether the user is waiting for an answer.",
+      "suggested": "Запуск ждёт вас? lop sessions показывает, что ему нужно",
+      "disposition": "fixed (remediation core-fix, session ef4f00143d56)"
+    },
+    {
+      "round": 1,
+      "id": "RU-019",
+      "severity": "NIT",
+      "namespace": "wire.exec",
+      "key": "wire.exec.exec_epilog",
+      "english": "Examples:\n  lop exec 'Review the change' --team release --background\n  printf 'Inspect this report' | lop exec --profile reviewer\n  lop exec --goal 'Finish the checklist' --loop 3 --name 'Night audit'\n  lop exec --resume SESSION_ID --loop-goal 'Verify every acceptance criterion'\n  lop exec --status JOB_ID\n\nResume restores the transcript, team, profile, goal and name first; explicit\nstartup flags override their own slots. Team and profile may coexist. A loop\nruns after the optional initial prompt; --loop N counts continuations only.\nSaved loop progress is visible on resume, but iterations never replay automatically.\nA goal alone does not run a model. Prompts are literal, not slash commands.\n--goal only SETS the objective; unlike the TUI's /goal it does not also\nsend that text as a message, because the prompt is exec's message channel.\n--agent/--agent-id select legacy agent data and are mutually exclusive.\nDefault non-TTY approvals deny. --control may wait for a supervisor; --yolo\nis an explicit override, never implied by --background or --team.\n--tools bounds what the run can reach: excluded tools are unreachable.\nForeground events/text use stdout; receipts use stderr. Detached runs log\nboth streams and print distinct job/session IDs. Use lop --resume SESSION_ID\nto view a live run or resume a finished one; exec refuses a live owner.",
+      "current": "Примеры:\n  lop exec 'Review the change' --team release --background\n  printf 'Inspect this report' | lop exec --profile reviewer\n  lop exec --goal 'Finish the checklist' --loop 3 --name 'Night audit'\n  lop exec --resume SESSION_ID --loop-goal 'Verify every acceptance criterion'\n  lop exec --status JOB_ID\n\nСначала resume восстанавливает транскрипт, команду, профиль, цель и имя;\nявные флаги запуска переопределяют свои значения. Команда и профиль могут\nсосуществовать. Цикл выполняется после необязательного начального промпта;\n--loop N считает только продолжения. Сохранённый прогресс цикла виден при\nвозобновлении, но итерации никогда не повторяются автоматически.\nОдна цель не запускает модель. Промпты буквальные, не слеш-команды.\n--goal только ЗАДАЁТ цель; в отличие от /goal в TUI он не отправляет этот\nтекст ещё и как сообщение, потому что промпт — канал сообщений exec.\n--agent/--agent-id выбирают устаревшие данные агента и взаимоисключающи.\nОдобрения без TTY по умолчанию отклоняются. --control может ждать супервизора;\n--yolo — явное переопределение, которое никогда не подразумевается\n--background или --team.\n--tools ограничивает доступное запуску: исключённые инструменты недостижимы.\nСобытия и текст переднего плана идут в stdout; квитанции — в stderr. Отсоединённые\nзапуски пишут оба потока в журнал и выводят различные ID задания и сессии.\nlop --resume SESSION_ID позволяет следить за живым запуском или возобновить\nзавершённый; exec отказывает, если есть живой владелец.",
+      "problem": "«Одна цель не запускает модель» reads as 'one goal'; 'alone' is «сама по себе». «взаимоисключающи» (short form) is non-standard.",
+      "suggested": "«Сама по себе цель не запускает модель.» · «…и исключают друг друга.»",
+      "disposition": "fixed (remediation core-fix, session ef4f00143d56)"
+    }
+  ]
+}

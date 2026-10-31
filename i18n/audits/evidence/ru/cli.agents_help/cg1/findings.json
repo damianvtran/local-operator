@@ -1,0 +1,27 @@
+{
+  "locale": "ru",
+  "namespace": "cli.agents_help",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 1,
+    "nit": 0
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 1,
+      "id": "RU-025",
+      "severity": "MINOR",
+      "namespace": "cli.agents_help",
+      "key": "cli.agents_help.pull",
+      "english": "Pull (download) an agent from Radient",
+      "current": "Получить (pull, скачать) агента из Radient",
+      "problem": "Kept-English hub `pull` is present in parentheses but the verb is «Получить»; pull_id/pull_org and cli.hub_help.status («полученных агентов») likewise. Acceptable as gloss, but push uses «Опубликовать (push…)» so the pair is at least consistent; flagging for the glossary owner rather than blocking.",
+      "suggested": "Выполнить pull (скачать) агента из Radient",
+      "disposition": "fixed (remediation core-fix, session ef4f00143d56)"
+    }
+  ]
+}

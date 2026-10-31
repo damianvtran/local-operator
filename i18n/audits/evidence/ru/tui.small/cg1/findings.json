@@ -1,0 +1,75 @@
+{
+  "locale": "ru",
+  "namespace": "tui.small",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 3,
+    "nit": 2
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 1,
+      "id": "RU-001",
+      "severity": "MINOR",
+      "namespace": "tui.small",
+      "key": "tui.small.spend.unpriced_cancelled_shortest",
+      "english": "bill unknown",
+      "current": "неизвестно",
+      "problem": "'bill unknown' → bare «неизвестно» drops the billing subject; at the 12-cell rung it reads as a generic 'unknown' and no longer says it is the charge that is unknown (the note requires the cancellation/billing reason to survive).",
+      "suggested": "сумма неизв. (12 cells)",
+      "disposition": "fixed (remediation core-fix, session ef4f00143d56)"
+    },
+    {
+      "round": 1,
+      "id": "RU-002",
+      "severity": "MINOR",
+      "namespace": "tui.small",
+      "key": "tui.small.ask_queue.urgent_clause",
+      "english": "{shown} urgent",
+      "current": "{shown} срочных",
+      "problem": "No plural branch, but genitive plural «срочных» is ungrammatical for 1/21 («1 срочных»); same for ask_queue.waiting_clause «{shown} ждут» («1 ждут»). Use a count-neutral label form.",
+      "suggested": "срочно: {shown} (and waiting_clause → ждут: {shown})",
+      "disposition": "fixed (remediation core-fix, session ef4f00143d56)"
+    },
+    {
+      "round": 1,
+      "id": "RU-003",
+      "severity": "MINOR",
+      "namespace": "tui.small",
+      "key": "tui.small.goal_panel.settled_heading",
+      "english": "settled",
+      "current": "завершены",
+      "problem": "Context says the heading is a noun, not a verb; «завершены» is a predicate (short participle, 'are settled').",
+      "suggested": "завершённые",
+      "disposition": "fixed (remediation core-fix, session ef4f00143d56)"
+    },
+    {
+      "round": 2,
+      "id": "RU2-005",
+      "severity": "NIT",
+      "namespace": "tui.small",
+      "key": "tui.small.ask_queue.urgent_clause",
+      "english": "{shown} urgent",
+      "current": "срочно: {shown}",
+      "problem": "The RU-002 fix is grammatical now, but «срочно:» is an adverb ('urgently: 2'). The usual Russian count-label form is the genitive plural before a colon (as in «ещё задач: {count}»). The sibling «ждут: {shown}» keeps a plural verb, so «ждут: 1» still jars a little.",
+      "suggested": "срочных: {shown} · waiting_clause: «в ожидании: {shown}» (timed_out_clause «просрочено: {shown}» is fine)",
+      "disposition": "open at PASS: minor/nit accepted, value unchanged"
+    },
+    {
+      "round": 2,
+      "id": "RU2-006",
+      "severity": "NIT",
+      "namespace": "tui.small",
+      "key": "tui.small.todo_panel.dropped",
+      "english": "{count} dropped",
+      "current": "{count} отменено",
+      "problem": "Same count-agreement family as RU-006: «{count} отменено». The sibling done_hidden «+{count} выполнено» and resolved «{resolved}/{total} закрыто» have the same pattern. These are tolerable, but the label form would match the remediated clauses.",
+      "suggested": "отменено: {count} · done_hidden «+выполнено: {count} · »",
+      "disposition": "open at PASS: minor/nit accepted, value unchanged"
+    }
+  ]
+}

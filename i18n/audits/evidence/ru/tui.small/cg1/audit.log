@@ -1,0 +1,86 @@
+# ru/tui.small audit.log: records the audit sessions kept, verbatim; nothing here is a replayed command.
+# The auditors wrote findings.jsonl / progress.log / summary.md (read-only brief), not a shell log.
+
+## round 1: audit dir core-audit/ru, auditor session 4f28a4bcc8e2
+verdict.txt:
+CHANGES_REQUESTED
+BLOCKER 0 · MAJOR 3 · MINOR 17 · NIT 5 · 1311 values in 56 namespaces
+progress.log:
+cli.agents_help 21 1
+cli.aida_help 4 0
+cli.browser 64 1
+cli.browser_help 20 0
+cli.config_help 9 0
+cli.credential_help 5 0
+cli.exec_help 20 0
+cli.exec_runtime 11 0
+cli.exec_worker_help 11 0
+cli.global_help 17 0
+cli.hub_help 12 0
+cli.hub_shared_help 12 1
+cli.install_help 5 0
+cli.login_help 2 0
+cli.login_status_help 2 0
+cli.logout_help 2 0
+cli.mcp_help 19 0
+cli.memory_help 1 0
+cli.mobile_help 15 0
+cli.model_help 5 0
+cli.monitor_help 6 0
+cli.qwencloud_help 5 0
+cli.refresh_help 7 0
+cli.resume_click_help 1 0
+cli.send_help 7 0
+cli.serve_help 5 0
+cli.services_help 9 3
+cli.sessions_help 47 0
+cli.stop_help 9 0
+cli.teams_help 34 0
+cli.update_help 6 0
+cli.wake_help 17 0
+mobile.setup 76 2
+relay.login 4 0
+tui.analytics 98 1
+tui.app 46 3
+tui.hub_links 56 2
+tui.import 87 0
+tui.library 108 1
+tui.projects 97 2
+tui.small 137 3
+tui.usage 21 0
+wire.aida_cadence 2 0
+wire.console 8 0
+wire.errors.agents 44 1
+wire.errors.auth 12 0
+wire.errors.files 11 0
+wire.errors.media 20 1
+wire.errors.sdk_spec 21 0
+wire.errors.sdk_startup 4 0
+wire.exec 17 2
+wire.host_speed 2 0
+wire.settings.account_policy 14 0
+wire.settings.hub_defaults 9 1
+wire.slash.library 2 0
+wire.tunnel_setup 5 0
+
+## round 2: audit dir core-audit2/ru, auditor session 4586ac33eefc
+verdict.txt:
+PASS
+BLOCKER 0 · MAJOR 0 · MINOR 4 · NIT 4 — 55 changed keys re-judged, 0 declines, sweep over 1311 values / 56 namespaces
+progress.log:
+start Sat Oct 31 06:03:23 EDT 2026
+read glossary + ru style guide (origin/main)
+read round-1 findings (25) + summary; changes.jsonl (55), declined.jsonl (0 lines)
+extracted en catalogues + context sidecars from origin/main to core-audit2/ru/en/
+(A) judged all 55 AFTER values vs English: all acceptable; 1 NIT carried (already_leaving), 1 NIT (action.pull)
+(B) no declines to judge
+(C) swept 1311 values: push/pull/merge, supervised, runtime, upstream, identity, approvals, job/todo, hyphen compounds, count agreement
+(D) mechanical: ICU args/types, ru plural one/few/many/other, select arms, backticks, %-tokens, ANSI count, edge whitespace, NFC, CR, Cc/Cf: 0 issues; widths 30 maxCells keys, 0 over
+wrote findings.jsonl (8), verdict PASS
+
+## applier-computed (apply_locale.py, run against the worktree at 137984daf98e6491dfd97cb6812d51c1a98abe6c)
+keys merged for this namespace: 137
+sha256 en  local_operator/i18n/catalogues/en/tui.small.json = 16d49c4ba2a514bbde7da494443abade26a3b28c0389e6bca124d00aa7d0ed75
+sha256 tgt local_operator/i18n/catalogues/ru/tui.small.json = 2f093aee1f19c2bcc07699b1c55011616ebe068ea7c3ccb90f49767fff34f6e5
+sha256 audited patch file (scratchpad core-i18n/ru/tui.small.json) = dc1b82ddd6b2f630cf441a522524d03817ef773c517efd690a1ab260f42e3a6f
+assertions passed: patch keys subset of en, every en key present, English key order, patch values byte-equal to catalogue values, no pre-existing value changed
