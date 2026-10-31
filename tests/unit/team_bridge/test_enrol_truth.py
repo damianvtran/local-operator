@@ -43,8 +43,17 @@ HUB = "https://hub.example/v1"
 
 
 @pytest.fixture(autouse=True)
-def _destination_open(monkeypatch: pytest.MonkeyPatch) -> None:
+def _destination_open(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(tb_client, "org_oauth_destination_allowed", lambda base: True)
+    # Start each test cold, as test_default_on does: the config watcher's change
+    # fingerprint can match across parametrized tests whose ``tmp_path`` name is
+    # reused, so a second row would read the first row's marker (seen with the
+    # #3225 version-mismatch rows: the row passes alone, fails second).
+    from local_operator import config_watch
+
+    config_watch._reset_for_tests()
+    yield
+    config_watch._reset_for_tests()
 
 
 def _client(handler, config_dir: Path | None) -> TeamBridgeClient:
@@ -445,7 +454,7 @@ async def test_default_on_recovers_a_failed_commit_without_a_second_post(
     assert hub.endpoint is not None and hub.endpoint["state"] == "active"
     assert Store(tmp_path).committed_owner_count() == 0  # the transient failure
     # NOT "done": a done marker would lock the account out of every retry.
-    assert _local(tmp_path).default_enrollment == {"acc_1": "pending:bep_1:0"}
+    assert _local(tmp_path).default_enrollment == {"acc_1": "pending:bep_1:0:bridge_consent_v2"}
     discipline.invalidate()
     await discipline.check(Boundary.SURFACE_OPEN)
     assert len(_enrolment_writes(hub)) == 1, "a recovery must never POST again"
@@ -486,6 +495,135 @@ async def test_default_on_v3_recovers_a_failed_commit_under_v3(
         "consent_version": "bridge_consent_v3",
         "consent_ref": "bep_1",
     }
+
+
+def _rewrite_record_version(hub: Any, version: str) -> None:
+    """The hub's stored record now cites ``version`` (an in-place rewrite)."""
+
+    assert hub.endpoint is not None
+    hub.endpoint = {**hub.endpoint, "consent": {**hub.endpoint["consent"], "version": version}}
+
+
+@pytest.mark.parametrize(
+    ("shown", "recorded"),
+    [
+        pytest.param("bridge_consent_v2", "bridge_consent_v3", id="shown-v2-record-v3"),
+        pytest.param("bridge_consent_v3", "bridge_consent_v2", id="shown-v3-record-v2"),
+    ],
+)
+async def test_default_on_retry_refuses_a_record_naming_another_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, shown: str, recorded: str
+):
+    """review m1 / QA Q2 (#3225): the marker records the ECHOED version, and the
+    commit-only recovery commits only a receipt for the text the member saw.
+    A mismatch is terminal (``done``), so it neither loops nor POSTs again."""
+
+    from local_operator.team_bridge.client import Boundary
+    from tests.unit.team_bridge.test_default_on import _discipline, _enrolment_writes
+    from tests.unit.team_bridge.test_discipline import _local
+
+    _flaky_commit(monkeypatch)
+    hub = _head_advancing_hub(
+        version=shown,
+        accepted=["bridge_consent_v1", "bridge_consent_v2", "bridge_consent_v3"],
+    )
+    discipline = _discipline(hub, tmp_path)
+    await discipline.check(Boundary.APP_START)
+    assert _local(tmp_path).default_enrollment == {"acc_1": f"pending:bep_1:0:{shown}"}
+    _rewrite_record_version(hub, recorded)
+    discipline.invalidate()
+    await discipline.check(Boundary.SURFACE_OPEN)
+    assert len(_enrolment_writes(hub)) == 1
+    assert Store(tmp_path).committed_owner_count() == 0
+    assert _local(tmp_path).default_enrollment == {"acc_1": "done"}
+
+
+async def test_commit_pending_reports_the_version_mismatch_distinctly(tmp_path: Path):
+    requests: list[httpx.Request] = []
+    consent = {"version": "bridge_consent_v2", "consented_via": "default_on", "current": True}
+    client = _client(_hub(_answer(consent), requests), tmp_path)
+    outcome = await client.commit_pending_default_enrollment(
+        tenant_id="tnt_1",
+        endpoint_id="bep_1",
+        head=0,
+        consent_version="bridge_consent_v3",
+        expected_account_id="acc_1",
+        may_commit_local=lambda: True,
+    )
+    assert outcome == {"committed": False, "code": "consent_version_mismatch"}
+    assert Store(tmp_path).committed_owner_count() == 0
+    with pytest.raises(ValueError):
+        await client.commit_pending_default_enrollment(
+            tenant_id="tnt_1",
+            endpoint_id="bep_1",
+            head=0,
+            consent_version="bridge_consent_v4",
+            expected_account_id="acc_1",
+            may_commit_local=lambda: True,
+        )
+
+
+@pytest.mark.parametrize(
+    ("recorded", "committed"),
+    [
+        pytest.param("bridge_consent_v2", True, id="legacy-marker-v2-record-commits"),
+        pytest.param("bridge_consent_v3", False, id="legacy-marker-v3-record-refused"),
+    ],
+)
+async def test_a_pre_3225_marker_reads_as_the_v2_it_echoed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, recorded: str, committed: bool
+):
+    """A versionless ``pending:<endpoint>:<head>`` was written by a build whose
+    POST hardcoded v2, so it recovers only against a v2 record."""
+
+    from local_operator.team_bridge.client import Boundary
+    from tests.unit.team_bridge.test_default_on import _discipline, _enrolment_writes
+    from tests.unit.team_bridge.test_discipline import _local
+
+    _flaky_commit(monkeypatch)
+    hub = _head_advancing_hub(
+        accepted=["bridge_consent_v1", "bridge_consent_v2", "bridge_consent_v3"]
+    )
+    discipline = _discipline(hub, tmp_path)
+    await discipline.check(Boundary.APP_START)
+    # Downgrade the marker to the legacy shape a pre-#3225 build wrote, via the
+    # same merge-preserving writer (the public one refuses it; ``done`` is
+    # terminal, so it cannot be reached through ``done`` either).
+    from local_operator import settings_io
+    from local_operator.config import ConfigManager
+    from local_operator.team_bridge.settings import DEFAULT_ENROLLMENT_PATH
+
+    settings_io._store(
+        ConfigManager(tmp_path), DEFAULT_ENROLLMENT_PATH, {"acc_1": "pending:bep_1:0"}
+    )
+    assert _local(tmp_path).default_enrollment == {"acc_1": "pending:bep_1:0"}
+    _rewrite_record_version(hub, recorded)
+    discipline.invalidate()
+    await discipline.check(Boundary.SURFACE_OPEN)
+    assert len(_enrolment_writes(hub)) == 1
+    assert Store(tmp_path).committed_owner_count() == (1 if committed else 0)
+    assert _local(tmp_path).default_enrollment == {"acc_1": "done"}
+
+
+def test_pending_marker_round_trips_and_fails_closed():
+    from local_operator.team_bridge.settings import (
+        parse_pending_default_enrollment as parse,
+    )
+    from local_operator.team_bridge.settings import pending_default_enrollment as make
+
+    assert parse(make("bep_1", 7, "bridge_consent_v3")) == ("bep_1", 7, "bridge_consent_v3")
+    assert parse(make("bep_1", None, "bridge_consent_v2")) == ("bep_1", 0, "bridge_consent_v2")
+    assert parse("pending:bep_1:7") == ("bep_1", 7, "bridge_consent_v2")  # legacy
+    for bad in (
+        "pending:bep_1:7:bridge_consent_v4",
+        "pending:bep_1:7:bridge_consent_v1",
+        "pending:bep_1:07",
+        "pending::7:bridge_consent_v2",
+        "pending:bep_1",
+    ):
+        assert parse(bad) is None, bad
+    with pytest.raises(ValueError):
+        make("bep_1", 0, "bridge_consent_v10")
 
 
 async def test_default_on_retry_never_binds_an_endpoint_it_did_not_create(
