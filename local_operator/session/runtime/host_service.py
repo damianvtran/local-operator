@@ -112,6 +112,41 @@ class SpawnRequest:
     capture: str
 
 
+def _is_runtime_interpreter(candidate: str) -> bool:
+    """Whether ``candidate`` is an interpreter this host may exec as a runtime.
+
+    THE SOCKET IS SAME-UID REACHABLE, so a request is untrusted input (design §4:
+    an impostor that wins the bind race is not authenticated). Left to name ANY
+    executable, a request was an arbitrary exec whose parent is the launchd job and
+    whose ancestry holds no requester -- more than the design's "a descriptor for
+    its own child", and the very ancestry the 2026-10-30 forensics read (#3222 R-6).
+    So the host accepts only the interpreters a legitimate engage can name: its own
+    (``sys.executable``) and the current generation's (``_spawn_interpreter``, the
+    one ``launch`` sends), compared by realpath. The argv after it is fixed
+    (``-m RUNTIME_MODULE``), so this bounds what a request can run to this install.
+
+    RESIDUAL RISK ACCEPTED FOR THIS SLICE: ``env`` is still the requester's, so a
+    same-uid peer can steer the interpreter (``PYTHONPATH``, ``PYTHONSTARTUP``) --
+    but that peer already runs arbitrary code as this uid and can ``exec`` anything
+    itself; what it gains is only the laundering of ancestry. A uid check would add
+    nothing: the socket is 0600 in a 0700 directory, so every peer that can connect
+    already IS this uid. A surface running a source checkout's venv is refused on
+    this route until it is migrated (slice 3) -- an honest failure, never a local fork.
+    """
+    from local_operator.session.runtime.launch import _spawn_interpreter
+
+    if not os.path.isabs(candidate) or not os.access(candidate, os.X_OK):
+        return False
+    try:
+        wanted = os.path.realpath(candidate)
+        return wanted in {
+            os.path.realpath(sys.executable),
+            os.path.realpath(_spawn_interpreter()),
+        }
+    except OSError:
+        return False
+
+
 class Refusal(Exception):
     """A request the host will not act on; ``str(exc)`` is the reason sent back."""
 
@@ -271,12 +306,8 @@ class SessionHost:
         ):
             raise Refusal("the request carries no environment")
         interpreter = request.get("interpreter")
-        if (
-            not isinstance(interpreter, str)
-            or not os.path.isabs(interpreter)
-            or not os.access(interpreter, os.X_OK)
-        ):
-            raise Refusal("the interpreter is not an executable absolute path")
+        if not isinstance(interpreter, str) or not _is_runtime_interpreter(interpreter):
+            raise Refusal("the interpreter is not this install's")
         capture = request.get("capture")
         if not isinstance(capture, str) or not capture:
             raise Refusal("the request names no capture file")
@@ -286,7 +317,14 @@ class SessionHost:
             raise Refusal("the capture file does not exist") from None
         import stat
 
-        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+        # ``hasattr`` IS the platform question (the xplat probe reads it as the
+        # guard): the host is launchd-only, but this module is imported -- and its
+        # AST pins run -- on Linux and Windows CI.
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or not hasattr(os, "getuid")
+            or info.st_uid != os.getuid()
+        ):
             raise Refusal("the capture file is not this account's regular file")
         wants_cap = bool(request.get("has_cap_fd"))
         if wants_cap and len(fds) != 1:
@@ -521,7 +559,11 @@ def main(argv: list[str] | None = None) -> int:
     signal.signal(signal.SIGTERM, request_stop)
     signal.signal(signal.SIGINT, request_stop)
     # A closed terminal must not end the host (it has none, but a hand run has).
-    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    # A no-op HANDLER and not SIG_IGN: an ignored disposition is inherited across
+    # exec, so every runtime would be born ignoring SIGHUP, whereas a handled
+    # signal resets to default in the child. ``process._install_sighup_ignore``
+    # documents deliberately not planting an inheritable ignore (#3222 N-1).
+    signal.signal(signal.SIGHUP, lambda _signum, _frame: None)
     return serve(config_dir(), stop)
 
 

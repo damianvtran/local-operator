@@ -159,6 +159,13 @@ def ensure_host_installed(config_dir: Path) -> HostInstallOutcome:
             observation = launchd.observe_job(label=LABEL, path=path, run=_launchctl)
             if observation.state == launchd.JobState.LIVE:
                 return HostInstallOutcome(True)
+            if observation.state == launchd.JobState.UNKNOWN:
+                # AN UNANSWERED ``launchctl print`` IS NOT A DEAD HOST (#3222 R-4):
+                # under load it times out on a perfectly healthy job, and
+                # ``kickstart -k`` would SIGKILL it and the request in flight.
+                # Declining here costs nothing -- the caller's bounded connect is
+                # the real liveness test and raises honestly if nobody answers.
+                return HostInstallOutcome(True)
             if launchd.kickstart(label=LABEL, path=path, run=_launchctl):
                 return HostInstallOutcome(True)
             # kickstart declined: launchd has forgotten the label (or refused);

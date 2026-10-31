@@ -603,6 +603,16 @@ def _spawn_runtime_hosted(
         initial_model=initial_model,
         model_selection_override=model_selection_override,
     )
+    # A HOST-FORKED RUNTIME IS NOT THE WAKE SUPERVISOR'S CHILD. ``_runtime_env``
+    # stamps the supervisor's ownership token when the supervisor itself engages,
+    # and ``owned_runtimes.sweep`` selects by that env marker, not by parentage --
+    # so a runtime the host forked on a wake's behalf would still be SIGTERMed on a
+    # supervisor stop, undercutting rule R3 (#3222 R-8a). The host's runtimes end
+    # only by their own residency policy or the stop ladder.
+    from local_operator.wakes.owned_runtimes import MARKER_ENVS
+
+    for marker in MARKER_ENVS:
+        env.pop(marker, None)
     handle_fd, capture_path = tempfile.mkstemp(prefix="lop-runtime-", suffix=".log")
     # Created here (0600, by mkstemp) and only NAMED to the host, exactly as
     # ``standby.try_adopt`` is given it: this process stays the capture file's

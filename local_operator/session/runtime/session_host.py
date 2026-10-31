@@ -49,8 +49,9 @@ provenance is preserved.
 NO IMPLICIT FALLBACK ANYWHERE IN THIS FILE. Every failure — platform without a
 supervisor, an installer refusal, a host that never answers, a refusing reply —
 raises :class:`SessionHostUnavailable`, which ``launch`` turns into a
-``RuntimeStartupError`` carrying a keyed sentence. Nothing here imports
-``subprocess`` to start a runtime, and nothing imports ``macos_disclaim``.
+``RuntimeStartupError`` carrying a keyed sentence. Nothing here starts a process:
+``subprocess`` appears only for ``TimeoutExpired``, and nothing imports
+``macos_disclaim``.
 """
 
 from __future__ import annotations
@@ -72,6 +73,8 @@ logger = logging.getLogger(__name__)
 #: reads it (the host forks through its own function, not through ``launch``).
 SPAWN_AUTHORITY_ENV = "LOP_SESSION_HOST"
 
+_TRUE_SPELLINGS = frozenset({"1", "true", "yes", "on"})
+
 AUTHORITY_LOCAL = "local"
 AUTHORITY_HOST = "host"
 
@@ -85,6 +88,11 @@ PROTOCOL_VERSION = 1
 HOST_DIRNAME = "run/session-host"
 SOCKET_NAME = "host.sock"
 LOCK_NAME = "host.lock"
+INSTALL_LOCK_NAME = "install.lock"
+
+#: How long a surface waits its turn at the installer. Sized past one full ladder
+#: (a bootstrap with launchd's own retries) so the waiter normally finds a host.
+INSTALL_LOCK_WAIT_S = 20.0
 
 #: ``sockaddr_un.sun_path`` is 104 bytes on macOS and ``bind`` fails past 103
 #: (measured; ``secrets.protocol.MAX_SOCKET_PATH`` records the same number). The
@@ -147,8 +155,12 @@ def unavailable_sentence(code: str) -> str:
 
 def spawn_authority() -> str:
     """Who forks a runtime in THIS process: ``AUTHORITY_HOST`` or ``AUTHORITY_LOCAL``."""
-    value = os.environ.get(SPAWN_AUTHORITY_ENV, "")
-    return AUTHORITY_HOST if value not in ("", "0", "false", "no", "off") else AUTHORITY_LOCAL
+    # A POSITIVE list, case-insensitive. This switch's unset state is the legacy
+    # (surface-forks) path, and for an opt-in whose DEFAULT is the unsafe path the
+    # safe reading of an unrecognised value is "not opted in": the earlier negative
+    # list sent ``False`` / ``OFF`` / ``No`` to the host route (#3222 R-5).
+    value = os.environ.get(SPAWN_AUTHORITY_ENV, "").strip().lower()
+    return AUTHORITY_HOST if value in _TRUE_SPELLINGS else AUTHORITY_LOCAL
 
 
 # ---------------------------------------------------------------------------
@@ -180,7 +192,10 @@ def socket_path(root: Path) -> Path:
     if len(str(primary)) <= _MAX_SOCKET_PATH:
         return primary
     digest = hashlib.sha256(str(Path(root)).encode("utf-8")).hexdigest()[:12]
-    uid = os.getuid() if hasattr(os, "getuid") else 0
+    if hasattr(os, "getuid"):
+        uid = os.getuid()
+    else:
+        uid = 0
     return Path(tempfile.gettempdir()) / f"lop-session-host-{uid}-{digest}" / SOCKET_NAME
 
 
@@ -334,9 +349,65 @@ def ensure_session_host(root: Path) -> None:
         return
     from local_operator.session.runtime import host_install
 
-    outcome = host_install.ensure_host_installed(Path(root))
+    # ONE COLD START AT A TIME PER STORE, and a re-ping once it is our turn
+    # (#3222 R-4). Two surfaces that both found no host would each run the
+    # installer, and a second ``kickstart -k`` SIGKILLs the host the first just
+    # started -- tearing down the first's in-flight request with a spurious
+    # "unavailable". Serialised, the later surface wakes to a host that answers and
+    # returns without touching launchd. A lock that cannot be taken in time is not
+    # an error: the installer is idempotent, and the bounded connect that follows
+    # decides.
+    guard = _InstallGuard(Path(root))
+    try:
+        guard.acquire(INSTALL_LOCK_WAIT_S)
+        if guard.held and ping(root, timeout_s=1.0):
+            return
+        outcome = host_install.ensure_host_installed(Path(root))
+    finally:
+        guard.release()
     if not outcome.ok:
         raise SessionHostUnavailable(outcome.code, outcome.reason)
+
+
+class _InstallGuard:
+    """A cross-process, bounded, non-blocking-polled lock around the install ladder.
+
+    The same ``LOCK_NB`` poll the wake lock uses (a thread parked in a blocking
+    ``flock`` blocks a sibling's ``close`` on macOS), on a file of its own beside
+    the host's election lock so the two never contend.
+    """
+
+    def __init__(self, root: Path) -> None:
+        self._root = root
+        self._fd: int | None = None
+
+    @property
+    def held(self) -> bool:
+        return self._fd is not None
+
+    def acquire(self, wait_s: float) -> None:
+        from local_operator.secrets.protocol import ensure_runtime_dir
+        from local_operator.wakes.lock import _try_lock
+
+        try:
+            ensure_runtime_dir(host_dir(self._root))
+            fd = os.open(host_dir(self._root) / INSTALL_LOCK_NAME, os.O_RDWR | os.O_CREAT, 0o600)
+        except OSError:
+            return
+        deadline = time.monotonic() + wait_s
+        while True:
+            if _try_lock(fd):
+                self._fd = fd
+                return
+            if time.monotonic() >= deadline:
+                os.close(fd)
+                return
+            time.sleep(0.1)
+
+    def release(self) -> None:
+        if self._fd is not None:
+            os.close(self._fd)
+            self._fd = None
 
 
 def _connect_with_deadline(root: Path, deadline_s: float) -> socket.socket:
