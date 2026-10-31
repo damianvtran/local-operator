@@ -58,10 +58,6 @@ def test_shipped_wire_namespaces_exist() -> None:
         "wire.errors.media",
         "wire.errors.sdk_spec",
         "wire.errors.sdk_startup",
-        # The session host's engage refusals (design-surface-independence slice 2):
-        # an English-only child of ``wire.errors``, the ``sdk_startup`` shape, so no
-        # audited locale hash moves; its seven translations are allowanced.
-        "wire.errors.session_host",
         "wire.errors.settings",
         "wire.exec",
         "wire.incidents",

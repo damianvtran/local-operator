@@ -8,7 +8,7 @@ WHAT THIS FILE PROVES, by execution rather than by reading:
   ladder (installer refuses, platform unsupported, nobody listening, host answers
   "no"). Every spawn primitive — ``subprocess.Popen`` itself, ``spawn_disclaimed``
   at both import sites, and the local route — is replaced by a counter that FAILS
-  the test if reached. The assertion is a keyed ``RuntimeStartupError`` and a
+  the test if reached. The assertion is a typed ``SessionHostStartupError`` and a
   count of zero. :func:`test_the_r4_check_goes_red_when_a_local_fallback_is_added`
   runs the SAME check against a mutant dispatcher that falls back, and requires it
   to fail: a passing test proves nothing until it can fail.
@@ -53,6 +53,7 @@ from local_operator.session.runtime import (
 )
 from local_operator.session.runtime.launch import (
     RuntimeStartupError,
+    SessionHostStartupError,
     WarmErrand,
     engage_runtime,
 )
@@ -194,7 +195,9 @@ def _engage(tmp_path: Path) -> Any:
     )
 
 
-def _assert_engage_refuses_without_forking(tmp_path: Path, forks: _Forks) -> RuntimeStartupError:
+def _assert_engage_refuses_without_forking(
+    tmp_path: Path, forks: _Forks
+) -> SessionHostStartupError:
     """The R4 check itself, shared with its negative control."""
     with pytest.raises(RuntimeStartupError) as raised:
         _engage(tmp_path)
@@ -202,9 +205,11 @@ def _assert_engage_refuses_without_forking(tmp_path: Path, forks: _Forks) -> Run
         f"a host-absent engage forked: Popen={forks.popen} disclaimed={forks.disclaimed} "
         f"local={forks.local}"
     )
-    # A KEYED sentence, in the active locale, vetted for display (``actionable``).
-    assert raised.value.actionable
-    assert raised.value.actionable == str(raised.value)
+    # Typed, and carrying NO user-facing sentence: the cause is host plumbing, and the
+    # surfaces already render their own localised generic line for an un-vetted
+    # startup failure (so no catalogue key exists for it).
+    assert isinstance(raised.value, SessionHostStartupError)
+    assert raised.value.actionable == ""
     return raised.value
 
 
@@ -235,7 +240,7 @@ def test_installer_refusal_never_forks_locally(
 
     monkeypatch.setattr(host_install, "ensure_host_installed", refusing)
     error = _assert_engage_refuses_without_forking(tmp_path, forks)
-    assert session_host.unavailable_sentence("unavailable") == str(error)
+    assert error.code == "unavailable"
     assert len(asked) == 1, "one engage must not ask the installer twice"
 
 
@@ -246,7 +251,7 @@ def test_an_unsupported_platform_never_forks_locally(
     # The REAL installer, with no supervisor on this "machine".
     monkeypatch.setattr(supervisors, "supervisor", lambda: None)
     error = _assert_engage_refuses_without_forking(tmp_path, forks)
-    assert session_host.unavailable_sentence("unsupported") == str(error)
+    assert error.code == "unsupported"
 
 
 def test_a_host_nobody_answers_never_forks_locally(
@@ -262,7 +267,7 @@ def test_a_host_nobody_answers_never_forks_locally(
     )
     started = time.monotonic()
     error = _assert_engage_refuses_without_forking(tmp_path, forks)
-    assert session_host.unavailable_sentence("unavailable") == str(error)
+    assert error.code == "unavailable"
     # Bounded: the connect ladder is inside the engage's own deadline.
     assert time.monotonic() - started < 6.0
 
@@ -280,7 +285,7 @@ def test_a_host_that_refuses_the_fork_never_forks_locally(
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(rig.root))
     forks = _arm_fork_counters(monkeypatch)
     error = _assert_engage_refuses_without_forking(rig.root, forks)
-    assert session_host.unavailable_sentence("refused") == str(error)
+    assert error.code == "refused"
     assert calls == ["r4session0001"], "exactly one ask reached the host, and it was not retried"
 
 

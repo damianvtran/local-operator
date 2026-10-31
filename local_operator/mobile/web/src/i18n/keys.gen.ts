@@ -617,9 +617,6 @@ export type MessageParams = {
   "wire.errors.sdk_startup.attach_runtime_missing": { "resume": string };
   "wire.errors.sdk_startup.profile_attach_failed": { "profile": string };
   "wire.errors.sdk_startup.tool_inventory_mismatch": { "spec_tools": string; "policy_tools": string };
-  "wire.errors.session_host.refused": undefined;
-  "wire.errors.session_host.unavailable": undefined;
-  "wire.errors.session_host.unsupported": undefined;
   "wire.errors.settings.config_retrieve_failed": { "error": string };
   "wire.errors.settings.config_unreadable": undefined;
   "wire.errors.settings.config_update_failed": { "error": string };

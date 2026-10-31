@@ -100,7 +100,7 @@ def render_plist(config_dir: Path) -> dict[str, object]:
 
 @dataclass(frozen=True)
 class HostInstallOutcome:
-    """Never an exception: the caller turns ``code`` into a keyed sentence.
+    """Never an exception; ``code`` is a log/test token, not user copy.
 
     ``code`` is ``""`` on success, else ``unsupported`` (no launchd here) or
     ``unavailable`` (launchd declined: sandboxed home, not the default store, a

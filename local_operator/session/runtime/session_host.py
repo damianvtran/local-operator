@@ -48,8 +48,8 @@ provenance is preserved.
 
 NO IMPLICIT FALLBACK ANYWHERE IN THIS FILE. Every failure — platform without a
 supervisor, an installer refusal, a host that never answers, a refusing reply —
-raises :class:`SessionHostUnavailable`, which ``launch`` turns into a
-``RuntimeStartupError`` carrying a keyed sentence. Nothing here starts a process:
+raises :class:`SessionHostUnavailable`, which ``launch`` turns into a typed
+``SessionHostStartupError`` (a ``RuntimeStartupError``). Nothing here starts a process:
 ``subprocess`` appears only for ``TimeoutExpired``, and nothing imports
 ``macos_disclaim``.
 """
@@ -123,34 +123,18 @@ DEATH_REPORT_WINDOW_S = 120.0
 class SessionHostUnavailable(RuntimeError):
     """The session host could not be reached or declined; nothing was forked.
 
-    ``code`` names which keyed sentence applies (``unsupported`` / ``unavailable``
-    / ``refused``) so the caller renders copy in the active locale instead of
-    this module carrying English; ``detail`` is for the log only.
+    ``code`` is the machine-readable cause (``unsupported`` / ``unavailable`` /
+    ``refused``); ``detail`` is for the log only. NEITHER IS USER COPY: this is
+    host plumbing, and a person is told by the surface's own existing generic
+    "the runtime is unavailable" sentence (see ``launch.SessionHostStartupError``).
+    No catalogue key exists for it on purpose -- a sentence nobody can act on
+    differently from the generic one is not worth seven translations.
     """
 
     def __init__(self, code: str, detail: str = "") -> None:
         super().__init__(f"session host {code}: {detail}" if detail else f"session host {code}")
         self.code = code
         self.detail = detail
-
-
-def unavailable_sentence(code: str) -> str:
-    """The keyed, localised sentence for a :class:`SessionHostUnavailable` ``code``.
-
-    Rendered here so ``launch`` stays free of copy. The codes are a closed set
-    (``unsupported`` / ``unavailable`` / ``refused``); an unknown one reads as
-    ``unavailable`` — the safe wording, because it promises nothing about the
-    cause and says nothing was started.
-    """
-    from local_operator.i18n.keys import wire_errors_session_host as keys
-    from local_operator.i18n.text import tr
-
-    text = tr("wire.errors.session_host")
-    if code == "unsupported":
-        return text(keys.unsupported())
-    if code == "refused":
-        return text(keys.refused())
-    return text(keys.unavailable())
 
 
 def spawn_authority() -> str:
