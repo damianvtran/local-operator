@@ -143,6 +143,10 @@ describe("the phone's bridge tool row", () => {
 		for (const n of quiet) {
 			expect(n.className).toContain("text-warning");
 			expect(n.className).not.toContain("bg-warning-wash");
+			/* Design round 4, D12: the 40% narrow cap belongs to the long inbox
+			   sentence alone. These two words fit 55% at every phone width, so
+			   capping them cut `awaiting accepta…` / `refused · not_mem…`. */
+			expect(n.className).not.toContain("@max-[24rem]");
 		}
 		expect(quiet[1].querySelector('svg[data-icon="hourglass"]')).toBeTruthy();
 	});
@@ -244,9 +248,11 @@ describe("the phone's bridge tool row", () => {
 		const word = [...inboxChip.querySelectorAll("span")].find((n) => n.textContent === "not posted to a conversation")!;
 		expect(word.className).toContain("@max-[18rem]:sr-only");
 		/* D11: on 360/390 rows the chip cap drops so the freed width reaches
-		   the summary. */
+		   the summary - for the inbox chip only (design round 4, D12). */
 		expect(inboxChip.className).toContain("@max-[24rem]:max-w-[40%]");
 		const refusedChip = refused.querySelector("[data-bridge-outcome]")!;
+		/* D12: a verdict chip keeps 55%, so the code is never cut mid-token. */
+		expect(refusedChip.className).not.toContain("@max-[24rem]");
 		const parts = [...refusedChip.children].map((n) => [n.textContent, n.className]);
 		/* `refused` has no mark, so its word never collapses; only the code sheds. */
 		expect(parts).toEqual([
@@ -295,6 +301,26 @@ describe("the phone's bridge tool row", () => {
 		const name = container.querySelector("button")!.textContent ?? "";
 		expect(name.match(/refused/g)?.length).toBe(1);
 		expect(name).not.toMatch(/· …/);
+	});
+
+	it("strips a cap that landed in the spaces after a single-segment outcome", () => {
+		/* Review round 4, R10: this is the shape `.trimEnd()` guards - the cap
+		   sits in the spaces right after the outcome WORD, so the untrimmed
+		   stub (`not posted to a conversation `) is no longer a prefix of the
+		   outcome and the caveat would stay in the summary too. A two-segment
+		   refusal matches either way: its text continues ` · <code>`, so even
+		   the untrimmed stub is a prefix. */
+		const { container } = render(
+			<ToolRow
+				entry={entry(
+					{ summary: "Sent to a teammate · not posted to a conversation   …" },
+					{ ...POST, op: "send", outcome: "inbox_only" },
+				)}
+			/>,
+		);
+		expect(screen.getByText("Sent to a teammate")).toBeTruthy();
+		const name = container.querySelector("button")!.textContent ?? "";
+		expect(name.match(/posted to a conversation/g)?.length).toBe(1);
 	});
 
 	it("keeps a summary whose last segment is not the outcome", () => {

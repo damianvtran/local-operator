@@ -247,11 +247,17 @@ function bridgeSummary(summary: string, outcome: { text: string; word: string } 
 	   empty or a prefix of the outcome (QA round 3, Q6): the innermost match
 	   is wrong when the code starts like the word (`refused · r…` matched `r`
 	   and kept `· refused`), and an empty last stub (`· refused · …`) must not
-	   stop the walk. Stop once a tail is longer than the outcome itself. */
+	   stop the walk. The walk carries no length bound: separators strictly
+	   decrease (so it terminates) and an OUTER tail is longer than the inner
+	   one, so an outer tail that is a prefix of the outcome proves the inner
+	   tail was not longer than the outcome either - the guard review round 4
+	   (R10) watched survive mutation was dead weight, not a rule. */
 	let cut = -1;
 	for (let sep = capped.lastIndexOf(" · "); sep >= 0; sep = capped.lastIndexOf(" · ", sep - 1)) {
+		/* The cap can land in the run of spaces after the outcome word, leaving
+		   `refused   ` to compare against `refused · not_member`; the trim is
+		   what makes that stub read as its own word (R10). */
 		const tail = capped.slice(sep + 3).trimEnd();
-		if (tail.length > outcome.text.length) break;
 		if (tail === "" || outcome.text.startsWith(tail)) cut = sep;
 	}
 	return cut >= 0 ? text.slice(0, cut) : text;
@@ -476,12 +482,16 @@ export function ToolRow({
 					<span
 						data-bridge-outcome={facts?.outcome ?? undefined}
 						className={cn(
-							/* Below a 24rem row (360/390 phones) the cap drops to 40%: the
-							   chip has auto basis and the summary flex-1 (basis 0), so the
-							   width D10 freed went to the long inbox chip, not the summary
-							   (design round 3, D11 / QA O3). The chip still shows its mark
-							   and the start of its word; the full sentence is one tap away. */
-							"min-w-0 max-w-[55%] shrink truncate rounded-sm px-1 text-mono-sm @max-[24rem]:max-w-[40%]",
+							"min-w-0 max-w-[55%] shrink truncate rounded-sm px-1 text-mono-sm",
+							/* Below a 24rem row (360/390 phones) the cap drops to 40% for the
+							   INBOX chip only: it has auto basis and the summary flex-1
+							   (basis 0), so the width D10/D3 freed otherwise went to its long
+							   sentence, not the summary (design round 3, D11 / QA O3).
+							   A verdict chip keeps the full 55%: its word and code fit there
+							   at every phone width, and the refusal code is the row's one
+							   technical fact - capping it to buy the summary 2-5px cut
+							   `not_member` mid-token instead (design round 4, D12). */
+							outcome.tone === "warning" && "@max-[24rem]:max-w-[40%]",
 							outcome.tone === "warning" && "border border-warning-border/40 bg-warning-wash text-warning",
 							outcome.tone === "danger" && "border border-danger-border/40 bg-danger-wash text-danger",
 							outcome.tone === "pending" && "text-warning",
