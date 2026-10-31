@@ -148,11 +148,16 @@ async def test_output_cap_keeps_utf8_prefix_and_original_byte_count() -> None:
 
 @pytest.mark.asyncio
 async def test_target_timeout_returns_partial_output_not_a_transport_error() -> None:
-    result = await _provider().run_command(_params("printf before; sleep 30", timeout_s=2))
+    # exec removes the intermediate shell: some shells emit their own job-
+    # termination diagnostic while a killed child exits, which is valid stderr
+    # but would make an assertion about our explicit output platform-dependent.
+    result = await _provider().run_command(
+        _params("printf before; printf warning >&2; exec sleep 30", timeout_s=2)
+    )
     assert result.exit_code is None
     assert result.timed_out
     assert result.stdout == "before"
-    assert result.stderr == ""
+    assert result.stderr == "warning"
 
 
 @pytest.mark.asyncio
