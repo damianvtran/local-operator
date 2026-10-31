@@ -28,3 +28,7 @@ each decision was made (PROTOCOL.md A3).
 
 Every legit message in all 12 runs has at least 3 valid trials, so the later
 ≥3-valid-trial floors on both arms of the newly-blocked rule change no result.
+
+A `hold` block is not the same as a `bounce` block: read the false-block column split
+by disposition, and see
+[What a false block means over time](../../README.md#what-a-false-block-means-over-time).
