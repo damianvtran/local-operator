@@ -215,6 +215,35 @@ AGENT_Q = (
 )
 
 
+EP = "bep_0123456789abcdef0123456789abcdef"
+DIRECTORY = [
+    {
+        "account_id": "acc_2",
+        "display_label": "Damian",
+        "agent": {
+            "endpoint_id": EP,
+            "name": "Aida",
+            "state": "active",
+            "avatar_url": f"/v1/messaging/endpoints/{EP}/avatar?v=fedcba9876543210",
+        },
+    },
+    {
+        "account_id": "acc_3",
+        "display_label": "Bea",
+        "agent": {
+            "endpoint_id": "bep_bea",
+            "name": "Otto",
+            "state": "active",
+            "avatar_url": "/v1/messaging/endpoints/bep_bea/avatar?v=b2b2b2b2b2b2b2b2",
+        },
+    },
+]
+
+
+def _without_directory(calls):
+    return [c[1] for c in calls if not c[1].startswith("/v1/messaging/directory?")]
+
+
 def _blue_jpeg() -> bytes:
     out = io.BytesIO()
     Image.new("RGB", (64, 64), (30, 60, 210)).save(out, format="JPEG")
@@ -223,25 +252,50 @@ def _blue_jpeg() -> bytes:
 
 def test_agent_composite_reads_only_the_endpoint_route(proxy):
     client, calls, state = proxy
-    state.update(serve_type="image/jpeg", serve=_blue_jpeg())
-    image = _png(client.get(f"{URL}?{AGENT_Q}"))
+    state.update(serve_type="image/jpeg", serve=_blue_jpeg(), directory=DIRECTORY)
+    response = client.get(f"{URL}?{AGENT_Q}")
+    image = _png(response)
     pixel = image.getpixel((16, 32))
     assert isinstance(pixel, tuple)
     assert pixel[:3] == pytest.approx((30, 60, 210), abs=16)
     assert [c[1] for c in calls] == [
+        "/v1/messaging/directory?tenant_id=tenant_a",
         "/v1/messaging/endpoints/bep_0123456789abcdef0123456789abcdef/avatar"
-        "?v=fedcba9876543210&size=64"
+        "?v=fedcba9876543210&size=64",
     ]
+    # The agent's own picture was drawn: no fallback signal.
+    assert "x-avatar-fallback" not in response.headers
 
 
 def test_agent_composite_falls_back_to_the_glyph_on_a_stale_version(proxy):
     client, calls, state = proxy
+    state["directory"] = DIRECTORY
     glyph = client.get(f"{URL}?{BASE_Q.replace('kind=person', 'kind=person_agent')}")
-    state["error"] = (404, "not_found")
+    assert "x-avatar-fallback" not in glyph.headers  # no picture was asked for
+    state["refuse_path"] = lambda path: (404, "not_found") if "/avatar?" in path else None
     fallback = client.get(f"{URL}?{AGENT_Q}")
     _png(fallback)
     assert fallback.content == glyph.content
-    assert len(calls) == 1
+    # F1: the desktop is told this is the glyph standing in for a picture.
+    assert fallback.headers["x-avatar-fallback"] == "glyph"
+    assert len(_without_directory(calls)) == 1
+
+
+def test_a_composite_for_a_naming_bs_endpoint_gets_as_glyph(proxy):
+    """Security review round 1, S-2. Sender acc_2's composite names Bea's agent
+    endpoint (and its real current version): core finds that endpoint is not
+    acc_2's in the tenant directory, draws acc_2's glyph, never reads Bea's
+    picture, and signals the fallback."""
+
+    client, calls, state = proxy
+    state.update(serve_type="image/jpeg", serve=_blue_jpeg(), directory=DIRECTORY)
+    glyph = client.get(f"{URL}?{BASE_Q.replace('kind=person', 'kind=person_agent')}")
+    crossed = AGENT_Q.replace(EP, "bep_bea").replace("fedcba9876543210", "b2b2b2b2b2b2b2b2")
+    response = client.get(f"{URL}?{crossed}")
+    _png(response)
+    assert response.content == glyph.content
+    assert response.headers["x-avatar-fallback"] == "glyph"
+    assert _without_directory(calls) == [], "B's picture was read for A"
 
 
 @pytest.mark.parametrize(

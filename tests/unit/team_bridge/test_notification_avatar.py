@@ -750,7 +750,33 @@ def test_undecodable_agent_picture_falls_back_to_the_glyph(bad):
     assert _agent(agent_picture=bad) == _agent()
 
 
-def _endpoint_client(tmp_path, upstream):
+def _directory(account="acc_2", endpoint="bep_1", v="fedcba9876543210", url=True):
+    """The hub's tenant directory, as ``TeamBridgeClient.directory`` reads it."""
+
+    import httpx
+
+    agent: dict[str, Any] = {"endpoint_id": endpoint, "name": "Aida", "state": "active"}
+    if url:
+        agent["avatar_url"] = f"/v1/messaging/endpoints/{endpoint}/avatar?v={v}"
+    members = [{"account_id": account, "display_label": "Damian", "agent": agent}]
+    return httpx.Response(200, json={"msg": "ok", "result": {"members": members}})
+
+
+def _endpoint_client(tmp_path, upstream, directory=None):
+    """``upstream`` serves the image routes; the directory read is answered by
+    ``directory`` (default: acc_2's agent bep_1 publishes fedcba98...)."""
+
+    answer = directory or _directory
+
+    def route(request):
+        if request.url.path == "/v1/messaging/directory":
+            return answer()
+        return upstream(request)
+
+    return _endpoint_client_raw(tmp_path, route)
+
+
+def _endpoint_client_raw(tmp_path, upstream):
     import httpx
 
     from local_operator.team_bridge.client import TeamBridgeClient
@@ -843,6 +869,8 @@ async def test_agent_banner_still_refuses_a_changed_login(tmp_path, monkeypatch)
     holder: dict[str, Any] = {}
 
     def upstream(request):
+        # The login changes during the PICTURE read (after the directory bound
+        # the endpoint), which is the window the fallback must not swallow.
         holder["store"].incarnation = "login-b"
         return httpx.Response(200, content=_jpeg(), headers={"content-type": "image/jpeg"})
 
@@ -863,7 +891,7 @@ async def test_agent_banner_still_refuses_a_changed_login(tmp_path, monkeypatch)
     ],
 )
 async def test_agent_picture_request_is_closed(tmp_path, kind, endpoint):
-    client = _endpoint_client(tmp_path, lambda _r: pytest.fail("no read"))
+    client = _endpoint_client_raw(tmp_path, lambda _r: pytest.fail("no read"))
     with pytest.raises(ValueError):
         await client.notification_avatar(
             "acc_2",
@@ -876,3 +904,127 @@ async def test_agent_picture_request_is_closed(tmp_path, kind, endpoint):
             expected_account_id="acc_1",
             endpoint=endpoint,
         )
+
+
+# -- Security review round 1, S-2: the endpoint is bound to the SENDER --------
+
+
+def _blue_picture_upstream(reads):
+    import httpx
+
+    def upstream(request):
+        reads.append(request.url.path)
+        return httpx.Response(
+            200, content=_jpeg((30, 60, 210)), headers={"content-type": "image/jpeg"}
+        )
+
+    return upstream
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "directory",
+    [
+        # B's agent: the endpoint belongs to ANOTHER account in the directory.
+        lambda: _directory(account="acc_b", endpoint="bep_1"),
+        # A's agent is a different endpoint than the one named.
+        lambda: _directory(account="acc_2", endpoint="bep_other"),
+        # Right endpoint, but the hub publishes a different version.
+        lambda: _directory(v="0000000000000000"),
+        # Right endpoint, no published picture at all.
+        lambda: _directory(url=False),
+    ],
+)
+async def test_a_composite_for_a_never_wears_another_endpoints_picture(
+    tmp_path, monkeypatch, directory
+):
+    """Sender A naming an endpoint the directory does not publish for A gets
+    A's glyph, and B's picture is never even read."""
+
+    monkeypatch.setattr(avatar_cache, "AVATAR_CACHE", avatar_cache.AvatarCache())
+    reads: list[str] = []
+    fell_back: list[bool] = []
+    client = _endpoint_client(tmp_path, _blue_picture_upstream(reads), directory)
+    data = await client.notification_avatar(
+        "acc_2",
+        tenant_id="tenant_a",
+        kind="person_agent",
+        theme="light",
+        size=64,
+        initials="DT",
+        v=None,
+        expected_account_id="acc_1",
+        endpoint=("bep_1", "fedcba9876543210"),
+        on_fallback=lambda: fell_back.append(True),
+    )
+    assert reads == [], "an unbound endpoint's picture was read"
+    assert fell_back == [True]
+    assert data == na.compose(
+        na.Variant("person_agent", "light", 64, "DT"),
+        origin=client._base_url,
+        account_id="acc_2",
+        photo=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_directory_draws_the_glyph(tmp_path, monkeypatch):
+    import httpx
+
+    monkeypatch.setattr(avatar_cache, "AVATAR_CACHE", avatar_cache.AvatarCache())
+    reads: list[str] = []
+    client = _endpoint_client(
+        tmp_path,
+        _blue_picture_upstream(reads),
+        lambda: httpx.Response(503, json={"code": "messaging_unavailable", "error": "x"}),
+    )
+    data = await _agent_banner(client)
+    assert reads == []
+    assert data == na.compose(
+        na.Variant("person_agent", "light", 64, "DT"),
+        origin=client._base_url,
+        account_id="acc_2",
+        photo=None,
+    )
+
+
+# -- Code review round 1, F1: the fallback is signalled ----------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "serve,expect_fallback",
+    [("blue", False), ("404", True), ("garbage-jpeg", True)],
+)
+async def test_fallback_is_signalled_only_when_the_glyph_replaced_a_picture(
+    tmp_path, monkeypatch, serve, expect_fallback
+):
+    import httpx
+
+    monkeypatch.setattr(avatar_cache, "AVATAR_CACHE", avatar_cache.AvatarCache())
+
+    def upstream(request):
+        if serve == "404":
+            return httpx.Response(404, json={"code": "not_found", "error": "x"})
+        if serve == "garbage-jpeg":
+            # Passes the type sniff, fails the decode: the compositor's arm.
+            return httpx.Response(
+                200, content=b"\xff\xd8\xff" + b"\0" * 64, headers={"content-type": "image/jpeg"}
+            )
+        return httpx.Response(200, content=_jpeg(), headers={"content-type": "image/jpeg"})
+
+    fell_back: list[bool] = []
+    client = _endpoint_client(tmp_path, upstream)
+    await client.notification_avatar(
+        "acc_2",
+        tenant_id="tenant_a",
+        kind="person_agent",
+        theme="light",
+        size=64,
+        initials="DT",
+        v=None,
+        expected_account_id="acc_1",
+        endpoint=("bep_1", "fedcba9876543210"),
+        on_fallback=lambda: fell_back.append(True),
+    )
+    assert fell_back == ([True] if expect_fallback else [])
