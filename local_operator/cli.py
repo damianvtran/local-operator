@@ -1243,18 +1243,6 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # session without cmux, over the same control-socket + registry substrate
     # the mobile stack already uses (loopback + 0600 record => same-account
     # trust boundary). See guides/peer-messaging.
-    # The Team Bridge avatar surface: an agent-callable path beside the status
-    # boundary's automatic reconcile (local_operator/team_bridge/cli.py).
-    from local_operator.team_bridge.cli import (
-        configure_parser as configure_team_bridge_parser,
-    )
-
-    team_bridge_parser = subparsers.add_parser(
-        "team-bridge",
-        # i18n: ignore developer CLI help (extraction tranche tracked)
-        help="Publish and inspect the chief of staff's picture on the bridge",
-    )
-    configure_team_bridge_parser(team_bridge_parser)
     send_parser = subparsers.add_parser(
         "send",
         help=_se.send().envelope(locale=help_locale)["text"],
@@ -17373,10 +17361,6 @@ def main() -> int:
             from local_operator.memory_cli import main as memory_main
 
             return memory_main(args)
-        if args.subcommand == "team-bridge":
-            from local_operator.team_bridge.cli import main as team_bridge_main
-
-            return team_bridge_main(args)
         if args.subcommand == "credential":
             if args.credential_command == "update":
                 return credential_update_command(args)
@@ -17669,6 +17653,10 @@ def main() -> int:
 
             return tunnel_main(args)
         elif args.subcommand == "team-bridge":
+            if getattr(args, "team_bridge_command", None) == "avatar":
+                from local_operator.team_bridge.cli import main as team_bridge_avatar
+
+                return team_bridge_avatar(args)
             if getattr(args, "team_bridge_command", None) == "setup":
                 from local_operator.team_bridge.setup_cli import (
                     main as team_bridge_setup,

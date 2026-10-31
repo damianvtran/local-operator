@@ -36,46 +36,6 @@ from local_operator.team_bridge import avatar_publish
 ACTIONS = ("status", "publish", "clear")
 
 
-def configure_parser(parser: argparse.ArgumentParser) -> None:
-    """Attach ``avatar`` and its three actions to the ``team-bridge`` parser."""
-
-    actions = parser.add_subparsers(dest="team_bridge_command", required=True)
-    avatar = actions.add_parser(
-        "avatar",  # i18n: ignore CLI command name
-        # i18n: ignore developer CLI help (extraction tranche tracked)
-        help="The chief of staff's picture as teammates see it on the bridge",
-    )
-    avatar_actions = avatar.add_subparsers(dest="avatar_command", required=True)
-    avatar_actions.add_parser(
-        "status",
-        # i18n: ignore developer CLI help (extraction tranche tracked)
-        help="What the hub holds and what this machine would publish",
-    )
-    avatar_actions.add_parser(
-        "publish",
-        # i18n: ignore developer CLI help (extraction tranche tracked)
-        help="Publish this machine's picture now, whatever the hub holds",
-    )
-    avatar_actions.add_parser(
-        "clear",
-        # i18n: ignore developer CLI help (extraction tranche tracked)
-        help="Remove the hub's copy; local agent files are untouched",
-    )
-    for action in avatar_actions.choices.values():
-        action.add_argument(
-            "--json",
-            action="store_true",
-            # i18n: ignore developer CLI help (extraction tranche tracked)
-            help="Print the operation's answer as JSON",
-        )
-        action.add_argument(
-            "--tenant",
-            default=None,
-            # i18n: ignore developer CLI help (extraction tranche tracked)
-            help="Organization id; defaults to the one this machine selected",
-        )
-
-
 def main(args: argparse.Namespace) -> int:
     """Run one avatar command and print its answer. Returns the exit code."""
 
@@ -92,6 +52,14 @@ def main(args: argparse.Namespace) -> int:
     return 0 if answer.get("ok", True) else 1
 
 
+def _config_dir() -> Any:
+    """The config root this command reads. A named seam: tests inject one."""
+
+    from local_operator.paths import config_dir as resolve_config_dir
+
+    return resolve_config_dir()
+
+
 def _client_for(root: Any) -> Any:
     """The bridge client this command uses. A named seam: tests inject a fake."""
 
@@ -101,29 +69,41 @@ def _client_for(root: Any) -> Any:
 
 
 async def _run(args: argparse.Namespace) -> dict[str, Any]:
-    from local_operator.paths import config_dir as resolve_config_dir
-
-    root = resolve_config_dir()
+    root = _config_dir()
     client = _client_for(root)
-    tenant_id = args.tenant
+    # ONE status read for the whole command, made with ONE resolved access
+    # record: reading it twice let the tenant selection and the write run under
+    # two different logins, and a pin that compares a value with itself proves
+    # nothing (review R1-S4). The record below is the one every later call gets.
+    access = await client.current_access()
+    payload = await client.status(access=access)
+    tenant_id = getattr(args, "tenant", None)
     if tenant_id is None:
         # The row every surface would select for this machine: the same rule the
         # status discipline uses, so the CLI cannot act on a different
         # organization than the one the app is showing.
         from local_operator.team_bridge.client import selected_tenant_id
 
-        tenant_id = selected_tenant_id(await client.status())
+        tenant_id = selected_tenant_id(payload)
         if tenant_id is None:
             return {"ok": False, "action": "none", "detail": "no organization is enrolled"}
     action = args.avatar_command
     if action == "status":
-        return _report("status", avatar_publish.plan_avatar(await client.status(), tenant_id, root))
+        return _report("status", avatar_publish.plan_avatar(payload, tenant_id, root))
     if action == "publish":
         return _report(
-            "publish", await avatar_publish.publish_agent_avatar(client, tenant_id, root)
+            "publish",
+            await avatar_publish.publish_agent_avatar(
+                client, tenant_id, root, access=access, status=payload
+            ),
         )
     if action == "clear":
-        return _report("clear", await avatar_publish.clear_agent_avatar(client, tenant_id))
+        return _report(
+            "clear",
+            await avatar_publish.clear_agent_avatar(
+                client, tenant_id, access=access, status=payload
+            ),
+        )
     raise ValueError(f"unknown avatar action: {action}")
 
 
@@ -166,4 +146,4 @@ def _sentence(answer: dict[str, Any]) -> str:
     )
 
 
-__all__ = ["ACTIONS", "configure_parser", "main"]
+__all__ = ["ACTIONS", "main"]

@@ -668,9 +668,6 @@ ENDPOINT_AVATAR_MIME_TYPES = (*ATTACHMENT_MIME_TYPES, "image/webp")
 #: bound exists so a hostile or broken hub cannot make a client trust an
 #: unbounded body.
 AVATAR_RESULT_MAX_BYTES = 64 * 1024
-#: The hub's source digest grammar: what ``X-Source-SHA256`` carries and what the
-#: status answer echoes back for comparison.
-_SOURCE_SHA256 = re.compile(r"[0-9a-f]{64}")
 #: An endpoint id is the hub's own short opaque token. Allowing only this
 #: alphabet is what keeps one from reshaping the upstream path.
 _ENDPOINT_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
@@ -1417,6 +1414,8 @@ class TeamBridgeClient:
         accept: str | None = None,
         files: Mapping[str, tuple[str, bytes, str]] | None = None,
         extra_headers: Mapping[str, str] | None = None,
+        oversize_code: str = "attachment_too_large",
+        oversize_sentence: str = _OVERSIZE_ATTACHMENT_SENTENCE,
     ) -> httpx.Response:
         # Every hub request in this class ends here, so the owner-audit path
         # gate lives here: no caller can reach `/agents/owned` by spelling the
@@ -1432,11 +1431,14 @@ class TeamBridgeClient:
             transport=self._transport,
             follow_redirects=False,
         ) as http:
-            headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
-            # The endpoint-avatar PUT carries its source digest in a header of its
-            # own; nothing else here sets one, so this is the single seam for it.
+            headers = {"Accept": "application/json"}
+            # Caller-supplied headers FIRST, so the pinned bearer below always
+            # wins: merged the other way round this seam replaced the credential
+            # (measured, review R1-S6), and a token that can be shadowed by a
+            # caller is not a pin.
             if extra_headers:
                 headers.update(extra_headers)
+            headers["Authorization"] = f"Bearer {token}"
             if if_none_match is not None:
                 headers["If-None-Match"] = if_none_match
             # Per-call synchronous authority runs after client/OAuth awaits,
@@ -1461,8 +1463,18 @@ class TeamBridgeClient:
                 # "unreachable"). Asking for identity also makes the cap
                 # measure wire bytes, so a compressed bomb cannot slip under it.
                 headers["Accept-Encoding"] = "identity"
+                # ``files``/``content`` ride the streamed request too. Leaving
+                # them out sent `content-length: 0` for a bounded multipart
+                # upload — an EMPTY picture the hub would store as nothing
+                # (measured by the security reviewer, review R1-S1) — so the
+                # body a bounded request carries is the body it declares.
                 async with http.stream(
-                    method, self._base_url + path, params=params, headers=headers
+                    method,
+                    self._base_url + path,
+                    params=params,
+                    headers=headers,
+                    files=files,
+                    content=content,
                 ) as streamed:
                     # Avatar reads need a hard allocation bound as well as a
                     # decoded-size bound. Refuse an ignored identity request
@@ -1482,9 +1494,13 @@ class TeamBridgeClient:
                     async for chunk in streamed.aiter_bytes():
                         size += len(chunk)
                         if size > max_response_bytes:
+                            # The class is the CALLER's: a byte read over its
+                            # image ceiling is an oversized attachment, while an
+                            # oversized JSON answer is an invalid response. One
+                            # shared reader, one code per contract.
                             raise BridgeRefusal(
-                                "attachment_too_large",
-                                _OVERSIZE_ATTACHMENT_SENTENCE,
+                                oversize_code,
+                                oversize_sentence,
                                 http_status=502,
                             )
                         chunks.append(chunk)
@@ -1589,6 +1605,8 @@ class TeamBridgeClient:
         pre_http_guard: Callable[[], None] | None = None,
         files: Mapping[str, tuple[str, bytes, str]] | None = None,
         extra_headers: Mapping[str, str] | None = None,
+        oversize_code: str = "attachment_too_large",
+        oversize_sentence: str = _OVERSIZE_ATTACHMENT_SENTENCE,
     ) -> httpx.Response:
         """Resolve, send, refresh-once-on-401: the response, refusals UNMAPPED.
 
@@ -1618,6 +1636,8 @@ class TeamBridgeClient:
                 pre_http_guard=pre_http_guard,
                 files=files,
                 extra_headers=extra_headers,
+                oversize_code=oversize_code,
+                oversize_sentence=oversize_sentence,
             )
         except httpx.HTTPError as failure:
             raise BridgeUnreachable() from failure
@@ -1636,6 +1656,8 @@ class TeamBridgeClient:
                     pre_http_guard=pre_http_guard,
                     files=files,
                     extra_headers=extra_headers,
+                    oversize_code=oversize_code,
+                    oversize_sentence=oversize_sentence,
                 )
             except httpx.HTTPError as failure:
                 raise BridgeUnreachable() from failure
@@ -3889,8 +3911,15 @@ class TeamBridgeClient:
                 http_status=413,
                 details={"limit_bytes": AVATAR_MAX_BYTES},
             )
-        if _SOURCE_SHA256.fullmatch(source_sha256) is None:
+        from local_operator.team_bridge.cos_name import SHA256_HEX
+
+        if SHA256_HEX.fullmatch(source_sha256) is None:
             raise ValueError("avatar digest must be 64 lowercase hex characters")
+        # THE BOUND IS AT DISPATCH, not after parsing: ``max_response_bytes``
+        # streams and stops, so a hostile or broken hub cannot make this buffer
+        # a body of its choosing on a schedule it controls. Measuring a parsed
+        # object afterwards spent the memory first and then billed for a second
+        # copy to measure it (review R1-S1/F7).
         response = await self._authorized(
             "PUT",
             f"/messaging/endpoints/{endpoint_id}/avatar",
@@ -3899,15 +3928,17 @@ class TeamBridgeClient:
             files={"file": ("avatar", bytes(data), "application/octet-stream")},
             extra_headers={"X-Source-SHA256": source_sha256},
             expected_account_id=expected_account_id,
+            max_response_bytes=AVATAR_RESULT_MAX_BYTES,
+            accept="application/json",
+            oversize_code="bridge_invalid_response",
+            oversize_sentence="Radient returned an invalid response.",  # i18n: ignore, no code
         )
         if response.status_code >= 400:
             raise _refusal(response)
         if response.status_code == 204:
             # The hub already holds these bytes: nothing was written or re-encoded.
             return {}
-        result = _envelope_result(response)
-        _require_body_within(result, AVATAR_RESULT_MAX_BYTES)
-        return result
+        return _envelope_result(response)
 
     async def delete_endpoint_avatar(
         self, endpoint_id: str, *, expected_account_id: str | None = None
@@ -3924,6 +3955,10 @@ class TeamBridgeClient:
             "DELETE",
             f"/messaging/endpoints/{endpoint_id}/avatar",
             expected_account_id=expected_account_id,
+            # A 204 carries nothing, but a hostile 4xx would otherwise be read
+            # whole before `_refusal` slices its first 16 KiB (review R1-S1).
+            max_response_bytes=MAX_ERROR_BODY_BYTES,
+            accept="application/json",
         )
         if response.status_code >= 400:
             raise _refusal(response)
@@ -5013,6 +5048,11 @@ class StatusDiscipline:
                 await self._retry_pending_commit(cached, access=access)
             return cached
         lock = self._locks.setdefault(key, asyncio.Lock())
+        #: The picture upload is deferred out of the lock below: it can be up to
+        #: AVATAR_MAX_BYTES of multipart for a whole account's status readers to
+        #: wait behind, and the reconcile is digest-gated, so a few milliseconds
+        #: later is the same answer (review R1-S7).
+        deferred: list[tuple[StatusCheck, OAuthAccess]] = []
         async with lock:
             # Re-check under the lock: a sibling that arrived first already read.
             state = self._states.get(key)
@@ -5022,9 +5062,19 @@ class StatusDiscipline:
                 and time.monotonic() - state.last_attempt < self._ttl(state)
             ):
                 return self._cached(state, boundary)
-            return await self._read(key, boundary, access)
+            check = await self._read(key, boundary, access, deferred=deferred)
+        for pending_check, pending_access in deferred:
+            await self._sync_agent_avatar(pending_check, pending_access)
+        return check
 
-    async def _read(self, key: str, boundary: Boundary, access: OAuthAccess) -> StatusCheck:
+    async def _read(
+        self,
+        key: str,
+        boundary: Boundary,
+        access: OAuthAccess,
+        *,
+        deferred: list[tuple[StatusCheck, OAuthAccess]] | None = None,
+    ) -> StatusCheck:
         revision = self._identity_revision
         prior = self._states.get(key)
         texts = prior.texts if prior is not None else AcceptedTexts()
@@ -5077,9 +5127,13 @@ class StatusDiscipline:
             check = self._sync_local_designation(check)
             await self._sync_agent_name(check, access)
             # The picture is a WRITE on the SAME boundary, so it sits inside the
-            # same read-only gate: a consent-preview discipline must invent
-            # neither an enrollment nor a published picture.
-            await self._sync_agent_avatar(check, access)
+            # same read-only gate as the name: a consent-preview discipline must
+            # invent neither an enrollment nor a published picture. It does NOT
+            # sit inside the status lock — see _check (review R1-S7).
+            if deferred is None:
+                await self._sync_agent_avatar(check, access)
+            else:
+                deferred.append((check, access))
         self._states[key] = _AccountState(
             last_attempt=time.monotonic(), check=check, texts=texts, identity_revision=revision
         )
@@ -5625,10 +5679,14 @@ class StatusDiscipline:
         owned = self._owned_endpoint(check, access, field=None)
         if owned is None:
             return
-        tenant_id, _endpoint_id, _endpoint = owned
+        tenant_id, endpoint_id, _endpoint = owned
         from local_operator.team_bridge import avatar_publish
 
-        await avatar_publish.reconcile(self._client, check, tenant_id, self._config_dir)
+        # The validated endpoint id rides along: the plan may only address the
+        # row this guard approved, never a re-derived first match (review R1-S3).
+        await avatar_publish.reconcile(
+            self._client, check, tenant_id, self._config_dir, endpoint_id
+        )
 
     def invalidate(self) -> None:
         """Drop every cached answer: the next check reads fresh.

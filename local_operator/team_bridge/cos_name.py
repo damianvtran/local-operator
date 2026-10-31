@@ -60,7 +60,7 @@ import logging
 import os
 import re
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -86,8 +86,10 @@ _AVATAR_BY_MIME = {
     "image/webp": "avatar.webp",
 }
 
-#: A stored digest: lowercase hex, as the local writer records it.
-_SHA256 = re.compile(r"[0-9a-f]{64}")
+#: The hub's source-digest grammar, in ONE place: what ``X-Source-SHA256``
+#: carries, what the status answer echoes back, and what a stored block records
+#: (review R1-F10b: it was declared three times).
+SHA256_HEX = re.compile(r"[0-9a-f]{64}")
 
 #: Characters the server treats as invisible beyond the Cc/Cf/Co categories
 #: (its ``isLabelInvisible``: Other_Default_Ignorable_Code_Point, variation
@@ -279,8 +281,10 @@ def _designated_aida(config_dir: Path | str | None) -> tuple[Path | None, str | 
         if not aida_state.is_aida_session(root, designated):
             return None
         return root, bridge_agent_name(_aida_name(values))
-    except Exception:  # noqa: BLE001 — a display name must never break the write it rides on
-        logger.debug("team_bridge: could not resolve the CoS display name", exc_info=True)
+    except Exception as exc:  # noqa: BLE001 — a name must never break the write it rides on
+        # The TYPE only. A traceback's last line is the exception's message, and
+        # a FileNotFoundError here names a config path (review R1-S8).
+        logger.debug("team_bridge: could not resolve the CoS identity (%s)", type(exc).__name__)
         return None
 
 
@@ -325,14 +329,20 @@ def _aida_definition(root: Path) -> tuple[str, Path, Mapping[str, Any]] | None:
 def _avatar_of(agent_dir: Path, block: object) -> dict[str, Any]:
     """The :class:`PublishedAgent` avatar fields for one stored ``avatar`` block.
 
-    ``block`` absent (or not a mapping) answers "no picture, deliberately"; a
-    block that is PRESENT but names a file this side will not resolve answers
-    ``avatar_broken`` — the distinction the publish path needs to tell "the user
-    cleared it" from "this file is in doubt".
+    A block that is PRESENT but names a file this side will not resolve answers
+    ``avatar_broken`` — publishing nothing, and never a delete — while a block
+    that is ABSENT is a DELIBERATE clear... but only when the agent store can
+    preserve the block in the first place. ``AgentData`` is a pydantic model with
+    the default ``extra="ignore"``, so until ``avatar`` is one of its fields both
+    writers drop the key on the next ordinary save (a rename, a settings edit).
+    Absence would then mean "the registry erased it", not "the user cleared it",
+    and treating it as a clear would silently delete the teammate-visible copy
+    for good (review R1-F4). When the field is missing from the model, absence is
+    a DOUBT and :attr:`PublishedAgent.avatar_broken` says so.
     """
 
     if not isinstance(block, Mapping):
-        return {}
+        return {} if _avatar_survives_registry() else {"avatar_broken": True}
     filename = _avatar_filename(block)
     if filename is None:
         return {"avatar_broken": True}
@@ -344,7 +354,7 @@ def _avatar_of(agent_dir: Path, block: object) -> dict[str, Any]:
     return {
         "avatar_path": candidate,
         "avatar_sha256": (
-            stored_sha if isinstance(stored_sha, str) and _SHA256.fullmatch(stored_sha) else None
+            stored_sha if isinstance(stored_sha, str) and SHA256_HEX.fullmatch(stored_sha) else None
         ),
         "avatar_bytes": (
             stored_bytes
@@ -354,12 +364,44 @@ def _avatar_of(agent_dir: Path, block: object) -> dict[str, Any]:
     }
 
 
+#: Cached answer for :func:`_avatar_survives_registry`; ``None`` = not asked yet.
+_AVATAR_FIELD: bool | None = None
+
+
+def _avatar_survives_registry() -> bool:
+    """Whether an ``avatar`` block survives the agent store's own round trip.
+
+    The design's MEASURED CONSTRAINT is that ``avatar`` becomes a first-class
+    ``AgentData`` field; both writers serialise ``model_dump()`` and the read path
+    builds rows through the model, so a key the model does not declare is dropped
+    on the next save. Until that field lands, an absent block proves nothing.
+
+    An import failure answers ``False`` — "cannot prove it survives" is exactly
+    the doubt this exists to express, and a picture must not be deleted on a
+    guess.
+    """
+
+    global _AVATAR_FIELD
+    if _AVATAR_FIELD is None:
+        try:
+            from local_operator.agents import AgentData
+
+            _AVATAR_FIELD = "avatar" in AgentData.model_fields
+        except Exception:  # noqa: BLE001 - an unreadable model is a doubt, not a crash
+            return False
+    return _AVATAR_FIELD
+
+
 def _avatar_filename(block: Mapping[str, Any]) -> str | None:
     """The stored file name: ``filename`` first, then the legacy mime fallback."""
 
     raw = block.get("filename")
     if isinstance(raw, str) and raw.strip():
-        return raw.strip()
+        # ``./avatar.png`` and ``avatar.png`` name the same file in the same
+        # directory, so the prefix is dropped here rather than read as a doubt by
+        # the separator rule below (review R1-F10).
+        name = raw.strip()
+        return name[2:] if name.startswith("./") else name
     mime = block.get("mime")
     if isinstance(mime, str):
         return _AVATAR_BY_MIME.get(mime.strip().lower())
@@ -414,7 +456,10 @@ class PublishedAgent:
     local_agent_id: str
     name: str | None = None
     #: The RESOLVED file, read at publish time. ``None`` means "no picture".
-    avatar_path: Path | None = None
+    #: ``repr=False`` on purpose: this class says a path in a dataclass "is how
+    #: a home directory reaches a log", so it must not put one in its own repr
+    #: (review R1-S5).
+    avatar_path: Path | None = field(default=None, repr=False)
     #: What ``agent.yml`` recorded. Trusted for the upload only while the file's
     #: size still matches ``avatar_bytes`` (see ``avatar_publish._avatar_bytes``).
     avatar_sha256: str | None = None
@@ -428,6 +473,7 @@ __all__ = [
     "AGENT_NAME_MAX_CHARS",
     "AVATAR_MAX_BYTES",
     "PublishedAgent",
+    "SHA256_HEX",
     "bridge_agent_name",
     "cos_display_name",
     "degenerate_agent_name",
