@@ -23,5 +23,6 @@
       "suggested": "Librarian جواب نہیں دے سکی: {error} (or switch the neighbour to masculine)",
       "disposition": "fixed (remediation core-fix, session be04c022ebd4)"
     }
-  ]
+  ],
+  "counts_scope": "counts, result and gate_status describe locale-wide rounds 1-2 as recorded in the ledger; findings with round \"targeted-argorder\" come from session b15ab322fa0f (read only the rephrased keys) and are not in those counts"
 }

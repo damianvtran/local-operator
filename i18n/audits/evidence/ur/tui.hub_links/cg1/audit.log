@@ -75,6 +75,37 @@ progress.log:
 (D) mechanical: ICU args, plural cats (one/other), backticks, Rich tags, --flags, ANSI, newline counts, NFC, CR, Cf/bidi/control chars, terminal-cell widths on 30 maxCells keys (wcwidth-style: Mn/Me/Cf=0, W/F=2). 0 over.
 Findings written: 5 (MINOR 2, NIT 3). Verdict PASS.
 
+## targeted argument-order audit: audit dir core-argaudit/ur, auditor session b15ab322fa0f
+verdict.txt:
+PASS
+keys_read=7 blocker=0 major=0 minor=1 nit=1
+findings.jsonl:
+{"id": "UR-ARG-1", "severity": "MINOR", "namespace": "tui.hub_links", "key": "tui.hub_links.mark.retry", "english": "Retry {direction} for {item} at {source}", "current": "{direction} دوبارہ کریں: {item}، {source} پر", "problem": "Meaning intact (retry direction, for item, at source; nothing inverted), but the colon+comma list drops the 'for' relation and reads like a terse label list rather than a sentence; slightly stilted.", "suggested": "{direction} دوبارہ کریں — {item} کے لیے، {source} پر"}
+{"id": "UR-ARG-2", "severity": "NIT", "namespace": "tui.analytics", "key": "tui.analytics.rate.legend", "english": "decode rate over {shown, number} of {total, number} calls", "current": "decode ریٹ {shown, number} کالز پر، کل {total, number} میں سے", "problem": "Correct direction (rate over shown, out of total); trailing 'کل {total} میں سے' is a tacked-on clause. Acceptable; a parenthetical reads a touch smoother.", "suggested": "decode ریٹ {shown, number} کالز پر (کل {total, number} میں سے)"}
+summary.md:
+# ur core — arg-order rephrase audit (independent)
+
+- Auditor: i18n-auditor role agent, session b15ab322fa0f, model anthropic/claude-opus-5-5. Did not translate these values; nothing edited.
+- Keys read: 7 of 7 in changes.jsonl. Current patch values were confirmed equal to each AFTER value, then checked against English from origin/main.
+- **Verdict: PASS.** 0 BLOCKER, 0 MAJOR, 1 MINOR, 1 NIT (see findings.jsonl).
+
+## Per-key
+| key | meaning | note |
+|---|---|---|
+| tui.analytics.rate.legend | OK: rate over {shown}, out of {total} | NIT: tacked-on clause |
+| tui.analytics.search.summary_free_paid | OK: {free} free out of {priced} priced; {money} paid. Not inverted | — |
+| tui.hub_links.mark.available | OK: update item from source | natural |
+| tui.hub_links.mark.retry | OK | MINOR: terse colon/comma form loses 'for' |
+| tui.hub_links.policy.save_failed | OK: policy for source, failure, retry | natural |
+| tui.library.building | OK: {scanned} out of {total} conversations | — |
+| wire.errors.agents.variable_not_found | OK: variable_key not found for agent_id; ICU '' escape kept as in English | — |
+
+## Mechanical checks
+- Placeholder names and kinds match English (`{shown, number}`/`{total, number}` kept as number; others are simple args). The English has no plural or select forms, so no CLDR categories are needed.
+- No manual bidi controls (LRM/RLM/LRE–PDF/LRI–PDI/ALM) in any value. The LTR islands (`decode`, placeholders) are left as-is, as the ur style guide requires.
+- Glossary: ایجنٹ (agent) used consistently. ویری ایبل, کالز and گفتگوئیں match the rest of the ur catalogue.
+- The ledger was not updated because the task said read-only. No validator or tests were run, by instruction. The checks above were done by reading the values plus a short script for placeholders and bidi controls.
+
 ## applier-computed (apply_locale.py, run against the worktree at 137984daf98e6491dfd97cb6812d51c1a98abe6c)
 keys merged for this namespace: 56
 sha256 en  local_operator/i18n/catalogues/en/tui.hub_links.json = 7fbe6713f8ac8f312884476c498c3b74e76c5f0853bdd027f25fc47d489311bb
