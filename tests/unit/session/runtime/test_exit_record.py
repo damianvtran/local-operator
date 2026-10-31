@@ -514,3 +514,80 @@ def test_a_clean_exit_removes_its_run_record(tmp_path: Path) -> None:
 
     assert journal.read_run_record(directory) is None
     assert journal.read_exit_record(directory) is not None
+
+
+# --- the boot cost riding on the run record --------------------------------
+#
+# WHY these pin what they pin: the record exists so a 150 s boot can be read as
+# "starved" or "slow work" without a profiler. The shape has to stay additive
+# (older builds read ``v: 1`` and must keep treating it as the same artifact),
+# and the measurement must never be the reason a run record is missing.
+
+
+def test_the_run_record_carries_this_boot_cost(tmp_path: Path, monkeypatch) -> None:
+    """``_note_run_start`` writes CPU, wall, switch counts, load and standby."""
+    monkeypatch.setattr(journal, "_ADOPTION", None)
+    directory = _session_dir(tmp_path)
+    process._note_run_start(_Handle("abc123", directory), _Runtime("abc123", 42.0))
+
+    raw = json.loads(journal.run_record_path(directory).read_text())
+    boot = raw["boot"]
+    assert set(boot) == {
+        "cpu_s",
+        "wall_s",
+        "voluntary_switches",
+        "involuntary_switches",
+        "load_1m",
+        "standby",
+    }
+    assert boot["standby"] is False, "a cold child says so explicitly"
+    assert boot["cpu_s"] > 0
+    assert boot["wall_s"] is not None and boot["wall_s"] >= boot["cpu_s"] * 0.5
+    assert isinstance(boot["involuntary_switches"], int)
+    # The record's original keys are untouched: ``covers_run`` still keys on them.
+    record = journal.read_run_record(directory)
+    assert record is not None and record.covers_run(os.getpid(), 42.0)
+    assert record.boot == boot
+
+
+def test_an_adopted_standby_reports_its_adoption_counters(tmp_path: Path, monkeypatch) -> None:
+    """After ``note_adoption`` the record says ``standby: true`` with the snapshot."""
+    monkeypatch.setattr(journal, "_ADOPTION", None)
+    journal.note_adoption()
+    directory = _session_dir(tmp_path)
+    process._note_run_start(_Handle("abc123", directory), _Runtime("abc123", 42.0))
+
+    boot = journal.read_run_record(directory).boot
+    assert boot["standby"] is True
+    adopted = boot["at_adoption"]
+    assert adopted["cpu_s"] <= boot["cpu_s"]
+    assert adopted["involuntary_switches"] <= boot["involuntary_switches"]
+    assert adopted["seconds_ago"] >= 0
+
+
+def test_an_unmeasurable_boot_still_writes_the_run_record(tmp_path: Path, monkeypatch) -> None:
+    """The run key is load-bearing for the listing; the boot cost is not."""
+    import resource
+
+    def boom(*_args):
+        raise OSError("no rusage here")
+
+    monkeypatch.setattr(resource, "getrusage", boom)
+    directory = _session_dir(tmp_path)
+    process._note_run_start(_Handle("abc123", directory), _Runtime("abc123", 42.0))
+
+    raw = json.loads(journal.run_record_path(directory).read_text())
+    assert "boot" not in raw, "absent, so the record is the shape it always was"
+    assert journal.read_run_record(directory).covers_run(os.getpid(), 42.0)
+
+
+def test_a_record_without_boot_cost_still_reads(tmp_path: Path) -> None:
+    """A record an older build wrote (no ``boot``) parses exactly as before."""
+    directory = _session_dir(tmp_path)
+    journal.run_record_path(directory).write_text(
+        json.dumps(
+            {"v": 1, "kind": "runtime-run", "session_id": "abc123", "pid": 7, "started_at": 9.0}
+        )
+    )
+    record = journal.read_run_record(directory)
+    assert record is not None and record.boot is None and record.covers_run(7, 9.0)

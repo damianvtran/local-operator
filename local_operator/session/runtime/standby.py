@@ -1931,6 +1931,13 @@ def _commit_adoption(sock: socket.socket, request: dict[str, Any]) -> int:
     ``id=``, so a platform that cannot rewrite argv still gets a working runtime
     (agent review round 2, nit).
     """
+    # FIRST, before any adoption work: the boundary between "CPU this process
+    # spent warming as a spare" and "CPU it spent booting the session". The run
+    # record (``process._boot_cost``) reports the two separately, because a slow
+    # adopted boot and a slow warm are different findings. Never raises.
+    from local_operator.session.runtime.journal import note_adoption
+
+    note_adoption()
     env = request.get("env")
     env = env if isinstance(env, dict) else {}
     # Recover the fd number this process was STARTED with, before the channel is
