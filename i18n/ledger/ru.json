@@ -1233,6 +1233,26 @@
       },
       "status": "passed",
       "note": "Independent audit of PR #3198 (team-bridge probe_suspected owner notification) at source_sha256 1eee3ff395d8a346dee9574283af593c36a0953c4798db0077446e1903770707 (catalogue_sha256 and raw sha256 agree). Copy change: 2 keys added (notify.probe_suspected_title, notify.probe_suspected_body); 0 deleted, 0 updated; the other 53 keys are unchanged since the PR #3189 passed row and were not re-audited. Checked against the en context notes: same sender, last day, possibly across conversations; testing what the agent accepts; sender no longer told why; no claim the sender was notified/blocked; no conversation named. Mechanical: key parity 55/55; no placeholders; NFC; no Cf/bidi controls; rendered through messages.render after regeneration. Translator (PR #3198 coder) and auditor are distinct agents in separate sessions, same model family (disclosed). ru: 1 major, fixed: title 'отправитель похож на зондирование' ('the sender resembles probing') is ungrammatical; now 'похоже, отправитель прощупывает агента'. Minor: 'отклонены' -> 'отклоняются' (ongoing), 'что принимает' -> 'что готов принять'. Unresolved blocker/major: 0. Evidence: i18n/audits/evidence/ru/cli.team_bridge/tbp3198/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.tool_rows.bridge",
+      "source_sha256": "58e76cb3bf5872c644ad83502f9efd0e5ca304d738cfe5f430c6a04ca192ef1c",
+      "translator": {
+        "agent": "i18n-translator (lopdev, PR #3203 translator lanes; round 1 + delta round 2)",
+        "model": "radient/auto (round 1, provider fallback) and anthropic/claude-opus-5-5 (delta round 2)",
+        "date": "2026-10-30"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev audit-ru, session 3d249a85d90e), independent of the translators",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback)",
+        "date": "2026-10-30",
+        "result": "passed",
+        "findings": 5,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent ru audit of PR #3203 (Team Bridge tool rows) at source_sha256 58e76cb3bf5872c644ad83502f9efd0e5ca304d738cfe5f430c6a04ca192ef1c (catalogues.catalogue_sha256 = raw sha256 of en/wire.tool_rows.bridge.json); target catalogue_sha256 of the auditor-fixed ru bytes = 30f76a743fbb05175982637d0ee72af8557d3abc1754589d1a7d3a5dd62dceee. All 85 keys read against en + .context.json and the composer (harness/bridge_copy.py). Mechanical: key parity 85/85; ICU argument sets identical; 127 sentinel renders through the ICU runtime (messages._runtime.render_message, locale ru) at counts 0/1/2/3/4/5/11/12/14/21/22/25/101/111/1000000, 0 lost/extra; plurals one/few/many/other on count.members and count.messages (1 участник, 2 участника, 5/11 участников, 21 участник, 22 участника; =0 'нет сообщений' kept); NFC; no Cf/bidi controls; all 8 maxCells met (outcome ≤27/32, outcome_short ≤14/14). Findings, all fixed by the auditor (0 blocker, 0 major, 4 minor, 1 nit): RU-C1 MINOR verb_*.react / react_remove 'Поставил реакцию в' + fallback 'разговор' / '#name' composed a wrong case and no preposition fits both a channel and a DM name ('в Дане'); now colon-introduced 'Поставил реакцию:' / 'Убрал реакцию:', the same pattern the translators already used for dm/send/reply. RU-C2 MINOR verb_*.channel_thread 'Прочитал ветку в' + 'разговор' = accusative after locative 'в' ('ветку в разговор'); now 'Прочитал ветку:'. RU-C3 MINOR verb_*.take_up 'Принял' collided with 'принять/принятия' = owner acceptance on the awaiting_acceptance rows of this namespace, and take_up is a FETCH (tool.py); now 'Получил/Получает/Не удалось получить'. RU-C4 MINOR verb_*.ack_working 'Забрал' (= took away/collected) misstates a working-claim ack; now 'Взял в работу/Берёт в работу/Не удалось взять в работу' (Освободил for ack_done kept). RU-C5 MINOR outcome_short.inbox_only 'не опубликовано' / outcome_short.unconfirmed 'не подтверждено' — the short forms were the full forms' tails and dropped the distinguishing half; 'не в разговоре' (14/14) keeps 'not in a conversation', 'под вопросом' (12/14) keeps 'may or may not have landed' without saying failed. RU-N1 NIT expanded.details 'Детали' → 'Подробности', the heading the ru catalogues use for a details disclosure (ui.agents.skills.detail.section.details, ui.chat.run_details). Accepted as is: 'Опубликовал в' + 'разговор' (accusative after 'в' reads as motion into; idiomatic for posting); 'ветке {label}' (prepositional after 'в', composes 'Опубликовал в ветке #general'); 'личное сообщение' for DM; masculine past-tense agent verbs (agent as subject, consistent across the namespace). Every ru verb, outcome and fallback value is byte-identical to its ui.chat.canonical.tool_row.bridge twin in local-operator-ui#1529 (65 pairs). Translator provenance from the manager brief (round 1 radient/auto fallback, delta round 2 anthropic/claude-opus-5-5); translator and auditor share the Claude model family (disclosed). Not verified: native-speaker naturalness, a rendered frame at narrow width. Unresolved blocker/major: 0."
     }
   ]
 }

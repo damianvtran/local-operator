@@ -65,6 +65,7 @@ from local_operator.harness.rows import (
     ask_timeout_notice,
     assistant_row_text,
     assistant_stop_notice,
+    bridge_row,
     compaction_refused_notice,
     gate_timeout_notice,
     held_delivery_notice,
@@ -392,6 +393,43 @@ def _message_text(message: AgentMessage) -> str:
     return ""
 
 
+def _bridge_summary(
+    args: Mapping[str, Any], details: Mapping[str, Any] | None, *, failed: bool = False
+) -> str:
+    """The Team Bridge row as one line, the TUI's words plus its outcome.
+
+    Tokens from ``harness/rows.py::bridge_row`` and copy from
+    ``harness/bridge_copy.py`` — the pair the TUI card calls — so a post, a
+    refusal and an inbox-only send say the same thing on both surfaces. The
+    phone cell has no status cap, so the outcome word (``not posted to a
+    conversation``, ``refused · code``) rides the end of the line; compacted
+    to the module's 80-character row cap like every other summary.
+    ``details=None`` is a call that has not returned: the running verb.
+    """
+    from local_operator.harness.bridge_copy import bridge_row_line
+
+    in_thread = bool(str(args.get("thread_root_id") or "").strip())
+    line = bridge_row_line(
+        bridge_row(args, details),
+        running=details is None,
+        in_thread=in_thread,
+        failed=failed,
+    )
+    return _compact(line, 80)
+
+
+def _settled_bridge_summary(
+    tool_name: str, args: Mapping[str, Any], details: object, *, failed: bool
+) -> str | None:
+    """The settled bridge summary, or None for any other tool (keep the row's)."""
+    if tool_name != "bridge":
+        return None
+    return (
+        _bridge_summary(args, details if isinstance(details, Mapping) else {}, failed=failed)
+        or tool_name
+    )
+
+
 def _summarize_args(tool_name: str, args: dict[str, Any]) -> str:
     """The one-line summary the collapsed row shows.
 
@@ -413,6 +451,11 @@ def _summarize_args(tool_name: str, args: dict[str, Any]) -> str:
         # the phone painted a blank summary cell while the terminal painted
         # `sessions` for the same call (round-1 review, R2).
         return _compact(sessions_row_summary(args), 80) or tool_name
+    if tool_name == "bridge":
+        # Replaces the `op=… channel_id=bcv_…` dump the generic tail painted.
+        # At call start the running verb; the settle arms below repaint it
+        # from the result's details (`_settled_bridge_summary`).
+        return _bridge_summary(args, None) or tool_name
     for key in ("path", "file_path", "file", "command", "pattern", "query", "url"):
         value = args.get(key)
         if isinstance(value, str) and value:
@@ -1910,6 +1953,14 @@ def fold_messages_to_entries(
                 # harness's vocabulary for this condition instead, from the arm
                 # marker on the result. EVERY other tool message keeps its text
                 # untouched — this is keyed on the marker, never on the wording.
+                settled_summary = _settled_bridge_summary(
+                    entry.tool_name or "",
+                    tool_args.get(message.tool_call_id or "", {}),
+                    result_details,
+                    failed=entry.tool_state == "failed",
+                )
+                if settled_summary is not None:
+                    entry.summary = settled_summary
                 receipt = output_limit_call_receipt(result_details) if message.is_error else None
                 result_text = receipt or message.text
                 if message.is_error:
@@ -2708,6 +2759,17 @@ class ProjectionFold:
                 1,
             )
             row.diff_added, row.diff_removed = _diff_counts(result.details)
+            # The live settle twin of the fold's arm above: same args (the
+            # stash is still held here — `_tool_details` pops it below), same
+            # details, so a watched call and its replay paint one summary.
+            settled_summary = _settled_bridge_summary(
+                event.tool_name,
+                self._tool_args.get(event.tool_call_id, {}),
+                result.details,
+                failed=row.tool_state == "failed",
+            )
+            if settled_summary is not None:
+                row.summary = settled_summary
             if result.is_error:
                 row.error = _compact(result.text, 200)
             # Output-artifact media rides the live row as the same lazily

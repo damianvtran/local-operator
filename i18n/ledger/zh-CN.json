@@ -2021,6 +2021,26 @@
       },
       "status": "passed",
       "note": "Independent audit of PR #3198 (team-bridge probe_suspected owner notification) at source_sha256 1eee3ff395d8a346dee9574283af593c36a0953c4798db0077446e1903770707 (catalogue_sha256 and raw sha256 agree). Copy change: 2 keys added (notify.probe_suspected_title, notify.probe_suspected_body); 0 deleted, 0 updated; the other 53 keys are unchanged since the PR #3189 passed row and were not re-audited. Checked against the en context notes: same sender, last day, possibly across conversations; testing what the agent accepts; sender no longer told why; no claim the sender was notified/blocked; no conversation named. Mechanical: key parity 55/55; no placeholders; NFC; no Cf/bidi controls; rendered through messages.render after regeneration. Translator (PR #3198 coder) and auditor are distinct agents in separate sessions, same model family (disclosed). zh-CN: 1 minor, fixed: '智能体审核' read as 'agent review' (approval), not content moderation; now '智能体的内容审核'. '将不再' -> '已不再' (state already in effect). 你 register per guide. Unresolved blocker/major: 0. Evidence: i18n/audits/evidence/zh-CN/cli.team_bridge/tbp3198/record.json"
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.tool_rows.bridge",
+      "source_sha256": "58e76cb3bf5872c644ad83502f9efd0e5ca304d738cfe5f430c6a04ca192ef1c",
+      "translator": {
+        "agent": "translator agents (lopdev, PR #3203): round 1 + round-2 delta",
+        "model": "radient/auto (round 1); anthropic/claude-opus-5-5 (round-2 delta)",
+        "date": "2026-10-30"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev, audit-zh-CN), independent of both translators",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback)",
+        "date": "2026-10-30",
+        "result": "passed",
+        "findings": 2,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent audit of PR #3203 (Team Bridge tool row), new namespace, all 85 keys read against en + .context.json, glossary and zh-CN guide. Target sha256 after fixes f6e58cc76c47dcd71aa9cb1dc90e131395a10461f20338a5dade2edb9780575c. Mechanical: key parity 85/85; 109 sentinel renders through i18n.runtime.render_message (plural counts 0/1/2/3/5/11/21/22/1000000), 0 lost placeholders; =0 arm and other-only plural with 条/名 classifiers; no Cf/bidi, NFC, no BOM. 2 minor, both fixed: ZH-1 channel_thread settled/running/failed rendered as bare 已读取/正在读取/无法读取, dropping 'thread' and colliding with channel_history -> 已读取讨论串 etc. (讨论串 per target.thread and ui.teamBridge.replies.*); ZH-2 react/react_remove verbs and expanded.reacted/reaction_removed used 加表情/移除表情, drifting from the Team Bridge app's 表情回应 term -> 已添加表情回应/已移除表情回应 etc. Same fixes applied to the UI mirror keys (local-operator-ui#1529). 你 register not exercised; no pronoun drift. Unresolved blocker/major: 0."
     }
   ]
 }

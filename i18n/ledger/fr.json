@@ -2202,6 +2202,26 @@
       },
       "status": "passed",
       "note": "Independent audit of PR #3198 (team-bridge probe_suspected owner notification) at source_sha256 1eee3ff395d8a346dee9574283af593c36a0953c4798db0077446e1903770707 (catalogue_sha256 and raw sha256 agree). Copy change: 2 keys added (notify.probe_suspected_title, notify.probe_suspected_body); 0 deleted, 0 updated; the other 53 keys are unchanged since the PR #3189 passed row and were not re-audited. Checked against the en context notes: same sender, last day, possibly across conversations; testing what the agent accepts; sender no longer told why; no claim the sender was notified/blocked; no conversation named. Mechanical: key parity 55/55; no placeholders; NFC; no Cf/bidi controls; rendered through messages.render after regeneration. Translator (PR #3198 coder) and auditor are distinct agents in separate sessions, same model family (disclosed). fr: 1 major + 2 minor, fixed. Major: title used 'Messages d’agents' where the namespace's established product name is 'Messages des agents'. Minor: plain U+0020 before ':' (guide requires U+202F); ASCII apostrophes (guide requires U+2019). Also 'Ce schéma peut signifier' -> 'Ce comportement peut indiquer' (calque). Unresolved blocker/major: 0. Evidence: i18n/audits/evidence/fr/cli.team_bridge/tbp3198/record.json"
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.tool_rows.bridge",
+      "source_sha256": "58e76cb3bf5872c644ad83502f9efd0e5ca304d738cfe5f430c6a04ca192ef1c",
+      "translator": {
+        "agent": "i18n-translator (lopdev, PR #3203; round 1 then delta round 2)",
+        "model": "radient/auto (round 1, provider fallback); anthropic/claude-opus-5-5 (round 2)",
+        "date": "2026-10-30"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev audit-fr), independent of the translators",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback)",
+        "date": "2026-10-30",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent audit of PR #3203 (Team Bridge tool row) at source_sha256 58e76cb3bf5872c644ad83502f9efd0e5ca304d738cfe5f430c6a04ca192ef1c (catalogues.catalogue_sha256 and raw sha256 agree); target fr bytes after fixes sha256 0f6ab8df6da26a7a0f551a0030e896abee1e13ad31db25953cc0d58f115e93e6. New namespace, all 85 keys read against the English source and its context sidecar, and composed through bridge_copy.bridge_row_line for every action in running/settled/failed. Mechanical: key parity 85/85; 100 sentinel renders through messages.render, 0 lost or extra placeholders; plural arms at 0/1/2/5/1000000/1500000 (one/many/other, '1 000 000 de membres'); no Cf/bidi controls; NFC; U+2019 apostrophes. Findings fixed by the auditor (4 minor, 1 nit): FR-B1 minor channel_thread verbs dropped 'thread' ('Lu dans'/'Lecture dans'/'Impossible de lire') so a thread read was indistinguishable from a channel read -> 'Fil lu dans'/'Lecture du fil dans'/'Impossible de lire le fil dans', matching the UI twin; FR-B2 minor verb_failed.channels 'Impossible de lister' had no object (complete phrase per sidecar) -> 'Impossible de lister les conversations'; FR-B3 minor verb_settled.shared_history 'Conversation partagée lue :' left a dangling colon before a count when unlabelled ('lue : (3 messages)') -> 'Lu dans la conversation partagée'; FR-B4 minor expanded.failed_error/refused_error used U+0020 before ':' -> U+202F per fr.md. Accepted as is: 'Créé :'/'Réservé :'/'Libéré :'/'Pris en charge :' label-colon register for verbs whose object follows (no idiomatic French past participle takes a bare following object); 'cette conversation' fallback (demonstrative reads naturally after 'dans'). Translators: round 1 radient/auto fallback, delta round 2 anthropic/claude-opus-5-5 (from the brief, not observed). Auditor distinct agent and context, same model family as round-2 translator (disclosed). Unresolved blocker/major: 0. Not verified: native-speaker review, rendered TUI/phone fit."
     }
   ]
 }

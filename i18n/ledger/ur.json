@@ -1014,6 +1014,27 @@
       },
       "status": "passed",
       "note": "Independent audit of PR #3198 (team-bridge probe_suspected owner notification) at source_sha256 1eee3ff395d8a346dee9574283af593c36a0953c4798db0077446e1903770707 (catalogue_sha256 and raw sha256 agree). Copy change: 2 keys added (notify.probe_suspected_title, notify.probe_suspected_body); 0 deleted, 0 updated; the other 53 keys are unchanged since the PR #3189 passed row and were not re-audited. Checked against the en context notes: same sender, last day, possibly across conversations; testing what the agent accepts; sender no longer told why; no claim the sender was notified/blocked; no conversation named. Mechanical: key parity 55/55; no placeholders; NFC; no Cf/bidi controls; rendered through messages.render after regeneration. Translator (PR #3198 coder) and auditor are distinct agents in separate sessions, same model family (disclosed). ur: 1 minor, fixed: title prefix 'ایجنٹ پیغامات' differed from the namespace product name 'ایجنٹ کے پیغامات'; aligned. Body accurate; no bidi controls (RTL ordering left to paint boundary). Unresolved blocker/major: 0. Evidence: i18n/audits/evidence/ur/cli.team_bridge/tbp3198/record.json"
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.tool_rows.bridge",
+      "source_sha256": "58e76cb3bf5872c644ad83502f9efd0e5ca304d738cfe5f430c6a04ca192ef1c",
+      "target_sha256": "df49edd0a9ad8443c16163ead4b58fb7079adce319322c8c498a0e714617405f",
+      "translator": {
+        "agent": "translator agents for PR #3203 (round 1 + delta round 2), separate from this auditor",
+        "model": "radient/auto (round 1, fallback); anthropic/claude-opus-5-5 (delta round 2)",
+        "date": "2026-10-30"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team, audit-ur, session 02f137cfd65f), independent of the translators",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback)",
+        "date": "2026-10-30",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent audit (PR #3203, Team Bridge tool rows) at source_sha256 58e76cb3bf5872c644ad83502f9efd0e5ca304d738cfe5f430c6a04ca192ef1c (catalogues.catalogue_sha256 and raw sha256 agree); target_sha256 df49edd0a9ad8443c16163ead4b58fb7079adce319322c8c498a0e714617405f is the post-fix ur file. All 85 keys read against en + context sidecar. Mechanical: key parity 85/85; 109 sentinel renders through the ICU runtime (i18n._runtime.render_message, locale ur — public render() coerces ur->en on this branch because shipped.json is en-only until regeneration), counts 0/1/2/3/5/11/21/22/1000000, 0 placeholders lost/extra; no Cf/bidi controls; NFC; outcome cells 5-23/32, short 5-9/14 (rich cell_len). Findings, all fixed in this commit (auditor-applied, 0 unresolved): UR-W1 MAJOR accept/approval collision — outcome.awaiting_acceptance «منظوری کا انتظار» and expanded.awaiting_acceptance «منظوری دینی» reused منظوری, the glossary approvals term (pending tool approvals); now «قبولیت کا انتظار» / «قبول کرنا ہو گا», matching ui.teamBridge.invitations.accept «قبول کریں». UR-W2 MINOR expanded.dm_headline «{label} کو ڈی ایم» -> «{label} کو براہ راست پیغام»: the Team Bridge UI names DMs براہ راست پیغام (ui.teamBridge.kind.dm); headline has room for the full form, the bare row fallbacks keep ڈی ایم. UR-W3 MINOR refused family «رد کر دیا گیا» -> «مسترد» (outcome.refused, expanded.refused*, 5 keys): the ur catalogues' settled refusal word is مسترد (ui.agents hub refusals, relay.approvals); 13 -> 5 cells on the status slot. Not findings: target.person «ایک ساتھی ایجنٹ» (sidecar: an agent teammate) accepted; count.conversations is a bare number by design. Translators: round 1 radient/auto, delta round 2 anthropic/claude-opus-5-5; auditor same model family, separate agent/context (disclosed)."
     }
   ]
 }
