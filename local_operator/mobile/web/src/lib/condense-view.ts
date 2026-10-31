@@ -15,6 +15,7 @@ import {
 	type Row,
 } from "./condense-rows";
 import {
+	bridgeOpOf,
 	foldRuns,
 	latchFoldedRuns,
 	receiptFoldUnits,
@@ -57,7 +58,7 @@ export function relayFoldOptions(liveTurn: boolean, latchedFoldIds: ReadonlySet<
 		summaryOf: (row: Row) => row.record.kind === "tool" ? (row.record.summary ?? "") : "",
 		// The relay wire can omit args under frame pressure. An absent op is the
 		// model's documented generic-label fallback, never an invented operation.
-		opOf: () => "",
+		opOf: bridgeOpOf,
 		failedOf: (row: Row) =>
 			row.record.kind === "tool" && isFailedResult(row.record.isError, undefined),
 		runningOf: (row: Row) => row.record.kind === "tool" && row.record.phase !== "done",

@@ -56,7 +56,7 @@ import {
 	peerIdentity,
 } from "./condense-predicates";
 import type { FoldableAction, FoldCountSegment } from "./condense-fold";
-import { foldCountSegments, foldSummary, workedSeconds, workedSecondsOf } from "./condense-fold";
+import { bridgeOpOf, foldCountSegments, foldSummary, workedSeconds, workedSecondsOf } from "./condense-fold";
 export function staysVisibleWhileCollapsed(record: CondenseRecord): boolean {
 	/*
 	 * THE PIN LIST IS THE BOUNDARY VOCABULARY (`boundaryKindOf`): the same
@@ -1404,7 +1404,10 @@ function factsOf(
 	for (const row of workRows) {
 		if (row.record.kind !== "tool") continue;
 		const failedHere = isFailedCall(row.record);
-		actions.push({ name: ledgerName(row.record), failed: failedHere });
+		/* The op rides along so the turn bar splits `bridge` the way the fold
+		   group beside it does (the desktop's `toolOp` at the same site; the
+		   condense parity fixture's `Bp` cases pin it). */
+		actions.push({ name: ledgerName(row.record), failed: failedHere, op: bridgeOpOf(row) });
 		if (failedHere) {
 			failed += 1;
 			firstFailedId ??= row.record.id;

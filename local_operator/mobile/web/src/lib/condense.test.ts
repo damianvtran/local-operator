@@ -42,6 +42,7 @@ import { describe, expect, it } from "vitest";
 import { buildRows, ledgerName } from "./condense-rows";
 import {
 	FOLD_MIN_ACTIONS,
+	bridgeOpOf,
 	foldRuns,
 	latchFoldedRuns,
 	receiptFoldUnits,
@@ -231,6 +232,18 @@ const RECORDS: Record<string, (id: string, i: number) => CondenseRecord> = {
 	Td: (id, i) => foldTool(id, i, "todo"),
 	Fa: (id, i) => ({ ...foldTool(id, i, "bash"), isError: true }),
 	Du: (id, i) => ({ ...foldTool(id, i, "bash"), durationS: 7 }),
+	/* Team Bridge's split noun: a POST (`kind:bridge:post`) and an ACTION
+	   (`kind:bridge`). The split reads the call's op from its args, which the
+	   relay record carries from `details.args` - the same args as the desktop's
+	   tokens, so the port reproduces the same keys from the same op. */
+	Bp: (id, i) => ({
+		...foldTool(id, i, "bridge"),
+		args: { op: "channel_post", channel_id: "bcv_1", body: "b" },
+	}),
+	Ba: (id, i) => ({
+		...foldTool(id, i, "bridge"),
+		args: { op: "channel_history", channel_id: "bcv_1" },
+	}),
 };
 
 /** A settled tool record, as the desktop's token grammar builds them. */
@@ -257,13 +270,15 @@ const seq = (spec: string): CondenseRecord[] =>
  * The production fold wiring, ported from `canonical-transcript.tsx`'s call site.
  * These are inputs to the model, not decisions of it, so the relay passes the same
  * ones the desktop's generator does - `summaryOf` and `opOf` are the live clause's
- * WORDS (surface copy) and the relay's own row supplies them, so both stay "".
+ * WORDS (surface copy) and the relay's own row supplies them, so `summaryOf`
+ * stays "". `opOf` is production's `bridgeOpOf`: the bridge split is a
+ * DECISION (which noun key a call counts under), so the fixture pins it.
  */
 const foldOptions = (liveTurn: boolean, latchedFoldIds: ReadonlySet<string>) => ({
 	nameOf: (row: Row) => ledgerName(row.record),
 	durationOf: workedSecondsOf,
 	summaryOf: () => "",
-	opOf: () => "",
+	opOf: bridgeOpOf,
 	failedOf: (row: Row) =>
 		row.record.kind === "tool" && isFailedResult(row.record.isError, undefined),
 	runningOf: (row: Row) => row.record.kind === "tool" && row.record.phase !== "done",
@@ -388,9 +403,10 @@ describe("the condense parity fixture", () => {
 		/*
 		 * AND THE SIZE IS PINNED, so a desktop change that adds a wall of quiet
 		 * cases shows up as a diff in review instead of quietly shrinking what this
-		 * suite proves. `-27` is read from the corpus this copy pins.
+		 * suite proves. `-28` is read from the corpus this copy pins (27 before the
+		 * bridge cases reseeded the property corpus, local-operator-ui #1529).
 		 */
-		expect(fromHelper.length).toBe(27);
+		expect(fromHelper.length).toBe(28);
 		/* Every skip carries the quiet pair, and none is skipped for another reason:
 		 * an unbuilt token would throw inside `seq`, never be filtered quietly. */
 		for (const entry of fromHelper) {
@@ -563,6 +579,10 @@ const WIRE: Record<string, WireToken> = {
 	Py: (id) => wireTool("eval", { id }),
 	Ak: (id) => wireTool("agent", { id }),
 	Td: (id) => wireTool("todo", { id }),
+	/* Bridge rides its args in `details.args`, which is where the relay record
+	   reads the op from (`toCondenseRecord`). */
+	Bp: (id) => wireTool("bridge", { id, details: { args: { op: "channel_post", channel_id: "bcv_1", body: "b" } } }),
+	Ba: (id) => wireTool("bridge", { id, details: { args: { op: "channel_history", channel_id: "bcv_1" } } }),
 	Fa: (id) => wireTool("bash", { id, tool_state: "failed" }),
 	Du: (id) => wireTool("bash", { id, elapsed_s: 7 }),
 	N: (id) => wireEntry({ id, kind: "assistant", text: "text", calls_tools: true }),

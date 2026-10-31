@@ -446,6 +446,27 @@ export function foldSummary(actions: FoldableAction[]): string {
  */
 
 /**
+ * The op token for a `bridge` row ONLY, read from its args when they rode.
+ *
+ * The relay deliberately passes no op in general (`condense-predicates.ts`,
+ * "WHAT IS DELIBERATELY NOT HERE": the wire drops args under frame pressure, so
+ * a derived op would be right only sometimes). Bridge is the exception because
+ * the fold's own noun splits on it (`team message` vs `team action`): without
+ * the op every bridge post would count as a generic action and the relay would
+ * disagree with the desktop on every well-formed frame. Used by BOTH the fold
+ * (`relayFoldOptions.opOf`) and the turn bar (`condense-plan.ts`), as the
+ * desktop passes `toolOp(args)` to both - otherwise the bar would say `team
+ * actions` beside a group that says `team messages`. When the args were
+ * stripped the token is "" and the fold falls back to the generic action noun,
+ * which under-claims rather than inventing a post.
+ */
+export function bridgeOpOf(row: Row): string {
+	if (row.record.kind !== "tool" || row.record.toolName.toLowerCase() !== "bridge") return "";
+	const op = row.record.args?.op;
+	return typeof op === "string" ? op : "";
+}
+
+/**
  * The count noun for each builtin the class table does not file.
  *
  * `foldCounts` names an unclassed action by KIND, and until this table the kind
@@ -480,7 +501,23 @@ const KIND_NOUNS: Record<string, { noun: string; plural: string }> = {
 	list_variables: { noun: "variable lookup", plural: "variable lookups" },
 	read_variable: { noun: "variable read", plural: "variable reads" },
 	sessions: { noun: "session", plural: "sessions" },
+	/* Non-post bridge ops; the posting ops count as `kind:bridge:post` (see
+	   `BRIDGE_POST_OPS`). */
+	bridge: { noun: "team action", plural: "team actions" },
 };
+
+/**
+ * The `bridge` ops that deliver words to someone, and so count as a `team
+ * message`. `send`/`reply` land in a peer inbox rather than a conversation,
+ * but they are still the run SAYING something; the row itself carries the
+ * "not posted to a conversation" caveat, the count line only counts.
+ */
+export const BRIDGE_POST_OPS: ReadonlySet<string> = new Set([
+	"channel_post",
+	"dm",
+	"send",
+	"reply",
+]);
 
 /**
  * The cap on the unique action-type segments ONE count line shows, and the
@@ -626,6 +663,21 @@ export const foldCountSegments = (
 					plural: "job cancellations",
 				});
 			else bump("kind:jobs", KIND_NOUNS.jobs);
+		} else if (n === "bridge") {
+			/*
+			 * The Team Bridge tool is ONE wire name over two different kinds of act:
+			 * the ops that put words in front of a person (`channel_post`, `dm`, and
+			 * the mailbox `send`/`reply`) and the reads/bookkeeping around them
+			 * (`directory`, `channel_history`, `ack`, `react`, ...). Counting a
+			 * directory lookup as a `team message` claims the run said something it
+			 * did not - the same false-claim species `jobs cancel` split for. The
+			 * desktop/TUI bridge-row lane (c733bb5b44de) owns the vocabulary; this is
+			 * its relay port. An op-less call (the relay wire can drop args under
+			 * frame pressure) takes the generic action noun: it never invents a post.
+			 */
+			if (BRIDGE_POST_OPS.has((action.op ?? "").toLowerCase()))
+				bump("kind:bridge:post", { noun: "team message", plural: "team messages" });
+			else bump("kind:bridge", KIND_NOUNS.bridge);
 		} else {
 			const noun = KIND_NOUNS[n];
 			if (noun) bump(`kind:${n}`, noun);
