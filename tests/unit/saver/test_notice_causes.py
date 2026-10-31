@@ -31,9 +31,7 @@ def _sentences() -> dict[str, str]:
     from local_operator.i18n.text import tr
 
     neutral = str(tr("wire.radient_saver")(chain_mod.notice_message(chain_mod.NOTICE_DISABLED)))
-    gate = saver_command.refusal_text(
-        saver_command.SaverDecision(source="gate", on=False)
-    )
+    gate = saver_command.refusal_text(saver_command.SaverDecision(source="gate", on=False))
     return {"neutral": neutral, "gate": gate}
 
 
@@ -79,7 +77,9 @@ class _RecordingChain:
         pytest.param(SaverHTTPError(302), id="http-302-unfollowed"),
     ],
 )
-def test_every_chain_cause_of_the_disabled_class_gets_the_neutral_sentence(exc: BaseException) -> None:
+def test_every_chain_cause_of_the_disabled_class_gets_the_neutral_sentence(
+    exc: BaseException,
+) -> None:
     rec = _RecordingChain()
     asyncio.run(SaverChain._on_failure(rec, exc))  # type: ignore[arg-type]
     assert rec.seen == [chain_mod.NOTICE_DISABLED], rec.seen

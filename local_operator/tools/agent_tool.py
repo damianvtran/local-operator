@@ -1701,9 +1701,11 @@ def write_profile(
         saver=(
             None
             if params.saver == "inherit"
-            else params.saver == "on"
-            if params.saver is not None
-            else current.saver if current is not None else None
+            else (
+                params.saver == "on"
+                if params.saver is not None
+                else current.saver if current is not None else None
+            )
         ),
         # Settable, and preserved when not set, for the same reason as the
         # allowlist: a role that coordinates must not stop coordinating

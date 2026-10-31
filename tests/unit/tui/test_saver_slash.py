@@ -8,6 +8,7 @@ Every form below is typed keystroke-by-keystroke into the real ``OperatorApp``
 composer at the shipped stylesheet, and the assertions are on what the
 dispatcher RECEIVED and on the journal rows actually on disk.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -187,8 +188,8 @@ def test_a_routed_session_paints_the_published_state() -> None:
     from local_operator.session.frontend_state import FrontendSessionState
     from local_operator.tui.app import _saver_label
 
-    assert _saver_label(FrontendSessionState(session_id="s", epoch="e",  saver_on=True)) == "saver"
-    assert _saver_label(FrontendSessionState(session_id="s", epoch="e",  saver_on=False)) == ""
+    assert _saver_label(FrontendSessionState(session_id="s", epoch="e", saver_on=True)) == "saver"
+    assert _saver_label(FrontendSessionState(session_id="s", epoch="e", saver_on=False)) == ""
     # An older backend omits the field and the model defaults it to False, so the
     # follower paints nothing rather than guessing from state it cannot read.
     assert _saver_label(FrontendSessionState(session_id="s", epoch="e")) == ""
@@ -196,15 +197,12 @@ def test_a_routed_session_paints_the_published_state() -> None:
 
 def test_the_badge_never_paints_an_empty_word(monkeypatch: pytest.MonkeyPatch) -> None:
     """A glyph with no word is unreadable, not compact."""
-    from types import SimpleNamespace
-
     import local_operator.i18n.text as text_mod
+    from local_operator.session.frontend_state import FrontendSessionState
     from local_operator.tui.app import _saver_label
 
-    from local_operator.session.frontend_state import FrontendSessionState
-
     monkeypatch.setattr(text_mod, "tr", lambda namespace: (lambda message: "   "))
-    assert _saver_label(FrontendSessionState(session_id="s", epoch="e",  saver_on=True)) == ""
+    assert _saver_label(FrontendSessionState(session_id="s", epoch="e", saver_on=True)) == ""
 
 
 @pytest.mark.asyncio
@@ -230,9 +228,7 @@ async def test_the_routed_path_paints_through_apply_frontend_state(tmp_path: Pat
             await pilot.resize_terminal(width, 30)
             await pilot.pause()
             for published in (True, False):
-                state = FrontendSessionState(
-                    session_id="s", epoch="e", saver_on=published
-                )
+                state = FrontendSessionState(session_id="s", epoch="e", saver_on=published)
                 app._apply_frontend_state(state)
                 # Assert THIS call's own effect, before any later repaint from a
                 # different path: `_status._saver` is what `_apply_frontend_state`

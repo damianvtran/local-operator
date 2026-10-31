@@ -222,7 +222,9 @@ def _override_lines(team: Any, mark: Callable[[str], str] | None = None) -> list
         if member.effort:
             parts.append(f"effort {member.effort}")  # i18n: ignore model-facing tool output
         if member.saver is not None:
-            parts.append(f"saver {'on' if member.saver else 'off'}")  # i18n: ignore model-facing tool output
+            parts.append(
+                f"saver {'on' if member.saver else 'off'}"
+            )  # i18n: ignore model-facing tool output
         rows.append(f"- {label(_slot_token(member))}: {', '.join(parts)}")
     if not rows:
         return []
