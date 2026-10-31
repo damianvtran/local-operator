@@ -422,3 +422,26 @@ def test_drag_cancellation_unwinds_and_releases(drag_guest: dict[str, str], tmp_
     assert ups[0]["failsafe"] is False
     assert calls[-1]["failsafe"] is True
     assert calls[-1]["held"] is None
+
+
+def test_modifier_cleanup_defers_keyboard_interrupt_until_every_release(monkeypatch) -> None:
+    import types
+
+    from local_operator.computer_input import _hold_x11
+
+    attempts = []
+    fake = types.SimpleNamespace(FAILSAFE=True, keyDown=lambda key: None)
+    interrupt = KeyboardInterrupt("release interrupted")
+
+    def release(key):
+        attempts.append((key, fake.FAILSAFE))
+        if key == "shift":
+            raise interrupt
+
+    fake.keyUp = release
+    monkeypatch.setitem(sys.modules, "pyautogui", fake)
+    with pytest.raises(KeyboardInterrupt) as caught:
+        _hold_x11(("ctrl", "shift"), "pass")
+    assert attempts == [("shift", False), ("ctrl", False)]
+    assert fake.FAILSAFE is True
+    assert caught.value is interrupt

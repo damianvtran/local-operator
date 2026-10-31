@@ -264,6 +264,88 @@ def _drag_x11(
         raise RuntimeError("drag failed after the press; the button was released") from failure
 
 
+def _hold_x11(keys: tuple[str, ...], body: str) -> None:
+    """Run ``body`` with ``keys`` held down; shipped as source into the guest.
+
+    WHY one statement: a ``key`` action presses and releases its chord before
+    the next action runs, so a held modifier cannot be expressed as a sequence
+    of actions (sealed osworld-21 t25k3c-t004 sent ``[click][key SHIFT][click]``
+    for a shift-click range selection and selected one item). The press, the
+    pointer action and the release therefore live in ONE guest process, so no
+    key-down state can outlive the statement.
+
+    Ordering is the OS convention: pressed in the order given, released in
+    reverse. Release is guaranteed on cooperative unwinding (exceptions and
+    KeyboardInterrupt) and attempted for EVERY pressed key even when an
+    earlier release fails; a key whose keyDown raised after injecting is
+    released too. SIGKILL or a client timeout cannot run ``finally``: the
+    caller's no-replay policy for an unobserved outcome stays the authority.
+    """
+    import importlib
+
+    pyautogui = importlib.import_module("pyautogui")
+    pressed: list[str] = []
+    release_failure = None
+    original_failsafe = getattr(pyautogui, "FAILSAFE", None)
+    try:
+        for key in keys:
+            # Recorded BEFORE keyDown: a press that injects and then raises
+            # still leaves the key held, and only this list drives release.
+            pressed.append(key)
+            pyautogui.keyDown(key)
+        # The body is the adapter's own compiled pointer statement, run with
+        # pyautogui as its only global -- the same name the guest prefix binds.
+        exec(body, {"pyautogui": pyautogui})
+    finally:
+        if pressed:
+            # FAILSAFE disarmed ONLY around the releases and restored after: a
+            # pointer action ending in a screen corner must not make keyUp raise
+            # FailSafeException and strand the key (same rule as _drag_x11).
+            setattr(pyautogui, "FAILSAFE", False)
+            try:
+                for key in reversed(pressed):
+                    try:
+                        pyautogui.keyUp(key)
+                    except BaseException as exc:
+                        if release_failure is None:
+                            release_failure = exc
+            finally:
+                setattr(pyautogui, "FAILSAFE", original_failsafe)
+        if release_failure is not None:
+            # Truthful failure, raised from finally so it also replaces a body
+            # failure (chained as context): never report success, nor only the
+            # pointer failure, while a key may still be held.
+            if not isinstance(release_failure, Exception):
+                # Cancellation is deferred, never swallowed: every release and
+                # FAILSAFE restoration must finish before it resumes unwinding.
+                raise release_failure
+            raise RuntimeError(
+                "held modifier keys could not be released; the guest may still be holding a key"
+            ) from release_failure
+
+
+def held_keys_source(keys: Sequence[str], body: str) -> str:
+    """Compile ``body`` (one guest statement) to run with ``keys`` held down.
+
+    ``keys`` are BACKEND key names already mapped from the protocol's validated
+    modifier vocabulary by the caller; this function never maps names, so the
+    adapter's one key table stays the only one. Literals carry both values into
+    the guest, and ``body`` rides as a ``repr`` string, never interpolated.
+    """
+    if (
+        not keys
+        or len(keys) > 4
+        or len(set(keys)) != len(keys)
+        or any(not isinstance(key, str) or not key for key in keys)
+    ):
+        raise ValueError("held keys must be 1..4 distinct non-empty names")
+    if not isinstance(body, str) or not body:
+        raise ValueError("held keys need a statement to hold them across")
+    source = textwrap.dedent(inspect.getsource(_hold_x11))
+    source += f"\n_hold_x11({tuple(keys)!r}, {body!r})"
+    return f"exec({source!r})"
+
+
 def validate_drag(
     start_x: int,
     start_y: int,
