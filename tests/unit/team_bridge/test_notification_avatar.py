@@ -70,16 +70,95 @@ def test_precropped_with_transparent_corners_and_badge_inside(size, kind, theme)
 
 
 def test_source_kind_rule_agent_marker_only_for_person_agent():
-    photo = _jpeg()
-    person = _render(kind="person", photo=photo)
-    agent = _render(kind="person_agent", photo=photo)
+    person = _render(kind="person")
+    agent = _render(kind="person_agent")
     marker = (int(256 * (1 - na.AGENT_MARKER_RATIO / 2)), int(256 * na.AGENT_MARKER_RATIO / 2))
-    # Without a marker that point is the red photo; with one it is not.
-    assert _rgb(person, marker) == pytest.approx((200, 40, 40), abs=12)
-    assert _rgb(agent, marker) != pytest.approx((200, 40, 40), abs=40)
-    # The rest of the picture is the same photo.
-    centre = (100, 100)
-    assert person.getpixel(centre) == agent.getpixel(centre)
+    colour = na.palette_colour(ORIGIN, "acc_ben", "light")
+    # Without a marker that point is the owner's colour tile; with one it is not.
+    assert _rgb(person, marker) == pytest.approx(colour, abs=12)
+    assert _rgb(agent, marker) != pytest.approx(colour, abs=40)
+
+
+@pytest.mark.parametrize("theme", ["light", "dark"])
+@pytest.mark.parametrize("size", [64, 256])
+def test_agent_never_wears_the_owners_photo(theme, size):
+    """2026-10-30: "Aida (Damian Tran)" showed Damian's face. Never again.
+
+    The owner's photo handed to a ``person_agent`` render must not reach the
+    pixels: the agent composite is byte-identical to the one rendered with no
+    photo at all (the glyph on the owner's colour), and no pixel of the face
+    is the photo's colour. The person control on the same bytes still shows
+    the photo, so this does not pass merely because photos never render.
+    """
+
+    red = (200, 40, 40)
+    photo = _jpeg(red)
+    with_photo = na.compose(
+        na.Variant("person_agent", theme, size, "DT"),
+        origin=ORIGIN,
+        account_id="acc_ben",
+        photo=photo,
+    )
+    without = na.compose(
+        na.Variant("person_agent", theme, size, "DT"),
+        origin=ORIGIN,
+        account_id="acc_ben",
+        photo=None,
+    )
+    assert with_photo == without
+    image = Image.open(io.BytesIO(with_photo)).convert("RGBA")
+    face_px = [
+        image.getpixel((x, y))
+        for x in range(size // 8, size // 2)
+        for y in range(size // 4, (3 * size) // 4)
+    ]
+    assert not any(
+        isinstance(p, tuple) and p[3] == 255 and all(abs(c - r) <= 24 for c, r in zip(p[:3], red))
+        for p in face_px
+    )
+    person = _render(kind="person", theme=theme, size=size, photo=photo)
+    assert _rgb(person, (size // 4, size // 2)) == pytest.approx(red, abs=16)
+
+
+def test_agent_face_is_the_glyph_not_the_owners_initials():
+    """Different owner initials draw the same agent face: initials are the owner's."""
+
+    a = na.compose(
+        na.Variant("person_agent", "light", 256, "DT"),
+        origin=ORIGIN,
+        account_id="acc_ben",
+        photo=None,
+    )
+    b = na.compose(
+        na.Variant("person_agent", "light", 256, "ST"),
+        origin=ORIGIN,
+        account_id="acc_ben",
+        photo=None,
+    )
+    assert a == b
+    # And it is not a blank tile: the glyph puts white ink on the face.
+    image = Image.open(io.BytesIO(a)).convert("RGBA")
+    white = sum(
+        1
+        for x in range(40, 180)
+        for y in range(40, 200)
+        if (p := image.getpixel((x, y)))
+        and isinstance(p, tuple)
+        and min(p[:3]) > 230
+        and p[3] == 255
+    )
+    assert white > 400
+
+
+def test_agent_face_clears_the_overlays():
+    """The glyph's ink never falls in the badge/marker clearance (same bar as initials D1)."""
+
+    from PIL import ImageChops
+
+    colour = (0, 0, 0)
+    glyph = na._agent_face(256, colour).convert("L")
+    assert glyph.getbbox() is not None
+    assert ImageChops.multiply(glyph, _exclusion_mask()).getbbox() is None
 
 
 def test_placeholder_colour_follows_account_not_name():
@@ -352,7 +431,9 @@ def test_initials_survive_in_the_actual_composite():
 
     from PIL import ImageChops
 
-    for kind in ("person", "person_agent"):
+    # Only a person draws initials: an agent's face is the glyph (covered by
+    # ``test_agent_face_clears_the_overlays``), never its owner's initials.
+    for kind in ("person",):
         image = _render(kind=kind, theme="light", size=256, initials="WQ")
         ink = na._placeholder(256, (0, 0, 0), "WQ").convert("L")
         # Every pixel where the glyph draws must still be white and opaque.
@@ -485,3 +566,52 @@ def test_render_concurrency_bounds_and_cancel_release(monkeypatch):
     assert _semaphore_free(na._RENDER_SLOTS, 2)
     monkeypatch.setattr(na, "compose", real)
     assert asyncio.run(call()).startswith(b"\x89PNG")
+
+
+@pytest.mark.asyncio
+async def test_agent_banner_never_fetches_the_owners_photo(tmp_path, monkeypatch):
+    """A released desktop still sends the owner's photo version for an agent.
+
+    Core must ignore it: no hub avatar read happens at all, and the returned
+    composite is the glyph one. The person control on the same client does
+    read the photo, so the transport is live.
+    """
+
+    import httpx
+
+    from local_operator.team_bridge.client import TeamBridgeClient
+    from tests.unit.team_bridge.test_avatar import AvatarStore
+
+    monkeypatch.setattr(avatar_cache, "AVATAR_CACHE", avatar_cache.AvatarCache())
+    reads: list[str] = []
+
+    def upstream(request):
+        reads.append(request.url.path)
+        return httpx.Response(200, content=_jpeg(), headers={"content-type": "image/jpeg"})
+
+    client = TeamBridgeClient(
+        tmp_path, store=AvatarStore(), transport=httpx.MockTransport(upstream)
+    )
+
+    async def banner(kind: na.Kind) -> bytes:
+        return await client.notification_avatar(
+            "acc_2",
+            tenant_id="tenant_a",
+            kind=kind,
+            theme="light",
+            size=64,
+            initials="DT",
+            v="0123456789abcdef",
+            expected_account_id="acc_1",
+        )
+
+    agent = await banner("person_agent")
+    assert reads == []
+    assert agent == na.compose(
+        na.Variant("person_agent", "light", 64, "DT"),
+        origin=client._base_url,
+        account_id="acc_2",
+        photo=None,
+    )
+    await banner("person")
+    assert reads == ["/v1/accounts/acc_2/avatar"]

@@ -8,6 +8,20 @@ the sender's circle-cropped photo -- or an initials placeholder on a stable
 per-person colour -- with the Local Operator mark in a bottom-right corner
 badge and, for a person's agent (chief of staff), a separate agent marker.
 
+AN AGENT NEVER WEARS ITS OWNER'S FACE (2026-10-30). A ``person_agent``
+composite is keyed by its OWNER's account (the agent has no account of its
+own), and until this date it drew the owner's photo or initials under the
+agent marker. In production that put Damian's face on "Aida (Damian Tran)".
+A ``person_agent`` face is now always the agent glyph (:func:`_agent_face`) on
+the owner's stable colour. Any photo supplied for it is ignored, never
+decoded, and :meth:`TeamBridgeClient.notification_avatar` never fetches one.
+That is deliberately "ignore", not "refuse": desktops already released still
+send the owner's photo reference for an agent, and ignoring it fixes their
+banners as soon as core updates instead of costing them the image. An agent's
+OWN published picture (the endpoint seam documented in the desktop's
+``src/shared/identity-avatar.ts``) would need its own closed endpoint-avatar
+read; none exists, so none is drawn.
+
 CONSTRAINTS (design contract, Team Bridge agreement, 2026-10-28):
 
 * Composition lives here, in core, so every consumer (desktop main today,
@@ -89,6 +103,9 @@ GAP_RATIO = 0.035
 #: badge; ``tests/unit/team_bridge/test_notification_avatar.py`` re-measures it.
 INITIALS_RATIO = 0.33
 INITIALS_CENTRE = (0.43, 0.45)
+#: The agent glyph's centre: up and left like the initials, clear of both
+#: overlays (``test_agent_face_clears_the_overlays`` measures it).
+AGENT_FACE_CENTRE = (0.42, 0.46)
 #: Supersampling for antialiased circles without a vector renderer.
 _SUPERSAMPLE = 4
 
@@ -339,6 +356,42 @@ def _placeholder(side: int, colour: tuple[int, int, int], initials: str) -> Imag
     return tile
 
 
+def _agent_face(side: int, colour: tuple[int, int, int]) -> Image:
+    """The agent glyph (the desktop's lucide ``Bot``) in white on ``colour``.
+
+    Drawn from the icon's own 24-unit geometry (head ``rect 4,8 16x12 r2``,
+    antenna ``12,8 -> 12,4 -> 8,4``, ears at y=14, eyes at x=9/15, y=13..15)
+    so the banner and the in-app plate show the same mark. It is supersampled
+    for antialiasing, the same way :func:`_circle_mask` is, because the module
+    has no vector renderer. The glyph spans the middle ~52 % and sits a little
+    up and left, inside the same clearances the initials honour, so neither
+    the badge nor the marker cuts it (``test_agent_face_clears_the_overlays``).
+    """
+
+    from PIL import Image as PILImage
+    from PIL import ImageDraw
+
+    big = side * _SUPERSAMPLE
+    tile = PILImage.new("RGBA", (big, big), (*colour, 255))
+    draw = ImageDraw.Draw(tile)
+    unit = big * 0.026
+    ox = big * AGENT_FACE_CENTRE[0] - 12 * unit
+    oy = big * AGENT_FACE_CENTRE[1] - 12 * unit
+
+    def at(x: float, y: float) -> tuple[float, float]:
+        return (ox + x * unit, oy + y * unit)
+
+    ink = (255, 255, 255, 255)
+    stroke = max(1, round(2 * unit))
+    draw.rounded_rectangle((*at(4, 8), *at(20, 20)), radius=2 * unit, outline=ink, width=stroke)
+    draw.line([at(12, 8), at(12, 4), at(8, 4)], fill=ink, width=stroke, joint="curve")
+    for a, b in ((at(2, 14), at(4, 14)), (at(20, 14), at(22, 14))):
+        draw.line([a, b], fill=ink, width=stroke)
+    for x in (9, 15):
+        draw.line([at(x, 13), at(x, 15)], fill=ink, width=stroke)
+    return tile.resize((side, side), PILImage.Resampling.LANCZOS)
+
+
 def _disc(side: int, fill: tuple[int, int, int, int]) -> Image:
     from PIL import Image as PILImage
 
@@ -421,12 +474,15 @@ def compose(
     # Always draw at 256 and downsample, so 64 px is a faithful reduction of
     # the same geometry rather than a second layout.
     side = 256
-    if photo is not None:
+    colour = palette_colour(origin, account_id, variant.theme)
+    if variant.kind == "person_agent":
+        # Never the owner's photo or initials (module docstring). A supplied
+        # photo is not even decoded: those bytes are the owner's, not the agent's.
+        face = _agent_face(side, colour)
+    elif photo is not None:
         face = _cover(decode_source(photo), side)
     else:
-        face = _placeholder(
-            side, palette_colour(origin, account_id, variant.theme), variant.initials
-        )
+        face = _placeholder(side, colour, variant.initials)
     canvas = PILImage.new("RGBA", (side, side), (0, 0, 0, 0))
     face.putalpha(ImageChops.multiply(face.getchannel("A"), _circle_mask(side)))
     canvas.alpha_composite(face)
