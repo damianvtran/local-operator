@@ -635,14 +635,16 @@ def _spawn_runtime_hosted(
         # NOT DELIVERED, and NOT FORKED HERE EITHER (rule R4). The only things
         # this arm does are clean up and raise: no capability copy is left in a
         # descriptor nobody will read, the capture file is not orphaned, and the
-        # caller gets a ``RuntimeStartupError`` whose ``actionable`` text is a
-        # KEYED sentence (``retrying changes nothing until the host is back`` is
-        # exactly that class's contract) -- never a local ``_spawn_runtime_local``.
+        # caller gets a typed ``SessionHostStartupError`` -- never a local
+        # ``_spawn_runtime_local``. It deliberately carries NO ``actionable``
+        # sentence: the cause is host plumbing for the log, and every surface
+        # already turns an un-vetted ``RuntimeStartupError`` into its own
+        # localised generic "runtime unavailable" line (``attached._ensure_bound``,
+        # ``relay``'s runtime-start reason), so there is no new user copy to key.
         handoff.close()
         capture.unlink(missing_ok=True)
         logger.warning("engage: the session host could not start %s: %s", session_id, exc)
-        sentence = session_host.unavailable_sentence(exc.code)
-        raise RuntimeStartupError(sentence, actionable=sentence) from exc
+        raise SessionHostStartupError(session_id, exc.code, exc.detail) from exc
     except BaseException:
         handoff.close()
         capture.unlink(missing_ok=True)
@@ -1034,6 +1036,28 @@ class RuntimeStartupError(RuntimeError):
         #: A vetted, user-facing sentence, or "" when the cause was not one of
         #: the known configuration conditions.
         self.actionable = actionable
+
+
+class SessionHostStartupError(RuntimeStartupError):
+    """The session host could not start a runtime; NOTHING was forked anywhere.
+
+    A ``RuntimeStartupError`` with an EMPTY ``actionable``, on purpose. That field
+    is the vetted, user-facing sentence a surface may echo; the cause here
+    (no supervisor on this platform, the host did not answer, the host declined) is
+    infrastructure detail for the log, and the surfaces already say something
+    localised and generic for an un-vetted startup failure. A dedicated catalogue
+    sentence would be seven translations of a message the person cannot act on any
+    differently. ``code`` (``unsupported`` / ``unavailable`` / ``refused``) is for
+    tests and logs. Being a subclass, every existing handler of
+    ``RuntimeStartupError`` (fail-fast, no respawn) treats it as before.
+    """
+
+    def __init__(self, session_id: str, code: str, detail: str = "") -> None:
+        super().__init__(
+            f"could not start a runtime for session {session_id}: the session host is "
+            f"{code}" + (f" ({detail})" if detail else "")
+        )
+        self.code = code
 
 
 class ActionableConnectionError(ConnectionError):
