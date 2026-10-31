@@ -76,7 +76,15 @@ def agent_dir_id(value: str) -> str:
 
 
 def _png_block(*, filename: str | None = "avatar.png", sha: str = PNG_SHA, size: int | None = None):
-    lines = ["avatar:", f"  sha256: {sha}", "  mime: image/png", f"  bytes: {size or len(PNG)}"]
+    # ``updated_at`` is required by the store's own model (``AgentAvatarMeta``), and
+    # the publisher resolves through that model, so a block without it is a doubt.
+    lines = [
+        "avatar:",
+        f"  sha256: {sha}",
+        "  mime: image/png",
+        f"  bytes: {size or len(PNG)}",
+        "  updated_at: '2026-10-30T00:00:00+00:00'",
+    ]
     if filename is not None:
         lines.append(f"  filename: {filename}")
     return "\n".join(lines) + "\n"
@@ -97,22 +105,28 @@ async def test_a_stored_picture_resolves_with_its_recorded_digest(tmp_path: Path
 
     assert agent is not None
     assert (agent.local_agent_id, agent.name) == ("aida", "Aida")
-    assert agent.avatar_path is not None and agent.avatar_path.name == "avatar.png"
+    assert agent.avatar_data == PNG
     assert agent.avatar_sha256 == PNG_SHA
     assert agent.avatar_broken is False
 
 
-async def test_the_filename_field_wins_and_a_webp_store_reads_back(tmp_path: Path):
-    """lopdev's store may end up ``avatar.webp``; the block names it, not us."""
+async def test_a_webp_block_is_a_doubt_because_the_store_never_writes_one(tmp_path: Path):
+    """R3-F3: the store holds ``avatar.png``/``avatar.jpg`` only (it re-encodes).
+
+    A ``webp`` block therefore names nothing the store would serve, and the
+    publisher follows the store: a doubt, never a publish and never a delete.
+    """
 
     _enrolled(tmp_path)
-    block = "avatar:\n  sha256: {sha}\n  mime: image/webp\n  bytes: {n}\n  filename: avatar.webp\n"
+    block = (
+        "avatar:\n  sha256: {sha}\n  mime: image/webp\n  bytes: {n}\n"
+        "  updated_at: '2026-10-30T00:00:00+00:00'\n  filename: avatar.webp\n"
+    )
     _agent(tmp_path, block=block.format(sha=WEBP_SHA, n=len(WEBP)), files={"avatar.webp": WEBP})
 
     agent = published_agent(tmp_path)
 
-    assert agent is not None and agent.avatar_path is not None
-    assert agent.avatar_path.name == "avatar.webp"
+    assert agent is not None and agent.avatar_data is None and agent.avatar_broken is True
 
 
 async def test_a_legacy_block_without_a_filename_falls_back_to_its_mime(tmp_path: Path):
@@ -121,8 +135,7 @@ async def test_a_legacy_block_without_a_filename_falls_back_to_its_mime(tmp_path
 
     agent = published_agent(tmp_path)
 
-    assert agent is not None and agent.avatar_path is not None
-    assert agent.avatar_path.name == "avatar.png"
+    assert agent is not None and agent.avatar_data == PNG
 
 
 @pytest.mark.parametrize(
@@ -145,7 +158,7 @@ async def test_a_name_outside_the_agents_own_directory_is_a_doubt(tmp_path: Path
     agent = published_agent(tmp_path)
 
     assert agent is not None
-    assert agent.avatar_path is None
+    assert agent.avatar_data is None
     assert agent.avatar_broken is True
 
 
@@ -158,7 +171,153 @@ async def test_a_symlink_out_of_the_directory_is_a_doubt(tmp_path: Path):
 
     agent = published_agent(tmp_path)
 
-    assert agent is not None and agent.avatar_path is None and agent.avatar_broken is True
+    assert agent is not None and agent.avatar_data is None and agent.avatar_broken is True
+
+
+# -- the publisher resolves THROUGH the store (R3-F1/F2) -----------------------
+#
+# ``agent.yml`` is writable by the agent itself and the hub copy is visible to
+# every teammate in the tenant, so "which file is the avatar" must be the
+# STORE's answer. Each cell below runs the real boundary against a recording
+# transport and asserts the file's CONTENT never appears in any request — an
+# exit code or an empty ``puts`` list alone would not notice a body that went out
+# under a different request.
+
+SECRET = "security_prompt: NEVER-REVEAL-THIS-PRIVATE-PROMPT"
+
+
+def _jpeg_block(*, mime: str = "image/png", filename: str = "avatar.jpg") -> str:
+    return (
+        "avatar:\n"
+        f"  sha256: {PNG_SHA}\n"
+        f"  mime: {mime}\n"
+        f"  bytes: {len(PNG)}\n"
+        "  updated_at: '2026-10-30T00:00:00+00:00'\n"
+        f"  filename: {filename}\n"
+    )
+
+
+async def _boundary_requests(root: Path) -> list[httpx.Request]:
+    """Run ONE real status boundary against a hub that holds a different picture."""
+
+    status = _endpoint_payload("active")
+    status["tenants"][0]["endpoint"].update({"agent_name": None})
+    status["tenants"][0]["endpoint"]["avatar"] = {
+        "hash": "0123456789abcdef",
+        "source_sha256": "0" * 64,
+    }
+    seen: list[httpx.Request] = []
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.url.path.endswith("/avatar") and request.method == "PUT":
+            return _multipart_echo(request)
+        return _ok(status)
+
+    await _discipline(_Counter(responder), root).check(Boundary.APP_START)
+    return seen
+
+
+def _avatar_traffic(seen: list[httpx.Request]) -> list[httpx.Request]:
+    return [r for r in seen if r.url.path.endswith("/avatar")]
+
+
+def _doubt_agent(root: Path, *, block: str, files: dict[str, bytes] | None = None) -> Path:
+    agent_dir = _agent(root, block=block, files=files)
+    # The private text lives in agent.yml itself, exactly where the real one does.
+    with (agent_dir / "agent.yml").open("a", encoding="utf-8") as handle:
+        handle.write(SECRET + "\n")
+    return agent_dir
+
+
+def _never_reached(seen: list[httpx.Request]) -> None:
+    assert _avatar_traffic(seen) == [], "a doubt must send neither a PUT nor a DELETE"
+    for request in seen:
+        assert b"NEVER-REVEAL" not in request.content
+        assert b"security_prompt" not in request.content
+
+
+async def test_a_filename_naming_agent_yml_is_a_doubt_and_discloses_nothing(tmp_path: Path):
+    """R3-F1(a): ``filename: agent.yml`` once uploaded the agent's private prompt."""
+
+    _enrolled(tmp_path)
+    _doubt_agent(tmp_path, block=_png_block(filename="agent.yml"), files={"avatar.png": PNG})
+
+    agent = published_agent(tmp_path)
+    assert agent is not None and agent.avatar_data is None and agent.avatar_broken is True
+
+    _never_reached(await _boundary_requests(tmp_path))
+
+
+async def test_a_symlink_to_agent_yml_is_a_doubt_and_discloses_nothing(tmp_path: Path):
+    """R3-F1(b): ``avatar.png -> agent.yml`` is a same-directory link, so the old
+    containment check (parent == directory) accepted it."""
+
+    _enrolled(tmp_path)
+    agent_dir = _doubt_agent(tmp_path, block=_png_block())
+    (agent_dir / "avatar.png").symlink_to(agent_dir / "agent.yml")
+
+    agent = published_agent(tmp_path)
+    assert agent is not None and agent.avatar_data is None and agent.avatar_broken is True
+
+    _never_reached(await _boundary_requests(tmp_path))
+
+
+async def test_a_symlink_to_a_file_outside_the_agent_is_a_doubt_and_discloses_nothing(
+    tmp_path: Path,
+):
+    """R3-F1(c): the target is outside the agent directory altogether."""
+
+    _enrolled(tmp_path)
+    outside = tmp_path / "private-notes.txt"
+    outside.write_text(SECRET + "\n", encoding="utf-8")
+    agent_dir = _doubt_agent(tmp_path, block=_png_block())
+    (agent_dir / "avatar.png").symlink_to(outside)
+
+    agent = published_agent(tmp_path)
+    assert agent is not None and agent.avatar_data is None and agent.avatar_broken is True
+
+    _never_reached(await _boundary_requests(tmp_path))
+
+
+async def test_a_filename_that_disagrees_with_the_mime_is_a_doubt(tmp_path: Path):
+    """R3-F1(d): ``avatar.jpg`` recorded as ``image/png`` is no file the store serves."""
+
+    _enrolled(tmp_path)
+    _doubt_agent(tmp_path, block=_jpeg_block(), files={"avatar.jpg": PNG})
+
+    agent = published_agent(tmp_path)
+    assert agent is not None and agent.avatar_data is None and agent.avatar_broken is True
+
+    _never_reached(await _boundary_requests(tmp_path))
+
+
+async def test_a_digest_mismatch_is_a_doubt_and_the_bytes_never_leave(tmp_path: Path):
+    """R3-F2(e): the store refuses a file that does not hash to its block."""
+
+    _enrolled(tmp_path)
+    other = b"\x89PNG\r\n\x1a\n" + b"NEVER-REVEAL-OTHER-BYTES"
+    _doubt_agent(tmp_path, block=_png_block(), files={"avatar.png": other})
+
+    agent = published_agent(tmp_path)
+    assert agent is not None and agent.avatar_data is None and agent.avatar_broken is True
+
+    _never_reached(await _boundary_requests(tmp_path))
+
+
+async def test_a_normal_block_still_publishes_exactly_its_picture(tmp_path: Path):
+    """R3-F1(f): the control. The same rig, a valid block: the PNG goes, nothing else."""
+
+    _enrolled(tmp_path)
+    _doubt_agent(tmp_path, block=_png_block(), files={"avatar.png": PNG})
+
+    seen = await _boundary_requests(tmp_path)
+
+    puts = [r for r in _avatar_traffic(seen) if r.method == "PUT"]
+    assert len(puts) == 1 and puts[0].headers["x-source-sha256"] == PNG_SHA
+    assert PNG in puts[0].content
+    for request in seen:
+        assert b"NEVER-REVEAL" not in request.content
 
 
 async def test_a_block_whose_file_is_gone_is_a_doubt_not_a_clear(tmp_path: Path):
@@ -169,7 +328,7 @@ async def test_a_block_whose_file_is_gone_is_a_doubt_not_a_clear(tmp_path: Path)
 
     agent = published_agent(tmp_path)
 
-    assert agent is not None and agent.avatar_path is None and agent.avatar_broken is True
+    assert agent is not None and agent.avatar_data is None and agent.avatar_broken is True
 
 
 async def test_an_oversized_file_is_a_doubt(tmp_path: Path):
@@ -193,7 +352,7 @@ async def test_no_avatar_block_is_a_deliberate_clear(
 
     agent = published_agent(tmp_path)
 
-    assert agent is not None and agent.avatar_path is None and agent.avatar_broken is False
+    assert agent is not None and agent.avatar_data is None and agent.avatar_broken is False
 
 
 async def test_an_absent_block_is_a_doubt_while_the_store_would_erase_it(
@@ -219,7 +378,7 @@ async def test_an_absent_block_is_a_doubt_while_the_store_would_erase_it(
 
     agent = published_agent(tmp_path)
 
-    assert agent is not None and agent.avatar_path is None and agent.avatar_broken is True
+    assert agent is not None and agent.avatar_data is None and agent.avatar_broken is True
 
 
 async def test_the_agent_store_can_preserve_the_avatar_block():
@@ -460,8 +619,12 @@ async def test_a_failure_never_raises_and_leaves_the_status_answer_untouched(
     assert tmp_path.name not in logged and PNG_SHA not in logged and "aida" not in logged
 
 
-async def test_a_hand_edited_file_is_published_under_its_true_digest(tmp_path: Path):
-    """The recorded digest is stale for a hand edit; the SIZE is what catches it."""
+async def test_a_hand_edited_file_is_a_doubt_not_an_upload(tmp_path: Path):
+    """R3-F2: bytes that do not hash to the block's digest are never published.
+
+    The store refuses to serve such a file, so the publisher does too; the hub
+    keeps what it has (no PUT) and nothing is deleted.
+    """
 
     _enrolled(tmp_path)
     edited = PNG + b"tampered"
@@ -470,7 +633,8 @@ async def test_a_hand_edited_file_is_published_under_its_true_digest(tmp_path: P
 
     await avatar_publish.reconcile(client, _status(hub_sha=PNG_SHA), "tnt_1", tmp_path)
 
-    assert client.puts == [("bep_1", edited, hashlib.sha256(edited).hexdigest())]
+    assert client.puts == [] and client.deletes == []
+    assert edited not in b"".join(p[1] for p in client.puts)
 
 
 async def test_the_explicit_publish_forces_the_write_whatever_the_hub_holds(tmp_path: Path):
@@ -753,16 +917,14 @@ async def test_a_stale_picture_version_is_a_refusal_not_a_fresh_image():
 # -- round 1 remediation: the cases the review measured ----------------------
 
 
-async def test_a_same_size_hand_edit_publishes_its_true_digest(
+async def test_a_same_size_hand_edit_is_a_doubt_not_an_upload(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    """R1-F3: the size-matching edit is the one only "always hash" catches.
+    """The size-matching edit is the one a length check cannot see.
 
-    The block still records the OLD digest and the OLD length, and the file has
-    been replaced by bytes of the SAME length. Sending the recorded digest would
-    earn a 204 "bytes I already hold", so the hub would keep the old picture and
-    echo the old digest — a replaced photo that never publishes and never
-    repairs.
+    The block records the OLD digest and the file now holds same-length bytes.
+    The store's digest check refuses it (R3-F2), so nothing is sent — neither the
+    stale digest (R1-F3's 204 trap) nor the new bytes.
     """
 
     _preserves_avatar(monkeypatch)
@@ -780,7 +942,7 @@ async def test_a_same_size_hand_edit_publishes_its_true_digest(
         tmp_path,
     )
 
-    assert client.puts == [("bep_1", edited, hashlib.sha256(edited).hexdigest())]
+    assert client.puts == [] and client.deletes == []
 
 
 async def test_a_paused_endpoint_is_never_published_or_cleared(tmp_path: Path):
@@ -996,33 +1158,37 @@ async def test_an_account_and_an_agent_with_the_same_id_never_share_cached_bytes
     assert {key[2] for key in keys} == {"acc_2", "endpoint:bep_1"}
 
 
-async def test_a_dot_slash_prefixed_name_is_the_same_file(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
-    """R1-F10: ``./avatar.png`` names THIS file; the prefix is normalised away."""
+async def test_a_dot_slash_prefixed_name_is_a_doubt(tmp_path: Path):
+    """R3-F1: the store compares ``filename`` EXACTLY, so this side does too.
+
+    ``./avatar.png`` was normalised away by the private resolver this replaced;
+    the store reads it as "no picture", and a publisher more lenient than the
+    store is the shape of the disclosure bug.
+    """
 
     _enrolled(tmp_path)
     _agent(tmp_path, block=_png_block(filename="./avatar.png"), files={"avatar.png": PNG})
 
     agent = published_agent(tmp_path)
 
-    assert agent is not None and agent.avatar_path is not None
-    assert agent.avatar_path.name == "avatar.png" and agent.avatar_broken is False
+    assert agent is not None and agent.avatar_data is None and agent.avatar_broken is True
 
 
-def test_a_nul_in_the_stored_name_is_refused(tmp_path: Path):
-    """R1-F10: a NUL truncates the name for any C-level caller downstream.
+def test_a_nul_in_the_stored_name_is_a_doubt(tmp_path: Path):
+    """A NUL cannot ride a YAML scalar, so it is asserted at the reader itself."""
 
-    Asserted at the resolver, not through ``agent.yml``: a NUL cannot survive
-    being written to a YAML scalar, so the block could never carry one — the
-    guard exists for every other route into this function.
-    """
-
-    from local_operator.team_bridge.cos_name import _resolve_avatar
+    from local_operator.team_bridge.cos_name import _stored_avatar_bytes
 
     agent_dir = tmp_path / "agents" / "aida"
     agent_dir.mkdir(parents=True)
     (agent_dir / "avatar.png").write_bytes(PNG)
+    block = {
+        "sha256": PNG_SHA,
+        "mime": "image/png",
+        "bytes": len(PNG),
+        "updated_at": "2026-10-30T00:00:00+00:00",
+        "filename": "avatar\x00.png",
+    }
 
-    assert _resolve_avatar(agent_dir, "avatar\x00.png") is None
-    assert _resolve_avatar(agent_dir, "avatar.png") is not None
+    assert _stored_avatar_bytes(agent_dir, block) is None
+    assert _stored_avatar_bytes(agent_dir, {**block, "filename": "avatar.png"}) == PNG
