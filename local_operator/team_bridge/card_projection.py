@@ -82,7 +82,7 @@ def carry_presented_body(source: Any, rendered: Any) -> None:
         and admission.valid()
     ):
         text = _rendered_text(rendered)
-        if text == admission.text:
+        if text is not None and text == admission.text:
             object.__setattr__(
                 rendered, "_bridge_presented_body", _PresentedBody(admission.ref, text)
             )

@@ -111,7 +111,9 @@ async def test_raw_persisted_card_never_leaks_in_any_render_or_cold_replay(tmp_p
         await session._transcript.append_message(card)
         raw = session._transcript.build_llm_history()
         # The UI keeps its raw entry; model conversion never receives its text.
-        assert "mention: no" in raw[0].details["text"]
+        persisted_card = raw[0]
+        assert isinstance(persisted_card, CustomMessage)
+        assert "mention: no" in persisted_card.details["text"]
         for rendered in (
             _default_convert_to_llm(raw),
             session._render_history(raw),
@@ -478,3 +480,35 @@ async def test_s2_unauthorized_fresh_reader_cannot_distinguish_completed_from_mi
     finally:
         await reader.dispose()
         await source.dispose()
+
+
+@pytest.mark.asyncio
+async def test_legacy_pair_wake_is_not_a_conversation_card(tmp_path):
+    """The pair lane already carries its screened excerpt; no body-turn gate."""
+    from local_operator.team_bridge.connector.wake import build_wake_payload
+
+    cfg = tmp_path / "cfg"
+    _store(cfg)
+    session = _session(tmp_path, CapturingStream([]), _runtime(cfg, FakeBridgeClient()))
+    try:
+        payload = build_wake_payload(
+            {
+                "message": {"body": {"text": "screened-pair-excerpt"}, "type": "note"},
+                "sender": {"name": "pair-sender"},
+                "thread": {"id": "bth_pair01"},
+            },
+            message_id="bmsg_pair01",
+            body_sha256="ab" * 32,
+        )
+        pair = session._peer_custom_message(
+            payload,
+            {"source": "team_bridge"},
+            custom_type="team_bridge_message",
+        )
+        rendered = _text(session._render_history([pair]))
+        assert rendered == pair.details["text"]
+        assert "bmsg_pair01" in rendered and "bth_pair01" in rendered
+        assert "screened-pair-excerpt" in rendered
+        assert PENDING_CARD not in rendered
+    finally:
+        await session.dispose()
