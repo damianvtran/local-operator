@@ -5741,12 +5741,17 @@ async def test_mcp_cancellation_seals_unknown_even_after_late_success(
 
     async def run(command: str, timeout: float) -> Any:
         remote = asyncio.create_task(http_request())
-        try:
-            return await asyncio.shield(remote)
-        except asyncio.CancelledError:
-            cancelled.set()
-            # A dispatched HTTP request may still return despite cancellation.
-            return await remote
+        while True:
+            try:
+                return await asyncio.shield(remote)
+            except asyncio.CancelledError:
+                if remote.cancelled():
+                    raise
+                # Publish only once the bridge operation has observed cancellation.
+                # Native socket teardown can cancel it again while it collects the
+                # late reply; keep shielding on EVERY await so that teardown cannot
+                # cancel the independent HTTP task before the handshake releases it.
+                cancelled.set()
 
     bridge.run_command = run
     await bridge.start()
