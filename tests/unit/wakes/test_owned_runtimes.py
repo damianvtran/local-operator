@@ -583,26 +583,76 @@ def test_an_unwritable_conversation_does_not_stop_the_sweep(tmp_path: Path, monk
     assert sent == [111]
 
 
-def test_a_candidate_with_no_published_record_is_not_signalled(tmp_path: Path, monkeypatch) -> None:
-    """No run key means no sanction, so signalling it would be a lie about the stop.
+def test_a_candidate_with_no_published_record_is_still_stopped_with_an_unstamped_marker(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    """Q3/R-3: a supervisor stop must still stop a runtime that has no published record.
 
-    The victim would refuse a signal nothing covers, and a supervisor that reported
-    the pid as signalled would act on a stop that cannot happen. The skip is SAID,
-    because a record that vanished under a live runtime is itself worth a line.
+    The first cut skipped it ("no run key, no sanction"), which left the runtime
+    running where main signalled it. The candidate is one THIS unit started and
+    promised to stop, so the stop goes out with a marker staged without a start
+    stamp (session + pid + staging window still pair it, ``marker_covers_signal``),
+    and the gap is said in the log. The ``fleet.boots`` fallback the first cut also
+    had is gone: boot values are plain dicts (so ``getattr`` found nothing) and
+    their ``started_at`` differs from the runtime's own by 0.15-16 s.
     """
-    from local_operator.session.runtime import reclaim
+    import logging
+
+    from local_operator.session.runtime import reclaim, registry, signal_receipt
+    from local_operator.session.runtime.types import session_dir
 
     root = tmp_path / "root"
     rows = [_row(111, root, "owner-a", "s1")]
+    _seed_conversation(root, "s1")
     monkeypatch.setattr(reclaim, "runtime_processes", lambda: rows)
     monkeypatch.setattr(reclaim, "process_row", lambda pid: rows[0])
     monkeypatch.setattr(
         reclaim,
         "read_fleet",
-        lambda root=None, **kw: SimpleNamespace(records={}, boots={}),
+        lambda root=None, **kw: SimpleNamespace(
+            records={}, boots={111: {"pid": 111, "started_at": 12345.0}}
+        ),
     )
-    sent: list[int] = []
-    monkeypatch.setattr(owned_runtimes.os, "kill", lambda pid, sig: sent.append(pid))
+    seen: list[dict[str, Any] | None] = []
 
-    assert owned_runtimes.sweep(root, owner="owner-a") == []
-    assert sent == [], "a candidate with no run key was signalled anyway"
+    def _kill(pid: int, sig: int) -> None:
+        seen.append(registry.read_stop_marker(session_dir(root, "s1")))
+
+    monkeypatch.setattr(owned_runtimes.os, "kill", _kill)
+    caplog.set_level(logging.WARNING, logger=owned_runtimes.logger.name)
+
+    assert owned_runtimes.sweep(root, owner="owner-a") == [111]
+    assert len(seen) == 1 and seen[0] is not None
+    marker = seen[0]
+    assert marker["started_at"] is None, "a boot record's start was used as the run key"
+    assert any("no published start" in r.getMessage() for r in caplog.records)
+    assert signal_receipt.marker_covers_signal(
+        marker, session_id="s1", pid=111, started_at=1.0, at=float(marker["at"])
+    )
+
+
+def test_a_candidate_with_only_a_run_record_is_keyed_from_it(tmp_path: Path, monkeypatch) -> None:
+    """No ``SessionRecord`` but a ``runtime-run.json`` for this pid: that start is the key."""
+    from local_operator.session.runtime import journal, reclaim, registry
+    from local_operator.session.runtime.types import session_dir
+
+    root = tmp_path / "root"
+    rows = [_row(111, root, "owner-a", "s1")]
+    directory = _seed_conversation(root, "s1")
+    assert journal.write_run_record(
+        "s1", conversation_dir=directory, pid=111, started_at=1_799_990_123.5
+    )
+    monkeypatch.setattr(reclaim, "runtime_processes", lambda: rows)
+    monkeypatch.setattr(reclaim, "process_row", lambda pid: rows[0])
+    monkeypatch.setattr(
+        reclaim, "read_fleet", lambda root=None, **kw: SimpleNamespace(records={}, boots={})
+    )
+    seen: list[dict[str, Any] | None] = []
+    monkeypatch.setattr(
+        owned_runtimes.os,
+        "kill",
+        lambda pid, sig: seen.append(registry.read_stop_marker(session_dir(root, "s1"))),
+    )
+
+    assert owned_runtimes.sweep(root, owner="owner-a") == [111]
+    assert seen[0] is not None and seen[0]["started_at"] == 1_799_990_123.5

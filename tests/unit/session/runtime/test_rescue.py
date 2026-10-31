@@ -852,12 +852,73 @@ def test_a_refusal_record_is_not_a_receipt_and_leaves_recovery_untouched(
     # exactly as it did before the refusal existed.
     assert rescue.read_signal_receipt(tmp_path, sid) is None
     after = decision()
-    assert (after.verdict, after.tag) == (
-        baseline.verdict,
-        baseline.tag,
-    ), "a refusal record changed the recovery decision"
+    # The VERDICT is unchanged by the refusal; the TAG now names the stronger evidence
+    # (the fallback reads the refusals file, Q2), so only the verdict is compared.
+    assert after.verdict == baseline.verdict, "a refusal record changed the recovery decision"
     assert after.verdict == "fire", "a refused-then-SIGKILLed run must still be rescued"
+    assert after.tag == "refused-signal-then-death"
     assert after.tag != "receipt-no-signals"
+
+
+def test_a_refused_then_killed_run_is_rescued_even_after_an_earlier_completed_turn(
+    tmp_path: Path, alive: set[int]
+) -> None:
+    """Q2: the fallback must see a refusal, or the gate hides the 2026-10-30 shape.
+
+    The session finished a turn earlier (a ``complete`` row), the next turn was in
+    flight, a bare SIGTERM was REFUSED, then the process was SIGKILLed. Before the
+    gate the SIGTERM wrote a ``sanction: none`` receipt and this was
+    ``fire / receipt-unsanctioned``; with the arrival moved to its own file the
+    fallback read only the latest completion and answered ``skip / complete`` — the
+    same verdict a plain SIGKILL earns, but for a run the evidence says somebody
+    tried to end and nobody sanctioned. The refusal is that evidence.
+    """
+    sid = "777788889999"
+    _session_dir(tmp_path, sid)
+    _record(tmp_path, sid, pid=DEAD_PID, started_at=STARTED, heartbeat_at=HEARTBEAT)
+    _journal(tmp_path, sid, DEAD_PID)
+    _completions(tmp_path, [(f"session/{sid}", "complete", "", "done")])
+
+    without = _verdict(tmp_path, sid)
+    assert without == "skip", "the control (a plain SIGKILL) is today's complete-skip"
+
+    registry.write_signal_refusals(
+        _session_dir(tmp_path, sid),
+        {
+            "v": 1,
+            "kind": "runtime",
+            "session_id": sid,
+            "pid": DEAD_PID,
+            "started_at": STARTED,
+            "refusals": [{"disposition": "refused", "name": "SIGTERM", "number": 15}],
+        },
+    )
+    report = rescue.rescue_scan(tmp_path, now=NOW, apply=False)
+    decision = next(d for d in report.decisions if d.session_id == sid)
+    assert (decision.verdict, decision.tag) == ("fire", "refused-signal-then-death")
+
+
+def test_a_refusal_from_an_earlier_run_does_not_rescue_a_later_one(
+    tmp_path: Path, alive: set[int]
+) -> None:
+    """The run key bounds the evidence: another run's refusal narrates nothing here."""
+    sid = "777788889999"
+    _session_dir(tmp_path, sid)
+    _record(tmp_path, sid, pid=DEAD_PID, started_at=STARTED, heartbeat_at=HEARTBEAT)
+    _journal(tmp_path, sid, DEAD_PID)
+    _completions(tmp_path, [(f"session/{sid}", "complete", "", "done")])
+    registry.write_signal_refusals(
+        _session_dir(tmp_path, sid),
+        {
+            "v": 1,
+            "kind": "runtime",
+            "session_id": sid,
+            "pid": DEAD_PID + 1,
+            "started_at": STARTED - 5_000,
+            "refusals": [{"disposition": "refused", "name": "SIGTERM", "number": 15}],
+        },
+    )
+    assert _verdict(tmp_path, sid) == "skip"
 
 
 # --- G. the exit record (a policy departure is not a death) ------------------

@@ -224,7 +224,12 @@ def exec_server(tmp_path, monkeypatch):
                 and generation
                 and _owner_is_dead(state["pid"], generation) is False
             ):
-                os.kill(state["pid"], signal.SIGTERM)
+                # SIGKILL, not SIGTERM: since the victim-side sanction gate a bare
+                # SIGTERM is REFUSED, so a teardown that sent one would leak the worker
+                # past the test. This is teardown of a worker THIS fixture started under
+                # its private config; SIGKILL is the unrefusable rung and loses nothing
+                # the test still reads.
+                os.kill(state["pid"], signal.SIGKILL)
         server.shutdown()
         server.server_close()
         serving.join(timeout=5)
@@ -858,12 +863,14 @@ async def test_exec_supervisor_approval_ui(exec_server, tmp_path, approve):
 
 @pytest.mark.parametrize(
     "termination,expected",
-    # `term` is an UNSANCTIONED SIGTERM (a bare os.kill, no stop marker), which is
-    # deliberately NOT a cancellation any more: nobody asked for it, and the ledger says
-    # so (`interrupted` + `stop_class: unattributed-signal`). `stop` is the supervisor's
-    # own control op and stays `cancelled`. `kill` is uncatchable, so the worker leaves
-    # no row and reconcile classifies it `unattributed-death`.
-    [("term", "interrupted"), ("kill", "interrupted"), ("stop", "cancelled")],
+    # `term` USED TO BE HERE: an unsanctioned SIGTERM (a bare os.kill, no stop marker)
+    # ended the worker as `interrupted` / `unattributed-signal`. Since the victim-side
+    # sanction gate that signal is REFUSED and the worker keeps its turn, so it has its
+    # own cell below (`test_an_unsanctioned_sigterm_is_refused_by_a_real_worker`).
+    # `stop` is the supervisor's own control op and stays `cancelled`. `kill` is
+    # uncatchable, so the worker leaves no row and reconcile classifies it
+    # `unattributed-death`.
+    [("kill", "interrupted"), ("stop", "cancelled")],
 )
 def test_exec_loop_lifecycle_outcomes(exec_server, termination, expected):
     import signal
@@ -894,7 +901,7 @@ def test_exec_loop_lifecycle_outcomes(exec_server, termination, expected):
     else:
         # Only the worker created by THIS fixture, under its private config,
         # is signalled. Never target ambient session discovery or cmux state.
-        os.kill(status["pid"], signal.SIGTERM if termination == "term" else signal.SIGKILL)
+        os.kill(status["pid"], signal.SIGKILL)
     # THE WAIT IS CHEAP, AND LONG ENOUGH FOR THE POLL ITSELF (QA round 1, Q1).
     # ``job_status(reconcile=True)`` shells out to ``ps`` to prove the owner is
     # gone, and under fleet load one call measured 2.8-14 s — which is how a 15 s
@@ -915,7 +922,6 @@ def test_exec_loop_lifecycle_outcomes(exec_server, termination, expected):
     assert (
         status.get("stop_class")
         == {
-            "term": "unattributed-signal",
             "kill": "unattributed-death",
             "stop": "deliberate",
         }[termination]
@@ -925,6 +931,65 @@ def test_exec_loop_lifecycle_outcomes(exec_server, termination, expected):
     assert len(requests) == before, "Status/reconciliation must never restart iterations"
     if termination != "kill":
         assert not Path(status["runtime_path"]).exists()
+
+
+def test_an_unsanctioned_sigterm_is_refused_by_a_real_worker(exec_server):
+    """The `term` row of the lifecycle table, rewritten for the sanction gate.
+
+    A REAL background worker receives a bare SIGTERM (nothing staged). It must keep
+    running its loop, say so in the ledger (an arrival row with `sanction: none` and
+    `action: refused`, no terminal row), and stay mortal to SIGKILL — which is then
+    classified `unattributed-death`, because the refused signal wrote no receipt of a
+    stop and a SIGKILL writes nothing.
+    """
+    import signal
+    import time
+
+    from local_operator.exec_mode import job_status, read_job_records
+
+    run, _requests, _root = exec_server
+    result = run(
+        "exec",
+        "--goal",
+        "HOLD_FIXTURE",
+        "--loop",
+        "2",
+        "--name",
+        "Refusal fixture",
+        "--background",
+        stdin="",
+    )
+    assert result.returncode == 0
+    job_id = result.stderr.split("Background job ", 1)[1].split(":", 1)[0]
+    status = _running_status(job_status, job_id)
+    assert status["status"] == "running"
+    pid = status["pid"]
+
+    # Only the worker created by THIS fixture, under its private config.
+    os.kill(pid, signal.SIGTERM)
+    deadline = time.monotonic() + 60
+    arrivals: list[dict[str, Any]] = []
+    while time.monotonic() < deadline and not arrivals:
+        arrivals = [r for r in read_job_records() if r.get("id") == job_id and "signal" in r]
+        time.sleep(0.1)
+    assert arrivals, "the refused arrival was never recorded"
+    assert arrivals[0]["signal"]["sanction"] == "none"
+    assert arrivals[0]["signal"]["action"] == "refused", arrivals[0]["signal"]
+    time.sleep(1.0)
+    assert job_status(job_id, reconcile=False)["status"] == "running", "the worker obeyed it"
+    os.kill(pid, 0)  # still alive: raises ProcessLookupError if it exited
+
+    os.kill(pid, signal.SIGKILL)
+    deadline = time.monotonic() + 90
+    reconciled = 0
+    while time.monotonic() < deadline:
+        status = job_status(job_id, reconcile=reconciled < 10)
+        if status["status"] not in ("starting", "running"):
+            break
+        reconciled += 1
+        time.sleep(0.1)
+    assert status["status"] == "interrupted", status
+    assert status.get("stop_class") == "unattributed-death", status
 
 
 def test_dash_leading_values_reach_the_detached_worker(exec_server):

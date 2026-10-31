@@ -1262,3 +1262,95 @@ async def test_sigkill_still_ends_a_runtime_that_refused_a_sigterm(
             assert rig.children["hardkill01"].wait(timeout=30) == -signal.SIGKILL
     finally:
         await rig.aclose()
+
+
+#: Boot latency the real-process reclaim cell forces BEFORE the runtime starts, so the
+#: precondition "``ps`` etime and the runtime's own start differ by more than the
+#: victim's 1.0 s tolerance" holds by construction on any machine, rather than only
+#: on one slow enough to boot in 1.2 s.
+_FORCED_BOOT_LATENCY_S = 1.8
+
+
+@pytest.mark.asyncio
+async def test_reclaims_sigterm_is_honoured_by_a_runtime_that_booted_slowly(
+    headless_tui_env: Path,
+) -> None:
+    """R-1/Q1, on a REAL runtime: reclaim's own marker path must be covered.
+
+    The first cut staged ``started_at = now - ps etime``. ``etime`` counts from
+    ``exec`` while the runtime stamps its record after interpreter boot, imports and
+    session construction (1.2-3 s), and the victim pairs only inside 1.0 s, so the
+    sweep's SIGTERM was REFUSED and the orphan it exists to end stayed up (review
+    measured 0 of 10, QA 0 of 21 live runtimes inside the tolerance).
+
+    HOW THE PRECONDITION IS FORCED: the child is started through a wrapper that sleeps
+    ``_FORCED_BOOT_LATENCY_S`` before running the production module, so exec -> record
+    exceeds the tolerance whatever the host's speed. The cell then PROVES the old
+    derivation would have missed (so it is discriminating, not decorative), stages the
+    marker through reclaim's REAL ``_attestation_record`` + ``_attest_before_signal``
+    from the real fleet read, sends the SIGTERM, and asserts the runtime honoured it:
+    exit 0, a receipt with ``sanction: marker``, and no refusal on disk.
+    """
+    from local_operator.session.runtime import reclaim
+
+    config = headless_tui_env
+    session_id = "reclaimslow01"
+    directory = _seed(config, session_id)
+    env = _child_env(config, session_id)
+    wrapper = (
+        "import runpy, time; "
+        f"time.sleep({_FORCED_BOOT_LATENCY_S}); "
+        "runpy.run_module('local_operator.session.runtime.process', "
+        "run_name='__main__', alter_sys=True)"
+    )
+    child = subprocess.Popen(
+        [sys.executable, "-c", wrapper],
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    try:
+        with bounded(150, "reclaim: marker from the published record is honoured"):
+            record = await _wait_record(config, session_id)
+            assert record.pid == child.pid
+
+            etime = subprocess.run(
+                ["ps", "-o", "etime=", "-p", str(child.pid)],
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+            age_s = reclaim.etime_seconds(etime)
+            old_key = time.time() - age_s
+            assert abs(old_key - record.started_at) >= 1.0, (
+                "precondition failed: the retired etime derivation would have been "
+                f"covered anyway (delta {old_key - record.started_at:+.2f}s), so this "
+                "cell would not discriminate"
+            )
+
+            item = reclaim.Verdict(
+                process=reclaim.RuntimeProcess(
+                    pid=child.pid,
+                    parent_pid=os.getpid(),
+                    age_s=float(age_s),
+                    cpu_s=0.0,
+                    command=f"{sys.executable} -m {reclaim.RUNTIME_MODULE}",
+                ),
+                config_root=str(config),
+                session_id=session_id,
+            )
+            attestation = reclaim._attestation_record(item, reclaim.read_fleet(config))
+            assert attestation is not None
+            assert attestation.started_at == record.started_at, "the key was not the published one"
+            reclaim._attest_before_signal(item, attestation)
+
+            os.kill(child.pid, signal.SIGTERM)
+            assert await asyncio.to_thread(child.wait, 120) == 0, "the sweep's SIGTERM was refused"
+            assert registry.read_signal_refusals(directory) is None, "a sanctioned stop was refused"
+            receipt = _receipt(directory)
+            assert receipt is not None and receipt["signals"][0]["sanction"] == "marker", receipt
+    finally:
+        if child.poll() is None:
+            _reap(child, config)

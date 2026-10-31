@@ -4154,6 +4154,12 @@ class _SignalState:
         #: is still running. The receipt file holds the arrivals; this holds the tally
         #: the exit line can print without re-reading it.
         self.refusals: int = 0
+        #: Log coalescing for :func:`_refuse_signal` (review R-4): the refusals FILE is
+        #: one coalesced entry per run, so the LOG must not be the unbounded half. The
+        #: monotonic stamp of the last WARNING written, and how many refusals have been
+        #: counted since it, so the next line can carry the number it stood in for.
+        self.refusal_logged_at: float | None = None
+        self.refusals_unlogged: int = 0
 
 
 def _signal_is_sanctioned(entry: dict[str, Any] | None) -> bool:
@@ -4242,6 +4248,12 @@ def _record_refusal(directory: Path, arrival: _Arrival) -> dict[str, Any] | None
     )
 
 
+#: The most often a REFUSED signal may write a WARNING after the first (review R-4).
+#: Sixty seconds: a looping sender is still named within a minute, and a runtime log
+#: that outlives a day of it grows by ~1.4k lines at worst rather than by one per signal.
+_REFUSAL_LOG_INTERVAL_S = 60.0
+
+
 def _refuse_signal(
     handle: object,
     sig: signal.Signals,
@@ -4285,14 +4297,28 @@ def _refuse_signal(
     session_id = str((entry or {}).get("session_id") or "")
     if not session_id:
         session_id = str(getattr(getattr(handle, "_session", None), "session_id", "") or "")
+    # THE FIRST REFUSAL IS ALWAYS LOUD; a LOOP IS NOT. One WARNING per arrival let a
+    # sender that retried SIGTERM grow ``runtime.log`` without bound (review R-4, QA
+    # Q4: 100 signals -> 100 lines) while the refusals file stayed one entry. So after
+    # the first line at most one more is written per ``_REFUSAL_LOG_INTERVAL_S``, and
+    # it carries how many arrivals it stands in for. The tally (``state.refusals``,
+    # the exit line) and the durable file still count every one.
+    now = time.monotonic()
+    last = state.refusal_logged_at
+    if last is not None and now - last < _REFUSAL_LOG_INTERVAL_S:
+        state.refusals_unlogged += 1
+        return
+    suppressed, state.refusals_unlogged = state.refusals_unlogged, 0
+    state.refusal_logged_at = now
     logger.warning(
         "session runtime: %s REFUSED (pid %d, session %s): no stop marker covers this "
         "run, so this runtime keeps serving its turn. A sanctioned stop stages a marker "
         "first (the stop ladder does); SIGKILL is unrefusable. Arrival recorded in this "
-        "session's refusal record.",
+        "session's refusal record.%s",
         sig.name,
         os.getpid(),
         session_id or "<unknown>",
+        f" ({suppressed} more refused since the last line.)" if suppressed else "",
     )
 
 

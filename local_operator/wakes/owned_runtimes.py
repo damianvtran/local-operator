@@ -214,26 +214,27 @@ def sweep(
         # THE MARKER GOES BEFORE THE SIGNAL, always: the victim cannot record
         # anything once the signal lands, and a rung that stages but is then
         # refused must take its marker back (see ``_withdraw_attestation``).
-        published = fleet.records.get(pid) or fleet.boots.get(pid)
-        started_at = getattr(published, "started_at", None)
-        if not isinstance(started_at, (int, float)):
-            # NO RUN KEY, SO NO SANCTION, SO NO STOP: the victim would refuse a
-            # signal nothing covers, and reporting it as signalled would be a lie a
-            # supervisor stop acts on. Say it instead — this is the one case where
-            # this unit cannot do its job, and a record that vanished under a live
-            # runtime is worth a line in the log.
+        started_at, key_source = reclaim.published_run_start(
+            config_dir, session_id, pid, records=fleet.records
+        )
+        if key_source == "unstamped":
+            # NO AUTHENTIC START EXISTS, and the stop still goes out: the candidate is
+            # a runtime THIS unit started and promised to stop, so skipping it would
+            # leave it running (main signalled it). The marker then pairs on session +
+            # pid + staging window alone, which a gated runtime accepts; an older,
+            # ungated one simply exits. Said out loud, because a runtime with neither
+            # a published record nor a run record is a degraded store.
             logger.warning(
-                "wake supervisor: %s; NOT signalling owned runtime %s (session %s): no "
-                "published record, so there is no run key to stage a sanction for",
+                "wake supervisor: %s; no published start for owned runtime %s (session "
+                "%s): staging its marker without a start stamp",
                 why,
                 pid,
                 session_id,
             )
-            continue
         record = _SweepRecord(
             session_id=session_id,
             pid=pid,
-            started_at=float(started_at),
+            started_at=started_at,
         )
         attested = _attest_before_signal(record, config_dir, why)
         try:
@@ -273,7 +274,7 @@ class _SweepRecord:
 
     session_id: str
     pid: int
-    started_at: float
+    started_at: float | None
 
 
 #: The involuntary-stop mechanism token this sweep's signals are attested under,

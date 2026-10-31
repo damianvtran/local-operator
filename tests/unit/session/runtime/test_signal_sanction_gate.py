@@ -546,3 +546,40 @@ def test_the_refusal_file_is_classified_by_both_enumerating_registries(
     )
     # THE GUARD A DELETING MOVE RUNS: it must accept this directory unchanged.
     sync.assert_complete(directory)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX signal semantics")
+@pytest.mark.asyncio
+async def test_a_signal_loop_cannot_grow_the_log(
+    directory: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R-4/Q4: the refusals FILE is one coalesced entry, so the LOG must be bounded too.
+
+    One WARNING per arrival let a sender that retried SIGTERM grow ``runtime.log``
+    without bound (100 signals -> 100 lines). The first refusal is always loud; the
+    rest are counted, and the next line after the interval carries the number it
+    stands in for. The tally and the durable file keep counting every arrival.
+    """
+    clock = [1000.0]
+    monkeypatch.setattr(process.time, "monotonic", lambda: clock[0])
+    caplog.set_level(logging.WARNING)
+    session = _Session(directory, busy=True)
+    state = process._SignalState(stop=asyncio.Event(), trigger={})
+    handle = _Handle(session)
+
+    for _ in range(50):
+        process._route_signal(handle, _Runtime(), signal.SIGTERM, state=state)
+        clock[0] += 0.01
+    lines = [r for r in caplog.records if "REFUSED" in r.getMessage()]
+    assert len(lines) == 1, f"{len(lines)} lines for one burst"
+    assert state.refusals == 50, "the tally must still count every arrival"
+
+    clock[0] += process._REFUSAL_LOG_INTERVAL_S
+    process._route_signal(handle, _Runtime(), signal.SIGTERM, state=state)
+    lines = [r for r in caplog.records if "REFUSED" in r.getMessage()]
+    assert len(lines) == 2
+    assert "49 more refused" in lines[-1].getMessage(), lines[-1].getMessage()
+
+    recorded = registry.read_signal_refusals(directory)
+    assert recorded is not None and recorded["refusals"][0]["count"] == 51
+    await _settle(state)
