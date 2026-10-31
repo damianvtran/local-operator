@@ -28,14 +28,15 @@ server dark (``BRIDGE_ENABLED`` off, RFC §5.5) the upstream answers 503
 (``unavailable`` with the refusal), which is the fail-closed behaviour the
 contract asks for, and the other routes carry the §6.5 code through.
 
-DEFAULT-ON CONTRACT (``bridge_consent_v2``, the UI banner "Team Bridge is on for you").
-The enrolment itself is NOT a route: the runtime's status discipline performs it
-(``POST /v1/messaging/enrollment`` upstream) when the hub serves and accepts v2,
+DEFAULT-ON CONTRACT (``bridge_consent_v2`` or ``v3``, the UI banner "Team Bridge is on
+for you"). The enrolment itself is NOT a route: the runtime's status discipline performs it
+(``POST /v1/messaging/enrollment`` upstream) when the hub serves and accepts a default-on
+version (``team_bridge.settings.DEFAULT_ON_CONSENT_VERSIONS``),
 the member is eligible with no endpoint and has not opted out here. These routes
 only expose what the banner needs, all ADDITIVE:
 
 * status ``default_on`` — ``{in_force, notice_pending}``: ``in_force`` the hub
-  serves+accepts v2 for this caller (the opt-out default applies);
+  serves+accepts a default-on version for this caller (the opt-out default applies);
   ``notice_pending`` the one-time notice was not dismissed
   (``team_bridge.onboarding != "seen"``). The banner shows when the surface is
   state C, settings ``default_on`` is true and ``notice_pending`` is true.

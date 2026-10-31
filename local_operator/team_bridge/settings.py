@@ -28,6 +28,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Mapping
 
+from local_operator.team_bridge.consent_versions import (
+    CONSENT_VERSION_V2,
+    DEFAULT_ON_CONSENT_VERSIONS,
+)
+
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from local_operator.config import ConfigManager
 
@@ -45,7 +50,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 #: Restoring the ON default belongs to the new-consent-version change, not a
 #: local flip.
 #:
-#: DEFAULT-ON UNDER ``bridge_consent_v2`` DOES NOT CHANGE THIS CONSTANT. The
+#: DEFAULT-ON UNDER ``bridge_consent_v2``/``v3`` DOES NOT CHANGE THIS CONSTANT. The
 #: registry literal and every consumer that reads ``enabled`` from disk (host,
 #: read_context, authority, wake, engagement) keep reading an absent key as OFF,
 #: so a hub that serves only v1 is byte-identical to the hold. The opt-out
@@ -59,11 +64,9 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 #: send/receive/wake work by itself — it only means "eligible to be enrolled".
 DEFAULT_TEAM_BRIDGE_ENABLED = False
 
-#: The one consent version whose copy discloses the opt-out default. Only a hub
-#: that SERVES it (and lists it as accepted) can turn an absent
-#: ``team_bridge.enabled`` into "eligible to be enrolled". Spelled here, not
-#: imported from ``client``, because ``client`` imports this module.
-DEFAULT_ON_CONSENT_VERSION = "bridge_consent_v2"
+#: The consent versions whose copy discloses the opt-out default are
+#: :data:`local_operator.team_bridge.consent_versions.DEFAULT_ON_CONSENT_VERSIONS`
+#: (a leaf the pure reconcile planner may import too).
 
 #: ``team_bridge.onboarding`` — the one-time dialog's shown-flag (RFC §5.3:
 #: client-local in v1, deliberately never a server row). ``""`` means "not
@@ -81,7 +84,8 @@ ONBOARDING_SEEN = "seen"
 #: account A enrolling did not suppress account B on the same machine.
 #:
 #: WHO WRITES IT. Under ``bridge_consent_v1`` nothing does (consent hold,
-#: #2712: a status read must never enrol). Under ``bridge_consent_v2`` two
+#: #2712: a status read must never enrol). Under a default-on consent
+#: (``bridge_consent_v2``/``v3``, ``consent_versions.DEFAULT_ON_CONSENT_VERSIONS``) two
 #: places do, and both mean "never enrol this account from this machine again":
 #: the gated automatic enrolment (``StatusDiscipline._default_enroll``) after the
 #: server created the endpoint, and the one-click turn-off (a successful
@@ -90,7 +94,8 @@ ONBOARDING_SEEN = "seen"
 #: key never proves anything either (the server's own no-op-when-an-endpoint-
 #: exists rule is the authoritative stickiness).
 #:
-#: ``pending:<endpoint_id>:<head>`` (D1, review R3/R2-1) is the one other
+#: ``pending:<endpoint_id>:<head>:<consent_version>`` (D1, review R3/R2-1; the
+#: version since #3225, see :func:`parse_pending_default_enrollment`) is the one other
 #: value: THIS machine's default-on POST created ``endpoint_id`` but the local
 #: owner commit failed or was vetoed. Without it the account was marked
 #: ``done`` from the hub's answer alone, the surface then read state C, and no
@@ -106,25 +111,51 @@ DEFAULT_ENROLLMENT_DONE = "done"
 DEFAULT_ENROLLMENT_PENDING_PREFIX = "pending:"
 
 
-def pending_default_enrollment(endpoint_id: str, head: int | None) -> str:
-    """The ``pending:<endpoint_id>:<head>`` marker value (see above)."""
+def pending_default_enrollment(endpoint_id: str, head: int | None, consent_version: str) -> str:
+    """The ``pending:<endpoint_id>:<head>:<consent_version>`` marker value (see above).
 
-    return f"{DEFAULT_ENROLLMENT_PENDING_PREFIX}{endpoint_id}:{head if head is not None else 0}"
+    ``consent_version`` is the version the default-on POST ECHOED — the text the
+    member was shown — so the commit-only recovery can refuse a hub record that
+    names any other version (review m1 / QA Q2 on #3225).
+    """
+
+    if consent_version not in DEFAULT_ON_CONSENT_VERSIONS:
+        raise ValueError("a pending marker records a default-on consent version")
+    head_part = head if head is not None else 0
+    return f"{DEFAULT_ENROLLMENT_PENDING_PREFIX}{endpoint_id}:{head_part}:{consent_version}"
 
 
-def parse_pending_default_enrollment(value: Any) -> tuple[str, int] | None:
-    """``(endpoint_id, pre-POST head)`` from a pending marker, else ``None``.
+def parse_pending_default_enrollment(value: Any) -> tuple[str, int, str] | None:
+    """``(endpoint_id, pre-POST head, echoed consent version)`` from a pending marker.
 
-    Anything malformed reads as "no pending commit": the retry is a recovery,
-    and a hand-edited value must never point it at an endpoint or a cursor.
+    Anything malformed reads as "no pending commit" (``None``): the retry is a
+    recovery, and a hand-edited value must never point it at an endpoint or a
+    cursor. A trailing version outside :data:`DEFAULT_ON_CONSENT_VERSIONS` is
+    malformed too (exact membership, never ordering).
+
+    LEGACY MARKERS. A marker written before #3225 is ``pending:<endpoint>:<head>``
+    with no version. It reads as ``bridge_consent_v2`` — not a guess: that build's
+    ``enroll_default_on`` hardcoded the v2 echo, so v2 is provably what was shown.
+    Recovery therefore still binds a pre-#3225 machine whose hub record cites v2,
+    and refuses one citing anything else. Reading it as "commit nothing" was the
+    alternative; it would strand exactly those machines "on, but deaf" (the D1
+    defect the marker exists to repair) for no consent gain.
     """
 
     if not isinstance(value, str) or not value.startswith(DEFAULT_ENROLLMENT_PENDING_PREFIX):
         return None
-    endpoint_id, sep, head = value[len(DEFAULT_ENROLLMENT_PENDING_PREFIX) :].rpartition(":")
+    rest = value[len(DEFAULT_ENROLLMENT_PENDING_PREFIX) :]
+    prefix, sep, last = rest.rpartition(":")
+    if sep and last in DEFAULT_ON_CONSENT_VERSIONS:
+        rest, version = prefix, last
+    elif last.isdigit():
+        version = CONSENT_VERSION_V2
+    else:
+        return None
+    endpoint_id, sep, head = rest.rpartition(":")
     if not sep or not endpoint_id or not head.isdigit() or (len(head) > 1 and head[0] == "0"):
         return None
-    return endpoint_id, int(head)
+    return endpoint_id, int(head), version
 
 
 #: ``team_bridge.session`` — the designated CoS session id (RFC §5.6/§13.6).
@@ -222,8 +253,9 @@ class TeamBridgeSettings:
 
         An explicit ``true`` or ``false`` (or an unreadable present value, which
         reads OFF) is returned as is. Only an ABSENT key consults the hub: it
-        reads ON while ``default_on_in_force`` (the hub serves
-        ``bridge_consent_v2`` and lists it as accepted) and OFF otherwise, so a
+        reads ON while ``default_on_in_force`` (the hub serves a member of
+        ``consent_versions.DEFAULT_ON_CONSENT_VERSIONS`` and lists it as
+        accepted) and OFF otherwise, so a
         v1-only hub sees exactly what :attr:`enabled` says today. ON here means
         "eligible to be enrolled", never "authorised": every send, receive and
         wake path still needs the committed owner and a current receipt.
@@ -295,7 +327,7 @@ def record_default_enrollment(
     if not isinstance(account_id, str) or not account_id.strip():
         raise ValueError("account_id must be a non-empty string")
     if value != DEFAULT_ENROLLMENT_DONE and parse_pending_default_enrollment(value) is None:
-        raise ValueError("value must be 'done' or a pending:<endpoint_id>:<head> marker")
+        raise ValueError("value must be 'done' or a pending:<endpoint_id>:<head>:<version> marker")
 
     from local_operator import settings_io
     from local_operator.config import CONFIG_FILE_NAME, ConfigManager
