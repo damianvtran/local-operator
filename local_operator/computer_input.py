@@ -286,6 +286,7 @@ def _hold_x11(keys: tuple[str, ...], body: str) -> None:
     pyautogui = importlib.import_module("pyautogui")
     pressed: list[str] = []
     release_failures: list[tuple[str, BaseException]] = []
+    failure: BaseException | None = None
     original_failsafe = getattr(pyautogui, "FAILSAFE", None)
     try:
         for key in keys:
@@ -296,6 +297,11 @@ def _hold_x11(keys: tuple[str, ...], body: str) -> None:
         # The body is the adapter's own compiled pointer statement, run with
         # pyautogui as its only global -- the same name the guest prefix binds.
         exec(body, {"pyautogui": pyautogui})
+    except BaseException as exc:
+        # A cleanup error must never replace an action failure or cancellation:
+        # callers rely on its exact identity/type, not a diagnostic wrapper.
+        failure = exc
+        raise
     finally:
         if pressed:
             # FAILSAFE disarmed ONLY around the releases and restored after: a
@@ -316,21 +322,38 @@ def _hold_x11(keys: tuple[str, ...], body: str) -> None:
             # The guest's stderr survives in the action record. Name EVERY
             # failed key there, even when cancellation remains the exception
             # being propagated and would otherwise hide a later release error.
-            details = "; ".join(
-                f"{key!r}: {type(exc).__name__}: {exc}" for key, exc in release_failures
-            )
+            details_parts = []
+            for key, exc in release_failures:
+                label = f"{key!r}: {type(exc).__name__}"
+                try:
+                    details_parts.append(f"{label}: {exc}")
+                except BaseException:
+                    # Exception messages can execute arbitrary __str__ code.
+                    # Retain the key/type even when rendering the message fails.
+                    details_parts.append(label)
+            details = "; ".join(details_parts)
             diagnostic = (
                 "held modifier keys could not be released; "
                 f"the guest may still be holding a key: {details}"
             )
-            print(diagnostic, file=sys.stderr)
-            release_failure = release_failures[0][1]
-            if not isinstance(release_failure, Exception):
-                # Preserve cancellation identity/type, but retain all cleanup
-                # failures on its traceback after every release was attempted.
-                release_failure.add_note(diagnostic)
+            # With no action failure, prefer any cleanup cancellation over an
+            # ordinary release error, even when the cancellation happened later.
+            # In either case propagate the original object and annotate every
+            # failed key so a nonzero result never conceals potentially held keys.
+            release_failure = next(
+                (exc for _, exc in release_failures if not isinstance(exc, Exception)),
+                release_failures[0][1],
+            )
+            intended_failure = failure if failure is not None else release_failure
+            intended_failure.add_note(diagnostic)
+            try:
+                print(diagnostic, file=sys.stderr)
+            except BaseException:
+                # Closed/broken stderr (including cancellation during emission)
+                # must not mask the intended error; its note survives regardless.
+                pass
+            if failure is None:
                 raise release_failure
-            raise RuntimeError(diagnostic) from release_failure
 
 
 def held_keys_source(keys: Sequence[str], body: str) -> str:
