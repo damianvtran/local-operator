@@ -39,6 +39,23 @@ async def test_graceful_only_cannot_combine_with_force(tmp_path, monkeypatch):
     exchange.assert_not_awaited()
 
 
+def test_the_handle_answers_the_retire_refusal_the_server_probes() -> None:
+    """The capability half of R3 / Q-1: the probe must hit a DECLARED attribute.
+
+    ``server._idle_refusal_reason`` reads it through ``getattr(handle, ...)`` and
+    maps ``""`` to ``busy``, so a handle that cannot answer the probe reports
+    every refusal as work in flight — the exact answer R3/Q-1 removed. The
+    capability-surface guard asks ``hasattr`` of the CLASS (the sibling
+    ``mcp_publication_gate`` note states the rule), which is why an attribute
+    assigned only inside ``begin_retire`` is not enough; measured as that guard's
+    first report on this branch.
+    """
+    assert hasattr(ServingSessionHandle, "_retire_refusal")
+    # The pre-refusal state, which is also the value the probe must not read as a
+    # cause: ``begin_retire`` sets it on every path before it returns.
+    assert ServingSessionHandle._retire_refusal == ""
+
+
 class _IdleStopHandle(FakeHandle):
     # Exercise the production atomic latch, not a test reimplementation of it.
     begin_retire = ServingSessionHandle.begin_retire

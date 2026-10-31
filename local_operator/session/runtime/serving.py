@@ -904,6 +904,22 @@ class ServingSessionHandle(SessionHandle):
     #: exists to catch. See ``create_session`` for what waits on it.
     mcp_publication_gate: PublicationGate | None = None
 
+    #: The idle latch's recorded refusal cause, or ``""`` until ``begin_retire``
+    #: records one. ``server._idle_refusal_reason`` is its only reader: it turns the
+    #: string into the stop refusal's token (``busy`` / ``wake`` / ``leaving``), so
+    #: a handle that cannot answer the probe would report every refusal as work in
+    #: flight — the answer R3/Q-1 exists to stop producing.
+    #:
+    #: Declared at CLASS level for the reason the latch above gives: the server
+    #: reaches for it with a ``getattr`` capability probe, and the
+    #: capability-surface guard reads ``hasattr(ServingSessionHandle, name)``, so an
+    #: attribute that lived only on the instance reads as a capability the handle
+    #: cannot answer (measured: the guard's first report after this PR added the
+    #: probe). ``begin_retire`` is the only writer, and every path that refuses sets
+    #: it before returning ``False``, so the reader never sees this default in
+    #: practice — the class still has to state it for the probe to resolve.
+    _retire_refusal: str = ""
+
     def __init__(
         self,
         session: Any,
