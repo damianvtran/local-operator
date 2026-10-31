@@ -465,4 +465,6 @@ def test_adapter_advertises_the_modifier_translator_it_ships() -> None:
         actions=(action,),
     )
     actions.ACTION_SURFACE.validate_batch(batch)
-    assert "shift" in actions.compile_action(action, _geo())
+    statement = actions.compile_action(action, _geo())
+    assert statement is not None
+    assert "shift" in statement

@@ -189,11 +189,14 @@ def test_disabled_modifiers_preserve_old_hello_and_enabled_fails_closed() -> Non
     from pydantic import ConfigDict, create_model
 
     # Model an old parent's strict hello contract, not a permissive JSON consumer.
-    fields = {
-        name: (field.annotation, field)
-        for name, field in AdapterCapabilities.model_fields.items()
-        if name != "modifiers"
-    }
+    fields = {}
+    for name, field in AdapterCapabilities.model_fields.items():
+        if name == "modifiers":
+            continue
+        # Concrete model fields must have a type before rebuilding the old contract.
+        annotation = field.annotation
+        assert annotation is not None
+        fields[name] = (annotation, field)
     old = create_model("OldCapabilities", __config__=ConfigDict(extra="forbid"), **fields)
     disabled = AdapterCapabilities(routes=("computer",), ask_user=True, scoring=True)
     assert "modifiers" not in disabled.model_dump(mode="json")
