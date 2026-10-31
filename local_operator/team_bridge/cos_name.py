@@ -56,8 +56,8 @@ opt-in.
 
 from __future__ import annotations
 
+import hashlib
 import logging
-import os
 import re
 import unicodedata
 from dataclasses import dataclass, field
@@ -76,15 +76,6 @@ AGENT_NAME_MAX_CHARS = 64
 #: because this module is the one place that decides WHAT the local picture is;
 #: ``avatar_publish`` and the client both read it from here.
 AVATAR_MAX_BYTES = 1024 * 1024
-
-#: An avatar file name, by the mime the block records. A block written before
-#: ``filename`` existed carries only ``{sha256, mime, bytes, updated_at}``, and
-#: the stored name is canonical per type, so the mime is a total fallback.
-_AVATAR_BY_MIME = {
-    "image/png": "avatar.png",
-    "image/jpeg": "avatar.jpg",
-    "image/webp": "avatar.webp",
-}
 
 #: The hub's source-digest grammar, in ONE place: what ``X-Source-SHA256``
 #: carries, what the status answer echoes back, and what a stored block records
@@ -238,7 +229,7 @@ def published_agent(config_dir: Path | str | None) -> PublishedAgent | None:
     that cannot see the local picture must never be the reason the hub's copy
     disappears.
 
-    A resolved agent may still carry no picture. ``avatar_path is None`` with
+    A resolved agent may still carry no picture. ``avatar_data is None`` with
     ``avatar_broken`` False is the user's own choice (the local writer stores
     the ``avatar`` block together with the file, so the block's absence is a
     cleared picture); ``avatar_broken`` True is a DOUBT — a block that names a
@@ -343,25 +334,43 @@ def _avatar_of(agent_dir: Path, block: object) -> dict[str, Any]:
 
     if not isinstance(block, Mapping):
         return {} if _avatar_survives_registry() else {"avatar_broken": True}
-    filename = _avatar_filename(block)
-    if filename is None:
+    data = _stored_avatar_bytes(agent_dir, block)
+    if data is None:
         return {"avatar_broken": True}
-    candidate = _resolve_avatar(agent_dir, filename)
-    if candidate is None:
-        return {"avatar_broken": True}
-    stored_sha = block.get("sha256")
-    stored_bytes = block.get("bytes")
-    return {
-        "avatar_path": candidate,
-        "avatar_sha256": (
-            stored_sha if isinstance(stored_sha, str) and SHA256_HEX.fullmatch(stored_sha) else None
-        ),
-        "avatar_bytes": (
-            stored_bytes
-            if isinstance(stored_bytes, int) and not isinstance(stored_bytes, bool)
-            else None
-        ),
-    }
+    return {"avatar_data": data, "avatar_sha256": hashlib.sha256(data).hexdigest()}
+
+
+def _stored_avatar_bytes(agent_dir: Path, block: Mapping[str, Any]) -> bytes | None:
+    """The picture bytes the LOCAL STORE would serve for ``block``, else ``None``.
+
+    There is deliberately no second implementation of "which file is the
+    avatar". ``agent.yml`` is writable by the agent itself and the hub copy is
+    visible to every teammate in the tenant, so a publisher that resolves the
+    file differently from the store is a disclosure path: a private resolver that
+    followed same-directory symlinks and accepted any basename uploaded
+    ``agent.yml`` (its ``security_prompt``) for ``filename: agent.yml`` and for a
+    symlink ``avatar.png -> agent.yml`` (review R3-F1). ``agent_avatar.read`` owns
+    the rule — only ``avatar.png``/``avatar.jpg`` agreeing with the mime, a
+    REGULAR file opened without following a symlink, bytes that hash to the
+    block's ``sha256`` — so whatever it refuses is a doubt here too. That also
+    makes a file edited behind the block's digest a doubt (R3-F2) rather than an
+    upload under a digest that does not describe it.
+
+    The bytes it returns are the ones published: re-opening a path after the
+    store vetted it would reopen the window the store closed.
+    """
+
+    from local_operator import agent_avatar
+    from local_operator.agents import AgentAvatarMeta
+
+    try:
+        meta = AgentAvatarMeta.model_validate(dict(block))
+        data, _mime, _sha = agent_avatar.read(agent_dir, meta)
+    except Exception:  # noqa: BLE001 — a doubt of any kind publishes nothing and deletes nothing
+        return None
+    if not data or len(data) > AVATAR_MAX_BYTES:
+        return None
+    return data
 
 
 #: Cached answer for :func:`_avatar_survives_registry`; ``None`` = not asked yet.
@@ -392,58 +401,6 @@ def _avatar_survives_registry() -> bool:
     return _AVATAR_FIELD
 
 
-def _avatar_filename(block: Mapping[str, Any]) -> str | None:
-    """The stored file name: ``filename`` first, then the legacy mime fallback."""
-
-    raw = block.get("filename")
-    if isinstance(raw, str) and raw.strip():
-        # ``./avatar.png`` and ``avatar.png`` name the same file in the same
-        # directory, so the prefix is dropped here rather than read as a doubt by
-        # the separator rule below (review R1-F10).
-        name = raw.strip()
-        return name[2:] if name.startswith("./") else name
-    mime = block.get("mime")
-    if isinstance(mime, str):
-        return _AVATAR_BY_MIME.get(mime.strip().lower())
-    return None
-
-
-def _resolve_avatar(agent_dir: Path, filename: str) -> Path | None:
-    """The avatar file ``filename`` names INSIDE ``agent_dir``, or ``None``.
-
-    The block is a hand-editable YAML file, so its ``filename`` is untrusted
-    input: an absolute path, a separator, ``..``, a NUL or a symlink pointing out
-    of the agent's own directory all read as "no picture" rather than as a file
-    to publish. The containment check runs AFTER ``resolve`` so a symlink swapped
-    in between counts as the escape it is.
-    """
-
-    if (
-        not filename
-        or filename in {".", ".."}
-        or any(sep and sep in filename for sep in (os.sep, os.altsep, "/", "\\"))
-        or os.path.isabs(filename)
-        or "\x00" in filename
-    ):
-        return None
-    try:
-        root = agent_dir.resolve(strict=True)
-        candidate = (root / filename).resolve(strict=False)
-    except OSError:
-        return None
-    if candidate.parent != root or not candidate.name:
-        return None
-    try:
-        if not candidate.is_file():
-            return None
-        size = candidate.stat().st_size
-    except OSError:
-        return None
-    if size <= 0 or size > AVATAR_MAX_BYTES:
-        return None
-    return candidate
-
-
 @dataclass(frozen=True)
 class PublishedAgent:
     """One local agent definition, as the hub's copy of it is derived from.
@@ -455,15 +412,11 @@ class PublishedAgent:
 
     local_agent_id: str
     name: str | None = None
-    #: The RESOLVED file, read at publish time. ``None`` means "no picture".
-    #: ``repr=False`` on purpose: this class says a path in a dataclass "is how
-    #: a home directory reaches a log", so it must not put one in its own repr
-    #: (review R1-S5).
-    avatar_path: Path | None = field(default=None, repr=False)
-    #: What ``agent.yml`` recorded. Trusted for the upload only while the file's
-    #: size still matches ``avatar_bytes`` (see ``avatar_publish._avatar_bytes``).
+    #: The picture the local store serves, as bytes (``None`` means "no picture").
+    #: ``repr=False``: a dataclass that gets logged must never print an image.
+    avatar_data: bytes | None = field(default=None, repr=False)
+    #: Digest of ``avatar_data``, verified against ``agent.yml`` by the store.
     avatar_sha256: str | None = None
-    avatar_bytes: int | None = None
     #: An ``avatar`` block is present but yields no usable file — a DOUBT, which
     #: publishes nothing and never deletes.
     avatar_broken: bool = False
