@@ -2935,8 +2935,8 @@ async def get_notification_avatar(
       ``64|256``; ``initials`` 0-2 letters/digits (may be empty);
       ``expected_account_id`` the captured VIEWER receipt, as on ``/avatar``.
     * ``v`` + ``avatar_account_id``: both or neither. With them, the photo is
-      read through the same closed ``/avatar`` relay; without, an initials
-      placeholder is drawn and no network is touched.
+      read through the same closed ``/avatar`` relay (person only); without, an
+      initials placeholder is drawn and no network is touched.
 
     ``avatar_account_id`` must equal the path account, so an avatar naming
     any other account is refused rather than drawn under someone else's name.

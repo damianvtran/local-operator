@@ -7,6 +7,8 @@ read as "from Ben" rather than "from the app", that one slot carries ONE PNG:
 the sender's circle-cropped photo -- or an initials placeholder on a stable
 per-person colour -- with the Local Operator mark in a bottom-right corner
 badge and, for a person's agent (chief of staff), a separate agent marker.
+For a ``person_agent`` the face is the agent glyph, never a photo and never
+an initial (agent review round 1, N1).
 
 AN AGENT NEVER WEARS ITS OWNER'S FACE (2026-10-30). A ``person_agent``
 composite is keyed by its OWNER's account (the agent has no account of its
@@ -104,8 +106,19 @@ GAP_RATIO = 0.035
 INITIALS_RATIO = 0.33
 INITIALS_CENTRE = (0.43, 0.45)
 #: The agent glyph's centre: up and left like the initials, clear of both
-#: overlays (``test_agent_face_clears_the_overlays`` measures it).
+#: overlays (``test_agent_face_keeps_its_distance_from_the_badge`` measures it).
 AGENT_FACE_CENTRE = (0.42, 0.46)
+#: The glyph's unit as a share of the canvas (design review round 1, D1).
+#: ``0.026`` crowded the LO badge: the ear stopped 2.8 px from the badge's
+#: punch ring at 256 px, ~0.7 px at 64, so it read as touching the gap. The
+#: designer's probe measured 11.2 px of room at ``0.023`` with a bbox of
+#: (49, 65)-(165, 164) — reaching that SAME rendered footprint here needs
+#: ``0.020``, because round caps plus the centred head stroke (D2) add a unit
+#: of ink on every side that the probe's rect-only geometry did not. Measured
+#: on the shipped renderer at ``0.020``: bbox (50, 71)-(165, 165), 13.3 px from
+#: the punch circle (the review's 11.2 px to the badge edge), still centred on
+#: ``AGENT_FACE_CENTRE``.
+AGENT_FACE_UNIT = 0.020
 #: Supersampling for antialiased circles without a vector renderer.
 _SUPERSAMPLE = 4
 
@@ -360,12 +373,31 @@ def _agent_face(side: int, colour: tuple[int, int, int]) -> Image:
     """The agent glyph (the desktop's lucide ``Bot``) in white on ``colour``.
 
     Drawn from the icon's own 24-unit geometry (head ``rect 4,8 16x12 r2``,
-    antenna ``12,8 -> 12,4 -> 8,4``, ears at y=14, eyes at x=9/15, y=13..15)
-    so the banner and the in-app plate show the same mark. It is supersampled
-    for antialiasing, the same way :func:`_circle_mask` is, because the module
-    has no vector renderer. The glyph spans the middle ~52 % and sits a little
-    up and left, inside the same clearances the initials honour, so neither
-    the badge nor the marker cuts it (``test_agent_face_clears_the_overlays``).
+    antenna ``12,8 -> 12,4 -> 8,4``, ears at ``y=14``, eyes at ``x=9``/``15``,
+    ``y=13..15``) so the banner and the in-app plate show the same mark.
+
+    CENTRED, ROUND-CAPPED STROKES, LIKE THE ICON (design review round 1, D2).
+    The first version stroked with PIL's ``width=``, which insets the head's
+    outline by half the stroke and butt-caps every segment; at 64 px that read
+    as a pixel robot: square eye dots and a shrunken head. The path is now
+    stroked the way an SVG does it — the head's rounded rect is expanded by
+    half the stroke so the stroke's CENTRE sits on the icon's path, and every
+    segment gets a filled disc at both ends for lucide's ``strokeLinecap:
+    round`` (PIL's ``line`` has no cap option). The eyes come out as the
+    rounded vertical pills the icon draws.
+
+    SUPERSAMPLED for antialiasing, the same way :func:`_circle_mask` is,
+    because the module has no vector renderer.
+
+    IT KEEPS ITS DISTANCE FROM THE BADGE (design review round 1, D1). The unit
+    was ``0.026`` of the canvas, which left 2.8 px between the glyph's ear and
+    the badge's punch ring at 256 px — about 0.7 px at 64, so the ear read as
+    touching the badge gap. ``AGENT_FACE_UNIT`` now leaves 11.2 px at the same
+    centre (see its own comment for why the rendered size, not the probe's
+    constant, is what is set), and
+    ``test_agent_face_keeps_its_distance_from_the_badge`` now enforces a
+    MINIMUM clearance rather than mere non-overlap, so a future size bump
+    fails instead of crowding silently.
     """
 
     from PIL import Image as PILImage
@@ -374,7 +406,7 @@ def _agent_face(side: int, colour: tuple[int, int, int]) -> Image:
     big = side * _SUPERSAMPLE
     tile = PILImage.new("RGBA", (big, big), (*colour, 255))
     draw = ImageDraw.Draw(tile)
-    unit = big * 0.026
+    unit = big * AGENT_FACE_UNIT
     ox = big * AGENT_FACE_CENTRE[0] - 12 * unit
     oy = big * AGENT_FACE_CENTRE[1] - 12 * unit
 
@@ -382,13 +414,37 @@ def _agent_face(side: int, colour: tuple[int, int, int]) -> Image:
         return (ox + x * unit, oy + y * unit)
 
     ink = (255, 255, 255, 255)
-    stroke = max(1, round(2 * unit))
-    draw.rounded_rectangle((*at(4, 8), *at(20, 20)), radius=2 * unit, outline=ink, width=stroke)
-    draw.line([at(12, 8), at(12, 4), at(8, 4)], fill=ink, width=stroke, joint="curve")
-    for a, b in ((at(2, 14), at(4, 14)), (at(20, 14), at(22, 14))):
-        draw.line([a, b], fill=ink, width=stroke)
-    for x in (9, 15):
-        draw.line([at(x, 13), at(x, 15)], fill=ink, width=stroke)
+    stroke = 2 * unit
+    half = stroke / 2
+
+    def round_cap(point: tuple[float, float]) -> None:
+        """lucide's ``strokeLinecap: round``: a disc of the stroke's radius."""
+
+        x, y = point
+        draw.ellipse((x - half, y - half, x + half, y + half), fill=ink)
+
+    def segment(a: tuple[float, float], b: tuple[float, float]) -> None:
+        """One round-capped stroke: the line plus a disc at each end."""
+
+        draw.line([a, b], fill=ink, width=max(1, round(stroke)))
+        round_cap(a)
+        round_cap(b)
+
+    # Head: the icon's rect, expanded by half a stroke so the stroke's centre
+    # lies ON the path instead of inside it (D2's inset outline).
+    draw.rounded_rectangle(
+        (*at(4 - 1, 8 - 1), *at(20 + 1, 20 + 1)),
+        radius=3 * unit,
+        outline=ink,
+        width=max(1, round(stroke)),
+    )
+    # Antenna, with its bend, then the two ears and the two eyes.
+    segment(at(12, 8), at(12, 4))
+    segment(at(12, 4), at(8, 4))
+    segment(at(2, 14), at(4, 14))
+    segment(at(20, 14), at(22, 14))
+    segment(at(9, 13), at(9, 15))
+    segment(at(15, 13), at(15, 15))
     return tile.resize((side, side), PILImage.Resampling.LANCZOS)
 
 

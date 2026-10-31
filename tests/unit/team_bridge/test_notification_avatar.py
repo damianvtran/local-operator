@@ -14,7 +14,7 @@ import zlib
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
-from PIL import Image
+from PIL import Image, ImageFilter
 
 from local_operator.team_bridge import avatar_cache
 from local_operator.team_bridge import notification_avatar as na
@@ -150,15 +150,87 @@ def test_agent_face_is_the_glyph_not_the_owners_initials():
     assert white > 400
 
 
+#: Breathing room the glyph must keep from the badge, in 256 px canvas pixels.
+#: Non-overlap was the old bar, and it let the ear stop 2.8 px from the badge's
+#: punch ring — about 0.7 px at 64 px, where it read as touching the gap
+#: (design review round 1, D1). The shipped size leaves 13.3 px, so 8 px guards
+#: the margin without pinning it to the last antialiased pixel.
+AGENT_GLYPH_MIN_CLEARANCE = 8
+#: Ink this faint is the resize's ring, not the glyph: at 8 px of dilation the
+#: raw mask only meets pixels at 1-30/255 on the stroke's outer edge, which no
+#: reader sees. The clearance claim is about visible ink.
+_AGENT_INK_VISIBLE = 32
+
+
+def _visible_ink(glyph):
+    """The glyph's alpha, with the resize's faint tail dropped."""
+
+    return glyph.point([255 if v >= _AGENT_INK_VISIBLE else 0 for v in range(256)])
+
+
+def _dilate(mask, radius: int):
+    """Grow a mask by ``radius`` px: a clearance test needs a margin, not a line."""
+
+    return mask.filter(ImageFilter.MaxFilter(2 * radius + 1))
+
+
+def _agent_glyph_clearance(side: int = 256, limit: int = 40) -> int:
+    """Visible ink's nearest distance to the overlays, in 256 px canvas pixels.
+
+    Grows the exclusion mask one pixel at a time and returns the first radius at
+    which it meets the glyph's ink — which is the Chebyshev distance between
+    them, the measure ``MaxFilter`` uses. Non-overlap at radius 0 is 1 px of
+    clearance, not 0, so the number is directly the gap a reader gets.
+    """
+
+    from PIL import ImageChops
+
+    glyph = _visible_ink(na._agent_face(side, (0, 0, 0)).convert("L"))
+    assert glyph.getbbox() is not None
+    exclusion = _exclusion_mask(side)
+    for radius in range(1, limit + 1):
+        if ImageChops.multiply(glyph, _dilate(exclusion, radius)).getbbox() is not None:
+            return radius
+    return limit + 1
+
+
 def test_agent_face_clears_the_overlays():
     """The glyph's ink never falls in the badge/marker clearance (same bar as initials D1)."""
 
     from PIL import ImageChops
 
-    colour = (0, 0, 0)
-    glyph = na._agent_face(256, colour).convert("L")
+    glyph = na._agent_face(256, (0, 0, 0)).convert("L")
     assert glyph.getbbox() is not None
     assert ImageChops.multiply(glyph, _exclusion_mask()).getbbox() is None
+
+
+def test_agent_face_keeps_its_distance_from_the_badge():
+    """A MINIMUM gap, not mere non-overlap (design review round 1, D1).
+
+    ``0.026`` of the canvas left 2.8 px at 256 px and ~0.7 px at 64, so the ear
+    read as touching the badge's punch ring while this suite stayed green. The
+    bar is now 8 px of visible ink, and the failure reports how far the shipped
+    glyph actually reaches so a size change reads as a number rather than a
+    boolean.
+    """
+
+    measured = _agent_glyph_clearance(256)
+    assert measured >= AGENT_GLYPH_MIN_CLEARANCE, (
+        f"the agent glyph is {measured} px from the badge/marker clearance at "
+        f"256 px, under the {AGENT_GLYPH_MIN_CLEARANCE} px floor"
+    )
+    # The margin is real, not a threshold artefact: at the crowded 0.026 unit
+    # the same assertion fails, so the floor can fail in the direction it is
+    # meant to guard.
+    old_unit = na.AGENT_FACE_UNIT
+    try:
+        na.AGENT_FACE_UNIT = 0.026
+        assert _agent_glyph_clearance(256) < AGENT_GLYPH_MIN_CLEARANCE, (
+            "the clearance floor does not fail at the old 0.026 unit, so it is "
+            "not measuring breathing room"
+        )
+    finally:
+        na.AGENT_FACE_UNIT = old_unit
 
 
 def test_placeholder_colour_follows_account_not_name():
