@@ -523,6 +523,31 @@ class _RunKey:
 # --- the predicate ----------------------------------------------------------
 
 
+def _refused_then_died(config_dir: Path, session_id: str, pid: int, started_at: float) -> bool:
+    """Whether THIS run REFUSED a terminating signal (sanction gate) and then died.
+
+    WHY RESCUE MUST READ THE REFUSALS FILE. Before the sanction gate an anonymous
+    SIGTERM left ``runtime-signal.json`` with ``sanction: none`` and the run was
+    classified ``fire / receipt-unsanctioned`` whatever its earlier completion rows
+    said. The gate moved that arrival to ``runtime-signal-refusals.json`` (so the
+    receipt keeps its "exists => a signal ended this run" shape, R-9), which left the
+    fallback blind to it: a session with an earlier COMPLETED turn then read
+    ``skip / complete`` for a run that was refused, killed and abandoned mid-turn.
+    That is exactly the 2026-10-30 shape, where the evidence matters most.
+
+    A refusal means a terminating signal reached this run and NOTHING sanctioned it;
+    a run that then died with no covering marker (checked earlier in the pass), no
+    exit record (ditto) and no receipt of a sanctioned stop was ended by something
+    that was not a stop, which is the population this pass exists for. Same run-key
+    rule as a receipt (``_receipt_covers_run``): a refusal from an EARLIER run of
+    this session says nothing about the run being classified.
+    """
+    refusals = registry.read_signal_refusals(session_dir(config_dir, session_id))
+    if not isinstance(refusals, dict) or not refusals.get("refusals"):
+        return False
+    return _receipt_covers_run(refusals, session_id, pid, started_at)
+
+
 def _death_class_fallback(
     config_dir: Path, session_id: str, *, stopped_marker: bool
 ) -> tuple[str, str]:
@@ -929,6 +954,11 @@ def rescue_scan(config_dir: Path, *, now: float | None = None, apply: bool = Tru
         receipt = read_signal_receipt(config_dir, sid)
         if receipt is not None and _receipt_covers_run(receipt, sid, pid, started_at):
             verdict, tag = _death_class_receipt(receipt)
+        elif _refused_then_died(config_dir, sid, pid, started_at):
+            # A refused signal is NOT a receipt (R-9) but it is still the affirmative
+            # statement the fallback has to guess at: something tried to end this run
+            # and nothing sanctioned it. See ``_refused_then_died``.
+            verdict, tag = FIRE, "refused-signal-then-death"
         else:
             stopped_marker = False
             try:

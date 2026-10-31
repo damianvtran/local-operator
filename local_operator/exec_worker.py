@@ -35,6 +35,7 @@ import logging
 import os
 import signal
 import sys
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 if TYPE_CHECKING:
@@ -142,7 +143,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _record_arrival(
-    session_box: list[SessionProtocol], job_id: str | None, stop_facts: dict[str, Any]
+    session_box: list[SessionProtocol],
+    job_id: str | None,
+    stop_facts: dict[str, Any],
+    *,
+    refused_action: str | None = None,
 ) -> None:
     """Record that SIGTERM arrived: the exec worker's signal receipt. NEVER RAISES.
 
@@ -180,6 +185,12 @@ def _record_arrival(
             number=int(signal.SIGTERM.value),
             in_flight=session is not None,
             action="stop",
+            # THE GATE'S OWN RECORD, in the one write that records the arrival: a
+            # refused arrival is written ``refused`` here, so the ledger row a later
+            # reader finds cannot disagree with what the handler did. ``None`` in the
+            # DISCOVERY WINDOW, where the gate cannot ask and today's behaviour
+            # stands (see ``_gate_applies``).
+            refused_action=refused_action,
         )
         entry.setdefault("at", _time.time())
         # LATEST WINS, the rule ``signal_receipt.cut_off_verdict`` states for every
@@ -226,6 +237,94 @@ def _note_stop_cause(session: Any, signal_entry: dict[str, Any] | None, count: i
         logging.getLogger(__name__).debug("could not note the stop cause", exc_info=True)
 
 
+def _refused_action(gated: bool) -> str | None:
+    """The action word for an arrival the gate is allowed to judge, else ``None``.
+
+    ``None`` means "leave the row as the arrival would have written it", which is what
+    keeps a discovery-window row byte-identical to today's.
+    """
+    from local_operator.session.runtime import signal_receipt
+
+    return signal_receipt.ACTION_REFUSED if gated else None
+
+
+def _gate_applies(session: Any) -> bool:
+    """Whether the victim gate CAN ask: the worker's run key exists yet.
+
+    THE CONTRACT'S "WHERE THE GATE CANNOT ASK, BEHAVE AS TODAY" (design §7 step 4 at
+    ``3ba837e6d9e``). A worker has no conversation directory during provider
+    discovery — ``_record_arrival`` says so and records ``sanction: none`` — so there
+    is no marker store to pair against and nothing to refuse on: it keeps today's
+    behaviour (abort, exit 130) and the attempt is recorded in the job ledger.
+
+    CLOSING THAT WINDOW IS DELIBERATELY NOT IN THIS SLICE. It needs a run key the
+    worker holds before its session exists (its ``exec-jobs.jsonl`` arrival row, or
+    the job id off argv), which makes the job ledger a second sanction store — a real
+    change with its own review, not a widening of this one.
+    """
+    if session is None:
+        return False
+    directory = getattr(getattr(session, "_transcript", None), "directory", None)
+    if directory is None:
+        return False
+    try:
+        return Path(directory).is_dir()
+    except (TypeError, OSError):
+        return False
+
+
+def _refuse_unsanctioned(facts: dict[str, Any], job_id: str | None = None) -> bool:
+    """True when this SIGTERM must be REFUSED: it is recorded and the turn runs on.
+
+    THE VICTIM-SIDE GATE, the same rule the session runtime applies
+    (``process._route_signal``): no terminating signal ends this worker unless a
+    durable stop marker covers the run. Read off the entry ``_record_arrival`` has
+    just written, so the decision and the durable row come from one pairing pass
+    (``signal_receipt.is_sanctioned``).
+
+    WHY THE WORKER NEEDS IT AT ALL: exit 130 is unconditional today, and the
+    measured 2026-10-30 21:57:52 event ended twelve background workers inside
+    1.33 s with every receipt saying ``sender: unavailable`` and nothing staged —
+    so the workers were the largest single population the anonymous sweep took.
+
+    BOTH KINDS OF MARKER PASS: a deliberate stop (a person asked) and an
+    involuntary one (``owned_runtimes.sweep`` on the wake supervisor's way out,
+    which stages one before signalling). Only "nothing staged" is refused.
+
+    A SUPERVISOR ``stop`` IS NOT AFFECTED and never reaches here: it CANCELS the
+    worker's lifetime over the control socket rather than signalling the process,
+    and the ledger records it as ``via: control-stop``. ``lop stop --force`` and
+    ``kill -9`` also still end this worker — SIGKILL has no handler by design.
+
+    WHERE IT CANNOT ASK, IT DOES NOT ACT: during provider discovery the worker has
+    no conversation directory, so there is no marker store to pair against — that
+    window keeps today's behaviour and is recorded (see ``_gate_applies``). The caller
+    consults this function only when the gate applies.
+
+    NEVER RAISES: this runs in a signal handler, where an exception would turn a
+    refusal into the hard exit the whole function exists to prevent.
+    """
+    try:
+        from local_operator.session.runtime import signal_receipt
+
+        entry = facts.get("signal") if isinstance(facts.get("signal"), dict) else None
+        if signal_receipt.is_sanctioned(entry):
+            return False
+        facts["refused"] = int(facts.get("refused") or 0) + 1
+        logging.getLogger(__name__).warning(
+            "exec worker: SIGTERM REFUSED (pid %d, job %s, session %s): no stop marker "
+            "covers this run, so the turn keeps running. A sanctioned stop stages a "
+            "marker first; SIGKILL is unrefusable. Arrival recorded in the job ledger.",
+            os.getpid(),
+            job_id or "<unknown>",
+            facts.get("session_id") or "<unknown>",
+        )
+        return True
+    except Exception:  # noqa: BLE001 — a handler must never fail on the gate itself
+        logging.getLogger(__name__).debug("could not read the signal's sanction", exc_info=True)
+        return True
+
+
 def _install_sigterm_handler(
     loop: asyncio.AbstractEventLoop,
     session_box: list[SessionProtocol],
@@ -247,10 +346,22 @@ def _install_sigterm_handler(
     facts = stop_facts if stop_facts is not None else {}
 
     def handler() -> None:
+        session = session_box[0] if session_box else None
+        # THE GATE ONLY WHERE IT CAN ASK: a run key is the session's conversation
+        # directory, absent during provider discovery (see ``_gate_applies``).
+        gated = _gate_applies(session)
         # FIRST: the arrival receipt (see ``_record_arrival``). Every arrival is
         # recorded, and the LATEST becomes the cause (see ``_record_arrival``).
-        _record_arrival(session_box, job_id, facts)
-        session = session_box[0] if session_box else None
+        _record_arrival(
+            session_box,
+            job_id,
+            facts,
+            refused_action=_refused_action(gated),
+        )
+        # THEN THE GATE, before anything acts on the signal: an unsanctioned
+        # arrival has been recorded, is said out loud, and ends nothing.
+        if gated and _refuse_unsanctioned(facts, job_id):
+            return
         if session is not None:
             _note_stop_cause(session, facts.get("signal"), int(facts.get("signal_count") or 1))
             try:
@@ -262,9 +373,20 @@ def _install_sigterm_handler(
     try:
         loop.add_signal_handler(signal.SIGTERM, handler)
     except (NotImplementedError, RuntimeError):
-        # Non-POSIX or pre-loop environments: fall back to a plain handler
-        # that cannot schedule into the loop.
-        signal.signal(signal.SIGTERM, lambda *_: sys.exit(EXIT_INTERRUPTED))
+        # Non-POSIX or pre-loop environments: fall back to a plain handler that
+        # cannot schedule into the loop. THE GATE STILL HOLDS on this arm — the
+        # arrival and its pairing are a synchronous write (``_record_arrival`` is
+        # called from the async handler too), so a signal nothing sanctioned is
+        # refused here as well, and only a sanctioned one raises ``SystemExit``.
+        def plain_handler(*_: object) -> None:
+            session = session_box[0] if session_box else None
+            gated = _gate_applies(session)
+            _record_arrival(session_box, job_id, facts, refused_action=_refused_action(gated))
+            if gated and _refuse_unsanctioned(facts, job_id):
+                return
+            sys.exit(EXIT_INTERRUPTED)
+
+        signal.signal(signal.SIGTERM, plain_handler)
     # AFTER THE HANDLER, ALWAYS: both branches above reach ``sigaction``
     # themselves, so arming first would let this worker's own install replace the
     # sensor and the receipt would say ``sender: unavailable`` for the life of

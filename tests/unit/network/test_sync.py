@@ -83,6 +83,7 @@ def seed(root: Path, session_id: str, *, rows: int = 3) -> Path:
     from local_operator.session.runtime.journal import EXIT_RECORD_NAME
     from local_operator.session.runtime.registry import (
         SIGNAL_RECEIPT_NAME,
+        SIGNAL_REFUSALS_NAME,
         STOP_MARKER_NAME,
         TURN_JOURNAL_NAME,
     )
@@ -107,6 +108,13 @@ def seed(root: Path, session_id: str, *, rows: int = 3) -> Path:
     # arrives, so the fixture has to hold one.
     (directory / SIGNAL_RECEIPT_NAME).write_text(
         json.dumps({"v": 1, "kind": "runtime", "signals": [{"name": "SIGTERM"}]}),
+        encoding="utf-8",
+    )
+    # The refusals record (a terminating signal the runtime declined) is the
+    # receipt's sibling and travels for the same reason; the round trip asserts
+    # EVERY ``COPY_SET_NAMES`` member arrives, so the fixture holds one.
+    (directory / SIGNAL_REFUSALS_NAME).write_text(
+        json.dumps({"v": 1, "kind": "runtime", "refusals": [{"name": "SIGTERM"}]}),
         encoding="utf-8",
     )
     # The runtime's exit record travels for the reason the receipt beside it
@@ -289,6 +297,7 @@ def test_the_copy_set_names_match_the_modules_that_own_them() -> None:
     from local_operator.session.runtime.journal import EXIT_RECORD_NAME
     from local_operator.session.runtime.registry import (
         SIGNAL_RECEIPT_NAME,
+        SIGNAL_REFUSALS_NAME,
         STOP_MARKER_NAME,
         TURN_JOURNAL_NAME,
     )
@@ -312,6 +321,10 @@ def test_the_copy_set_names_match_the_modules_that_own_them() -> None:
         # termination signal it received. Evidence ABOUT a run, keyed to that run's
         # pid, so it travels with the session exactly as the marker does.
         SIGNAL_RECEIPT_NAME,
+        # The receipt's sibling: terminating signals the runtime REFUSED. Unlisted,
+        # a session that refused one signal could no longer be moved
+        # (``assert_complete`` -> ``unlisted_content``).
+        SIGNAL_REFUSALS_NAME,
         # The runtime's durable exit record: when and why the last run left. A
         # move that dropped it would leave the destination reading "no record
         # attests to a stop" — the SIGKILL shape — silently rewriting the

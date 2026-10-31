@@ -458,7 +458,18 @@ def arm(sig: int) -> bool:
                 mask=int(saved.mask),
                 flags=flags,
             )
+            # PUBLISH BEFORE INSTALLING, NEVER AFTER. The sensor's last act is
+            # ``_restore`` + ``_redeliver``; with no saved action to restore it
+            # re-raises at itself forever (a process spinning at ~91% CPU that
+            # ignores even a sanctioned stop until SIGKILL — measured with 0.2 ms
+            # arrivals). A signal can land the instant ``sigaction`` returns, so
+            # the saved action has to exist BEFORE the sensor can run. The failure
+            # paths below withdraw it again, while the sensor is not live.
+            _SAVED[number] = saved
+            _CALLBACKS[number] = callback
             if lib.sigaction(number, ctypes.byref(sensor), None) != 0:
+                _SAVED.pop(number, None)
+                _CALLBACKS.pop(number, None)
                 logger.debug("siginfo: could not install the sensor for %s", number)
                 return False
             verified = struct()
@@ -470,9 +481,9 @@ def arm(sig: int) -> bool:
                 # trust (a plain sa_handler called with three arguments would read
                 # the siginfo pointer as a ``frame`` object).
                 lib.sigaction(number, ctypes.byref(saved), None)
+                _SAVED.pop(number, None)
+                _CALLBACKS.pop(number, None)
                 return False
-            _CALLBACKS[number] = callback
-            _SAVED[number] = saved
             _FACTS.pop(number, None)
             logger.debug("siginfo: sender sensor armed for signal %s", number)
             return True
@@ -494,14 +505,19 @@ def disarm(sig: int) -> bool:
     except Exception:  # noqa: BLE001
         return False
     with _LOCK:
-        _CALLBACKS.pop(number, None)
-        _FACTS.pop(number, None)
-        saved = _SAVED.pop(number, None)
+        # RESTORE FIRST, FORGET AFTER — the mirror of :func:`arm`'s publish-before-
+        # install. While the sensor is the live action its saved action must stay
+        # published: forgetting first opens a window in which a delivery runs the
+        # sensor with nothing to restore and re-raises at itself forever.
+        saved = _SAVED.get(number)
         lib = _libc()
-        if saved is None or lib is None:
-            return False
-        try:
-            return lib.sigaction(number, ctypes.byref(saved), None) == 0
-        except Exception:  # noqa: BLE001
-            logger.debug("siginfo: disarming raised", exc_info=True)
-            return False
+        restored = False
+        if saved is not None and lib is not None:
+            try:
+                restored = lib.sigaction(number, ctypes.byref(saved), None) == 0
+            except Exception:  # noqa: BLE001
+                logger.debug("siginfo: disarming raised", exc_info=True)
+        _CALLBACKS.pop(number, None)
+        _SAVED.pop(number, None)
+        _FACTS.pop(number, None)
+        return restored

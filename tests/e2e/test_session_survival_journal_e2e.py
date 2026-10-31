@@ -56,7 +56,7 @@ from tests.e2e.test_cut_off_turns_e2e import (
     _spawn,
     _successor_boot,
 )
-from tests.e2e.test_signal_drain_e2e import _spawn_with_drain_bound
+from tests.e2e.test_signal_drain_e2e import _spawn_with_drain_bound, _stage_sanction
 from tests.e2e.watchdog import bounded
 
 pytestmark = pytest.mark.e2e
@@ -292,6 +292,13 @@ async def test_a_sigterm_the_drain_bound_cuts_records_the_readers_own_token(
             assert before is not None and before.open is True and before.pid == child.pid
             assert before.exit_cause == "", "no exit cause before any signal"
 
+            # THE SIGNAL IS SANCTIONED, because since the victim-side sanction gate a
+            # SIGTERM nothing staged is REFUSED and the runtime keeps serving: an
+            # unstaged signal here parked the cell on its 180 s wait (review R-2). What
+            # this cell is about is the writer's exit token after the drain bound cuts
+            # a turn, not whether an anonymous signal is obeyed; the ladder stages the
+            # same marker before its SIGTERM rung.
+            _stage_sanction(config, session_id, directory)
             child.send_signal(signal.SIGTERM)
             await asyncio.to_thread(child.wait, 180)
             assert child.returncode == 0, child.returncode
