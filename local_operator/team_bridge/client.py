@@ -3924,8 +3924,12 @@ class TeamBridgeClient:
             expected_account_id=expected_account_id,
             # A 204 carries nothing, but a hostile 4xx would otherwise be read
             # whole before `_refusal` slices its first 16 KiB (review R1-S1).
+            # The class is this ROUTE's: inheriting the attachment code named a
+            # feature the caller is not using (review R2-F2).
             max_response_bytes=MAX_ERROR_BODY_BYTES,
             accept="application/json",
+            oversize_code="bridge_invalid_response",
+            oversize_sentence="Radient returned an invalid response.",  # i18n: ignore, no code
         )
         if response.status_code >= 400:
             raise _refusal(response)
