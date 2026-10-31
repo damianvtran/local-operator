@@ -45,7 +45,9 @@ pytestmark = pytest.mark.asyncio
 
 def _canonical_png() -> bytes:
     from io import BytesIO
+
     from PIL import Image
+
     from local_operator import agent_avatar
 
     buffer = BytesIO()
@@ -1247,7 +1249,9 @@ def test_a_nul_in_the_stored_name_is_a_doubt(tmp_path: Path):
 async def test_only_normalized_pixels_can_leave_the_publisher(tmp_path: Path, kind: str):
     """Q1: matching metadata is not proof of an image; no ancillary bytes leave."""
     from io import BytesIO
+
     from PIL import Image, PngImagePlugin
+
     from local_operator import agent_avatar
 
     sentinel = b"PRIVATE_PROMPT_SENTINEL"

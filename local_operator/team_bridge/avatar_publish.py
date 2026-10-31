@@ -53,10 +53,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Protocol
 
-from local_operator.team_bridge.cos_name import (
-    SHA256_HEX,
-    published_agent,
-)
+from local_operator.team_bridge.cos_name import SHA256_HEX, published_agent
 
 logger = logging.getLogger(__name__)
 
