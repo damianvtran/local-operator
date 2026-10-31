@@ -1,11 +1,11 @@
 {
   "wire.sessions.approval_stop_local": "dừng {address} nếu phiên đang rảnh: giải phóng lease của phiên và không bao giờ gửi tín hiệu; bị từ chối khi phiên đang làm việc",
   "wire.sessions.approval_stop_peer": "dừng {address} trên {peer}: bản dựng này luôn từ chối, sẽ không gửi gì",
-  "wire.sessions.stop_pending": "{name} đã chấp nhận lệnh dừng, nhưng chưa thoát sau {seconds} s. Không có tín hiệu nào được gửi — hãy xem danh sách phiên trước khi thử lại.",
-  "wire.sessions.stop_refused_busy": "{name} đang làm việc (một lượt, một phê duyệt, một tác nhân con hoặc một tác vụ), nên không có gì bị dừng và không có tín hiệu nào được gửi. Thử lại khi phiên rảnh.",
-  "wire.sessions.stop_refused_old_owner": "{name} đang chạy bản dựng cũ hơn, bản dựng đó không thể cam kết chỉ dừng khi phiên rảnh, nên không có gì bị dừng và không có tín hiệu nào được gửi. Thử lại sẽ không thay đổi điều đó — hãy đề nghị người vận hành dừng nó.",
-  "wire.sessions.stop_refused_unanswered": "{name} không trả lời, nên không thể xác nhận việc chỉ dừng khi phiên rảnh và không có tín hiệu nào được gửi. Hãy xem danh sách phiên trước — có thể phiên đã không còn.",
-  "wire.sessions.stop_refused_wake": "{name} đang rảnh, nhưng một lần thức dậy theo lịch sắp đến trong cửa sổ giữ, nên không có gì bị dừng và không có tín hiệu nào được gửi. Thử lại sau khi lần thức dậy đó chạy.",
+  "wire.sessions.stop_pending": "“{name}” đã chấp nhận lệnh dừng, nhưng chưa thoát sau {seconds} s. Không có tín hiệu nào được gửi — hãy xem danh sách phiên trước khi thử lại.",
+  "wire.sessions.stop_refused_busy": "“{name}” đang làm việc (một lượt, một phê duyệt, một tác nhân con hoặc một tác vụ), nên không có gì bị dừng và không có tín hiệu nào được gửi. Thử lại khi phiên rảnh.",
+  "wire.sessions.stop_refused_old_owner": "“{name}” đang chạy bản dựng cũ hơn, bản dựng đó không thể cam kết chỉ dừng khi phiên rảnh, nên không có gì bị dừng và không có tín hiệu nào được gửi. Thử lại sẽ không thay đổi điều đó — hãy đề nghị người vận hành dừng nó.",
+  "wire.sessions.stop_refused_unanswered": "“{name}” không trả lời, nên không thể xác nhận việc chỉ dừng khi phiên rảnh và không có tín hiệu nào được gửi. Hãy xem danh sách phiên trước — có thể phiên đã không còn.",
+  "wire.sessions.stop_refused_wake": "“{name}” đang rảnh, nhưng một lần thức dậy theo lịch sắp đến trong cửa sổ giữ, nên không có gì bị dừng và không có tín hiệu nào được gửi. Thử lại sau khi lần thức dậy đó chạy.",
   "wire.sessions.stop_remote_refused": "Không thể dừng một phiên trên thiết bị khác từ đây bằng bản dựng này: không thể bảo đảm thoát mà không gửi tín hiệu và chỉ khi phiên rảnh, nên không có gì được gửi. Người vận hành có thể dừng nó trên thiết bị đó.",
   "wire.sessions.stop_self_refused": "Mục tiêu đó chính là phiên này, và một phiên không thể tự dừng chính nó. Hãy dừng nó từ một phiên khác."
 }
