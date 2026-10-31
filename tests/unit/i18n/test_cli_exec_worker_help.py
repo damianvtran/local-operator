@@ -154,7 +154,7 @@ def _collapse(text: str) -> str:
     return " ".join(text.split())
 
 
-def test_every_help_literal_renders_byte_for_byte() -> None:
+def test_every_help_literal_renders_byte_for_byte(monkeypatch) -> None:
     """The rendered English equals the string argparse used to receive.
 
     The catalogue value is the ICU SOURCE (a literal apostrophe is doubled for
@@ -165,10 +165,15 @@ def test_every_help_literal_renders_byte_for_byte() -> None:
     """
     from local_operator.exec_worker import build_parser
 
+    # This pins the source round-trip, not translation coverage. The parser
+    # resolves help independently of the process locale, so pin both paths.
+    monkeypatch.setenv("LOP_LANG", "en")
     rendered_help = _collapse(build_parser().format_help())
-    for key, source in _catalogue().items():
-        rendered = _t(messages.msg(key))
-        assert rendered == source.replace("''", "'"), key
+    for key in _catalogue():
+        rendered = messages.render(key, {}, locale="en")
+        # Compare to the frozen argparse literal, not another projection of the
+        # same catalogue: otherwise changing a --flag changes both sides.
+        assert rendered == REPLACED_LITERALS[key.rsplit(".", 1)[1]], key
         assert _collapse(rendered) in rendered_help, f"{key}: {rendered!r} is not shown by --help"
 
 
