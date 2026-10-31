@@ -14,25 +14,34 @@ AN AGENT NEVER WEARS ITS OWNER'S FACE (2026-10-30). A ``person_agent``
 composite is keyed by its OWNER's account (the agent has no account of its
 own), and until this date it drew the owner's photo or initials under the
 agent marker. In production that put Damian's face on "Aida (Damian Tran)".
-A ``person_agent`` face is now always the agent glyph (:func:`_agent_face`) on
-the owner's stable colour. Any photo supplied for it is ignored, never
-decoded, and :meth:`TeamBridgeClient.notification_avatar` never fetches one.
+A ``person_agent`` face is now the agent glyph (:func:`_agent_face`) on the
+owner's stable colour, or the agent's own picture (below). Any OWNER photo
+supplied for it is ignored, never decoded, and
+:meth:`TeamBridgeClient.notification_avatar` never fetches one.
 That is deliberately "ignore", not "refuse": desktops already released still
 send the owner's photo reference for an agent, and ignoring it fixes their
-banners as soon as core updates instead of costing them the image. An agent's
-OWN published picture (the endpoint seam documented in the desktop's
-``src/shared/identity-avatar.ts``) would need its own closed endpoint-avatar
-read; none exists, so none is drawn.
+banners as soon as core updates instead of costing them the image.
+
+AN AGENT MAY WEAR ITS OWN PICTURE (2026-10-31). When the hub publishes the
+agent's own picture (the directory's ``agent.avatar_url``), the desktop passes
+its endpoint and version, :meth:`TeamBridgeClient.notification_avatar` reads it
+through the closed ``/messaging/endpoints/{id}/avatar`` route, and it arrives
+here as ``agent_picture`` -- a parameter separate from ``photo`` on purpose, so
+no caller can route an account photo into an agent face by passing the wrong
+bytes to the right argument. The badge and the agent marker are drawn over it
+exactly as over the glyph. A missing or undecodable picture draws the glyph:
+a cosmetic picture never costs a banner its image.
 
 CONSTRAINTS (design contract, Team Bridge agreement, 2026-10-28):
 
 * Composition lives here, in core, so every consumer (desktop main today,
   other surfaces later) gets the same validated bytes, and no consumer ever
   decodes a remote image itself.
-* The ONLY photo source is :meth:`TeamBridgeClient.fetch_avatar` -- the closed
-  ``/accounts/{id}/avatar`` read on the configured hub, redirects disabled,
-  1 MiB cap, revalidated under the current login on every use. This module
-  never takes or follows a URL.
+* The ONLY photo sources are :meth:`TeamBridgeClient.fetch_avatar` (a person)
+  and :meth:`TeamBridgeClient.fetch_endpoint_avatar` (an agent) -- the closed
+  ``/accounts/{id}/avatar`` and ``/messaging/endpoints/{id}/avatar`` reads on
+  the configured hub, redirects disabled, 1 MiB cap, revalidated under the
+  current login on every use. This module never takes or follows a URL.
 * The picture is PRE-CROPPED with transparent corners and the badge sits fully
   inside the canvas, because Windows' optional ``hint-crop="circle"`` would
   clip a badge drawn at the corner of a square image.
@@ -521,8 +530,14 @@ def compose(
     origin: str,
     account_id: str,
     photo: bytes | None,
+    agent_picture: bytes | None = None,
 ) -> bytes:
-    """Render one notification PNG. Pure and synchronous; call off-loop."""
+    """Render one notification PNG. Pure and synchronous; call off-loop.
+
+    ``photo`` is a PERSON's account picture and is never decoded for an agent;
+    ``agent_picture`` is an agent's own endpoint picture and is never read for
+    a person.
+    """
 
     from PIL import Image as PILImage
     from PIL import ImageChops
@@ -535,6 +550,11 @@ def compose(
         # Never the owner's photo or initials (module docstring). A supplied
         # photo is not even decoded: those bytes are the owner's, not the agent's.
         face = _agent_face(side, colour)
+        if agent_picture is not None:
+            try:
+                face = _cover(decode_source(agent_picture), side)
+            except AvatarImageRejected:
+                pass  # the glyph stays: a bad agent picture is not a lost banner image
     elif photo is not None:
         face = _cover(decode_source(photo), side)
     else:
@@ -571,6 +591,7 @@ async def render(
     origin: str,
     account_id: str,
     photo: bytes | None,
+    agent_picture: bytes | None = None,
     check_owner: Callable[[], None] = lambda: None,
 ) -> bytes:
     """Concurrency-bounded :func:`compose` off the event loop. Stores nothing.
@@ -589,7 +610,13 @@ async def render(
         try:
             with _RENDER_SLOTS:
                 check_owner()
-                data = compose(variant, origin=origin, account_id=account_id, photo=photo)
+                data = compose(
+                    variant,
+                    origin=origin,
+                    account_id=account_id,
+                    photo=photo,
+                    agent_picture=agent_picture,
+                )
                 check_owner()
                 return data
         finally:

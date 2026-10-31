@@ -75,8 +75,15 @@ def proxy(tmp_path, monkeypatch):
             if ctype == "application/json" and raw:
                 body = json.loads(raw)
             calls.append((self.command, self.path, body, self.headers.get("authorization"), ctype))
-            if state["error"]:
-                code, error = state["error"]
+            # Per-path refusal (endpoint-avatar tests): the hub answers by the
+            # path it was asked for, so one endpoint's version can 404 while
+            # another's serves.
+            refusal = state["refuse_path"](self.path) if state.get("refuse_path") else None
+            if refusal:
+                state.setdefault("conditionals", []).append(self.headers.get("if-none-match"))
+            failure = state["error"] or refusal
+            if failure:
+                code, error = failure
                 out = json.dumps({"code": error, "error": "Fixture refusal"}).encode()
                 return self._reply(code, out, "application/json")
             if self.command == "POST" and self.path.split("?")[0].endswith("/attachments"):

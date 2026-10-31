@@ -4133,8 +4133,18 @@ class TeamBridgeClient:
         initials: str,
         v: str | None,
         expected_account_id: str,
+        endpoint: tuple[str, str] | None = None,
     ) -> bytes:
         """Render only after current-avatar authorization, never from stale bytes.
+
+        ``endpoint`` is ``(endpoint_id, v)`` for a ``person_agent`` whose hub
+        directory publishes the agent's OWN picture. It is read through
+        :meth:`fetch_endpoint_avatar` (never the owner's account route) and is
+        best effort: an unreachable hub, a stale version or a refusal draws the
+        agent glyph rather than failing the banner, because the picture is
+        cosmetic and the desktop's 250 ms budget has no room for a retry. A
+        changed login is the exception and still refuses, so a queued read
+        cannot draw under the wrong viewer.
 
         The directory join belongs to the tenant-scoped desktop caller. Here
         tenant is validated as part of the closed contract (the desktop keys its
@@ -4162,8 +4172,12 @@ class TeamBridgeClient:
             or size not in na.SIZES
             or not na.valid_initials(initials)
             or (v is not None and re.fullmatch(r"[0-9a-f]{16}", v) is None)
+            or (endpoint is not None and kind != "person_agent")
+            or (endpoint is not None and re.fullmatch(r"[0-9a-f]{16}", endpoint[1]) is None)
         ):
             raise ValueError("invalid notification avatar request")
+        if endpoint is not None:
+            _require_endpoint_id(endpoint[0])
         scope, authority = self._avatar_authority(expected_account_id)
 
         def check_owner() -> None:
@@ -4189,12 +4203,27 @@ class TeamBridgeClient:
             photo, _mime = await self.fetch_avatar(
                 sender_account_id, v=v, size=size, expected_account_id=expected_account_id
             )
+        agent_picture: bytes | None = None
+        if endpoint is not None:
+            try:
+                agent_picture, _mime = await self.fetch_endpoint_avatar(
+                    endpoint[0], v=endpoint[1], size=size, expected_account_id=expected_account_id
+                )
+            except BridgeSignInRequired:
+                raise
+            except BridgeRefusal as refusal:
+                # A login change is a refusal, never a fallback: the glyph would
+                # be drawn under a viewer who no longer owns this request.
+                if refusal.code == ACCOUNT_MISMATCH_CODE:
+                    raise
+                agent_picture = None
         check_owner()
         data = await na.render(
             variant,
             origin=self._base_url,
             account_id=sender_account_id,
             photo=photo,
+            agent_picture=agent_picture,
             check_owner=check_owner,
         )
         check_owner()
