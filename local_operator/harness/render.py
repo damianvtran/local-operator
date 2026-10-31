@@ -446,7 +446,22 @@ def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
             # cross-session transcript row but the model never does. Unlisted
             # custom types are dropped (bookkeeping), which is precisely the
             # trap a new aside type falls into.
-            out.append(_injected_user_message(message.details.get("text", ""), message.id))
+            text = message.details.get("text", "")
+            if message.custom_type == TEAM_BRIDGE_MESSAGE_TYPE:
+                # Journal safety is not admission safety: a busy mailbox row
+                # can flush before the next turn hydrates its screened body.
+                # Gate here too so bare replay/alternate renderers fail closed.
+                from local_operator.team_bridge.card_projection import model_card_text
+
+                text = model_card_text(message, messages)
+            rendered = _injected_user_message(text, message.id)
+            if message.custom_type == TEAM_BRIDGE_MESSAGE_TYPE:
+                from local_operator.team_bridge.card_projection import (
+                    carry_presented_body,
+                )
+
+                carry_presented_body(message, rendered)
+            out.append(rendered)
         elif message.custom_type == TODO_REMINDER_MESSAGE_TYPE and index == newest_reminder:
             # The continuation guardrail's nudge (``Session._todo_continuation``)
             # reaches the model as a user turn or it does nothing at all: this
