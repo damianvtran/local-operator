@@ -1,0 +1,14 @@
+{
+  "cli.hub_shared_help.publish_yes": "تصدیقی پرامپٹس چھوڑ دیں؛ غیر حل شدہ ویلیوز قبول نہیں کرتا (ان کے لیے --accept-unresolved استعمال کریں)",
+  "cli.hub_shared_help.publish_preview_only": "پیش منظر چلائیں اور شائع کیے بغیر diff چھاپیں (جب کچھ عمومی بنانا پڑے تو ایگزٹ 2)",
+  "cli.hub_shared_help.publish_json": "مشین کے پڑھنے کے قابل پیش منظر آؤٹ پٹ؛ اس میں حوالہ ویلیوز اور ایک بار استعمال ہونے والا commit pin ہے، اس لیے اسے حساس سمجھیں",
+  "cli.hub_shared_help.publish_accept_unresolved": "ہر اس ویلیو کو تسلیم کریں جسے پیش منظر درجہ بند نہ کر سکا، اور انہیں جوں کا توں شائع کریں",
+  "cli.hub_shared_help.publish_allow_internal_ops": "تنظیمی اشاعت کے لیے اندرونی آپریشنز الاؤنس کی رضامندی (--org درکار؛ رضامندی کا متن انٹرایکٹو طور پر دکھاتا ہے)",
+  "cli.hub_shared_help.sync_check": "صرف بتائیں کہ کیا دستیاب ہے؛ کچھ تبدیل نہ کریں",
+  "cli.hub_shared_help.sync_prefer": "تنازع کا فیصلہ کریں: جن سیکشنز کو دونوں نے بدلا ان میں اپنی طرف رکھیں یا ہب کی لیں",
+  "cli.hub_shared_help.sync_accept_unknown_baseline": "بیس لائن نامعلوم ہونے پر لاگو کریں: ہب کے اضافے لیے جاتے ہیں، آپ کا کچھ نہیں جاتا",
+  "cli.hub_shared_help.sync_replace": "اپنی کاپی کو ہب کی کاپی سے بدل کر ضائع کریں (بتاتا ہے کیا ضائع ہوا؛ --yes درکار)",
+  "cli.hub_shared_help.sync_yes": "--replace کی تصدیق کریں",
+  "cli.hub_shared_help.sync_dry_run": "دکھائیں کیا بدلے گا؛ کوئی ایجنٹ قطار نہ لکھیں",
+  "cli.hub_shared_help.sync_json": "رپورٹ JSON کے طور پر جاری کریں"
+}

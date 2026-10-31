@@ -1,0 +1,39 @@
+{
+  "locale": "ur",
+  "namespace": "wire.exec",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 1,
+    "nit": 1
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 1,
+      "id": "UR-026",
+      "severity": "MINOR",
+      "namespace": "wire.exec",
+      "key": "wire.exec.exec_epilog",
+      "english": "Examples:\n  lop exec 'Review the change' --team release --background\n  printf 'Inspect this report' | lop exec --profile reviewer\n  lop exec --goal 'Finish the checklist' --loop 3 --name 'Night audit'\n  lop exec --resume SESSION_ID --loop-goal 'Verify every acceptance criterion'\n  lop exec --status JOB_ID\n\nResume restores the transcript, team, profile, goal and name first; explicit\nstartup flags override their own slots. Team and profile may coexist. A loop\nruns after the optional initial prompt; --loop N counts continuations only.\nSaved loop progress is visible on resume, but iterations never replay automatically.\nA goal alone does not run a model. Prompts are literal, not slash commands.\n--goal only SETS the objective; unlike the TUI's /goal it does not also\nsend that text as a message, because the prompt is exec's message channel.\n--agent/--agent-id select legacy agent data and are mutually exclusive.\nDefault non-TTY approvals deny. --control may wait for a supervisor; --yolo\nis an explicit override, never implied by --background or --team.\n--tools bounds what the run can reach: excluded tools are unreachable.\nForeground events/text use stdout; receipts use stderr. Detached runs log\nboth streams and print distinct job/session IDs. Use lop --resume SESSION_ID\nto view a live run or resume a finished one; exec refuses a live owner.",
+      "current": "مثالیں:\n  lop exec 'Review the change' --team release --background\n  printf 'Inspect this report' | lop exec --profile reviewer\n  lop exec --goal 'Finish the checklist' --loop 3 --name 'Night audit'\n  lop exec --resume SESSION_ID --loop-goal 'Verify every acceptance criterion'\n  lop exec --status JOB_ID\n\nResume پہلے ٹرانسکرپٹ، ٹیم، پروفائل، ہدف اور نام بحال کرتا ہے؛ واضح\nstartup فلیگز اپنے اپنے سلاٹ کو اوور رائڈ کرتے ہیں۔ ٹیم اور پروفائل ساتھ رہ سکتے ہیں۔\nلوپ اختیاری ابتدائی پرامپٹ کے بعد چلتا ہے؛ --loop N صرف تسلسل گنتا ہے۔\nمحفوظ شدہ لوپ کی پیش رفت resume پر نظر آتی ہے، لیکن تکرارات خودکار طور پر دوبارہ نہیں چلتیں۔\nصرف ہدف ماڈل نہیں چلاتا۔ پرامپٹس لفظی ہیں، سلیش کمانڈز نہیں۔\n--goal صرف مقصد SET کرتا ہے؛ TUI کے /goal کے برعکس یہ متن کو\nپیغام کے طور پر نہیں بھیجتا، کیونکہ پرامپٹ exec کا پیغام چینل ہے۔\n--agent/--agent-id پرانے ایجنٹ ڈیٹا کا انتخاب کرتے ہیں اور باہم مانع ہیں۔\nڈیفالٹ غیر TTY منظوریاں مسترد ہوتی ہیں۔ --control سپروائزر کا انتظار کر سکتا ہے؛ --yolo\nواضح اوور رائڈ ہے، --background یا --team سے کبھی مفروضہ نہیں ہوتا۔\n--tools طے کرتا ہے کہ رن کیا حاصل کر سکتا ہے: خارج شدہ ٹولز ناقابلِ رسائی ہیں۔\nفورگراؤنڈ ایونٹس/متن stdout استعمال کرتے ہیں؛ رسیدیں stderr۔ الگ کیے گئے رنز دونوں\nاسٹریمز لاگ کرتے ہیں اور الگ الگ جاب/سیشن IDs چھاپتے ہیں۔ lop --resume SESSION_ID\nلائیو رن دیکھنے یا مکمل ہوئے رن کو دوبارہ شروع کرنے کے لیے استعمال کریں؛ exec لائیو مالک کو مسترد کرتا ہے۔",
+      "problem": "Prose words left in Latin outside tokens: 'Resume', 'startup', and '--goal صرف مقصد SET کرتا ہے'. These are not flags or commands (English caps is emphasis). Reads as machine-mixed.",
+      "suggested": "Resume → «دوبارہ شروع کرنا»، startup فلیگز → «آغاز کے فلیگز»، «--goal صرف مقصد مقرر کرتا ہے»",
+      "disposition": "fixed (remediation core-fix, session be04c022ebd4)"
+    },
+    {
+      "round": 2,
+      "id": "UR2-003",
+      "severity": "NIT",
+      "namespace": "wire.exec",
+      "key": "wire.exec.tools_unreachable",
+      "english": "Warning: --tools names no tool this run could reach: {names}. The session reached {count} tool(s).",
+      "current": "انتباہ: --tools کسی ایسے ٹول کا نام نہیں لیتا جس تک یہ رن پہنچ سکے: {names}۔ سیشن {count} ٹول(ز) تک پہنچا۔",
+      "problem": "Sweep recurrence of the UR-006 class: the bracket plural hack «ٹول(ز)» copies English 'tool(s)'. It is not Urdu morphology.",
+      "suggested": "…سیشن {count} ٹولز تک پہنچا۔ (or make {count} an ICU plural: one {# ٹول} other {# ٹولز}; argument name unchanged)",
+      "disposition": "open at PASS: minor/nit accepted, value unchanged"
+    }
+  ]
+}

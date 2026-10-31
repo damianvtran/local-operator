@@ -1164,14 +1164,43 @@ def test_every_job_row_field_is_classified() -> None:
     assert not stale, f"stale entries for row fields that no longer exist: {sorted(stale)}"
 
 
-def test_the_attach_frame_fits_for_a_session_that_ran_all_year(tmp_path: Path) -> None:
-    """The class guard: EVERY collection field maxed at once, still under the cap.
+@pytest.mark.parametrize("cache_reported", [None, True, False])
+def test_the_attach_frame_fits_for_a_session_that_ran_all_year(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cache_reported: bool | None
+) -> None:
+    """The class guard, including real compatible-provider cache evidence."""
+    if cache_reported is not None:
+        import httpx
 
-    Populated from ``_collection_fields()`` rather than by hand, so a field
-    added to the model is filled here automatically and this assertion is what
-    catches it. The reference machine's real session serialized 1,052,296
-    bytes through this path.
-    """
+        from local_operator.harness.types import ChatRequest, Message, StreamUsageEvent
+        from local_operator.providers.clients import OpenAICompatClient
+
+        async def receive() -> Usage:
+            usage: dict[str, Any] = {"prompt_tokens": 30000, "completion_tokens": 10}
+            if cache_reported:
+                usage["prompt_tokens_details"] = {"cached_tokens": 0}
+            payload = f'data: {json.dumps({"choices": [], "usage": usage})}\n\ndata: [DONE]\n\n'
+            async with httpx.AsyncClient(
+                transport=httpx.MockTransport(lambda req: httpx.Response(200, text=payload))
+            ) as http:
+                client = OpenAICompatClient("https://openrouter.ai/api/v1", http_client=http)
+                req = ChatRequest(
+                    model=ModelSpec(provider="openrouter", model_id="synthetic"),
+                    messages=[Message.user("synthetic")],
+                )
+                events = [event async for event in client.stream(req, "synthetic")]
+            return next(event.usage for event in events if isinstance(event, StreamUsageEvent))
+
+        observed = asyncio.run(receive())
+        assert observed._cache_read_reported is cache_reported
+        original_receipt = _receipt
+
+        def populated_receipt(index: int) -> Usage:
+            receipt = original_receipt(index)
+            receipt._cache_read_reported = observed._cache_read_reported
+            return receipt
+
+        monkeypatch.setitem(globals(), "_receipt", populated_receipt)
     jobs = [
         job.model_copy(
             update={

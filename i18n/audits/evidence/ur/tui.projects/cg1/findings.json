@@ -1,0 +1,39 @@
+{
+  "locale": "ur",
+  "namespace": "tui.projects",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 2,
+    "nit": 0
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 1,
+      "id": "UR-010",
+      "severity": "MINOR",
+      "namespace": "tui.projects",
+      "key": "tui.projects.binding_zoom_out",
+      "english": "Coarser time",
+      "current": "موٹا وقت",
+      "problem": "«موٹا وقت» ('fat/thick time') is a literal calque of 'coarser'; with «باریک وقت» the pair reads oddly. These name zoom levels of the timeline.",
+      "suggested": "بڑا وقفہ (zoom_in: چھوٹا وقفہ) — or زوم آؤٹ / زوم ان, matching tui.projects.zoom «زوم»",
+      "disposition": "fixed (remediation core-fix, session be04c022ebd4)"
+    },
+    {
+      "round": 1,
+      "id": "UR-011",
+      "severity": "MINOR",
+      "namespace": "tui.projects",
+      "key": "tui.projects.tracked",
+      "english": " · {count} tracked",
+      "current": " · {count} زیرِ نگرانی",
+      "problem": "«زیرِ نگرانی» is the glossary's rendering of 'supervised' (systemd units, glossary §2) and the ur 'monitor' family is «نگرانی»; using it for projects 'tracked' collides with both.",
+      "suggested": "· {count} ٹریک شدہ",
+      "disposition": "fixed (remediation core-fix, session be04c022ebd4)"
+    }
+  ]
+}

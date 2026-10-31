@@ -1147,7 +1147,7 @@ class TestTheForkInheritsItsParentsCacheKey:
 
         body = client._build_responses_body(request)
         assert body["prompt_cache_key"] == PARENT_ID
-        assert body["prompt_cache_retention"] == "24h"
+        assert "prompt_cache_retention" not in body
 
 
 class TestTheForkMarkSurvivesTruncation:

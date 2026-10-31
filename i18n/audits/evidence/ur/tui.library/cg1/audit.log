@@ -1,0 +1,114 @@
+# ur/tui.library audit.log: records the audit sessions kept, verbatim; nothing here is a replayed command.
+# The auditors wrote findings.jsonl / progress.log / summary.md (read-only brief), not a shell log.
+
+## round 1: audit dir core-audit/ur, auditor session dab7435f3cd0
+verdict.txt:
+CHANGES_REQUESTED
+BLOCKER 0 · MAJOR 1 · MINOR 18 · NIT 5 · 24 findings over 1337 values in 56 namespaces
+progress.log:
+cli.agents_help 21 0
+cli.aida_help 4 0
+cli.browser 64 2
+cli.browser_help 20 0
+cli.config_help 9 0
+cli.credential_help 5 1
+cli.exec_help 20 1
+cli.exec_runtime 11 0
+cli.exec_worker_help 11 0
+cli.global_help 17 0
+cli.hub_help 12 0
+cli.hub_shared_help 12 0
+cli.install_help 5 0
+cli.login_help 2 0
+cli.login_status_help 2 0
+cli.logout_help 2 0
+cli.mcp_help 19 0
+cli.memory_help 1 0
+cli.mobile_help 15 0
+cli.model_help 5 0
+cli.monitor_help 6 0
+cli.qwencloud_help 5 0
+cli.refresh_help 7 0
+cli.resume_click_help 1 0
+cli.send_help 7 0
+cli.serve_help 5 0
+cli.services_help 9 1
+cli.sessions_help 47 2
+cli.stop_help 9 0
+cli.teams_help 34 0
+cli.update_help 6 0
+cli.wake_help 17 1
+mobile.setup 76 1
+tui.analytics 98 0
+tui.app 46 2
+tui.hub_links 56 1
+tui.import 87 1
+tui.library 108 1
+tui.notices 30 2
+tui.projects 97 2
+tui.small 137 4
+tui.usage 21 0
+wire.aida_cadence 2 0
+wire.console 8 0
+wire.errors.agents 44 0
+wire.errors.auth 12 0
+wire.errors.files 11 0
+wire.errors.media 20 0
+wire.errors.sdk_spec 21 0
+wire.errors.sdk_startup 4 0
+wire.exec 17 1
+wire.host_speed 2 0
+wire.settings.account_policy 14 1
+wire.settings.hub_defaults 9 0
+wire.slash.library 2 0
+wire.tunnel_setup 5 0
+
+## round 2: audit dir core-audit2/ur, auditor session 1a185836d3d9
+verdict.txt:
+PASS
+BLOCKER 0 · MAJOR 0 · MINOR 2 · NIT 3
+progress.log:
+2026-10-31T10:04:51Z fetched en+context for 56 ns
+(A) judged all 62 changed keys fresh vs English + glossary/style guide; all after-values present in patches (62/62 match changes.jsonl).
+(B) declined.jsonl is empty; all 24 round-1 findings (UR-001..026 minus 012/015) have a change row.
+(C) swept 1337 values: effort Latin, archived/محفوظ, aside/(س) hacks, حد, درآمد, اسناد, supervised/سپروائزڈ/زیرِ نگرانی, merge/pull/push/commit/endpoint/extra, subagent, نشست, Librarian gender, safe/محفوظ, protocol labels (HTTP/OAuth/SSE), residual Latin prose words.
+(D) mechanical: ICU args, plural cats (one/other), backticks, Rich tags, --flags, ANSI, newline counts, NFC, CR, Cf/bidi/control chars, terminal-cell widths on 30 maxCells keys (wcwidth-style: Mn/Me/Cf=0, W/F=2). 0 over.
+Findings written: 5 (MINOR 2, NIT 3). Verdict PASS.
+
+## targeted argument-order audit: audit dir core-argaudit/ur, auditor session b15ab322fa0f
+verdict.txt:
+PASS
+keys_read=7 blocker=0 major=0 minor=1 nit=1
+findings.jsonl:
+{"id": "UR-ARG-1", "severity": "MINOR", "namespace": "tui.hub_links", "key": "tui.hub_links.mark.retry", "english": "Retry {direction} for {item} at {source}", "current": "{direction} دوبارہ کریں: {item}، {source} پر", "problem": "Meaning intact (retry direction, for item, at source; nothing inverted), but the colon+comma list drops the 'for' relation and reads like a terse label list rather than a sentence; slightly stilted.", "suggested": "{direction} دوبارہ کریں — {item} کے لیے، {source} پر"}
+{"id": "UR-ARG-2", "severity": "NIT", "namespace": "tui.analytics", "key": "tui.analytics.rate.legend", "english": "decode rate over {shown, number} of {total, number} calls", "current": "decode ریٹ {shown, number} کالز پر، کل {total, number} میں سے", "problem": "Correct direction (rate over shown, out of total); trailing 'کل {total} میں سے' is a tacked-on clause. Acceptable; a parenthetical reads a touch smoother.", "suggested": "decode ریٹ {shown, number} کالز پر (کل {total, number} میں سے)"}
+summary.md:
+# ur core — arg-order rephrase audit (independent)
+
+- Auditor: i18n-auditor role agent, session b15ab322fa0f, model anthropic/claude-opus-5-5. Did not translate these values; nothing edited.
+- Keys read: 7 of 7 in changes.jsonl. Current patch values were confirmed equal to each AFTER value, then checked against English from origin/main.
+- **Verdict: PASS.** 0 BLOCKER, 0 MAJOR, 1 MINOR, 1 NIT (see findings.jsonl).
+
+## Per-key
+| key | meaning | note |
+|---|---|---|
+| tui.analytics.rate.legend | OK: rate over {shown}, out of {total} | NIT: tacked-on clause |
+| tui.analytics.search.summary_free_paid | OK: {free} free out of {priced} priced; {money} paid. Not inverted | — |
+| tui.hub_links.mark.available | OK: update item from source | natural |
+| tui.hub_links.mark.retry | OK | MINOR: terse colon/comma form loses 'for' |
+| tui.hub_links.policy.save_failed | OK: policy for source, failure, retry | natural |
+| tui.library.building | OK: {scanned} out of {total} conversations | — |
+| wire.errors.agents.variable_not_found | OK: variable_key not found for agent_id; ICU '' escape kept as in English | — |
+
+## Mechanical checks
+- Placeholder names and kinds match English (`{shown, number}`/`{total, number}` kept as number; others are simple args). The English has no plural or select forms, so no CLDR categories are needed.
+- No manual bidi controls (LRM/RLM/LRE–PDF/LRI–PDI/ALM) in any value. The LTR islands (`decode`, placeholders) are left as-is, as the ur style guide requires.
+- Glossary: ایجنٹ (agent) used consistently. ویری ایبل, کالز and گفتگوئیں match the rest of the ur catalogue.
+- The ledger was not updated because the task said read-only. No validator or tests were run, by instruction. The checks above were done by reading the values plus a short script for placeholders and bidi controls.
+
+## applier-computed (apply_locale.py, run against the worktree at 137984daf98e6491dfd97cb6812d51c1a98abe6c)
+keys merged for this namespace: 108
+sha256 en  local_operator/i18n/catalogues/en/tui.library.json = 5a389b6a7d8de06621462f2685eff6dc95cd4cd6584d35dd6c26a0a19ad50b11
+sha256 tgt local_operator/i18n/catalogues/ur/tui.library.json = ff3ecebcb35d50a7f429932a80e51e7b0e897cca68fd19fd19ba2f3ae04c0e05
+sha256 audited patch file (scratchpad core-i18n/ur/tui.library.json) = b15b37b3e29d63f4ee3f72b0fb4662a289fdbccf2c0793d0669c77921793b0ab
+assertions passed: patch keys subset of en, every en key present, English key order, patch values byte-equal to catalogue values, no pre-existing value changed

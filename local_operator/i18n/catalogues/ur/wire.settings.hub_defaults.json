@@ -1,0 +1,11 @@
+{
+  "wire.settings.hub_defaults.agents.help": "آف: تمام ایجنٹ/مہارت لنکس کی اپ ڈیٹس موقوف؛ آن: نئے لنکس سبسکرائب۔",
+  "wire.settings.hub_defaults.agents.label": "ایجنٹ/مہارت لنکس کی خودکار اپ ڈیٹ",
+  "wire.settings.hub_defaults.agents.off.description": "تمام ایجنٹ اور مہارت لنکس کی اپ ڈیٹس موقوف کریں",
+  "wire.settings.hub_defaults.agents.on.description": "نئے ایجنٹ اور مہارت لنکس سبسکرائب کریں",
+  "wire.settings.hub_defaults.model_default.note": "ہب merge آپ کا موجودہ ڈیفالٹ ماڈل استعمال کرتے ہیں۔ پرانا ہب ماڈل اوور رائڈ نظر انداز ہوتا ہے۔",
+  "wire.settings.hub_defaults.teams.help": "نئے ٹیم لنکس کا ڈیفالٹ؛ موجودہ لنکس اپنی پالیسیاں برقرار رکھتے ہیں۔",
+  "wire.settings.hub_defaults.teams.label": "نئے ٹیم لنکس سبسکرائب کریں",
+  "wire.settings.hub_defaults.teams.off.description": "نئے ٹیم لنکس کی آنے والی اپ ڈیٹس موقوف کریں",
+  "wire.settings.hub_defaults.teams.on.description": "نئے ٹیم لنکس سبسکرائب کریں"
+}

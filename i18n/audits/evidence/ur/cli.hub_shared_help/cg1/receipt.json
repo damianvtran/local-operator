@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "audit_id": "cg1",
+  "locale": "ur",
+  "namespace": "cli.hub_shared_help",
+  "source_sha256": "5d40860430e36224bd77e95ff8298bd4b80f052f3d910a532947af6e78632b44",
+  "target_sha256": "c1b762d1dbe539aa2721ea2a8ecfce588e3e641f4cfb2a7c3ccf9e1e62df413f",
+  "hashes": {
+    "audit.log": "b5d9a9325bcb8eda8c8b3dbbcedb18cc68bc2f230082ac65e420ae2ef1369b7a",
+    "findings.json": "d8a68e0db4d4c1f1f0a4e9acb5425534facd80a21f4a02d5bc69bca63fa66e48",
+    "record.json": "7d0c69bd4405a4dfec8d78f615c5058657e10faefb829b2c0fb2d971792d6e45",
+    "report.md": "db5c1e5fe40c1fbb2d06ca76254f474a2718124662d01ed301d2d58a3d8f4a60"
+  }
+}

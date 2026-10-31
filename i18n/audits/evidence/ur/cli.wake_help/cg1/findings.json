@@ -1,0 +1,27 @@
+{
+  "locale": "ur",
+  "namespace": "cli.wake_help",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 1,
+    "nit": 0
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 1,
+      "id": "UR-023",
+      "severity": "MINOR",
+      "namespace": "cli.wake_help",
+      "key": "cli.wake_help.create_session",
+      "english": "session id to wake",
+      "current": "جگانے والا سیشن id",
+      "problem": "Active/passive slip: «جگانے والا سیشن id» = 'the session id that does the waking'; English is the session to BE woken.",
+      "suggested": "جگایا جانے والا سیشن id",
+      "disposition": "fixed (remediation core-fix, session be04c022ebd4)"
+    }
+  ]
+}

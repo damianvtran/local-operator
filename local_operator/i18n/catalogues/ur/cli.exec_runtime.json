@@ -1,0 +1,13 @@
+{
+  "cli.exec_runtime.thinking": "· سوچ رہا ہے…",
+  "cli.exec_runtime.tool_interrupted": "⊘ {name} روکا گیا",
+  "cli.exec_runtime.tool_failed": "✗ {name} ناکام",
+  "cli.exec_runtime.output_check_failed": "! آؤٹ پٹ کی جانچ ناکام ({format}، کوشش {attempt}/{max_attempts}): {reason}",
+  "cli.exec_runtime.retry": "[dim]کوشش {attempt}: {error}[/dim]",
+  "cli.exec_runtime.model_fallback": "[dim]متبادل {selector} پر گیا[/dim]",
+  "cli.exec_runtime.model_switched": "[dim]{selector} پر منتقل ہوا[/dim]",
+  "cli.exec_runtime.model_returned": "[dim]{selector} پر لوٹ آیا[/dim]",
+  "cli.exec_runtime.compacting": "[dim]کانٹیکسٹ کمپریس ہو رہا ہے…[/dim]",
+  "cli.exec_runtime.error": "خرابی: {sentence}",
+  "cli.exec_runtime.aborted": "[red]منسوخ[/red]"
+}

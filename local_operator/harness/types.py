@@ -1318,6 +1318,10 @@ class Usage(BaseModel):
     #: zero-frame-bytes reason as the decode window; the transcript encoder is
     #: the one writer that puts it on disk.
     _cache_diagnostics_id: str | None = PrivateAttr(default=None)
+    # This is live routing evidence, not durable billing data. Repeating even a
+    # tiny field across hundreds of receipts breaks the bounded attach frame.
+    # model_copy retains it; a serialized/replayed receipt safely becomes unknown.
+    _cache_read_reported: bool | None = PrivateAttr(default=None)
 
     @model_serializer(mode="wrap")
     def _serialize_usage_without_unset_stamp(

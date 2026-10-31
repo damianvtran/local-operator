@@ -1,0 +1,15 @@
+{
+  "locale": "ur",
+  "namespace": "wire.errors.agents",
+  "result": "CLEAN",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 0
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [],
+  "counts_scope": "counts, result and gate_status describe locale-wide rounds 1-2 as recorded in the ledger; findings with round \"targeted-argorder\" come from session b15ab322fa0f (read only the rephrased keys) and are not in those counts"
+}
