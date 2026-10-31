@@ -528,26 +528,115 @@ def test_a_pre_screen_hold_publishes_held_too(tmp_path, monkeypatch, setup, code
     assert code not in json.dumps({k: v for k, v in published[0].items() if k != "access"})
 
 
-def test_an_engagement_hold_publishes_but_a_producer_fence_does_not(tmp_path, monkeypatch) -> None:
+def test_the_engagement_gate_keeps_its_code_and_publishes_nothing(tmp_path, monkeypatch) -> None:
+    """A hub write before the engagement gate is the spend that gate prevents.
+
+    PR #3198 CI (`test_v1_unengaged_conversation_message_holds_visibly_and_never_wakes`,
+    which forbids even building the wire here): the publish is skipped, the hold
+    reports ``open_chief_of_staff`` — never ``conversation_failed``.
+    """
+
     from local_operator.team_bridge.connector import conversation as conversation_mod
 
     a, config_dir, server, published, _admits = _rig(tmp_path, monkeypatch)
     _wire_rig(monkeypatch, server, {"a": (a, config_dir)})
     ref = _ref(server)
+    wired: list[str] = []
+
+    async def must_not_run(*args: Any, **kwargs: Any):
+        wired.append("called")
+        raise AssertionError("no hub client before the engagement gate")
 
     monkeypatch.setattr(conversation_mod, "engagement_hold", lambda d, c: "open_chief_of_staff")
-    Store(config_dir).persist_hold(a, ref.encode(), "screening_hold", retry_at=0)
-    _retry(a, config_dir)
-    assert [p["hold_class"] for p in published] == ["awaiting_review"]
-
-    # A fence (bridge off) means the connector may not act for this owner at
-    # all: no hub write, not even a best-effort one.
-    published.clear()
-    monkeypatch.setattr(conversation_mod, "_producer_fence", lambda *a, **k: "bridge_off")
+    monkeypatch.setattr(conversation_mod, "_wire_for", must_not_run)
     Store(config_dir).persist_hold(a, ref.encode(), "screening_hold", retry_at=0)
     out = _retry(a, config_dir)
+
     assert out["outcomes"][0]["action"] == "hold"
+    assert published == [] and wired == []
+    hold = Store(config_dir).screening_hold(a, ref.encode())
+    assert hold is not None and hold["hold_code"] == "open_chief_of_staff"
+
+
+def _call_handler(owner: Any, ref: Any, config_dir: Path) -> dict[str, Any]:
+    """Drive the handler itself: CI asserted ITS return value, so does this."""
+
+    from local_operator.team_bridge.connector import conversation as conversation_mod
+
+    return asyncio.run(
+        conversation_mod.handle_conversation_available(
+            owner,
+            ref,
+            config_dir=config_dir,
+            auth_store=None,
+            access=SimpleNamespace(credential_id=owner.credential_id),
+        )
+    )
+
+
+def test_a_producer_fence_never_publishes(tmp_path, monkeypatch) -> None:
+    # The connector may not act for this owner at all (bridge off, consent
+    # revoked, owner re-enrolled): no hub write, not even a best-effort one.
+    from local_operator.team_bridge.connector import conversation as conversation_mod
+
+    a, config_dir, server, published, _admits = _rig(tmp_path, monkeypatch)
+    _wire_rig(monkeypatch, server, {"a": (a, config_dir)})
+    monkeypatch.setattr(conversation_mod, "_producer_fence", lambda *a, **k: "bridge_off")
+    out = _call_handler(a, _ref(server), config_dir)
+
+    assert out == {"action": "hold", "message_id": MID, "code": "bridge_off"}
     assert published == []
+
+
+@pytest.mark.parametrize(
+    ("setup", "screen", "code"),
+    [
+        (lambda s: setattr(s, "body_route_available", False), None, "body_unavailable"),
+        (lambda s: setattr(s, "body_override", "tampered bytes"), None, "body_hash_mismatch"),
+        (lambda s: None, "none", "screening_unavailable"),
+        (lambda s: None, "hold", "screening_hold"),
+    ],
+)
+def test_every_held_path_returns_its_own_code(tmp_path, monkeypatch, setup, screen, code) -> None:
+    """PR #3198 CI: the publish is optional, the CODE never is.
+
+    Only the hub write may be skipped. A hold that reports its own code must
+    never come back as ``conversation_failed`` because a publish was skipped,
+    unavailable or refused.
+    """
+
+    from local_operator.team_bridge.connector import conversation as conversation_mod
+
+    a, config_dir, server, published, admits = _rig(tmp_path, monkeypatch)
+    _wire_rig(monkeypatch, server, {"a": (a, config_dir)}, disposition=screen or "deliver")
+    setup(server)
+    if screen == "none":
+
+        async def no_result(*args: Any, **kwargs: Any):
+            return None
+
+        monkeypatch.setattr(conversation_mod, "screen_item", no_result)
+    out = _call_handler(a, _ref(server), config_dir)
+
+    assert out == {"action": "hold", "message_id": MID, "code": code}
+    assert admits == []
+    # And the sender still learns it is held, under a coarse class only.
+    assert published and published[0]["message_id"] == MID
+    if code not in DELIVERY_HOLD_CLASSES:  # screening_unavailable is both
+        assert code not in json.dumps({k: v for k, v in published[0].items() if k != "access"})
+
+
+def test_a_failing_publish_never_changes_the_hold_code(tmp_path, monkeypatch) -> None:
+    a, config_dir, server, _published, _admits = _rig(tmp_path, monkeypatch)
+    _wire_rig(monkeypatch, server, {"a": (a, config_dir)}, disposition="hold")
+
+    async def exploding(*args: Any, **kwargs: Any):
+        raise RuntimeError("hub gone")
+
+    monkeypatch.setattr(FakeWire, "put_delivery_state", exploding, raising=False)
+    out = _call_handler(a, _ref(server), config_dir)
+
+    assert out == {"action": "hold", "message_id": MID, "code": "screening_hold"}
 
 
 def test_a_slow_hub_costs_the_drain_at_most_the_short_cap(tmp_path, monkeypatch) -> None:

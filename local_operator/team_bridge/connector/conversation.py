@@ -800,6 +800,30 @@ async def handle_conversation_available(
 
     terminal = False
     client: Any = None
+
+    async def held(code: str) -> dict[str, Any]:
+        """Publish "held" (best-effort), then return the hold outcome.
+
+        PR #3198 review R2: a hold AFTER the wire exists (body unreadable or
+        mismatched, images unbound, screening never ran) is as invisible to the
+        human sender as a screening hold, so it publishes too — each maps to
+        ``awaiting_review`` or a coarser class, never its code.
+
+        THE PUBLISH IS THE ONLY THING THAT MAY BE SKIPPED, NEVER THE CODE
+        (PR #3198 CI): the returned dict is built from ``code`` alone, so no
+        failure to publish — and no missing client — can turn a named hold into
+        ``conversation_failed``. Three holds carry no client on purpose: the
+        producer fence, the engagement gate (a hub write before it is the very
+        spend that gate exists to prevent, pinned by
+        ``test_v1_unengaged_conversation_message_holds_visibly_and_never_wakes``)
+        and an owner this connector may not act for. Their publish is skipped
+        and the hold still reports its own code.
+        """
+
+        if client is not None:
+            await _publish_held(client, owner, ref, code, access)
+        return {"action": "hold", "message_id": message_id, "code": code}
+
     try:
         fence_code = _producer_fence(store, owner, access, settings)
         if fence_code:
@@ -809,27 +833,10 @@ async def handle_conversation_available(
         # admit; the loop re-drives it on the bounded backoff until the owner
         # sends the session a message (see ``engagement_hold``).
         engage_code = engagement_hold(designation, config_dir)
-
-        client = wire if wire is not None else await _wire_for(owner, config_dir, auth_store)
-
-        async def held(code: str) -> dict[str, Any]:
-            """Publish "held" (best-effort), then return the hold outcome.
-
-            PR #3198 review R2: a hold BEFORE screening (body unreadable or
-            mismatched, images unbound, the owner's session not yet engaged)
-            is as invisible to the human sender as a screening hold, so every
-            hold from here on publishes too — each maps to ``awaiting_review``
-            or a coarser class, never its code. Deliberately NOT the producer
-            fence above or the ``StoreRefused`` sink below: those say the
-            connector may not act for this owner (bridge off, consent revoked,
-            owner re-enrolled), and a hub write would be acting.
-            """
-
-            await _publish_held(client, owner, ref, code, access)
-            return {"action": "hold", "message_id": message_id, "code": code}
-
         if engage_code:
             return await held(engage_code)
+
+        client = wire if wire is not None else await _wire_for(owner, config_dir, auth_store)
         # A durable ref is only a locator. No person-membership read or legacy
         # cached name can supply display provenance. Failed admission must not
         # post even a metadata-only card: that would still wake the recipient.
@@ -1142,10 +1149,10 @@ async def handle_conversation_available(
         # can retain fetched body/provider echoes even when its message is not
         # explicitly interpolated. Emit only a closed structural code here.
         logger.warning("bridge: conversation delivery held code=conversation_failed")
-        if client is not None:
-            # R2: an unexpected failure is a hold the sender should see too.
-            await _publish_held(client, owner, ref, "conversation_failed", access)
-        return {"action": "hold", "message_id": message_id, "code": "conversation_failed"}
+        # R2: an unexpected failure is a hold the sender should see too, and it
+        # goes through the ONE guarded publish path (``held``), never a bare
+        # call inside this handler's own except clause.
+        return await held("conversation_failed")
     finally:
         if terminal:
             _clear_terminal_hold(owner, ref, config_dir)
