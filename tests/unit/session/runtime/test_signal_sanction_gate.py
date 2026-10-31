@@ -41,6 +41,7 @@ import asyncio
 import logging
 import os
 import signal
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -583,3 +584,148 @@ async def test_a_signal_loop_cannot_grow_the_log(
     recorded = registry.read_signal_refusals(directory)
     assert recorded is not None and recorded["refusals"][0]["count"] == 51
     await _settle(state)
+
+
+# ---------------------------------------------------------------------------
+# The sanction gate x the siginfo sender sensor (#3214)
+# ---------------------------------------------------------------------------
+#
+# Both live in the signal router and both change what a record says. The sensor
+# (``local_operator.siginfo``) names WHO sent a signal; the gate decides whether it is
+# obeyed. These cells pin how they compose: the sender survives a refusal, the sensor's
+# one-shot claim is not lost to a refusal, a refusal never overwrites the receipt of a
+# later sanctioned stop, and a kernel-originated signal stays unattributed in both files.
+
+
+def _capture(monkeypatch: pytest.MonkeyPatch, *facts: dict[str, int] | None) -> None:
+    """Make ``siginfo.take`` answer ``facts`` in order, then ``None`` (a spent sensor)."""
+    from local_operator import siginfo
+
+    queue = list(facts)
+    monkeypatch.setattr(siginfo, "take", lambda _sig: queue.pop(0) if queue else None)
+
+
+_KNOWN = {"signo": 15, "pid": 4321, "uid": 501, "code": 0}
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX signal semantics")
+@pytest.mark.asyncio
+async def test_a_sanctioned_sigterm_names_its_sender_and_drains_as_before(
+    directory: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(1) The receipt names the sender AND the drain is the one it always was."""
+    _capture(monkeypatch, _KNOWN)
+    _stage_deliberate(directory)
+    state, receipt = await _drive(_Session(directory, busy=True))
+
+    assert state.refusals == 0 and state.draining is not None, "a sanctioned stop must drain"
+    assert receipt is not None
+    sender = receipt["signals"][0]["sender"]
+    assert (sender["state"], sender["pid"], sender["uid"]) == ("known", 4321, 501), sender
+    assert registry.read_signal_refusals(directory) is None
+    await _settle(state)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX signal semantics")
+@pytest.mark.asyncio
+async def test_an_unsanctioned_sigterm_is_refused_and_still_names_who_tried(
+    directory: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(2) The sensor's value is naming who TRIED — a refusal must not cost that fact."""
+    _capture(monkeypatch, _KNOWN)
+    state, receipt = await _drive(_Session(directory, busy=True))
+
+    assert state.refusals == 1 and not state.stop.is_set() and state.draining is None
+    assert receipt is None, "a refusal wrote a receipt"
+    recorded = registry.read_signal_refusals(directory)
+    assert recorded is not None
+    sender = recorded["refusals"][0]["sender"]
+    assert (sender["state"], sender["pid"], sender["uid"]) == ("known", 4321, 501), sender
+    await _settle(state)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX signal semantics")
+@pytest.mark.asyncio
+async def test_a_kernel_originated_signal_stays_unattributed_in_both_files(
+    directory: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(4) ``si_pid == 0`` is the kernel (a timer), never "process zero" — refused or not."""
+    from local_operator import incidents
+
+    kernel = {"signo": 15, "pid": 0, "uid": 0, "code": 0}
+    _capture(monkeypatch, kernel)
+    refused, _ = await _drive(_Session(directory, busy=True))
+    recorded = registry.read_signal_refusals(directory)
+    assert recorded is not None
+    assert recorded["refusals"][0]["sender"] == signal_receipt.SENDER_KERNEL
+    await _settle(refused)
+
+    _capture(monkeypatch, kernel)
+    _stage_deliberate(directory)
+    accepted, receipt = await _drive(_Session(directory, busy=True))
+    assert receipt is not None
+    assert receipt["signals"][0]["sender"] == signal_receipt.SENDER_KERNEL
+    for sender in (recorded["refusals"][0]["sender"], receipt["signals"][0]["sender"]):
+        assert incidents.render_named_sender(sender) == "", "a kernel signal was given a name"
+    assert "sender=unavailable" in signal_receipt.describe(receipt)
+    await _settle(accepted)
+
+
+@pytest.mark.skipif(
+    os.name == "nt" or sys.platform != "darwin", reason="the sensor is armed on Darwin only"
+)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rearm", [True, False], ids=["rearmed", "control-not-rearmed"])
+async def test_a_refusal_does_not_spend_the_sensor_a_later_sanctioned_stop_needs(
+    directory: Path, monkeypatch: pytest.MonkeyPatch, rearm: bool
+) -> None:
+    """(3) The one-shot claim, on a REAL kernel capture (SIGUSR2, so SIGTERM is never armed here).
+
+    ``siginfo`` restores the platform's action on its first delivery and ``arm`` on an
+    already-armed signal does not re-install it, so a REFUSED signal — which leaves the
+    process running — would otherwise blind the sanctioned stop that follows: its
+    receipt, the one an incident is reconstructed from, would say ``no-siginfo``. Two
+    real signals from this process, refusal then sanction, and the second receipt must
+    name its sender while the first stays in the refusals file and is never written over.
+
+    The ``control-not-rearmed`` arm turns the fix off and asserts the loss, so the cell
+    cannot pass for the wrong reason.
+    """
+    from local_operator import siginfo
+
+    number = int(signal.SIGUSR2)
+    previous = signal.signal(signal.SIGUSR2, lambda *_: None)
+    try:
+        assert siginfo.arm(number), "the sensor could not arm on this host"
+        if not rearm:
+            monkeypatch.setattr(signal_receipt, "rearm_sender_capture", lambda _n: False)
+
+        os.kill(os.getpid(), signal.SIGUSR2)
+        await asyncio.sleep(0.2)
+        refused, receipt = await _drive(_Session(directory, busy=True), signal.SIGUSR2)
+        assert refused.refusals == 1 and receipt is None
+        first = registry.read_signal_refusals(directory)
+        assert first is not None
+        assert first["refusals"][0]["sender"]["pid"] == os.getpid(), first
+        await _settle(refused)
+
+        _stage_deliberate(directory)
+        os.kill(os.getpid(), signal.SIGUSR2)
+        await asyncio.sleep(0.2)
+        accepted, receipt = await _drive(_Session(directory, busy=True), signal.SIGUSR2)
+        assert accepted.refusals == 0 and receipt is not None
+        sender = receipt["signals"][0]["sender"]
+        if rearm:
+            assert sender["state"] == "known" and sender["pid"] == os.getpid(), sender
+        else:
+            assert sender == signal_receipt.SENDER_UNAVAILABLE, "the control did not lose it"
+
+        # A REFUSAL NEVER OVERWRITES A RECEIPT, and the receipt never absorbs a refusal.
+        after = registry.read_signal_refusals(directory)
+        assert after is not None and after["refusals"][0]["count"] == 1
+        assert after["refusals"][0]["sender"]["pid"] == os.getpid()
+        assert len(receipt["signals"]) == 1 and receipt["signals"][0]["sanction"] == "marker"
+        await _settle(accepted)
+    finally:
+        siginfo.disarm(number)
+        signal.signal(signal.SIGUSR2, previous)

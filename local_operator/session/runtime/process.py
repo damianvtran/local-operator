@@ -4294,6 +4294,12 @@ def _refuse_signal(
     depend on a clock a sender can wait out.
     """
     state.refusals += 1
+    # The arrival has claimed its sender (``observe`` took the capture); the sensor is
+    # spent and this runtime is STILL RUNNING, so put it back or the sanctioned stop
+    # that eventually ends this run would be recorded ``no-siginfo``.
+    from local_operator.session.runtime import signal_receipt as _receipt
+
+    _receipt.rearm_sender_capture(int(sig.value))
     session_id = str((entry or {}).get("session_id") or "")
     if not session_id:
         session_id = str(getattr(getattr(handle, "_session", None), "session_id", "") or "")
