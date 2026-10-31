@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import time
 from typing import Any, cast
 
 import pytest
@@ -45,6 +47,70 @@ def bound_runtime(tmp_path, monkeypatch):
     client = RecordingClient()
     runtime = BridgeRuntime(cast(Any, client), tmp_path, owner.tenant_id, owner, "s1")
     return runtime, client, store
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("revocation", [None, "move", "clear", "retire"])
+async def test_named_reply_rechecks_authority_after_member_lookup(
+    bound_runtime, monkeypatch, revocation
+):
+    runtime, client, store = bound_runtime
+    entered = asyncio.Event()
+    resume = asyncio.Event()
+    reservations = []
+    reserve = reply_guard.reserve_post
+
+    async def members(*args, **kwargs):
+        entered.set()
+        await resume.wait()
+        return {"members": [{"account_id": "acc_2", "display_label": "Recipient", "kind": "human"}]}
+
+    def reserve_spy(*args, **kwargs):
+        reservations.append(kwargs)
+        return reserve(*args, **kwargs)
+
+    monkeypatch.setattr(client, "conversation", members)
+    monkeypatch.setattr(reply_guard, "reserve_post", reserve_spy)
+    task = asyncio.create_task(
+        execute_bridge(
+            runtime,
+            {
+                "op": "channel_post",
+                "channel_id": A,
+                "body": "reply for A",
+                "in_reply_to_message_id": MA,
+                "to": {"name": "Recipient"},
+            },
+        )
+    )
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=10)
+        if revocation in ("move", "clear"):
+            store.update_designated_session(runtime.owner, "s2" if revocation == "move" else None)
+        elif revocation == "retire":
+            assert store.retire_body_reservation(
+                runtime.owner,
+                conversation_id=A,
+                message_id=MA,
+                terminal_code="screening_rejected",
+                now=time.time(),
+            )
+        resume.set()
+        out = await asyncio.wait_for(task, timeout=10)
+        if revocation is None:
+            assert out["ok"], out
+            assert len(reservations) == 1
+            assert len(client.calls) == 1
+            assert client.calls[0]["conversation_id"] == A
+        else:
+            assert out.get("code") == "reply_binding_unavailable", (out, client.calls, reservations)
+            assert reservations == []
+            assert client.calls == []
+    finally:
+        resume.set()
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
 
 @pytest.mark.asyncio

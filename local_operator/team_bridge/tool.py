@@ -1859,6 +1859,18 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
                 return _error(str(failure), code=failure.code)
             mentions = [member.mention()]
             recipient_account_id = member.account_id
+        # Member resolution awaited remote I/O after the early binding check.
+        # Revocation during that wait must refuse before even spending budget.
+        # These synchronous checks and budget reservation have no intervening
+        # await. This is the tool's handoff boundary, not transport-wide atomic
+        # revocation: the client still awaits OAuth resolution/retries below,
+        # and this cannot retract bytes once handed to that transport.
+        fence = outbound_tool_fence(runtime)
+        if fence is not None:
+            return _error(fence["error"], code=fence["code"])
+        refused = _validate_reply_destination(runtime, args)
+        if refused is not None:
+            return refused
         # LOOP/COST GUARD (wake contract): every conversation message now wakes
         # its agent members, so two agents answering every wake would trade
         # posts for ever. Reserved LAST among the local checks (a malformed or
