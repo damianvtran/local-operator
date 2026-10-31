@@ -338,6 +338,16 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "the store's own roots and log file (``~/.local-operator``, ``logs``, "
         "``runtime.log``, the agent home): the directories a session lives UNDER",
     ),
+    "local_operator/evaluation/team_bridge_moderation/fixture.py": (
+        1,
+        "``_FIXTURE_MARKER`` ('.team-bridge-moderation-fixture-v1'): a provenance file the "
+        "moderation eval writes at the TOP of a caller-supplied temporary world root (a "
+        "pytest ``tmp_path`` or the operator's ``--workdir``), so `teardown_fixture` can "
+        "prove the tree was built by ``build_fixture`` before deleting it. It lives in "
+        "that throwaway world, never in a session directory, and no session copy may "
+        "carry it: a peer device inheriting the marker could not rebuild the world "
+        "around it, and the eval's worlds are per-case scratch, not conversation state",
+    ),
     "local_operator/remote_compute/config.py": (
         2,
         "``_ALABEL_PREFIX`` ('xn--') and ``_LOOPBACK_NAME`` ('localhost') are "

@@ -630,6 +630,48 @@ def render_prompt(
     template = SCREENING_TEMPLATES.get(version)
     if template is None:
         raise ValueError(f"no embedded screening template for version {version!r}")
+    template_sha256 = screening_template_sha256(version)
+    if template_sha256 is None:  # unreachable: the template map selected it
+        raise ValueError(f"no trusted hash for screening version {version!r}")
+    return _render_with_template(
+        template,
+        template_sha256=template_sha256,
+        body_text=body_text,
+        sender=sender,
+        organization=organization,
+        msg_type=msg_type,
+        nonce=nonce,
+        attachments=attachments,
+    )
+
+
+def _render_with_template(
+    template: str,
+    *,
+    template_sha256: str,
+    body_text: str,
+    sender: str,
+    organization: str,
+    msg_type: str,
+    nonce: str | None,
+    attachments: str | None,
+) -> RenderedPrompt:
+    """The substitution and nonce rules behind :func:`render_prompt`.
+
+    WHY THIS IS A SEPARATE, PRIVATE FUNCTION. Production must only ever render
+    EMBEDDED bytes, so :func:`render_prompt` keeps the version lookup and its
+    refusal of unembedded versions, then delegates here. The screen-only
+    evaluation bench (``evaluation/team_bridge_moderation/screenbench.py``)
+    measures CANDIDATE templates before they are embedded, and a candidate is
+    only comparable with the shipped template if it renders through the very
+    same single-pass substitution, forged-nonce refusal and three-nonce
+    assertion. Copying those rules into the eval would let the two drift, so
+    the eval calls this helper with arbitrary bytes instead. That is its ONLY
+    other caller: nothing on the live connector path may call it, because it
+    performs no trust check on ``template`` and records whatever
+    ``template_sha256`` the caller supplies.
+    """
+
     token = nonce if nonce is not None else secrets.token_hex(_NONCE_BYTES)
     has_slot = "{{attachments}}" in template
     if has_slot != (attachments is not None):
@@ -665,9 +707,6 @@ def render_prompt(
     text = "".join(parts)
     if text.count(token) != 3:
         raise ValueError("rendered prompt lost its nonce delimiters")
-    template_sha256 = screening_template_sha256(version)
-    if template_sha256 is None:  # unreachable: the template map selected it
-        raise ValueError(f"no trusted hash for screening version {version!r}")
     rendered = RenderedPrompt(
         nonce=token,
         template_sha256=template_sha256,
