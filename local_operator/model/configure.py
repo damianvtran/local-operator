@@ -8095,7 +8095,7 @@ def create_stream_fn(
 def calculate_cost(
     model_info: ModelInfo,
     input_tokens: int,
-    output_tokens: int,
+    output_tokens: float,
     cache_read_tokens: int = 0,
     cache_write_tokens: int = 0,
     *,
