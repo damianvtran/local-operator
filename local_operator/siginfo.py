@@ -377,11 +377,21 @@ def arm(sig: int) -> bool:
     ``sigaction`` themselves, so arming first would have the product's own
     install silently replace the sensor, and :func:`take` would keep answering
     forever. The saved action is therefore the product's handler, which is
-    exactly what :func:`_restore` puts back before re-raising.
+    exactly what :func:`_restore` puts back before re-raising. Two consequences
+    of that contract, both deliberate:
 
-    Returns ``True`` when a sensor is installed (or already was), ``False`` on
-    any platform/step where it cannot be — a caller treats ``False`` as "the
-    receipt keeps saying unavailable", never as an error.
+    * a ``SIG_DFL``/``SIG_IGN`` action is REFUSED, so "arm after the handler" is
+      enforced by the code and not only by this paragraph: a process with no
+      Python-level action has nothing that could ever read a capture, and arming
+      over an ignore would convert a deliberate ignore into an action;
+    * a caller that later REPLACES the action (``loop.remove_signal_handler``,
+      a bare ``signal.signal``) takes the sensor with it. Nothing re-arms, and
+      no receipt is harmed: the receipt for a signal that process no longer
+      handles has nothing to say about the sender, and says ``no-siginfo``.
+
+    Returns ``True`` when the sensor is now in place (armed here or already),
+    ``False`` where it cannot be — a caller reads ``False`` as "this receipt
+    keeps its old wording", never as an error.
     """
     try:
         number = int(sig)
