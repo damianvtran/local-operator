@@ -168,3 +168,22 @@ def test_capability_is_advertised():
     from local_operator.server.features import static_feature_flags
 
     assert static_feature_flags()["team_bridge_endpoint_avatar"] == 1
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"<svg xmlns='http://www.w3.org/2000/svg'><script>alert(1)</script></svg>",
+        b"<!doctype html><html><body>hi</body></html>",
+    ],
+)
+@pytest.mark.parametrize("route", ["endpoints/" + EP, "accounts/acc_2"])
+def test_markup_labelled_as_png_is_refused_on_both_relays(proxy, body, route):
+    """Security review round 1, S-1: SVG/HTML bytes the hub labels image/png
+    are refused (502), never relayed to the renderer as an image."""
+
+    client, _, state = proxy
+    state.update(serve_type="image/png", serve=body)
+    response = client.get(f"/v1/desktop/team-bridge/{route}/avatar" + QUERY)
+    assert response.status_code == 502
+    assert response.content != body

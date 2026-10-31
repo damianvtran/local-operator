@@ -116,6 +116,12 @@ def proxy(tmp_path, monkeypatch):
                 state.setdefault("statuses", []).append(200)
             if self.command == "GET" and ("/attachments/" in self.path or "/avatar?" in self.path):
                 return self._reply(200, state["serve"], state["serve_type"])
+            if self.command == "GET" and self.path.startswith("/v1/messaging/directory?"):
+                # The tenant directory (notification composites bind an agent's
+                # endpoint picture to its sender through it). Set per test.
+                members = state.get("directory", [])
+                out = json.dumps({"msg": "ok", "result": {"members": members}}).encode()
+                return self._reply(200, out, "application/json")
             out = json.dumps({"msg": "Message sent", "result": {"id": MID, "seq": 1}}).encode()
             return self._reply(200, out, "application/json")
 
