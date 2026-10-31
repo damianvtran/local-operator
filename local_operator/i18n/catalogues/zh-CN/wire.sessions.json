@@ -1,6 +1,6 @@
 {
   "wire.sessions.approval_stop_local": "若{address}空闲则停止：释放会话租约，绝不发送信号；正在工作时拒绝",
-  "wire.sessions.approval_stop_peer": "停止{address}（{peer}上）：此构建一律拒绝，不会发送任何内容",
+  "wire.sessions.approval_stop_peer": "{address}在{peer}上无法停止：此构建一律拒绝，不会发送任何内容",
   "wire.sessions.stop_pending": "{name}已接受停止，但{seconds} s后仍未退出。没有发送任何信号——重试前先查看会话列表。",
   "wire.sessions.stop_refused_busy": "{name}正在工作（一个轮次、一项审批、一个子智能体或一个任务），因此没有停止任何内容，也没有发送任何信号。等它空闲后再重试。",
   "wire.sessions.stop_refused_old_owner": "{name}运行的是较旧的构建，无法保证只在空闲时停止，因此没有停止任何内容，也没有发送任何信号。重试不会改变这一点——让操作员停止它。",
