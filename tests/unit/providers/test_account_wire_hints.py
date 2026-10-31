@@ -109,7 +109,9 @@ async def test_unknown_compatible_endpoints_do_not_borrow_first_party_retention(
     [
         ("gpt-5.6", 1_800_000, "documented-default"),
         ("gpt-6", 1_800_000, "documented-default"),
-        ("gpt-5", 1_800_000, "bounded-heuristic"),
+        # Organization defaults can be in-memory; never claim a 30-minute
+        # legacy lease merely because the old request forced extended retention.
+        ("gpt-5", 300_000, "bounded-heuristic"),
     ],
 )
 async def test_public_responses_documented_default_vs_legacy_heuristic(model, ttl, source):

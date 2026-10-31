@@ -326,6 +326,41 @@ async def test_openai_compat_normalizes_provider_specific_cache_hits(
     assert usage.context_tokens == 40
 
 
+@pytest.mark.parametrize(
+    ("reported", "expected"),
+    [(None, None), (0, 0), (12, 12), (True, None), (-1, None), (0.1, None), ("bad", None)],
+)
+async def test_openai_compat_preserves_cache_counter_presence(
+    reported: Any, expected: int | None
+) -> None:
+    usage_body: dict[str, Any] = {"prompt_tokens": 30000, "completion_tokens": 7}
+    if reported is not None:
+        usage_body["prompt_tokens_details"] = {"cached_tokens": reported}
+    body = _sse([{"choices": [], "usage": usage_body}])
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(
+            200, content=body, headers={"content-type": "text/event-stream"}
+        )
+    )
+    async with httpx.AsyncClient(transport=transport) as http:
+        client = OpenAICompatClient("https://api.test.example/v1", http_client=http)
+        events = await _collect(
+            client.stream(ChatRequest(model=_spec(), messages=[Message.user("hi")]), "sk-test")
+        )
+    usage = [event.usage for event in events if isinstance(event, StreamUsageEvent)][-1]
+    assert usage.cache_read_tokens == (expected or 0)
+    assert usage._cache_read_reported is (expected is not None)
+    assert usage.model_copy()._cache_read_reported is (expected is not None)
+    assert usage.model_copy(deep=True)._cache_read_reported is (expected is not None)
+    from local_operator.providers.failover import _stamp_serving_spec
+
+    stamped = _stamp_serving_spec(StreamUsageEvent(usage=usage), _spec())
+    assert stamped.usage._cache_read_reported is (expected is not None)
+    assert "cache_read_reported" not in usage.model_dump()
+    # Replayed numeric zero has no reliable provenance and must stay unknown.
+    assert type(usage).model_validate(usage.model_dump())._cache_read_reported is None
+
+
 async def test_openai_compat_prefers_standard_cache_detail_over_alias() -> None:
     """A compatibility alias must not double-count a standard cache detail."""
     body = _sse(
@@ -1360,7 +1395,7 @@ async def test_openai_api_key_gpt5_uses_public_responses_end_to_end() -> None:
     ]
     assert body["reasoning"] == {"effort": "high"}
     assert body["prompt_cache_key"] == "session-123"
-    assert body["prompt_cache_retention"] == "24h"
+    assert "prompt_cache_retention" not in body
 
     assert [event.delta for event in events if isinstance(event, StreamTextDelta)] == ["Checking"]
     tool_events = [event for event in events if isinstance(event, StreamToolCallDelta)]
@@ -5007,9 +5042,8 @@ def test_public_5_6_body_uses_documented_cache_defaults_plus_include() -> None:
     assert not _has_breakpoint(body["input"])
 
 
-def test_public_pre_5_6_body_unchanged() -> None:
-    """Regression guard: a non-reasoning model keeps top-level instructions,
-    prompt_cache_retention, no ``include``, and no breakpoints."""
+def test_public_pre_5_6_body_respects_org_retention() -> None:
+    """Older models retain instructions without overriding organization retention."""
     spec = ModelSpec(
         provider="openai",
         model_id="gpt-5.4",
@@ -5026,7 +5060,7 @@ def test_public_pre_5_6_body_unchanged() -> None:
         )
     )
     assert body["instructions"] == "Stable.\n\nVolatile."
-    assert body["prompt_cache_retention"] == "24h"
+    assert "prompt_cache_retention" not in body
     assert "include" not in body
     assert "prompt_cache_options" not in body
     assert not _has_breakpoint(body["input"])
