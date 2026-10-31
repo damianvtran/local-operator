@@ -14,7 +14,7 @@ generic ``{enabled, session}`` preference has NO path into that record
   endpoint and the consent echo that machine sent. That user action is the
   source; served/cached text alone never reaches it, and a status read never
   calls it (consent hold: #2712's auto-enrollment is disabled) — except the
-  hub-created ``default_on`` endpoint of the gated ``bridge_consent_v2``
+  hub-created ``default_on`` endpoint of the gated ``bridge_consent_v2``/``v3``
   enrolment (``TeamBridgeClient.enroll_default_on``), which commits through the
   same function only after the hub's answer proves it created that endpoint.
 

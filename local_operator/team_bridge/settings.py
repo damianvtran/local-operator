@@ -45,7 +45,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 #: Restoring the ON default belongs to the new-consent-version change, not a
 #: local flip.
 #:
-#: DEFAULT-ON UNDER ``bridge_consent_v2`` DOES NOT CHANGE THIS CONSTANT. The
+#: DEFAULT-ON UNDER ``bridge_consent_v2``/``v3`` DOES NOT CHANGE THIS CONSTANT. The
 #: registry literal and every consumer that reads ``enabled`` from disk (host,
 #: read_context, authority, wake, engagement) keep reading an absent key as OFF,
 #: so a hub that serves only v1 is byte-identical to the hold. The opt-out
@@ -59,11 +59,9 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 #: send/receive/wake work by itself — it only means "eligible to be enrolled".
 DEFAULT_TEAM_BRIDGE_ENABLED = False
 
-#: The one consent version whose copy discloses the opt-out default. Only a hub
-#: that SERVES it (and lists it as accepted) can turn an absent
-#: ``team_bridge.enabled`` into "eligible to be enrolled". Spelled here, not
-#: imported from ``client``, because ``client`` imports this module.
-DEFAULT_ON_CONSENT_VERSION = "bridge_consent_v2"
+#: The consent versions whose copy discloses the opt-out default are
+#: :data:`local_operator.team_bridge.consent_versions.DEFAULT_ON_CONSENT_VERSIONS`
+#: (a leaf the pure reconcile planner may import too).
 
 #: ``team_bridge.onboarding`` — the one-time dialog's shown-flag (RFC §5.3:
 #: client-local in v1, deliberately never a server row). ``""`` means "not
@@ -222,8 +220,9 @@ class TeamBridgeSettings:
 
         An explicit ``true`` or ``false`` (or an unreadable present value, which
         reads OFF) is returned as is. Only an ABSENT key consults the hub: it
-        reads ON while ``default_on_in_force`` (the hub serves
-        ``bridge_consent_v2`` and lists it as accepted) and OFF otherwise, so a
+        reads ON while ``default_on_in_force`` (the hub serves a member of
+        ``consent_versions.DEFAULT_ON_CONSENT_VERSIONS`` and lists it as
+        accepted) and OFF otherwise, so a
         v1-only hub sees exactly what :attr:`enabled` says today. ON here means
         "eligible to be enrolled", never "authorised": every send, receive and
         wake path still needs the committed owner and a current receipt.

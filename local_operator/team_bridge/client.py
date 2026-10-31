@@ -88,9 +88,16 @@ from local_operator.providers.radient_credentials import (
     org_oauth_destination_allowed,
 )
 from local_operator.team_bridge import availability
+
+# V2/V3 are re-exported: callers and tests have always imported the consent
+# version names from ``client``.
+from local_operator.team_bridge.consent_versions import (  # noqa: F401
+    CONSENT_VERSION_V2,
+    CONSENT_VERSION_V3,
+    DEFAULT_ON_CONSENT_VERSIONS,
+)
 from local_operator.team_bridge.settings import (
     DEFAULT_ENROLLMENT_DONE,
-    DEFAULT_ON_CONSENT_VERSION,
     TeamBridgeSettings,
     parse_pending_default_enrollment,
     pending_default_enrollment,
@@ -129,11 +136,16 @@ TEXT_CAP_BYTES = 2048
 SEED_HEAD_TIMEOUT_S = 3.0
 
 CONSENT_VERSION_V1 = "bridge_consent_v1"
-#: The opt-out disclosure. Only a hub SERVING it (and listing it as accepted)
-#: lets the status discipline enrol anybody automatically; see
-#: :func:`default_on_in_force`. An explicit enable is version-agnostic and
-#: echoes whatever the hub served.
-CONSENT_VERSION_V2 = DEFAULT_ON_CONSENT_VERSION
+# ``CONSENT_VERSION_V2`` / ``CONSENT_VERSION_V3`` (the opt-out disclosures) and
+# ``DEFAULT_ON_CONSENT_VERSIONS`` come from ``consent_versions``. Only a hub SERVING a
+# member of that set (and listing it as accepted) lets the status discipline
+# enrol anybody automatically; see :func:`default_on_in_force`. An explicit
+# enable is version-agnostic and echoes whatever the hub served.
+#
+# Served consent TEXT has no per-version byte pin here (only v1 is embedded,
+# for the offline dialog fallback): v2 and v3 bytes are accepted per version by
+# :class:`AcceptedTexts` (monotonic, immutable once versioned, 2 KiB cap), and
+# every default-on decision requires the served bytes to equal that record.
 SCREENING_VERSION_V1 = "bridge-screen-v1"
 GUIDANCE_VERSION_V1 = "bridge-guidance-v1"
 
@@ -920,7 +932,11 @@ def _consent_on_record(endpoint: Mapping[str, Any]) -> str | None:
     if not isinstance(consent, Mapping) or consent.get("current") is not True:
         return None
     version = consent.get("version")
-    return version if version in (CONSENT_VERSION_V1, CONSENT_VERSION_V2) else None
+    # Exact membership: v1, or a default-on version (v2, v3) whose text this
+    # client knows; anything else (v4, v10, garbage) is not a known consent.
+    if version == CONSENT_VERSION_V1 or version in DEFAULT_ON_CONSENT_VERSIONS:
+        return version
+    return None
 
 
 VALID_STATES = ("active", "paused", "disabled")
@@ -1998,14 +2014,22 @@ class TeamBridgeClient:
         *,
         tenant_id: str,
         expected_account_id: str,
+        consent_version: str,
         may_commit_local: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
         """``POST /messaging/enrollment``: the hub's default-on enrolment.
 
-        WHY A ROUTE OF ITS OWN. Under ``bridge_consent_v2`` the hub enrols an
-        eligible member with no endpoint and records the provenance itself
-        (``consented_via = default_on``). The body therefore carries ONLY
-        ``consent_version`` (always v2) and the tenant: there is deliberately no
+        WHY A ROUTE OF ITS OWN. Under a default-on consent (``bridge_consent_v2``
+        or ``v3``) the hub enrols an eligible member with no endpoint and records
+        the provenance itself (``consented_via = default_on``). The body
+        therefore carries ONLY ``consent_version`` and the tenant.
+
+        ``consent_version`` is REQUIRED and must be the version the hub SERVED
+        (the one :func:`default_on_in_force` proved): the hub refuses an echo
+        that is not its served version, and claiming v2 when v3 bytes were
+        shown would record consent to text the member never saw. A version
+        outside :data:`DEFAULT_ON_CONSENT_VERSIONS` raises ``ValueError`` before
+        any I/O. There is deliberately no
         ``consented_via`` parameter anywhere on this path, because provenance is
         a fact the server establishes by which route wrote it, never a claim the
         client makes (pinned by a test that fails if the key ever appears).
@@ -2018,9 +2042,10 @@ class TeamBridgeClient:
 
         THE LOCAL COMMIT. The native owner + receipt are committed through the
         same machinery as an explicit enable, but ONLY when the hub's answer
-        proves THIS call created an active, v2, ``default_on`` endpoint. The hub
+        proves THIS call created an active ``default_on`` endpoint citing the
+        echoed version. The hub
         answers a no-op (200, current settings) when an endpoint already exists
-        in any state; committing a v2 receipt for a consent that was actually
+        in any state; committing a receipt for a consent that was actually
         collected as ``dialog``/``settings`` on another machine would invent a
         consent record this one never saw. Errors (404/405 from an older hub, a
         409 ``consent_version_unknown``, transport failures) propagate as
@@ -2039,7 +2064,9 @@ class TeamBridgeClient:
         member's next Turn off (or the unchanged explicit OFF) governs.
         """
 
-        body: dict[str, Any] = {"consent_version": CONSENT_VERSION_V2, "tenant_id": tenant_id}
+        if consent_version not in DEFAULT_ON_CONSENT_VERSIONS:
+            raise ValueError("default-on enrolment needs a default-on consent version")
+        body: dict[str, Any] = {"consent_version": consent_version, "tenant_id": tenant_id}
         _require_body_within(body, SETTINGS_BODY_MAX_BYTES)
         access = await self._guarded_access(expected_account_id)
         head = await self._pre_enable_head(tenant_id=tenant_id, access=access)
@@ -2049,7 +2076,7 @@ class TeamBridgeClient:
         if not (
             isinstance(consent, Mapping)
             and consent.get("consented_via") == "default_on"
-            and consent.get("version") == CONSENT_VERSION_V2
+            and consent.get("version") == consent_version
         ):
             # The hub's no-op: nothing was created here, so there is no local
             # enrolment to report on either.
@@ -2060,7 +2087,7 @@ class TeamBridgeClient:
             local_enrollment = await self._commit_explicit_enable(
                 state="active",
                 tenant_id=tenant_id,
-                consent_version=CONSENT_VERSION_V2,
+                consent_version=consent_version,
                 result=result,
                 access=access,
                 head=head,
@@ -2100,8 +2127,10 @@ class TeamBridgeClient:
         This NEVER POSTs again: it reads the caller's settings (``GET``, the one
         answer carrying the endpoint's consent record) and commits the owner
         only when that record still proves this machine's default-on consent —
-        the SAME endpoint id the marker names, ``default_on`` + v2, current,
-        active. An endpoint consented elsewhere (dialog/settings) never matches,
+        the SAME endpoint id the marker names, ``default_on`` + a default-on
+        version (v2 or v3: the marker does not record which one the POST
+        echoed, so the hub's own record names it and the receipt cites that),
+        current, active. An endpoint consented elsewhere (dialog/settings) never matches,
         so the consent hold is not widened into state C (R2-6).
 
         ``head`` is the PRE-POST head the marker stored (0 for a brand-new
@@ -2122,7 +2151,7 @@ class TeamBridgeClient:
             and endpoint.get("id") == endpoint_id
             and isinstance(consent, Mapping)
             and consent.get("consented_via") == "default_on"
-            and consent.get("version") == CONSENT_VERSION_V2
+            and consent.get("version") in DEFAULT_ON_CONSENT_VERSIONS
             # Fail closed like ``_consent_on_record`` (review R1-3): a recovery
             # that commits consent needs the hub to SAY the record still binds.
             and consent.get("current") is True
@@ -2133,7 +2162,7 @@ class TeamBridgeClient:
         outcome = await self._commit_explicit_enable(
             state="active",
             tenant_id=tenant_id,
-            consent_version=CONSENT_VERSION_V2,
+            consent_version=str(consent["version"]),
             result=answer,
             access=access,
             head=head,
@@ -4486,15 +4515,16 @@ def default_on_in_force(check: StatusCheck) -> bool:
     """Whether this answer proves the hub's opt-out default is in force for the caller.
 
     ALL of: a READY answer; an eligible selected organization (the hub omits
-    ``consent`` for everyone else); the served ``consent.version`` is EXACTLY
-    ``bridge_consent_v2`` (the disclosure whose copy offers the opt-out) AND the
-    hub lists it in ``consent.accepted_versions``; and this client ACCEPTED those
+    ``consent`` for everyone else); the served ``consent.version`` is EXACTLY a
+    member of :data:`DEFAULT_ON_CONSENT_VERSIONS` (``bridge_consent_v2`` or
+    ``bridge_consent_v3``, the disclosures whose copy offers the opt-out) AND the
+    hub lists that same version in ``consent.accepted_versions``; and this client ACCEPTED those
     bytes on this answer (a refused text — backwards, changed-in-place, oversized
     — is in ``check.rejected`` and never authorises anything).
 
     A missing or malformed accepted set reads False, never "anything goes":
     that is also what a hub predating the set looks like, and such a hub must
-    keep the consent hold. Exact string membership, never version ordering: v3
+    keep the consent hold. Exact string membership, never version ordering: v4
     would be a new disclosure this build has not been taught to default on.
     """
 
@@ -4507,19 +4537,17 @@ def default_on_in_force(check: StatusCheck) -> bool:
     if not isinstance(consent, Mapping):
         return False
     accepted = consent.get("accepted_versions")
+    served = consent.get("version")
     if (
-        consent.get("version") != CONSENT_VERSION_V2
+        not isinstance(served, str)
+        or served not in DEFAULT_ON_CONSENT_VERSIONS
         or not isinstance(accepted, list)
-        or CONSENT_VERSION_V2 not in accepted
+        or served not in accepted
         or "consent" in check.rejected
     ):
         return False
     record = check.texts.get("consent")
-    return (
-        record is not None
-        and record.version == CONSENT_VERSION_V2
-        and record.text == consent.get("text")
-    )
+    return record is not None and record.version == served and record.text == consent.get("text")
 
 
 class StatusDiscipline:
@@ -4867,7 +4895,8 @@ class StatusDiscipline:
         EVERY gate must hold, each failing individually means ZERO writes (a
         table test pins each):
 
-        1. v2 is served AND accepted by the hub (:func:`default_on_in_force`);
+        1. a default-on version (v2 or v3) is served AND accepted by the hub
+           (:func:`default_on_in_force`);
         2. the surface state is exactly B — eligible, NO endpoint. Never C/D/E
            (an endpoint in any state, so an opt-out is never reversed by a
            default) and never A/F/G;
@@ -4900,6 +4929,16 @@ class StatusDiscipline:
             return check
         tenant_id = selected_tenant_id(check.payload)
         if tenant_id is None:
+            return check
+        # The version ``default_on_in_force`` just proved served+accepted with
+        # matching bytes: the enrolment echoes exactly what was shown.
+        served_consent = (
+            check.payload.get("consent") if isinstance(check.payload, Mapping) else None
+        )
+        served_version = (
+            served_consent.get("version") if isinstance(served_consent, Mapping) else None
+        )
+        if not isinstance(served_version, str):
             return check
         local = _local_settings_snapshot(config_dir)
         if local is None or (local.enabled_is_set and not local.enabled):
@@ -4945,6 +4984,7 @@ class StatusDiscipline:
             result = await self._client.enroll_default_on(
                 tenant_id=tenant_id,
                 expected_account_id=account_id,
+                consent_version=served_version,
                 may_commit_local=_local_still_open,
             )
         except (BridgeRefusal, BridgeSignInRequired, ValueError):

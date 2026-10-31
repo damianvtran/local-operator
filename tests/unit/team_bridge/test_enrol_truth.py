@@ -185,6 +185,7 @@ async def test_c_resume_commits_when_the_hub_holds_this_members_consent(tmp_path
         pytest.param(None, id="no-consent-block"),
         pytest.param({**CONSENT_ON_RECORD, "current": False}, id="consent-no-longer-current"),
         pytest.param({**CONSENT_ON_RECORD, "version": "bridge_consent_v9"}, id="unknown-version"),
+        pytest.param({**CONSENT_ON_RECORD, "version": "bridge_consent_v4"}, id="v4"),
     ],
 )
 async def test_c_resume_without_consent_on_record_says_so(tmp_path: Path, consent):
@@ -199,6 +200,28 @@ async def test_c_resume_without_consent_on_record_says_so(tmp_path: Path, consen
     assert result["endpoint"]["state"] == "active"
     assert result["local_enrollment"] == {"committed": False, "code": "no_consent_echo"}
     assert Store(tmp_path).committed_owner_count() == 0
+
+
+async def test_c_resume_commits_under_a_v3_record(tmp_path: Path):
+    """A hub record citing bridge_consent_v3 is a consent this client knows."""
+
+    requests: list[httpx.Request] = []
+    consent = {**CONSENT_ON_RECORD, "version": "bridge_consent_v3"}
+    client = _client(_hub(_answer(consent), requests), tmp_path)
+    result = await client.put_settings(
+        state="active",
+        tenant_id="tnt_1",
+        endpoint={"state": "paused"},
+        expected_account_id="acc_1",
+    )
+    assert result["local_enrollment"] == {"committed": True, "code": "committed"}
+    store = Store(tmp_path)
+    owner = store.active_owner()
+    assert owner is not None
+    assert store.owner_consent_receipt(owner) == {
+        "consent_version": "bridge_consent_v3",
+        "consent_ref": "bep_1",
+    }
 
 
 async def test_c_resume_without_a_tenant_says_so(tmp_path: Path):
@@ -437,6 +460,32 @@ async def test_default_on_recovers_a_failed_commit_without_a_second_post(
         "consent_ref": "bep_1",
     }
     assert _local(tmp_path).default_enrollment == {"acc_1": "done"}
+
+
+async def test_default_on_v3_recovers_a_failed_commit_under_v3(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from local_operator.team_bridge.client import Boundary
+    from tests.unit.team_bridge.test_default_on import _discipline, _enrolment_writes
+
+    _flaky_commit(monkeypatch)
+    hub = _head_advancing_hub(
+        version="bridge_consent_v3",
+        accepted=["bridge_consent_v1", "bridge_consent_v2", "bridge_consent_v3"],
+    )
+    discipline = _discipline(hub, tmp_path)
+    await discipline.check(Boundary.APP_START)
+    assert Store(tmp_path).committed_owner_count() == 0
+    discipline.invalidate()
+    await discipline.check(Boundary.SURFACE_OPEN)
+    assert len(_enrolment_writes(hub)) == 1, "a recovery must never POST again"
+    store = Store(tmp_path)
+    owner = store.active_owner()
+    assert owner is not None
+    assert store.owner_consent_receipt(owner) == {
+        "consent_version": "bridge_consent_v3",
+        "consent_ref": "bep_1",
+    }
 
 
 async def test_default_on_retry_never_binds_an_endpoint_it_did_not_create(
