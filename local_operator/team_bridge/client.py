@@ -969,6 +969,23 @@ def _require_attachment_id(attachment_id: str) -> None:
         raise ValueError("attachment id is not a minted batt_ id")
 
 
+def _sniff_image(data: bytes) -> str | None:
+    """The image type ``data`` actually is, by magic bytes, or ``None``.
+
+    Covers exactly the avatar routes' closed sets (PNG, JPEG, WebP). Anything
+    else - SVG, HTML, a truncated header - is ``None`` and never matches a
+    declared type.
+    """
+
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
 def _require_endpoint_id(endpoint_id: str) -> None:
     """Refuse an endpoint id that could reshape the upstream path."""
 
@@ -4039,7 +4056,16 @@ class TeamBridgeClient:
                     avatar_cache.AVATAR_CACHE.put(key, cached)
                 return cached.body, cached.mime
         mime = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
-        if response.status_code != 200 or mime not in mime_types or not response.content:
+        # The bytes must BE the type the hub declared (security review round 1,
+        # S-1): a hub label alone let SVG/HTML through as `image/png`. The relay
+        # then serves the sniffed type, so a renderer never receives a label the
+        # payload contradicts. Shared by the account and the endpoint picture.
+        if (
+            response.status_code != 200
+            or mime not in mime_types
+            or not response.content
+            or _sniff_image(response.content) != mime
+        ):
             raise BridgeRefusal(
                 "bridge_invalid_response",
                 "Radient returned an invalid response.",  # i18n: ignore, no code
@@ -4091,8 +4117,31 @@ class TeamBridgeClient:
         initials: str,
         v: str | None,
         expected_account_id: str,
+        endpoint: tuple[str, str] | None = None,
+        on_fallback: Callable[[], None] | None = None,
     ) -> bytes:
         """Render only after current-avatar authorization, never from stale bytes.
+
+        ``endpoint`` is first BOUND to the sender (security review round 1,
+        S-2): the tenant directory must list ``sender_account_id`` with an
+        agent whose ``endpoint_id`` is this one and whose published
+        ``avatar_url`` names this exact version. Otherwise the glyph is drawn,
+        so no caller can paint another agent's face under this sender's name,
+        mirroring the ``avatar_account_id`` arm's equality rule.
+
+        ``on_fallback`` is called when an agent picture was asked for and the
+        glyph was drawn instead (unbound, unreadable or undecodable), so the
+        route can tell the desktop to keep that answer for its short failure
+        TTL rather than its photo lease (code review round 1, F1).
+
+        ``endpoint`` is ``(endpoint_id, v)`` for a ``person_agent`` whose hub
+        directory publishes the agent's OWN picture. It is read through
+        :meth:`fetch_endpoint_avatar` (never the owner's account route) and is
+        best effort: an unreachable hub, a stale version or a refusal draws the
+        agent glyph rather than failing the banner, because the picture is
+        cosmetic and the desktop's 250 ms budget has no room for a retry. A
+        changed login is the exception and still refuses, so a queued read
+        cannot draw under the wrong viewer.
 
         The directory join belongs to the tenant-scoped desktop caller. Here
         tenant is validated as part of the closed contract (the desktop keys its
@@ -4120,8 +4169,12 @@ class TeamBridgeClient:
             or size not in na.SIZES
             or not na.valid_initials(initials)
             or (v is not None and re.fullmatch(r"[0-9a-f]{16}", v) is None)
+            or (endpoint is not None and kind != "person_agent")
+            or (endpoint is not None and re.fullmatch(r"[0-9a-f]{16}", endpoint[1]) is None)
         ):
             raise ValueError("invalid notification avatar request")
+        if endpoint is not None:
+            _require_endpoint_id(endpoint[0])
         scope, authority = self._avatar_authority(expected_account_id)
 
         def check_owner() -> None:
@@ -4137,22 +4190,99 @@ class TeamBridgeClient:
 
         variant = na.Variant(kind=kind, theme=theme, size=size, initials=initials)
         photo: bytes | None = None
-        if v is not None:
+        # A person's agent is drawn as the agent glyph, never its owner's face
+        # (2026-10-30; ``notification_avatar`` module docstring). An older
+        # desktop still sends the owner's photo version for it: ignore it and
+        # touch no network, so the fix reaches released desktops too.
+        if v is not None and kind != "person_agent":
             # The raw entity keeps its own rules (revalidated per use, no-store
             # honoured) in ``fetch_avatar``; nothing derived from it is kept here.
             photo, _mime = await self.fetch_avatar(
                 sender_account_id, v=v, size=size, expected_account_id=expected_account_id
             )
+        agent_picture: bytes | None = None
+        if endpoint is not None:
+            try:
+                if await self._endpoint_belongs_to(
+                    sender_account_id,
+                    endpoint,
+                    tenant_id=tenant_id,
+                    expected_account_id=expected_account_id,
+                ):
+                    agent_picture, _mime = await self.fetch_endpoint_avatar(
+                        endpoint[0],
+                        v=endpoint[1],
+                        size=size,
+                        expected_account_id=expected_account_id,
+                    )
+            except BridgeSignInRequired:
+                raise
+            except BridgeRefusal as refusal:
+                # A login change is a refusal, never a fallback: the glyph would
+                # be drawn under a viewer who no longer owns this request.
+                if refusal.code == ACCOUNT_MISMATCH_CODE:
+                    raise
+                agent_picture = None
         check_owner()
         data = await na.render(
             variant,
             origin=self._base_url,
             account_id=sender_account_id,
             photo=photo,
+            agent_picture=agent_picture,
             check_owner=check_owner,
+            on_fallback=on_fallback if endpoint is not None else None,
         )
         check_owner()
         return data
+
+    async def _endpoint_belongs_to(
+        self,
+        sender_account_id: str,
+        endpoint: tuple[str, str],
+        *,
+        tenant_id: str,
+        expected_account_id: str,
+    ) -> bool:
+        """Whether the tenant directory publishes THIS picture for THIS sender.
+
+        The directory is the same hub answer the desktop derived the endpoint
+        from, read under the same viewer fence. Binding key is
+        ``(sender account, agent.endpoint_id, agent.avatar.hash)``: three fields
+        of ONE row, so naming another agent's endpoint — even with its correct
+        current version — cannot paint it, and a malformed or missing directory
+        is "not bound" (the glyph), never a pass.
+
+        The version is read from ``agent.avatar.hash``, the documented field the
+        hub itself renders into ``?v=``, and NOT from the ``avatar_url`` string
+        (security review round 2, S-3): the URL is agent-server's rendering
+        detail, so keying on it makes any future reshuffle there silently glyph
+        every agent face — fail-closed, and invisible to both repos' tests. A
+        hub that publishes no structured hash still binds through an exactly
+        equal ``avatar_url``, which pins the same version; a row that publishes
+        a structured hash is judged on it alone, so the two can never disagree
+        about whether this is the picture.
+        """
+
+        directory = await self.directory(tenant_id, expected_account_id=expected_account_id)
+        members = directory.get("members") if isinstance(directory, dict) else None
+        if not isinstance(members, list):
+            return False
+        expected_url = f"/v1/messaging/endpoints/{endpoint[0]}/avatar?v={endpoint[1]}"
+        for member in members:
+            if not isinstance(member, dict) or member.get("account_id") != sender_account_id:
+                continue
+            agent = member.get("agent")
+            if not isinstance(agent, dict) or agent.get("endpoint_id") != endpoint[0]:
+                continue
+            avatar = agent.get("avatar")
+            if isinstance(avatar, dict) and isinstance(avatar.get("hash"), str):
+                if avatar["hash"] == endpoint[1]:
+                    return True
+                continue
+            if isinstance(agent.get("avatar_url"), str) and agent["avatar_url"] == expected_url:
+                return True
+        return False
 
     async def fetch_attachment(
         self,

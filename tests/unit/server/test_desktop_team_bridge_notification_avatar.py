@@ -55,6 +55,27 @@ def test_photo_composite_reads_only_the_closed_avatar_route(proxy):
     assert [c[1] for c in calls] == ["/v1/accounts/acc_2/avatar?v=0123456789abcdef&size=64"]
 
 
+def test_agent_photo_reference_is_accepted_and_never_fetched(proxy):
+    """The exact shape a RELEASED desktop sends for an agent (agent review round 1, F1).
+
+    An agent's directory row is its owner's, so desktops already in the field
+    pass the OWNER's photo version with ``kind=person_agent``. The route must
+    answer 200 with the glyph composite and touch no upstream route at all: if
+    a later change passed ``v`` straight through to some fetch, this is the case
+    that would notice.
+    """
+
+    client, calls, state = proxy
+    state.update(serve_type="image/jpeg", serve=_jpeg())
+    image = _png(client.get(f"{URL}?{PHOTO_Q.replace('kind=person', 'kind=person_agent')}"))
+    assert calls == []
+    # Not the photo it was handed: the composite is the glyph on the owner's
+    # palette colour, so the red JPEG cannot be what came back.
+    pixel = image.getpixel((20, 20))
+    assert isinstance(pixel, tuple)
+    assert pixel[:3] != pytest.approx((200, 40, 40), abs=16)
+
+
 def test_placeholder_touches_no_network(proxy):
     client, calls, _ = proxy
     _png(client.get(f"{URL}?{BASE_Q}"))
@@ -185,4 +206,112 @@ def test_overload_is_a_transient_503_not_a_bad_image(proxy, monkeypatch):
     assert response.status_code == 503
     assert response.json()["detail"]["code"] == "renderer_busy"
     assert "retry-after" not in response.headers
+    assert not calls
+
+
+AGENT_Q = (
+    BASE_Q.replace("kind=person", "kind=person_agent")
+    + "&v=fedcba9876543210&avatar_endpoint_id=bep_0123456789abcdef0123456789abcdef"
+)
+
+
+EP = "bep_0123456789abcdef0123456789abcdef"
+DIRECTORY = [
+    {
+        "account_id": "acc_2",
+        "display_label": "Damian",
+        "agent": {
+            "endpoint_id": EP,
+            "name": "Aida",
+            "state": "active",
+            "avatar_url": f"/v1/messaging/endpoints/{EP}/avatar?v=fedcba9876543210",
+        },
+    },
+    {
+        "account_id": "acc_3",
+        "display_label": "Bea",
+        "agent": {
+            "endpoint_id": "bep_bea",
+            "name": "Otto",
+            "state": "active",
+            "avatar_url": "/v1/messaging/endpoints/bep_bea/avatar?v=b2b2b2b2b2b2b2b2",
+        },
+    },
+]
+
+
+def _without_directory(calls):
+    return [c[1] for c in calls if not c[1].startswith("/v1/messaging/directory?")]
+
+
+def _blue_jpeg() -> bytes:
+    out = io.BytesIO()
+    Image.new("RGB", (64, 64), (30, 60, 210)).save(out, format="JPEG")
+    return out.getvalue()
+
+
+def test_agent_composite_reads_only_the_endpoint_route(proxy):
+    client, calls, state = proxy
+    state.update(serve_type="image/jpeg", serve=_blue_jpeg(), directory=DIRECTORY)
+    response = client.get(f"{URL}?{AGENT_Q}")
+    image = _png(response)
+    pixel = image.getpixel((16, 32))
+    assert isinstance(pixel, tuple)
+    assert pixel[:3] == pytest.approx((30, 60, 210), abs=16)
+    assert [c[1] for c in calls] == [
+        "/v1/messaging/directory?tenant_id=tenant_a",
+        "/v1/messaging/endpoints/bep_0123456789abcdef0123456789abcdef/avatar"
+        "?v=fedcba9876543210&size=64",
+    ]
+    # The agent's own picture was drawn: no fallback signal.
+    assert "x-avatar-fallback" not in response.headers
+
+
+def test_agent_composite_falls_back_to_the_glyph_on_a_stale_version(proxy):
+    client, calls, state = proxy
+    state["directory"] = DIRECTORY
+    glyph = client.get(f"{URL}?{BASE_Q.replace('kind=person', 'kind=person_agent')}")
+    assert "x-avatar-fallback" not in glyph.headers  # no picture was asked for
+    state["refuse_path"] = lambda path: (404, "not_found") if "/avatar?" in path else None
+    fallback = client.get(f"{URL}?{AGENT_Q}")
+    _png(fallback)
+    assert fallback.content == glyph.content
+    # F1: the desktop is told this is the glyph standing in for a picture.
+    assert fallback.headers["x-avatar-fallback"] == "glyph"
+    assert len(_without_directory(calls)) == 1
+
+
+def test_a_composite_for_a_naming_bs_endpoint_gets_as_glyph(proxy):
+    """Security review round 1, S-2. Sender acc_2's composite names Bea's agent
+    endpoint (and its real current version): core finds that endpoint is not
+    acc_2's in the tenant directory, draws acc_2's glyph, never reads Bea's
+    picture, and signals the fallback."""
+
+    client, calls, state = proxy
+    state.update(serve_type="image/jpeg", serve=_blue_jpeg(), directory=DIRECTORY)
+    glyph = client.get(f"{URL}?{BASE_Q.replace('kind=person', 'kind=person_agent')}")
+    crossed = AGENT_Q.replace(EP, "bep_bea").replace("fedcba9876543210", "b2b2b2b2b2b2b2b2")
+    response = client.get(f"{URL}?{crossed}")
+    _png(response)
+    assert response.content == glyph.content
+    assert response.headers["x-avatar-fallback"] == "glyph"
+    assert _without_directory(calls) == [], "B's picture was read for A"
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        # A person never wears an endpoint picture.
+        AGENT_Q.replace("kind=person_agent", "kind=person"),
+        # Both photo shapes at once, or a half of either.
+        AGENT_Q + "&avatar_account_id=acc_2",
+        AGENT_Q.replace("&v=fedcba9876543210", ""),
+        AGENT_Q.replace("fedcba9876543210", "FEDCBA9876543210"),
+        AGENT_Q.replace("bep_0123456789abcdef0123456789abcdef", "bep%2F..%2Facc_2"),
+        AGENT_Q.replace("bep_0123456789abcdef0123456789abcdef", "b" * 129),
+    ],
+)
+def test_agent_picture_query_is_closed(proxy, query):
+    client, calls, _ = proxy
+    assert client.get(f"{URL}?{query}").status_code == 422
     assert not calls
