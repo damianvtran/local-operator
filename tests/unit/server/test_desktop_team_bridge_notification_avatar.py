@@ -55,6 +55,27 @@ def test_photo_composite_reads_only_the_closed_avatar_route(proxy):
     assert [c[1] for c in calls] == ["/v1/accounts/acc_2/avatar?v=0123456789abcdef&size=64"]
 
 
+def test_agent_photo_reference_is_accepted_and_never_fetched(proxy):
+    """The exact shape a RELEASED desktop sends for an agent (agent review round 1, F1).
+
+    An agent's directory row is its owner's, so desktops already in the field
+    pass the OWNER's photo version with ``kind=person_agent``. The route must
+    answer 200 with the glyph composite and touch no upstream route at all: if
+    a later change passed ``v`` straight through to some fetch, this is the case
+    that would notice.
+    """
+
+    client, calls, state = proxy
+    state.update(serve_type="image/jpeg", serve=_jpeg())
+    image = _png(client.get(f"{URL}?{PHOTO_Q.replace('kind=person', 'kind=person_agent')}"))
+    assert calls == []
+    # Not the photo it was handed: the composite is the glyph on the owner's
+    # palette colour, so the red JPEG cannot be what came back.
+    pixel = image.getpixel((20, 20))
+    assert isinstance(pixel, tuple)
+    assert pixel[:3] != pytest.approx((200, 40, 40), abs=16)
+
+
 def test_placeholder_touches_no_network(proxy):
     client, calls, _ = proxy
     _png(client.get(f"{URL}?{BASE_Q}"))
