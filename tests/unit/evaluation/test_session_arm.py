@@ -61,6 +61,7 @@ from local_operator.evaluation.adapters.rpc import RpcErrorDetail, RpcRemoteErro
 from local_operator.evaluation.evidence.models import ScoreArtifact
 from local_operator.evaluation.protocol import (
     ArtifactRef,
+    FinishAction,
     FrameGeometry,
     FrameRef,
     FrameSize,
@@ -248,6 +249,7 @@ def _bridge(
     instruction: str = "the task as stated",
     completion_gate: bool = True,
     completion_challenges: int = 1,
+    premature_terminal_gate: bool = True,
     reply_guidance: str | None = None,
 ) -> ActionBridge:
     obs0 = observation or _observation()
@@ -269,6 +271,7 @@ def _bridge(
         instruction=instruction,
         completion_gate=completion_gate,
         completion_challenges=completion_challenges,
+        premature_terminal_gate=premature_terminal_gate,
         reply_guidance=reply_guidance,
     )
     bridge.arm(obs0)
@@ -959,9 +962,12 @@ class TestCompletionGate:
         assert bridge.terminal is True
 
     @pytest.mark.asyncio
-    async def test_a_failed_claim_is_never_challenged(self, tmp_path: Path) -> None:
+    async def test_a_failed_claim_after_an_action_is_never_challenged(self, tmp_path: Path) -> None:
         events: list[tuple[str, dict[str, Any]]] = []
         bridge = _bridge(tmp_path, record=lambda kind, payload: events.append((kind, payload)))
+        await bridge.call({"actions": [{"kind": "wait", "duration_ms": 50}]})
+        bridge.fold(TurnEndEvent())
+        events.clear()
         reply = await bridge.call(
             {"actions": [{"kind": "finish", "status": "failed", "reason": "cannot finish"}]}
         )
@@ -969,6 +975,94 @@ class TestCompletionGate:
         # The failed claim is still a valid finish PROPOSAL: one admitted
         # epoch, then the finish row.
         assert [kind for kind, _ in events] == ["output_epoch", "finish"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("status", ["failed", "infeasible"])
+    async def test_a_step_zero_non_done_claim_is_challenged_once_then_accepted(
+        self, tmp_path: Path, status: str
+    ) -> None:
+        """The sealed t24w1-t004 shape on this channel: call #1 is the finish."""
+
+        events: list[tuple[str, dict[str, Any]]] = []
+        obs = _observation()
+        bridge = _bridge(
+            tmp_path, observation=obs, record=lambda kind, payload: events.append((kind, payload))
+        )
+        claim = {"actions": [{"kind": "finish", "status": status, "reason": "inspect first"}]}
+        first = await bridge.call(claim)
+        assert first["is_error"] is False
+        assert first["details"]["terminal"] == "completion-challenged"
+        text = first["content"][0].text
+        assert "no action has been executed" in text.lower()
+        assert "the task as stated" in text
+        assert bridge.terminal is False
+        assert bridge.end_requested is None
+        # Recorded as the done challenge is -- same row kind, same epoch kind --
+        # with the trigger naming which rule fired.
+        assert [kind for kind, _ in events] == ["output_epoch", "completion_challenged"]
+        assert events[0][1] == {"epoch_kind": "finish-challenged", "steps": 1}
+        assert events[1][1]["trigger"] == "premature-terminal"
+        assert events[1][1]["status"] == status
+        assert events[1][1]["observation_id"] == obs.observation_id
+        # Re-declaring the same finish is accepted, status untouched.
+        second = await bridge.call(claim)
+        assert second["details"]["terminal"] == "finish"
+        assert bridge.terminal is True
+        finish = [payload for kind, payload in events if kind == "finish"]
+        assert finish == [
+            {
+                "status": status,
+                "reason": "inspect first",
+                "actions": 1,
+                "completion_challenged": False,
+            }
+        ]
+
+    @pytest.mark.asyncio
+    async def test_the_premature_challenge_spends_no_done_budget(self, tmp_path: Path) -> None:
+        bridge = _bridge(tmp_path)
+        await bridge.call({"actions": [{"kind": "finish", "status": "failed", "reason": "x"}]})
+        await bridge.call({"actions": [{"kind": "wait", "duration_ms": 50}]})
+        bridge.fold(TurnEndEvent())
+        done = {"actions": [{"kind": "finish", "status": "done", "reason": "did it"}]}
+        assert (await bridge.call(done))["details"]["terminal"] == "completion-challenged"
+        assert (await bridge.call(done))["details"]["terminal"] == "finish"
+        assert bridge.completion_challenges_fired == 1
+
+    @pytest.mark.asyncio
+    async def test_the_premature_gate_can_be_disabled_for_a_control_arm(
+        self, tmp_path: Path
+    ) -> None:
+        bridge = _bridge(tmp_path, premature_terminal_gate=False)
+        reply = await bridge.call(
+            {"actions": [{"kind": "finish", "status": "failed", "reason": "x"}]}
+        )
+        assert reply["details"]["terminal"] == "finish"
+
+    @pytest.mark.asyncio
+    async def test_both_arms_quote_the_same_premature_challenge(self, tmp_path: Path) -> None:
+        """One builder for both channels: the runner client's text, byte for byte."""
+
+        from local_operator.evaluation.runner.provider_client import (
+            build_completion_challenge,
+        )
+        from local_operator.evaluation.session_arm import CHALLENGE_REPLY_GUIDANCE
+
+        guidance = CHALLENGE_REPLY_GUIDANCE.format(tool_name="apply_actions")
+        obs = _observation()
+        bridge = _bridge(tmp_path, observation=obs, reply_guidance=guidance)
+        reply = await bridge.call(
+            {"actions": [{"kind": "finish", "status": "infeasible", "reason": "no app"}]}
+        )
+        expected = build_completion_challenge(
+            claim=FinishAction(
+                observation_id=obs.observation_id, status="infeasible", reason="no app"
+            ),
+            instruction="the task as stated",
+            observation=obs,
+            reply_guidance=guidance,
+        )
+        assert reply["content"][0].text == expected
 
     @pytest.mark.asyncio
     async def test_the_gate_can_be_disabled_for_a_control_arm(self, tmp_path: Path) -> None:

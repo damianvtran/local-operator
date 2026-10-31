@@ -3915,7 +3915,11 @@ def build_completion_challenge(
     observation: Observation,
     reply_guidance: str | None = None,
 ) -> str:
-    """The user turn that asks the model to check a ``done`` claim.
+    """The user turn that asks the model to check a terminal claim.
+
+    A ``done`` claim gets the completion challenge below; a ``failed`` or
+    ``infeasible`` claim reaches here only from the premature-terminal gate and
+    gets its neutral variant (see the branch).
 
     ``reply_guidance`` is the ONE sentence that states HOW to answer, and it is
     a parameter because the channel differs while the challenge's substance
@@ -3953,6 +3957,28 @@ def build_completion_challenge(
         f"(Observation ID: {observation.observation_id}; Frames: "
         f"{_frames_line(observation)}) and nothing else."
     )
+
+    if claim.status != "done":
+        # THE PREMATURE-TERMINAL CHALLENGE (``runner.completion``, second rule):
+        # a non-done finish declared before any action executed. The only
+        # caller that reaches this branch is that gate, so the text is built
+        # from the claim's own status rather than a separate parameter -- the
+        # protocol's ``challenge_completion`` signature stays unchanged and
+        # every client gets the right words for free. The wording is NEUTRAL
+        # on purpose: it states the one fact the model may have missed (nothing
+        # has run), restates the task, and names keeping the status as an equal
+        # reply. It must never imply the task is feasible -- some are not, and
+        # an infeasible task has to be able to end ``infeasible``.
+        return (
+            f'You declared this task "{claim.status}" before any action has been '
+            "executed in this episode. No action has been executed yet.\n\n"
+            f'Your stated reason was: "{_bounded_quote(claim.reason)}"\n\n'
+            "The task you were given was:\n"
+            f"{_bounded_quote(instruction)}\n\n"
+            "Reply in exactly one of these two ways:\n"
+            f'* the SAME finish action, unchanged, to confirm "{claim.status}"; or\n'
+            "* a batch of actions to proceed with the task.\n\n" + guidance
+        )
 
     return (
         "You declared this task finished. That declaration is a CLAIM, and it is "

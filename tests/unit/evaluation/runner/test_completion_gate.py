@@ -64,6 +64,7 @@ from tests.unit.evaluation.runner.conftest import (
 )
 
 CHALLENGED = "completion-challenged"
+PREMATURE = "premature-terminal-challenged"
 
 
 class GatedModel(ScriptedModel):
@@ -77,19 +78,31 @@ class GatedModel(ScriptedModel):
     things the model really produced.
     """
 
-    def __init__(self, *args: Any, finish_status: str = "done", **kwargs: Any) -> None:
+    def __init__(
+        self, *args: Any, finish_status: str | Sequence[str] = "done", **kwargs: Any
+    ) -> None:
         super().__init__(*args, **kwargs)
-        self.finish_status = finish_status
+        # A single status applies to every finish; a sequence is consumed one
+        # per finish declaration (the last repeats), so a test can script a
+        # premature ``failed`` followed by a later ``done``.
+        self.finish_statuses = (
+            [finish_status] if isinstance(finish_status, str) else list(finish_status)
+        )
+        self.finishes = 0
         self.challenges: list[tuple[ActionBatch, str, str]] = []
 
     async def decide(
         self, observation: Observation, history: Sequence[EpisodeTurn], **kwargs: Any
     ) -> Any:
         decision = await super().decide(observation, history, **kwargs)
-        if self.finish_status == "done":
-            return decision
         batch = decision.action_batch
-        restated = batch.actions[0].model_copy(update={"status": self.finish_status})
+        if not isinstance(batch.actions[0], FinishAction):
+            return decision
+        status = self.finish_statuses[min(self.finishes, len(self.finish_statuses) - 1)]
+        self.finishes += 1
+        if status == "done":
+            return decision
+        restated = batch.actions[0].model_copy(update={"status": status})
         return decision.model_copy(
             update={"action_batch": batch.model_copy(update={"actions": (restated,)})}
         )
@@ -137,11 +150,9 @@ def _run_episode(
     )
 
 
-def _challenges(bundle: Path) -> list[ErrorPayload]:
+def _challenges(bundle: Path, code: str = CHALLENGED) -> list[ErrorPayload]:
     return [
-        payload
-        for payload in payloads(bundle, ErrorPayload)
-        if payload.diagnostic_code == CHALLENGED
+        payload for payload in payloads(bundle, ErrorPayload) if payload.diagnostic_code == code
     ]
 
 
@@ -276,10 +287,44 @@ async def test_the_gate_off_ends_on_the_first_declaration(tmp_path: Path, episod
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", ["failed", "infeasible"])
-async def test_a_non_done_finish_is_never_challenged(
+async def test_a_non_done_finish_after_an_action_is_never_challenged(
     tmp_path: Path, episode_id: str, status: str
 ) -> None:
-    """A model reporting that it could NOT finish has no completion to confirm."""
+    """A model reporting that it could NOT finish has no completion to confirm.
+
+    Once it has acted, that report is a conclusion drawn from what it saw, so
+    neither gate asks again: the premature-terminal gate is scoped to a finish
+    declared before ANY action executed.
+    """
+
+    adapter = FakeAdapter(tmp_path, episode_id)
+    model = GatedModel(["wait", "finish"], finish_status=status)
+    runner = _run_episode(tmp_path, episode_id, adapter=adapter, model=model)
+
+    outcome = await runner.run()
+
+    assert outcome.bundle_root is not None
+    assert model.calls == 2
+    assert model.challenges == []
+    assert _challenges(outcome.bundle_root) == []
+    assert _challenges(outcome.bundle_root, PREMATURE) == []
+
+
+# ---------------------------------------------------------------------------
+# The premature-terminal gate: a non-done finish before any action executed
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["failed", "infeasible"])
+async def test_a_step_zero_non_done_finish_is_challenged_once_then_accepted(
+    tmp_path: Path, episode_id: str, status: str
+) -> None:
+    """The sealed t24w1-t004 shape: ``finish(failed)`` as call #1, then nothing.
+
+    Challenged once, and the identical re-declaration ends the episode with the
+    SAME status -- the escape hatch a genuinely infeasible task needs.
+    """
 
     adapter = FakeAdapter(tmp_path, episode_id)
     model = GatedModel(["finish"], finish_status=status)
@@ -288,9 +333,99 @@ async def test_a_non_done_finish_is_never_challenged(
     outcome = await runner.run()
 
     assert outcome.bundle_root is not None
+    assert outcome.status == "completed"
+    report = verify_bundle(outcome.bundle_root)
+    assert report.valid, [issue.code for issue in report.issues]
+    assert model.calls == 2
+    assert len(model.challenges) == 1
+    # Recorded the way a ``done`` challenge is -- an ``error`` event carrying
+    # the text the model was shown -- under its own code so audits can count it.
+    premature = _challenges(outcome.bundle_root, PREMATURE)
+    assert len(premature) == 1
+    assert premature[0].category == "model" and premature[0].retryable is True
+    assert _challenges(outcome.bundle_root) == []
+    assert _challenge_text(outcome.bundle_root, premature[0]) == model.challenges[0][2]
+    terminal = [
+        payload
+        for payload in payloads(outcome.bundle_root, ActionBatchPayload)
+        if payload.terminal == "finish"
+    ]
+    assert len(terminal) == 1
+    from local_operator.evaluation.adapters.supervisor import verify_artifact
+
+    sealed = verify_artifact(outcome.bundle_root / "artifacts", terminal[0].action_artifact)
+    assert sealed == model.challenges[0][0].to_canonical_json()
+    assert json.loads(sealed)["actions"][0]["status"] == status
+
+
+@pytest.mark.asyncio
+async def test_the_premature_gate_has_its_own_bound_and_spends_no_done_budget(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """Step-0 ``failed`` challenged, then work, then ``done`` challenged too.
+
+    Separate counters: sharing the done budget would let a premature challenge
+    silently disarm the completion gate for the rest of the episode.
+    """
+
+    adapter = FakeAdapter(tmp_path, episode_id)
+    model = GatedModel(["finish", "wait", "finish", "finish"], finish_status=["failed", "done"])
+    runner = _run_episode(tmp_path, episode_id, adapter=adapter, model=model)
+
+    outcome = await runner.run()
+
+    assert outcome.bundle_root is not None
+    assert outcome.status == "completed"
+    assert model.calls == 4
+    assert len(_challenges(outcome.bundle_root, PREMATURE)) == 1
+    assert len(_challenges(outcome.bundle_root)) == 1
+
+
+@pytest.mark.asyncio
+async def test_the_premature_gate_off_ends_on_the_first_non_done_finish(
+    tmp_path: Path, episode_id: str
+) -> None:
+    adapter = FakeAdapter(tmp_path, episode_id)
+    model = GatedModel(["finish"], finish_status="failed")
+    config = build_config(tmp_path, max_steps=4, premature_terminal_gate=False)
+    runner = _run_episode(tmp_path, episode_id, adapter=adapter, model=model, config=config)
+
+    outcome = await runner.run()
+
+    assert outcome.bundle_root is not None
     assert model.calls == 1
     assert model.challenges == []
-    assert _challenges(outcome.bundle_root) == []
+    assert _challenges(outcome.bundle_root, PREMATURE) == []
+
+
+@pytest.mark.parametrize("status", ["failed", "infeasible"])
+def test_the_premature_challenge_is_neutral_and_names_both_replies(status: str) -> None:
+    """Restates the task and that nothing ran; never asserts feasibility."""
+
+    observation = Observation(
+        task_id="task-1",
+        episode_id="episode-1",
+        sequence=0,
+        observation_id="obs-1",
+        text="Make the new slides match the deck",
+    )
+    claim = FinishAction(observation_id="obs-1", status=status, reason="Need to inspect first")
+
+    text = build_completion_challenge(
+        claim=claim, instruction=observation.text or "", observation=observation
+    )
+
+    assert "Make the new slides match the deck" in text
+    assert "Need to inspect first" in text
+    assert "no action has been executed" in text.lower()
+    assert f'"{status}"' in text
+    assert "the same finish action, unchanged" in text.lower()
+    assert "obs-1" in text
+    # Neutral: neither the done challenge's verdict language nor any claim
+    # about whether the task can be done.
+    assert "CLAIM" not in text
+    assert "not finished" not in text
+    assert "feasible" not in text.replace(f'"{status}"', "").lower()
 
 
 @pytest.mark.asyncio
@@ -569,6 +704,20 @@ def test_the_flag_reaches_the_config_and_the_scripted_client_can_challenge(
 
     assert off.no_completion_gate is True
     assert on.no_completion_gate is False
+    assert on.no_premature_terminal_gate is False
+    assert (
+        build_parser()
+        .parse_args(_driver_args(tmp_path, durable_run_root, "--no-premature-terminal-gate"))
+        .no_premature_terminal_gate
+        is True
+    )
+    assert not build_config(
+        durable_run_root,
+        episode_id="ep-premature-off",
+        max_steps=2,
+        max_cycle_usd_micros=None,
+        premature_terminal_gate=False,
+    ).premature_terminal_gate
     for args, expected in ((off, False), (on, True)):
         config = build_config(
             durable_run_root,
@@ -579,9 +728,10 @@ def test_the_flag_reaches_the_config_and_the_scripted_client_can_challenge(
         )
         assert config.completion_gate is expected
     # The default is the gate ON, so an unset flag runs the shipped arm.
-    assert build_config(
+    default = build_config(
         durable_run_root, episode_id="ep-default", max_steps=2, max_cycle_usd_micros=None
-    ).completion_gate
+    )
+    assert default.completion_gate and default.premature_terminal_gate
     assert callable(
         getattr(_ScriptedFinish(_route_identity("test", "fake/model:free")), "challenge_completion")
     )

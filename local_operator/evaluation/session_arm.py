@@ -137,7 +137,11 @@ from local_operator.evaluation.runner.action_tool import (
     _no_pending_refusal,
     _refusal,
 )
-from local_operator.evaluation.runner.completion import finish_claim
+from local_operator.evaluation.runner.completion import (
+    PREMATURE_TERMINAL_CHALLENGES,
+    challenge_kind,
+    finish_claim,
+)
 from local_operator.evaluation.runner.episode import (
     _PROVISIONAL_CLEANUP_ACTION,
     EpisodeConfig,
@@ -1067,6 +1071,11 @@ class ActionBridge:
     #: flag).
     completion_gate: bool = True
     completion_challenges: int = 1
+    #: The runner's premature-terminal gate (``runner/completion.py``, second
+    #: rule): a ``failed``/``infeasible`` finish before any batch executed is
+    #: challenged once, from its own fixed budget. Same config field, same
+    #: driver flag (``--no-premature-terminal-gate``) as the reply channel.
+    premature_terminal_gate: bool = True
     #: The channel sentence appended to the challenge -- see
     #: :data:`CHALLENGE_REPLY_GUIDANCE`.
     reply_guidance: str | None = None
@@ -1136,6 +1145,15 @@ class ActionBridge:
         #: for the runner's reason: the bound is a property of the episode's
         #: protocol, not of any writer.
         self._completion_fired = 0
+        #: Premature-terminal challenges made; bounded by
+        #: ``PREMATURE_TERMINAL_CHALLENGES`` and kept apart from
+        #: ``_completion_fired`` so it never spends the ``done`` budget.
+        self._premature_fired = 0
+        #: Non-terminal batches dispatched to the adapter -- the runner's
+        #: ``_steps_taken`` analogue (see the increment for why at dispatch).
+        #: ``_steps`` cannot serve: it counts admitted output epochs, which a
+        #: challenged finish and an ask exchange also consume.
+        self._executed = 0
         #: ``(observation_id, rendered blocks)`` for every screen this bridge
         #: has shown: observation zero in ``arm``, each executed result in
         #: ``call``. The completion challenge re-attaches the state the model is
@@ -1760,11 +1778,20 @@ class ActionBridge:
             terminal = _terminal_kind(batch)
             if terminal == "finish":
                 claim = finish_claim(batch)
-                if (
-                    self.completion_gate
-                    and self._completion_fired < self.completion_challenges
-                    and claim.status == "done"
-                ):
+                # The rule is the runner's (``runner.completion.challenge_kind``);
+                # only the counters are this bridge's.
+                kind = challenge_kind(
+                    claim,
+                    executed_steps=self._executed,
+                    completion_open=(
+                        self.completion_gate and self._completion_fired < self.completion_challenges
+                    ),
+                    premature_open=(
+                        self.premature_terminal_gate
+                        and self._premature_fired < PREMATURE_TERMINAL_CHALLENGES
+                    ),
+                )
+                if kind is not None:
                     # The runner's completion gate (``runner/completion.py``),
                     # enforced on this channel: the FIRST ``done`` claim is
                     # refused once and re-asked, and every later finish -- the
@@ -1783,7 +1810,10 @@ class ActionBridge:
                     # before the challenge is built and recorded (blueprint §3).
                     self._consume_output_epoch("finish-challenged")
                     self._mark_group_kind("finish-challenged")
-                    self._completion_fired += 1
+                    if kind == "premature-terminal":
+                        self._premature_fired += 1
+                    else:
+                        self._completion_fired += 1
                     challenge = build_completion_challenge(
                         claim=claim,
                         instruction=self.instruction,
@@ -1791,15 +1821,18 @@ class ActionBridge:
                         reply_guidance=self.reply_guidance,
                     )
                     if self.record is not None:
-                        self.record(
-                            "completion_challenged",
-                            {
-                                "status": claim.status,
-                                "reason": claim.reason,
-                                "challenge": challenge,
-                                "observation_id": pending.observation_id,
-                            },
-                        )
+                        row: dict[str, Any] = {
+                            "status": claim.status,
+                            "reason": claim.reason,
+                            "challenge": challenge,
+                            "observation_id": pending.observation_id,
+                        }
+                        # The ``done`` row keeps its historical shape (no
+                        # trigger key); the new rule is discriminated the way
+                        # the prose arm's row is, by ``trigger``.
+                        if kind == "premature-terminal":
+                            row["trigger"] = "premature-terminal"
+                        self.record("completion_challenged", row)
                     # Evidence first, re-prompt second (the runner's ordering):
                     # on this channel the challenge IS the re-prompt, and the
                     # state it names rides WITH it -- the same rendered blocks
@@ -1894,6 +1927,12 @@ class ActionBridge:
                     "is_error": True,
                     "details": refusal.details,
                 }
+            # Counted at DISPATCH, not on success: a batch whose read-back was
+            # lost (committed, or an ambiguous delivery) still acted on the
+            # environment, and the premature-terminal gate must err toward NOT
+            # challenging. A declared not-applied batch is counted too -- the
+            # model has acted and been answered, which is all the gate asks.
+            self._executed += 1
             try:
                 result = await self.execute(batch)
             except Exception as error:  # noqa: BLE001 - _after_failed_execute owns it
@@ -3173,6 +3212,7 @@ async def run_session_episode(
             instruction=observation.text or "",
             completion_gate=config.completion_gate,
             completion_challenges=config.completion_challenges,
+            premature_terminal_gate=config.premature_terminal_gate,
             reply_guidance=CHALLENGE_REPLY_GUIDANCE.format(tool_name=declaration.tool_name),
             progress_guards=progress_guards,
             progress_budget=spec.budget if progress_guards is not None else None,

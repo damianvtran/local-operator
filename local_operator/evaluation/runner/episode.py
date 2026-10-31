@@ -124,7 +124,12 @@ from local_operator.evaluation.receipts import (
     commit_budget,
     reconcile_budget,
 )
-from local_operator.evaluation.runner.completion import CompletionGate, finish_claim
+from local_operator.evaluation.runner.completion import (
+    CHALLENGE_DIAGNOSTIC_CODES,
+    ChallengeKind,
+    CompletionGate,
+    finish_claim,
+)
 from local_operator.evaluation.runner.guards import (
     RECENT_TURNS_WINDOW,
     EpisodeGuard,
@@ -340,8 +345,15 @@ class EpisodeConfig:
     declaration is always accepted and the gate can never drive an episode to a
     model failure. Turning the gate off is a campaign's control arm rather than
     an operator preference -- it changes what the model is asked, so a run has
-    to record which arm produced it -- and a non-``done`` finish is never
-    challenged, because there is no completion in it to confirm.
+    to record which arm produced it -- and a non-``done`` finish is not
+    challenged by it, because there is no completion in it to confirm.
+
+    ``premature_terminal_gate`` is the second, separate rule: a ``failed`` or
+    ``infeasible`` finish declared before ANY batch has executed is challenged
+    once (fixed budget of one, independent of ``completion_challenges``) with a
+    neutral re-ask, and the re-declared finish is accepted unchanged. ON by
+    default for the same reason -- the second declaration always ends the
+    episode, so the worst case is one extra cycle -- and off is a control arm.
 
     They are ON by default rather than opt-in because the path is unreachable
     unless an adapter explicitly raises ``ObservationPhaseError``: an adapter
@@ -418,6 +430,7 @@ class EpisodeConfig:
     execution_overhead_seconds_per_action: float = 0.0
     completion_gate: bool = True
     completion_challenges: int = 1
+    premature_terminal_gate: bool = True
 
     def __post_init__(self) -> None:
         rate = self.execution_overhead_seconds_per_action
@@ -694,6 +707,7 @@ class EpisodeRunner:
             client=model,
             enabled=config.completion_gate,
             challenges=config.completion_challenges,
+            premature=config.premature_terminal_gate,
         )
         self._responder = responder if responder is not None else NullUserResponder()
         self._responder_override = responder is not None
@@ -1156,13 +1170,17 @@ class EpisodeRunner:
             self._turns[-1] = self._turns[-1].model_copy(update=turn_update)
             terminal = _terminal_kind(batch)
             if terminal == "finish":
-                # A ``done`` declaration is refused-as-a-claim ONCE (see
-                # ``runner.completion``). The second one is always accepted, so
-                # the branch below is reached for the answer that ends the
-                # episode -- the identical first claim, or an action that
-                # closes the gap the model found when it looked again.
-                if self._completion_gate.should_challenge(finish_claim(batch)):
-                    await self._challenge_completion(batch)
+                # A ``done`` declaration -- or a ``failed``/``infeasible`` one
+                # made before ANY batch executed -- is refused-as-a-claim ONCE
+                # (see ``runner.completion``). The second one is always
+                # accepted, so the branch below is reached for the answer that
+                # ends the episode -- the identical first claim, or an action
+                # the model chose when asked again.
+                kind = self._completion_gate.should_challenge(
+                    finish_claim(batch), executed_steps=self._steps_taken
+                )
+                if kind is not None:
+                    await self._challenge_completion(batch, kind)
                     continue
                 self._append_batch(batch, terminal="finish")
                 return
@@ -1173,7 +1191,7 @@ class EpisodeRunner:
             if self._last_step_terminated:
                 return
 
-    async def _challenge_completion(self, batch: ActionBatch) -> None:
+    async def _challenge_completion(self, batch: ActionBatch, kind: ChallengeKind) -> None:
         """Refuse this turn's end, and ask the model to check its own claim.
 
         NOTHING MOVES. The observation is unchanged and the turn does not close,
@@ -1189,8 +1207,8 @@ class EpisodeRunner:
         call still says what was asked of it.
         """
 
-        text = await self._completion_gate.challenge(batch, self._turns)
-        self._append_model_error("completion-challenged", text)
+        text = await self._completion_gate.challenge(batch, self._turns, kind)
+        self._append_model_error(CHALLENGE_DIAGNOSTIC_CODES[kind], text)
 
     async def _decide(self, observation: Observation) -> Any:
         """Ask the model until it returns a usable batch, within the retry bounds.
