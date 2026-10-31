@@ -90,6 +90,8 @@ from lop_osworld_v2_adapter.providers.base import (
 from lop_osworld_v2_adapter.provisioning import ProvisioningPlan
 from lop_osworld_v2_adapter.taskfile import TaskDescriptor
 
+from local_operator.evaluation.adapters.api import RunCommandParams, RunCommandResult
+
 logger = logging.getLogger(__name__)
 
 # The tag every resource this adapter creates carries. It is both the leak
@@ -1507,6 +1509,19 @@ class AwsProvider:
                 pass
             self._sleep(guest_supervisor.RESTART_RESULT_INTERVAL_S)
         return guest_supervisor.empty_restart("result_unavailable")
+
+    async def run_command(self, params: RunCommandParams) -> RunCommandResult:
+        """One bounded guest shell; transport errors escape without retries."""
+        from lop_osworld_v2_adapter.remote_command import decode_result, payload_for
+
+        url = f"http://{self._public_ip}:{GUEST_PORT}{_EXECUTE_PATH}"
+        body = await asyncio.to_thread(
+            self._clients.http_post_json,
+            url,
+            payload_for(params),
+            params.timeout_s + 10,
+        )
+        return decode_result(body, params)
 
     def _run_guest_command(
         self, command: Sequence[str], timeout: float

@@ -48,6 +48,8 @@ from local_operator.evaluation.adapters.api import (
     RescueDescriptor,
     ResetStartParams,
     ResolvedSecret,
+    RunCommandParams,
+    RunCommandResult,
     ScoreParams,
     ScoreResult,
     validate_execution,
@@ -1146,6 +1148,28 @@ class VerifiedAdapterSession:
         except BaseException:
             await self._poison_after_ambiguous_mutation()
             raise
+        return result
+
+    async def run_command(self, params: RunCommandParams, *, timeout: float) -> RunCommandResult:
+        """A command may mutate target state; ambiguous failures poison, never retry."""
+        if self.verifier.current_observation is None:
+            raise SupervisionError("run_command has no current observation")
+        if params.episode_id != self.verifier.current_observation.episode_id:
+            raise SupervisionError("run_command belongs to another episode")
+        result = await self._mutating_call(
+            "run_command",
+            params,
+            RunCommandResult,
+            timeout=timeout,
+            validate=lambda value: (
+                None
+                if isinstance(value, RunCommandResult)
+                else (_ for _ in ()).throw(
+                    SupervisionError("run_command returned the wrong result")
+                )
+            ),
+        )
+        assert isinstance(result, RunCommandResult)
         return result
 
     async def execute(

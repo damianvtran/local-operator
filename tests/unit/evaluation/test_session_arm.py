@@ -1756,9 +1756,13 @@ class TestEpisodeSessionSurface:
         return SessionRoots(config_dir=root, agent_home=agent_home, cwd=work, allow_volatile=True)
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("command", [False, True])
     async def test_the_inventory_holds_the_shipped_tools_and_the_action_tool(
-        self, scratch: SessionRoots, tmp_path: Path
+        self, scratch: SessionRoots, tmp_path: Path, command: bool
     ) -> None:
+        from local_operator.evaluation import session_arm as session_arm_mod
+        from local_operator.evaluation.session_arm import validate_episode_session_spec
+
         bridge = ActionBridge(
             endpoint=tmp_path / "b.sock",
             surface=ActionSurface(),
@@ -1774,7 +1778,11 @@ class TestEpisodeSessionSurface:
                 endpoint=tmp_path / "b.sock",
                 surface=ActionSurface(),
                 python_executable=sys.executable,
-                cwd=scratch.cwd_path,
+                # The shared editable interpreter points at the primary tree.
+                # -m must start in THIS source tree, not silently test an older
+                # primary-checkout server after the MCP manager strips PYTHONPATH.
+                cwd=Path(session_arm_mod.__file__).resolve().parents[2],
+                command=command,
             )
             assert_declaration_resolved(
                 cwd=scratch.cwd_path,
@@ -1792,19 +1800,24 @@ class TestEpisodeSessionSurface:
                 approvals=ApprovalPolicy.declared(EPISODE_TOOL_SURFACE),
                 name="arm-surface",
             )
+            spec = validate_episode_session_spec(spec=spec, command=command)
+            expected = {decl.tool_name}
+            if command:
+                expected.add(decl.command_tool_name)
             async with sdk.open_session(spec, roots=scratch) as session:
                 deadline = time.monotonic() + 25.0
                 names: tuple[str, ...] = ()
                 while time.monotonic() < deadline:
                     names = session_tool_names(session)
-                    if decl.tool_name in names:
+                    if expected <= set(names):
                         break
                     await asyncio.sleep(0.1)
-                assert decl.tool_name in names, names
+                assert expected <= set(names), names
                 # The DECLARED surface, resolved: the members the flow needs
                 # are live, and nothing outside the declaration leaked in.
                 assert {"task", "team", "hub", "jobs", "wait", "bash"} <= set(names), names
-                assert set(names) <= set(EPISODE_TOOL_SURFACE), names
+                assert set(names) <= set(spec.tools), names
+                assert ("mcp__episode_actions_run_command" in names) is command
         finally:
             await bridge.stop()
 
@@ -5326,3 +5339,319 @@ class TestStepBudgetPosition:
         text = renderer.render(_observation())[0].text
         assert "Step budget" not in text
         assert text.startswith("Task: task_001\nStep: 0\n")
+
+
+# ---------------------------------------------------------------------------
+# The remote command capability: gated, text-returning, recorded
+# ---------------------------------------------------------------------------
+
+
+def _command_result(**overrides: Any) -> Any:
+    from local_operator.evaluation.adapters.api import RunCommandResult
+
+    values: dict[str, Any] = {
+        "exit_code": 0,
+        "timed_out": False,
+        "stdout": "out-line\n",
+        "stderr": "",
+        "stdout_bytes": 9,
+        "stderr_bytes": 0,
+        "stdout_truncated": False,
+        "stderr_truncated": False,
+    }
+    values.update(overrides)
+    return RunCommandResult.model_validate(values)
+
+
+async def _speak_command(bridge: ActionBridge, arguments: dict[str, Any]) -> dict[str, Any]:
+    from local_operator.evaluation.action_server import COMMAND_TOOL_NAME
+
+    reader, writer = await asyncio.open_unix_connection(str(bridge.endpoint))
+    try:
+        writer.write(encode_call(arguments, tool=COMMAND_TOOL_NAME))
+        await writer.drain()
+        return decode_response(await reader.readline())
+    finally:
+        writer.close()
+        await writer.wait_closed()
+
+
+class TestCommandPromptHeader:
+    TOOL = "mcp__episode_actions_apply_actions"
+    COMMAND = "mcp__episode_actions_run_command"
+
+    def test_without_the_command_tool_the_header_is_unchanged(self) -> None:
+        for tools in (EPISODE_TOOL_SURFACE, (self.TOOL,)):
+            base = render_prompt_header(
+                tool_name=self.TOOL, surface=ActionSurface(), tool_names=tools, confined=True
+            )
+            explicit = render_prompt_header(
+                tool_name=self.TOOL,
+                surface=ActionSurface(),
+                tool_names=tools,
+                confined=True,
+                command_tool=None,
+            )
+            assert base == explicit
+            assert "run_command" not in base
+
+    def test_with_the_command_tool_the_header_names_it_and_stays_true(self) -> None:
+        text = render_prompt_header(
+            tool_name=self.TOOL,
+            surface=ActionSurface(),
+            tool_names=(*EPISODE_TOOL_SURFACE, self.COMMAND),
+            confined=True,
+            command_tool=self.COMMAND,
+        )
+        assert f"`{self.COMMAND}`" in text
+        assert "as text" in text
+        # The topology note must not keep claiming the action tool is the ONLY
+        # way to read from the remote computer once a command channel exists.
+        assert f"the only way to read from it is the state `{self.TOOL}` returns." not in text
+        assert "on the remote computer, not in your local workspace" in text
+        # Also stated when the session holds no local tools.
+        bare = render_prompt_header(
+            tool_name=self.TOOL,
+            surface=ActionSurface(),
+            tool_names=(self.TOOL, self.COMMAND),
+            confined=False,
+            command_tool=self.COMMAND,
+        )
+        assert f"`{self.COMMAND}`" in bare
+        lowered = (
+            text.replace(self.TOOL, "<t>")
+            .replace(self.COMMAND, "<c>")
+            .replace(OBSERVATION_MARKER_GUIDE, "")
+            .lower()
+        )
+        for word in ("osworld", "kimi", "benchmark", "episode", "task_", "vm", "guest", "score"):
+            assert word not in lowered, word
+
+
+class TestCommandInventory:
+    def test_only_a_negotiated_command_enters_the_inventory_and_approvals(
+        self, tmp_path: Path
+    ) -> None:
+        from local_operator.evaluation.session_arm import validate_episode_session_spec
+
+        spec = SessionSpec(
+            world_root=tmp_path,
+            tools=EPISODE_TOOL_SURFACE,
+            approvals=ApprovalPolicy.declared(EPISODE_TOOL_SURFACE),
+        )
+        assert validate_episode_session_spec(spec=spec) is spec
+        enabled = validate_episode_session_spec(spec=spec, command=True)
+        command = "mcp__episode_actions_run_command"
+        assert enabled.tools == (*EPISODE_TOOL_SURFACE, command)
+        assert enabled.approvals.tools == enabled.tools
+        assert command not in spec.tools
+
+
+class TestCommandDeclaration:
+    def test_a_non_capable_target_declares_exactly_today_s_server(self, tmp_path: Path) -> None:
+        config = tmp_path / "c"
+        config.mkdir()
+        decl = declare_action_server(
+            config_dir=config, endpoint=tmp_path / "b.sock", surface=ActionSurface()
+        )
+        entry = json.loads((config / "mcp.json").read_text(encoding="utf-8"))["mcpServers"][
+            "episode-actions"
+        ]
+        assert entry["enabledTools"] == ["apply_actions"]
+        assert "--command" not in entry["args"]
+        assert decl.command_tool_name is None
+
+    def test_a_capable_target_declares_the_command_tool(self, tmp_path: Path) -> None:
+        config = tmp_path / "c"
+        config.mkdir()
+        decl = declare_action_server(
+            config_dir=config,
+            endpoint=tmp_path / "b.sock",
+            surface=ActionSurface(),
+            command=True,
+        )
+        entry = json.loads((config / "mcp.json").read_text(encoding="utf-8"))["mcpServers"][
+            "episode-actions"
+        ]
+        assert entry["enabledTools"] == ["apply_actions", "run_command"]
+        assert entry["args"][-1] == "--command"
+        assert decl.command_tool_name == "mcp__episode_actions_run_command"
+        assert entry["ownTurnOnly"] is True
+
+
+class TestBridgeCommand:
+    def _bridge(
+        self, tmp_path: Path, *, run_command: Any, rows: list[tuple[str, dict[str, Any]]]
+    ) -> ActionBridge:
+        bridge = _bridge(tmp_path, record=lambda kind, payload: rows.append((kind, payload)))
+        bridge.run_command = run_command
+        return bridge
+
+    @pytest.mark.asyncio
+    async def test_a_bridge_without_the_seam_refuses_and_records_nothing(
+        self, tmp_path: Path
+    ) -> None:
+        rows: list[tuple[str, dict[str, Any]]] = []
+        bridge = self._bridge(tmp_path, run_command=None, rows=rows)
+        await bridge.start()
+        try:
+            reply = await _speak_command(bridge, {"command": "ls"})
+        finally:
+            await bridge.stop()
+        assert reply["is_error"] is True
+        assert "not available" in reply["content"][0]["text"]
+        assert [kind for kind, _ in rows if kind == "command"] == []
+
+    @pytest.mark.asyncio
+    async def test_a_command_result_is_text_with_streams_apart_and_recorded(
+        self, tmp_path: Path
+    ) -> None:
+        calls: list[tuple[str, float]] = []
+        rows: list[tuple[str, dict[str, Any]]] = []
+
+        async def run_command(command: str, timeout_s: float) -> Any:
+            calls.append((command, timeout_s))
+            return _command_result(
+                stdout="hello\n", stdout_bytes=6, stderr="warn\n", stderr_bytes=5
+            )
+
+        bridge = self._bridge(tmp_path, run_command=run_command, rows=rows)
+        steps_before = bridge.steps
+        await bridge.start()
+        try:
+            reply = await _speak_command(bridge, {"command": "echo hello", "timeout_s": 7})
+        finally:
+            await bridge.stop()
+        assert calls == [("echo hello", 7.0)]
+        assert reply["is_error"] is False
+        text = reply["content"][0]["text"]
+        assert "exit_code: 0" in text
+        assert "timed_out: false" in text
+        stdout_at, stderr_at = text.index("stdout"), text.index("stderr")
+        assert stdout_at < text.index("hello") < stderr_at < text.index("warn")
+        assert reply["details"]["exit_code"] == 0
+        # A command neither spends the action step budget nor consumes the
+        # screen the model is acting on.
+        assert bridge.steps == steps_before
+        recorded = [payload for kind, payload in rows if kind == "command"]
+        assert recorded == [
+            {
+                "call_id": recorded[0]["call_id"],
+                "command": "echo hello",
+                "timeout_s": 7.0,
+                "exit_code": 0,
+                "timed_out": False,
+                "stdout_bytes": 6,
+                "stderr_bytes": 5,
+                "stdout_truncated": False,
+                "stderr_truncated": False,
+            }
+        ]
+
+    @pytest.mark.asyncio
+    async def test_truncation_is_said_in_the_result(self, tmp_path: Path) -> None:
+        rows: list[tuple[str, dict[str, Any]]] = []
+
+        async def run_command(command: str, timeout_s: float) -> Any:
+            del command, timeout_s
+            return _command_result(stdout="abc", stdout_bytes=500_000, stdout_truncated=True)
+
+        bridge = self._bridge(tmp_path, run_command=run_command, rows=rows)
+        await bridge.start()
+        try:
+            reply = await _speak_command(bridge, {"command": "cat big"})
+        finally:
+            await bridge.stop()
+        text = reply["content"][0]["text"]
+        assert "TRUNCATED" in text and "500000 bytes" in text
+        assert reply["details"]["stdout_truncated"] is True
+        assert [p for k, p in rows if k == "command"][0]["stdout_truncated"] is True
+
+    @pytest.mark.asyncio
+    async def test_a_timeout_is_reported_without_an_exit_code(self, tmp_path: Path) -> None:
+        rows: list[tuple[str, dict[str, Any]]] = []
+
+        async def run_command(command: str, timeout_s: float) -> Any:
+            del command, timeout_s
+            return _command_result(exit_code=None, timed_out=True, stdout="", stdout_bytes=0)
+
+        bridge = self._bridge(tmp_path, run_command=run_command, rows=rows)
+        await bridge.start()
+        try:
+            reply = await _speak_command(bridge, {"command": "sleep 99", "timeout_s": 2})
+        finally:
+            await bridge.stop()
+        text = reply["content"][0]["text"]
+        assert "timed_out: true" in text
+        assert "exit_code: none" in text
+        assert reply["details"]["timed_out"] is True
+        assert [p for k, p in rows if k == "command"][0]["exit_code"] is None
+
+    @pytest.mark.asyncio
+    async def test_a_failing_target_is_an_error_result_not_swallowed(self, tmp_path: Path) -> None:
+        rows: list[tuple[str, dict[str, Any]]] = []
+
+        async def run_command(command: str, timeout_s: float) -> Any:
+            del command, timeout_s
+            raise RuntimeError("control server refused the connection")
+
+        bridge = self._bridge(tmp_path, run_command=run_command, rows=rows)
+        await bridge.start()
+        try:
+            reply = await _speak_command(bridge, {"command": "ls"})
+        finally:
+            await bridge.stop()
+        assert reply["is_error"] is True
+        text = reply["content"][0]["text"]
+        assert "could not run the command" in text
+        assert "control server refused the connection" in text
+        recorded = [p for k, p in rows if k == "command"]
+        assert recorded[0]["error"].startswith("RuntimeError")
+        assert recorded[0]["exit_code"] is None
+
+    @pytest.mark.asyncio
+    async def test_cancelled_command_seals_unknown_outcome_and_reraises(
+        self, tmp_path: Path
+    ) -> None:
+        rows: list[tuple[str, dict[str, Any]]] = []
+
+        async def run_command(command: str, timeout_s: float) -> Any:
+            assert rows[0][0] == "command_started"
+            raise asyncio.CancelledError()
+
+        bridge = self._bridge(tmp_path, run_command=run_command, rows=rows)
+        with pytest.raises(asyncio.CancelledError):
+            await bridge.call_command({"command": "true"})
+        result = [p for k, p in rows if k == "command"][0]
+        assert result["exit_code"] is None
+        assert result["stdout_truncated"] is None
+        assert result["stderr_truncated"] is None
+        assert "outcome unknown" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_invalid_arguments_are_refused_before_the_target(self, tmp_path: Path) -> None:
+        calls: list[str] = []
+
+        async def run_command(command: str, timeout_s: float) -> Any:
+            calls.append(command)
+            return _command_result()
+
+        bridge = self._bridge(tmp_path, run_command=run_command, rows=[])
+        await bridge.start()
+        try:
+            replies = [
+                await _speak_command(bridge, arguments)
+                for arguments in (
+                    {},
+                    {"command": ""},
+                    {"command": 5},
+                    {"command": "ls", "timeout_s": 0},
+                    {"command": "ls", "timeout_s": 10_000},
+                    {"command": "ls", "timeout_s": True},
+                    {"command": "ls", "cwd": "/"},
+                )
+            ]
+        finally:
+            await bridge.stop()
+        assert calls == []
+        assert all(reply["is_error"] is True for reply in replies)
