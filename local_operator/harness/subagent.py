@@ -4274,8 +4274,8 @@ async def _construct_child_session(
                 mark_pin(f"{model_spec.provider}/{model_spec.model_id}")
     # Team slot outranks profile, then the child inherits its parent's live
     # decision. The session's explicit slash choice always outranks this pin.
-    from local_operator.teams import find_member
     from local_operator.saver.command import saver_on
+    from local_operator.teams import find_member
 
     slot_name = team_slot_name(agent, bool(target and target.is_team_launch)) or (
         target.role if target else agent

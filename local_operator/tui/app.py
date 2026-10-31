@@ -46864,7 +46864,11 @@ class OperatorApp(App[None]):
 
         result = await saver_slash(self._session, arg, SaverNotice)
         self._system_notice(result.text, result.style)
-        self._status.update(saver=_saver_label(self._session))
+        # `_status` is built on mount; a slash that completes during teardown (or
+        # before the band exists) has no band to repaint, and the notice above is
+        # already the receipt, so skip the repaint rather than raise.
+        if self._status is not None:
+            self._status.update(saver=_saver_label(self._session))
 
     def _cmd_fast(self, arg: str, notice: NoticeFn) -> None:
         """``/fast`` — toggle fast mode; ``/fast on|off|status`` — set or report it.

@@ -3482,6 +3482,11 @@ class Session:
         #: The last sign-in answer, stamped by the same read. Read by the
         #: badge instead of the credential store, which shells out per call.
         self._saver_signed_in: bool | None = None
+        #: The launching agent's Saver pin (team slot, then profile), stamped by
+        #: ``harness.subagent`` on a child it spawns and read by
+        #: ``saver.command.saver_choices``. ``None`` = no pin, the resolver's
+        #: "fall through" value, which is what every non-child session holds.
+        self._saver_agent_pin_value: bool | None = None
         self._stream_fn = stream_fn
         saver_bridge = getattr(self._stream_fn, "bind_saver_session", None)
         if callable(saver_bridge):

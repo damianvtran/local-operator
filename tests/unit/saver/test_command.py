@@ -19,6 +19,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -39,7 +40,7 @@ class Result:
     style: str
 
 
-def session(tmp_path: Path, mode: str = "opt_in", *, settings: dict | None = None):
+def session(tmp_path: Path, mode: str = "opt_in", *, settings: dict[str, Any] | None = None):
     """A session-shaped object over a real journal directory."""
     routing = settings if settings is not None else {"radient": {"saver": {"mode": mode}}}
     return SimpleNamespace(
@@ -54,7 +55,7 @@ def session(tmp_path: Path, mode: str = "opt_in", *, settings: dict | None = Non
     )
 
 
-def rows(tmp_path: Path) -> list[dict]:
+def rows(tmp_path: Path) -> list[dict[str, Any]]:
     """The custom rows actually on disk, read back through the real reader."""
     return [
         entry.payload

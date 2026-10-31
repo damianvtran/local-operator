@@ -23,6 +23,22 @@ from local_operator.tui.app import OperatorApp
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
 SETTINGS = {"radient": {"saver": {"mode": "opt_in"}}}
+
+
+class SaverFakeSession(FakeSession):
+    """The shared pilot fake plus the three Saver fields these tests drive.
+
+    Declared here rather than on ``FakeSession``: only this suite reads them, and
+    the shared fake is pinned to ``SessionProtocol`` by its own tests. Declaring
+    them is what lets pyright check every assignment and read below instead of
+    each one being an undeclared attribute on the base class.
+    """
+
+    routing_settings: dict[str, Any] | None = None
+    radient_saver_choice: bool | None = None
+    _transcript: Any = None
+
+
 #: The badge as the band paints it: the compression mark plus the word.
 BADGE = "\u2296 saver"
 
@@ -91,7 +107,7 @@ def _notices(app: OperatorApp) -> list[str]:
 @pytest.mark.asyncio
 async def test_every_documented_form_runs_as_typed(tmp_path: Path) -> None:
     """The four argument forms, plus the bare toggle and the usage answer."""
-    session = FakeSession()
+    session = SaverFakeSession()
     session.routing_settings = SETTINGS
     session.radient_saver_choice = None
     session._transcript = Transcript(tmp_path / "sessions" / "saver")
@@ -126,7 +142,7 @@ async def test_every_documented_form_runs_as_typed(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_the_argument_list_offers_saver_words_not_providers(tmp_path: Path) -> None:
     """The rows that made the enable form unrunnable are gone."""
-    session = FakeSession()
+    session = SaverFakeSession()
     session.routing_settings = SETTINGS
     session.radient_saver_choice = None
     session._transcript = Transcript(tmp_path / "sessions" / "saver")
@@ -154,7 +170,7 @@ async def test_the_argument_list_offers_saver_words_not_providers(tmp_path: Path
 @pytest.mark.asyncio
 async def test_the_badge_appears_iff_saver_is_on(tmp_path: Path) -> None:
     """Design D1 + UX U4: one rule, and no phantom mark when off."""
-    session = FakeSession()
+    session = SaverFakeSession()
     session.routing_settings = SETTINGS
     session.radient_saver_choice = None
     session._transcript = Transcript(tmp_path / "sessions" / "saver")
@@ -165,6 +181,7 @@ async def test_the_badge_appears_iff_saver_is_on(tmp_path: Path) -> None:
             await pilot.resize_terminal(width, 30)
             await pilot.pause()
             await _typed(pilot, app, "/saver inherit")
+            assert app._status is not None  # built on mount, which _boot awaited
             off = app._status.render_text(width).plain
             # The icon is the mark; the cwd in these tests is the worktree path
             # (`.../saver-cmd`), so a bare substring test would pass on the path.
@@ -217,7 +234,7 @@ async def test_the_routed_path_paints_through_apply_frontend_state(tmp_path: Pat
     """
     from local_operator.session.frontend_state import FrontendSessionState
 
-    session = FakeSession()
+    session = SaverFakeSession()
     session.routing_settings = SETTINGS
     session.radient_saver_choice = None
     session._transcript = Transcript(tmp_path / "sessions" / "saver")
@@ -230,6 +247,7 @@ async def test_the_routed_path_paints_through_apply_frontend_state(tmp_path: Pat
             for published in (True, False):
                 state = FrontendSessionState(session_id="s", epoch="e", saver_on=published)
                 app._apply_frontend_state(state)
+                assert app._status is not None  # built on mount
                 # Assert THIS call's own effect, before any later repaint from a
                 # different path: `_status._saver` is what `_apply_frontend_state`
                 # pushed, and it is the value the band renders. A longer settle
@@ -252,7 +270,7 @@ async def test_bare_radient_never_changes_state_however_many_enters(tmp_path: Pa
     because a buffer assertion is exactly what let the previous version pass while
     the feature flipped (QA Q2).
     """
-    session = FakeSession()
+    session = SaverFakeSession()
     session.routing_settings = SETTINGS
     session.radient_saver_choice = None
     journal_dir = tmp_path / "sessions" / "saver"
@@ -292,7 +310,7 @@ async def test_bare_radient_never_changes_state_however_many_enters(tmp_path: Pa
 @pytest.mark.asyncio
 async def test_an_explicit_radient_saver_value_still_writes(tmp_path: Path) -> None:
     """The rule is about the BARE form; an explicit value is honoured."""
-    session = FakeSession()
+    session = SaverFakeSession()
     session.routing_settings = SETTINGS
     session.radient_saver_choice = None
     session._transcript = Transcript(tmp_path / "sessions" / "saver")
@@ -315,7 +333,7 @@ async def test_signed_out_refuses_and_writes_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(saver_command, "signed_in", lambda: False)
-    session = FakeSession()
+    session = SaverFakeSession()
     session.routing_settings = SETTINGS
     session.radient_saver_choice = None
     session._transcript = Transcript(tmp_path / "sessions" / "saver")
@@ -339,7 +357,7 @@ async def test_the_app_host_agrees_with_the_serving_host_on_every_input(tmp_path
     `tests/unit/session/runtime/test_serving_saver_slash.py` runs against the
     serving dispatch, so the pair cannot drift apart again.
     """
-    session = FakeSession()
+    session = SaverFakeSession()
     session.routing_settings = SETTINGS
     session.radient_saver_choice = None
     journal_dir = tmp_path / "sessions" / "saver"
