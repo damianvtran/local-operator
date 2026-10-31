@@ -112,6 +112,25 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "Unlinks the task record under the config dir's supervisor/ dir, never a session path.",
     ),
+
+    # The receiver's wake-diagnostics counter: a config-dir sidecar published by
+    # atomic replace. ``diagnostics_path()`` is ``<config_dir>/team_bridge/
+    # wake_diagnostics.json`` and its temp sibling is that same FIXED name plus
+    # ``.tmp`` — both are module constants under the config root's team_bridge/
+    # directory, so neither can be a session directory or a transcript, and no
+    # caller input (conversation id, message id, sender) reaches either path.
+    # The file records a count per closed code, never per-session state
+    # (QA round 2).
+    (
+        "local_operator/team_bridge/wake_diagnostics.py::record_woke_nobody",
+        "os.replace",
+        "Atomic swap of a fixed-name .tmp FILE onto the config dir's team_bridge/ counter",
+    ),
+    (
+        "local_operator/team_bridge/wake_diagnostics.py::record_woke_nobody",
+        "<path>.unlink",
+        "Clears only that write's own .tmp FILE beside the counter; never a session path",
+    ),
     # Dedicated credential-root cache, never a transcript path: path_for hashes
     # the opaque session id under account-affinity/<auth-db namespace>/*.json.
     # replace takes only a sibling mkstemp REGULAR FILE; cleanup unlinks only
