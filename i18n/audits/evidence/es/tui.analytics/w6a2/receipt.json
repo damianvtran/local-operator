@@ -1,0 +1,39 @@
+{
+  "schema": 1,
+  "audit_id": "w6a2",
+  "audit_round": 2,
+  "locale": "es",
+  "namespace": "tui.analytics",
+  "audit_date": "2026-10-30",
+  "audited_revision": "b925c2e11be36653dfe88ac78f627bc2531427df",
+  "auditor": {
+    "agent": "i18n-auditor (lopdev team), es-tui-r2-b",
+    "session_or_instance": "3add261f67ba",
+    "model": "radient/auto"
+  },
+  "seals": [
+    {
+      "path": "i18n/audits/evidence/es/tui.analytics/w6a2/record.json",
+      "sha256": "fc27e1921bfe2bbb95eb7935d525545ad7040267a123b61cee396eb06e1861ff"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.analytics/w6a2/report.md",
+      "sha256": "d57a1a6177aa4bc1dce95c641f0a1869a3d9d0c6f8946b5cfa5a63174a063317"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.analytics/w6a2/audit.log",
+      "sha256": "2eac0a20c21efcbc59d3847c3b11554baa5384f1316a230cd24913e3a1c3819e"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.analytics/w6a2/checks.py",
+      "sha256": "5e0247c9b628daae3c0519556e97a689e2dbc2a7c93516c905a8a88830957b06"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.analytics/w6a2/probe_analytics_geometry.py.txt",
+      "sha256": "3f9149462413596e2a26504a42919efa492b70de285ce809720d3b9a8040bc1a"
+    }
+  ],
+  "verdict": "passed",
+  "unresolved_blocker_major_count": 0,
+  "note": "sealed at write time; a later edit to any companion invalidates its seal"
+}

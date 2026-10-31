@@ -1,0 +1,65 @@
+#!/usr/bin/env python3
+"""Measure the /analytics card geometry at 80x24 without loading the app.
+
+The stylesheet rules reproduced here (quoted from local_operator.tcss):
+  Screen { padding: 1; }
+  AnalyticsScreen .analytics-panel { width: 90%; max-width: 140;
+                                     height: 85%; padding: 1 2; }
+  #analytics-title { width: 100%; }
+The report body is a ReportView that CROPS an overrunning line, so the question
+is: what width does the body actually get, and does the Output row's note fit.
+"""
+
+from __future__ import annotations
+
+import asyncio
+
+from rich.cells import cell_len
+from textual.app import App, ComposeResult
+from textual.containers import Container
+from textual.widgets import Static
+
+
+class Panel(App):
+    def compose(self) -> ComposeResult:
+        with Container(classes="analytics-panel"):
+            yield Static(id="analytics-title")
+            yield Static(id="analytics-scroll")
+            yield Static(id="analytics-hint")
+
+    def on_mount(self) -> None:
+        self.screen.styles.padding = 1
+        panel = self.query_one(".analytics-panel")
+        panel.styles.width = "90%"
+        panel.styles.max_width = 140
+        panel.styles.padding = (1, 2)
+
+
+async def main() -> int:
+    for terminal in (80, 90, 120):
+        app = Panel()
+        async with app.run_test(size=(terminal, 24)) as pilot:
+            await pilot.pause()
+            await pilot.pause()
+            body = app.query_one("#analytics-scroll")
+            hint = app.query_one("#analytics-hint")
+            print(
+                f"{terminal}x24: body_width={body.size.width} hint_width={hint.size.width} "
+                f"panel_width={app.query_one('.analytics-panel').size.width}"
+            )
+            for label, note in (
+                ("en 12.3k", "12.3k generation, 12.3k thinking"),
+                ("es 12.3k", "12.3k generación, 12.3k razonamiento"),
+                ("es 12.3k old", "12.3k generación, 12.3k pensamiento"),
+                ("en 1.2M", "1.234.567 generation, 1.234.567 thinking"),
+                ("es 1.2M", "1.234.567 generación, 1.234.567 razonamiento"),
+            ):
+                row = 2 + 22 + 11 + 2 + cell_len(note)
+                print(
+                    f"    {label:<12} row={row} note={cell_len(note)} "
+                    f"-> {'FITS' if row <= body.size.width else 'CROPPED'}"
+                )
+    return 0
+
+
+raise SystemExit(asyncio.run(main()))

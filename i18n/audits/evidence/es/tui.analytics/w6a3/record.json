@@ -1,0 +1,146 @@
+{
+  "schema": 1,
+  "audit_id": "w6a3",
+  "audit_round": 3,
+  "audit_kind": "delta_audit_plus_class_sweep",
+  "locale": "es",
+  "namespace": "tui.analytics",
+  "audit_date": "2026-10-30",
+  "audited_revision": "4912975a4b5dd0c2c6011dbfcb20188c50e44084",
+  "audited_revision_note": "The es catalogue differs from HEAD (`M local_operator/i18n/catalogues/es/tui.analytics.json`, 2 values), so HEAD does not bind its bytes; input_hashes.target does, and checks.py re-prints it.",
+  "delta": {
+    "changed_keys": {
+      "tui.analytics.totals.cache_hit": {
+        "from": "Tasa de aciertos de caché",
+        "from_cells": 25,
+        "to": "Aciertos de caché",
+        "to_cells": 17
+      },
+      "tui.analytics.totals.decode": {
+        "from": "Tasa de decodificación",
+        "from_cells": 22,
+        "to": "Decodificación",
+        "to_cells": 14
+      }
+    },
+    "scope": "exactly two values; verified with `git diff` (see audit.log)"
+  },
+  "key_count": {
+    "en": 98,
+    "target": 98,
+    "context": 98
+  },
+  "verdict": "passed",
+  "verdict_reason": "The two changed labels are correct and fit; no OVER, label/value fusion or clipped figure exists in tui.analytics. The class sweep's one OVER is outside this namespace (tui.small goal_panel.done_suffix) and is recorded in the tui.small w6a3 bundle with status changes_requested.",
+  "auditor": {
+    "agent": "i18n-auditor (lopdev team), es-tui-r3-analytics",
+    "session": "13ac587c68a7",
+    "model": "anthropic/claude-sonnet-5-5",
+    "actual_model_source": "the session header of this run names anthropic/claude-sonnet-5-5; no provider failure, fallback or model switch occurred during this round, so the primary model produced every measurement and judgement in this record.",
+    "independent_from_translator_session": true,
+    "independence": "I did not write or remediate this copy, and I read neither author's session. Round-2 evidence was read as context only; every measurement here was re-derived on the current bytes.",
+    "date": "2026-10-30"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.analytics.json",
+      "sha256": "aa5221066aa84eedf0f924628d51bc8f08ccf5f26b5075638b9d40062f7b617e"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/es/tui.analytics.json",
+      "sha256": "0287f77ba86d6b7e1ea1e29107f7b3344932a338d5a3e70e4440c2b5397358b7",
+      "tracked": false,
+      "note": "modified/untracked relative to HEAD; HEAD does not bind these bytes, this sha256 does"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.analytics.context.json",
+      "sha256": "04356facdf1802a34a4be9ab6d3255cc9e92826d2b4e9ae917c43f687a9325eb"
+    }
+  },
+  "sweep": {
+    "scope": "tui.small tui.library tui.projects tui.analytics tui.import tui.hub_links tui.app tui.usage",
+    "method": "AST taint scan of local_operator/tui/*.py and widgets/*.py for catalogue strings reaching ljust/rjust/center/add_column/kv/marked/_pad_cells/format-spec pads; CSS fixed widths; module constants named *CELL*/*COL*/*WIDTH*; hand-traced and measured with rich.cells.cell_len; four spots confirmed in rendered frames (analytics Totals, goal panel, library rail, projects board).",
+    "namespaces_with_findings": [
+      "tui.small"
+    ],
+    "outside_analytics": "One OVER: tui.small.goal_panel.done_suffix. See ../../../tui.small/w6a3/. Everything else is OK, tolerated by a data-sized column or ladder, or English-parity (listed in report.md).",
+    "limits": "tui.app.help.* and tui.small notes were measured as composed rows; cached `info_panel`, `session_panel`, `todo_panel`, `session_sidebar` use width ladders and were read, not frame-tested, except where stated. Library detail pane, settings rows and picker footers were not frame-rendered."
+  },
+  "findings": [
+    {
+      "id": "R3-1",
+      "severity": "verdict",
+      "key": "tui.analytics.totals.cache_hit / totals.decode",
+      "status": "closed",
+      "text": "Both new labels fit the code-fixed 22-cell kv() column (17 and 14 cells, value at cell 24), the rendered frame has a blank cell before every value, and they still read as rate/measure beside `86%` / `42 tok/s` and their notes. Negative control (restore `Tasa de aciertos de caché`/`Tasa de decodificación`) trips both the static check (25 and 22 cells) and the rendered frame (`caché86%`, `decodificación42 tok/s`)."
+    },
+    {
+      "id": "R3-2",
+      "severity": "minor",
+      "key": "tui.analytics.totals.{cache_read,cache_write,cache_hit,decode}_note (+ fresh_note)",
+      "status": "open",
+      "text": "At the 80x24 card (body 66, note room 29) the Spanish notes are cropped by ReportView where English fits for four of the five (en 23/26/28/21, es 30/33/35/34 cells; fresh_note is cropped in both). The VALUE is intact, so not a fusion/clip of a figure; round-2 A7 recorded the same mechanism for output_note. Optional ≤29-cell wordings: `entrada servida de la caché` (27), `entrada escrita en la caché` (27), `del contexto servido de caché` (29), `velocidad medida` (16)."
+    },
+    {
+      "id": "R3-3",
+      "severity": "nit",
+      "key": "tui.analytics.totals.{cache_hit,decode}",
+      "status": "open",
+      "text": "`Aciertos de caché` / `Decodificación` drop the English `rate`; acceptable because the value carries % and tok/s and the note names the measure. If a unit-bearing label were wanted, `Aciertos de caché` could stay and `Decodificación` become `Vel. decodificación` (19) — a preference, not requested."
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [
+      "R3-1",
+      "R3-2",
+      "R3-3"
+    ],
+    "blocker_major_finding_ids": []
+  },
+  "negative_control": {
+    "restored_values": [
+      "Tasa de aciertos de caché",
+      "Tasa de decodificación"
+    ],
+    "static_check_tripped": true,
+    "rendered_frame_tripped": true,
+    "evidence": "audit.log sections 3 and 4 (TRIPPED lines and the `NEG|` rows)"
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/es/tui.analytics/w6a3/report.md",
+      "sha256": "a568cbaab9b03eb22b6fc8392d4d11a2830a98841bde6a95504017b593afac55"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.analytics/w6a3/audit.log",
+      "sha256": "10bb0168956567e3f0b6766e404fe1a2f3117ee12ed91fa1ba381424e3896f39"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.analytics/w6a3/checks.py",
+      "sha256": "77e2d9ed075a03a86a924e2ad73feb4f4eb7e685cd103f815994425ed4659b64"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.analytics/w6a3/probe_analytics_frame.py.txt",
+      "sha256": "621d15e500a2a925f04e878388f4a12f5328be8332a58f2a44db1dc4e637e3ad"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.analytics/w6a3/probe_goal_frame.py.txt",
+      "sha256": "b07ece3f54508823d6c860d2648697be3c3cfe57f4c8c126a4336c40a414c7a7"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.analytics/w6a3/probe_goal_wrap.py.txt",
+      "sha256": "fc7a0c3ef58f9bb7901588f63a692b562f700d48b7b1ad510dd07e82f996ccdd"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.analytics/w6a3/probe_library_rail.py.txt",
+      "sha256": "d66fd957f5355a65c7af0dc10b820d02686c94decc7fd1cd3b9460253c996832"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.analytics/w6a3/probe_projects_card.py.txt",
+      "sha256": "167e11f8f7bb845bbdb8268596a4148ede71fc1fb13821cf230c609c0efdbe28"
+    }
+  ],
+  "audit_notes_not_execution_log": "report.md is reasoning; audit.log is the verbatim execution capture. The probe_*.py.txt files are the exact scripts whose output is in audit.log."
+}

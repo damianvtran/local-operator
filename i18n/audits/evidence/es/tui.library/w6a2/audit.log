@@ -1,0 +1,103 @@
+audit.log — es/tui.library — audit id w6a2 (round 2) — 2026-10-30
+Auditor: translation-auditor (lopdev team), independent of the translator;
+authored none of this copy, repaired none of it, edited nothing outside
+i18n/audits/evidence/es/.
+Model ACTUALLY running: radient/auto (session header anthropic/claude-sonnet-5-5;
+provider-quota fallbacks openai/gpt-6-astra -> kimi/k3.1-pro -> radient/auto).
+All commands below were RUN in this worktree; output is verbatim.
+
+## CMD  git rev-parse HEAD && git branch --show-current
+$ git rev-parse HEAD
+b925c2e11be36653dfe88ac78f627bc2531427df
+$ git branch --show-current
+feat/i18n-es-tui
+
+## CMD  git status --porcelain -- <target>
+$ git status --porcelain -- local_operator/i18n/catalogues/es/tui.library.json
+?? local_operator/i18n/catalogues/es/tui.library.json
+
+## CMD  shasum -a 256 of en / target / context
+5a389b6a7d8de06621462f2685eff6dc95cd4cd6584d35dd6c26a0a19ad50b11  local_operator/i18n/catalogues/en/tui.library.json
+81cbce350526ce25b68aeebd09175c747716dc8324e9277b424ec44cf6b3f205  local_operator/i18n/catalogues/es/tui.library.json
+(no context sidecar for this namespace)
+
+## CMD  repo validator (catalogue checks): python3 scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+
+## CMD  this bundle's checks: PYTHONPATH=$PWD /Users/damian/local-operator/.venv/bin/python i18n/audits/evidence/es/tui.library/w6a2/checks.py
+== es audit w6a2 :: namespace tui.library
+repo            /Users/damian/lo-i18n-es
+en              local_operator/i18n/catalogues/en/tui.library.json  sha256 5a389b6a7d8de06621462f2685eff6dc95cd4cd6584d35dd6c26a0a19ad50b11  messages 108
+target          local_operator/i18n/catalogues/es/tui.library.json  sha256 81cbce350526ce25b68aeebd09175c747716dc8324e9277b424ec44cf6b3f205  messages 108
+context         (none — this namespace has no English sidecar)
+
+[PASS] C1 keys: 0 problem(s)
+[PASS] C2 arguments: 0 problem(s)
+[PASS] C3 plural categories: 0 problem(s)
+[PASS] C4 machine tokens: 0 problem(s)
+[PASS] C5 whitespace: 0 problem(s)
+[PASS] C6 maxCells: 0 problem(s)
+[PASS] C7 register/typography: 0 problem(s)
+[PASS] C8 english residue: 0 problem(s)
+[PASS] C10 remediation scope: 0 problem(s)
+[PASS] C11 changed-key widths: 0 problem(s)
+[PASS] C12 goal-panel pair: 0 problem(s)
+[PASS] C13 code_count constraint: 0 problem(s)
+
+maxCells budgets: none declared for this namespace (no usable sidecar)
+
+C11 changed-key widths, with placeholders substituted as the code supplies them:
+       tui.library.rail_hidden                              no budget  en  61  es  45  [RAIL_MIN_WIDTH = 90]
+       tui.library.form_name_placeholder                    no budget  en  27  es  47  [no arguments]
+
+C9 ship gate: resolve.eligible_locale('es') -> 'en' — the generated shipped.json in this working tree does not list es, so messages.render() would answer in ENGLISH. C9 therefore renders through the same catalogue lookup + ICU formatter render_record uses after the gate; the gate itself is a ledger state, not a property of these bytes.
+[PASS] C9 plural rendering (executed): 0 problem(s)
+        tui.library.asset_count [count=0] -> '0 recursos'
+        tui.library.asset_count [count=1] -> '1 recurso'
+        tui.library.asset_count [count=2] -> '2 recursos'
+        tui.library.asset_count [count=1000000] -> '1.000.000 de recursos'
+        tui.library.detail_sources [count=1] -> '1 conversación'
+        tui.library.detail_sources [count=2] -> '2 conversaciones'
+        tui.library.detail_sources [count=1000000] -> '1.000.000 de conversaciones'
+
+negative controls (each must be CAUGHT):
+  [CAUGHT] NC1 drop a placeholder (tui.library.ask_prompt)
+           -> tui.library.ask_prompt: arguments (('path', 'simple'), ('kind', 'simple'), ('session', 'simple')) != en's (('name', 'simple'), ('path', 'simple'), ('kind', 'simple'), ('session', 'simple'))
+  [CAUGHT] NC2 relabel a plural branch as few (tui.library.asset_count)
+           -> tui.library.asset_count: plural 'count' carries ['few', 'one', 'other'], es requires exactly ['many', 'one', 'other']
+  [CAUGHT] NC3 strip a backtick code span (synthetic fixture)
+           -> nc.key: backtick code span [] != en's ['`browser`']
+  [CAUGHT] NC4 trim a load-bearing edge space (synthetic fixture)
+           -> nc.key: edge whitespace/newlines (0, 0, 0) != en's (0, 1, 0) (en='allow ', es='permitir')
+  [CAUGHT] NC5 inflate a value past a 4-cell budget (tui.library.category_all)
+           -> tui.library.category_all: es 5 cells > maxCells 4 (en 3) — 'Todos'
+  [CAUGHT] NC6 use a forbidden glossary term
+           -> nc.key: contains 'demonio' — daemon stays English (es guide, W2 amendment)
+  [CAUGHT] NC7 leave English prose untranslated
+           -> nc.key: English word 'the' in 'Open the settings page'
+  [CAUGHT] NC8 drop a key from the target
+           -> missing key 'nc.other'
+  [CAUGHT] NC9 render a plural with no many arm at 10^6
+           -> nc.key: the 10^6 render '1.000.000 otros' lacks ' de ' — the `many` branch did not select
+
+round-2 negative controls (each must be CAUGHT):
+  [CAUGHT] C10 scope: one edit OUTSIDE the recorded delta
+           -> scope drift: reverting the recorded changes does not reproduce round-1 bytes (c3fb67de90fa4f73380b8f6e217305a6f606c64e9d38e84446dac6eb31137ef7 != 4b3e5982fdf26c71896579709f968dd25508f9fa48a1f942c0f616c0f4acbc62) — a value OUTSIDE the recorded delta changed
+  [CAUGHT] C10 scope: one recorded key left holding its round-1 value
+           -> tui.library.rail_hidden: expected the remediated value 'Los filtros aparecen a partir de {width} columnas.', found 'Los filtros aparecen cuando el terminal tiene al menos {width} columnas de ancho.'
+  [CAUGHT] C2 arguments: the placeholder dropped from tui.library.rail_hidden
+           -> tui.library.rail_hidden: arguments () != en's (('width', 'simple'),)
+  [CAUGHT] C7 typography: ASCII ellipsis reintroduced in a remediated key
+           -> tui.library.rail_hidden: ASCII ellipsis instead of … — '... Los filtros aparecen a partir de {width} columnas.'
+
+checks.py: PASS (hard checks clean; controls all caught)
+EXIT=0
+
+## CMD  ship-gate state observed while running C9 (never modified by this audit)
+$ git status --porcelain -- local_operator/i18n/data/shipped.json
+ M local_operator/i18n/data/shipped.json
+$ git diff --stat -- local_operator/i18n/data/shipped.json
+ local_operator/i18n/data/shipped.json | 1 -
+ 1 file changed, 1 deletion(-)
+$ git show HEAD:local_operator/i18n/data/shipped.json | tr -d "\n "
+{"locales":["en","fr","es","zh-CN","ru","vi","ur","hi"],"schema":1}

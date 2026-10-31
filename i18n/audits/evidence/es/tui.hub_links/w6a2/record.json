@@ -1,0 +1,154 @@
+{
+  "schema": 1,
+  "audit_id": "w6a2",
+  "audit_round": 2,
+  "locale": "es",
+  "namespace": "tui.hub_links",
+  "audit_date": "2026-10-30",
+  "audited_revision": "b925c2e11be36653dfe88ac78f627bc2531427df",
+  "audited_revision_note": "The es target is UNTRACKED at this revision, so HEAD does not bind its bytes. The on-disk sha256 in input_hashes.target is the binding identity; the probe re-reads the same files and prints their digests at the top of its run (audit.log §3).",
+  "branch_checked_out": "feat/i18n-es-tui",
+  "branch_note": "the task brief named `tui-wip`; `git rev-parse --abbrev-ref HEAD` reports feat/i18n-es-tui, recorded here as found",
+  "key_count": {
+    "en": 56,
+    "target": 56,
+    "context": 55
+  },
+  "verdict": "changes_requested",
+  "result": "changes_requested — 0 blocker, 1 major (stands), 0 new findings",
+  "verdict_reason": "Mechanical and width deck clean on the current bytes. HL-2 and HL-4 closed; HL-3's non-application accepted as a disposition. HL-1 stands in its remediated form: the string no longer points at the notice line it is printed on (the w6a1 defect), but it now names 'el diálogo' — a surface that does not exist in this product and a term with exactly one occurrence in the whole es catalogue, where the glossary's rendering for prompt is 'prompt'.",
+  "auditor": {
+    "agent": "i18n-auditor (lopdev team), independent Spanish translation auditor",
+    "session_or_instance": "7fa3a39af5d9",
+    "model": "radient/auto",
+    "model_note": "Model as actually run, not the session header. The header named anthropic/claude-sonnet-5-5; provider quota failures switched the session to openai/gpt-6-astra, then kimi/k3.1-pro, then radient/auto before any audit work began. Every check, measurement and finding in this bundle was produced under radient/auto. No claim is made for the primary model.",
+    "date": "2026-10-30",
+    "independent_from_translator_session": true,
+    "independent_of_round_1_session": "6a2f6fa808a7 (the w6a1 auditor session; different session, same inputs re-read)",
+    "actual_model_source": "session model-switch events in the run transcript (quota fallbacks), disclosed verbatim",
+    "independence": "I authored none of this copy and repaired none of it. I wrote no catalogue, sidecar, ledger, allowance or generated file; only this evidence directory. Judgement is LLM reasoning against the en source, the context sidecar, the shipped es catalogues and the rendering code. No translation/memory/MT service was used to compare or back-translate."
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.hub_links.json",
+      "sha256": "7fbe6713f8ac8f312884476c498c3b74e76c5f0853bdd027f25fc47d489311bb",
+      "tracked": true
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.hub_links.context.json",
+      "sha256": "9b81676163337d8a93e38138909dbd4801f8edd8416075c6efb994f9870c682e",
+      "tracked": true
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/es/tui.hub_links.json",
+      "sha256": "f3bde8f887ec44c2ab4b1fd79ac0d227fdb96561d3c4b992076157f6bc239c76",
+      "tracked": false
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/es/tui.hub_links/w6a2/record.json",
+      "role": "record",
+      "sha256": "self"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.hub_links/w6a2/report.md",
+      "role": "audit report (findings, measurements, limitations)",
+      "sha256": "e8c55a1e954dbf30c3c94912423be49e520027281edfe01fa471da0131c8497d"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.hub_links/w6a2/audit.log",
+      "role": "execution log: validator + probe + measurement commands and their actual output",
+      "sha256": "a13a00b5f37952a72477b9e4b1df4ac892908a259a29c2bf5d9b4877c8254833"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.hub_links/w6a2/checks.py",
+      "role": "the probe that produced sections A-D, including the negative controls",
+      "sha256": "cd4b5f867beacc48eaa16ea2b29ce4335210cadcfae5c2a16381dc8954123278"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "changes_requested",
+    "unresolved_blocker_major_count": 1,
+    "finding_ids": [
+      "HL-1",
+      "HL-2",
+      "HL-3",
+      "HL-4"
+    ]
+  },
+  "findings": [
+    {
+      "id": "HL-1",
+      "severity": "major",
+      "status": "stands (narrowed)",
+      "key": "tui.hub_links.refusal.revision_moved",
+      "en": "This link changed while you were reviewing it. Reopen the prompt to confirm the latest.",
+      "round_1_value": "Este vínculo cambió mientras lo revisabas. Vuelve a abrir el aviso para confirmar la última versión.",
+      "current": "Este vínculo cambió mientras lo revisabas. Vuelve a abrir el diálogo y confirma la versión más reciente.",
+      "problem": "The 'aviso' collision is fixed, but the replacement names a referent that does not exist: the panel is a Static overlay opened by /hub (hub_links_panel.py:102-103), not a ModalScreen, and the thing to re-arm is the inline consent block inside that card. The app's modal screens (/resume picker, settings sheets) are the only dialog-like surfaces, so 'diálogo' points elsewhere. 'diálogo' occurs once in the es catalogue; 'prompt' is the glossary's es rendering (38 occurrences in 36 values).",
+      "suggestion": "Este vínculo cambió mientras lo revisabas. Vuelve a abrir el prompt y confirma la versión más reciente. (no-anglicism alternative: '… Vuelve a activar la confirmación y comprueba la versión más reciente.')",
+      "evidence": "hub_links_panel.py:100-105 (class HubLinksPanel(Static), 'The overlay itself. Opened by /hub'), 565-577 (arming), 599-607 (notice); audit.log §5 term counts"
+    },
+    {
+      "id": "HL-2",
+      "severity": "minor",
+      "status": "closed",
+      "key": "tui.hub_links.reason.baseline_unknown",
+      "en": "This link's history isn't known yet, so it can't publish unattended. Pull or resolve it first.",
+      "current": "Todavía no se conoce el historial de este vínculo, así que no puede publicar sin supervisión. Haz pull primero o resuelve el vínculo.",
+      "problem": "Closed: the ambiguous 'resuélvelo' is gone and the recovery names the link.",
+      "suggestion": "none",
+      "evidence": "probe C2 passes"
+    },
+    {
+      "id": "HL-3",
+      "severity": "nit",
+      "status": "disposition accepted (not applied)",
+      "key": "tui.hub_links.reason.unsafe_publication",
+      "en": "Publishing to this public location needs your explicit consent first.",
+      "current": "Publicar en esta ubicación pública requiere antes tu consentimiento explícito.",
+      "problem": "Deliberately unchanged. The adverb placement is grammatical and the meaning correct; it was a preference, so leaving it does not affect the verdict.",
+      "suggestion": "no action required",
+      "evidence": "implementer's declared non-application; probe leaves it unasserted"
+    },
+    {
+      "id": "HL-4",
+      "severity": "nit",
+      "status": "closed",
+      "key": "tui.hub_links.action.pull",
+      "en": "Pull now",
+      "current": "Hacer pull ahora",
+      "problem": "Closed: matches the es guide's recorded amendment ('pull'/'push' stay English, infinitive labels) and the shipped CLI wording.",
+      "suggestion": "none",
+      "evidence": "i18n/style-guides/es.md:88-93; the key has no call site in this checkout (only the generated action_pull() accessor)"
+    }
+  ],
+  "round_1_bundle": "i18n/audits/evidence/es/tui.hub_links/w6a1/",
+  "check_output": [
+    {
+      "cmd": "python3 scripts/i18n/check.py",
+      "result": "exit 0 — 'check.py: ok — 191 file(s) scanned, 2348 literal(s) at or below the baseline, catalogues consistent; 51 advisory finding(s)'"
+    },
+    {
+      "cmd": "~/local-operator/.venv/bin/python i18n/audits/evidence/es/tui.hub_links/w6a2/checks.py",
+      "result": "exit 1 — 3 failing checks across the three namespaces (1 hub_links, 0 app, 2 usage); 11/11 negative controls behaved as required (10 breakages caught, 1 intended pass accepted)"
+    },
+    {
+      "cmd": "~/local-operator/.venv/bin/python - <<'PY' (measurement block captured in audit.log §4)",
+      "result": "cell_len from rich.cells; name_width derived from the live SLASH_COMMANDS registry (20); /help rows 68/73/72 vs 74; stop_all 57 vs 70; usage counters 27 vs 31 floor and 42 vs en 45; paid notes continue 54/44, family_caps 55/31, eligibility 37/27"
+    },
+    {
+      "cmd": "python3 (term counts over 95 es catalogue files, audit.log §5)",
+      "result": "diálogo: 1 occurrence (the audited key); prompt: 38 occurrences in 36 values"
+    }
+  ],
+  "audit_notes_not_execution_log": "report.md and verdict_reason are reasoning; audit.log holds the captured command output and is the execution record.",
+  "limitations": [
+    "LLM semantic judgement; no native-speaker attestation, and native review is not claimed as a gate.",
+    "No rendered TUI frame captured: widths are computed with rich.cells.cell_len against the geometry the source documents, and truncation points are computed from Text.truncate(..., overflow='ellipsis').",
+    "No repo-wide pytest suite or generator was run; the validator plus the probe are the mechanical evidence.",
+    "audit_notes_not_execution_log: report.md is reasoning; audit.log is the captured command output and is the execution record."
+  ],
+  "no_writes": "No catalogue, sidecar, ledger, allowance, baseline or generated file was written by this audit; only this evidence directory."
+}

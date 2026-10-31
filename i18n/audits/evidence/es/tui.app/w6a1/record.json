@@ -1,0 +1,197 @@
+{
+  "schema": 1,
+  "audit_id": "w6a1",
+  "audit_round": 1,
+  "locale": "es",
+  "namespace": "tui.app",
+  "audit_date": "2026-10-30",
+  "audited_revision": "b925c2e11be36653dfe88ac78f627bc2531427df",
+  "audited_revision_note": "The es target is UNTRACKED at this revision, so HEAD does not bind its bytes. The on-disk sha256 in input_hashes.target is the binding identity, and the probe re-derives it through local_operator.i18n.catalogues.load_catalogue() in section A.",
+  "key_count": {
+    "en": 46,
+    "target": 46,
+    "context": 46
+  },
+  "verdict": "changes_requested",
+  "result": "changes_requested — 0 blocker, 3 major, 2 minor, 3 nit",
+  "verdict_reason": "Mechanical deck clean: six plurals each carry one/many/other with every branch rendering its source counterpart's arguments; NBSPs, glyph spans, commands and env vars are byte-preserved. Three majors remain: {label} activado/desactivado disagrees with both switch labels (búsqueda web, consulta web), goals.settled_heading renders 'asentados' where the panel's list is the finished one, and three /help key rows compose past the source's pinned 74-cell ceiling at 80 columns (80/79/78).",
+  "auditor": {
+    "agent": "i18n-auditor (lopdev team), independent Spanish translation auditor",
+    "session_or_instance": "6a2f6fa808a7",
+    "model": "radient/auto",
+    "model_note": "Model as actually run. Session header was anthropic/claude-sonnet-5-5; three provider-failure (quota) switches occurred before any work was done: -> openai/gpt-6-astra -> kimi/k3.1-pro -> radient/auto. Every check, reading and finding in this bundle was produced under radient/auto. No claim is made for the primary model.",
+    "date": "2026-10-30",
+    "independence": "I authored none of this copy and repaired none of it. I wrote no catalogue, sidecar, ledger, allowance or generated file; only this evidence directory. Judgement is LLM reasoning against en source, the context sidecar, the shipped es catalogues and the rendering code; no translation/MT service was used to compare or back-translate."
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.app.json",
+      "sha256": "7e5f39df72438663a66afca0e5338e90b7b984bdca6b562195ce976945bd7875",
+      "tracked": true
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/es/tui.app.json",
+      "sha256": "c735760d47d99853ed7aa1e2ecdb6e41d1cba1cecd4bb5fdf98f2b56c6906a38",
+      "tracked": false
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.app.context.json",
+      "sha256": "a840ac61e3c1e1178825257c1b9ebaa6ebfef500df4f3a29e8c463b50eef42fa",
+      "tracked": true
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/es/tui.app/w6a1/record.json",
+      "role": "record",
+      "sha256": "self"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.app/w6a1/report.md",
+      "role": "audit report (findings, witnesses, limitations)",
+      "sha256": "22df4f577e0a4148b750f9aa87485ba74823d9b823eb41f42668f452d5eafcdf"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.app/w6a1/audit.log",
+      "role": "execution log: validator + probe commands and their actual output",
+      "sha256": "fcece0254dd95f2709125e7e6551b06c9a0bdcf3d6bf7bf23aa1b47973e1a49c"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.app/w6a1/checks.py",
+      "role": "the probe that produced sections A-D, including the negative controls",
+      "sha256": "341db1b989d0725dae8d8fdcd343a37501cb436457138a7568c871d111f92a79"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "changes_requested",
+    "unresolved_blocker_major_count": 3,
+    "finding_ids": [
+      "APP-1",
+      "APP-2",
+      "APP-3",
+      "APP-4",
+      "APP-5",
+      "APP-6",
+      "APP-7",
+      "APP-8"
+    ]
+  },
+  "findings": [
+    {
+      "id": "APP-1",
+      "severity": "major",
+      "keys": [
+        "tui.app.config.toggle_on",
+        "tui.app.config.toggle_off"
+      ],
+      "en": "{label} on — takes effect from your next turn / {label} off — calls will be refused until it is turned back on",
+      "current": "{label} activado — surte efecto desde tu próximo turno / {label} desactivado — las llamadas se rechazarán hasta que se vuelva a activar",
+      "problem": "Gender agreement is wrong in every render. The only values {label} receives are the two switch names built at app.py:42825 — 'búsqueda web' and 'consulta web' — both feminine, so the receipt reads 'búsqueda web activado' / 'consulta web desactivado'.",
+      "suggestion": "{label} activada — surte efecto desde tu próximo turno and {label} desactivada — las llamadas se rechazarán hasta que se vuelva a activar (a future masculine label would need a neutral shape, e.g. '{label}: activado')",
+      "evidence": "app.py:42824-42836 (label builders + the two receipt keys); the same two labels are the only values either template can receive"
+    },
+    {
+      "id": "APP-2",
+      "severity": "major",
+      "key": "tui.app.goals.settled_heading",
+      "en": "settled goals",
+      "current": "objetivos asentados",
+      "problem": "'asentado' is a calque of 'settled' in its resting/established sense; the list it heads is the FINISHED goals (goal_panel.py paints them with _DONE_STYLE = Style(strike=True, dim=True), whose comment says the strike reads as 'finished'), so a reader can take it as 'goals that were set'. The in-flight tui.small catalogue prints the same heading as 'finalizados'. The only committed use of 'asentados' for settled (wire.settings, about projects being done/paused/archived) does not transfer to completed goals.",
+      "suggestion": "objetivos finalizados",
+      "evidence": "local_operator/tui/widgets/goal_panel.py:_DONE_STYLE and 276; tui.small.goal_panel.settled_heading (untracked sibling, so NOT cited as shipped precedent); wire.settings.wakes_triggers_project_staleness_enabled.help"
+    },
+    {
+      "id": "APP-3",
+      "severity": "major",
+      "keys": [
+        "tui.app.help.paste_note",
+        "tui.app.help.skill_note",
+        "tui.app.help.cmd_paste_note"
+      ],
+      "en": "attaches an image or file from the system clipboard / runs a named skill on the rest of the line / same, where the terminal forwards it; not Terminal.app",
+      "current": "adjunta una imagen o un archivo del portapapeles del sistema (60) / ejecuta una habilidad con nombre sobre el resto de la línea (59) / lo mismo, donde la terminal lo reenvíe; no en Terminal.app (58)",
+      "problem": "Every /help key row composes as name_width + note and the source pins the composed row at <= 74 cells at 80 columns (app.py:56210-56216, 56249-56265), with the cmd+v row documented as having ZERO headroom ('composes to EXACTLY 74'). name_width is 20 here, so these compose to 80, 79 and 78: each wraps, and the wrapped tail lands at the key gutter where it reads as another key row (design round 1 D2). A pinned test asserts the bound.",
+      "suggestion": "adjunta una imagen o un archivo del portapapeles (48 -> 68); ejecuta la habilidad indicada en el resto de la línea (53 -> 73); igual, si la terminal lo reenvía; no en Terminal.app (52 -> 72)",
+      "evidence": "app.py:56199-56600 (help block comments and the two cached-width tests); rich.cells.cell_len measurements in audit.log section B"
+    },
+    {
+      "id": "APP-4",
+      "severity": "minor",
+      "key": "tui.app.stop_all.already_leaving",
+      "en": "{shown} already leaving — asked again, then left alone",
+      "current": "{shown} ya saliendo — se les volvió a pedir y no se insistió más",
+      "problem": "The en phrase is deliberately count-neutral ('the phrase covers one and many, so only the digit varies' — sidecar); the es adds a plural indirect object, so with one session it reads '1 ya saliendo — se les volvió a pedir'.",
+      "suggestion": "{shown} ya saliendo — se volvió a pedir y no se insistió más (impersonal, count-neutral)",
+      "evidence": "tui.app.context.json note for this key; the string is rendered once for all counts (no ICU plural)"
+    },
+    {
+      "id": "APP-5",
+      "severity": "minor",
+      "key": "tui.app.help.cmd_paste_note",
+      "en": "same, where the terminal forwards it; not Terminal.app",
+      "current": "lo mismo, donde la terminal lo reenvíe; no en Terminal.app",
+      "problem": "Subjunctive reads hypothetical, but the fact is definite: this terminal does or does not forward the chord. Indicative is the natural mood, and the shorter wording also fits the row (APP-3).",
+      "suggestion": "igual, si la terminal lo reenvía; no en Terminal.app",
+      "evidence": "idiom; en states a condition on the terminal, not a hypothesis"
+    },
+    {
+      "id": "APP-6",
+      "severity": "nit",
+      "key": "tui.app.config.label_web_fetch",
+      "en": "web fetch",
+      "current": "consulta web",
+      "problem": "'consulta' in Spanish dev usage means query/request, so the pair 'búsqueda web' / 'consulta web' needs context to disambiguate; 'descarga web' or 'obtención web' names what the tool does. Current wording is distinguishable and matches house style, so this is preference.",
+      "suggestion": "descarga web",
+      "evidence": "the two switch names are adjacent in the same receipt list"
+    },
+    {
+      "id": "APP-7",
+      "severity": "nit",
+      "key": "tui.app.help.skill_note",
+      "en": "runs a named skill on the rest of the line",
+      "current": "ejecuta una habilidad con nombre sobre el resto de la línea",
+      "problem": "'con nombre' is a calque of 'a named skill' and reads as 'with a name'; the gesture runs the skill you name there. Fixed in the APP-3 replacement.",
+      "suggestion": "ejecuta la habilidad indicada en el resto de la línea",
+      "evidence": "idiom"
+    },
+    {
+      "id": "APP-8",
+      "severity": "nit",
+      "keys": [
+        "tui.app.sidebar.why_retry_budget",
+        "tui.app.sidebar.why_retired",
+        "tui.app.sidebar.why_left_screen"
+      ],
+      "en": "retry budget exhausted / source retired / source left the screen",
+      "current": "presupuesto de reintentos agotado / origen retirado / origen fuera de pantalla",
+      "problem": "These three are consumed only by a logger.warning call (app.py:11503-11511), never by the sidebar panel. The glossary keeps developer logs English (allowlist category), so translating them puts Spanish into logs nobody localises. Catalogue-scope question, not a translator defect — the translations themselves are correct.",
+      "suggestion": "record the intent: either allowlist them as dev logs or accept translated log lines",
+      "evidence": "app.py:11499-11511; i18n/glossary.md section 1 (dev logs keep English); i18n/allowlist.toml"
+    }
+  ],
+  "check_output": [
+    {
+      "cmd": "python3 scripts/i18n/check.py",
+      "result": "exit 0 — 'check.py: ok — 191 file(s) scanned, 2348 literal(s) at or below the baseline, catalogues consistent; 51 advisory finding(s)'"
+    },
+    {
+      "cmd": "PYTHONPATH=$PWD ~/local-operator/.venv/bin/python i18n/audits/evidence/es/tui.app/w6a1/checks.py --namespace tui.app",
+      "result": "exit 1 (findings present). 25 checks pass, 7 fail. Section A: all mechanical checks pass on 46 keys, including six plurals with one/many/other, no empty branch, and per-branch argument parity. Section B: 3 of 6 /help rows exceed the pinned 74-cell ceiling. Section C: toggle agreement (2 keys), settled heading and already_leaving fail; check-in wording, NBSPs and the stop_all warning pass; the plural render matrix shows correct one/many/other selection at 1, 2, 10^6 and 1.5M."
+    },
+    {
+      "cmd": "same probe, full three-namespace run (section D)",
+      "result": "10 negative controls: 10 behaved as required (8 breakages caught, 2 intended passes accepted)"
+    },
+    {
+      "cmd": "runtime plural render check",
+      "result": "1 despertar / 2 despertares / 1000000 de despertares / 1500000 despertares; 1 ventana / 2 ventanas / 1000000 de ventanas (es: many only at exact 10^6 multiples)"
+    }
+  ],
+  "limitations": [
+    "LLM semantic judgement; no native-speaker attestation.",
+    "No rendered TUI frame captured. The three wrap findings are derived from the composed-row arithmetic the source itself documents (name_width 20 + note, ceiling 74) plus rich.cells.cell_len, not photographed from a running app.",
+    "Width ruler taken from ~/local-operator/.venv (this checkout has no .venv); no dependency was installed for the audit.",
+    "The tui.small witness is untracked in this worktree, so it is reported as an in-flight sibling catalogue and never as shipped precedent.",
+    "No repo-wide tests or generators were run; the catalogue loader + parser probe is the mechanical check."
+  ]
+}

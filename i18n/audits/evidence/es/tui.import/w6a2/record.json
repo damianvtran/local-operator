@@ -1,0 +1,190 @@
+{
+  "schema": 1,
+  "audit_id": "w6a2",
+  "audit_round": 2,
+  "locale": "es",
+  "namespace": "tui.import",
+  "audit_date": "2026-10-30",
+  "audited_revision": "b925c2e11be36653dfe88ac78f627bc2531427df",
+  "audited_revision_note": "The es catalogue is UNTRACKED at this revision (`?? local_operator/i18n/catalogues/es/tui.import.json`), so HEAD does not bind its bytes. This audit binds to the exact on-disk target sha256 in input_hashes.target, which checks.py re-prints; the binding is not assumed.",
+  "key_count": {
+    "en": 87,
+    "target": 87,
+    "context": 0
+  },
+  "verdict": "passed",
+  "result": "passed — 0 blocker, 0 major, 0 minor, 4 nit (3 deferred from round 1, 1 recorded now)",
+  "verdict_reason": "The round-1 major is closed on the current bytes, not on the implementer's word: the sessions-state hint row re-assembles to 75 cells against the view's documented 76-cell row at 80x24 and ends with the complete `esc volver`, and the assembler is proven by reproducing the real widget's EN row byte-for-byte (62 cells, painted headless). I2 (`listar`) and I3 (`… con la tecla espacio …`) are applied verbatim; the longer error message renders complete in the empty-state body (75-cell message in a 76-cell body). All other state rows measure 10-48 cells; the destructive-path semantics and the state/outcome gender split are byte-identical to round 1. The one new observation is a nit: the show_move gate's 74-cell floor (a 78-column terminal) is one cell narrower than this row, clipping the final `r` of `volver` in that single column.",
+  "verdict_scope": "passed is driven by the checks: 0 blocking failures and all 14 negative controls tripped, including the three round-2 controls that restore the round-1 defects. I4 is a recorded nit outside the documented 80x24 budget; N1/N2 are deferred nits and N3 had no wording requested.",
+  "auditor": {
+    "agent": "i18n-auditor (lopdev team), es-tui-r2-b",
+    "session_or_instance": "3add261f67ba",
+    "model": "radient/auto",
+    "model_note": "Model AS ACTUALLY RUN: radient/auto. The session opened on anthropic/claude-sonnet-5-5 and hit consecutive provider failures (quota): openai/gpt-6-astra, then kimi/k3.1-pro, then radient/auto. The style guide, glossary and English source were read under the earlier models; every measurement, every catalogue read of the CURRENT bytes and every judgement in this record were produced under radient/auto. No model was pinned, and no claim is made that the primary model performed this round.",
+    "date": "2026-10-30",
+    "independence": "I authored none of this copy and applied none of the remediation. I read the English source, the context sidecar, the es style guide and glossary, the shipped es TUI catalogues, and the widgets that consume these keys (harness_import_view.py, analytics_panel.py, subagent_view.py HintButton, report_view.py). Measurements come from the runtime's own ICU parser, render_message, rich.cells.cell_len, and headless mountings of the real widgets. I edited no catalogue, sidecar, ledger, allowance or generated file."
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.import.json",
+      "revision": "b925c2e11be36653dfe88ac78f627bc2531427df",
+      "sha256": "932e0f87210ff80950346c684afb000907610c9ff35388125977182120b136c2"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/es/tui.import.json",
+      "sha256": "17a4dec148f5de8bfb07e79c35e0b84eaa02da13bbf713676c42dbaa4d840725",
+      "tracked": false
+    },
+    "context": null
+  },
+  "round1_reference": {
+    "audit_id": "w6a1",
+    "record": "i18n/audits/evidence/es/tui.import/w6a1/record.json",
+    "verdict": "changes_requested — 0 blocker, 1 major, 2 minor, 3 nit",
+    "target_sha256": "ffb39975f8a17571c316e9a2f2c2ff7657011732769136ee3e4d537cc400a422",
+    "target_changed_since_round1": true
+  },
+  "findings": [
+    {
+      "id": "I1",
+      "key": "tui.import.hint_select / hint_preview / all_none / hint_move / hint_back",
+      "severity": "major",
+      "round": 1,
+      "status": "closed",
+      "disposition": "applied verbatim (space elegir); verified by re-measurement",
+      "previous": "↑↓ mover · space seleccionar · a todas/ninguna · enter vista previa · esc volver",
+      "current": "↑↓ mover · space elegir · a todas/ninguna · enter vista previa · esc volver",
+      "measured_cells": {
+        "es_row": 75,
+        "en_row": 62,
+        "documented_budget": 76,
+        "spare": 1
+      },
+      "evidence": "Row re-assembled from the current catalogue with HintButton._build's seam rule, which the real widget reproduces byte-identically for EN at 80x24 (62 cells, rig in audit.log). The row now ends with the complete `esc volver` (10 cells, offset 65) inside the 76-cell row; every other state's row measures 10-48 cells.",
+      "new_defect": "none; the gate-boundary band is recorded separately as I4"
+    },
+    {
+      "id": "I2",
+      "key": "tui.import.hint_list",
+      "severity": "minor",
+      "round": 1,
+      "status": "closed",
+      "disposition": "applied verbatim",
+      "previous": "lista",
+      "current": "listar",
+      "measured_cells": {
+        "row": 25
+      },
+      "evidence": "Infinitive action label; result row reads `enter listar · esc volver`. A new [register] check asserts an infinitive on all nine verb hints and trips on `lista`.",
+      "new_defect": "none found"
+    },
+    {
+      "id": "I3",
+      "key": "tui.import.error_select",
+      "severity": "minor",
+      "round": 1,
+      "status": "closed",
+      "disposition": "applied verbatim",
+      "previous": "Selecciona al menos una sesión con espacio antes de previsualizar.",
+      "current": "Selecciona al menos una sesión con la tecla espacio antes de previsualizar.",
+      "measured_cells": {
+        "message": 75,
+        "body": 76
+      },
+      "evidence": "The ambiguity of `con espacio` is gone and the referent matches the hint row's `space`. The longer message was checked for truncation by injecting it into the real empty-state body: the widget holds the complete string (body_text_plain_contains_full_message=True).",
+      "new_defect": "none found"
+    },
+    {
+      "id": "N1",
+      "key": "tui.import.result_memory",
+      "severity": "nit",
+      "round": 1,
+      "status": "deferred",
+      "disposition": "not applied; accepted",
+      "current": "memoria importada: {imported} · omitidos: {skipped} · ocultados: {redactions}",
+      "evidence": "`ocultados` describes what the reader sees; the count and the fact are right."
+    },
+    {
+      "id": "N2",
+      "key": "tui.import.selected_count",
+      "severity": "nit",
+      "round": 1,
+      "status": "deferred",
+      "disposition": "not applied; accepted",
+      "current": "seleccionadas: {count}",
+      "evidence": "Still the weaker shape than `{count} seleccionadas`, but the fact is right."
+    },
+    {
+      "id": "N3",
+      "key": "tui.import.metadata_only_explain",
+      "severity": "nit",
+      "round": 1,
+      "status": "recorded_only",
+      "disposition": "no wording requested in round 1",
+      "current": "Puede que el harness haya eliminado el rollout.",
+      "evidence": "Kept machine term, correct under the glossary's product-name policy."
+    },
+    {
+      "id": "I4",
+      "key": "tui.import sessions-state row (gate boundary)",
+      "severity": "nit",
+      "round": 2,
+      "status": "recorded",
+      "disposition": "accepted, no change requested",
+      "problem": "`_hint_labels` gates show_move on `self.size.width >= 74` and Textual's Widget.size is the CONTENT width, so the narrowest box with all five hints is 74 cells (a 78-column terminal). The 75-cell row is 1 cell over there and the final `r` of `volver` clips. The documented 80x24 budget (76) passes with 1 spare; the band is one column wide and `esc` stays visible. Copy route if wanted: `a todo/nada` = 71 cells (drops the feminine agreement with sesiones); code route: gate >= 77.",
+      "evidence": "checks.py row measurements + gate-boundary note; rig in audit.log."
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [
+      "I1",
+      "I2",
+      "I3",
+      "N1",
+      "N2",
+      "N3",
+      "I4"
+    ],
+    "blocker_major_finding_ids": []
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/es/tui.import/w6a2/report.md",
+      "sha256": "f48187396161093577f2687cda33a197264a0e93f889290b01940cb687a95994"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.import/w6a2/audit.log",
+      "sha256": "9614f0f98e9b746fa1c9aeebb5589983d37c1894fe556dc682fcbfa2ba3cf355"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.import/w6a2/checks.py",
+      "sha256": "813c89aebf3aab4da43ec4ca584a1e47d7c0720ed31edeeea10aa7f0dafa5fe2"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.import/w6a2/probe_import_hints.py.txt",
+      "sha256": "c9d66eafe0d9e183ec03a77797e959f58c08bba249c4f8aec6922e08fb3a0f8a"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.import/w6a2/probe_error_select_wrap.py.txt",
+      "sha256": "cbc0d73a071dbfc3b2d073f7bda4456112f7c9d59d844f42f49d4cd59c6e1330"
+    }
+  ],
+  "current_bytes_match_audited_hashes": true,
+  "audit_notes_not_execution_log": "The prose in report.md and this record is judgement, not evidence of execution. The commands and their real output are in audit.log; checks.py is the script that produced them, and the widget rigs are preserved beside it as `.py.txt`.",
+  "ledger_row": {
+    "status": "passed",
+    "source_sha256": "932e0f87210ff80950346c684afb000907610c9ff35388125977182120b136c2",
+    "target_sha256": "17a4dec148f5de8bfb07e79c35e0b84eaa02da13bbf713676c42dbaa4d840725",
+    "auditor": {
+      "agent": "i18n-auditor",
+      "model": "radient/auto",
+      "date": "2026-10-30",
+      "round": 2
+    },
+    "note_budget_chars": 280,
+    "note": "R2 w6a2: 7 findings, 0 blocker/major; checks.py PASS + controls; record w6a2; model radient/auto (quota fallback)",
+    "written_by": "coordinator (the auditor does not edit the ledger in round 2)"
+  }
+}

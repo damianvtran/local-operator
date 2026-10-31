@@ -1,0 +1,180 @@
+{
+  "schema": 1,
+  "audit_id": "w6a2",
+  "audit_round": 2,
+  "locale": "es",
+  "namespace": "tui.analytics",
+  "audit_date": "2026-10-30",
+  "audited_revision": "b925c2e11be36653dfe88ac78f627bc2531427df",
+  "audited_revision_note": "The es catalogue is UNTRACKED at this revision (`?? local_operator/i18n/catalogues/es/tui.analytics.json`), so HEAD does not bind its bytes. This audit binds to the exact on-disk target sha256 in input_hashes.target, which checks.py re-prints; the binding is not assumed.",
+  "key_count": {
+    "en": 98,
+    "target": 98,
+    "context": 98
+  },
+  "verdict": "passed",
+  "result": "passed — 0 blocker, 0 major, 0 minor, 5 nit (3 deferred from round 1, 2 recorded now)",
+  "verdict_reason": "Both round-1 minors were applied verbatim and re-measured on the current bytes. A1's `razonamiento` matches the shipped es term for the reasoning-token class and resolves a split rather than creating one. A2's `↑↓ fila · enter abrir · e todo` is 30 cells against the 31-cell cap, restores the row-cursor noun, and cannot carry `expandir` (33 cells). All five declared budgets were re-measured with rich.cells.cell_len: four within cap; keys_bare is over by 2 while EN is over by 1, so the cap is unattainable in source. Ladder order is strictly widest-first. The only new observations are nits: a tier-verb split forced by the cap (A6) and a source-side note crop in the composed Output row (A7).",
+  "verdict_scope": "passed is driven by the checks: 0 blocking failures and every negative control tripped. A3-A5 are deferred round-1 nits judged acceptable; A6 and A7 are recorded nits that request no change to this catalogue.",
+  "auditor": {
+    "agent": "i18n-auditor (lopdev team), es-tui-r2-b",
+    "session_or_instance": "3add261f67ba",
+    "model": "radient/auto",
+    "model_note": "Model AS ACTUALLY RUN: radient/auto. The session opened on anthropic/claude-sonnet-5-5 and hit consecutive provider failures (quota): openai/gpt-6-astra, then kimi/k3.1-pro, then radient/auto. The style guide, glossary and English source were read under the earlier models; every measurement, every catalogue read of the CURRENT bytes and every judgement in this record were produced under radient/auto. No model was pinned, and no claim is made that the primary model performed this round.",
+    "date": "2026-10-30",
+    "independence": "I authored none of this copy and applied none of the remediation. I read the English source, the context sidecar, the es style guide and glossary, the shipped es TUI catalogues, and the widgets that consume these keys (harness_import_view.py, analytics_panel.py, subagent_view.py HintButton, report_view.py). Measurements come from the runtime's own ICU parser, render_message, rich.cells.cell_len, and headless mountings of the real widgets. I edited no catalogue, sidecar, ledger, allowance or generated file."
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.analytics.json",
+      "revision": "b925c2e11be36653dfe88ac78f627bc2531427df",
+      "sha256": "aa5221066aa84eedf0f924628d51bc8f08ccf5f26b5075638b9d40062f7b617e"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/es/tui.analytics.json",
+      "sha256": "0496f1b123ab06e0aee3c991f8551c0013f77b3b1fff77230b876ec4e9143657",
+      "tracked": false
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.analytics.context.json",
+      "sha256": "04356facdf1802a34a4be9ab6d3255cc9e92826d2b4e9ae917c43f687a9325eb"
+    }
+  },
+  "round1_reference": {
+    "audit_id": "w6a1",
+    "record": "i18n/audits/evidence/es/tui.analytics/w6a1/record.json",
+    "verdict": "passed — 0 blocker, 0 major, 2 minor, 3 nit",
+    "target_sha256": "6d6e6274c0d97a1bb5c2a723b9a2da526bbf6244d1646bdb76abded282f8e627",
+    "target_changed_since_round1": true
+  },
+  "findings": [
+    {
+      "id": "A1",
+      "key": "tui.analytics.totals.output_note",
+      "severity": "minor",
+      "round": 1,
+      "status": "closed",
+      "disposition": "applied verbatim",
+      "previous": "{generation} generación, {thinking} pensamiento",
+      "current": "{generation} generación, {thinking} razonamiento",
+      "measured_cells": 36,
+      "evidence": "`razonamiento` is the shipped es term for the reasoning/token class across cli.exec_help, relay.chrome, wire.settings (five effort keys), tui.notices and wire.errors.desktop; the surviving `pensamiento` occurrences are wire.settings' private-thinking display, a different referent. No maxCells declared; the composed Output row is measured under A7.",
+      "new_defect": "none found"
+    },
+    {
+      "id": "A2",
+      "key": "tui.analytics.hint.expand.compact",
+      "severity": "minor",
+      "round": 1,
+      "status": "closed",
+      "disposition": "applied verbatim",
+      "previous": "↑↓ · enter expandir · e todo",
+      "current": "↑↓ fila · enter abrir · e todo",
+      "measured_cells": {
+        "es": 30,
+        "en": 29,
+        "cap": 31
+      },
+      "evidence": "Restores the row-cursor noun the ladder exists to distinguish from `↑↓ desplazar`, and repairs the width inversion against hint.expand.keys (24, cap 25). `↑↓ fila · enter expandir · e todo` measures 33 against the 31-cell cap, so the compact verb cannot be `expandir`; `abrir` is the shipped action label for 'enter opens this row's content' and this screen has no second open-like action.",
+      "new_defect": "none found"
+    },
+    {
+      "id": "A3",
+      "key": "tui.analytics.search.meta_live",
+      "severity": "nit",
+      "round": 1,
+      "status": "deferred",
+      "disposition": "not applied; accepted",
+      "current": "todo el proceso · en vivo",
+      "evidence": "Section meta names the same process-wide scope; the semantic scope assertion passes."
+    },
+    {
+      "id": "A4",
+      "key": "tui.analytics.search.summary_free_paid",
+      "severity": "nit",
+      "round": 1,
+      "status": "deferred",
+      "disposition": "not applied; accepted",
+      "current": "{free} de {priced} con precio fueron gratis · {money} pagado",
+      "evidence": "The free/paid split and the {priced} denominator survive; only the finite past-tense verb is off-register."
+    },
+    {
+      "id": "A5",
+      "key": "tui.analytics.rate.legend",
+      "severity": "nit",
+      "round": 1,
+      "status": "deferred",
+      "disposition": "not applied; accepted",
+      "current": "tasa de decodificación en {shown, number} de {total, number} llamadas",
+      "evidence": "`en` vs `sobre` is a preposition preference; the coverage claim reads correctly."
+    },
+    {
+      "id": "A6",
+      "key": "tui.analytics.hint.expand.compact vs hint.expand.full/full_metric",
+      "severity": "nit",
+      "round": 2,
+      "status": "recorded",
+      "disposition": "accepted, no change requested",
+      "problem": "The same `enter` key is labelled `abrir` at the compact tier and `expandir` at the two wider tiers. Forced by the cap (expandir = 33 > 31) and not misleading: the key string is identical in every tier, a reader sees one tier at a time, and the ladder already varies vocabulary by tier (esc vs esc volver).",
+      "evidence": "checks.py `ladder verbs` note + the compact counterfactual measurement."
+    },
+    {
+      "id": "A7",
+      "key": "tui.analytics.totals.output_note (composed Output row)",
+      "severity": "nit",
+      "round": 2,
+      "status": "recorded",
+      "disposition": "accepted, source-side; no translation change requested",
+      "problem": "At 80x24 the analytics card body measures 66 cells; kv() spends a fixed 37 before the note, so the note has 29 cells and a session-scale note needs 32 in EN and 36 in ES. The tail is cropped in BOTH locales (row 69 EN / 73 ES). The A1 word change cost 1 cell (pensamiento 11 -> razonamiento 12); the crop is pre-existing and source-side.",
+      "evidence": "probe_analytics_geometry.py.txt block in audit.log (body_width=66 at 80x24)."
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [
+      "A1",
+      "A2",
+      "A3",
+      "A4",
+      "A5",
+      "A6",
+      "A7"
+    ],
+    "blocker_major_finding_ids": []
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/es/tui.analytics/w6a2/report.md",
+      "sha256": "d57a1a6177aa4bc1dce95c641f0a1869a3d9d0c6f8946b5cfa5a63174a063317"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.analytics/w6a2/audit.log",
+      "sha256": "2eac0a20c21efcbc59d3847c3b11554baa5384f1316a230cd24913e3a1c3819e"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.analytics/w6a2/checks.py",
+      "sha256": "5e0247c9b628daae3c0519556e97a689e2dbc2a7c93516c905a8a88830957b06"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.analytics/w6a2/probe_analytics_geometry.py.txt",
+      "sha256": "3f9149462413596e2a26504a42919efa492b70de285ce809720d3b9a8040bc1a"
+    }
+  ],
+  "current_bytes_match_audited_hashes": true,
+  "audit_notes_not_execution_log": "The prose in report.md and this record is judgement, not evidence of execution. The commands and their real output are in audit.log; checks.py is the script that produced them, and the widget rigs are preserved beside it as `.py.txt`.",
+  "ledger_row": {
+    "status": "passed",
+    "source_sha256": "aa5221066aa84eedf0f924628d51bc8f08ccf5f26b5075638b9d40062f7b617e",
+    "target_sha256": "0496f1b123ab06e0aee3c991f8551c0013f77b3b1fff77230b876ec4e9143657",
+    "auditor": {
+      "agent": "i18n-auditor",
+      "model": "radient/auto",
+      "date": "2026-10-30",
+      "round": 2
+    },
+    "note_budget_chars": 280,
+    "note": "R2 w6a2: 7 findings, 0 blocker/major; checks.py PASS + controls; record w6a2; model radient/auto (quota fallback)",
+    "written_by": "coordinator (the auditor does not edit the ledger in round 2)"
+  }
+}
