@@ -13,17 +13,21 @@ import argparse
 import asyncio
 
 from local_operator.config import ConfigManager
+from local_operator.i18n.cli_help import help_text
+from local_operator.i18n.keys import cli_group_help as _gg
 from local_operator.paths import config_dir
 
 
 def add_fetch_subparser(
     subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
     parent_parser: argparse.ArgumentParser,
+    *,
+    help_locale: str | None = None,
 ) -> None:
     """Install ``fetch`` and its focused configuration subcommands."""
     fetch_parser = subparsers.add_parser(
         "fetch",
-        help="Configure and test headless web fetching",
+        help=help_text(_gg.fetch(), help_locale),
         parents=[parent_parser],
     )
     commands = fetch_parser.add_subparsers(dest="fetch_command")

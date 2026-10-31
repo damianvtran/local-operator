@@ -45,6 +45,8 @@ import argparse
 from pathlib import Path
 from typing import Any
 
+from local_operator.i18n.cli_help import help_text
+from local_operator.i18n.keys import cli_group_help as _gg
 from local_operator.secrets.errors import KINDS
 
 #: Default variable name exported by ``lop secret file``. Named for the
@@ -53,7 +55,7 @@ from local_operator.secrets.errors import KINDS
 DEFAULT_FILE_ENV_VAR = "GOOGLE_APPLICATION_CREDENTIALS"
 
 
-def add_parser(subparsers: Any) -> None:
+def add_parser(subparsers: Any, *, help_locale: str | None = None) -> None:
     """Register ``lop secret`` and its verbs.
 
     Stdlib-only and importable without touching the crypto stack: this runs on
@@ -64,9 +66,11 @@ def add_parser(subparsers: Any) -> None:
     :mod:`local_operator.secrets.handlers`, which :func:`main` imports only
     once a verb has actually been dispatched.
     """
+    # ``help_locale`` is the ONE snapshot ``build_cli_parser`` resolved; ``None`` (a
+    # standalone caller) makes ``help_text`` resolve fresh.
     parser = subparsers.add_parser(
         "secret",
-        help="Encrypted long-term secrets an agent can retrieve without a prompt",
+        help=help_text(_gg.secret(), help_locale),
     )
     actions = parser.add_subparsers(dest="secret_command")
 
