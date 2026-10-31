@@ -612,6 +612,7 @@ def build_config(
     max_cycle_usd_micros: int | None,
     execution_overhead_seconds_per_action: float = 0.0,
     completion_gate: bool = True,
+    premature_terminal_gate: bool = True,
 ) -> Any:
     """Roots under ONE durable directory; timeouts sized for a real worker.
 
@@ -657,6 +658,7 @@ def build_config(
         handshake_timeout=60.0,
         max_cycle_cost_micros=max_cycle_usd_micros,
         completion_gate=completion_gate,
+        premature_terminal_gate=premature_terminal_gate,
     )
 
 
@@ -961,6 +963,14 @@ def build_parser(*, internal_test_support: bool = False) -> argparse.ArgumentPar
         "did before the gate existed. This is a campaign's CONTROL ARM, not a "
         "preference -- it changes what the model is asked -- and the arm is "
         "stamped on the manifest either way",
+    )
+    parser.add_argument(
+        "--no-premature-terminal-gate",
+        action="store_true",
+        help="do not challenge a `finish status=failed|infeasible` declared before "
+        "any action has executed: the episode ends on that first declaration. A "
+        "campaign's CONTROL ARM like --no-completion-gate, stamped on the manifest "
+        "either way",
     )
     parser.add_argument(
         "--progress-guards",
@@ -1990,6 +2000,7 @@ async def run(
                 _ACTION_SETTLE_SECONDS if settle_policy == "paper" else 0.0
             ),
             completion_gate=not args.no_completion_gate,
+            premature_terminal_gate=not args.no_premature_terminal_gate,
         )
     except VolatileRootError as error:
         print(str(error), file=sys.stderr)
@@ -2043,6 +2054,10 @@ async def run(
             # unconditionally, because a run that did NOT challenge would
             # otherwise be indistinguishable from one whose stamp was lost.
             "completion_gate": not args.no_completion_gate,
+            # Whether a failed/infeasible finish declared before any action
+            # executed was challenged once. Same reasoning as the stamp above:
+            # it changes what the model is asked, so the arm rides the score.
+            "premature_terminal_gate": not args.no_premature_terminal_gate,
             # Whether the session arm ran the runner's no-progress guards. Like
             # the completion gate it changes how an episode can END, so a score
             # must carry it; the reply arm always runs them. Stamped
@@ -2129,19 +2144,34 @@ async def run(
             print(str(error), file=sys.stderr)
             return EXIT_PREFLIGHT
 
-    if config.completion_gate and not _can_challenge_completion(model_client):
-        # A DEAD INSTRUMENT MUST NOT RETURN A READING. The gate refuses to fire
-        # for a client that cannot re-present the end state, so carrying on
-        # would seal a bundle whose manifest says the gate was on while no
+    # Either gate being on means the manifest claims a gate, and one shared
+    # method feeds both.
+    any_terminal_gate = config.completion_gate or config.premature_terminal_gate
+    if any_terminal_gate and not _can_challenge_completion(model_client):
+        # A DEAD INSTRUMENT MUST NOT RETURN A READING. Both terminal-claim gates
+        # refuse to fire for a client that cannot re-present the end state (one
+        # shared ``CompletionChallenger`` method feeds both), so carrying on
+        # would seal a bundle whose manifest says a gate was on while no
         # challenge was ever made -- a run that cannot be told apart from a
         # gate-off run by anything except reading its code. Fail with the
-        # remedy named instead; ``--no-completion-gate`` is how an operator says
-        # they meant it.
+        # remedy named instead; the corresponding ``--no-…-gate`` flag is how an
+        # operator says they meant it. The condition names BOTH gates, because a
+        # run with ``--no-completion-gate`` still stamps
+        # ``premature_terminal_gate: true`` and would be sealed claiming a gate
+        # that could never fire.
+        flags = [
+            flag
+            for flag, enabled in (
+                ("--no-completion-gate", config.completion_gate),
+                ("--no-premature-terminal-gate", config.premature_terminal_gate),
+            )
+            if enabled
+        ]
         print(
             f"--model-client {args.model_client} cannot re-present the end state "
-            "(no challenge_completion), so the completion gate cannot fire and "
+            "(no challenge_completion), so no terminal-claim gate can fire and "
             "this bundle would claim a gate that never ran; pass "
-            "--no-completion-gate to run without it deliberately",
+            f"{' or '.join(flags)} to run without it deliberately",
             file=sys.stderr,
         )
         return EXIT_PREFLIGHT
