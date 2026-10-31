@@ -112,7 +112,6 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "Unlinks the task record under the config dir's supervisor/ dir, never a session path.",
     ),
-
     # The receiver's wake-diagnostics counter: a config-dir sidecar published by
     # atomic replace. ``diagnostics_path()`` is ``<config_dir>/team_bridge/
     # wake_diagnostics.json`` and its temp sibling is that same FIXED name plus

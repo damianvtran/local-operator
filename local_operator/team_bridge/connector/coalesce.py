@@ -269,7 +269,23 @@ class WakeCoalescer:
             # posted, or whose reservation is settled, must not wake anyone.
             group.items = _still_owed(group)
             if not group.items:
+                # NOT a silent drop. Every item was already POSTED or SETTLED
+                # (a replay settled it while the card sat buffered), so no wake
+                # is owed — but the iteration's summary has to say that, because
+                # "acked to the caller, woken nobody, no outcome recorded" is
+                # indistinguishable from a lost card when a test or an owner
+                # reads the summary afterwards (CI shard 1 remediation).
                 del self._groups[key]
+                logger.info(
+                    "bridge: coalesced group settled before its flush code=card_already_posted"
+                )
+                outcomes.append(
+                    {
+                        "action": "already_posted",
+                        "conversation_id": key[2],
+                        "message_ids": [],
+                    }
+                )
                 continue
             metadata = merge_metadata([item.metadata for item in group.items])
             try:
@@ -378,6 +394,17 @@ def _still_owed(group: _Group) -> list[_Pending]:
             except StoreRefused:
                 pass
         if status in (CARD_POSTED, CARD_SETTLED):
+            # The VERDICT, on the record: ``posted`` means a card was already
+            # handed off; ``settled`` means the reservation left ``pending`` for
+            # another reason (a body turn claimed it, or it completed) — two
+            # different causes that used to look identical from outside, as an
+            # empty transcript with no reason at all (CI shard 1). Closed enum
+            # values only: never a body, an id or a label. The store is NOT
+            # extended for this: its schema is a migration-versioned surface and
+            # another lane is mid-change there (wake contract, hotfix lane).
+            logger.info(
+                "bridge: coalesced card dropped code=card_not_owed status=%s", status
+            )
             try:
                 store.delete_hold(group.owner, item.ref_key)
             except StoreRefused:

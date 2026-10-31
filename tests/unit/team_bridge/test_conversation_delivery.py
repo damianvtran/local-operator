@@ -318,6 +318,25 @@ def _persist_fake_receipt(config_dir: Path, receipt: Any, *, message_id: str) ->
         )
 
 
+@pytest.fixture(autouse=True)
+def _instant_wakes(monkeypatch: pytest.MonkeyPatch):
+    """This file's contract is "one iteration writes its card", so no window.
+
+    The connector's coalescer rate-limits a conversation's wakes to one per
+    ``DEFAULT_COALESCE_WINDOW_S`` (3 s). The window is a production behaviour
+    with its own coverage (``test_wake_every_message.py``); here it is only an
+    INPUT that can make a card late, so the assertions below would be timing
+    the clock between two iterations instead of the delivery under test.
+    ``test_dm_runtime_transport.py`` pins the same seam for the same reason.
+    """
+
+    from local_operator.team_bridge.connector import coalesce as coalesce_mod
+
+    monkeypatch.setattr(
+        coalesce_mod, "CONNECTOR_COALESCER", coalesce_mod.WakeCoalescer(window_s=0.0)
+    )
+
+
 def _wire_rig(
     monkeypatch: pytest.MonkeyPatch,
     server: FakeServer,
@@ -416,7 +435,19 @@ def _runtime_rows(runtimes: dict[str, tuple[OwnerSnapshot, Path]]):
 
 
 def _run(owner: OwnerSnapshot, config_dir: Path) -> dict[str, Any]:
-    return asyncio.run(
+    """One connector iteration, with a silent wake failure made loud.
+
+    ``run_iteration`` hands each card to the coalescer, which delivers it in a
+    ``try`` that turns ANY exception (or a reservation that turned out to be
+    already posted) into a quiet hold — correct in production, where a wake
+    must never fail an iteration, but fatal for these tests: an empty
+    transcript then reports as an ``IndexError`` three lines later and the real
+    cause never reaches the log (CI shard 1, three failures that were "likely
+    flakes" for two rounds). The outcome is part of the iteration's summary, so
+    assert on it HERE.
+    """
+
+    summary = asyncio.run(
         loop_mod.run_iteration(
             owner,
             config_dir=config_dir,
@@ -424,6 +455,18 @@ def _run(owner: OwnerSnapshot, config_dir: Path) -> dict[str, Any]:
             auth_store=None,
         )
     )
+    for outcome in summary.get("coalesced_wakes") or ():
+        # A ``hold`` is the flush's swallowed-exception branch: the wake did not
+        # go out. In production that is the right trade (a wake never fails an
+        # iteration); in these tests it must be a named failure, not an empty
+        # transcript three lines later. ``already_posted`` is NOT a failure —
+        # the settled-reservation cells below expect exactly it.
+        assert outcome.get("action") != "hold", (
+            f"the wake did not go out: {outcome} — the flush caught a delivery "
+            "failure and re-buffered the group; see the logger's "
+            "code=delivery_failed line for the cause"
+        )
+    return summary
 
 
 def _reservation_rows(config_dir: Path) -> list[dict[str, Any]]:
@@ -1675,3 +1718,15 @@ def test_a_pre_upgrade_reservation_replay_posts_at_most_the_logged_card(
         # Marked, so it is never re-evaluated as owed again. A ``claimed`` row
         # reads POSTED from its state alone and needs no mark.
         assert rows[0]["card_posted_at"] is not None
+
+
+def test_the_wake_window_is_pinned_for_this_file() -> None:
+    """The autouse pin above is load-bearing (see its docstring): assert it.
+
+    A fixture that silently stopped applying would turn every card assertion in
+    this file back into a race against the connector's 3 s rate window.
+    """
+
+    from local_operator.team_bridge.connector import coalesce as coalesce_mod
+
+    assert coalesce_mod.CONNECTOR_COALESCER.window_s == 0.0

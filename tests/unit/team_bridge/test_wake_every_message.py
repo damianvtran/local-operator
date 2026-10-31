@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import re
 import time
 from dataclasses import dataclass, field
@@ -1491,3 +1492,65 @@ def test_an_unfollowed_thread_reply_does_not_lift_the_brake(
 ) -> None:
     captured = _captured_directed(tmp_path, monkeypatch, thread_follower=False)
     assert captured["directed"] is False
+
+
+def test_a_group_settled_before_its_flush_is_an_outcome_not_a_silence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """CI shard 1: a card the flush declines to send must SAY it declined.
+
+    The replay path can settle a reservation while its card is still buffered (a
+    hold re-drive, a body turn). ``flush_due`` then owes no wake — correct — but
+    it used to delete the group and record NOTHING, which reads exactly like a
+    lost card to anything watching the iteration summary (a test asserting an
+    empty transcript, an owner reading ``coalesced_wakes``). It now reports
+    ``already_posted`` and logs the verdict once.
+
+    ``_still_owed`` is stubbed to the settled verdict so the cell pins the
+    OUTCOME plumbing without re-testing the store read, which has its own cells.
+    """
+
+    from local_operator.team_bridge.connector import coalesce as coalesce_mod
+
+    config_dir = tmp_path / "a"
+    config_dir.mkdir()
+    owner = SimpleNamespace(
+        endpoint_id="bep_a",
+        tenant_id="tnt_1",
+        account_id="acc_a",
+        credential_id=1,
+        canonical_base_url="https://api.example/v1",
+        enrollment_generation=1,
+    )
+    metadata = ConversationCardMetadata(
+        conversation_id=CONV,
+        tenant_id="tnt_1",
+        conversation_label="#agents",
+        sender_label="Ada",
+        sender_kind="human",
+        mention=False,
+        message_id="bcmsg_m9",
+        conversation_seq=9,
+    )
+    monkeypatch.setattr(coalesce_mod, "_still_owed", lambda group: [])
+    coalescer = coalesce_mod.WakeCoalescer(window_s=0.0)
+    with coalescer.scope():
+        coalescer.enqueue(
+            owner, metadata, ref_key="ref-nine", session_id="sess_a", config_dir=config_dir
+        )
+
+    async def never(_owner: Any, _metadata: Any, **_kwargs: Any) -> str:
+        raise AssertionError("a settled group must not be delivered")
+
+    with caplog.at_level(logging.INFO, logger=coalesce_mod.logger.name):
+        outcomes = asyncio.run(
+            coalescer.flush_due(deliver=never, owner_filter=owner, config_dir=config_dir)
+        )
+    assert [outcome["action"] for outcome in outcomes] == ["already_posted"]
+    assert outcomes[0]["conversation_id"] == CONV
+    assert "code=card_already_posted" in caplog.text
+    # And the group is gone, so a later pass does not report it again.
+    again = asyncio.run(
+        coalescer.flush_due(deliver=never, owner_filter=owner, config_dir=config_dir)
+    )
+    assert again == []
