@@ -1,11 +1,11 @@
 {
   "wire.sessions.approval_stop_local": "detener {address} si está inactiva: libera la concesión de la sesión y nunca envía señales; se rechaza mientras esté trabajando",
   "wire.sessions.approval_stop_peer": "detener {address} en {peer}: en esta compilación siempre se rechaza, no se enviará nada",
-  "wire.sessions.stop_pending": "“{name}” aceptó la detención, pero no había salido tras {seconds} s. No se envió ninguna señal — lee la lista de sesiones antes de reintentar.",
-  "wire.sessions.stop_refused_busy": "“{name}” está trabajando ahora mismo (un turno, una aprobación, un subagente o un trabajo), así que no se detuvo nada y no se envió ninguna señal. Vuelve a intentarlo cuando esté inactiva.",
-  "wire.sessions.stop_refused_old_owner": "“{name}” ejecuta una compilación más antigua que no puede prometer una detención solo de sesiones inactivas, así que no se detuvo nada y no se envió ninguna señal. Reintentar no cambiará eso: pide al operador que la detenga.",
-  "wire.sessions.stop_refused_unanswered": "“{name}” no respondió, así que no se pudo confirmar una detención solo de sesiones inactivas y no se envió ninguna señal. Lee primero la lista de sesiones: puede que ya no exista.",
+  "wire.sessions.stop_pending": "“{name}” aceptó la detención, pero seguía sin salir tras {seconds} s. No se envió ninguna señal — lee la lista de sesiones antes de reintentar.",
+  "wire.sessions.stop_refused_busy": "“{name}” está trabajando ahora mismo (un turno, una aprobación, un subagente o un trabajo en segundo plano), así que no se detuvo nada y no se envió ninguna señal. Vuelve a intentarlo cuando esté inactiva.",
+  "wire.sessions.stop_refused_old_owner": "“{name}” ejecuta una compilación más antigua que no puede prometer una detención limitada a sesiones inactivas, así que no se detuvo nada y no se envió ninguna señal. Reintentar no cambiará eso: pide al operador que la detenga.",
+  "wire.sessions.stop_refused_unanswered": "“{name}” no respondió, así que no se pudo confirmar una detención limitada a sesiones inactivas y no se envió ninguna señal. Lee primero la lista de sesiones: puede que ya no exista.",
   "wire.sessions.stop_refused_wake": "“{name}” está inactiva, pero un despertar programado vence dentro de la ventana de retención, así que no se detuvo nada y no se envió ninguna señal. Vuelve a intentarlo cuando ese despertar se haya activado.",
-  "wire.sessions.stop_remote_refused": "Una sesión en otro dispositivo no se puede detener desde aquí en esta compilación: no se puede garantizar una salida sin señales y solo si está inactiva, así que no se envió nada. El operador puede detenerla en ese dispositivo.",
+  "wire.sessions.stop_remote_refused": "Una sesión en otro dispositivo no se puede detener desde aquí en esta compilación: no se puede garantizar una salida sin señales y limitada a sesiones inactivas, así que no se envió nada. El operador puede detenerla en ese dispositivo.",
   "wire.sessions.stop_self_refused": "Ese destino es esta misma sesión, y una sesión no puede detenerse a sí misma. Deténla desde otra sesión."
 }
