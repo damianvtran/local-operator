@@ -527,7 +527,8 @@ def test_the_tool_roster_is_the_sessions_own_built_tools() -> None:
     # The description is the tool's OWN text — first sentence — never a prose
     # copy kept beside the roster that a tool rewrite could drift from.
     assert rows[0].description == (
-        "Manage OTHER local `lop` sessions (top-level and stored; subagents are `hub`'s)."
+        "Manage local `lop` sessions (top-level and stored; subagents are `hub`'s);"
+        " `move` acts on THIS one."
     )
     assert sessions_tool.description.startswith(rows[0].description)
     assert all(
