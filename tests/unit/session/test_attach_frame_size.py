@@ -1580,7 +1580,9 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year(
     # being deleted.
     snapshot = frame["data"]["snapshot"]
     if long_context != "none":
-        assert len(state.usage_components) == 200
+        # The fixture deliberately restores a pre-cap 5,000-receipt state.
+        # The projection caps that tail without mutating its source.
+        assert len(state.usage_components) == 5_000
         assert 0 < len(snapshot["usage_components"]) <= 200
         assert state.usage_components[-1].openai_long_context is True
         assert snapshot["usage_components"][-1]["openai_long_context"] is True
