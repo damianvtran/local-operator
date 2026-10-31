@@ -496,7 +496,11 @@ _USER_SUPPLIED_MODEL_PROVIDERS = frozenset({"ollama"})
 #: direct `/v1/models` listing exposes ids but no capability flags, so an
 #: uncurated current snapshot still needs a family rule; older registry rows
 #: remain explicitly off through ``ModelInfo.supports_responses_api``'s default.
-_OPENAI_RESPONSES_API = re.compile(r"^gpt-5(?:[.-]|$)")
+# Keep the established GPT-5 rule, but infer GPT-6 capabilities only for
+# documented models and their dated snapshots, not an unknown future variant.
+_OPENAI_RESPONSES_API = re.compile(
+    r"^(?:gpt-5(?:[.-]|$)|gpt-6(?:-astra|-sol|-luna|\.1-sol|\.1-terra)" r"(?:-\d{4}-\d{2}-\d{2})?$)"
+)
 
 #: The DeepSeek-hosted models that run DeepSeek's THINKING MODE, and therefore
 #: demand the reasoning echo documented on ``ModelSpec.requires_reasoning_echo``
@@ -4457,8 +4461,22 @@ class SessionStreamFn:
             return
         prompt_tokens = usage.input_tokens if usage else 0
         if prompt_tokens < self.PROVIDER_STRIKE_MIN_PROMPT_TOKENS:
+            # No receipt, missing prompt count, and a short prompt cannot tell
+            # whether this host would have reused the warm prefix. Such a turn
+            # interrupts consecutive misses just like an absent cache counter.
+            self._provider_strikes.get(model_id, {}).pop(served, None)
+            self._provider_strike_at.get(model_id, {}).pop(served, None)
             return
-        cached = usage.cache_read_tokens if usage else 0
+        # Unknown evidence cannot establish consecutive misses: the intervening
+        # turn could have hit. Discard this host's pending strike without treating
+        # the unknown as a measured hit. Replayed receipts safely remain unknown.
+        if usage is None or (
+            usage._cache_read_reported is not True and usage.cache_read_tokens == 0
+        ):
+            self._provider_strikes.get(model_id, {}).pop(served, None)
+            self._provider_strike_at.get(model_id, {}).pop(served, None)
+            return
+        cached = usage.cache_read_tokens
         floor = max(
             self.PROVIDER_STRIKE_MIN_CACHED_TOKENS,
             int(prompt_tokens * self.PROVIDER_STRIKE_MIN_CACHED_FRACTION),
