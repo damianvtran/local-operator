@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -33,7 +34,8 @@ def _value_sha(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-def _body_sha(manifest: dict) -> str:
+# The parsed manifest is heterogeneous: note strings sit beside the namespaces mapping.
+def _body_sha(manifest: dict[str, Any]) -> str:
     """Self-hash: a file cannot contain its own file hash, so the manifest hashes
     its canonical body (every field except ``manifest_sha256``, sorted keys,
     compact separators, UTF-8)."""
