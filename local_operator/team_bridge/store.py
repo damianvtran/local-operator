@@ -356,7 +356,8 @@ CREATE TABLE IF NOT EXISTS screening_breaker (
     account_scope TEXT PRIMARY KEY,
     failures INTEGER NOT NULL,
     open_until REAL NOT NULL,
-    updated_at REAL NOT NULL
+    updated_at REAL NOT NULL,
+    last_failure_class TEXT
 );
 """
 _PRODUCER_SCHEMA = """
@@ -2669,6 +2670,41 @@ class Store:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(screening_holds)")}
         if "failure_class" not in columns:
             conn.execute("ALTER TABLE screening_holds ADD COLUMN failure_class TEXT")
+
+    @staticmethod
+    def _breaker_has_class_column(conn: sqlite3.Connection) -> bool:
+        """Whether this file's ``screening_breaker`` already has the column.
+
+        A read-only probe: the open breaker is read on every screening cycle,
+        so the write lock is taken only on the first touch after an upgrade.
+        """
+
+        return any(
+            row[1] == "last_failure_class"
+            for row in conn.execute("PRAGMA table_info(screening_breaker)")
+        )
+
+    @staticmethod
+    def _ensure_breaker_class_column(conn: sqlite3.Connection) -> None:
+        """Add ``last_failure_class`` to a ``screening_breaker`` that predates it.
+
+        WHY: a ``breaker_open`` hold parks a message for a failure that is
+        NOT its own, so the receiver status could say nothing about WHY the
+        account is broken — the one fact the operator needs to fix it. The
+        class of the failure that most recently advanced the breaker is kept
+        here, in the SAME closed vocabulary as ``screening_holds.failure_class``
+        (clamped by :func:`_closed_failure_class`), never provider prose.
+
+        ADDITIVE AND NULLABLE, so no schema stamp moves (same rule as
+        :meth:`_ensure_hold_failure_class_column`): an older binary sharing
+        this state file never names it, and a pre-upgrade row reads NULL —
+        "class unknown". Not in ``_V3_COLUMNS``: a table without it is not
+        damaged.
+        """
+
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(screening_breaker)")}
+        if "last_failure_class" not in columns:
+            conn.execute("ALTER TABLE screening_breaker ADD COLUMN last_failure_class TEXT")
 
     def body_card_status(
         self, owner: OwnerSnapshot, conversation_id: str, message_id: str
@@ -5591,18 +5627,24 @@ class Store:
     BREAKER_THRESHOLD = 3
     BREAKER_BACKOFF_S = (60.0, 120.0, 240.0, 480.0, 900.0)
 
-    def record_screening_failure(self, owner: OwnerSnapshot) -> float:
+    def record_screening_failure(
+        self, owner: OwnerSnapshot, *, failure_class: str | None = None
+    ) -> float:
         """One provider failure; open/advance the breaker, return ``retry_at``.
 
         Persisted so a restart cannot forget an open breaker, and FINITE so
         a broken route cannot park an account forever: the ladder stops at
-        its last rung until a success resets it.
+        its last rung until a success resets it. ``failure_class`` is the
+        closed class of THIS failure, kept on the breaker row so a later
+        ``breaker_open`` hold can say what actually broke (the message it
+        parks never met the provider itself).
         """
 
         with self._connect() as conn:
             self._init(conn)
             self._begin_write(conn)
             self._require_live(conn, owner)
+            self._ensure_breaker_class_column(conn)
             scope = self._account_scope(owner)
             row = conn.execute(
                 "SELECT failures FROM screening_breaker WHERE account_scope = ?", (scope,)
@@ -5614,8 +5656,9 @@ class Store:
                 open_until = time.time() + self.BREAKER_BACKOFF_S[rung]
             conn.execute(
                 "INSERT OR REPLACE INTO screening_breaker "
-                "(account_scope, failures, open_until, updated_at) VALUES (?,?,?,?)",
-                (scope, failures, open_until, time.time()),
+                "(account_scope, failures, open_until, updated_at, last_failure_class) "
+                "VALUES (?,?,?,?,?)",
+                (scope, failures, open_until, time.time(), _closed_failure_class(failure_class)),
             )
             return open_until
 
@@ -5632,14 +5675,30 @@ class Store:
             )
 
     def screening_breaker_state(self, owner: OwnerSnapshot) -> dict[str, Any] | None:
-        """Current breaker row (contentless: counts + timestamps only)."""
+        """Current breaker row (contentless: counts, timestamps, last class).
+
+        ``last_failure_class`` is the closed class of the failure that most
+        recently advanced the breaker, so a ``breaker_open`` hold can name
+        what broke instead of only when it reopens. The read takes the write
+        lock to run the guarded ``ALTER`` first (same shape as
+        :meth:`body_card_status`): a store last opened by an older binary has
+        no such column, and a missing column must never turn into a None
+        breaker — that would silently serve through an OPEN breaker.
+        """
 
         try:
             with self._connect() as conn:
                 self._init(conn)
+                if not self._breaker_has_class_column(conn):
+                    # Additive column, added on first touch by a new binary. A
+                    # missing column must NEVER turn into a None breaker (that
+                    # would serve straight through an OPEN one), so the ALTER
+                    # runs here rather than the read failing soft.
+                    self._begin_write(conn)
+                    self._ensure_breaker_class_column(conn)
                 row = conn.execute(
-                    "SELECT failures, open_until, updated_at FROM screening_breaker "
-                    "WHERE account_scope = ?",
+                    "SELECT failures, open_until, updated_at, last_failure_class "
+                    "FROM screening_breaker WHERE account_scope = ?",
                     (self._account_scope(owner),),
                 ).fetchone()
                 return dict(row) if row is not None else None

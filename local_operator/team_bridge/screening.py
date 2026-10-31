@@ -1103,8 +1103,16 @@ async def _screen_core(
 
     now = _time.time()
     if breaker is not None and float(breaker.get("open_until", 0) or 0) > now:
+        # The class of the failure that OPENED this breaker rides the hold: the
+        # message parked here never reached a provider, so without it the
+        # receiver status could say only "broken", never what to fix.
         _persist_hold(
-            store, owner, message_id, "breaker_open", retry_at=float(breaker["open_until"])
+            store,
+            owner,
+            message_id,
+            "breaker_open",
+            retry_at=float(breaker["open_until"]),
+            failure_class=breaker.get("last_failure_class"),
         )
         return ScreenResult("hold", hold_code="breaker_open", retry_at=float(breaker["open_until"]))
 
@@ -1292,11 +1300,14 @@ async def _screen_core(
             return ScreenResult("hold", hold_code=code)
         raise
     except Exception as failure:  # noqa: BLE001 - sanitized hold; never prose
-        retry_at = _record_failure(store, owner)
         # A CLOSED class from the exception's type/typed fields (never its
         # text), so the receiver status can say what kind of failure parked
         # the message — ``chain_exhausted`` when every configured hop failed.
+        # Computed BEFORE the breaker advance so the same class rides both.
         from local_operator.team_bridge.model_boundary import screening_failure_class
+
+        failure_class = screening_failure_class(failure)
+        retry_at = _record_failure(store, owner, failure_class=failure_class)
 
         _commit_hold(
             store,
@@ -1306,7 +1317,7 @@ async def _screen_core(
             fingerprint,
             epoch,
             "provider_error",
-            failure_class=screening_failure_class(failure),
+            failure_class=failure_class,
         )
         return ScreenResult("hold", hold_code="provider_error", retry_at=retry_at)
 
@@ -1433,11 +1444,17 @@ def _policy_row_matches(row: Mapping[str, Any], snapshot: "PolicySnapshot") -> b
     )
 
 
-def _record_failure(store: Store, owner: OwnerSnapshot) -> float | None:
-    """Advance the durable breaker; return its retry time (best effort)."""
+def _record_failure(
+    store: Store, owner: OwnerSnapshot, *, failure_class: str | None = None
+) -> float | None:
+    """Advance the durable breaker; return its retry time (best effort).
+
+    ``failure_class`` rides the breaker row so a LATER ``breaker_open`` hold
+    — a message that never met the provider — can still name what broke.
+    """
 
     try:
-        return store.record_screening_failure(owner)
+        return store.record_screening_failure(owner, failure_class=failure_class)
     except StoreRefused:
         return None
 

@@ -2034,3 +2034,30 @@ def test_consent_currency_fails_closed_outside_the_accepted_set(tmp_path) -> Non
         "bridge_consent_v1", "bridge_consent_v2", ("bridge_consent_v1", "bridge_consent_v2")
     )
     assert store.text_floor(owner, "consent") is None
+
+
+def test_breaker_open_hold_names_the_failure_that_broke_the_breaker(tmp_path) -> None:
+    """0.93.3: a ``breaker_open`` hold parks a message that NEVER met the
+    provider, so its class can only come from the breaker row itself — without
+    it the receiver status says "broken" and nothing about what to fix (29
+    messages parked that way)."""
+
+    from local_operator.providers.failover import ProviderError
+
+    store, owner = _setup(tmp_path)
+    error = ProviderError(429, "rate limited", retryable=True, kind="quota")
+    for index in range(3):
+        out = _run(owner, tmp_path, Runner(error=error), item=_item(message_id=f"bmsg_q{index}"))
+        assert out.disposition == "hold" and out.hold_code == "provider_error"
+    state = store.screening_breaker_state(owner)
+    assert state is not None and state["last_failure_class"] == "quota"
+
+    runner = Runner()
+    out = _run(owner, tmp_path, runner, item=_item(message_id="bmsg_q9"))
+
+    assert out.hold_code == "breaker_open" and runner.calls == []
+    with sqlite3.connect(state_db_path(tmp_path)) as db:
+        assert db.execute(
+            "SELECT hold_code, failure_class FROM screening_holds WHERE message_id = ?",
+            ("bmsg_q9",),
+        ).fetchall() == [("breaker_open", "quota")]
