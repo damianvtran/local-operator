@@ -1637,6 +1637,12 @@ def _boot_cost() -> dict[str, Any] | None:
       For a boot doing its work on one thread the three add up to ``wall_s``;
       CPU and ready time are summed over threads, so parallel threads can push
       ``cpu_s`` past ``wall_s`` (``boot_cost.window`` says why that is allowed).
+      BOTH ARE ``null`` when the split cannot be trusted: the ready-to-run time
+      is unreadable, or (Linux) the kernel reports zero run-queue wait while wall
+      materially exceeds CPU (schedstats off, sandboxed ``/proc``). Then no bucket
+      absorbs the gap — ``wall_s - cpu_s`` is simply unattributed. On Linux a
+      thread that exits during the scan is skipped, so ``waited_for_cpu_s`` can
+      read low by that thread's share rather than vanish.
     * ``voluntary_switches`` / ``involuntary_switches`` — raw ``getrusage``
       counts over the window. Evidence only: on macOS blocking waits are booked as
       involuntary too, so their ratio does NOT distinguish starved from blocked.
@@ -1652,7 +1658,8 @@ def _boot_cost() -> dict[str, Any] | None:
     after the standby warm-up's own ``boot_cost.sample()`` it is ~0.04 ms. Not
     counted here: importing ``journal`` (5-22 ms on a loaded host), which this
     call site already paid before ``boot`` existed. No subprocess, lock or
-    directory walk on macOS (Linux lists ``/proc/self/task``). Never raises — the record is written without it.
+    directory walk on macOS (Linux lists ``/proc/self/task``). Never raises —
+    the record is written without it.
     """
     try:
         from local_operator.session.runtime import boot_cost, journal

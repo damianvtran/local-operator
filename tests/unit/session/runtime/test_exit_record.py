@@ -651,3 +651,74 @@ def test_a_record_without_boot_cost_still_reads(tmp_path: Path) -> None:
     )
     record = journal.read_run_record(directory)
     assert record is not None and record.boot is None and record.covers_run(7, 9.0)
+
+
+def _fake_linux_proc(monkeypatch, schedstat: dict[str, bytes | None]) -> None:
+    """Serve ``/proc/self/task/*/schedstat`` and ``/proc/self/stat`` from a dict.
+
+    A ``None`` row is a thread that exited between the listing and the read.
+    The stat row puts the start tick at 0 and ``CLOCK_BOOTTIME`` at 100 s, so the
+    process age is 100 s.
+    """
+    import builtins
+    import io
+
+    from local_operator.session.runtime import boot_cost
+
+    real_open = builtins.open
+    stat = b"99 (py thon) S " + b" ".join([b"0"] * 18) + b" 0 0\n"
+
+    def fake_open(path, mode="r", *args, **kwargs):
+        path = str(path)
+        if path == "/proc/self/stat":
+            return io.BytesIO(stat)
+        if path.startswith("/proc/self/task/"):
+            row = schedstat[path.split("/")[4]]
+            if row is None:
+                raise FileNotFoundError(path)
+            return io.BytesIO(row)
+        return real_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", fake_open)
+    monkeypatch.setattr(boot_cost.os, "listdir", lambda _p: list(schedstat))
+    monkeypatch.setattr(boot_cost.time, "CLOCK_BOOTTIME", 7, raising=False)
+    monkeypatch.setattr(boot_cost.time, "clock_gettime", lambda _c: 100.0)
+    monkeypatch.setattr(boot_cost.os, "sysconf", lambda _n: 100)
+    monkeypatch.setattr(boot_cost.sys, "platform", "linux")
+
+
+def test_linux_without_run_queue_accounting_fails_closed(monkeypatch) -> None:
+    """Zero run-queue wait with wall >> CPU must not be reported as "blocked".
+
+    Round 2 of #3226: without schedstats the sum is on-CPU time only, so a
+    starved boot would read as blocked — the mislabel this record exists to stop.
+    """
+    from local_operator.session.runtime import boot_cost
+
+    _fake_linux_proc(monkeypatch, {"1": b"500000000 0 3\n", "2": b"10000000 0 1\n"})
+    sample = boot_cost.sample()
+    assert sample is not None and sample["wall_s"] == 100.0
+    assert sample["runnable_s"] is None
+    record = boot_cost.window(sample)
+    assert record["waited_for_cpu_s"] is None and record["blocked_s"] is None
+    assert record["wall_s"] == 100.0, "wall and CPU are still recorded"
+
+
+def test_linux_thread_exiting_mid_scan_keeps_the_survivors(monkeypatch) -> None:
+    from local_operator.session.runtime import boot_cost
+
+    _fake_linux_proc(
+        monkeypatch,
+        {"1": b"2000000000 60000000000 9\n", "2": None, "3": b"1000000000 0 2\n"},
+    )
+    runnable, age, run_queue = boot_cost._linux_times()
+    assert runnable == 63.0, "threads 1 and 3 summed; the exited thread skipped"
+    assert run_queue == 60_000_000_000 and age == 100.0
+    assert boot_cost.sample()["runnable_s"] == 63.0  # type: ignore[index]
+
+
+def test_linux_with_no_readable_thread_has_no_runnable_figure(monkeypatch) -> None:
+    from local_operator.session.runtime import boot_cost
+
+    _fake_linux_proc(monkeypatch, {"1": None})
+    assert boot_cost._linux_times()[0] is None

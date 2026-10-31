@@ -32,8 +32,17 @@ SOURCES, one call each, no subprocess, no lock, no directory walk on macOS:
   thread, summed: ``/proc/self/schedstat`` alone is the MAIN thread only), and
   the ``/proc/self/stat`` start tick against ``CLOCK_BOOTTIME`` (clock-tick
   resolution, usually 10 ms). Threads that already exited drop out of the sum,
-  so ``runnable_s`` can read low there. NOT EXERCISED LOCALLY: the Linux branch
-  is covered by CI's Ubuntu jobs only.
+  so ``runnable_s`` can read low there; a thread that exits DURING the scan is
+  skipped and the surviving threads still sum (a partial figure, low by that
+  thread's share, beats none). FAILS CLOSED when the kernel reports no
+  run-queue wait at all (schedstats accounting off, a sandboxed ``/proc``):
+  the sum would be on-CPU time only, so a STARVED boot would read as blocked
+  — the exact mislabel this module exists to prevent. If the run-queue total
+  is 0 while wall exceeds CPU by more than :data:`_MATERIAL_GAP_S`, the split
+  is withheld: ``waited_for_cpu_s`` and ``blocked_s`` are ``null`` and NO
+  bucket absorbs the difference — ``wall_s`` and ``cpu_s`` are still recorded,
+  and the gap between them stays unattributed. NOT EXERCISED LOCALLY: the
+  Linux branch is covered by CI's Ubuntu jobs only.
 * Both — ``getrusage(RUSAGE_SELF)`` for ``cpu_s`` and the switch counts, so CPU
   and the counts are one snapshot; it excludes reaped children, which is right:
   the question is what the runtime itself spent.
@@ -59,6 +68,11 @@ from typing import Any
 #: ri_user_time=16, ri_proc_start_abstime=80, ri_runnable_time=288; pinned by
 #: ``test_boot_cost``.
 _RUSAGE_INFO_V4 = 4
+
+#: How far wall may exceed CPU before a zero run-queue reading on Linux is
+#: treated as "not accounted" rather than "never waited". Below it there is no
+#: gap worth attributing, so the (then near-zero) split is harmless either way.
+_MATERIAL_GAP_S = 0.1
 
 _DARWIN: Any = None
 
@@ -112,18 +126,38 @@ def _darwin_times() -> tuple[float | None, float | None]:
     return info.ri_runnable_time * tick, age
 
 
-def _linux_times() -> tuple[float | None, float | None]:
-    """``(runnable_s, age_s)`` from schedstat and the stat start tick."""
+def _linux_times() -> tuple[float | None, float | None, int | None]:
+    """``(runnable_s, age_s, run_queue_ns)`` from schedstat and the stat start tick.
+
+    ``run_queue_ns`` is the summed run-queue wait alone, returned so
+    :func:`sample` can fail closed when the kernel is not accounting it (see the
+    module docstring). A thread that exits mid-scan raises ``OSError`` on its
+    own ``schedstat`` and is skipped; the figure is ``None`` only when the task
+    directory itself cannot be listed or NO thread could be read.
+    """
     runnable: float | None = None
+    run_queue: int | None = None
     try:
-        total = 0
-        for task in os.listdir("/proc/self/task"):
+        tasks = os.listdir("/proc/self/task")
+    except OSError:
+        tasks = []
+    on_cpu_total = 0
+    queue_total = 0
+    read_any = False
+    for task in tasks:
+        try:
             with open(f"/proc/self/task/{task}/schedstat", "rb") as handle:
                 on_cpu, run_delay = handle.read().split()[:2]
-            total += int(on_cpu) + int(run_delay)
-        runnable = total / 1e9
-    except (OSError, ValueError):
-        runnable = None
+            on_cpu_total += int(on_cpu)
+            queue_total += int(run_delay)
+            read_any = True
+        except (OSError, ValueError):
+            # The thread exited between the listing and the read (or its row is
+            # malformed): skip it rather than lose every other thread's figure.
+            continue
+    if read_any:
+        runnable = (on_cpu_total + queue_total) / 1e9
+        run_queue = queue_total
     age: float | None = None
     try:
         with open("/proc/self/stat", "rb") as handle:
@@ -137,7 +171,7 @@ def _linux_times() -> tuple[float | None, float | None]:
         age = boottime - start_ticks / os.sysconf("SC_CLK_TCK")
     except (OSError, ValueError, IndexError, AttributeError):
         age = None
-    return runnable, age
+    return runnable, age, run_queue
 
 
 def sample() -> dict[str, float] | None:
@@ -158,7 +192,12 @@ def sample() -> dict[str, float] | None:
         if sys.platform == "darwin":
             runnable, wall = _darwin_times()
         elif sys.platform.startswith("linux"):
-            runnable, wall = _linux_times()
+            runnable, wall, run_queue_ns = _linux_times()
+            cpu = usage.ru_utime + usage.ru_stime
+            if run_queue_ns == 0 and wall is not None and wall - cpu > _MATERIAL_GAP_S:
+                # Fail closed (module docstring): no run-queue accounting means
+                # the split cannot tell starved from blocked, so withhold it.
+                runnable = None
     except Exception:  # noqa: BLE001 — one missing fact, not a missing record
         runnable, wall = None, None
     return {
