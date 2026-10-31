@@ -137,7 +137,11 @@ from local_operator.evaluation.runner.action_tool import (
     _no_pending_refusal,
     _refusal,
 )
-from local_operator.evaluation.runner.completion import finish_claim
+from local_operator.evaluation.runner.completion import (
+    PREMATURE_TERMINAL_CHALLENGES,
+    challenge_kind,
+    finish_claim,
+)
 from local_operator.evaluation.runner.episode import (
     _PROVISIONAL_CLEANUP_ACTION,
     EpisodeConfig,
@@ -165,6 +169,11 @@ from local_operator.evaluation.runner.provider_client import (
     build_completion_challenge,
 )
 from local_operator.evaluation.runner.public_reply import tolerated_fields_note
+from local_operator.evaluation.runner.step_budget import (
+    StepPosition,
+    enforced_position,
+    restate_step_budget,
+)
 from local_operator.harness.types import (
     AgentEndEvent,
     AgentEvent,
@@ -827,6 +836,12 @@ class ObservationRenderer:
             rebuild_every_frames=DEFAULT_REBUILD_EVERY_FRAMES,
         )
         self._turns: list[EpisodeTurn] = []
+        #: Where the step-budget position comes from, or ``None`` for no line.
+        #: Wired to :meth:`ActionBridge.step_position` by the driver AFTER the
+        #: bridge exists (the bridge is built around this renderer), so the
+        #: position is always the bridge's ENFORCED clocks, read at render
+        #: time -- never a count this renderer keeps.
+        self.step_position: Callable[[], StepPosition | None] | None = None
 
     def render_read_only(self, observation: Observation) -> list[Any]:
         """Render a capture without attributing unchanged pixels to an action."""
@@ -835,7 +850,8 @@ class ObservationRenderer:
     def render(self, observation: Observation, *, read_only: bool = False) -> list[Any]:
         """The observation's content blocks, in the builder's own rendering."""
 
-        self._turns.append(EpisodeTurn(observation=observation))
+        position = self.step_position() if self.step_position is not None else None
+        self._turns.append(EpisodeTurn(observation=observation, step_budget=position))
         self._builder.append_new_turns(self._turns, read_only=read_only)
         message = self._builder.messages[-1]
         return list(message.content)
@@ -1067,6 +1083,11 @@ class ActionBridge:
     #: flag).
     completion_gate: bool = True
     completion_challenges: int = 1
+    #: The runner's premature-terminal gate (``runner/completion.py``, second
+    #: rule): a ``failed``/``infeasible`` finish before any batch executed is
+    #: challenged once, from its own fixed budget. Same config field, same
+    #: driver flag (``--no-premature-terminal-gate``) as the reply channel.
+    premature_terminal_gate: bool = True
     #: The channel sentence appended to the challenge -- see
     #: :data:`CHALLENGE_REPLY_GUIDANCE`.
     reply_guidance: str | None = None
@@ -1136,14 +1157,27 @@ class ActionBridge:
         #: for the runner's reason: the bound is a property of the episode's
         #: protocol, not of any writer.
         self._completion_fired = 0
+        #: Premature-terminal challenges made; bounded by
+        #: ``PREMATURE_TERMINAL_CHALLENGES`` and kept apart from
+        #: ``_completion_fired`` so it never spends the ``done`` budget.
+        self._premature_fired = 0
+        #: Non-terminal batches dispatched to the adapter -- the runner's
+        #: ``_steps_taken`` analogue (see the increment for why at dispatch).
+        #: ``_steps`` cannot serve: it counts admitted output epochs, which a
+        #: challenged finish and an ask exchange also consume.
+        self._executed = 0
         #: ``(observation_id, rendered blocks)`` for every screen this bridge
         #: has shown: observation zero in ``arm``, each executed result in
         #: ``call``. The completion challenge re-attaches the state the model is
         #: looking at from HERE instead of calling the renderer again -- the
         #: renderer is stateful and a second render would append a duplicate
         #: turn to the transcript the model is shown.
-        self._initial_shown: tuple[str, list[Any]] | None = None
-        self._last_shown: tuple[str, list[Any]] | None = None
+        #: ``(observation_id, rendered blocks, step position rendered with)``.
+        #: The position is kept so a re-attach (the completion challenge) can
+        #: restate the budget line at the position CURRENT then -- the
+        #: challenge itself charges a step after the screen was rendered.
+        self._initial_shown: tuple[str, list[Any], StepPosition | None] | None = None
+        self._last_shown: tuple[str, list[Any], StepPosition | None] | None = None
         #: The terminal assistant message the prose arm reads. Updated by
         #: ``fold`` on every ``MessageEndEvent``, so once the turn ends this is
         #: the message the run ended on -- a prose "Done" never reaches
@@ -1200,7 +1234,11 @@ class ActionBridge:
         if self._token is not None:
             raise SessionArmError("the action bridge was already armed with an observation")
         self._token = PendingObservationToken(observation)
-        self._initial_shown = (observation.observation_id, list(self.render(observation)))
+        self._initial_shown = (
+            observation.observation_id,
+            list(self.render(observation)),
+            self.step_position(),
+        )
         self._last_observation = observation
 
     @property
@@ -1215,6 +1253,22 @@ class ActionBridge:
     def steps(self) -> int:
         return self._steps
 
+    def step_position(self) -> StepPosition | None:
+        """The budget position the model is shown, on the ENFORCED clocks.
+
+        ``max_steps`` is enforced on BOTH clocks (``call`` refuses at
+        ``_attempted_groups >= max_steps`` and at ``_steps >= max_steps``), so
+        the binding one -- the larger -- is what has been used: stating the
+        smaller would promise steps the bridge will refuse. Read live, so a
+        ``max_steps`` changed mid-run is stated as the value now enforced --
+        the driver's stop gate reads this same ``bridge.max_steps``. ``None``
+        for a cap below 1: that episode is refused at its first call and has
+        no position to state. See ``runner.step_budget`` for why the model is
+        told at all.
+        """
+
+        return enforced_position(max(self._steps, self._attempted_groups), self.max_steps)
+
     @property
     def attempted_groups(self) -> int:
         """Completed root output groups reserved on the ATTEMPTED clock.
@@ -1225,6 +1279,28 @@ class ActionBridge:
         """
 
         return self._attempted_groups
+
+    def _challenge_epoch_pair_fits(self) -> bool:
+        """Whether this channel's clocks can hold a challenge AND its reply.
+
+        The runner charges a challenge to the model's retry allowance; this
+        channel charges every admitted output group, the re-ask included, and
+        ``max_steps`` bounds those epochs (blueprint §3). A challenge spends one
+        epoch, so the model's answer needs a second one: where the budget cannot
+        hold both, challenging CONSUMES the episode's last epoch and the
+        declaration it asked about never arrives. Measured by QA at
+        ``max_steps == 1``: a step-0 ``finish(infeasible)`` -- the declaration a
+        genuinely infeasible task is scored on -- ended ``truncated / max-steps``
+        with no ``finish`` row at all, where the control arm recorded it.
+
+        So the gate DECLINES when the exchange does not fit, instead of spending
+        a budget that cannot complete what it starts. Both clocks are checked
+        because ``max_steps`` is enforced on both: ``_steps`` (admitted epochs)
+        and ``_attempted_groups`` (reserved at admission, so a refused group is
+        still spent).
+        """
+
+        return self._steps + 2 <= self.max_steps and self._attempted_groups + 1 <= self.max_steps
 
     def _group_key(self) -> str:
         """The canonical key of the output group being served.
@@ -1440,11 +1516,17 @@ class ActionBridge:
         total by construction. The empty fallback exists only so a future
         arming path cannot make the bridge raise inside a socket handler; it is
         not a state either shipped path can produce.
+
+        The blocks are the ones already shown -- never a re-render, which would
+        charge the builder's per-turn state twice -- except that their budget
+        line is restated at the position NOW: a challenge consumes a step after
+        the screen was rendered, and the stale count would understate ``used``
+        by one at the very moment the model weighs whether to stop.
         """
 
         for shown in (self._last_shown, self._initial_shown):
             if shown is not None and shown[0] == observation.observation_id:
-                return shown[1]
+                return restate_step_budget(shown[1], shown[2], self.step_position())
         return []
 
     def fold(self, event: AgentEvent) -> None:
@@ -1760,11 +1842,37 @@ class ActionBridge:
             terminal = _terminal_kind(batch)
             if terminal == "finish":
                 claim = finish_claim(batch)
-                if (
-                    self.completion_gate
-                    and self._completion_fired < self.completion_challenges
-                    and claim.status == "done"
-                ):
+                # The rule is the runner's (``runner.completion.challenge_kind``);
+                # only the counters are this bridge's.
+                kind = challenge_kind(
+                    claim,
+                    executed_steps=self._executed,
+                    completion_open=(
+                        self.completion_gate and self._completion_fired < self.completion_challenges
+                    ),
+                    premature_open=(
+                        self.premature_terminal_gate
+                        and self._premature_fired < PREMATURE_TERMINAL_CHALLENGES
+                    ),
+                )
+                if kind == "premature-terminal" and not self._challenge_epoch_pair_fits():
+                    # A challenge the budget cannot see through is worse than no
+                    # challenge: it would spend the last epoch and lose the very
+                    # declaration the gate exists to protect (see
+                    # ``_challenge_epoch_pair_fits``). Accept the claim and say
+                    # so in the ledger -- a silently skipped gate reads exactly
+                    # like one that never fired.
+                    if self.record is not None:
+                        self.record(
+                            "premature_gate_skipped",
+                            {
+                                "reason": "step-budget",
+                                "steps": self._steps,
+                                "max_steps": self.max_steps,
+                            },
+                        )
+                    kind = None
+                if kind is not None:
                     # The runner's completion gate (``runner/completion.py``),
                     # enforced on this channel: the FIRST ``done`` claim is
                     # refused once and re-asked, and every later finish -- the
@@ -1774,16 +1882,22 @@ class ActionBridge:
                     # ``action_batch`` is written -- but the claim ITSELF is an
                     # admitted output decision and consumes one external output
                     # epoch (blueprint §3), exactly as the runner's challenge
-                    # does at the official clock. A ``failed`` claim is
-                    # NOT challenged (there is no completion to confirm; the
-                    # runner's rule), and a claim is only ever challenged if the
-                    # shared text can name the task back, which is why the
-                    # instruction rides on the bridge.
+                    # does at the official clock. A ``failed``/``infeasible``
+                    # claim IS challenged once when NO action has executed yet
+                    # (the premature rule); one made after an action is not,
+                    # because there is no reasoning turn to re-open -- the
+                    # model already reported what the environment showed it.
+                    # A claim is only ever challenged if the shared text can
+                    # name the task back, which is why the instruction rides
+                    # on the bridge.
                     # The proposal is ADMITTED here: one epoch, consumed
                     # before the challenge is built and recorded (blueprint §3).
                     self._consume_output_epoch("finish-challenged")
                     self._mark_group_kind("finish-challenged")
-                    self._completion_fired += 1
+                    if kind == "premature-terminal":
+                        self._premature_fired += 1
+                    else:
+                        self._completion_fired += 1
                     challenge = build_completion_challenge(
                         claim=claim,
                         instruction=self.instruction,
@@ -1791,15 +1905,18 @@ class ActionBridge:
                         reply_guidance=self.reply_guidance,
                     )
                     if self.record is not None:
-                        self.record(
-                            "completion_challenged",
-                            {
-                                "status": claim.status,
-                                "reason": claim.reason,
-                                "challenge": challenge,
-                                "observation_id": pending.observation_id,
-                            },
-                        )
+                        row: dict[str, Any] = {
+                            "status": claim.status,
+                            "reason": claim.reason,
+                            "challenge": challenge,
+                            "observation_id": pending.observation_id,
+                        }
+                        # The ``done`` row keeps its historical shape (no
+                        # trigger key); the new rule is discriminated the way
+                        # the prose arm's row is, by ``trigger``.
+                        if kind == "premature-terminal":
+                            row["trigger"] = "premature-terminal"
+                        self.record("completion_challenged", row)
                     # Evidence first, re-prompt second (the runner's ordering):
                     # on this channel the challenge IS the re-prompt, and the
                     # state it names rides WITH it -- the same rendered blocks
@@ -1894,6 +2011,12 @@ class ActionBridge:
                     "is_error": True,
                     "details": refusal.details,
                 }
+            # Counted at DISPATCH, not on success: a batch whose read-back was
+            # lost (committed, or an ambiguous delivery) still acted on the
+            # environment, and the premature-terminal gate must err toward NOT
+            # challenging. A declared not-applied batch is counted too -- the
+            # model has acted and been answered, which is all the gate asks.
+            self._executed += 1
             try:
                 result = await self.execute(batch)
             except Exception as error:  # noqa: BLE001 - _after_failed_execute owns it
@@ -1918,7 +2041,7 @@ class ActionBridge:
             # state alone -- the note is a correction of an EARLIER reply, and
             # re-attached to an unrelated claim it reads as guidance for the
             # claim instead. It is delivered once, on the call's own result.
-            self._last_shown = (result.observation.observation_id, rendered)
+            self._last_shown = (result.observation.observation_id, rendered, self.step_position())
             note = tolerated_fields_note(tolerated_fields)
             if note is not None:
                 # The correction for a sibling field this call carried and the
@@ -2169,7 +2292,7 @@ class ActionBridge:
         ]
         if shown_before is None or shown_before.observation_id != recovered.observation_id:
             rendered = (self.render_read_only or self.render)(recovered)
-            self._last_shown = (recovered.observation_id, rendered)
+            self._last_shown = (recovered.observation_id, rendered, self.step_position())
             self._last_observation = recovered
             content = [*content, *rendered]
         if self.record is not None:
@@ -2235,7 +2358,7 @@ class ActionBridge:
         ]
         if shown_before is None or shown_before.observation_id != recovered.observation_id:
             rendered = self.render(recovered)
-            self._last_shown = (recovered.observation_id, rendered)
+            self._last_shown = (recovered.observation_id, rendered, self.step_position())
             self._last_observation = recovered
             content = [*content, *rendered]
         if self.record is not None:
@@ -2305,7 +2428,7 @@ class ActionBridge:
         ]
         if shown_before is None or shown_before.observation_id != recovered.observation_id:
             rendered = self.render(recovered)
-            self._last_shown = (recovered.observation_id, rendered)
+            self._last_shown = (recovered.observation_id, rendered, self.step_position())
             self._last_observation = recovered
             content = [*content, *rendered]
         if self.record is not None:
@@ -3173,10 +3296,15 @@ async def run_session_episode(
             instruction=observation.text or "",
             completion_gate=config.completion_gate,
             completion_challenges=config.completion_challenges,
+            premature_terminal_gate=config.premature_terminal_gate,
             reply_guidance=CHALLENGE_REPLY_GUIDANCE.format(tool_name=declaration.tool_name),
             progress_guards=progress_guards,
             progress_budget=spec.budget if progress_guards is not None else None,
         )
+        # Every observation the bridge renders from here on (observation zero
+        # in ``arm``, each executed result, each re-bind) states the step
+        # budget on the bridge's own enforced clocks.
+        renderer.step_position = bridge.step_position
         bridge.arm(observation)
         await bridge.start()
 
@@ -3294,6 +3422,10 @@ async def run_session_episode(
             #   produced no MessageEnd fold -- fires while the episode is
             #   still LIVE (``end_requested is None``): a completed
             #   terminal turn has nothing left to stop.
+            # The cap is read from the BRIDGE (seeded from
+            # ``config.max_steps``), the same value its refusals and the
+            # model's budget line read: one source, so the stated budget is
+            # literally the one this stop enforces.
             if (
                 not budget_stop_sent
                 and handle is not None
@@ -3307,20 +3439,20 @@ async def run_session_episode(
                             call.name == declaration.tool_name for call in event.message.tool_calls
                         )
                         and bridge.end_requested is None
-                        and bridge.attempted_groups >= config.max_steps
+                        and bridge.attempted_groups >= bridge.max_steps
                     )
                     or (
                         isinstance(event, ToolExecutionEndEvent)
                         and event.tool_name == declaration.tool_name
                         and (
-                            bridge.steps >= config.max_steps
-                            or bridge.attempted_groups >= config.max_steps
+                            bridge.steps >= bridge.max_steps
+                            or bridge.attempted_groups >= bridge.max_steps
                         )
                     )
                     or (
                         isinstance(event, TurnEndEvent)
                         and bridge.end_requested is None
-                        and bridge.attempted_groups >= config.max_steps
+                        and bridge.attempted_groups >= bridge.max_steps
                     )
                 )
             ):
@@ -3502,7 +3634,7 @@ async def run_session_episode(
             # The runner's guard truncation: a scored partial whose reason is
             # the guard's stable code (``truncation_reason`` on the reply arm).
             status = "truncated"
-        elif terminal_reason == "max-steps" or steps >= config.max_steps:
+        elif terminal_reason == "max-steps" or steps >= bridge.max_steps:
             status = "truncated"
             terminal_reason = terminal_reason or "max-steps"
         else:

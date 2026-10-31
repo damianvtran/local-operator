@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import sqlite3
 import time
@@ -54,6 +55,7 @@ __all__ = [
     "ACK_CONFLICT",
     "CONNECTOR_CLAIM_TOKEN_PREFIX",
     "SCHEMA_VERSION",
+    "SCREENING_FAILURE_CLASSES",
     "Store",
     "StoreRefused",
     "state_db_path",
@@ -331,6 +333,7 @@ CREATE TABLE IF NOT EXISTS screening_holds (
     hold_code TEXT NOT NULL,
     retry_at REAL,
     created_at REAL NOT NULL,
+    failure_class TEXT,
     PRIMARY KEY (owner_key, message_id)
 );
 CREATE TABLE IF NOT EXISTS screening_schedule (
@@ -339,6 +342,47 @@ CREATE TABLE IF NOT EXISTS screening_schedule (
     lease_holder TEXT,
     lease_expires REAL
 );
+-- The model-ANSWER cache: a content-addressed HOLD, keyed exactly as the
+-- verdict cache is (receipts are keyed per message, so a hold kept there would
+-- occupy the write-once receipt slot for that message and block a later
+-- admission under a republished template). A retry schedule re-screens the same
+-- body, and a stochastic screener draws a DIFFERENT answer on a re-draw, so the
+-- answer of a hold has to be readable without spending a second dispatch. Only
+-- a MODEL answer is ever written here; a route failure never is (a provider
+-- outage must recover through the retry schedule).
+--
+-- ONE row per key tuple, and the row is REPLACEABLE exactly when a read would
+-- refuse to serve it (a different epoch, creator generation or engine
+-- version). Keeping an unservable row was a silent way to disable the cache:
+-- a policy rollback or an epoch bump left the old row in place, the insert
+-- could not overwrite it, and every later pass re-drew the body forever.
+CREATE TABLE IF NOT EXISTS screening_answer_holds (
+    owner_key TEXT NOT NULL,
+    body_sha256 TEXT NOT NULL,
+    template_sha256 TEXT NOT NULL,
+    model TEXT NOT NULL,
+    admission_revision TEXT NOT NULL,
+    envelope_digest TEXT NOT NULL,
+    hold_code TEXT NOT NULL,
+    prompt_version TEXT NOT NULL,
+    -- The screening ENGINE version: a code stamp for the parser, the token
+    -- ceiling and the prompt renderer (``client.SCREENING_ENGINE_VERSION``).
+    -- It is part of what a cached answer is valid UNDER — a code fix that
+    -- clears a miscoded artefact (a parser that mistook trailing spaces for a
+    -- cut reply) must invalidate the artefact it produced, and no republish is
+    -- involved in that kind of fix.
+    engine_version TEXT NOT NULL DEFAULT '',
+    -- The closed failure class the receiver status shows for this hold
+    -- (``stream_refused`` for an answered refusal). Without it a replay would
+    -- have to re-derive a class from a failure it no longer has.
+    failure_class TEXT,
+    policy_epoch INTEGER NOT NULL,
+    creator_generation INTEGER NOT NULL,
+    created_at REAL NOT NULL,
+    PRIMARY KEY (
+        owner_key, body_sha256, template_sha256, model, admission_revision, envelope_digest
+    )
+);
 CREATE TABLE IF NOT EXISTS screening_policy (
     owner_key TEXT PRIMARY KEY,
     version TEXT NOT NULL,
@@ -346,13 +390,15 @@ CREATE TABLE IF NOT EXISTS screening_policy (
     default_model TEXT,
     revision TEXT NOT NULL,
     epoch INTEGER NOT NULL,
-    accepted_at REAL NOT NULL
+    accepted_at REAL NOT NULL,
+    approved_serving TEXT
 );
 CREATE TABLE IF NOT EXISTS screening_breaker (
     account_scope TEXT PRIMARY KEY,
     failures INTEGER NOT NULL,
     open_until REAL NOT NULL,
-    updated_at REAL NOT NULL
+    updated_at REAL NOT NULL,
+    last_failure_class TEXT
 );
 """
 _PRODUCER_SCHEMA = """
@@ -481,6 +527,54 @@ _PRODUCER_DDL_STATEMENTS = (
     "fingerprint TEXT NOT NULL, phase TEXT NOT NULL, created_at REAL NOT NULL, "
     "UNIQUE (owner_key, message_id))",
 )
+
+
+_SCREENING_HOLD_ADDED = (
+    "CREATE TABLE IF NOT EXISTS screening_answer_holds ("
+    "owner_key TEXT NOT NULL, body_sha256 TEXT NOT NULL, template_sha256 TEXT NOT NULL, "
+    "model TEXT NOT NULL, admission_revision TEXT NOT NULL, envelope_digest TEXT NOT NULL, "
+    "hold_code TEXT NOT NULL, prompt_version TEXT NOT NULL, failure_class TEXT, "
+    "engine_version TEXT NOT NULL DEFAULT '', "
+    "policy_epoch INTEGER NOT NULL, "
+    "creator_generation INTEGER NOT NULL, created_at REAL NOT NULL, "
+    "PRIMARY KEY (owner_key, body_sha256, template_sha256, model, "
+    "admission_revision, envelope_digest))",
+)
+
+
+def _ensure_answer_hold_table(conn: sqlite3.Connection) -> None:
+    """Create the answer cache on a store that predates it.
+
+    A stamped current-version store never re-runs schema DDL, so an existing
+    operator database would otherwise reach the cache path with no table. This
+    is purely ADDITIVE (``IF NOT EXISTS``): it holds no budget, receipt or
+    authority, so creating it empty cannot reset or launder anything — the only
+    consequence of a lost row is that the next screen draws again, which is the
+    behaviour every retry had before this table existed.
+
+    It is also safe under the CALLER's write lock: both callers open ONE
+    ``BEGIN IMMEDIATE`` transaction so the authority checks and the row they
+    act on cannot interleave with another writer, and the DDL inside it is
+    idempotent — a store that already carries the table pays only the catalogue
+    read, and one that predates it gets it inside the same linearized snapshot
+    that then reads or writes it. Creating a table takes no authority away from
+    anyone, so it is the one DDL that belongs on this path rather than in a
+    migration.
+
+    A table created by an earlier build of this table gets the engine-version
+    column added in place: rows written before it carry ``''``, which can never
+    equal the running engine version, so they are replaced (never served) by the
+    next answered hold for that key.
+    """
+
+    for statement in _SCREENING_HOLD_ADDED:
+        conn.execute(statement)
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(screening_answer_holds)")}
+    if "engine_version" not in columns:
+        conn.execute(
+            "ALTER TABLE screening_answer_holds "
+            "ADD COLUMN engine_version TEXT NOT NULL DEFAULT ''"
+        )
 
 
 def _ensure_producer_table(conn: sqlite3.Connection) -> None:
@@ -901,6 +995,55 @@ def _receipt_int(value: Any, default: int) -> int | None:
         return None
 
 
+def policy_serving_models(policy: Mapping[str, Any]) -> frozenset[str]:
+    """The model ids whose verdict the published policy accepts as its own.
+
+    WHY: screening walks the operator's fallback chain (one isolated attempt
+    per hop), so an allow can legitimately be served by a hop other than the
+    published ``default_model``. Every receipt fence used to require
+    ``receipt.model == default_model``, which turned a fallback hop's allow
+    into ``receipt_stale`` / ``stale_proof`` / ``policy_drift`` downstream
+    (PR #3194 review B1/S-3) after the hop had already been billed.
+
+    ``approved_serving`` is the JSON list of ``[provider, model]`` pairs the
+    trusted publisher wrote for the WHOLE chain; it is bound into the
+    admission revision, so a chain edit advances revision and epoch. The
+    fence compares MODEL ids because a receipt records only its model; the
+    provider half was already enforced per hop by that hop's runner (the
+    tuple check), before any receipt could exist.
+
+    FAIL CLOSED, never wider: a legacy row (column absent or NULL) and a
+    damaged value both mean ``{default_model}`` only — exactly the authority
+    every row had before this column existed.
+    """
+
+    default = policy.get("default_model")
+    models = {default} if isinstance(default, str) and default else set()
+    raw = policy.get("approved_serving")
+    if isinstance(raw, str) and raw:
+        try:
+            pairs = json.loads(raw)
+        except ValueError:
+            pairs = None
+        if isinstance(pairs, list) and all(
+            isinstance(pair, list)
+            and len(pair) == 2
+            and all(isinstance(part, str) and part for part in pair)
+            for pair in pairs
+        ):
+            models.update(pair[1] for pair in pairs)
+    return frozenset(models)
+
+
+_POLICY_FIELDS = ("version", "template_sha256", "default_model", "revision", "epoch")
+
+
+def serialize_serving(pairs: "Sequence[tuple[str, str]] | None") -> str | None:
+    """The ONE stored form of ``approved_serving`` (publisher and republish check)."""
+
+    return json.dumps(sorted([str(p), str(m)] for p, m in set(pairs))) if pairs else None
+
+
 def receipt_authority(
     owner: OwnerSnapshot, policy: Mapping[str, Any], receipt: Mapping[str, Any]
 ) -> tuple[dict[str, Any] | None, str | None, str]:
@@ -937,7 +1080,7 @@ def receipt_authority(
 
     if (
         policy.get("template_sha256") != receipt.get("template_sha256")
-        or policy.get("default_model") != receipt.get("model")
+        or receipt.get("model") not in policy_serving_models(policy)
         or policy.get("revision") != receipt.get("admission_revision")
     ):
         return None, RECEIPT_STALE, ""
@@ -1000,6 +1143,302 @@ class OwnerReceipt:
 
     consent_version: str
     consent_ref: str
+
+
+def screening_hold_message_id(value: str) -> str:
+    """The bare message id a ``screening_holds.message_id`` row names.
+
+    WHY THIS EXISTS. ``screening_holds.message_id`` carries TWO shapes: the bare
+    id (``bcmsg_…`` / ``bmsg_…``, written by the screener and by pair holds)
+    and the composite conversation feed ref
+    ``message_available:conversation_id=<bcv>/<bcmsg>/<seq>/<n>/<kind>…``
+    (canonicalised by :func:`_contentless_delivery_key` on every hold write and
+    on :meth:`Store.delete_hold`). Receipts and attempts are keyed by the BARE
+    id. A reader that looks a held message up by bare id alone misses every
+    composite row — which is how held messages were once reported as having
+    "vanished" — and a reader that counts rows counts one message twice when
+    both shapes exist for it. Every status reader goes through this ONE parser
+    so a held message is counted once whatever shape its row has, and can be
+    joined to its receipt.
+
+    READ-ONLY by contract: this maps a stored key to a join key; it never
+    rewrites the stored key (the loop and ``delete_hold`` depend on the
+    composite spelling). A malformed composite answers the raw value unchanged
+    — it still counts as one held message under its own key, and nothing about
+    it is echoed — rather than raising inside a status read.
+    """
+
+    from local_operator.team_bridge.types import (
+        CONVERSATION_FEED_KIND,
+        CONVERSATION_FEED_TYPE,
+        parse_conversation_ref_value,
+    )
+
+    prefix = f"{CONVERSATION_FEED_TYPE}:{CONVERSATION_FEED_KIND}="
+    if not value.startswith(prefix):
+        return value
+    ref = parse_conversation_ref_value(value[len(prefix) :])
+    return ref.message_id if ref is not None else value
+
+
+#: Hold codes a status read may emit verbatim, beyond screening's own
+#: ``screening.HOLD_CODES`` (imported lazily: ``screening`` imports this
+#: module). WHY a closed list (PR #3189 review m1): ``hold_code`` is a TEXT
+#: column and not every writer passes a constant — the connector persists the
+#: hub's ``BridgeRefusal.code`` and spine outcome codes — so a shape filter
+#: would let any lowercase string through to the CLI and the desktop. These are
+#: the connector's DELIVERY-side codes, written after screening admitted the
+#: message (``connector/loop.py``, ``conversation.py``, ``wake.py``): spine
+#: outcomes, producer fences, reservation failures and the loop's own
+#: defaults. Anything not listed renders as ``other``. Extend this list when a
+#: writer gains a code.
+_DELIVERY_HOLD_CODES = frozenset(
+    {
+        # spine outcomes (wake.py / conversation.py ``{"action": "hold"}``)
+        "ack_binding_mismatch",
+        "ack_tuple_mismatch",
+        "attachments_malformed",
+        "attachments_unbound",
+        "body_invalid",
+        "body_unavailable",
+        "bounce_receipt_missing",
+        "bridge_meta_invalid",
+        "conversation_failed",
+        "delivery_failed",
+        "display_context_invalid",
+        "envelope_missing",
+        "mismatched_id",
+        "screening_bounce",
+        "screening_unavailable",
+        "screening_unknown",
+        "sender_malformed",
+        # producer fences (wake._producer_fence)
+        "bridge_off",
+        "credential_changed",
+        "consent_revoked",
+        "no_designation",
+        # body reservation failures (conversation._record_body_reservation)
+        "receipt_unavailable",
+        "reservation_refused",
+        # the loop's own defaults (connector/loop.py)
+        "hold",
+        "retry_failed",
+        # wake.py's recorded-verdict hand-off and conversation.py's screening
+        # outcome default (PR #3189 review round 2, m3)
+        "verdict_identity_mismatch",
+        "screening_hold",
+        # StoreRefused codes the connector saves verbatim as a hold
+        # (``{"action": "hold", "code": failure.code}`` in loop.py and
+        # conversation.py): the codes the store calls on those paths raise,
+        # taken from store.py (_connect/_init/_require_live/claim/
+        # record_body_reservation)
+        "state_unreadable",
+        "invalid_body_reservation",
+        "schema_unsupported",
+        "schema_unversioned",
+        "ref_migration_conflict",
+        "stale_generation",
+        "not_enrolled",
+        "busy",
+    }
+)
+
+#: Families written as ``<family>:<detail>`` (``phase_refused:<code>`` in
+#: wake.py, ``policy_stale:<code>`` from the pre-handoff gate, and wake.py's
+#: ACK/envelope outcomes ``ack_recovery:``/``ack_refused:``/
+#: ``ack_not_confirmed:``/``envelope_refused:``): the family is the code; the
+#: detail is a hub string and is never echoed.
+_FAMILY_HOLD_CODES = frozenset(
+    {
+        "phase_refused",
+        "policy_stale",
+        "ack_recovery",
+        "ack_refused",
+        "ack_not_confirmed",
+        "envelope_refused",
+    }
+)
+
+#: The ``screening_holds.failure_class`` vocabulary a sibling change writes
+#: (provider failover classification). Same rule: unlisted reads ``other``.
+SCREENING_FAILURE_CLASSES = frozenset(
+    {
+        "auth_unusable",
+        "quota",
+        "timeout",
+        "provider_5xx",
+        "stream_refused",
+        "identity_refused",
+        "chain_exhausted",
+        "other",
+    }
+)
+
+#: The window the rejected count looks back over.
+SCREENING_REJECT_WINDOW_S = 24 * 3600.0
+
+
+def _status_hold_code(value: Any, known: frozenset[str]) -> str:
+    if not isinstance(value, str):
+        return "other"
+    if value in known:
+        return value
+    family = value.partition(":")[0]
+    return family if family in _FAMILY_HOLD_CODES else "other"
+
+
+def _status_failure_class(value: Any) -> str:
+    return value if isinstance(value, str) and value in SCREENING_FAILURE_CLASSES else "other"
+
+
+def _status_timestamp(value: Any) -> float | None:
+    """A stored REAL as a finite float, or ``None`` for a damaged cell.
+
+    Non-numeric (review m2) and non-finite (round 2, m4) values both read as
+    damaged: SQLite keeps ``inf``/``-inf`` as REALs (Python's driver binds
+    ``NaN`` as NULL, which these NOT NULL columns refuse, but the guard does
+    not rely on that), and an infinite age or breaker deadline would render
+    as ``inf`` on the CLI and break strict JSON on the desktop route.
+    """
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
+
+
+#: The closed vocabularies the hub accepts on a per-recipient delivery state
+#: (contract v1, "Team Bridge per-recipient delivery state"). The hub validates
+#: them too; they are closed HERE so nothing outside them is ever sent.
+DELIVERY_HOLD_CLASSES = ("screening_unavailable", "awaiting_review", "delivery_pending")
+REFUSAL_CLASSES = ("manipulation", "personal_info", "abusive", "unsafe_content", "out_of_scope")
+
+#: Family-collapsed hold codes (see :func:`_status_hold_code`) that mean "the
+#: screener could not run or answer yet": transient, retried without the owner.
+#: ``screening_unavailable`` is the connector's own code for "no screening
+#: result at all" (``screen_item`` answered ``None``), which is the same fact.
+_HOLD_CLASS_SCREENING_UNAVAILABLE = frozenset(
+    {
+        "provider_error",
+        "breaker_open",
+        "parse_failed",
+        "runner_unavailable",
+        "retry_later",
+        "policy_stale",
+        "template_mismatch",
+        "model_identity_mismatch",
+        "model_identity_unknown",
+        "owner_changed",
+        "stale_generation",
+        "busy",
+        "budget_exhausted",
+        "screening_unavailable",
+        # The provider ANSWERED but the reply cannot admit (#3200, #3195): the
+        # screening model's own safety refusal, or a reply cut off at the
+        # output ceiling. Neither is the sender's fault and neither is
+        # terminal — the message is re-screened on the next drain exactly like
+        # a provider error — so the sender is told screening is temporarily
+        # unavailable, never that their message was judged and held for review.
+        # Named EXPLICITLY rather than left to the fallback: the conservative
+        # class would claim a human is reviewing it, which is not what happens.
+        "model_refused",
+        "reply_truncated",
+    }
+)
+
+#: Codes written AFTER screening admitted the message: delivery, not moderation,
+#: is what is pending.
+_HOLD_CLASS_DELIVERY_PENDING = frozenset({"delivery_failed", "bridge_off", "phase_refused"})
+
+#: Screening category → the ONE coarse class that may leave this machine.
+#: Keyed by the closed :data:`SCREENING_CATEGORIES`; a category added there
+#: without a row here maps to no class (the hub shows a generic "refused"),
+#: never to a guessed one — the table test pins full coverage.
+_REFUSAL_CLASS_BY_CATEGORY = {
+    "prompt_injection": "manipulation",
+    "social_engineering": "manipulation",
+    "personal_info_request": "personal_info",
+    "harassment": "abusive",
+    "malicious_link": "unsafe_content",
+    "spam": "unsafe_content",
+    "out_of_scope_work": "out_of_scope",
+    "new_work_request": "out_of_scope",
+}
+
+
+def delivery_hold_class(hold_code: Any) -> str:
+    """The coarse ``hold_class`` a recipient may publish for one held message.
+
+    WHY THIS EXISTS. The sender of a held message (and the recipient's owner on
+    the hub) is told THAT it is held and, for the owner, roughly why — never
+    the hold code itself: a code such as ``model_hold`` or
+    ``bounce_without_category`` is a screener outcome, and publishing it would
+    turn the hub into an oracle for probing the recipient's moderation. So the
+    code is collapsed to one of three classes.
+
+    CONSTRAINTS. The code first goes through #3189's closed whitelist and
+    family collapse (:func:`_status_hold_code`): a free-text or hub-supplied
+    detail (``phase_refused:<hub code>``) never reaches the mapping, and
+    anything unrecognised — including a non-string — is ``awaiting_review``,
+    the conservative class that promises nothing about when it clears.
+    """
+
+    from local_operator.team_bridge.screening import HOLD_CODES
+
+    code = _status_hold_code(hold_code, frozenset(HOLD_CODES) | _DELIVERY_HOLD_CODES)
+    if code in _HOLD_CLASS_SCREENING_UNAVAILABLE:
+        return "screening_unavailable"
+    if code in _HOLD_CLASS_DELIVERY_PENDING:
+        return "delivery_pending"
+    return "awaiting_review"
+
+
+def refusal_class(categories: Any) -> str | None:
+    """The ONE coarse ``refusal_class`` for a rejected message, or ``None``.
+
+    WHY. The raw screening categories never leave this machine (contract v1):
+    eight fine categories would let a sender map the recipient's moderation
+    one probe at a time. Five coarse classes, one per refusal, are the most
+    that may be published — and the hub additionally withholds even that from
+    a sender it suspects of probing.
+
+    CONSTRAINTS. Only exact members of the closed :data:`SCREENING_CATEGORIES`
+    count; a bare string (free text, or one category passed unwrapped) is
+    refused rather than iterated character by character. Several categories
+    resolve to the FIRST in :data:`SCREENING_CATEGORIES` order, so the answer
+    is deterministic and a single class. No known category → ``None``.
+    """
+
+    if isinstance(categories, (str, bytes)) or not isinstance(
+        categories, (list, tuple, frozenset, set)
+    ):
+        return None
+    present = {name for name in categories if isinstance(name, str)}
+    for name in SCREENING_CATEGORIES:
+        if name in present:
+            return _REFUSAL_CLASS_BY_CATEGORY.get(name)
+    return None
+
+
+def read_screening_status(config_dir: Path) -> dict[str, Any] | None:
+    """The screening status for the live owner of ``config_dir``, or ``None``.
+
+    The ONE wrapper both surfaces call (``lop team-bridge receiver status`` and
+    the desktop status route; PR #3189 review N1), so its error contract lives
+    in one place: a status read never fails its caller (CLI exit 0, route 200).
+    Any failure — absent store, not enrolled, fenced, unreadable, or a damaged
+    row this reader did not anticipate — is ``None``, and the exception's own
+    text is not echoed (it can name a path or a stored value).
+    """
+
+    try:
+        store = Store(config_dir)
+        owner = store.active_owner_readonly()
+        if owner is None:
+            return None
+        return store.screening_status_readonly(owner)
+    except Exception:  # noqa: BLE001 — a status read never fails its caller
+        return None
 
 
 def _contentless_delivery_key(value: str) -> str:
@@ -1110,10 +1549,41 @@ BODY_RESERVATION_STATES = ("pending", "claimed", "completed", "retired")
 #: re-written for the same message keeps the row's FIRST ``created_at`` — the
 #: age the owner sees is how long the message has waited, not how long since
 #: its latest reason. Relies on the table's (owner_key, message_id) key.
+#: The CLOSED vocabulary of ``screening_holds.failure_class`` (read by the
+#: receiver status line, PR #3189). Owned HERE because the store is the boundary
+#: that must guarantee it: every writer clamps through
+#: :func:`_closed_failure_class`, so a future producer cannot widen the column
+#: with free text. ``model_boundary`` re-exports it for its classifier.
+SCREENING_FAILURE_CLASSES = (
+    "auth_unusable",
+    "quota",
+    "timeout",
+    "provider_5xx",
+    "stream_refused",
+    "identity_refused",
+    "chain_exhausted",
+    "other",
+)
+
+
+def _closed_failure_class(value: Any) -> str | None:
+    """``None`` stays ``None`` (no class); anything outside the set is ``other``."""
+
+    if value is None:
+        return None
+    return value if value in SCREENING_FAILURE_CLASSES else "other"
+
+
 _HOLD_UPSERT = (
     "ON CONFLICT(owner_key, message_id) DO UPDATE SET "
     "hold_code = excluded.hold_code, retry_at = excluded.retry_at"
 )
+
+#: The SCREENING-OUTCOME hold upsert: as :data:`_HOLD_UPSERT`, plus the
+#: ``failure_class`` column, so a re-hold for a new reason never keeps the
+#: previous outcome's class (a later ``model_hold`` clears a stale
+#: ``chain_exhausted``). Only the writers that own the column use it.
+_HOLD_UPSERT_CLASSED = _HOLD_UPSERT + ", failure_class = excluded.failure_class"
 
 #: What a replay owes for an admission's card (PR #3063 reviews M5/m11/m15).
 #: ``owed``: the reservation is still ``pending`` and no card was recorded —
@@ -2030,6 +2500,161 @@ class Store:
             ).fetchone()
             return int(row["n"]) if row is not None else 0
 
+    def screening_status_readonly(
+        self, owner: OwnerSnapshot, *, now: float | None = None
+    ) -> dict[str, Any] | None:
+        """Held / breaker / rejected screening counts for this live owner (read-only).
+
+        WHY THIS EXISTS. When screening parks a message (a hold) or moderates
+        it ``reject``, the owner previously saw only silence: 46 messages sat in
+        ``screening_holds`` for up to 90 minutes and four rejections left no
+        signal anywhere. ``lop team-bridge receiver status`` and the desktop
+        status read both render this one answer.
+
+        CONTENT LAW. Counts, closed codes, categories, ages and timestamps
+        only — never a body, a model reply, a reason or a sender label. The
+        query selects no other column; hold codes and failure classes pass
+        only through closed whitelists (``other`` otherwise) and categories
+        only through the closed screening vocabulary (``unknown``). Read-only
+        over an EXISTING store; never creates, migrates or writes.
+
+        COUNTING. Every ``screening_holds`` row is a live durable retry, so
+        every row counts (PR #3189 review M1). Rows are normalised by
+        :func:`screening_hold_message_id` and counted once per bare message
+        id; when one message has rows in both shapes the composite (canonical)
+        row's code wins. A held message that ALREADY has a receipt was
+        screened and admitted but not delivered (``delivery_failed``,
+        ``bridge_off``, ``phase_refused``, a reservation failure, ...): it is
+        reported in its own ``after_screening`` bucket rather than hidden.
+        The ``deliveries`` table does not prove delivery for a conversation
+        message (it carries pair deliveries only), so a hold is never
+        discounted against it; a hold whose message was in fact delivered is
+        retired by the loop's next re-drive. ``failure_class`` is read only
+        when that column exists (a sibling change adds it); absent, the
+        dominant class is ``None``.
+
+        DAMAGED ROWS (review m2) are read defensively: a non-numeric
+        ``created_at`` still counts the message but gives it no age, and a
+        category that is not a string is ignored. Nothing here raises past
+        :func:`read_screening_status`.
+
+        ``None`` for an absent store or a fenced owner. Unreadable raises
+        :class:`StoreRefused` like every ``_connect_readonly`` caller.
+        """
+
+        from local_operator.team_bridge.screening import HOLD_CODES
+
+        known_codes = frozenset(HOLD_CODES) | _DELIVERY_HOLD_CODES
+        at = time.time() if now is None else float(now)
+        with self._connect_readonly() as conn:
+            if conn is None:
+                return None
+            if self._live_generation(conn, owner) != owner.enrollment_generation:
+                return None
+            key = _owner_key(owner)
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(screening_holds)")}
+            failure_column = ", failure_class" if "failure_class" in columns else ""
+            holds = conn.execute(
+                f"SELECT message_id, hold_code, created_at{failure_column} "
+                "FROM screening_holds WHERE owner_key = ?",
+                (key,),
+            ).fetchall()
+            receipted = {
+                str(row["message_id"])
+                for row in conn.execute(
+                    "SELECT message_id FROM screening_receipts WHERE owner_key = ?", (key,)
+                )
+            }
+            rejects = conn.execute(
+                "SELECT categories FROM screening_receipts "
+                "WHERE owner_key = ? AND verdict = 'reject' AND created_at >= ?",
+                (key, at - SCREENING_REJECT_WINDOW_S),
+            ).fetchall()
+            breaker = conn.execute(
+                "SELECT failures, open_until FROM screening_breaker WHERE account_scope = ?",
+                (self._account_scope(owner),),
+            ).fetchone()
+
+        # One entry per bare message id: (canonical?, code, oldest created_at, class).
+        held: dict[str, tuple[bool, str, float | None, str | None]] = {}
+        for row in holds:
+            stored = str(row["message_id"])
+            bare = screening_hold_message_id(stored)
+            canonical = bare != stored
+            code = _status_hold_code(row["hold_code"], known_codes)
+            created = _status_timestamp(row["created_at"])
+            raw_class = row["failure_class"] if failure_column else None
+            failure = _status_failure_class(raw_class) if raw_class is not None else None
+            prior = held.get(bare)
+            if prior is not None:
+                ages = [value for value in (created, prior[2]) if value is not None]
+                created = min(ages) if ages else None
+                if prior[0] and not canonical:
+                    code, canonical = prior[1], True
+                failure = failure if failure is not None else prior[3]
+            held[bare] = (canonical, code, created, failure)
+
+        by_code: dict[str, int] = {}
+        after_by_code: dict[str, int] = {}
+        classes: dict[str, int] = {}
+        for bare, (_canonical, code, _created, failure) in held.items():
+            by_code[code] = by_code.get(code, 0) + 1
+            if bare in receipted:
+                after_by_code[code] = after_by_code.get(code, 0) + 1
+            if failure is not None:
+                classes[failure] = classes.get(failure, 0) + 1
+        oldest = min((entry[2] for entry in held.values() if entry[2] is not None), default=None)
+        # Highest count wins; a tie resolves alphabetically so the answer is stable.
+        dominant = min(classes, key=lambda name: (-classes[name], name)) if classes else None
+
+        by_category: dict[str, int] = {}
+        for row in rejects:
+            try:
+                decoded = json.loads(row["categories"])
+            except (TypeError, ValueError):
+                decoded = None
+            names = (
+                [name for name in decoded if isinstance(name, str)]
+                if isinstance(decoded, list)
+                else []
+            )
+            for name in names or ["unknown"]:
+                category = name if name in _CLOSED_CATEGORIES else "unknown"
+                by_category[category] = by_category.get(category, 0) + 1
+
+        failures = 0
+        open_until = 0.0
+        if breaker is not None:
+            failures = int(_status_timestamp(breaker["failures"]) or 0)
+            open_until = _status_timestamp(breaker["open_until"]) or 0.0
+
+        def _ranked(counts: dict[str, int]) -> dict[str, int]:
+            return dict(sorted(counts.items(), key=lambda item: (-item[1], item[0])))
+
+        return {
+            "held": {
+                "count": len(held),
+                "by_code": _ranked(by_code),
+                "oldest_age_s": max(0.0, at - oldest) if oldest is not None else None,
+                "dominant_failure_class": dominant,
+                # Held AFTER an admitting receipt: screened, not yet delivered.
+                # A subset of ``count``/``by_code``, never in addition to them.
+                "after_screening": {
+                    "count": sum(after_by_code.values()),
+                    "by_code": _ranked(after_by_code),
+                },
+            },
+            "breaker": {
+                "state": "open" if open_until > at else "closed",
+                "failures": failures,
+                "open_until": open_until if open_until > 0 else None,
+            },
+            "rejected_24h": {
+                "count": len(rejects),
+                "by_category": _ranked(by_category),
+            },
+        }
+
     def designated_session_for_readonly(self, owner: OwnerSnapshot) -> str | None:
         """The designated CoS session id, read-only, under the same live fence.
 
@@ -2210,6 +2835,78 @@ class Store:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(body_reservations)")}
         if "card_posted_at" not in columns:
             conn.execute("ALTER TABLE body_reservations ADD COLUMN card_posted_at REAL")
+
+    @staticmethod
+    def _ensure_policy_serving_column(conn: sqlite3.Connection) -> None:
+        """Add ``approved_serving`` to a ``screening_policy`` that predates it.
+
+        Same additive, nullable, no-stamp rule as
+        :meth:`_ensure_hold_failure_class_column`: an older binary never names
+        it, and a NULL reads as ``{default_model}`` only
+        (:func:`policy_serving_models`), so a legacy row keeps exactly the
+        authority it had. Not in ``_V3_COLUMNS``: its absence is not damage.
+        """
+
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(screening_policy)")}
+        if "approved_serving" not in columns:
+            conn.execute("ALTER TABLE screening_policy ADD COLUMN approved_serving TEXT")
+
+    @staticmethod
+    def _ensure_hold_failure_class_column(conn: sqlite3.Connection) -> None:
+        """Add ``failure_class`` to a ``screening_holds`` that predates it.
+
+        WHY: a ``provider_error`` hold said nothing about WHICH failure parked
+        the message (auth, quota, 5xx, an exhausted fallback chain), so the
+        receiver status could not tell the operator what to fix. The column
+        holds a closed class from ``model_boundary.SCREENING_FAILURE_CLASSES``
+        — never provider prose. The receiver status (PR #3189) reads it by
+        this exact name, only when present.
+
+        ADDITIVE AND NULLABLE, so no schema stamp moves (the same rule as
+        :meth:`_ensure_card_posted_column`): an older binary sharing this
+        state file never names the column and keeps opening it, and every
+        pre-upgrade row reads NULL — "class unknown". It is NOT in
+        ``_V3_COLUMNS``: a table without it is not damaged.
+        """
+
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(screening_holds)")}
+        if "failure_class" not in columns:
+            conn.execute("ALTER TABLE screening_holds ADD COLUMN failure_class TEXT")
+
+    @staticmethod
+    def _breaker_has_class_column(conn: sqlite3.Connection) -> bool:
+        """Whether this file's ``screening_breaker`` already has the column.
+
+        A read-only probe: the open breaker is read on every screening cycle,
+        so the write lock is taken only on the first touch after an upgrade.
+        """
+
+        return any(
+            row[1] == "last_failure_class"
+            for row in conn.execute("PRAGMA table_info(screening_breaker)")
+        )
+
+    @staticmethod
+    def _ensure_breaker_class_column(conn: sqlite3.Connection) -> None:
+        """Add ``last_failure_class`` to a ``screening_breaker`` that predates it.
+
+        WHY: a ``breaker_open`` hold parks a message for a failure that is
+        NOT its own, so the receiver status could say nothing about WHY the
+        account is broken — the one fact the operator needs to fix it. The
+        class of the failure that most recently advanced the breaker is kept
+        here, in the SAME closed vocabulary as ``screening_holds.failure_class``
+        (clamped by :func:`_closed_failure_class`), never provider prose.
+
+        ADDITIVE AND NULLABLE, so no schema stamp moves (same rule as
+        :meth:`_ensure_hold_failure_class_column`): an older binary sharing
+        this state file never names it, and a pre-upgrade row reads NULL —
+        "class unknown". Not in ``_V3_COLUMNS``: a table without it is not
+        damaged.
+        """
+
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(screening_breaker)")}
+        if "last_failure_class" not in columns:
+            conn.execute("ALTER TABLE screening_breaker ADD COLUMN last_failure_class TEXT")
 
     def body_card_status(
         self, owner: OwnerSnapshot, conversation_id: str, message_id: str
@@ -2689,9 +3386,12 @@ class Store:
             # writer that commits mid-snapshot would otherwise be half-visible).
             conn.execute("BEGIN")
             key = _owner_key(owner)
+            # ``*`` rather than a column list: this read-only connection may
+            # face a store that predates ``approved_serving`` (a reader never
+            # ALTERs), and ``receipt_authority`` reads it with ``.get`` so an
+            # absent column means ``{default_model}`` only.
             policy_row = conn.execute(
-                "SELECT version, template_sha256, default_model, revision, epoch "
-                "FROM screening_policy WHERE owner_key = ?",
+                "SELECT * FROM screening_policy WHERE owner_key = ?",
                 (key,),
             ).fetchone()
             policy = dict(policy_row) if policy_row is not None else None
@@ -3540,8 +4240,14 @@ class Store:
         revision: str,
         expected_epoch: int | None = None,
         create_only: bool = False,
+        approved_serving: "Sequence[tuple[str, str]] | None" = None,
     ) -> int:
         """Publish the current accepted policy; return its durable epoch.
+
+        ``approved_serving`` is the full screening chain's ``(provider,
+        model)`` set (see :func:`policy_serving_models`); stored sorted as
+        JSON, ``None`` stores NULL (= ``{default_model}`` only). It is part
+        of what "unchanged" means, so a chain edit is a real publication.
 
         TRUSTED PUBLISHER entry point (a live configuration source), NOT a
         screening caller: the pipeline never publishes from its caller
@@ -3559,14 +4265,16 @@ class Store:
         bridge-screen-v1/v2 today; the floor row is what a future version bumps).
         """
 
+        serving = serialize_serving(approved_serving)
         with self._connect() as conn:
             self._init(conn)
             self._begin_write(conn)
             self._require_live(conn, owner)
+            self._ensure_policy_serving_column(conn)
             key = _owner_key(owner)
             row = conn.execute(
-                "SELECT version, template_sha256, default_model, revision, epoch "
-                "FROM screening_policy WHERE owner_key = ?",
+                "SELECT version, template_sha256, default_model, revision, epoch, "
+                "approved_serving FROM screening_policy WHERE owner_key = ?",
                 (key,),
             ).fetchone()
             if row is not None and create_only:
@@ -3595,8 +4303,8 @@ class Store:
                 conn.execute(
                     "INSERT INTO screening_policy "
                     "(owner_key, version, template_sha256, default_model, revision, epoch, "
-                    "accepted_at) VALUES (?,?,?,?,?,1,?)",
-                    (key, version, template_sha256, default_model, revision, time.time()),
+                    "accepted_at, approved_serving) VALUES (?,?,?,?,?,1,?,?)",
+                    (key, version, template_sha256, default_model, revision, time.time(), serving),
                 )
                 return 1
             if expected_epoch is not None and int(row["epoch"]) != expected_epoch:
@@ -3609,13 +4317,14 @@ class Store:
                 and row["template_sha256"] == template_sha256
                 and row["default_model"] == default_model
                 and row["revision"] == revision
+                and row["approved_serving"] == serving
             )
             if unchanged:
                 return int(row["epoch"])
             conn.execute(
                 "UPDATE screening_policy SET version = ?, template_sha256 = ?, "
-                "default_model = ?, revision = ?, epoch = ?, accepted_at = ? "
-                "WHERE owner_key = ?",
+                "default_model = ?, revision = ?, epoch = ?, accepted_at = ?, "
+                "approved_serving = ? WHERE owner_key = ?",
                 (
                     version,
                     template_sha256,
@@ -3623,6 +4332,7 @@ class Store:
                     revision,
                     int(row["epoch"]) + 1,
                     time.time(),
+                    serving,
                     key,
                 ),
             )
@@ -3634,12 +4344,19 @@ class Store:
         try:
             with self._connect() as conn:
                 self._init(conn)
+                # ``*``: ``approved_serving`` is absent on a legacy table (only a
+                # publish ALTERs), and the republish check must SEE a damaged one.
                 row = conn.execute(
-                    "SELECT version, template_sha256, default_model, revision, epoch "
-                    "FROM screening_policy WHERE owner_key = ?",
+                    "SELECT * FROM screening_policy WHERE owner_key = ?",
                     (_owner_key(owner),),
                 ).fetchone()
-                return dict(row) if row is not None else None
+                if row is None:
+                    return None
+                policy = {k: row[k] for k in _POLICY_FIELDS}
+                policy["approved_serving"] = (
+                    row["approved_serving"] if "approved_serving" in row.keys() else None
+                )
+                return policy
         except sqlite3.Error:
             return None
 
@@ -3764,23 +4481,27 @@ class Store:
             self._begin_write(conn)
             self._require_live(conn, owner)
             policy = conn.execute(
-                "SELECT template_sha256, default_model, revision, epoch FROM screening_policy "
-                "WHERE owner_key = ?",
+                "SELECT * FROM screening_policy WHERE owner_key = ?",
                 (key,),
             ).fetchone()
             if policy is None:
                 return False
+            # Membership in the published serving set, not equality with the
+            # default: a fallback hop's allow is this policy's own verdict.
+            models = sorted(policy_serving_models(dict(policy)))
+            if not models:
+                return False
             moved = conn.execute(
                 "UPDATE screening_receipts SET policy_epoch = ? WHERE owner_key = ? "
                 "AND message_id = ? AND verdict = 'allow' AND template_sha256 = ? "
-                "AND model = ? AND admission_revision = ? AND creator_generation = ? "
-                "AND policy_epoch < ?",
+                f"AND model IN ({','.join('?' * len(models))}) AND admission_revision = ? "
+                "AND creator_generation = ? AND policy_epoch < ?",
                 (
                     int(policy["epoch"]),
                     key,
                     str(message_id),
                     policy["template_sha256"],
-                    policy["default_model"],
+                    *models,
                     policy["revision"],
                     owner.enrollment_generation,
                     int(policy["epoch"]),
@@ -3874,15 +4595,14 @@ class Store:
             if receipt is None:
                 raise StoreRefused("no_receipt", "no screening receipt for this message")
             policy = conn.execute(
-                "SELECT template_sha256, default_model, revision, epoch FROM screening_policy "
-                "WHERE owner_key = ?",
+                "SELECT * FROM screening_policy WHERE owner_key = ?",
                 (key,),
             ).fetchone()
             if policy is None:
                 raise StoreRefused("no_policy", "no published screening policy")
             if (
                 policy["template_sha256"] != receipt["template_sha256"]
-                or policy["default_model"] != receipt["model"]
+                or receipt["model"] not in policy_serving_models(dict(policy))
                 or policy["revision"] != receipt["admission_revision"]
                 or int(policy["epoch"]) != int(receipt["policy_epoch"])
                 or int(receipt["creator_generation"]) != owner.enrollment_generation
@@ -4159,13 +4879,12 @@ class Store:
             ):
                 return ("proof_drift", "the stored screening proof changed")
             policy = conn.execute(
-                "SELECT template_sha256, default_model, revision, epoch FROM screening_policy "
-                "WHERE owner_key = ?",
+                "SELECT * FROM screening_policy WHERE owner_key = ?",
                 (key,),
             ).fetchone()
             if policy is None or (
                 policy["template_sha256"] != receipt["template_sha256"]
-                or policy["default_model"] != receipt["model"]
+                or receipt["model"] not in policy_serving_models(dict(policy))
                 or policy["revision"] != receipt["admission_revision"]
                 or int(policy["epoch"]) != int(receipt["policy_epoch"])
             ):
@@ -4401,9 +5120,10 @@ class Store:
                 key = _owner_key(owner)
                 if self._live_generation(conn, owner) != owner.enrollment_generation:
                     return None
+                # ``*``: receipt_authority reads ``approved_serving`` (absent on
+                # a legacy row) with ``.get``.
                 policy = conn.execute(
-                    "SELECT version, template_sha256, default_model, revision, epoch "
-                    "FROM screening_policy WHERE owner_key = ?",
+                    "SELECT * FROM screening_policy WHERE owner_key = ?",
                     (key,),
                 ).fetchone()
                 if policy is None:
@@ -4447,6 +5167,193 @@ class Store:
         except StoreRefused:
             raise
 
+    def consume_screening_answer_hold(
+        self,
+        owner: OwnerSnapshot,
+        *,
+        body_sha256: str,
+        template_sha256: str,
+        model: str,
+        admission_revision: str,
+        envelope_digest: str,
+        engine_version: str,
+    ) -> tuple[str, str | None] | None:
+        """The model ANSWER already cached for this screening tuple, or None.
+
+        Returns ``(hold_code, failure_class)``: the class rides along so a
+        replayed hold keeps the closed class the receiver status shows, rather
+        than re-deriving one from a provider failure that no longer exists.
+
+        Keyed exactly as ``consume_screening_receipt`` keys a verdict (body +
+        template + model + admission revision + envelope digest), so a re-screen
+        of an identical body under the same template/model/revision re-reads the
+        answer it already paid for instead of drawing a new one. The key carries
+        the template AND the revision, which is what makes a republish re-draw by
+        construction: a new template hash or revision simply does not match.
+
+        Authority is re-verified in the same linearized transaction a cached
+        verdict gets — live committed generation, the published policy row, and
+        the row's own epoch/generation/engine version — and any mismatch is a
+        MISS, never a stale answer replayed under someone else's authority. The
+        writer replaces exactly the rows this read would refuse to serve, so a
+        miss here is always a row that the next answered hold can overwrite.
+        """
+
+        try:
+            with self._connect() as conn:
+                self._init(conn)
+                self._begin_write(conn)
+                _ensure_answer_hold_table(conn)
+                key = _owner_key(owner)
+                if self._live_generation(conn, owner) != owner.enrollment_generation:
+                    return None
+                policy = conn.execute(
+                    "SELECT * FROM screening_policy WHERE owner_key = ?", (key,)
+                ).fetchone()
+                if policy is None:
+                    return None
+                row = conn.execute(
+                    "SELECT hold_code, failure_class, policy_epoch, creator_generation, "
+                    "engine_version "
+                    "FROM screening_answer_holds WHERE owner_key = ? AND body_sha256 = ? "
+                    "AND template_sha256 = ? AND model = ? AND admission_revision = ? "
+                    "AND envelope_digest = ?",
+                    (key, body_sha256, template_sha256, model, admission_revision, envelope_digest),
+                ).fetchone()
+                if row is None:
+                    return None
+                if (
+                    policy["template_sha256"] != template_sha256
+                    or policy["default_model"] != model
+                    or policy["revision"] != admission_revision
+                    or int(policy["epoch"]) != int(row["policy_epoch"])
+                    or int(row["creator_generation"]) != owner.enrollment_generation
+                    or row["engine_version"] != engine_version
+                ):
+                    return None
+                # The CALLER decides whether this code is a model answer it may
+                # replay (``screening._ANSWER_HOLD_CACHEABLE``): classification
+                # lives in one place, so a row written by another build is
+                # re-screened rather than replayed as an answer it does not
+                # recognise.
+                code = row["hold_code"]
+                if not isinstance(code, str):
+                    return None
+                failure_class = row["failure_class"]
+                return (code, failure_class if isinstance(failure_class, str) else None)
+        except sqlite3.Error as error:
+            raise StoreRefused("state_busy", str(error)) from None
+        except StoreRefused:
+            raise
+
+    def record_screening_answer_hold(
+        self,
+        owner: OwnerSnapshot,
+        *,
+        body_sha256: str,
+        template_sha256: str,
+        model: str,
+        admission_revision: str,
+        envelope_digest: str,
+        hold_code: str,
+        prompt_version: str,
+        engine_version: str,
+        expected_epoch: int,
+        failure_class: str | None = None,
+    ) -> None:
+        """Cache ONE model-answer hold under the verdict cache's own key.
+
+        REPLACEABLE, not write-once: a row is overwritten exactly when a read
+        would refuse to serve it — a different policy epoch, a different creator
+        generation, or a different screening engine version. Write-once was the
+        first shape and it silently disabled the cache: a policy rollback, an
+        epoch bump caused only by an approved-serving-model edit, or a
+        re-enrollment left an UNSERVABLE row occupying the key, so every later
+        pass re-drew the body and this table made no difference at all. Within
+        one (epoch, generation, engine) the first answer still wins, which is
+        what keeps the outcome from depending on draw order.
+
+        The same statement prunes every other row for this body whose epoch or
+        generation is stale, so a republished policy does not leave unreadable
+        rows growing behind it.
+
+        Never call this for a provider/route failure. A cached outage outcome
+        would keep the message held for as long as the key matched, which is the
+        opposite of what the retry schedule is for.
+
+        The caller treats this as best effort: the cache is a cost and
+        consistency guard for retries, never admission authority, so a refused
+        write must leave the (already committed) hold intact and the message
+        retriable.
+        """
+
+        try:
+            with self._connect() as conn:
+                self._init(conn)
+                self._begin_write(conn)
+                self._require_live(conn, owner)
+                _ensure_answer_hold_table(conn)
+                key = _owner_key(owner)
+                policy = conn.execute(
+                    "SELECT * FROM screening_policy WHERE owner_key = ?", (key,)
+                ).fetchone()
+                if policy is None:
+                    raise StoreRefused("policy_stale", "no published policy for the answer cache")
+                if int(policy["epoch"]) != expected_epoch:
+                    raise StoreRefused("policy_stale", "accepted policy changed during the run")
+                if (
+                    policy["template_sha256"] != template_sha256
+                    or policy["default_model"] != model
+                    or policy["revision"] != admission_revision
+                ):
+                    raise StoreRefused("policy_stale", "answer key is not the published policy's")
+                conn.execute(
+                    "INSERT INTO screening_answer_holds (owner_key, body_sha256, template_sha256, "
+                    "model, admission_revision, envelope_digest, hold_code, prompt_version, "
+                    "failure_class, engine_version, policy_epoch, creator_generation, created_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                    "ON CONFLICT (owner_key, body_sha256, template_sha256, model, "
+                    "admission_revision, envelope_digest) DO UPDATE SET "
+                    "hold_code = excluded.hold_code, "
+                    "prompt_version = excluded.prompt_version, "
+                    "failure_class = excluded.failure_class, "
+                    "engine_version = excluded.engine_version, "
+                    "policy_epoch = excluded.policy_epoch, "
+                    "creator_generation = excluded.creator_generation, "
+                    "created_at = excluded.created_at "
+                    "WHERE screening_answer_holds.policy_epoch <> excluded.policy_epoch "
+                    "OR screening_answer_holds.creator_generation <> excluded.creator_generation "
+                    "OR screening_answer_holds.engine_version <> excluded.engine_version",
+                    (
+                        key,
+                        body_sha256,
+                        template_sha256,
+                        model,
+                        admission_revision,
+                        envelope_digest,
+                        hold_code,
+                        prompt_version,
+                        _closed_failure_class(failure_class),
+                        engine_version,
+                        expected_epoch,
+                        owner.enrollment_generation,
+                        time.time(),
+                    ),
+                )
+                # EVICT every row of this body that no read can serve under the
+                # policy just written (an older epoch, another generation): the
+                # key tuple is per policy generation, so a republish would
+                # otherwise leave one dead row per template behind forever.
+                conn.execute(
+                    "DELETE FROM screening_answer_holds WHERE owner_key = ? "
+                    "AND body_sha256 = ? AND (policy_epoch <> ? OR creator_generation <> ?)",
+                    (key, body_sha256, expected_epoch, owner.enrollment_generation),
+                )
+        except sqlite3.Error as error:
+            raise StoreRefused("state_busy", str(error)) from None
+        except StoreRefused:
+            raise
+
     def finish_screening(
         self,
         owner: OwnerSnapshot,
@@ -4462,8 +5369,14 @@ class Store:
         verify: Any = None,
         admission_revision: str | None = None,
         turn: str | None = None,
+        failure_class: str | None = None,
     ) -> None:
         """Commit ONE logical outcome, fenced on every binding that matters.
+
+        ``failure_class`` rides a HOLD only (the pipeline sets it on the
+        dispatch-failure paths: ``provider_error``, and the answered-refusal
+        holds ``model_refused``/``reply_truncated``/``parse_failed`` as
+        ``stream_refused``); every other hold writes NULL into it.
 
         Inside ONE write transaction: live-owner/generation (native fence,
         H2 discipline), the attempt belongs to THIS owner AND message AND
@@ -4726,10 +5639,19 @@ class Store:
                 # Upsert, never REPLACE (PR #3063 review m10): a re-drive held
                 # again for a NEW reason must keep the row's ``created_at``,
                 # or the owner-visible hold age resets on every pass.
+                self._ensure_hold_failure_class_column(conn)
                 conn.execute(
-                    "INSERT INTO screening_holds (owner_key, message_id, "
-                    "hold_code, retry_at, created_at) VALUES (?,?,?,?,?) " + _HOLD_UPSERT,
-                    (key, message_id, hold_code, retry_at, time.time()),
+                    "INSERT INTO screening_holds (owner_key, message_id, hold_code, "
+                    "retry_at, created_at, failure_class) VALUES (?,?,?,?,?,?) "
+                    + _HOLD_UPSERT_CLASSED,
+                    (
+                        key,
+                        message_id,
+                        hold_code,
+                        retry_at,
+                        time.time(),
+                        _closed_failure_class(failure_class),
+                    ),
                 )
 
     def screen_schedule(self, owner: OwnerSnapshot) -> dict[str, Any] | None:
@@ -4899,8 +5821,12 @@ class Store:
         *,
         retry_at: float | None = None,
         keep_existing: bool = False,
+        failure_class: str | None = None,
     ) -> None:
         """Durably quarantine a VALID-LIVE-OWNER early refusal (H3-Q8).
+
+        ``failure_class`` is set only by the screening pipeline's
+        ``provider_error`` fallback write; any other caller writes NULL.
 
         Early holds (no usable default, template floor mismatch, budget
         exhaustion) happen before any attempt row exists; their per-item
@@ -4920,21 +5846,25 @@ class Store:
         # code and schedule move IN PLACE. INSERT OR REPLACE deleted and
         # re-inserted the row, so every re-hold reset the visible hold age.
         on_conflict = (
-            "ON CONFLICT(owner_key, message_id) DO NOTHING" if keep_existing else _HOLD_UPSERT
+            "ON CONFLICT(owner_key, message_id) DO NOTHING"
+            if keep_existing
+            else _HOLD_UPSERT_CLASSED
         )
         with self._connect() as conn:
             self._init(conn)
             self._begin_write(conn)
             self._require_live(conn, owner)
+            self._ensure_hold_failure_class_column(conn)
             conn.execute(
                 "INSERT INTO screening_holds (owner_key, message_id, hold_code, "
-                "retry_at, created_at) VALUES (?,?,?,?,?) " + on_conflict,
+                "retry_at, created_at, failure_class) VALUES (?,?,?,?,?,?) " + on_conflict,
                 (
                     _owner_key(owner),
                     _contentless_delivery_key(message_id),
                     hold_code,
                     retry_at,
                     time.time(),
+                    _closed_failure_class(failure_class),
                 ),
             )
 
@@ -5065,10 +5995,15 @@ class Store:
             self._begin_write(conn)
             self._require_live(conn, owner)
             if hold_code:
+                # A re-code to a DIFFERENT reason drops the old failure class:
+                # the class describes the provider failure that parked the
+                # row, and must never be reported against another reason.
+                self._ensure_hold_failure_class_column(conn)
                 updated = conn.execute(
-                    "UPDATE screening_holds SET retry_at = ?, hold_code = ? "
+                    "UPDATE screening_holds SET retry_at = ?, hold_code = ?, "
+                    "failure_class = CASE WHEN hold_code = ? THEN failure_class ELSE NULL END "
                     "WHERE owner_key = ? AND message_id = ?",
-                    (float(retry_at), str(hold_code), *key),
+                    (float(retry_at), str(hold_code), str(hold_code), *key),
                 )
             else:
                 updated = conn.execute(
@@ -5083,18 +6018,24 @@ class Store:
     BREAKER_THRESHOLD = 3
     BREAKER_BACKOFF_S = (60.0, 120.0, 240.0, 480.0, 900.0)
 
-    def record_screening_failure(self, owner: OwnerSnapshot) -> float:
+    def record_screening_failure(
+        self, owner: OwnerSnapshot, *, failure_class: str | None = None
+    ) -> float:
         """One provider failure; open/advance the breaker, return ``retry_at``.
 
         Persisted so a restart cannot forget an open breaker, and FINITE so
         a broken route cannot park an account forever: the ladder stops at
-        its last rung until a success resets it.
+        its last rung until a success resets it. ``failure_class`` is the
+        closed class of THIS failure, kept on the breaker row so a later
+        ``breaker_open`` hold can say what actually broke (the message it
+        parks never met the provider itself).
         """
 
         with self._connect() as conn:
             self._init(conn)
             self._begin_write(conn)
             self._require_live(conn, owner)
+            self._ensure_breaker_class_column(conn)
             scope = self._account_scope(owner)
             row = conn.execute(
                 "SELECT failures FROM screening_breaker WHERE account_scope = ?", (scope,)
@@ -5106,8 +6047,9 @@ class Store:
                 open_until = time.time() + self.BREAKER_BACKOFF_S[rung]
             conn.execute(
                 "INSERT OR REPLACE INTO screening_breaker "
-                "(account_scope, failures, open_until, updated_at) VALUES (?,?,?,?)",
-                (scope, failures, open_until, time.time()),
+                "(account_scope, failures, open_until, updated_at, last_failure_class) "
+                "VALUES (?,?,?,?,?)",
+                (scope, failures, open_until, time.time(), _closed_failure_class(failure_class)),
             )
             return open_until
 
@@ -5124,17 +6066,43 @@ class Store:
             )
 
     def screening_breaker_state(self, owner: OwnerSnapshot) -> dict[str, Any] | None:
-        """Current breaker row (contentless: counts + timestamps only)."""
+        """Current breaker row (contentless: counts, timestamps, last class).
+
+        ``last_failure_class`` is the closed class of the failure that most
+        recently advanced the breaker, so a ``breaker_open`` hold can name
+        what broke instead of only when it reopens.
+
+        READ PATH IS LOCK-FREE (m1, PR #3212). This runs on every screening
+        cycle, and taking the write lock here to run the first-touch ``ALTER``
+        meant a contended store escaped ``_screen_core`` step 7 as
+        ``StoreRefused("busy")`` instead of a hold -- a read refused by a
+        schema upgrade it does not need. The column is therefore PROBED, never
+        added: a file last written by an older binary answers with
+        ``last_failure_class: None`` ("class unknown") while the breaker itself
+        is still enforced, because a missing column must never turn into a
+        None breaker — that would silently serve through an OPEN breaker. The
+        ``ALTER`` happens on the WRITE path (:meth:`record_screening_failure`),
+        which already holds the lock for it.
+        """
 
         try:
             with self._connect() as conn:
                 self._init(conn)
+                columns = "failures, open_until, updated_at"
+                if self._breaker_has_class_column(conn):
+                    columns = f"{columns}, last_failure_class"
+                # Fixed projection built from two literals; the only value is
+                # the bound parameter. No caller text reaches the SQL.
                 row = conn.execute(
-                    "SELECT failures, open_until, updated_at FROM screening_breaker "
-                    "WHERE account_scope = ?",
+                    f"SELECT {columns} FROM screening_breaker WHERE account_scope = ?",
                     (self._account_scope(owner),),
                 ).fetchone()
-                return dict(row) if row is not None else None
+                if row is None:
+                    return None
+                state = dict(row)
+                # Pre-upgrade row: the breaker is real, only its class is unknown.
+                state.setdefault("last_failure_class", None)
+                return state
         except sqlite3.Error:
             return None
 

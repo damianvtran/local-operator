@@ -18,6 +18,14 @@
   "cli.team_bridge.status.linger": "Tiếp tục chạy sau khi đăng xuất: {state, select, yes{có (đã bật lingering)} other{không — để tiếp tục chạy khi đã đăng xuất, chạy: {command}}}",
   "cli.team_bridge.status.isolated_note": "Thư mục cấu hình này không phải thư mục mặc định, nên dịch vụ bộ nhận dùng chung không bao giờ được cài đặt cho thư mục này và không phiên nào tự động nhận tin nhắn tác nhân của nó. Để nhận tin nhắn cho thư mục này, tự chạy bộ nhận: {command}",
   "cli.team_bridge.status.no_supervisor_note": "Thay vào đó, chạy bộ nhận ở tiền cảnh: {command}",
+  "cli.team_bridge.status.screening": "Sàng lọc: {held} · {breaker} · {rejected}",
+  "cli.team_bridge.status.screening_healthy": "Sàng lọc: không có tin nào bị giữ hay bị từ chối trong 24 giờ qua · cầu dao đóng",
+  "cli.team_bridge.status.screening_held": "{count, plural, other {# tin bị giữ}} ({codes}; cũ nhất {age})",
+  "cli.team_bridge.status.screening_held_class": "{count, plural, other {# tin bị giữ}} ({codes}; cũ nhất {age}; chủ yếu là {failure_class})",
+  "cli.team_bridge.status.screening_held_none": "không có tin bị giữ",
+  "cli.team_bridge.status.screening_breaker": "cầu dao {state, select, open{còn mở {remaining} nữa ({failures, plural, other {# lần lỗi}})} failing{đóng ({failures, plural, other {# lần lỗi gần đây}})} other{đóng}}",
+  "cli.team_bridge.status.screening_rejected": "{count, plural, other {# tin bị từ chối trong 24 giờ}} ({categories})",
+  "cli.team_bridge.status.screening_rejected_none": "không có tin bị từ chối trong 24 giờ",
   "cli.team_bridge.outcome.installed": "Bộ nhận đã được cài đặt và đang chạy.",
   "cli.team_bridge.outcome.current": "Bộ nhận đã được cài đặt và đang chạy; không có thay đổi.",
   "cli.team_bridge.outcome.registered": "Bộ nhận đã được cài đặt nhưng không chạy; nay đã được khởi động lại.",
@@ -43,5 +51,7 @@
   "cli.team_bridge.setup.designation_missing": "Tin nhắn tác nhân đã được thiết lập cho {account_id}, nhưng chưa có phiên chánh văn phòng nào được chỉ định cho tài khoản này. Mở ứng dụng Local Operator và chọn phiên sẽ trả lời các tác nhân của bạn.",
   "cli.team_bridge.setup.ready": "Tin nhắn tác nhân: sẵn sàng. Tài khoản {account_id}, phiên chánh văn phòng {session}, và bộ nhận đã được đặt.",
   "cli.team_bridge.setup.not_ready": "Tin nhắn tác nhân đã được thiết lập, nhưng bộ nhận chưa được đặt ({service}). {detail}",
-  "cli.team_bridge.setup.failed": "Không chạy được bước kiểm tra sẵn sàng. Không có thay đổi nào."
+  "cli.team_bridge.setup.failed": "Không chạy được bước kiểm tra sẵn sàng. Không có thay đổi nào.",
+  "cli.team_bridge.notify.probe_suspected_title": "Tin nhắn tác nhân: một người gửi có dấu hiệu dò thử",
+  "cli.team_bridge.notify.probe_suspected_body": "Trong một ngày qua, bộ kiểm duyệt của tác nhân đã từ chối nhiều tin nhắn từ cùng một người gửi. Dấu hiệu này có thể cho thấy ai đó đang thử xem tác nhân của bạn chấp nhận những gì. Người gửi đó sẽ không còn được cho biết lý do tin nhắn của họ bị từ chối nữa."
 }

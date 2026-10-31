@@ -52,6 +52,7 @@ class Node:
             path.mkdir(parents=True, exist_ok=True)
         env = {k: v for k, v in os.environ.items() if not k.startswith(("CMUX_", "LOP_"))}
         env.update(
+            GIT_CONFIG_NOSYSTEM="1",
             GIT_CONFIG_SYSTEM=os.devnull,
             GIT_TERMINAL_PROMPT="0",
             GH_CONFIG_DIR=str(root / "gh-config"),

@@ -261,6 +261,13 @@ _WALK_DEPTH_CAP = 2
 # top-arm raise (32,872 -> 33,364), whose child arm carries neither tool and
 # moves only by the shared ``system.md`` paragraph.
 MEASURED_TOKENS: dict[str, int] = {
+    # RE-MEASURED (agent pictures, local-operator #1533 branch): 1364 -> 1408
+    # (+44) on the clean arm and 1393 -> 1437 on the tier arm. The delta is the
+    # one bullet telling the model how to set an agent's profile picture, which
+    # is a `bash` + CLI capability by the footprint ladder rather than a schema
+    # field (a field would ride every request for a write almost nobody makes).
+    # Deliberately SHORT: an earlier draft of the same sentence cost 83, and the
+    # `--help` text carries the flag detail instead. No other entry moved.
     # RE-MEASURED (LOH-9 S3): 1044 -> 1056. The delta is the one-clause
     # fork exception on the ephemeral bullet ("a fork starts with a copy of
     # this conversation's roles"), added because the guides and the two
@@ -285,7 +292,7 @@ MEASURED_TOKENS: dict[str, int] = {
     # account). Worded to cost no more than the old text: the child-kind
     # context budget had 2 billed tokens of headroom. The ``team`` entry moves by
     # the same -1 for its twin field; the same printed table measured both.
-    "agent": 1364,
+    "agent": 1408,
     # RE-MEASURED (ask/notify dedupe, asks/dedupe.py): 1079 -> 1078. The
     # restraint now says "decide, never for FYI" and "asking notifies: never
     # also `notify` it"; trims elsewhere in the same paragraph pay for it so
@@ -367,9 +374,20 @@ MEASURED_TOKENS: dict[str, int] = {
     # inspect_ownership operation adds 19 opt-in tokens, not wire prompt cost.
     # 1327 -> 1424 (2026-10-16): the browser `type` secret_ref convention adds
     # the field's own description to the doc — the deliberate cost of the value
-    # never appearing in the transcript (incident: a literal password in `type`
-    # reached a subagent's transcript, where no shape pass could see it).
-    "browser": 1655,
+    # never appearing in the transcript (a literal password in `type` reached a
+    # subagent's transcript, where no shape pass could see it).
+    # 1655 -> 1801 (browser recording, D8, +146): two ops (`record_start`,
+    # `record_stop`) and one note. The note replaces the prose the guide carries
+    # in full (the AV1 caveat, the approval-before-capture rule, the desktop-only
+    # host), and the fixed caps/limits live in `guide://browser` instead of here.
+    # The schema must advertise the pair or the feature is undiscoverable.
+    # Measured by this test's own print; no other tool's entry moved. (The step
+    # is 1655 -> 1801, not 1424 -> 1801: 1424 was two ledger baselines ago,
+    # review round 1 R1-6.)
+    # 1801 -> 1803 (+2, review round 2 m2): "not expected in Chrome's <video>" replaces
+    # "not Chrome's <video>", because Chrome playback was never tested. Measured by
+    # this test's own print.
+    "browser": 1803,
     # NEW (code-requests PR1b): the ``code_requests`` doc — relation and lane
     # vocabulary, the freshness rule and the data-not-instructions framing.
     # 475 tokens is the deliberate cost of the reference detail staying OFF the
@@ -510,8 +528,15 @@ MEASURED_TOKENS: dict[str, int] = {
     # this file's own renderer. Re-measured via this test's print; it is the
     # ONLY entry that moved, every other count is byte-identical.
     # RE-MEASURED (ask/notify dedupe): 242 -> 241 — "FYI ... never a question
-    # (`ask` notifies)", worded to cost less than the text it replaced.
-    "notify": 241,
+    # (`ask` notifies)", worded less than the text it replaced.
+    # RE-MEASURED (title guard, notifications design §3.1): 241 -> 260, the only
+    # changed entry. The 19 tokens are the title rule (a placeholder is refused)
+    # bought here as well as in the `system.md` clause, because this doc is what
+    # the model reads at the moment it writes the title. Deliberately the SHORT
+    # form: the full rule, including the `no_reply` alternative, rides the
+    # refusal message and the prompt clause, and the context-budget ratchet bills
+    # this surface on every request. Measured by this test's print, never pasted.
+    "notify": 260,
     "patience": 330,
     # RE-MEASURED 2026-10-20 (evidence-attachment discoverability): ``project``
     # 1098 -> 1143 is the ONLY entry that moved — the ``attach`` description now
@@ -630,7 +655,7 @@ MEASURED_TOKENS: dict[str, int] = {
 #: takes because both arms render the completed notes; ``task`` stays 764.
 #: RE-MEASURED (F0, #3054): agent 1394 -> 1393, the same -1 ``scope``-default
 #: wording as the canonical arm; ``task`` stays 764.
-TIER_ARM_TOKENS: dict[str, int] = {"agent": 1393, "task": 764}
+TIER_ARM_TOKENS: dict[str, int] = {"agent": 1437, "task": 764}
 
 
 async def _noop_execute(*_args: Any, **_kwargs: Any) -> ToolResult:

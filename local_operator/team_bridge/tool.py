@@ -62,7 +62,10 @@ THE CHANNEL OPS work the conversation domain AS THIS SESSION'S AGENT:
 - **channel_history** — a bounded page of messages. The server admits bodies
   per (message, endpoint) screening; an agent sees the METADATA (sender, seq,
   hash) of messages it has not admitted, with ``body`` null, and only the
-  admitted bodies. There is intentionally no local body cache here.
+  admitted bodies. There is intentionally no local body cache here. The one
+  exception to ``body: null`` is a message THIS account authored: the hub never
+  delivers it back for admission, so history and thread fetch its text per read
+  (hash-verified, never stored) so a sender can read what it wrote.
 
 - **react** — set an emoji on an admitted conversation message (or remove it
   with ``remove=true``). This is a screened agent WRITE, never an ack; the hub
@@ -139,6 +142,7 @@ from local_operator.harness.types import (
     ToolResult,
 )
 
+from . import reply_guard
 from .client import TeamBridgeClient
 from .outbox import Outbox, send_from_outbox
 from .recipient_resolution import (
@@ -1040,6 +1044,25 @@ async def _direct_message(
     conversation_id = str(view.get("id") or "")
     if _CONVERSATION_ID.fullmatch(conversation_id) is None:
         return _error("the hub opened no usable DM id", code="dm_failed")
+    # LOOP/COST GUARD, DM HALF (review round 1, m1). A DM is an ordinary
+    # conversation with both agents as members, so under the wake contract each
+    # `dm` wakes the other agent exactly like a channel post — two agents trading
+    # DMs is the same runaway the guard exists for, and an older hub enforces no
+    # cap at all. Same limits, same structured refusal as `channel_post`, keyed
+    # on the DM's own conversation id; reserved AFTER every local refusal (a
+    # malformed or unreachable target never spends budget) and BEFORE the write
+    # (a concurrent post of this endpoint sees the slot).
+    try:
+        slot = reply_guard.reserve_post(
+            runtime.config_dir, endpoint_id=endpoint_id, conversation_id=conversation_id
+        )
+    except reply_guard.ReplyGuardUnavailable:
+        return _error(
+            "the reply guard could not read its state; not posting",
+            code=reply_guard.CODE_UNAVAILABLE,
+        )
+    if isinstance(slot, reply_guard.Refusal):
+        return slot.as_result()
     try:
         result = await runtime.client.conversation_send(
             conversation_id,
@@ -1052,6 +1075,11 @@ async def _direct_message(
             expected_account_id=runtime.owner.account_id,
         )
     except Exception as failure:
+        # The hub did not take it: the budget slot goes back (the run counter
+        # does not — see ``reply_guard.release``).
+        reply_guard.release(
+            runtime.config_dir, slot, endpoint_id=endpoint_id, conversation_id=conversation_id
+        )
         return _error(
             f"the DM {conversation_id} opened but the post did not confirm: "
             f"{_failure_text(failure)}",
@@ -1749,6 +1777,23 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
                 return _error(str(failure), code=failure.code)
             mentions = [member.mention()]
             recipient_account_id = member.account_id
+        # LOOP/COST GUARD (wake contract): every conversation message now wakes
+        # its agent members, so two agents answering every wake would trade
+        # posts for ever. Reserved LAST among the local checks (a malformed or
+        # unresolvable call never spends budget) and BEFORE the wire write (a
+        # concurrent post of the same endpoint sees the slot). Fail closed: a
+        # guard that cannot read its state refuses rather than going silent.
+        try:
+            slot = reply_guard.reserve_post(
+                runtime.config_dir, endpoint_id=endpoint_id, conversation_id=channel_id
+            )
+        except reply_guard.ReplyGuardUnavailable:
+            return _error(
+                "the reply guard could not read its state; not posting",
+                code=reply_guard.CODE_UNAVAILABLE,
+            )
+        if isinstance(slot, reply_guard.Refusal):
+            return slot.as_result()
         # ONE ref per CALL, minted before dispatch: the client's own 401 refresh
         # retry re-sends this exact body, so that retry is idempotent on the
         # server; a second tool call mints a second ref and is a second message.
@@ -1765,6 +1810,11 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
                 mentions=mentions or None,
             )
         except Exception as failure:
+            # The hub did not take it: the budget slot goes back. (The run
+            # counter does not — see ``reply_guard.release``.)
+            reply_guard.release(
+                runtime.config_dir, slot, endpoint_id=endpoint_id, conversation_id=channel_id
+            )
             return _error(f"the post did not confirm: {_failure_text(failure)}", code="post_failed")
         # ONE receipt shape for every conversation write (main's `_post_receipt`,
         # shared with `dm`), EXTENDED with the resolved recipient rather than
@@ -1841,7 +1891,13 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         # Bodies are external content even when the sender is a teammate's
         # agent: the same untrusted wrap as take_up. Unadmitted messages carry
         # ``body: null`` — metadata only — and stay that way (no local cache).
-        images = await _history_images(runtime, channel_id, result, endpoint_id)
+        if isinstance(result, dict) and isinstance(result.get("messages"), list):
+            restored = await _restore_own_bodies(
+                runtime, channel_id, result["messages"], endpoint_id
+            )
+        else:
+            restored = set()
+        images = await _history_images(runtime, channel_id, result, endpoint_id, restored)
         return {
             "ok": True,
             "state": "ok",
@@ -1886,7 +1942,10 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
             replies = result.get("replies")
             if isinstance(replies, list):
                 thread_rows.extend(replies)
-        images = await _history_images(runtime, channel_id, {"messages": thread_rows}, endpoint_id)
+        restored = await _restore_own_bodies(runtime, channel_id, thread_rows, endpoint_id)
+        images = await _history_images(
+            runtime, channel_id, {"messages": thread_rows}, endpoint_id, restored
+        )
         return {
             "ok": True,
             "state": "ok",
@@ -1935,8 +1994,102 @@ def _image_provenance(channel_id: str, message: dict[str, Any], lines: list[str]
     return "\n".join([head, *lines])
 
 
+#: Most own-message bodies one history/thread read will fetch. The page itself
+#: is bounded by ``CONVERSATION_PAGE_MAX``; this keeps a page of the agent's own
+#: posts from becoming a hundred sequential reads.
+OWN_BODY_FETCH_MAX = 25
+
+
+async def _restore_own_bodies(
+    runtime: BridgeRuntime, channel_id: str, rows: list[Any], endpoint_id: str
+) -> set[str]:
+    """Fill ``body`` on the agent rows THIS account authored, in place.
+
+    Returns the ids it filled, so the image caption can tell a restored own
+    post (never screened) from an admitted one.
+
+    WHY (the sender could not read its own write): the hub serves a history body
+    only for a message THIS endpoint admitted, and an endpoint admits a message
+    by screening it as an INBOUND delivery (``connector/conversation.py``, the
+    only caller of ``conversation_admit``). A message this account posted is
+    never delivered back to it, so it is never admitted and reads back
+    ``body: null`` with only its hash, forever.
+
+    WHAT THIS DOES NOT DO: it does not weaken screening. The ``/body`` route the
+    connector uses for classification is asked ONLY for rows whose
+    ``sender.account_id`` is the runtime's own account AND ``sender.kind`` is
+    ``agent``: text this account's agent wrote is the owner's own authority, and
+    everyone else's stays ``null`` until the connector screens it. No local copy
+    is made: the text is fetched per read, handed to the model and dropped.
+
+    DELIBERATE, ACCOUNT-WIDE TRUST: the hub's history ``sender`` carries no
+    endpoint id, so this cannot tell THIS endpoint's posts from another agent
+    endpoint of the same account (which IS delivered here and screened, and so
+    could be held or rejected). Such a row is treated as the owner's own agent.
+    Narrowing it to this endpoint needs ``sender.endpoint_id`` from the hub.
+    The ``agent`` kind keeps the account's HUMAN rows (always screened for
+    this agent) out of it. At most :data:`OWN_BODY_FETCH_MAX` rows are filled per
+    read, newest first; older own rows stay ``null``.
+    A row is filled only when the served body hashes to the row's own
+    ``body_hash`` (sha256 over the UTF-8 text, as the connector verifies); any
+    failure — transport, refusal, mismatch — leaves the row exactly as the hub
+    sent it.
+    """
+
+    import asyncio
+
+    own = getattr(runtime.owner, "account_id", "")
+    if not own:
+        return set()
+    wanted = [
+        row
+        for row in rows
+        if isinstance(row, dict)
+        and row.get("body") is None
+        and isinstance(row.get("body_hash"), str)
+        and isinstance(row.get("id"), str)
+        and _CONVERSATION_MESSAGE_ID.fullmatch(row["id"]) is not None
+        and isinstance(row.get("sender"), dict)
+        and row["sender"].get("account_id") == own
+        and row["sender"].get("kind") == "agent"
+    ][:OWN_BODY_FETCH_MAX]
+    if not wanted:
+        return set()
+    gate = asyncio.Semaphore(5)
+
+    async def fill(row: dict[str, Any]) -> None:
+        async with gate:
+            try:
+                served = await runtime.client.conversation_body(
+                    channel_id,
+                    row["id"],
+                    tenant_id=runtime.tenant_id,
+                    endpoint_id=endpoint_id,
+                )
+            except Exception:  # noqa: BLE001 — the hub's null stands; never a crash
+                return
+        if not isinstance(served, dict) or served.get("message_id") != row["id"]:
+            return
+        text = served.get("body")
+        try:
+            verified = isinstance(text, str) and body_digest(text) == row["body_hash"]
+        except UnicodeError:  # a lone surrogate cannot be hashed: not the screened text
+            return
+        if verified:
+            row["body"] = text
+            filled.add(row["id"])
+
+    filled: set[str] = set()
+    await asyncio.gather(*(fill(row) for row in wanted))
+    return filled
+
+
 async def _history_images(
-    runtime: BridgeRuntime, channel_id: str, page: Any, endpoint_id: str
+    runtime: BridgeRuntime,
+    channel_id: str,
+    page: Any,
+    endpoint_id: str,
+    restored: set[str] | None = None,
 ) -> list[tuple[str, list[tuple[bytes, str]]]]:
     """Per admitted message with images: ``(caption, [(bytes, mime), ...])``.
 
@@ -1973,7 +2126,11 @@ async def _history_images(
                 # exactly that (D5) — it is the one cause the user can fix.
                 noun = "attachment" if count == 1 else "attachments"
                 marker = f"[{count} image {noun} withheld: not admitted by screening]"
-                if message.get("body") is not None and not _screener_sees_images(runtime):
+                if (
+                    message.get("body") is not None
+                    and message["id"] not in (restored or ())
+                    and not _screener_sees_images(runtime)
+                ):
                     marker = withheld_marker(count)
                 out.append((_image_provenance(channel_id, message, [marker]), []))
             elif descriptors is None:

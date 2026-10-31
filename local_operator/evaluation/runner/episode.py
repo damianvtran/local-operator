@@ -124,7 +124,12 @@ from local_operator.evaluation.receipts import (
     commit_budget,
     reconcile_budget,
 )
-from local_operator.evaluation.runner.completion import CompletionGate, finish_claim
+from local_operator.evaluation.runner.completion import (
+    CHALLENGE_DIAGNOSTIC_CODES,
+    ChallengeKind,
+    CompletionGate,
+    finish_claim,
+)
 from local_operator.evaluation.runner.guards import (
     RECENT_TURNS_WINDOW,
     EpisodeGuard,
@@ -138,6 +143,7 @@ from local_operator.evaluation.runner.secrets import (
     SecretResolver,
     StaticSecretResolver,
 )
+from local_operator.evaluation.runner.step_budget import enforced_position
 
 # Cleanup kinds are a closed vocabulary in ``lifecycle.CleanupAction``. A worker
 # session is the one resource the parent always knows exists before the adapter
@@ -340,8 +346,15 @@ class EpisodeConfig:
     declaration is always accepted and the gate can never drive an episode to a
     model failure. Turning the gate off is a campaign's control arm rather than
     an operator preference -- it changes what the model is asked, so a run has
-    to record which arm produced it -- and a non-``done`` finish is never
-    challenged, because there is no completion in it to confirm.
+    to record which arm produced it -- and a non-``done`` finish is not
+    challenged by it, because there is no completion in it to confirm.
+
+    ``premature_terminal_gate`` is the second, separate rule: a ``failed`` or
+    ``infeasible`` finish declared before ANY batch has executed is challenged
+    once (fixed budget of one, independent of ``completion_challenges``) with a
+    neutral re-ask, and the re-declared finish is accepted unchanged. ON by
+    default for the same reason -- the second declaration always ends the
+    episode, so the worst case is one extra cycle -- and off is a control arm.
 
     They are ON by default rather than opt-in because the path is unreachable
     unless an adapter explicitly raises ``ObservationPhaseError``: an adapter
@@ -418,6 +431,7 @@ class EpisodeConfig:
     execution_overhead_seconds_per_action: float = 0.0
     completion_gate: bool = True
     completion_challenges: int = 1
+    premature_terminal_gate: bool = True
 
     def __post_init__(self) -> None:
         rate = self.execution_overhead_seconds_per_action
@@ -694,6 +708,7 @@ class EpisodeRunner:
             client=model,
             enabled=config.completion_gate,
             challenges=config.completion_challenges,
+            premature=config.premature_terminal_gate,
         )
         self._responder = responder if responder is not None else NullUserResponder()
         self._responder_override = responder is not None
@@ -752,6 +767,13 @@ class EpisodeRunner:
         # the pinned one is not comparable against runs that kept it.
         self._served_routes: set[tuple[str, str, str]] = set()
         self._steps_taken = 0
+        # The terminal claim a gate refused as-a-claim and asked the model to
+        # re-check (last one wins: at most one challenge per rule can fire, and
+        # the model may answer a premature challenge with a ``done`` claim that
+        # the other rule then challenges). Consulted by the stop handlers when
+        # the re-decide never produces an accepted batch -- see
+        # ``_settle_on_challenged_claim``.
+        self._challenged_finish: ActionBatch | None = None
         self._truncated = False
         self._last_step_terminated = False
         self._finalization_id = f"final-{spec.episode_id}"
@@ -1022,7 +1044,8 @@ class EpisodeRunner:
             # voiding them because no human answered would throw away paid
             # work exactly like the decision-exhaustion case below. Before any
             # step there is nothing to grade, so the pre-existing cancellation
-            # path stands (nothing was paid for except model calls).
+            # path stands (nothing was paid for except model calls) -- UNLESS a
+            # terminal claim is already waiting on its re-check (below).
             if self._steps_taken > 0:
                 return await self._finalize_agent_stop(
                     handshake,
@@ -1032,6 +1055,8 @@ class EpisodeRunner:
                     detail=f"ask-user was not answered (ask {stop.ask_id})",
                     failure_kind=None,
                 )
+            if self._settle_on_challenged_claim():
+                return await self._finalize_scored(handshake)
             return await self._finalize_cancelled(str(stop) or "cancelled")
         except _Cancelled as cancel:
             return await self._finalize_cancelled(str(cancel) or "cancelled")
@@ -1041,7 +1066,12 @@ class EpisodeRunner:
             # episode scores like a truncation instead of sealing unscored and
             # voiding every step it already paid for. At zero steps there is
             # no environment work to grade, so the unscored model-failure
-            # path is the honest outcome.
+            # path is the honest outcome -- UNLESS a gate is waiting on the
+            # model's re-check of a terminal claim it already made
+            # (``_settle_on_challenged_claim``): that claim is the episode's
+            # declaration, and sealing unscored here would drop an episode out
+            # of the scored set for the treatment arm only, biasing an A/B
+            # denominator.
             if self._steps_taken > 0:
                 return await self._finalize_agent_stop(
                     handshake,
@@ -1051,6 +1081,8 @@ class EpisodeRunner:
                     detail=_diagnostic(failure, self._redactions),
                     failure_kind="model",
                 )
+            if self._settle_on_challenged_claim():
+                return await self._finalize_scored(handshake)
             return await self._finalize_failure(failure)
         except _EvidenceFailure:
             raise
@@ -1135,6 +1167,14 @@ class EpisodeRunner:
                 self._truncated = True
                 self._truncation_reason = self._truncation_reason or "max-steps"
                 return
+            # The model is shown its position on the SAME counter the check
+            # above enforces, read here -- immediately before the decision --
+            # so a cap changed mid-run is stated as the value now in force.
+            # The builder renders each turn once, so a re-decide of this turn
+            # (a rejection, a challenge) cannot restate a different number.
+            self._turns[-1] = self._turns[-1].model_copy(
+                update={"step_budget": enforced_position(self._steps_taken, self._config.max_steps)}
+            )
             decision = await self._decide(current)
             batch = decision.action_batch
             # The tolerated sibling fields ride the turn, and the update always
@@ -1156,13 +1196,17 @@ class EpisodeRunner:
             self._turns[-1] = self._turns[-1].model_copy(update=turn_update)
             terminal = _terminal_kind(batch)
             if terminal == "finish":
-                # A ``done`` declaration is refused-as-a-claim ONCE (see
-                # ``runner.completion``). The second one is always accepted, so
-                # the branch below is reached for the answer that ends the
-                # episode -- the identical first claim, or an action that
-                # closes the gap the model found when it looked again.
-                if self._completion_gate.should_challenge(finish_claim(batch)):
-                    await self._challenge_completion(batch)
+                # A ``done`` declaration -- or a ``failed``/``infeasible`` one
+                # made before ANY batch executed -- is refused-as-a-claim ONCE
+                # (see ``runner.completion``). The second one is always
+                # accepted, so the branch below is reached for the answer that
+                # ends the episode -- the identical first claim, or an action
+                # the model chose when asked again.
+                kind = self._completion_gate.should_challenge(
+                    finish_claim(batch), executed_steps=self._steps_taken
+                )
+                if kind is not None:
+                    await self._challenge_completion(batch, kind)
                     continue
                 self._append_batch(batch, terminal="finish")
                 return
@@ -1173,7 +1217,7 @@ class EpisodeRunner:
             if self._last_step_terminated:
                 return
 
-    async def _challenge_completion(self, batch: ActionBatch) -> None:
+    async def _challenge_completion(self, batch: ActionBatch, kind: ChallengeKind) -> None:
         """Refuse this turn's end, and ask the model to check its own claim.
 
         NOTHING MOVES. The observation is unchanged and the turn does not close,
@@ -1187,10 +1231,50 @@ class EpisodeRunner:
         Evidence first, re-prompt second: the challenge is a conversation turn
         the model was shown, so a bundle sealed by a failure during the next
         call still says what was asked of it.
+
+        The claim is armed for settlement HERE, after the client has accepted
+        the turn and the challenge is durable: from this point the episode has a
+        declaration outstanding, and if the re-decide never yields an accepted
+        batch the claim is what the episode ends on (see
+        ``_settle_on_challenged_claim``). Arming before the client answered
+        would settle on a claim the model was never asked about.
         """
 
-        text = await self._completion_gate.challenge(batch, self._turns)
-        self._append_model_error("completion-challenged", text)
+        text = await self._completion_gate.challenge(batch, self._turns, kind)
+        self._append_model_error(CHALLENGE_DIAGNOSTIC_CODES[kind], text)
+        self._challenged_finish = batch
+
+    def _settle_on_challenged_claim(self) -> bool:
+        """Seal the challenged claim as this episode's terminal, if one is open.
+
+        WHY THIS EXISTS. A gate refuses a terminal claim as-a-claim, so the
+        episode does not end on it. Every path back to a decision can also END
+        instead -- the corrective-retry ceiling, the empty-truncation retreats,
+        an ask nobody answers -- and at zero executed steps those handlers had
+        nothing to grade, so they sealed the episode UNSCORED (``model_failure``
+        or a cancellation). With the gate off the same model ends scored on the
+        very declaration the gate refused, so the gate alone could move an
+        episode out of the scored set: the treatment arm would carry a smaller
+        denominator in an A/B campaign, which is a bias, not a cosmetic
+        difference.
+
+        So the claim stands as the declaration: it is appended as the terminal
+        ``action_batch`` -- nothing has moved since it was made, which is
+        exactly why the observation it names is still the current one, and why
+        a bundle sealed here still ends once -- and the episode is scored on it
+        like the accepted second declaration would have been. Both rules are
+        covered, because both refuse a claim without ending the episode.
+
+        Zero executed steps is the only case this may decide: once a step has
+        landed the existing handlers already grade the state reached, and a
+        claim made before that step is not what the environment ended on.
+        """
+
+        claim = self._challenged_finish
+        if claim is None or self._steps_taken > 0:
+            return False
+        self._append_batch(claim, terminal="finish")
+        return True
 
     async def _decide(self, observation: Observation) -> Any:
         """Ask the model until it returns a usable batch, within the retry bounds.

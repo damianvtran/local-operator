@@ -425,6 +425,47 @@ def test_a_done_card_at_80_columns_does_not_wrap_its_hint_row_away() -> None:
         assert "2026-09-21 11:30" in body.plain
 
 
+def test_a_longer_localised_done_tag_does_not_orphan_itself_on_a_second_line(monkeypatch) -> None:
+    """The ``  — done`` tag is a catalogue string, so its width is the locale's.
+
+    ``_GOAL_TAG_CELLS`` was tuned to English (8 cells) and subtracted from the
+    goal row's clip budget. Spanish ``  — hecho`` is 9 cells, so a goal clipped
+    to the full budget plus a 9-cell tag measured one cell over the box, wrapped,
+    and left ``hecho`` alone on a second line (found by a rendered frame at
+    100x40, not by a sidecar budget — none is declared for this key).
+
+    The row now reserves the width of the string it is about to append. This test
+    drives that with a 9-cell tag and a goal long enough to be clipped, so it
+    fails on the constant-only budget and passes on the measured one.
+    """
+    from local_operator.tui.widgets import goal_panel
+
+    real_t = goal_panel._t
+    suffix = "  — hecho"
+    assert cell_len(suffix) > goal_panel._GOAL_TAG_CELLS
+
+    def localised(msg):  # noqa: ANN001, ANN202
+        is_tag = getattr(msg, "code", "") == "tui.small.goal_panel.done_suffix"
+        return suffix if is_tag else real_t(msg)
+
+    monkeypatch.setattr(goal_panel, "_t", localised)
+    long_goal = " ".join(["objetivo"] * 12)
+    for screen in (60, 80, 100):
+        width = screen - PANEL_PADDING_CELLS
+        body = _body(
+            width=width,
+            goal=long_goal,
+            status="done",
+            judge={"state": "done", "verdict": "achieved", "reason": "met"},
+            history=[],
+        )
+        lines = body.plain.split("\n")
+        goal_row = next(line for line in lines if line.startswith("▌ "))
+        assert goal_row.endswith(suffix), f"{screen}: tag was not kept on the goal row"
+        assert cell_len(goal_row) <= width, f"{screen}: {cell_len(goal_row)} cells in {width}"
+        assert not any(line.strip() == "hecho" for line in lines), f"{screen}: orphaned tag"
+
+
 @pytest.mark.asyncio
 async def test_the_card_counts_the_settled_goals_it_did_not_paint() -> None:
     """Design D1 / UX U1 through the APP's own repaint.

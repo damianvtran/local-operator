@@ -62,6 +62,7 @@ tenant_id: tnt_1
 conversation_id: bcv_abcdefgh
 message_id: bcmsg_abcdef01
 conversation_seq: 1
+expect: reply
 {ROOT_REPLY_LINE}
 guidance: bridge-guidance-v2"""
 
@@ -317,6 +318,25 @@ def _persist_fake_receipt(config_dir: Path, receipt: Any, *, message_id: str) ->
         )
 
 
+@pytest.fixture(autouse=True)
+def _instant_wakes(monkeypatch: pytest.MonkeyPatch):
+    """This file's contract is "one iteration writes its card", so no window.
+
+    The connector's coalescer rate-limits a conversation's wakes to one per
+    ``DEFAULT_COALESCE_WINDOW_S`` (3 s). The window is a production behaviour
+    with its own coverage (``test_wake_every_message.py``); here it is only an
+    INPUT that can make a card late, so the assertions below would be timing
+    the clock between two iterations instead of the delivery under test.
+    ``test_dm_runtime_transport.py`` pins the same seam for the same reason.
+    """
+
+    from local_operator.team_bridge.connector import coalesce as coalesce_mod
+
+    monkeypatch.setattr(
+        coalesce_mod, "CONNECTOR_COALESCER", coalesce_mod.WakeCoalescer(window_s=0.0)
+    )
+
+
 def _wire_rig(
     monkeypatch: pytest.MonkeyPatch,
     server: FakeServer,
@@ -415,7 +435,19 @@ def _runtime_rows(runtimes: dict[str, tuple[OwnerSnapshot, Path]]):
 
 
 def _run(owner: OwnerSnapshot, config_dir: Path) -> dict[str, Any]:
-    return asyncio.run(
+    """One connector iteration, with a silent wake failure made loud.
+
+    ``run_iteration`` hands each card to the coalescer, which delivers it in a
+    ``try`` that turns ANY exception (or a reservation that turned out to be
+    already posted) into a quiet hold — correct in production, where a wake
+    must never fail an iteration, but fatal for these tests: an empty
+    transcript then reports as an ``IndexError`` three lines later and the real
+    cause never reaches the log (CI shard 1, three failures that were "likely
+    flakes" for two rounds). The outcome is part of the iteration's summary, so
+    assert on it HERE.
+    """
+
+    summary = asyncio.run(
         loop_mod.run_iteration(
             owner,
             config_dir=config_dir,
@@ -423,6 +455,18 @@ def _run(owner: OwnerSnapshot, config_dir: Path) -> dict[str, Any]:
             auth_store=None,
         )
     )
+    for outcome in summary.get("coalesced_wakes") or ():
+        # A ``hold`` is the flush's swallowed-exception branch: the wake did not
+        # go out. In production that is the right trade (a wake never fails an
+        # iteration); in these tests it must be a named failure, not an empty
+        # transcript three lines later. ``already_posted`` is NOT a failure —
+        # the settled-reservation cells below expect exactly it.
+        assert outcome.get("action") != "hold", (
+            f"the wake did not go out: {outcome} — the flush caught a delivery "
+            "failure and re-buffered the group; see the logger's "
+            "code=delivery_failed line for the cause"
+        )
+    return summary
 
 
 def _reservation_rows(config_dir: Path) -> list[dict[str, Any]]:
@@ -895,11 +939,13 @@ def test_one_channel_message_wakes_mentioned_a_and_notify_all_b(tmp_path, monkey
     # (f) No OS notification by default.
     assert notifications == []
 
-    # (g) Triage copy is NOT duplicated in the card; it lives in the served
-    # guidance named by version. Mention state alone distinguishes the cases.
-    assert "no_reply" not in card_b
+    # (g) The triage RULES stay in the served guidance named by version; the
+    # card carries only the per-wake expectation (wake contract): a mention
+    # expects a reply, an unmentioned message is weighed, no_reply ends it.
+    assert "expect: weigh relevance; no_reply if nothing is needed" in card_b
     assert "guidance: bridge-guidance-v2" in card_b
     assert "no_reply" not in transcripts["sess_a"][0]["payload"]
+    assert "expect: reply" in transcripts["sess_a"][0]["payload"]
 
     for session in ("sess_a", "sess_b"):
         print(f"\n--- {session} transcript ---")
@@ -1441,7 +1487,8 @@ def test_alias_retry_consumes_only_that_hold_not_canonical_or_sibling(tmp_path, 
             (sibling, time.time() + 3600),
         ):
             conn.execute(
-                "INSERT INTO screening_holds VALUES (?,?,?,?,?)",
+                "INSERT INTO screening_holds (owner_key, message_id, hold_code, "
+                "retry_at, created_at) VALUES (?,?,?,?,?)",
                 (key, raw, "screening_hold", deadline, 12),
             )
     loop_mod._RETRY_ATTEMPTS.clear()
@@ -1498,7 +1545,9 @@ def test_a_reply_card_names_its_thread_and_how_to_answer_in_it() -> None:
     lines = card.splitlines()
     assert lines[0].startswith("Thread reply · #agents · from Bea's agent")
     assert lines[1] == BRIDGE_UNTRUSTED_CLAUSE
-    assert f"thread_root_id: {ROOT_ID}" in lines
+    # `(reply to)` carries the contract's `reply_to_message_id` name for the
+    # same id on the same line (review round 1, m4).
+    assert f"thread_root_id: {ROOT_ID} (reply to)" in lines
     assert "channel_post with this thread_root_id" in card
 
 
@@ -1575,7 +1624,7 @@ def test_a_thread_reply_card_keeps_only_its_thread_route() -> None:
     )
     lines = card.splitlines()
     assert lines[-3:-1] == [
-        f"thread_root_id: {ROOT_ID}",
+        f"thread_root_id: {ROOT_ID} (reply to)",
         "reply in thread: bridge channel_post with this thread_root_id; "
         "read the thread with channel_thread",
     ]
@@ -1669,3 +1718,15 @@ def test_a_pre_upgrade_reservation_replay_posts_at_most_the_logged_card(
         # Marked, so it is never re-evaluated as owed again. A ``claimed`` row
         # reads POSTED from its state alone and needs no mark.
         assert rows[0]["card_posted_at"] is not None
+
+
+def test_the_wake_window_is_pinned_for_this_file() -> None:
+    """The autouse pin above is load-bearing (see its docstring): assert it.
+
+    A fixture that silently stopped applying would turn every card assertion in
+    this file back into a race against the connector's 3 s rate window.
+    """
+
+    from local_operator.team_bridge.connector import coalesce as coalesce_mod
+
+    assert coalesce_mod.CONNECTOR_COALESCER.window_s == 0.0

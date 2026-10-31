@@ -517,6 +517,12 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help=_ag.pull_org().envelope(locale=help_locale)["text"],
     )
     # Sync command
+    # Picture command: profile pictures (``lop agents picture set|remove|show``).
+    from local_operator import cli_agent_picture  # small; keyed copy lives there
+
+    cli_agent_picture.add_parser(
+        agents_subparsers, parent_parser=parent_parser, help_locale=help_locale
+    )
     sync_parser = agents_subparsers.add_parser(
         "sync",
         help=_ag.sync().envelope(locale=help_locale)["text"],
@@ -1117,6 +1123,13 @@ def build_cli_parser() -> argparse.ArgumentParser:
     )
 
     add_team_bridge_parser(subparsers, parent_parser, help_locale=help_locale)
+
+    # `lop disk reclaim` (issue #2676): the sanctioned disk-pressure front door.
+    # Stdlib-only registration for the same reason as `network`: the planner is
+    # imported by the handler, never while the parser is built.
+    from local_operator.disk_cli import add_parser as add_disk_parser
+
+    add_disk_parser(subparsers, parent_parser)
 
     # Operator authority (issue #1310, revision 2). Registration is stdlib-only
     # for the same reason `secret`'s is: `lop --version` must not load
@@ -17393,6 +17406,10 @@ def main() -> int:
                 return agents_create_command(args.name, agent_registry)
             elif args.agents_command == "delete":
                 return agents_delete_command(args, agent_registry, base_dir)
+            elif args.agents_command == "picture":
+                from local_operator import cli_agent_picture
+
+                return cli_agent_picture.run(args, agent_registry)
             elif args.agents_command == "push":
                 # Push agent to Radient
                 if getattr(args, "org", None) is not None:
@@ -17671,6 +17688,10 @@ def main() -> int:
             return send_command(args)
         elif args.subcommand == "model":
             return model_command(args)
+        elif args.subcommand == "disk":
+            from local_operator.disk_cli import main as disk_main
+
+            return disk_main(args)
         elif args.subcommand == "sessions":
             return sessions_command(args)
         elif args.subcommand == "stop":

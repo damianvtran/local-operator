@@ -1,0 +1,192 @@
+{
+  "schema": 1,
+  "audit_id": "w6a2",
+  "audit_round": 2,
+  "locale": "es",
+  "namespace": "tui.usage",
+  "audit_date": "2026-10-30",
+  "audited_revision": "b925c2e11be36653dfe88ac78f627bc2531427df",
+  "audited_revision_note": "The es target is UNTRACKED at this revision, so HEAD does not bind its bytes. The on-disk sha256 in input_hashes.target is the binding identity; the probe re-reads the same files and prints their digests at the top of its run (audit.log §3).",
+  "branch_checked_out": "feat/i18n-es-tui",
+  "branch_note": "the task brief named `tui-wip`; `git rev-parse --abbrev-ref HEAD` reports feat/i18n-es-tui, recorded here as found",
+  "key_count": {
+    "en": 21,
+    "target": 21,
+    "context": 21
+  },
+  "verdict": "passed",
+  "result": "passed — 0 blocker, 0 major; 2 minor + 1 nit recorded from this remediation",
+  "verdict_reason": "US-1 closed (the allowance now uses relay.shell's shipped term and still makes the money claim); US-2 closed (both counters count-neutral) with a cosmetic tally side effect recorded as a nit; US-3's width half closed (mixed counters 27 of the 31-cell floor body, composed row 3 cells shorter than en) but its agreement half is NOT: '{value} caducadas' still renders '1 caducadas', now the only count-first counter beside two label-form siblings. The relay alignment also cost 5 cells, so the note clips at 58-62 column terminals where it previously fit; both are minors, not majors, because the panel ellipsises these rows by design and the meaning survives.",
+  "auditor": {
+    "agent": "i18n-auditor (lopdev team), independent Spanish translation auditor",
+    "session_or_instance": "7fa3a39af5d9",
+    "model": "radient/auto",
+    "model_note": "Model as actually run, not the session header. The header named anthropic/claude-sonnet-5-5; provider quota failures switched the session to openai/gpt-6-astra, then kimi/k3.1-pro, then radient/auto before any audit work began. Every check, measurement and finding in this bundle was produced under radient/auto. No claim is made for the primary model.",
+    "date": "2026-10-30",
+    "independent_from_translator_session": true,
+    "independent_of_round_1_session": "6a2f6fa808a7 (the w6a1 auditor session; different session, same inputs re-read)",
+    "actual_model_source": "session model-switch events in the run transcript (quota fallbacks), disclosed verbatim",
+    "independence": "I authored none of this copy and repaired none of it. I wrote no catalogue, sidecar, ledger, allowance or generated file; only this evidence directory. Judgement is LLM reasoning against the en source, the context sidecar, the shipped es catalogues and the rendering code. No translation/memory/MT service was used to compare or back-translate."
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.usage.json",
+      "sha256": "5aeaec254352896101bf2825ac03d06f74c95e3598cda23536c5fe28507a2f8b",
+      "tracked": true
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.usage.context.json",
+      "sha256": "bf599f5f161087b890e1e24434a03209fee286b865173af6b578da3133b6ef19",
+      "tracked": true
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/es/tui.usage.json",
+      "sha256": "e2ab2abd3d581eb5c093cb3148b4beede61a3ed518b9b9de39c3361309c01a48",
+      "tracked": false
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/es/tui.usage/w6a2/record.json",
+      "role": "record",
+      "sha256": "self"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.usage/w6a2/report.md",
+      "role": "audit report (findings, measurements, limitations)",
+      "sha256": "3669e784b28817b80eeb2e526a8caaf0709440a0cf75114ee53e21aa2587c715"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.usage/w6a2/audit.log",
+      "role": "execution log: validator + probe + measurement commands and their actual output",
+      "sha256": "e3f312fe019f5411190038b67aaae08548deb39f4f83404f8a4e4dabdd6a0676"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.usage/w6a2/checks.py",
+      "role": "the probe that produced sections A-D, including the negative controls",
+      "sha256": "cd4b5f867beacc48eaa16ea2b29ce4335210cadcfae5c2a16381dc8954123278"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [
+      "US-1",
+      "US-2",
+      "US-3",
+      "US-4",
+      "F-U1",
+      "F-U2",
+      "F-U3"
+    ]
+  },
+  "findings": [
+    {
+      "id": "US-1",
+      "severity": "major",
+      "status": "closed",
+      "key": "tui.usage.paid.continue",
+      "en": "included quota used; credits will continue",
+      "round_1_value": "cuota incluida agotada; continuará con créditos",
+      "current": "Asignación incluida agotada; continuará con créditos",
+      "problem": "Closed: one money object keeps one name across surfaces; the final period is correctly absent (en has none) though relay.shell's copy carries one. The money claim survives (a control that swaps it for 'se detendrá' is caught).",
+      "suggestion": "none",
+      "evidence": "relay.shell.usage.continue; probe C8 + C8 negative control"
+    },
+    {
+      "id": "US-2",
+      "severity": "minor",
+      "status": "closed",
+      "key": "tui.usage.exhausted / stale",
+      "en": "{value} exhausted / {value} stale",
+      "round_1_value": "{value} agotadas / {value} obsoletas",
+      "current": "agotadas: {value} / obsoletas: {value}",
+      "problem": "Closed in the title row: no more '1 agotadas'. See F-U3 for the tally side effect.",
+      "suggestion": "none",
+      "evidence": "probe C9 (agreement) and C9 negative control"
+    },
+    {
+      "id": "US-3",
+      "severity": "minor",
+      "status": "partially closed (width closed, agreement open)",
+      "key": "tui.usage.sign_in_expired",
+      "en": "{value} sign-in expired",
+      "round_1_value": "{value} con inicio de sesión caducado",
+      "current": "{value} caducadas",
+      "problem": "The width half is closed: the mixed row drops from 46 to 27 cells and fits the 31-cell floor body. The agreement half is not: {value} is a bare count of windows, so at one expired account the most-read row reads '1 caducadas', and the row now mixes shapes ('2 caducadas  ·  obsoletas: 1').",
+      "suggestion": "caducadas: {value} — count-neutral, same shape as its siblings, mixed row 29 ≤ 31",
+      "evidence": "usage_panel.py _flagged_account_counts / _title_row (1789-1800); probe B4/C9; audit.log §4"
+    },
+    {
+      "id": "US-4",
+      "severity": "minor",
+      "status": "disposition accepted (not applied), recording OUTSTANDING",
+      "key": "tui.usage.paid.family_caps / paid.eligibility_unknown",
+      "en": "model-family caps still apply / Spend eligibility unknown",
+      "current": "siguen aplicándose los límites por familia de modelos / Elegibilidad para gasto desconocida",
+      "problem": "Accepted: the wording is the shipped relay copy for the same facts, meaning exact, and rewording would give one concept two names. Two corrections for the record: the promised width exception is NOT yet in i18n/style-guides/es.md (only cli.services_status is recorded there), and round 1's 'at 60+ columns both fit' was imprecise — family_caps composes to 55, needing a 64-column terminal.",
+      "suggestion": "record the exception in the es style guide before the wave closes",
+      "evidence": "style-guides/es.md:118; probe B5 EXC rows"
+    },
+    {
+      "id": "F-U1",
+      "severity": "minor",
+      "status": "new (same defect US-3 was meant to answer)",
+      "key": "tui.usage.sign_in_expired",
+      "en": "{value} sign-in expired",
+      "current": "{value} caducadas",
+      "problem": "'1 caducadas' at one expired window, and the three counters mix shapes in one row.",
+      "suggestion": "caducadas: {value} (12 cells; mixed row 29 ≤ 31 floor body)",
+      "evidence": "probe C9; rendered through the shipped runtime with value='1'"
+    },
+    {
+      "id": "F-U2",
+      "severity": "minor",
+      "status": "new (indirect effect of the US-1 fix)",
+      "key": "tui.usage.paid.continue",
+      "en": "included quota used; credits will continue",
+      "current": "Asignación incluida agotada; continuará con créditos",
+      "problem": "Composed width grew from 49 to 54 (en 44). With body = columns - 9, es previously fit from a 58-column terminal and now needs 63; en fits from 53. In the 58-62 band es now clips where it fit before, and at 60 columns it truncates to 'Asignación incluida agotada; continuará con crédit…', cutting the object of the money claim.",
+      "suggestion": "extend the recorded paid-annotation width exception to this key (recommended), or 'Asignación incluida agotada; sigue con créditos' (49 composed, fits from 58 columns)",
+      "evidence": "usage_panel.py:1039-1049 (TIER_INDENT + truncate); probe B5; audit.log §4"
+    },
+    {
+      "id": "F-U3",
+      "severity": "nit",
+      "status": "new (indirect effect of the US-2 fix)",
+      "key": "tui.usage.exhausted (footer tally)",
+      "en": "{value} exhausted",
+      "current": "agotadas: {value}",
+      "problem": "UsageStats.describe() renders the same key among count-first siblings ('{value} cerca del límite', '{value} saldos informados'), so the footer reads '5 ventanas · agotadas: 1 · 1 cerca del límite · 2 saldos informados'. Cosmetic; the footer drops the whole tally segment rather than truncating, and it only appears on wide panels.",
+      "suggestion": "accept and leave; recorded so it is not rediscovered",
+      "evidence": "usage_panel.py:190-235 (describe), 1822-1866 (footer drops 'stats' wholesale); probe C9"
+    }
+  ],
+  "round_1_bundle": "i18n/audits/evidence/es/tui.usage/w6a1/",
+  "check_output": [
+    {
+      "cmd": "python3 scripts/i18n/check.py",
+      "result": "exit 0 — 'check.py: ok — 191 file(s) scanned, 2348 literal(s) at or below the baseline, catalogues consistent; 51 advisory finding(s)'"
+    },
+    {
+      "cmd": "~/local-operator/.venv/bin/python i18n/audits/evidence/es/tui.hub_links/w6a2/checks.py",
+      "result": "exit 1 — 3 failing checks across the three namespaces (1 hub_links, 0 app, 2 usage); 11/11 negative controls behaved as required (10 breakages caught, 1 intended pass accepted)"
+    },
+    {
+      "cmd": "~/local-operator/.venv/bin/python - <<'PY' (measurement block captured in audit.log §4)",
+      "result": "cell_len from rich.cells; name_width derived from the live SLASH_COMMANDS registry (20); /help rows 68/73/72 vs 74; stop_all 57 vs 70; usage counters 27 vs 31 floor and 42 vs en 45; paid notes continue 54/44, family_caps 55/31, eligibility 37/27"
+    },
+    {
+      "cmd": "python3 (term counts over 95 es catalogue files, audit.log §5)",
+      "result": "diálogo: 1 occurrence (the audited key); prompt: 38 occurrences in 36 values"
+    }
+  ],
+  "audit_notes_not_execution_log": "report.md and verdict_reason are reasoning; audit.log holds the captured command output and is the execution record.",
+  "limitations": [
+    "LLM semantic judgement; no native-speaker attestation, and native review is not claimed as a gate.",
+    "No rendered TUI frame captured: widths are computed with rich.cells.cell_len against the geometry the source documents, and truncation points are computed from Text.truncate(..., overflow='ellipsis').",
+    "No repo-wide pytest suite or generator was run; the validator plus the probe are the mechanical evidence.",
+    "audit_notes_not_execution_log: report.md is reasoning; audit.log is the captured command output and is the execution record."
+  ],
+  "no_writes": "No catalogue, sidecar, ledger, allowance, baseline or generated file was written by this audit; only this evidence directory."
+}

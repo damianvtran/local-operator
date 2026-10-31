@@ -112,6 +112,24 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "Unlinks the task record under the config dir's supervisor/ dir, never a session path.",
     ),
+    # The receiver's wake-diagnostics counter: a config-dir sidecar published by
+    # atomic replace. ``diagnostics_path()`` is ``<config_dir>/team_bridge/
+    # wake_diagnostics.json`` and its temp sibling is that same FIXED name plus
+    # ``.tmp`` — both are module constants under the config root's team_bridge/
+    # directory, so neither can be a session directory or a transcript, and no
+    # caller input (conversation id, message id, sender) reaches either path.
+    # The file records a count per closed code, never per-session state
+    # (QA round 2).
+    (
+        "local_operator/team_bridge/wake_diagnostics.py::record_woke_nobody",
+        "os.replace",
+        "Atomic swap of a fixed-name .tmp FILE onto the config dir's team_bridge/ counter",
+    ),
+    (
+        "local_operator/team_bridge/wake_diagnostics.py::record_woke_nobody",
+        "<path>.unlink",
+        "Clears only that write's own .tmp FILE beside the counter; never a session path",
+    ),
     # Dedicated credential-root cache, never a transcript path: path_for hashes
     # the opaque session id under account-affinity/<auth-db namespace>/*.json.
     # replace takes only a sibling mkstemp REGULAR FILE; cleanup unlinks only
@@ -1356,6 +1374,46 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/agents.py::_write_text_atomically",
         "<path>.unlink",
         "only the same-directory temp FILE this write created",
+    ),
+    # -- agent pictures: agents/<id>/avatar.{png,jpg}, never sessions/ ---------
+    # ``agent_avatar`` owns two fixed basenames (``avatar.png`` / ``avatar.jpg``)
+    # joined onto an agent directory the REGISTRY resolved from a known agent id;
+    # no session id, no caller-supplied name and no directory is ever removed.
+    (
+        "local_operator/agent_avatar.py::_write_bytes_atomically",
+        "os.replace",
+        "temp FILE -> agents/<id>/avatar.png|jpg (os.replace onto a file); never sessions/",
+    ),
+    (
+        "local_operator/agent_avatar.py::_write_bytes_atomically",
+        "<path>.unlink",
+        "only the same-directory temp FILE this write created",
+    ),
+    (
+        "local_operator/agent_avatar.py::remove_siblings",
+        "<path>.unlink",
+        "the stale avatar.png|jpg FILE beside agent.yml (one of two fixed names); never sessions/",
+    ),
+    (
+        "local_operator/agent_avatar.py::remove",
+        "<path>.unlink",
+        "both fixed avatar.png|jpg FILEs in an agent dir, absent is fine; never sessions/",
+    ),
+    (
+        "local_operator/agent_avatar.py::subscribe._unsubscribe",
+        "<path>.remove",
+        "list.remove of a callback from the in-process subscriber list; not the filesystem",
+    ),
+    (
+        "local_operator/agents.py::AgentRegistry.set_agent_avatar",
+        "<path>.unlink",
+        "rollback drops only the new agents/<id>/avatar.png|jpg FILE after a failed "
+        "agent.yml write",
+    ),
+    (
+        "local_operator/agents.py::AgentRegistry.clear_agent_avatar",
+        "<path>.remove",
+        "calls agent_avatar.remove, which unlinks the two fixed avatar FILEs in agents/<id>/",
     ),
     (
         "local_operator/network/definitions.py::write_index",
@@ -3828,6 +3886,18 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "Unlinks cache FILEs inside a read-models/<sid> directory whose session has no index; "
         "the directory itself is left in place",
+    ),
+    # -- team-bridge moderation evaluation: a tmp world the harness built ------
+    # `teardown_fixture` deletes the fixture tree ONE eval case ran in, created by
+    # `build_fixture` under a caller-supplied tmp root (`tmp_path / "world"` in the
+    # tests). It requires the builder's provenance marker and both owned home/config
+    # directories, and reapplies the builder's operator-root refusal. The path is
+    # `world.root`, never a session id or directory, and evaluation reads no sessions/.
+    (
+        "local_operator/evaluation/team_bridge_moderation/fixture.py::teardown_fixture",
+        "shutil.rmtree",
+        "Deletes only a marked eval fixture with both owned directories; protected "
+        "operator/session roots are refused before removal",
     ),
 )
 

@@ -1,0 +1,9 @@
+{
+  "wire.errors.agent_avatar.empty_body": "No picture was sent. Send the image bytes as the request body.",
+  "wire.errors.agent_avatar.imaging_unavailable": "Pictures need image support, which isn't installed. Reinstall Local Operator with the images extra.",
+  "wire.errors.agent_avatar.not_found": "This agent has no picture.",
+  "wire.errors.agent_avatar.too_large": "This picture is too large. Choose an image under {limit_mib} MB.",
+  "wire.errors.agent_avatar.too_many_pixels": "This picture has too many pixels. Choose an image under {limit_mp} megapixels.",
+  "wire.errors.agent_avatar.undecodable": "This picture couldn't be read. The file may be damaged.",
+  "wire.errors.agent_avatar.unsupported_type": "This picture can't be used. Choose a PNG, JPEG, WebP, GIF or HEIC image."
+}

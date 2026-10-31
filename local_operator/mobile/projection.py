@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
@@ -65,6 +66,7 @@ from local_operator.harness.rows import (
     ask_timeout_notice,
     assistant_row_text,
     assistant_stop_notice,
+    bridge_row,
     compaction_refused_notice,
     gate_timeout_notice,
     held_delivery_notice,
@@ -392,6 +394,79 @@ def _message_text(message: AgentMessage) -> str:
     return ""
 
 
+def _bridge_summary(
+    args: Mapping[str, Any], details: Mapping[str, Any] | None, *, failed: bool = False
+) -> str:
+    """The Team Bridge row as one line, the TUI's words plus its outcome.
+
+    Tokens from ``harness/rows.py::bridge_row`` and copy from
+    ``harness/bridge_copy.py`` — the pair the TUI card calls — so a post, a
+    refusal and an inbox-only send say the same thing on both surfaces. The
+    phone cell has no status cap, so the outcome word (``not posted to a
+    conversation``, ``refused · code``) rides the end of the line; compacted
+    to the module's 80-character row cap like every other summary.
+    ``details=None`` is a call that has not returned: the running verb.
+    """
+    from local_operator.harness.bridge_copy import bridge_row_line
+
+    in_thread = bool(str(args.get("thread_root_id") or "").strip())
+    line = bridge_row_line(
+        bridge_row(args, details),
+        running=details is None,
+        in_thread=in_thread,
+        failed=failed,
+    )
+    return _compact(line, 80)
+
+
+def _settled_bridge_summary(
+    tool_name: str, args: Mapping[str, Any], details: object, *, failed: bool
+) -> str | None:
+    """The settled bridge summary, or None for any other tool (keep the row's)."""
+    if tool_name != "bridge":
+        return None
+    return (
+        _bridge_summary(args, details if isinstance(details, Mapping) else {}, failed=failed)
+        or tool_name
+    )
+
+
+#: Opaque Team Bridge ids (conversation, message, account, endpoint). The tail
+#: takes ``_`` and ``-`` too: real ids include ``acc_remote_9`` and
+#: ``ep_01J-ABC``, and a ``[A-Za-z0-9]`` tail left the second half visible
+#: (review round 1, R3). Kept in step with ``harness/rows.py``'s prefix tuple.
+_BRIDGE_ID_RE = re.compile(r"\b(?:bcv|bcmsg|acc|ep)_[A-Za-z0-9_-]+")
+
+
+def _scrub_bridge_ids(text: str) -> str:
+    """``text`` with every bridge id replaced by an ellipsis, spaces tidied."""
+    return " ".join(_BRIDGE_ID_RE.sub("…", text).split())
+
+
+def _bridge_copy(
+    row: Mapping[str, Any], args: Mapping[str, Any], details: Mapping[str, Any] | None
+) -> dict[str, str]:
+    """The phone's bridge strings: chip word, expansion headline and sentence.
+
+    ``outcome`` is the short word the row's chip shows (``None`` → "" for a
+    plain landed call); ``outcome_sentence`` the expanded card's full sentence.
+    Every value is id-free ON THE WIRE, not just on screen: the sentence
+    interpolates the tool's raw ``error``, and real refusals name the
+    conversation (``team_bridge/tool.py`` ``channel_id={conversation_id}``), so
+    each value is scrubbed here rather than trusting every client to do it
+    (review round 1, R3 / QA Q2). ``internals`` - where ids belong - is not
+    carried.
+    """
+    from local_operator.harness.bridge_copy import bridge_expanded, outcome_word
+
+    expanded = bridge_expanded(row, args, details)
+    return {
+        "outcome": _scrub_bridge_ids(outcome_word(row) or ""),
+        "headline": _scrub_bridge_ids(str(expanded.get("headline") or "")),
+        "outcome_sentence": _scrub_bridge_ids(str(expanded.get("outcome") or "")),
+    }
+
+
 def _summarize_args(tool_name: str, args: dict[str, Any]) -> str:
     """The one-line summary the collapsed row shows.
 
@@ -413,6 +488,11 @@ def _summarize_args(tool_name: str, args: dict[str, Any]) -> str:
         # the phone painted a blank summary cell while the terminal painted
         # `sessions` for the same call (round-1 review, R2).
         return _compact(sessions_row_summary(args), 80) or tool_name
+    if tool_name == "bridge":
+        # Replaces the `op=… channel_id=bcv_…` dump the generic tail painted.
+        # At call start the running verb; the settle arms below repaint it
+        # from the result's details (`_settled_bridge_summary`).
+        return _bridge_summary(args, None) or tool_name
     for key in ("path", "file_path", "file", "command", "pattern", "query", "url"):
         value = args.get(key)
         if isinstance(value, str) and value:
@@ -569,7 +649,11 @@ def _video_refs_for_content(content: list[Any] | None) -> list[dict[str, Any]]:
 
 
 def _tool_row_details(
-    args: dict[str, Any], output: str, result_details: dict[str, Any] | None
+    args: dict[str, Any],
+    output: str,
+    result_details: dict[str, Any] | None,
+    *,
+    tool_name: str = "",
 ) -> dict[str, Any]:
     """The expand-on-tap payload for a settled tool row.
 
@@ -581,6 +665,14 @@ def _tool_row_details(
     details: dict[str, Any] = {}
     if args:
         details["args"] = {k: _compact(str(v), TOOL_ARGS_CHARS) for k, v in args.items()}
+        if tool_name == "bridge":
+            # The phone renders a bridge message's body as MARKDOWN, and
+            # ``_compact`` flattens every newline - a list or a paragraph break
+            # became one run-on line. Same character cap, line structure kept.
+            for key in ("body", "text"):
+                value = args.get(key)
+                if isinstance(value, str):
+                    details["args"][key] = _compact_multiline(value, TOOL_ARGS_CHARS)
     if output:
         details["output"] = output[-TOOL_OUTPUT_TAIL_CHARS:]
     if result_details:
@@ -603,6 +695,27 @@ def _tool_row_details(
         for key in LIVE_IMAGE_DETAIL_KEYS:
             if key in result_details:
                 details[key] = result_details[key]
+    if tool_name == "bridge":
+        # The Team Bridge row's FACTS, decided once in ``harness/rows.py`` so
+        # the phone, desktop and TUI agree on what a call did. The generic
+        # args view cannot say it: an inbox-only ``send`` looks like any
+        # landed call, and the most visible token in the args is a ``bcv_``
+        # id. Computed from the UNCAPPED args and the full result details
+        # (not the ``TOOL_ARGS_CHARS``-compacted copy above), because the
+        # outcome reads result fields the compacted args never had. Small and
+        # id-free by contract, so it is cheap to re-send on every repaint; a
+        # frame-pressure tier that sheds ``details`` sheds it too, and the row
+        # falls back to its summary alone.
+        row = bridge_row(args, result_details)
+        details["bridge_row"] = row
+        # The WORDS ride beside the tokens, rendered here by the same
+        # ``harness/bridge_copy.py`` the TUI card and this module's summary
+        # call (``wire.tool_rows.bridge``, the daemon's locale). The phone
+        # paints them verbatim instead of minting a parallel ``relay.*`` copy
+        # of one decision: three surfaces, one translation. ``internals`` stay
+        # behind - the expansion's generic args block already holds what the
+        # operator debugging a call needs, and ids must not lead anything.
+        details["bridge_copy"] = _bridge_copy(row, args, result_details)
     return details
 
 
@@ -1910,6 +2023,14 @@ def fold_messages_to_entries(
                 # harness's vocabulary for this condition instead, from the arm
                 # marker on the result. EVERY other tool message keeps its text
                 # untouched — this is keyed on the marker, never on the wording.
+                settled_summary = _settled_bridge_summary(
+                    entry.tool_name or "",
+                    tool_args.get(message.tool_call_id or "", {}),
+                    result_details,
+                    failed=entry.tool_state == "failed",
+                )
+                if settled_summary is not None:
+                    entry.summary = settled_summary
                 receipt = output_limit_call_receipt(result_details) if message.is_error else None
                 result_text = receipt or message.text
                 if message.is_error:
@@ -1932,6 +2053,7 @@ def fold_messages_to_entries(
                     # reading for.
                     "" if receipt else result_text,
                     result_details if isinstance(result_details, dict) else None,
+                    tool_name=entry.tool_name,
                 )
                 # Output-artifact media rides the row as REFERENCES (index +
                 # mime), the same lazy contract user attachments use: bytes
@@ -1990,7 +2112,9 @@ def _peer_cycle_child_row(child: dict[str, Any]) -> TranscriptEntry:
 
     result = ToolResult.model_validate(child["result"])
     arguments = child["arguments"]
-    details = _tool_row_details(arguments, result.text, result.details)
+    details = _tool_row_details(
+        arguments, result.text, result.details, tool_name=child["tool_name"]
+    )
     details["args"] = {key: str(value) for key, value in arguments.items()}
     details["output"] = result.text
     return TranscriptEntry(
@@ -2708,6 +2832,17 @@ class ProjectionFold:
                 1,
             )
             row.diff_added, row.diff_removed = _diff_counts(result.details)
+            # The live settle twin of the fold's arm above: same args (the
+            # stash is still held here — `_tool_details` pops it below), same
+            # details, so a watched call and its replay paint one summary.
+            settled_summary = _settled_bridge_summary(
+                event.tool_name,
+                self._tool_args.get(event.tool_call_id, {}),
+                result.details,
+                failed=row.tool_state == "failed",
+            )
+            if settled_summary is not None:
+                row.summary = settled_summary
             if result.is_error:
                 row.error = _compact(result.text, 200)
             # Output-artifact media rides the live row as the same lazily
@@ -2729,7 +2864,10 @@ class ProjectionFold:
             if video_refs:
                 row.videos = video_refs
             row.details = self._tool_details(
-                self._tool_args.pop(event.tool_call_id, {}), result.text, result.details
+                self._tool_args.pop(event.tool_call_id, {}),
+                result.text,
+                result.details,
+                tool_name=row.tool_name,
             )
         elif isinstance(event, NoticeEvent):
             # ``kind`` rides into ``details`` as the phone's ``severity``. This
@@ -2875,6 +3013,14 @@ class ProjectionFold:
         recognises the eventual event as THIS row rather than guessing from the
         transcript tail — see that method for why the guess was wrong. Omitted
         by callers with no id to offer, which keeps the legacy tail match.
+
+        The row carries ``user_row_text(text)``, not the raw argument: the
+        handle may hold the EXPANDED payload a ``$skill`` invocation persists
+        (the TUI expands at submit), and painting that verbatim showed the whole
+        SKILL.md body on the phone — including as a phone steer's own echo —
+        until the next full repaint replaced the row with the stripped one
+        (SKM-D2). One helper, so the live row and both replay folds agree by
+        construction.
         """
         entry = TranscriptEntry(
             # Synthetic id when the handle has none: the row still needs a
@@ -2882,7 +3028,7 @@ class ProjectionFold:
             # registry below is what carries the correlation instead.
             id=message_id or f"user-{time.time_ns()}",
             kind="steer" if steer else "user",
-            text=text,
+            text=user_row_text(text),
             final=True,
         )
         self._append(entry)
@@ -2988,6 +3134,13 @@ class ProjectionFold:
             return False
         text = message.text
         refs = _image_refs(message)
+        # The row this fold PAINTS, decided by the helper both replay folds use.
+        # Envelope and marker detection below keep reading the RAW text: those
+        # are facts about the producer's message, not what the row displays. A
+        # `$skill` invocation persists as its expanded payload, so a live row
+        # built from `text` showed the whole SKILL.md body until the next full
+        # repaint — the very leak the replay folds already fixed (SKM-D2).
+        row_text = user_row_text(text)
         # Echo reconciliation runs BEFORE the envelope branch, not after. A
         # message whose text matches the envelope shape can still be one the
         # phone sent (a user quoting the wrapper, or a phone-issued steer);
@@ -3008,7 +3161,9 @@ class ProjectionFold:
             for candidate in reversed(self.projection.transcript[-3:]):
                 if (
                     candidate.kind in ("user", "steer")
-                    and candidate.text == text
+                    # Stripped text on BOTH sides: the echo row holds what the
+                    # surface paints, the event holds the persisted payload.
+                    and candidate.text == row_text
                     and candidate.id not in owned
                 ):
                     entry = candidate
@@ -3090,7 +3245,7 @@ class ProjectionFold:
             )
             return True
         self._append(
-            TranscriptEntry(id=message.id, kind="user", text=text, images=refs, final=True)
+            TranscriptEntry(id=message.id, kind="user", text=row_text, images=refs, final=True)
         )
         return True
 
@@ -4105,7 +4260,12 @@ class ProjectionFold:
             ]
 
     def _tool_details(
-        self, args: dict[str, Any], output: str, result_details: dict[str, Any] | None
+        self,
+        args: dict[str, Any],
+        output: str,
+        result_details: dict[str, Any] | None,
+        *,
+        tool_name: str = "",
     ) -> dict[str, Any]:
         """The live path's expand payload — one implementation with replay's.
 
@@ -4113,7 +4273,7 @@ class ProjectionFold:
         for the same call expand to the same thing; the caps here are the
         wire budget's and must not drift between the two paths.
         """
-        return _tool_row_details(args, output, result_details)
+        return _tool_row_details(args, output, result_details, tool_name=tool_name)
 
     def _append(self, entry: TranscriptEntry) -> None:
         self.projection.transcript.append(entry)

@@ -652,6 +652,7 @@ async def status(
     # which must never ride ``lop serve``'s boot path (module docstring).
     from local_operator.team_bridge.read_context import READ_AVAILABILITY
     from local_operator.team_bridge.settings import TeamBridgeSettings
+    from local_operator.team_bridge.store import read_screening_status
 
     check = await get_status_discipline(config_manager.config_dir).check(boundary)
     # The local keys come from the DIRECTORY-scoped process watcher's last-good
@@ -774,6 +775,12 @@ async def status(
         #: when nothing waits, so an older renderer that ignores the key loses
         #: nothing.
         "delivery_hold": _delivery_hold(config_manager),
+        #: Screening's held / breaker / rejected counts — the same answer
+        #: ``lop team-bridge receiver status --json`` carries under
+        #: ``screening`` (``Store.screening_status_readonly``). Counts, codes,
+        #: categories and ages only; ``None`` when not enrolled or unreadable.
+        #: Additive: an older renderer that ignores the key loses nothing.
+        "screening_summary": read_screening_status(config_manager.config_dir),
         # The receiver's SERVICE state, distinct from enrolment, on every
         # platform (launchd, systemd --user, Task Scheduler): ``loaded`` the
         # supervisor holds it; ``installed`` registered but not running;
@@ -1402,10 +1409,42 @@ def _validate_schedule_time(value: str) -> None:
     datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
-class ScheduledMentionIn(_Strict):
+class MentionIn(_Strict):
+    """One structured mention: the hub's Send-policy row ``{kind, account_id[, endpoint_id]}``.
+
+    Shared by the immediate send (``ConversationSendIn``) and the scheduled
+    send (``ScheduledCreateIn``) so the two bodies cannot drift into two
+    mention vocabularies. ``endpoint_id`` is present for an agent member and
+    absent for a human; the hub, not this route, owns whether the pair names a
+    real member.
+    """
+
     kind: Literal["human", "agent"]
     account_id: str = Field(min_length=1, max_length=128)
     endpoint_id: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+#: The scheduled-send name predates the immediate send's mentions; kept so
+#: existing imports keep resolving to the one shared model.
+ScheduledMentionIn = MentionIn
+
+
+def _validate_mentions(mentions: list[MentionIn]) -> None:
+    # A duplicate row would be a second "mention" bit for the same member;
+    # refused rather than deduped so a renderer bug is visible, matching the
+    # attachment_ids rule above.
+    keys = [(m.kind, m.account_id, m.endpoint_id) for m in mentions]
+    if len(set(keys)) != len(keys):
+        raise ValueError("mentions must be distinct")
+    # The immediate-send client re-validates each row at serialization
+    # (``validate_member_mention``), which refuses padded ids; a row that
+    # passed here but failed there would surface as a server error instead of
+    # a clean 422. Held here, not on ``MentionIn``, so the scheduled body's
+    # accepted shape is unchanged by this slice.
+    for m in mentions:
+        for value in (m.account_id, m.endpoint_id):
+            if value is not None and value != value.strip():
+                raise ValueError("mention ids must not carry surrounding whitespace")
 
 
 class ScheduledCreateIn(_Strict):
@@ -1620,10 +1659,18 @@ class ConversationSendIn(ConversationOwnerIn):
     #: minted message-id grammar here so a malformed id never reaches the hub;
     #: the hub owns the real rule (same conversation, root not a reply).
     thread_root_id: str | None = Field(default=None, pattern=CONVERSATION_REPLY_ROOT_PATTERN)
+    #: Members this message is directed at (the @-mention autocomplete). The
+    #: hub sets each named member's ``mention`` bit from it, which is what
+    #: makes the wake card read ``mention: yes``. Empty (the default) is
+    #: forwarded as NO key at all, so an undirected send stays byte-identical
+    #: to the pre-mention wire and an older hub never sees the field. Gated in
+    #: the UI by the ``team_bridge_send_mentions`` capability.
+    mentions: list[MentionIn] = Field(default_factory=list, max_length=50)
 
     @model_validator(mode="after")
     def _content(self) -> "ConversationSendIn":
         _validate_attachment_ids(self.attachment_ids)
+        _validate_mentions(self.mentions)
         if not self.body and not self.attachment_ids:
             raise ValueError("a message needs body or attachment_ids")
         # A THREADED send (``thread_root_id`` present) REQUIRES the captured-owner
@@ -1690,6 +1737,34 @@ class ConversationConsentIn(ConversationOwnerIn):
                 raise ValueError("withdraw carries no consent_version")
         elif self.consent_version is None:
             raise ValueError("accept and decline require consent_version")
+        return self
+
+
+class ConversationAgentNotifyIn(_Strict):
+    """The owner's choice of what wakes THEIR agent in one conversation.
+
+    ``all`` = every message, ``mention`` = direct/channel @-mentions AND replies
+    in threads the agent follows, ``mute`` = never (history only). The same three
+    words the UI shows as "Every message / @-mentions and its threads / Never
+    (muted)" (wake contract, Amendment A1: naming ``mention`` as "only
+    @-mentions" was wrong — a followed-thread reply wakes the agent without one).
+    The captured-owner receipt is REQUIRED, like the reaction write: no shipped
+    renderer calls this route yet, so there is no legacy caller to stay
+    compatible with, and an optional guard would regress the first time a
+    renderer forgot it. The endpoint is NOT a body field: it is always this
+    machine's enrolled agent, never one the caller names.
+    """
+
+    notify: Literal["all", "mention", "mute"]
+    expected_account_id: str = Field(min_length=1, max_length=128)
+    tenant_id: str = Field(min_length=1, max_length=128)
+
+    @model_validator(mode="after")
+    def _receipt_grammar(self) -> "ConversationAgentNotifyIn":
+        if not is_account_id(self.expected_account_id):
+            raise ValueError("expected_account_id is outside the accepted grammar")
+        if not self.tenant_id.strip():
+            raise ValueError("a guarded mutation needs an explicit tenant_id")
         return self
 
 
@@ -2145,6 +2220,63 @@ async def conversation_consent(
     )
 
 
+@router.put(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}/agent-notify",
+    response_model=CRUDResponse[Any],
+)
+async def conversation_agent_notify(
+    conversation_id: str,
+    request: Request,
+    body: ConversationAgentNotifyIn,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """Set what wakes the owner's OWN agent in this conversation (wake contract).
+
+    WHY A DESKTOP ROUTE: agents now default to ``all`` (woken for every
+    message, deciding relevance themselves), and the owner needs a per-
+    conversation way back to "only @-mentions" or "never". The hub's
+    endpoint-addressed notify write is the only one that reaches an agent
+    member; this route resolves the endpoint from the LOCAL enrolled owner, so
+    a renderer can only ever change this machine's own agent.
+
+    The receipt is checked against that owner before any network: an
+    unenrolled machine is ``not_enrolled``, a receipt for another account is
+    ``owner_mismatch`` and a tenant other than the enrolled one is
+    ``invalid_tenant``. The client then re-checks the bearer against
+    ``expected_account_id``, and the hub owns membership. Hub refusals pass
+    through verbatim; the answer is the hub's conversation view.
+    """
+
+    import sqlite3
+
+    from local_operator.team_bridge.store import Store, StoreRefused
+
+    _require_conversation_id(conversation_id)
+    _refuse_write_scope(request)
+    try:
+        owner = Store(config_manager.config_dir).active_owner_readonly()
+    except (StoreRefused, sqlite3.Error):
+        _raise_read("state_unreadable")
+    if owner is None or not owner.endpoint_id:
+        _raise_read("not_enrolled")
+    if owner.account_id != body.expected_account_id:
+        _raise_read("owner_mismatch")
+    if owner.tenant_id != body.tenant_id:
+        _raise_read("invalid_tenant")
+    client = _conversation_client(config_manager)
+    return reply(
+        await _conversation_reply(
+            client.conversation_agent_notify(
+                conversation_id,
+                owner.endpoint_id,
+                notify=body.notify,
+                tenant_id=body.tenant_id,
+                expected_account_id=body.expected_account_id,
+            )
+        )
+    )
+
+
 # -- owner's pending agent invitations (agent-server #227) ---------------------
 #
 # `GET /conversations` lists only what the caller's HUMAN identity is in, so an
@@ -2575,6 +2707,9 @@ async def send_conversation_message(
                 agent_label=body.agent_label,
                 thread_root_id=body.thread_root_id,
                 attachment_ids=body.attachment_ids,
+                # ``or None``: the client adds the key only for a non-empty
+                # list, so an undirected send keeps today's exact wire.
+                mentions=[m.model_dump(exclude_none=True) for m in body.mentions] or None,
             )
         )
     )

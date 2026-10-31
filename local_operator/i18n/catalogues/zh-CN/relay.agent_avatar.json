@@ -1,0 +1,5 @@
+{
+  "relay.agent_avatar.alt": "{name} 的头像",
+  "relay.agent_avatar.change": "更换 {name} 的头像",
+  "relay.agent_avatar.desktop_hint": "请在桌面应用中更换此头像"
+}

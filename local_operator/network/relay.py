@@ -7986,6 +7986,7 @@ class RelayServer:
                     # ``_row_binding``): the origin's sidebar paints a team
                     # badge from it exactly as it does for a local row.
                     "binding": self._row_binding(record.session_id),
+                    **self._row_avatar(record.session_id),
                 }
             )
         for row in self._stored_rows():
@@ -8008,6 +8009,20 @@ class RelayServer:
         for row in self._mesh_hosted_rows(seen):
             rows.append(row)
         return rows
+
+    def _row_avatar(self, session_id: str) -> dict[str, str | None]:
+        """``agent_id``/``avatar_sha256`` for an outbound peer row (additive).
+
+        The same resolver the local listing uses (``agent_avatar.session_row_fields``,
+        memoised per store), so a peer's row names its agent the way that device's
+        own sidebar would. The id is THIS device's registry id: an origin cannot
+        fetch the bytes through the mesh today, so it draws the glyph -- the pair
+        is carried so a later picture channel needs no row-shape change. Team
+        Bridge/notification avatar fields are a separate lane and untouched here.
+        """
+        from local_operator.agent_avatar import session_row_fields
+
+        return session_row_fields(self.root, session_id)
 
     def _row_binding(self, session_id: str) -> dict[str, str | None]:
         """The agent/team this session is attached to, for its listing row.
@@ -8112,6 +8127,7 @@ class RelayServer:
                     "origin": dict(stamp.origin) if stamp.origin else None,
                     "archived": None,
                     "binding": self._row_binding(entry.name),
+                    **self._row_avatar(entry.name),
                 }
             )
         return rows
@@ -8221,6 +8237,7 @@ class RelayServer:
                     "origin": (dict(stamp.origin) if stamp is not None and stamp.origin else None),
                     "archived": None,
                     "binding": self._row_binding(session_id),
+                    **self._row_avatar(session_id),
                 }
             )
         return rows
@@ -9433,6 +9450,7 @@ class RelayServer:
             OPEN_FRAME_MAX_EXTRA_ROWS,
             OPEN_FRAME_MAX_RAW_PAGES,
             OPEN_FRAME_MAX_ROWS,
+            StripMemo,
             align_page,
             build_frame,
             late_index_stop,
@@ -9475,6 +9493,12 @@ class RelayServer:
         page_rows: list[tuple[int, bool, int]] = []
         index_at_first_page = False
         frame_at = time.monotonic()
+        # ONE STRIP PER ROW PER OPEN — the desktop twin's rule (``StripMemo``).
+        # Every row is this read's own ``json.loads``, so nothing is shared.
+        # ``supplements=False`` is spelled out for parity with the desktop twin:
+        # this read never paints supplements (``align_page``/``build_frame``
+        # below take their default), and a memo must match that value.
+        strip_memo = StripMemo(supplements=False)
         for attempt in range(OPEN_FRAME_MAX_RAW_PAGES):
             read_at = time.monotonic()
             try:
@@ -9542,9 +9566,9 @@ class RelayServer:
                 break
             collected = rows + collected
             page_rows.append((len(rows), page.has_more, len(sources)))
-            kept, reached = align_page(collected, limit)
-            paintable_rows = paintable(collected)
-            if reached and len(paintable(kept)) >= limit:
+            kept, reached = align_page(collected, limit, memo=strip_memo)
+            paintable_rows = paintable(collected, memo=strip_memo)
+            if reached and len(paintable(kept, memo=strip_memo)) >= limit:
                 break
             # THE INDEX IS FETCHED AFTER THE FIRST PAGE, DELIBERATELY — the same
             # ordering the desktop twin documents: the page is what the client
@@ -9611,6 +9635,7 @@ class RelayServer:
                     collected,
                     index=index,
                     limit=limit,
+                    memo=strip_memo,
                 )
                 if stop is not None and stop < len(page_rows):
                     keep = sum(rows for rows, _more, _sources in page_rows[:stop])
@@ -9641,9 +9666,10 @@ class RelayServer:
             index.sig.get("mtime"),
         ):
             index = None
-        kept, reached = align_page(collected, limit)
+        kept, reached = align_page(collected, limit, memo=strip_memo)
         result = build_frame(
             kept,
+            memo=strip_memo,
             index=index,
             resolved_runs=facts.runs if facts is not None else None,
             # ``building`` is what a cold index answers (see

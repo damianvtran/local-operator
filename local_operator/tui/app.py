@@ -1520,25 +1520,15 @@ def _looks_like_botched_count(arg: str) -> bool:
 def _skill_body_has_content(body: str | None) -> TypeGuard[str]:
     """Whether a resolved SKILL.md carries anything beyond its frontmatter.
 
-    ``resolve_skill_url`` returns the file verbatim, so a stub whose YAML block
-    is the entire file comes back as a NON-EMPTY string with zero instruction
-    in it. A plain truthiness check therefore called that a successful load and
-    sent the model a `<skill>` block containing only `name:` and
-    `description:` — which is the silent no-op this exists to catch.
+    The rule itself lives in :func:`local_operator.skills.invoke.skill_body_has_content`
+    because the mobile relay expands the same ``$name`` mentions and the two
+    surfaces must call "this skill has nothing to say" the same thing. A second
+    copy here is how the two would drift, and a skill that fires on the phone
+    but not in the terminal is a defect no single-surface test can see.
     """
-    if not body or not body.strip():
-        return False
-    text = body.lstrip()
-    if text.startswith("---"):
-        # Drop the leading YAML block, if it is terminated. An UNterminated one
-        # is malformed rather than empty, so it falls through and counts as
-        # content: the user should see the skill fire and read the odd result,
-        # not be told their skill is empty when it is broken.
-        rest = text[3:]
-        end = rest.find("\n---")
-        if end != -1:
-            text = rest[end + 4 :]
-    return bool(text.strip())
+    from local_operator.skills.invoke import skill_body_has_content
+
+    return skill_body_has_content(body)
 
 
 class _SkillExpansion(NamedTuple):

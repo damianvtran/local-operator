@@ -15,6 +15,7 @@ vi.mock("./api", () => ({
 	getSubagentDetail: vi.fn(() => new Promise(() => undefined)),
 	imageUrl: vi.fn(() => ""),
 	getCommands: vi.fn(async () => ({ commands: [] })),
+	getSkills: vi.fn(async () => ({ skills: [] })),
 	getModels: vi.fn(async () => ({ models: [] })),
 	// THE CHIP'S TWO CALLS (the composer's working-directory cluster). Stubbed
 	// like every other api function here rather than spread from the real module,

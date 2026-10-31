@@ -29,6 +29,8 @@ import type {
 	NotificationToken,
 	SessionSummary,
 	SessionTagsResponse,
+	SkillExpansionReceipt,
+	SkillsResponse,
 	SlashCommand,
 	SubagentDetail,
 	TagsResponse,
@@ -180,6 +182,22 @@ export function getUsage(): Promise<{ reports: PhoneUsageReport[]; source: "cach
 
 export function getCommands(): Promise<{ commands: SlashCommand[] }> {
 	return request("/api/commands");
+}
+
+/** The `$name` vocabulary for ONE session (`GET /api/skills?session_id=`).
+
+    SESSION-SCOPED because discovery walks up from the conversation's own
+    directory: a relay serving two checkouts answers each conversation with the
+    skills that checkout would see. Rows are sorted by name and capped at 500 by
+    the relay; `description` is cut to 160 chars. Hidden skills are included
+    with `hidden: true` — being typed is exactly the case `hide` leaves open,
+    so the picker must offer them.
+
+    A 404 means the session is unknown to this relay (start it here first); any
+    failure simply leaves the picker closed, never a banner (SKM-D5). */
+export function getSkills(sessionId: string): Promise<SkillsResponse> {
+	const query = new URLSearchParams({ session_id: sessionId });
+	return request(`/api/skills?${query}`);
 }
 
 /** Every queued ask worth showing, across conversations (design §4/§5.3).
@@ -394,6 +412,10 @@ export type CommandReceipt = {
 	detail: string;
 	tone?: "success" | "neutral";
 	refused?: boolean;
+	/** Present only when the relay expanded `$name` mentions
+	    on this prompt/steer — additive, so a caller that ignores it reads
+	    `detail` exactly as before. Absent on a relay that does not expand. */
+	skills?: SkillExpansionReceipt;
 };
 
 export function sendCommand(sessionId: string, op: CommandOp): Promise<CommandReceipt> {

@@ -125,15 +125,102 @@ def _last_check(root: Path) -> float | None:
     return float(value) if isinstance(value, (int, float)) else None
 
 
+def _compact_age(seconds: float) -> str:
+    """``41m`` / ``2h 10m`` / ``30s``: minute precision once past a minute."""
+
+    from local_operator.i18n.format import format_duration
+    from local_operator.i18n.text import active_locale
+
+    whole = int(seconds)
+    return format_duration(whole if whole < 60 else whole - whole % 60, active_locale())
+
+
+def _counts(mapping: dict[str, int]) -> str:
+    # Codes and categories are technical identifiers (closed vocabularies),
+    # interpolated verbatim; only the sentence around them is localized.
+    return ", ".join(f"{name} {count}" for name, count in mapping.items())
+
+
+def _screening_line(screening: dict[str, Any], *, now: float) -> Any:
+    """The ONE human screening line as a keyed message (rendered by the caller)."""
+
+    held = screening["held"]
+    breaker = screening["breaker"]
+    rejected = screening["rejected_24h"]
+    if held["count"] == 0 and rejected["count"] == 0 and breaker["failures"] == 0:
+        return _k.status_screening_healthy()
+    t = _tr()
+    if held["count"] == 0:
+        held_text = t(_k.status_screening_held_none())
+    else:
+        age = _compact_age(held["oldest_age_s"] or 0.0)
+        after = held.get("after_screening") or {}
+        # Screened-but-undelivered holds ride the SAME verbatim code list as
+        # their own ``held_after_screening <n>`` entry (a subset of the codes
+        # before it), so the bucket is visible with no new localized copy.
+        codes = _counts(
+            {
+                **held["by_code"],
+                **({"held_after_screening": after["count"]} if after.get("count") else {}),
+            }
+        )
+        failure_class = held.get("dominant_failure_class")
+        held_text = t(
+            _k.status_screening_held_class(
+                count=held["count"], codes=codes, age=age, failure_class=failure_class
+            )
+            if failure_class
+            else _k.status_screening_held(count=held["count"], codes=codes, age=age)
+        )
+    if breaker["state"] == "open":
+        state = "open"
+    else:
+        state = "failing" if breaker["failures"] else "closed"
+    remaining = _compact_age(max(0.0, (breaker["open_until"] or now) - now))
+    breaker_text = t(
+        _k.status_screening_breaker(state=state, remaining=remaining, failures=breaker["failures"])
+    )
+    rejected_text = (
+        t(
+            _k.status_screening_rejected(
+                count=rejected["count"], categories=_counts(rejected["by_category"])
+            )
+        )
+        if rejected["count"]
+        else t(_k.status_screening_rejected_none())
+    )
+    return _k.status_screening(held=held_text, breaker=breaker_text, rejected=rejected_text)
+
+
+def _woke_nobody(root: Path) -> dict[str, int]:
+    """Conversation arrivals that woke no session, per typed code (read-only).
+
+    The badge-only case (agent messages on, no designated session) woke nobody
+    and used to be invisible from the outside; the receiver counts it and this
+    is where an owner sees it. A machine that never recorded one answers with an
+    empty mapping rather than a zero it cannot know (review round 1, 7b).
+    """
+
+    from local_operator.team_bridge.wake_diagnostics import woke_nobody_counts
+
+    try:
+        return woke_nobody_counts(root)
+    except Exception:  # noqa: BLE001 — a status field never fails the command
+        return {}
+
+
 def _status(root: Path, *, as_json: bool) -> int:
     import os
 
     from local_operator import supervisors
     from local_operator.team_bridge.connector import install
+    from local_operator.team_bridge.store import read_screening_status
 
     state = install.connector_state(root)
     enrolment = _enrolment_state(root)
     last = _last_check(root)
+    screening = read_screening_status(root)
+    woke_nobody = _woke_nobody(root)
     log = install.log_path(root)
     journal = install.journal_hint()
     linger: bool | None = None
@@ -154,7 +241,15 @@ def _status(root: Path, *, as_json: bool) -> int:
                     "journal": journal,
                     "last_check": last,
                     "linger": linger,
+                    # Arrivals that woke NOBODY, per typed code. Empty means
+                    # none recorded (or a machine that never ran a receiver).
+                    # A machine key on purpose: the human line for this would
+                    # be new user-facing copy, which the i18n ledger gates on a
+                    # per-locale audit (see the PR's remediation note).
+                    "woke_nobody": woke_nobody,
                     "foreground_command": install.foreground_command(root),
+                    # ``None`` when not enrolled or unreadable; see _screening.
+                    "screening": screening,
                 }
             )
         )
@@ -172,6 +267,8 @@ def _status(root: Path, *, as_json: bool) -> int:
     else:
         when = time.strftime("%Y-%m-%d %H:%M:%S %Z", time.localtime(last))
         print(t(_k.status_last_check(when=when)))
+    if screening is not None:
+        print(t(_screening_line(screening, now=time.time())))
     if linger is not None:
         print(t(_k.status_linger(state="yes" if linger else "no", command=linger_command)))
     if state == install.CODE_ISOLATED:

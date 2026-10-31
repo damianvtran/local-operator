@@ -54,6 +54,7 @@ from pathlib import Path
 from typing import Any, Mapping, Protocol
 
 from local_operator.team_bridge.client import (
+    SCREENING_ENGINE_VERSION,
     SCREENING_TEMPLATES,
     SCREENING_VERSION_V1,
     SCREENING_VERSION_V3,
@@ -99,6 +100,11 @@ HOLD_CODES = (
     "breaker_open",
     "runner_unavailable",
     "provider_error",
+    # The provider ANSWERED but the reply cannot admit: the screening model's
+    # own safety refusal, or a reply cut off at the output ceiling. Neither is
+    # a route failure, so neither advances the account breaker (#3195).
+    "model_refused",
+    "reply_truncated",
     "model_identity_unknown",
     "model_identity_mismatch",
     "parse_failed",
@@ -625,6 +631,48 @@ def render_prompt(
     template = SCREENING_TEMPLATES.get(version)
     if template is None:
         raise ValueError(f"no embedded screening template for version {version!r}")
+    template_sha256 = screening_template_sha256(version)
+    if template_sha256 is None:  # unreachable: the template map selected it
+        raise ValueError(f"no trusted hash for screening version {version!r}")
+    return _render_with_template(
+        template,
+        template_sha256=template_sha256,
+        body_text=body_text,
+        sender=sender,
+        organization=organization,
+        msg_type=msg_type,
+        nonce=nonce,
+        attachments=attachments,
+    )
+
+
+def _render_with_template(
+    template: str,
+    *,
+    template_sha256: str,
+    body_text: str,
+    sender: str,
+    organization: str,
+    msg_type: str,
+    nonce: str | None,
+    attachments: str | None,
+) -> RenderedPrompt:
+    """The substitution and nonce rules behind :func:`render_prompt`.
+
+    WHY THIS IS A SEPARATE, PRIVATE FUNCTION. Production must only ever render
+    EMBEDDED bytes, so :func:`render_prompt` keeps the version lookup and its
+    refusal of unembedded versions, then delegates here. The screen-only
+    evaluation bench (``evaluation/team_bridge_moderation/screenbench.py``)
+    measures CANDIDATE templates before they are embedded, and a candidate is
+    only comparable with the shipped template if it renders through the very
+    same single-pass substitution, forged-nonce refusal and three-nonce
+    assertion. Copying those rules into the eval would let the two drift, so
+    the eval calls this helper with arbitrary bytes instead. That is its ONLY
+    other caller: nothing on the live connector path may call it, because it
+    performs no trust check on ``template`` and records whatever
+    ``template_sha256`` the caller supplies.
+    """
+
     token = nonce if nonce is not None else secrets.token_hex(_NONCE_BYTES)
     has_slot = "{{attachments}}" in template
     if has_slot != (attachments is not None):
@@ -660,9 +708,6 @@ def render_prompt(
     text = "".join(parts)
     if text.count(token) != 3:
         raise ValueError("rendered prompt lost its nonce delimiters")
-    template_sha256 = screening_template_sha256(version)
-    if template_sha256 is None:  # unreachable: the template map selected it
-        raise ValueError(f"no trusted hash for screening version {version!r}")
     rendered = RenderedPrompt(
         nonce=token,
         template_sha256=template_sha256,
@@ -740,16 +785,109 @@ _HOLD_FOR_COMMIT = {
 
 
 def _persist_hold(
-    store: Store, owner: OwnerSnapshot, message_id: str, code: str, retry_at: float | None = None
+    store: Store,
+    owner: OwnerSnapshot,
+    message_id: str,
+    code: str,
+    retry_at: float | None = None,
+    *,
+    failure_class: str | None = None,
 ) -> None:
     """Best-effort durable hold for a VALID live owner; never raises."""
 
     try:
-        store.persist_hold(owner, message_id, code, retry_at=retry_at)
+        store.persist_hold(owner, message_id, code, retry_at=retry_at, failure_class=failure_class)
     except StoreRefused:
         # An owner that went stale between validation and the hold write
         # simply gets no row: durable state must never hold another
         # generation's data, and H4 reconciles from the ack path.
+        pass
+
+
+#: The hold codes that are a MODEL ANSWER: the screener actually read the body
+#: and said no (or answered nothing usable). ONLY these are cached, because
+#: only these describe the message. The draw is not deterministic — no
+#: temperature 0 is ever sent for the Claude 5+/o-series/GPT-5 families
+#: (``local_operator/model/configure.py``: ``_NO_SAMPLING_PARAMS`` matches
+#: ``claude-[a-z]+-(5-9...)``, ``o[1-9]`` and ``gpt-5``, and ``_OMIT_SAMPLING``
+#: sends neither key) — so a re-draw is a fresh sample. Re-screening a held body
+#: therefore used to mean "the first draw that says deliver wins", which is not
+#: a screening policy anyone chose: a false negative that repeats eventually
+#: admits, and the receipt commit deletes the hold rows that would have shown
+#: it. Caching the answer makes the outcome a function of the message, not of
+#: how many times the retry schedule happened to run.
+#:
+#: Everything else is deliberately NOT cacheable: ``provider_error``,
+#: ``breaker_open``, ``budget_exhausted``, ``retry_later``, ``policy_stale`` and
+#: every route-failure code describe the ROUTE, not the message, and the retry
+#: schedule exists so a provider outage recovers instead of pinning the message
+#: to a cached outage. Owner/identity/state codes are about THIS run's
+#: authority, so they must be re-derived, never replayed.
+#:
+#: ``bounce_without_category`` BELONGS here: it is the model saying no and
+#: explaining itself instead of naming a category. Leaving it out was a hole
+#: with the same shape as the original defect — its hold carries no retry time,
+#: so it is due every cycle, and the next draw delivered with an allow receipt
+#: (reproduced in review). A refusal is a refusal whichever field it arrives in.
+#:
+#: ``parse_failed``/``reply_truncated`` are code artefacts as much as answers,
+#: which is why the key carries ``SCREENING_ENGINE_VERSION``: a parser or
+#: ceiling fix bumps that stamp and clears them, so an engine bug can never
+#: become a permanent denial and no republish is needed to fix one.
+_ANSWER_HOLD_CACHEABLE = frozenset(
+    {"model_hold", "model_refused", "reply_truncated", "parse_failed", "bounce_without_category"}
+)
+
+
+def _remember_answer_hold(
+    store: Store,
+    owner: OwnerSnapshot,
+    envelope: Envelope,
+    snapshot: PolicySnapshot,
+    hold_code: str,
+    epoch: int,
+    *,
+    answered_model: str | None,
+    failure_class: str | None = None,
+) -> None:
+    """Cache a MODEL-ANSWER hold so a retry re-reads it instead of re-drawing.
+
+    PRIMARY ONLY (``answered_model``): the row is keyed by the REQUESTED model,
+    so caching an answer a FALLBACK hop gave would park the message under the
+    primary's identity. After the primary recovered, the retry would read the
+    fallback's hold and never reach the primary again — a route failure quietly
+    becoming a cached answer, which is the one thing this cache must not do. A
+    fallback's answer still decides THIS pass; it just is not remembered.
+
+    Best effort ON PURPOSE: the durable per-message hold is already committed,
+    and this cache is a cost/consistency guard for the retry schedule, never
+    admission authority. A refused write leaves the message exactly as a miss
+    leaves it — retriable — rather than turning a cache failure into a failed
+    hold.
+    """
+
+    if hold_code not in _ANSWER_HOLD_CACHEABLE or snapshot.default_model is None:
+        return
+    if answered_model is None or answered_model != snapshot.default_model:
+        return
+    try:
+        store.record_screening_answer_hold(
+            owner,
+            body_sha256=envelope.body_sha256,
+            template_sha256=snapshot.template_sha256,
+            # The REQUESTED identity, which is the key a cached verdict is read
+            # under — so the answer stored here is exactly the one the next
+            # screen of this tuple looks for.
+            model=snapshot.default_model,
+            admission_revision=snapshot.admission_revision,
+            envelope_digest=envelope.envelope_digest,
+            hold_code=hold_code,
+            prompt_version=snapshot.screening_version,
+            engine_version=SCREENING_ENGINE_VERSION,
+            expected_epoch=epoch,
+            failure_class=failure_class,
+        )
+    except StoreRefused:
         pass
 
 
@@ -1090,6 +1228,36 @@ async def _screen_core(
                 attachments_hash=envelope.attachments_hash,
             )
 
+    # 6b. ANSWER cache: a re-screen of this exact tuple must re-read a MODEL
+    #     ANSWER, never draw a new one. Nothing is dispatched and nothing is
+    #     charged on this path; the per-message hold row is refreshed so the
+    #     receiver status and the hold's age behave exactly as before. Only a
+    #     code this build classifies as a model answer is replayed
+    #     (``_ANSWER_HOLD_CACHEABLE``); anything else falls through and retries.
+    if snapshot.default_model is not None:
+        try:
+            cached_answer = store.consume_screening_answer_hold(
+                owner,
+                body_sha256=envelope.body_sha256,
+                template_sha256=snapshot.template_sha256,
+                model=snapshot.default_model,
+                admission_revision=snapshot.admission_revision,
+                envelope_digest=envelope.envelope_digest,
+                engine_version=SCREENING_ENGINE_VERSION,
+            )
+        except StoreRefused:
+            # An UNVERIFIED cache read is a miss, not an answer: the durable
+            # reservation below re-verifies owner, policy and turn before any
+            # spend, so a miss here can never launder a stale answer.
+            cached_answer = None
+        if cached_answer is not None and cached_answer[0] in _ANSWER_HOLD_CACHEABLE:
+            code, cached_class = cached_answer
+            # The class rides along so the receiver status shows the SAME closed
+            # failure class the first draw produced (``stream_refused`` for an
+            # answered refusal) instead of a blank one on every later pass.
+            _persist_hold(store, owner, message_id, code, failure_class=cached_class)
+            return ScreenResult("hold", hold_code=code)
+
     # 7. Account breaker: an open breaker is a hold with its own retry time,
     #    BEFORE any reservation (no spend while the route is known-broken).
     breaker = store.screening_breaker_state(owner)
@@ -1097,8 +1265,16 @@ async def _screen_core(
 
     now = _time.time()
     if breaker is not None and float(breaker.get("open_until", 0) or 0) > now:
+        # The class of the failure that OPENED this breaker rides the hold: the
+        # message parked here never reached a provider, so without it the
+        # receiver status could say only "broken", never what to fix.
         _persist_hold(
-            store, owner, message_id, "breaker_open", retry_at=float(breaker["open_until"])
+            store,
+            owner,
+            message_id,
+            "breaker_open",
+            retry_at=float(breaker["open_until"]),
+            failure_class=breaker.get("last_failure_class"),
         )
         return ScreenResult("hold", hold_code="breaker_open", retry_at=float(breaker["open_until"]))
 
@@ -1285,14 +1461,87 @@ async def _screen_core(
             _commit_hold(store, owner, message_id, attempt_id, fingerprint, epoch, code)
             return ScreenResult("hold", hold_code=code)
         raise
-    except Exception:  # noqa: BLE001 - sanitized hold; never prose
-        retry_at = _record_failure(store, owner)
-        _commit_hold(store, owner, message_id, attempt_id, fingerprint, epoch, "provider_error")
+    except Exception as failure:  # noqa: BLE001 - sanitized hold; never prose
+        # A CLOSED class from the exception's type/typed fields (never its
+        # text), so the receiver status can say what kind of failure parked
+        # the message — ``chain_exhausted`` when every configured hop failed.
+        # Computed BEFORE the breaker advance so the same class rides both.
+        from local_operator.team_bridge.model_boundary import screening_failure_class
+
+        # The breaker measures the ROUTE, not the message (#3195). A stream
+        # that the provider COMPLETED but that cannot admit -- the model's own
+        # safety refusal, a reply truncated at the token ceiling -- proves the
+        # route works. Counting those let a sender whose messages provoke a
+        # refusal open the account breaker and park every other inbound
+        # message, the owner's teammates included, and the parked retries
+        # re-tripped it. Typed by the runner's closed reason (duck-typed so
+        # this module keeps its lazy model_boundary import); prose-free. Only
+        # ``_ScreeningStreamRefused`` defines the attribute, and ProviderError
+        # has no ``__getattr__``, so no other failure can claim to be answered;
+        # the HOLD_CODES membership check below closes the vocabulary anyway.
+        answered = getattr(failure, "answered_hold_code", None)
+        if isinstance(answered, str) and answered in HOLD_CODES:
+            try:
+                store.record_screening_success(owner)
+            except StoreRefused:
+                pass
+            # The receiver status keeps the same closed class an answered
+            # refusal always had (``stream_refused``); only the breaker
+            # accounting differs.
+            _commit_hold(
+                store,
+                owner,
+                message_id,
+                attempt_id,
+                fingerprint,
+                epoch,
+                answered,
+                failure_class=screening_failure_class(failure),
+            )
+            # An ANSWERED stream refusal (the model's own safety refusal, a reply
+            # truncated at the ceiling) is a model answer: cache it so the retry
+            # schedule re-reads it instead of re-drawing a different answer.
+            # FENCED HERE, not later: this branch returns from the exception
+            # handler by design (a completed-but-unusable stream must not reach
+            # the identity or parse steps), so the live-policy fence it would
+            # otherwise meet at step 12 is evaluated here instead of the cache
+            # being written under a policy that has already moved.
+            if snapshot.matches_live(policy):
+                _remember_answer_hold(
+                    store,
+                    owner,
+                    envelope,
+                    snapshot,
+                    answered,
+                    epoch,
+                    # The hop that ANSWERED owns the answer: the chain tags its
+                    # refusal with the serving model (never a fallback's hold
+                    # cached under the primary's key).
+                    answered_model=getattr(failure, "serving_model", None),
+                    failure_class=screening_failure_class(failure),
+                )
+            return ScreenResult("hold", hold_code=answered)
+
+        failure_class = screening_failure_class(failure)
+        retry_at = _record_failure(store, owner, failure_class=failure_class)
+
+        _commit_hold(
+            store,
+            owner,
+            message_id,
+            attempt_id,
+            fingerprint,
+            epoch,
+            "provider_error",
+            failure_class=failure_class,
+        )
         return ScreenResult("hold", hold_code="provider_error", retry_at=retry_at)
 
     # 11b. A provider RESPONSE — even a valid model HOLD — is a provider
     #      SUCCESS: it resets consecutive failures (A5). Only the exception
-    #      path above counts toward the breaker; cached proofs never do.
+    #      path above counts toward the breaker, and only for a route failure
+    #      (an answered refusal/truncation is a success there too); cached
+    #      proofs never do.
     try:
         store.record_screening_success(owner)
     except StoreRefused:
@@ -1323,14 +1572,32 @@ async def _screen_core(
     parsed = parse_verdict(reply)
     if parsed is None:
         _commit_hold(store, owner, message_id, attempt_id, fingerprint, epoch, "parse_failed")
+        _remember_answer_hold(
+            store, owner, envelope, snapshot, "parse_failed", epoch, answered_model=actual_model
+        )
         return ScreenResult("hold", hold_code="parse_failed")
     disposition, categories, reason, _verdict = parsed
     if disposition == "hold":
         _commit_hold(store, owner, message_id, attempt_id, fingerprint, epoch, "model_hold")
+        _remember_answer_hold(
+            store, owner, envelope, snapshot, "model_hold", epoch, answered_model=actual_model
+        )
         return ScreenResult("hold", hold_code="model_hold").set_private_reason(reason)
     if disposition == "bounce" and not categories:
         _commit_hold(
             store, owner, message_id, attempt_id, fingerprint, epoch, "bounce_without_category"
+        )
+        # A CATEGORYLESS bounce is still the model refusing the message — it
+        # explained instead of naming a category. Its hold carries no retry time,
+        # so not caching it meant the next cycle re-drew and could deliver.
+        _remember_answer_hold(
+            store,
+            owner,
+            envelope,
+            snapshot,
+            "bounce_without_category",
+            epoch,
+            answered_model=actual_model,
         )
         return ScreenResult("hold", hold_code="bounce_without_category").set_private_reason(reason)
     if disposition == "bounce":
@@ -1413,11 +1680,17 @@ def _policy_row_matches(row: Mapping[str, Any], snapshot: "PolicySnapshot") -> b
     )
 
 
-def _record_failure(store: Store, owner: OwnerSnapshot) -> float | None:
-    """Advance the durable breaker; return its retry time (best effort)."""
+def _record_failure(
+    store: Store, owner: OwnerSnapshot, *, failure_class: str | None = None
+) -> float | None:
+    """Advance the durable breaker; return its retry time (best effort).
+
+    ``failure_class`` rides the breaker row so a LATER ``breaker_open`` hold
+    — a message that never met the provider — can still name what broke.
+    """
 
     try:
-        return store.record_screening_failure(owner)
+        return store.record_screening_failure(owner, failure_class=failure_class)
     except StoreRefused:
         return None
 
@@ -1430,6 +1703,8 @@ def _commit_hold(
     fingerprint: str,
     epoch: int,
     hold_code: str,
+    *,
+    failure_class: str | None = None,
 ) -> None:
     """Record ONE hold against the reserved attempt; never raise."""
 
@@ -1441,9 +1716,10 @@ def _commit_hold(
             fingerprint=fingerprint,
             expected_epoch=epoch,
             hold_code=hold_code,
+            failure_class=failure_class,
         )
     except StoreRefused:
-        _persist_hold(store, owner, message_id, hold_code)
+        _persist_hold(store, owner, message_id, hold_code, failure_class=failure_class)
 
 
 async def _keep_turn_alive(

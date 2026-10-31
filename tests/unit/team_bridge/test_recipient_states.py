@@ -708,15 +708,20 @@ async def test_unmentioned_member_is_woken_exactly_when_the_setting_emits_a_row(
     card = router.calls[0].payload
     assert "mention: no" in card
     assert "mention: yes" not in card
-    # No reply obligation rides the card; reply-vs-quiet is the served
-    # guidance's call, not this delivery's. The one reply mention allowed is
-    # the conditional ROUTE line (where an answer goes if one is sent), so
-    # an answer stays in the conversation instead of the legacy pair inbox.
+    # WAKE CONTRACT (2026-10-30): an unmentioned card now carries the
+    # per-wake expectation — weigh relevance, end with no_reply if nothing is
+    # needed — and never an obligation to answer. The ROUTE line stays the
+    # conditional one, so an answer lands in the conversation, not the legacy
+    # pair inbox.
     reply_lines = [line for line in card.splitlines() if "reply" in line.lower()]
-    assert "no_reply" not in card
+    # No `directed:` line for an ambient card: `mention: no` already says it
+    # (review round 1, m4 — the word is only emitted for `thread`).
+    assert "directed:" not in card
+    assert "expect: reply" not in card
     assert reply_lines == [
+        "expect: weigh relevance; no_reply if nothing is needed",
         "if you reply: bridge channel_post with channel_id = this conversation_id; "
-        "legacy send/reply never appears in a conversation"
+        "legacy send/reply never appears in a conversation",
     ]
     assert "guidance: bridge-guidance-v2" in card
     requests = _card_requests(all_member)

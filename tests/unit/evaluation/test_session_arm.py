@@ -31,6 +31,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -61,6 +62,7 @@ from local_operator.evaluation.adapters.rpc import RpcErrorDetail, RpcRemoteErro
 from local_operator.evaluation.evidence.models import ScoreArtifact
 from local_operator.evaluation.protocol import (
     ArtifactRef,
+    FinishAction,
     FrameGeometry,
     FrameRef,
     FrameSize,
@@ -248,6 +250,7 @@ def _bridge(
     instruction: str = "the task as stated",
     completion_gate: bool = True,
     completion_challenges: int = 1,
+    premature_terminal_gate: bool = True,
     reply_guidance: str | None = None,
 ) -> ActionBridge:
     obs0 = observation or _observation()
@@ -269,6 +272,7 @@ def _bridge(
         instruction=instruction,
         completion_gate=completion_gate,
         completion_challenges=completion_challenges,
+        premature_terminal_gate=premature_terminal_gate,
         reply_guidance=reply_guidance,
     )
     bridge.arm(obs0)
@@ -959,9 +963,12 @@ class TestCompletionGate:
         assert bridge.terminal is True
 
     @pytest.mark.asyncio
-    async def test_a_failed_claim_is_never_challenged(self, tmp_path: Path) -> None:
+    async def test_a_failed_claim_after_an_action_is_never_challenged(self, tmp_path: Path) -> None:
         events: list[tuple[str, dict[str, Any]]] = []
         bridge = _bridge(tmp_path, record=lambda kind, payload: events.append((kind, payload)))
+        await bridge.call({"actions": [{"kind": "wait", "duration_ms": 50}]})
+        bridge.fold(TurnEndEvent())
+        events.clear()
         reply = await bridge.call(
             {"actions": [{"kind": "finish", "status": "failed", "reason": "cannot finish"}]}
         )
@@ -969,6 +976,213 @@ class TestCompletionGate:
         # The failed claim is still a valid finish PROPOSAL: one admitted
         # epoch, then the finish row.
         assert [kind for kind, _ in events] == ["output_epoch", "finish"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("status", ["failed", "infeasible"])
+    async def test_a_step_zero_non_done_claim_is_challenged_once_then_accepted(
+        self, tmp_path: Path, status: str
+    ) -> None:
+        """The sealed t24w1-t004 shape on this channel: call #1 is the finish."""
+
+        events: list[tuple[str, dict[str, Any]]] = []
+        obs = _observation()
+        bridge = _bridge(
+            tmp_path, observation=obs, record=lambda kind, payload: events.append((kind, payload))
+        )
+        claim = {"actions": [{"kind": "finish", "status": status, "reason": "inspect first"}]}
+        first = await bridge.call(claim)
+        assert first["is_error"] is False
+        assert first["details"]["terminal"] == "completion-challenged"
+        text = first["content"][0].text
+        assert "no action has been executed" in text.lower()
+        assert "the task as stated" in text
+        assert bridge.terminal is False
+        assert bridge.end_requested is None
+        # Recorded as the done challenge is -- same row kind, same epoch kind --
+        # with the trigger naming which rule fired.
+        assert [kind for kind, _ in events] == ["output_epoch", "completion_challenged"]
+        assert events[0][1] == {"epoch_kind": "finish-challenged", "steps": 1}
+        assert events[1][1]["trigger"] == "premature-terminal"
+        assert events[1][1]["status"] == status
+        assert events[1][1]["observation_id"] == obs.observation_id
+        # Re-declaring the same finish is accepted, status untouched.
+        second = await bridge.call(claim)
+        assert second["details"]["terminal"] == "finish"
+        assert bridge.terminal is True
+        finish = [payload for kind, payload in events if kind == "finish"]
+        assert finish == [
+            {
+                "status": status,
+                "reason": "inspect first",
+                "actions": 1,
+                "completion_challenged": False,
+            }
+        ]
+
+    @pytest.mark.asyncio
+    async def test_the_premature_challenge_spends_no_done_budget(self, tmp_path: Path) -> None:
+        bridge = _bridge(tmp_path)
+        await bridge.call({"actions": [{"kind": "finish", "status": "failed", "reason": "x"}]})
+        await bridge.call({"actions": [{"kind": "wait", "duration_ms": 50}]})
+        bridge.fold(TurnEndEvent())
+        done = {"actions": [{"kind": "finish", "status": "done", "reason": "did it"}]}
+        assert (await bridge.call(done))["details"]["terminal"] == "completion-challenged"
+        assert (await bridge.call(done))["details"]["terminal"] == "finish"
+        assert bridge.completion_challenges_fired == 1
+
+    @pytest.mark.asyncio
+    async def test_a_done_challenge_does_not_stop_the_next_claim_being_premature(
+        self, tmp_path: Path
+    ) -> None:
+        """The EXECUTED counter, not the epoch counter, decides premise.
+
+        Step-0 ``done`` challenged (one epoch spent, ``_steps`` = 1, NOTHING
+        executed), then answered ``failed``: the episode still has no action
+        behind it, so that claim is premature and the rule fires. Reading
+        ``_steps`` here would accept it silently -- the two counters differ by
+        exactly the challenged epoch, which is why this pin exists (mutation
+        ``executed_steps=self._steps`` used to pass the whole suite).
+        """
+
+        events: list[tuple[str, dict[str, Any]]] = []
+        bridge = _bridge(tmp_path, record=lambda kind, payload: events.append((kind, payload)))
+        done = {"actions": [{"kind": "finish", "status": "done", "reason": "done"}]}
+        assert (await bridge.call(done))["details"]["terminal"] == "completion-challenged"
+        failed = {"actions": [{"kind": "finish", "status": "failed", "reason": "cannot"}]}
+        second = await bridge.call(failed)
+        assert second["details"]["terminal"] == "completion-challenged"
+        triggers = [
+            payload.get("trigger") for kind, payload in events if kind == "completion_challenged"
+        ]
+        # None is the historical ``done`` row (no trigger key).
+        assert triggers == [None, "premature-terminal"]
+        # The re-declaration is still accepted, status untouched.
+        assert (await bridge.call(failed))["details"]["terminal"] == "finish"
+        assert bridge.terminal is True
+
+    @pytest.mark.asyncio
+    async def test_a_batch_refused_at_admission_is_not_an_executed_action(
+        self, tmp_path: Path
+    ) -> None:
+        """The s20a shape: a refused batch is not an executed one.
+
+        In ``runs/s20a-t001-20261028-071043`` call #1 was
+        ``[wait, finish(infeasible)]``, refused before admission because a
+        finish must be alone in its batch. Nothing ran, so the ``failed``
+        declaration that followed was still a zero-executed-actions claim and
+        the gate has to challenge it; counting the refused batch would accept
+        it silently, which is the shape that lost the episode.
+        """
+
+        events: list[tuple[str, dict[str, Any]]] = []
+        bridge = _bridge(tmp_path, record=lambda kind, payload: events.append((kind, payload)))
+        mixed = await bridge.call(
+            {
+                "actions": [
+                    {"kind": "wait", "duration_ms": 50},
+                    {"kind": "finish", "status": "infeasible", "reason": "no app"},
+                ]
+            }
+        )
+        assert mixed["is_error"] is True
+        # A refusal before admission spends no epoch, so the ledger has nothing
+        # yet -- and in particular no executed batch for the gate to count.
+        assert [kind for kind, _ in events] == []
+        reply = await bridge.call(
+            {"actions": [{"kind": "finish", "status": "failed", "reason": "gave up"}]}
+        )
+        assert reply["details"]["terminal"] == "completion-challenged"
+        assert [kind for kind, _ in events if kind == "completion_challenged"] == [
+            "completion_challenged"
+        ]
+        assert events[-1][1]["trigger"] == "premature-terminal"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("status", ["infeasible", "failed"])
+    async def test_a_one_step_budget_still_records_the_declaration(
+        self, tmp_path: Path, status: str
+    ) -> None:
+        """At ``max_steps == 1`` the challenge would cost the only epoch.
+
+        The challenge is a re-ask, so its answer needs an epoch of its own; a
+        budget of one can hold the challenge or the declaration, never both.
+        Spending it on the challenge lost the model's own ``infeasible`` -- the
+        declaration OSWorld scores an impossible task on -- to
+        ``truncated / max-steps`` (QA round 1, Q1). The gate therefore declines
+        and the claim is recorded, with the decline durable in the ledger.
+        """
+
+        events: list[tuple[str, dict[str, Any]]] = []
+        bridge = _bridge(
+            tmp_path, max_steps=1, record=lambda kind, payload: events.append((kind, payload))
+        )
+        claim = {"actions": [{"kind": "finish", "status": status, "reason": "no app"}]}
+        reply = await bridge.call(claim)
+        assert reply["details"]["terminal"] == "finish"
+        assert reply["is_error"] is False
+        assert bridge.terminal is True
+        assert bridge.end_requested == "finish"
+        # The decline is recorded BEFORE the accepted proposal's own epoch:
+        # the gate decides first, then the accepted finish is admitted.
+        assert [kind for kind, _ in events] == [
+            "premature_gate_skipped",
+            "output_epoch",
+            "finish",
+        ]
+        assert events[0][1] == {"reason": "step-budget", "steps": 0, "max_steps": 1}
+        assert events[1][1] == {"epoch_kind": "finish", "steps": 1}
+        assert events[2][1]["status"] == status
+
+    @pytest.mark.asyncio
+    async def test_two_steps_are_enough_for_the_challenge_and_the_reply(
+        self, tmp_path: Path
+    ) -> None:
+        """The guard is a budget floor, not a blanket disable.
+
+        At ``max_steps == 2`` the challenge (epoch 1) and the re-declaration
+        (epoch 2) both fit, so the gate fires and the status survives.
+        """
+
+        bridge = _bridge(tmp_path, max_steps=2)
+        claim = {"actions": [{"kind": "finish", "status": "infeasible", "reason": "no app"}]}
+        assert (await bridge.call(claim))["details"]["terminal"] == "completion-challenged"
+        assert (await bridge.call(claim))["details"]["terminal"] == "finish"
+        assert bridge.terminal is True
+
+    @pytest.mark.asyncio
+    async def test_the_premature_gate_can_be_disabled_for_a_control_arm(
+        self, tmp_path: Path
+    ) -> None:
+        bridge = _bridge(tmp_path, premature_terminal_gate=False)
+        reply = await bridge.call(
+            {"actions": [{"kind": "finish", "status": "failed", "reason": "x"}]}
+        )
+        assert reply["details"]["terminal"] == "finish"
+
+    @pytest.mark.asyncio
+    async def test_both_arms_quote_the_same_premature_challenge(self, tmp_path: Path) -> None:
+        """One builder for both channels: the runner client's text, byte for byte."""
+
+        from local_operator.evaluation.runner.provider_client import (
+            build_completion_challenge,
+        )
+        from local_operator.evaluation.session_arm import CHALLENGE_REPLY_GUIDANCE
+
+        guidance = CHALLENGE_REPLY_GUIDANCE.format(tool_name="apply_actions")
+        obs = _observation()
+        bridge = _bridge(tmp_path, observation=obs, reply_guidance=guidance)
+        reply = await bridge.call(
+            {"actions": [{"kind": "finish", "status": "infeasible", "reason": "no app"}]}
+        )
+        expected = build_completion_challenge(
+            claim=FinishAction(
+                observation_id=obs.observation_id, status="infeasible", reason="no app"
+            ),
+            instruction="the task as stated",
+            observation=obs,
+            reply_guidance=guidance,
+        )
+        assert reply["content"][0].text == expected
 
     @pytest.mark.asyncio
     async def test_the_gate_can_be_disabled_for_a_control_arm(self, tmp_path: Path) -> None:
@@ -3617,6 +3831,16 @@ class TestAgentStopOutcome:
         return session.prompts[0][0]
 
     @pytest.mark.asyncio
+    async def test_the_driver_states_the_step_budget_from_the_config(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_scratch: Path
+    ) -> None:
+        # The REAL driver wiring (``run_session_arm`` builds the renderer, the
+        # bridge, and connects them): the first prompt states the configured
+        # ``max_steps`` (``build_config``'s 4) on the bridge's zero clocks.
+        first = await self._first_prompt(tmp_path, monkeypatch, short_scratch)
+        assert "Step budget: 0 of 4 steps used, 4 remaining." in first
+
+    @pytest.mark.asyncio
     async def test_the_first_prompt_states_the_machine_topology(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_scratch: Path
     ) -> None:
@@ -4062,6 +4286,7 @@ _LIFETIME_PROBE = '''
 import asyncio
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -4952,3 +5177,152 @@ async def test_recovery_seam_forwards_fresh_explicitly_and_preserves_default(
     assert await recover(fresh=True) == live
     assert await recover() == live
     assert [params.fresh for params in calls] == [True, False]
+
+
+class TestStepBudgetPosition:
+    """The session arm states its step budget on the bridge's ENFORCED clocks.
+
+    The measured defect (``runner/step_budget.py``): a model shown no budget
+    stopped at 3-11 % of ``max_steps=500``. The session arm renders through the
+    runner's own ``_ContextBuilder`` (``ObservationRenderer``), so the line is
+    the runner arm's line; these tests pin that its numbers are the bridge's
+    and that the completion gate is untouched by it.
+    """
+
+    def _rendered_bridge(self, tmp_path: Path, *, max_steps: int = 5) -> ActionBridge:
+        renderer = ObservationRenderer(tmp_path / "artifacts")
+        bridge = _bridge(tmp_path, max_steps=max_steps)
+        bridge.render = renderer.render
+        renderer.step_position = bridge.step_position
+        # ``_bridge`` armed with the stub renderer; re-arm through the real one
+        # the way the driver does (renderer wired before ``arm``).
+        bridge._token = None
+        bridge.arm(_observation())
+        return bridge
+
+    @pytest.mark.asyncio
+    async def test_each_screen_states_the_enforced_position(self, tmp_path: Path) -> None:
+        bridge = self._rendered_bridge(tmp_path, max_steps=5)
+        assert "Step budget: 0 of 5 steps used, 5 remaining." in bridge.initial_blocks[0].text
+
+        result = await bridge.call({"actions": [{"kind": "wait", "duration_ms": 50}]})
+
+        text = result["content"][0].text
+        enforced = max(bridge.steps, bridge.attempted_groups)
+        assert enforced == 1
+        assert f"Step budget: {enforced} of 5 steps used, 4 remaining." in text
+        # The observation's own text still ends the message: the line never
+        # sits between the screen and the model.
+        assert text.endswith("screen B")
+
+    @pytest.mark.asyncio
+    async def test_the_line_follows_a_raised_cap(self, tmp_path: Path) -> None:
+        bridge = self._rendered_bridge(tmp_path, max_steps=5)
+        bridge.max_steps = 40
+        result = await bridge.call({"actions": [{"kind": "wait", "duration_ms": 50}]})
+        assert "Step budget: 1 of 40 steps used, 39 remaining." in result["content"][0].text
+
+    @pytest.mark.asyncio
+    async def test_the_completion_challenge_still_fires_and_restates_the_task(
+        self, tmp_path: Path
+    ) -> None:
+        bridge = self._rendered_bridge(tmp_path, max_steps=5)
+        reply = await bridge.call(
+            {"actions": [{"kind": "finish", "status": "done", "reason": "filled the form"}]}
+        )
+        assert reply["details"]["terminal"] == "completion-challenged"
+        challenge = reply["content"][0].text
+        assert "That declaration is a CLAIM" in challenge
+        assert "the task as stated" in challenge
+        # The challenge text itself is unchanged and carries no line; the
+        # re-attached screen is the one already shown, never a re-render.
+        assert "Step budget" not in challenge
+        accepted = await bridge.call(
+            {"actions": [{"kind": "finish", "status": "done", "reason": "filled the form"}]}
+        )
+        assert accepted["details"]["terminal"] == "finish"
+
+    @pytest.mark.asyncio
+    async def test_the_challenge_re_attach_states_the_position_now(self, tmp_path: Path) -> None:
+        # Review r1 M1 / QA r1 Q2: the challenge CONSUMES a step after the
+        # screen was rendered, so the re-attached screen must state the
+        # position enforced at the moment the model reads it, not the count it
+        # carried when first shown ("0 of 5" while the bridge was at 1).
+        bridge = self._rendered_bridge(tmp_path, max_steps=5)
+        assert "Step budget: 0 of 5 steps used" in bridge.initial_blocks[0].text
+        reply = await bridge.call(
+            {"actions": [{"kind": "finish", "status": "done", "reason": "filled the form"}]}
+        )
+        assert reply["details"]["terminal"] == "completion-challenged"
+        enforced = max(bridge.steps, bridge.attempted_groups)
+        assert enforced == 1
+        reattached = "\n".join(
+            block.text for block in reply["content"][1:] if hasattr(block, "text")
+        )
+        shown = re.findall(r"Step budget: (\d+) of (\d+) steps used, (\d+) remaining", reattached)
+        assert shown == [(str(enforced), "5", str(5 - enforced))]
+        # The screen first delivered is left as it was delivered.
+        assert "Step budget: 0 of 5 steps used" in bridge.initial_blocks[0].text
+
+    @pytest.mark.asyncio
+    async def test_the_challenge_after_an_action_states_the_position_now(
+        self, tmp_path: Path
+    ) -> None:
+        # The same pin on ``_last_shown`` (a screen rendered by ``call``): the
+        # premature rule does not fire after an action, but the ``done`` gate
+        # does, and its re-attach must also read the live clocks.
+        bridge = self._rendered_bridge(tmp_path, max_steps=6)
+        await bridge.call({"actions": [{"kind": "wait", "duration_ms": 50}]})
+        bridge.fold(TurnEndEvent())
+        reply = await bridge.call(
+            {"actions": [{"kind": "finish", "status": "done", "reason": "filled the form"}]}
+        )
+        assert reply["details"]["terminal"] == "completion-challenged"
+        enforced = max(bridge.steps, bridge.attempted_groups)
+        assert enforced == 2
+        reattached = "\n".join(
+            block.text for block in reply["content"][1:] if hasattr(block, "text")
+        )
+        assert f"Step budget: {enforced} of 6 steps used, {6 - enforced} remaining." in reattached
+        assert "Step budget: 1 of 6" not in reattached
+
+    def test_a_zero_cap_arms_with_no_line(self, tmp_path: Path) -> None:
+        # Review r1 M3: base armed ``max_steps=0`` and refused at the first
+        # call; the line must not turn that into a validation crash before
+        # the first screen, nor state a ``0 of 0`` count.
+        bridge = self._rendered_bridge(tmp_path, max_steps=0)
+        assert bridge.step_position() is None
+        assert "Step budget" not in bridge.initial_blocks[0].text
+
+    @pytest.mark.asyncio
+    async def test_a_zero_cap_still_ends_at_the_first_call(self, tmp_path: Path) -> None:
+        bridge = self._rendered_bridge(tmp_path, max_steps=0)
+        result = await bridge.call({"actions": [{"kind": "wait", "duration_ms": 50}]})
+        assert "Step budget" not in "\n".join(
+            block.text for block in result["content"] if hasattr(block, "text")
+        )
+        assert bridge.steps == 0
+
+    @pytest.mark.asyncio
+    async def test_a_cap_lowered_to_zero_mid_run_drops_the_line(self, tmp_path: Path) -> None:
+        bridge = self._rendered_bridge(tmp_path, max_steps=5)
+        obs1 = _observation(sequence=1, text="screen B")
+
+        async def lowering_execute(batch: Any) -> ExecuteResult:
+            del batch
+            bridge.max_steps = 0
+            return _result(input_observation=_observation(), output_observation=obs1)
+
+        bridge.execute = lowering_execute
+        result = await bridge.call({"actions": [{"kind": "wait", "duration_ms": 50}]})
+        text = result["content"][0].text
+        assert bridge.step_position() is None
+        assert "Step budget" not in text
+        assert text.endswith("screen B")
+
+    def test_a_renderer_without_a_budget_is_unchanged(self, tmp_path: Path) -> None:
+        # No ``step_position`` wired: the content is the builder's base render.
+        renderer = ObservationRenderer(tmp_path / "artifacts")
+        text = renderer.render(_observation())[0].text
+        assert "Step budget" not in text
+        assert text.startswith("Task: task_001\nStep: 0\n")

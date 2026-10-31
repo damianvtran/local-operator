@@ -56,6 +56,11 @@ def test_shipped_wire_namespaces_exist() -> None:
         "wire.errors.desktop",
         "wire.errors.files",
         "wire.errors.media",
+        # Agent profile pictures: the refusals `PUT /v1/agents/{id}/avatar` returns
+        # (unsupported_type, too_large, too_many_pixels, undecodable, not_found,
+        # imaging_unavailable, empty_body), rendered by the desktop and phone
+        # surfaces from the reason word the envelope carries as `code`.
+        "wire.errors.agent_avatar",
         "wire.errors.sdk_spec",
         "wire.errors.sdk_startup",
         "wire.errors.settings",
@@ -99,6 +104,11 @@ def test_shipped_wire_namespaces_exist() -> None:
         # locale ledger hashes do not move).
         "wire.errors.notifications",
         "wire.slash.notifications_page",
+        # The Team Bridge tool row (TUI card + phone projection): verbs, kind
+        # fallbacks, counts and outcome words keyed off `bridge_row` tokens.
+        # Its own namespace so no audited catalogue's hash moves; the
+        # translation wave lands its seven locales in a follow-up.
+        "wire.tool_rows.bridge",
     }
     for namespace in _PENDING_EXTRACTION:
         assert catalogues.load_catalogue("en", namespace) == {}
@@ -119,6 +129,7 @@ def test_shipped_wire_namespaces_exist() -> None:
     assert catalogues.load_catalogue("en", "wire.slash.library") != {}
     assert catalogues.load_catalogue("en", "wire.errors.notifications") != {}
     assert catalogues.load_catalogue("en", "wire.slash.notifications_page") != {}
+    assert catalogues.load_catalogue("en", "wire.tool_rows.bridge") != {}
     assert catalogues.load_catalogue("en", "wire.settings") != {}
     # The Aida cadence interval row is a small English-only addition carried in
     # its own `wire.*` namespace so already-audited `wire.settings` locale
@@ -217,8 +228,21 @@ def test_wave3_hindi_carries_its_namespace_snapshot_with_parity(i18n_check) -> N
     # the other seven locales; it sorts after `relay.chrome`. Carrying it
     # pins key/placeholder parity here, while shipping still waits on its
     # independent audit row, exactly as each namespace above did.
+    # The relay catalogue translation wave adds the four namespaces hi had never
+    # carried — `relay.account_policy` (13 keys, en from #2453),
+    # `relay.library` (1, a64e332b996), `relay.session` (17, #2329) and
+    # `relay.shell` (44, ec55a9f2bd9): account-routing settings, the library
+    # count, the session list/view and the shell chrome. Each has been in en
+    # since its own extraction slice but went untranslated here, and each joins
+    # on the same terms as everything above: its own passed independent audit
+    # row against the current en bytes (i18n/ledger/hi.json).
     locale = "hi"
     namespaces = (
+        # `lop agents picture set|remove|show`: 11 keys, carried in all seven
+        # locales with its audited ledger row at the current en bytes. Sorted
+        # first: `namespaces()` returns files sorted and this one precedes
+        # cli.exec_remote_help.
+        "cli.agents_picture",
         "cli.exec_remote_help",
         # The serve-supervision slice's 14-key namespace, carried in every locale
         # only with its independently audited ledger row at the current en bytes;
@@ -230,6 +254,12 @@ def test_wave3_hindi_carries_its_namespace_snapshot_with_parity(i18n_check) -> N
         # ships cross-platform, so Hindi carries it like the rest. It sorts
         # after cli.services_status.
         "cli.team_bridge",
+        "relay.account_policy",
+        # The phone's agent-picture copy (alt text, the header control's label
+        # and the change-it-on-the-desktop hint), carried in all seven locales
+        # only with its independently audited ledger row at the current en
+        # bytes; it sorts before relay.approvals.
+        "relay.agent_avatar",
         "relay.approvals",
         "relay.ask",
         "relay.asks",
@@ -241,8 +271,20 @@ def test_wave3_hindi_carries_its_namespace_snapshot_with_parity(i18n_check) -> N
         # doubly audited ledger row; it keeps relay.chrome's English bytes
         # frozen, and sorts between relay.chrome and relay.session.tags.
         "relay.health",
+        # The library page's pluralized count; it sorts between the relay
+        # health dot and the notifications inbox.
+        "relay.library",
         "relay.notifications",
+        # `relay.session` is the session list/view copy — a DISTINCT namespace
+        # from `relay.session.tags` below, not a parent of it.
+        "relay.session",
         "relay.session.tags",
+        # The team bridge's shell setting (main #3189).
+        "relay.shell",
+        # The composer's `$skill` picker (SKM-D6): 3 keys, carried in every
+        # locale only with a fresh, independently audited ledger row at the
+        # current en bytes. Sorts between relay.shell and relay.transcript.
+        "relay.skills",
         # Audited relay condensation copy adds 19 keys; keep this census exact.
         "relay.transcript",
         "tui.asks",
@@ -264,6 +306,7 @@ def test_wave3_hindi_carries_its_namespace_snapshot_with_parity(i18n_check) -> N
         "tui.viewer",
         "tui.welcome",
         "wire.errors",
+        "wire.errors.agent_avatar",
         "wire.errors.desktop",
         "wire.errors.notifications",
         "wire.errors.settings",
@@ -279,6 +322,11 @@ def test_wave3_hindi_carries_its_namespace_snapshot_with_parity(i18n_check) -> N
         "wire.settings",
         "wire.slash",
         "wire.slash.notifications_page",
+        # The Team Bridge tool row (TUI card + phone projection). Carried with
+        # the seven-locale translation wave; key/placeholder parity is pinned
+        # here like every namespace above, and shipping still waits on its
+        # independent audit row. It sorts after wire.slash.notifications_page.
+        "wire.tool_rows.bridge",
     )
     assert catalogues.namespaces(locale) == namespaces
     for namespace in namespaces:

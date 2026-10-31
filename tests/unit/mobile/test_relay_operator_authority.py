@@ -475,7 +475,24 @@ def test_the_route_table_names_the_paths_this_build_actually_serves(
     # …and the way BACK, which is a different kind of route: the only push path
     # that is not reachable from a device session (ADR 0006 §4 round 4 B1).
     assert "/api/push/devices/{device_id:str}/unrevoke" in paths
-    assert not [path for path in paths if path.startswith("/v1/")], paths
+    # THE ONE NAMED EXCEPTION to "this relay has no /v1 namespace": an agent's
+    # picture. It is deliberately the SAME path as the core server's
+    # ``GET /v1/agents/{agent_id}/avatar`` (the frozen picture contract: a client
+    # builds ``/v1/agents/{agent_id}/avatar?v=<sha>`` on every surface), and the
+    # phone reaches only this relay, so the relay must answer there. It is a
+    # READ: the phone has no picture editor, so no write verb may ever appear on
+    # it. The rule still fails on any OTHER /v1 path -- the exception names one
+    # route and one verb, it does not open the namespace.
+    avatar_path = "/v1/agents/{agent_id:str}/avatar"
+    assert avatar_path in paths
+    avatar_methods = {
+        method
+        for route in app.routes
+        if getattr(route, "path", "") == avatar_path
+        for method in (getattr(route, "methods", None) or set())
+    }
+    assert avatar_methods <= {"GET", "HEAD"}, avatar_methods
+    assert not [path for path in paths if path.startswith("/v1/") and path != avatar_path], paths
 
 
 def test_the_portal_and_the_relay_agree_about_the_namespace() -> None:

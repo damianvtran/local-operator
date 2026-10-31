@@ -465,6 +465,25 @@ def static_feature_flags() -> dict[str, Any]:
         # alone, because the UI's reaction hold was lifted on exactly that
         # condition. A renderer that does not see it shows no reaction controls.
         "team_bridge_reactions": 1,
+        # SEND MENTIONS: `mentions: [{kind, account_id, endpoint_id?}]` on the
+        # conversation send body (the @-mention autocomplete). Agents carry
+        # their `bep_` endpoint id, humans none; at most 50 distinct rows. The
+        # hub sets each named member's `mention` bit from it. The route's
+        # `_Strict` body refused the key before this, so a renderer that does
+        # not see this key must send none (it would be a 422). WRITE-only: the
+        # hub's message read view does not return `mentions`, so this key
+        # promises no readback highlight.
+        "team_bridge_send_mentions": 1,
+        # The owner's per-conversation wake level for THEIR agent (wake
+        # contract, 2026-10-30): `PUT /v1/desktop/team-bridge/conversations/
+        # {id}/agent-notify` with `notify` all|mention|mute plus the required
+        # owner/tenant receipt. Agents now default to waking on every
+        # message, so the UI offers "Every message / @-mentions and its threads /
+        # Never (muted)" — `mention` means direct or channel @-mentions AND
+        # replies in threads the agent follows, not mentions alone (wake
+        # contract, Amendment A1). A renderer that does not see this flag shows
+        # no such control.
+        "team_bridge_agent_notify": 1,
         # The OWNER AUDIT ("{chief of staff}'s messages"): the read-only
         # `/v1/desktop/team-bridge/owner-audit/...` family over agent-server
         # #221, where the signed-in owner reads every conversation their own
@@ -1044,6 +1063,12 @@ def static_feature_flags() -> dict[str, Any]:
         # row (an additive field) rather than bump this key — a renderer that can read
         # link-only rows can read a fuller one.
         "code_requests": 1,
+        # AGENT PROFILE PICTURES: `GET/PUT/DELETE /v1/agents/{id}/avatar`, the `avatar`
+        # block on agent rows, `agent_id`/`avatar_sha256` on session rows and the
+        # `agent.avatar.changed` desktop-feed frame (contract: `local_operator.agent_avatar`).
+        # ADDITIVE; the key is how a renderer learns the editor's PUT exists before it
+        # offers an upload that would 404/405 on an older backend. Absent: glyph only.
+        "agent_avatar": 1,
         # THE PER-SESSION FILE INDEX: `GET /v1/desktop/sessions/{id}/files` (the files this
         # conversation and its subagents produced: written, edited, command outputs,
         # screenshots, downloads, generated images/videos and Highlights callouts, derived

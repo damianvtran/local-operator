@@ -1,0 +1,9 @@
+{
+  "wire.errors.agent_avatar.empty_body": "कोई तस्वीर नहीं भेजी गई। इमेज के बाइट्स अनुरोध के बॉडी में भेजें।",
+  "wire.errors.agent_avatar.imaging_unavailable": "तस्वीरों के लिए इमेज सपोर्ट चाहिए, जो इंस्टॉल नहीं है। Local Operator को images एक्स्ट्रा के साथ फिर से इंस्टॉल करें।",
+  "wire.errors.agent_avatar.not_found": "इस एजेंट की कोई तस्वीर नहीं है।",
+  "wire.errors.agent_avatar.too_large": "यह तस्वीर बहुत बड़ी है। {limit_mib} MB से छोटी इमेज चुनें।",
+  "wire.errors.agent_avatar.too_many_pixels": "इस तस्वीर में बहुत ज़्यादा पिक्सेल हैं। {limit_mp} मेगापिक्सेल से कम की इमेज चुनें।",
+  "wire.errors.agent_avatar.undecodable": "यह तस्वीर पढ़ी नहीं जा सकी। फ़ाइल खराब हो सकती है।",
+  "wire.errors.agent_avatar.unsupported_type": "यह तस्वीर इस्तेमाल नहीं की जा सकती। PNG, JPEG, WebP, GIF या HEIC इमेज चुनें।"
+}

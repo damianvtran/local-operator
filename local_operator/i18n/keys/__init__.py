@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from . import (
     cli_agents_help,
+    cli_agents_picture,
     cli_aida_help,
     cli_browser,
     cli_browser_help,
@@ -45,6 +46,7 @@ from . import (
     cli_wake_help,
     mobile_setup,
     relay_account_policy,
+    relay_agent_avatar,
     relay_approvals,
     relay_ask,
     relay_asks,
@@ -56,6 +58,7 @@ from . import (
     relay_session,
     relay_session_tags,
     relay_shell,
+    relay_skills,
     relay_transcript,
     tui_analytics,
     tui_app,
@@ -83,6 +86,7 @@ from . import (
     wire_aida_cadence,
     wire_console,
     wire_errors,
+    wire_errors_agent_avatar,
     wire_errors_agents,
     wire_errors_auth,
     wire_errors_desktop,
@@ -105,11 +109,13 @@ from . import (
     wire_slash,
     wire_slash_library,
     wire_slash_notifications_page,
+    wire_tool_rows_bridge,
     wire_tunnel_setup,
 )
 
 __all__ = [
     "cli_agents_help",
+    "cli_agents_picture",
     "cli_aida_help",
     "cli_browser",
     "cli_browser_help",
@@ -146,6 +152,7 @@ __all__ = [
     "cli_wake_help",
     "mobile_setup",
     "relay_account_policy",
+    "relay_agent_avatar",
     "relay_approvals",
     "relay_ask",
     "relay_asks",
@@ -157,6 +164,7 @@ __all__ = [
     "relay_session",
     "relay_session_tags",
     "relay_shell",
+    "relay_skills",
     "relay_transcript",
     "tui_analytics",
     "tui_app",
@@ -184,6 +192,7 @@ __all__ = [
     "wire_aida_cadence",
     "wire_console",
     "wire_errors",
+    "wire_errors_agent_avatar",
     "wire_errors_agents",
     "wire_errors_auth",
     "wire_errors_desktop",
@@ -206,5 +215,6 @@ __all__ = [
     "wire_slash",
     "wire_slash_library",
     "wire_slash_notifications_page",
+    "wire_tool_rows_bridge",
     "wire_tunnel_setup",
 ]

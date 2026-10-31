@@ -1,0 +1,13 @@
+{
+  "cli.agents_picture.error.no_agent": "Нет агента с именем или ID {agent}.",
+  "cli.agents_picture.error.read_file": "Не удалось прочитать {path}: {error}",
+  "cli.agents_picture.help.agent": "Имя или ID агента",
+  "cli.agents_picture.help.file": "Путь к изображению PNG, JPEG, WebP, GIF или HEIC",
+  "cli.agents_picture.help.group": "Задать, удалить или показать изображение профиля агента",
+  "cli.agents_picture.help.remove": "Удалить изображение агента",
+  "cli.agents_picture.help.set": "Задать изображение агента из файла",
+  "cli.agents_picture.help.show": "Вывести метаданные изображения агента в формате JSON",
+  "cli.agents_picture.remove.done": "Изображение агента {agent} удалено.",
+  "cli.agents_picture.remove.none": "У агента {agent} нет изображения для удаления.",
+  "cli.agents_picture.set.done": "Изображение для {agent} задано ({mime}, байт: {bytes})."
+}

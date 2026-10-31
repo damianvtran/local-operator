@@ -278,6 +278,15 @@ _PATH_SHAPED = re.compile(r"^(?!\.\.?(?:/|$))[A-Za-z0-9._-]+(?:/(?!\.\.?(?:/|$))
 #: the way the import list was. Every module with at least one candidate appears here, so
 #: "a module I did not think about" is itself a failing state.
 _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
+    "local_operator/agent_avatar.py": (
+        2,
+        "``PNG_NAME``/``JPEG_NAME`` ('avatar.png', 'avatar.jpg'): an AGENT's picture, "
+        "stored in the agent's own directory (<config>/agents/<id>/), never an entry of "
+        "a session directory -- so no session copy carries it. The picture is also "
+        "deliberately local-only on the mesh: the definitions mirror keeps the local "
+        "row's own picture and a peer can neither set, replace nor clear it, and an "
+        "agent EXPORT drops it (``AgentRegistry._is_skipped_from_archive``)",
+    ),
     "local_operator/notifications/store.py": (
         1,
         "notifications.db is the machine-wide config-root inbox, not a session "
@@ -293,6 +302,12 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "lease path, not a pathname or a translated/copyable session entry",
     ),
     # ---- this install's CONFIG, LOG and STORE surface (outside ``sessions/``) ----
+    "local_operator/disk_pressure.py": (
+        1,
+        "``RECEIPT_DIRNAME`` ('disk-reclaim-receipts'): lives at the DEVICE-level "
+        "config root (<config>/disk-reclaim-receipts/), a sibling of sessions/ -- "
+        "never an entry of a session directory, so no session copy carries it.",
+    ),
     "local_operator/memory_maintenance.py": (
         3,
         "``LOCK_NAME``/``STAMP_NAME``/``ATTEMPT_NAME`` ('.compact.lock', '.compact.stamp', "
@@ -331,6 +346,16 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         5,
         "the store's own roots and log file (``~/.local-operator``, ``logs``, "
         "``runtime.log``, the agent home): the directories a session lives UNDER",
+    ),
+    "local_operator/evaluation/team_bridge_moderation/fixture.py": (
+        1,
+        "``_FIXTURE_MARKER`` ('.team-bridge-moderation-fixture-v1'): a provenance file the "
+        "moderation eval writes at the TOP of a caller-supplied temporary world root (a "
+        "pytest ``tmp_path`` or the operator's ``--workdir``), so `teardown_fixture` can "
+        "prove the tree was built by ``build_fixture`` before deleting it. It lives in "
+        "that throwaway world, never in a session directory, and no session copy may "
+        "carry it: a peer device inheriting the marker could not rebuild the world "
+        "around it, and the eval's worlds are per-case scratch, not conversation state",
     ),
     "local_operator/remote_compute/config.py": (
         2,
@@ -1021,9 +1046,11 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "the default config dirname, as ``paths`` has it",
     ),
     "local_operator/browser_files.py": (
-        3,
-        "the browser download audit log, the downloads directory beside it, and the "
-        "fallback filename stem for a download with no name of its own",
+        4,
+        "the browser download audit log, the downloads directory beside it, the "
+        "recordings directory beside that (clips the agent asked for, never part of a "
+        "session's copy set), and the fallback filename stem for a download with no "
+        "name of its own",
     ),
     "local_operator/ui_browser/state.py": (
         2,

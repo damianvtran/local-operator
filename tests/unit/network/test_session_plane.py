@@ -5437,3 +5437,38 @@ def test_the_read_model_wait_cannot_park_a_link_thread(
     result = server_b._stored_projection(hangs)
     elapsed = _time.monotonic() - started
     assert result.state == "stale" and elapsed < 0.9, (result, elapsed)
+
+
+def test_listing_rows_carry_the_bound_agents_picture_identity(root: Path) -> None:
+    """Outbound peer rows add ``agent_id``/``avatar_sha256`` (additive, both keys).
+
+    Same resolver as the local listing (``agent_avatar.session_row_fields``): the
+    binding is an agent NAME, resolved to this device's registry id.
+    """
+    import io
+
+    from PIL import Image
+
+    from local_operator.agents import AgentRegistry
+    from local_operator.resume import write_session_attachment
+    from tests.unit.test_agent_avatar import _edit_fields
+
+    registry = AgentRegistry(config_dir=root, refresh_interval=0.0)
+    agent = registry.create_agent(_edit_fields(name="coder"))
+    image = io.BytesIO()
+    Image.new("RGB", (32, 32), (9, 9, 9)).save(image, "PNG")
+    meta = registry.set_agent_avatar(agent.id, image.getvalue())
+    bound, bare = "b0b0b0b0b0b0", "ba5eba5eba5e"
+    for session_id in (bound, bare):
+        (root / "sessions" / session_id).mkdir(parents=True)
+        (root / "sessions" / session_id / "transcript.jsonl").write_text("", encoding="utf-8")
+    write_session_attachment(root / "sessions" / bound, team="", agent="coder", goal="")
+    server = relay.RelayServer(
+        root=root, settings=relay.NetworkSettings(port=0, listen_address="127.0.0.1")
+    )
+    rows = {item["session_id"]: item for item in server.local_session_rows()}
+    if bound in rows:
+        assert rows[bound]["agent_id"] == agent.id
+        assert rows[bound]["avatar_sha256"] == meta.sha256
+    assert server._row_avatar(bound) == {"agent_id": agent.id, "avatar_sha256": meta.sha256}
+    assert server._row_avatar(bare) == {"agent_id": None, "avatar_sha256": None}

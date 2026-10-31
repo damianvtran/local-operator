@@ -842,6 +842,20 @@ async def deliver_wake(
     return f"engaged {session_id} ({getattr(outcome, 'state', 'started')})"
 
 
+def _badge_only(config_dir: Path, message_id: str) -> dict[str, Any]:
+    """The ``no_designation`` outcome: nothing delivered, and nothing hidden.
+
+    ``BADGE_ONLY`` is a real answer, not a failure — but an owner with agent
+    messages on and no designated session sees a receiver that polls and nothing
+    else, so the fact is logged and counted (review round 1, 7b).
+    """
+
+    from ..wake_diagnostics import CODE_NO_DESIGNATION, record_woke_nobody
+
+    record_woke_nobody(config_dir, code=CODE_NO_DESIGNATION)
+    return {"action": "badge_only", "message_id": message_id, "code": CODE_NO_DESIGNATION}
+
+
 async def handle_message_available(
     owner: Any,
     message_id: str,
@@ -871,13 +885,13 @@ async def handle_message_available(
         # checks all passed), and the loop treats badge_only as "leave the row"
         # rather than scheduling a screening-hold backoff. Later fences (the
         # designation vanishing mid-flight) still HOLD with the typed code.
-        return {"action": "badge_only", "message_id": message_id}
+        return _badge_only(config_dir, message_id)
     if fence_code:
         return {"action": "hold", "message_id": message_id, "code": fence_code}
     designation = store.designated_session_for(owner)
     if designation is None:
         # §5.6: no designation = arrivals do not wake — badge only.
-        return {"action": "badge_only", "message_id": message_id}
+        return _badge_only(config_dir, message_id)
 
     from local_operator.team_bridge.store import CONNECTOR_CLAIM_TOKEN_PREFIX
 

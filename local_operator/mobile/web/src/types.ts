@@ -119,6 +119,43 @@ export interface TranscriptEntryDetails {
 	   reads). `text` is the notice verbatim for both kinds. */
 	waited_s?: number;
 	urgent?: boolean;
+	/* A `bridge` (Team Bridge) tool row's facts, composed server-side by the
+	   shared `harness/rows.py::bridge_row` so the phone, desktop and TUI say the
+	   same thing about one call. Absent on a frame whose details were shed;
+	   the row then falls back to its summary alone. */
+	bridge_row?: BridgeRowFacts;
+	/* The bridge row's WORDS, rendered by the daemon from the shared
+	   `wire.tool_rows.bridge` copy (`harness/bridge_copy.py`), so the phone
+	   paints the TUI's strings in the daemon's locale. */
+	bridge_copy?: BridgeRowCopy;
+}
+
+/** Display-ready bridge strings; every value is text, never an id. */
+export interface BridgeRowCopy {
+	/** The chip word (`not posted to a conversation`, `refused · not_member`); "" when plain. */
+	outcome?: string;
+	/** The expansion's who/where line (`Direct message to Priya Shah`). */
+	headline?: string;
+	/** The expansion's full outcome sentence. */
+	outcome_sentence?: string;
+}
+
+/** The shared bridge-row contract (`harness/rows.py::bridge_row`). Every field
+    is display-ready: `target.label` is a name, never a `bcv_`/`ep_` id. */
+export interface BridgeRowFacts {
+	op?: string;
+	action?: string;
+	target?: {
+		kind?: "channel" | "dm" | "person" | "message" | "directory" | "none";
+		label?: string;
+	};
+	preview?: string;
+	count?: number | null;
+	emoji?: string | null;
+	/** null = an ordinary landed call; everything else is a caveat the row
+	    must state (an inbox-only send is NOT a conversation post). */
+	outcome?: null | "inbox_only" | "refused" | "failed" | "unconfirmed" | "awaiting_acceptance";
+	code?: string | null;
 }
 
 export interface PeerSender {
@@ -749,6 +786,12 @@ export interface SessionSummary {
 	    operator's own conversation. Additive and defaulted: an older daemon
 	    omits it, and a reader must treat absence as "no opener". */
 	opened_by?: SessionOpenedBy | null;
+	/** The bound agent's registry id and its profile picture's sha256 (core
+	    `agent_avatar` contract); the picture is `/v1/agents/{agent_id}/avatar?v=
+	    <avatar_sha256>` on this relay. Both null on an unbound or pictureless
+	    row; absent on an older daemon. Either missing means "draw the glyph". */
+	agent_id?: string | null;
+	avatar_sha256?: string | null;
 	todos_open: number;
 	mtime: number;
 	/** Immutable conversation birth; absent on older daemons, never activity. */
@@ -762,6 +805,35 @@ export interface SlashCommand {
 	description: string;
 	aliases: string[];
 	arguments: "none" | "optional" | "required";
+}
+
+/** One row of the relay's `$name` catalogue (`GET /api/skills?session_id=`).
+
+    `description` is the skill's one-line routing sentence, cut to 160 chars by
+    the relay (`_SKILL_DESCRIPTION_CHARS`); `hidden` marks a skill whose `hide`
+    frontmatter suppresses automatic selection. The picker still offers hidden
+    skills: being typed is exactly the case `hide` leaves open. */
+export interface SkillEntry {
+	name: string;
+	description: string;
+	hidden: boolean;
+}
+
+/** What `GET /api/skills` answers. Sorted by name by the relay, so a picker
+    that reorders under the finger is a client bug, not a server answer. */
+export interface SkillsResponse {
+	skills: SkillEntry[];
+}
+
+/** The additive `skills` block a prompt/steer receipt carries when the relay
+    honoured `expand_skills` (SKM-D4): what attached to the message that was
+    sent, and what did not (an empty or unreadable SKILL.md skips that skill
+    and lets the message through). Both lists are names WITHOUT the `$`; the
+    phone joins the skipped ones into its one keyed notice. Absent on a reply
+    from a relay that does not expand — which is the capability's answer too. */
+export interface SkillExpansionReceipt {
+	attached: string[];
+	skipped: string[];
 }
 
 /** One offerable model, as `GET /api/models` ranks it.
@@ -878,6 +950,13 @@ export interface Capabilities {
 	    relays that have none of these routes). Absent on an older relay, which
 	    must HIDE the action rather than offer a control whose request would 404. */
 	session_tags?: { available: boolean };
+	/** The relay serves `GET /api/skills`, and honours `expand_skills` on a
+	    prompt/steer body with a `skills: {attached, skipped}` receipt. A RELAY
+	    capability like `session_tags`: an older relay drops the flag silently,
+	    which on the wire looks exactly like a skill that did not fire, so a
+	    client must gate the `$` affordance on this key rather than on the
+	    presence of the route. */
+	skill_invocation?: { available: boolean };
 	/** Creation keys are safe to replay only when this versioned contract is
 	    advertised. Older relays silently ignore unknown start-body fields. */
 	session_start?: { version: number; durable_idempotency: boolean; receipt_capacity: number };
@@ -892,6 +971,13 @@ export type CommandOp =
 			/** The reserved annotation (input-mode-v1), omitted when absent. */
 			input_mode?: InputMode;
 			input_path?: string;
+			/** Ask the relay to expand `$name` mentions before delivery (SKM-D1).
+			    Set only when this client saw `capabilities.skill_invocation` and
+			    the text carries `$`; an older relay drops it silently, which is
+			    why the capability — never this field — tells a phone the feature
+			    exists. Part of the retry envelope's bytes: a replay asks for the
+			    same expansion the first attempt asked for. */
+			expand_skills?: boolean;
 		}
 	| { op: "abort" }
 	| { op: "set_model"; provider: string; model_id: string }

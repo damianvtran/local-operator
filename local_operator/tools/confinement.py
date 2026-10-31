@@ -206,6 +206,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import stat
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -340,23 +341,108 @@ def kernel_exposed_read_subtrees() -> tuple[Path, ...]:
     return tuple(subtrees)
 
 
+def _scratchpad_grant(
+    scratchpad: str | Path | None, *, root: Path, session_dir: str | Path | None
+) -> Path | None:
+    """The scratchpad path a confinement may grant, or ``None`` to grant none.
+
+    Review round 1, R1 (a BLOCKER): the grant used to be ``Path(pad).resolve()``,
+    which FOLLOWS a symlink at the pad itself. The confined shell holds write
+    over the pad node, so it could ``rm -rf`` the pad, ``ln -s /`` in its place,
+    and the next call's confinement granted ``/`` read+write -- to the shell and
+    to the path tools, whose ``contains()`` reads the same grant. Reproduced end
+    to end through ``execute_bash`` before this fix.
+
+    So the pad is resolved WITHOUT following its final component (the parent is
+    resolved, the leaf re-appended), and granted only when every check holds:
+
+    - the leaf is absent or a real directory (``lstat``: a symlink, a file or a
+      device is dropped). An absent pad is granted: whatever is created there
+      later is judged again by the next call's confinement;
+    - it is ``<session dir>/scratchpad`` by the store layout
+      (:func:`~local_operator.scratchpad.scratchpad_root`), and the context's
+      own ``session_dir`` when it carries one -- a pad that is not this
+      session's is not this grant's to give;
+    - it neither equals nor contains the root's parent, HOME or the config dir
+      (defence in depth: none of those can be a session's pad by the layout,
+      but a grant that covered one would undo the boundary wholesale);
+    - the profile can carry it (:func:`profile_path_refusal`).
+
+    Anything else DROPS the pad and keeps the confinement: failing narrow costs
+    only the pad, never the session's boundary.
+    """
+
+    if not scratchpad:
+        return None
+    # Local imports keep this module's import graph flat (as ``from_context``).
+    from local_operator.paths import config_dir
+    from local_operator.scratchpad import scratchpad_root
+
+    try:
+        spelled = Path(scratchpad).expanduser()
+        if not spelled.is_absolute():
+            return None
+        pad = spelled.parent.resolve() / spelled.name
+        try:
+            mode = pad.lstat().st_mode
+        except FileNotFoundError:
+            mode = None
+        if mode is not None and (stat.S_ISLNK(mode) or not stat.S_ISDIR(mode)):
+            return None
+        if mode is not None and pad.resolve() != pad:
+            return None
+        if scratchpad_root(pad.parent) != pad:
+            return None
+        if session_dir and Path(session_dir).expanduser().resolve() != pad.parent:
+            return None
+        guarded = (root.parent, Path.home().resolve(), config_dir().expanduser().resolve())
+    except (OSError, RuntimeError, ValueError):
+        return None
+    if any(tree == pad or tree.is_relative_to(pad) for tree in guarded):
+        return None
+    if profile_path_refusal(pad) is not None:
+        return None
+    return pad
+
+
 @dataclass(frozen=True)
 class ToolConfinement:
-    """One session's confinement root and the decisions that follow from it."""
+    """One session's confinement root and the decisions that follow from it.
+
+    ``scratchpad`` is the session's OWN ``scratchpad://`` root, granted beside
+    ``root`` -- see :meth:`from_context` for why it is a second grant rather
+    than something the root is assumed to contain.
+    """
 
     root: Path
+    scratchpad: Path | None = None
 
     @classmethod
-    def at(cls, root: str | Path) -> ToolConfinement:
-        """Build a confinement for ``root``, fully resolved.
+    def at(
+        cls,
+        root: str | Path,
+        *,
+        scratchpad: str | Path | None = None,
+        session_dir: str | Path | None = None,
+    ) -> ToolConfinement:
+        """Build a confinement for ``root`` (and the session's scratchpad), resolved.
 
         Resolution matters: seatbelt compares vnode paths, and the file-tool
         checks compare against this root, so both must be the REAL path --
         a ``/tmp``-style symlink spelling must not make the jail and the
         check disagree about the same directory.
+
+        A scratchpad the profile cannot carry (:func:`profile_path_refusal`)
+        is DROPPED, not escaped and not a refusal of the whole confinement:
+        failing narrow keeps the session's boundary intact and costs only the
+        pad. The same drop applies to every pad :func:`_scratchpad_grant`
+        refuses (a symlink at the pad, a path that is not the session's own
+        ``<session dir>/scratchpad``, one that would cover HOME or config).
         """
 
-        return cls(root=Path(root).expanduser().resolve())
+        resolved_root = Path(root).expanduser().resolve()
+        pad = _scratchpad_grant(scratchpad, root=resolved_root, session_dir=session_dir)
+        return cls(root=resolved_root, scratchpad=pad)
 
     @classmethod
     def from_context(cls, context: ToolContext | None) -> ToolConfinement | None:
@@ -372,16 +458,60 @@ class ToolConfinement:
         raw = getattr(context, "confinement_root", None)
         if not raw:
             return None
-        return cls.at(raw)
+        # THE SESSION'S OWN SCRATCHPAD IS GRANTED TOO, read from the SAME
+        # context field (``scratchpad_dir_of``) that ``scratchpad://`` resolves
+        # against and that the bash tool exports as ``LOCAL_OPERATOR_SCRATCHPAD``
+        # -- one source, so the scheme, the env var and the kernel grant cannot
+        # name three different directories. Why a second grant at all: the pad
+        # lives in the session store under the CONFIG dir, while the root is
+        # wherever the host confined the session (an episode's ``world/``), so
+        # the two are siblings, not nested. Measured in a sealed benchmark
+        # record (m23smoke-t001, v0.91.6): ``write scratchpad://job.py``
+        # succeeded while every shell read/write of the same file was EPERM,
+        # because the profile granted only the root. Only the pad itself is
+        # granted -- never the session directory around it (the transcript),
+        # the config dir or HOME.
+        from local_operator.scratchpad import (
+            scratchpad_dir_of,  # local: keep this module's import graph flat
+        )
+
+        return cls.at(
+            raw,
+            scratchpad=scratchpad_dir_of(context),
+            session_dir=getattr(context, "session_dir", None),
+        )
+
+    def _granted_roots(self) -> tuple[Path, ...]:
+        """Every tree this confinement grants: the root, then the scratchpad."""
+
+        return (self.root,) if self.scratchpad is None else (self.root, self.scratchpad)
+
+    def _confined_to(self) -> str:
+        """The allowed trees, as refusal text names them (review round 1, M1).
+
+        A refusal that named only the root sent an agent refused elsewhere
+        back to the root, when its scratchpad is the other place it may work.
+        """
+
+        if self.scratchpad is None:
+            return str(self.root)
+        return f"{self.root} and its scratchpad {self.scratchpad}"
 
     def contains(self, path: Path) -> bool:
-        """Whether a RESOLVED path lies at or under the confinement root."""
+        """Whether a RESOLVED path lies at or under the root or the scratchpad.
 
-        try:
-            path.relative_to(self.root)
-        except ValueError:
-            return False
-        return True
+        The scratchpad counts so the path tools agree with the shell: a file the
+        kernel lets ``cat`` read must not be refused to ``read`` by its
+        absolute path (the path ``write scratchpad://`` reports back).
+        """
+
+        for granted in self._granted_roots():
+            try:
+                path.relative_to(granted)
+            except ValueError:
+                continue
+            return True
+        return False
 
     def path_denial(self, path: Path, *, resolvable: bool = True) -> str | None:
         """The refusal for a path outside the root, or ``None`` when inside.
@@ -395,12 +525,12 @@ class ToolConfinement:
 
         if not resolvable:
             return (
-                f"refused: this session is confined to {self.root}, and this path "
-                "could not be resolved inside it"
+                f"refused: this session is confined to {self._confined_to()}, and this "
+                "path could not be resolved inside it"
             )
         if self.contains(path):
             return None
-        return f"refused: this session is confined to {self.root}; {path} is outside it"
+        return f"refused: this session is confined to {self._confined_to()}; {path} is outside it"
 
     def cwd_denial(self, cwd: str | None) -> str | None:
         """The refusal for a working directory outside the root, or ``None``."""
@@ -411,14 +541,14 @@ class ToolConfinement:
             resolved = Path(cwd).expanduser().resolve()
         except (OSError, ValueError):
             return (
-                f"refused: this session is confined to {self.root} and its working "
-                f"directory ({cwd}) cannot be resolved inside it"
+                f"refused: this session is confined to {self._confined_to()}, and its "
+                f"working directory ({cwd}) cannot be resolved inside it"
             )
         if self.contains(resolved):
             return None
         return (
-            f"refused: this session is confined to {self.root} and its working "
-            f"directory ({cwd}) is outside it"
+            f"refused: this session is confined to {self._confined_to()}, and its "
+            f"working directory ({cwd}) is outside it"
         )
 
     def wrap(self, argv: Sequence[str]) -> list[str] | None:
@@ -509,9 +639,10 @@ class ToolConfinement:
         are still allowlisted, which is the line this boundary draws (see the
         module docstring's residuals).
 
-        The third: the write allowlist is the root plus the null devices, and
-        nothing else -- writes are the direction that matters most and they
-        are the strictest list in the file.
+        The third: the write allowlist is the root, the session's own
+        scratchpad (when it has one; see :meth:`from_context`) and the null
+        devices, and nothing else -- writes are the direction that matters
+        most and they are the strictest list in the file.
 
         The fourth: the network line. ``(deny network*)`` REPLACED the
         ``(allow network-outbound)`` this profile used to carry. The deny line
@@ -533,14 +664,30 @@ class ToolConfinement:
         beside it, or the narrow one stops meaning anything.
         """
 
+        granted = " ".join(f'(subpath "{path}")' for path in self._granted_roots())
         read_subpaths = (
-            str(self.root),
+            *(str(path) for path in self._granted_roots()),
             *self._machinery_read_subpaths(),
             *_SYSTEM_READ_SUBPATHS,
         )
         reads = " ".join(f'(subpath "{path}")' for path in read_subpaths)
         writes = " ".join(f'(literal "{path}")' for path in _SYSTEM_WRITE_LITERALS)
         mach = " ".join(f'(global-name "{name}")' for name in _MACH_LOOKUP_GLOBAL_NAMES)
+        # THE PAD NODE ITSELF CANNOT BE UNLINKED OR RENAMED (review round 1, R1).
+        # ``subpath`` covers the pad directory too, so without this a shell ran
+        # ``rm -rf "$LOCAL_OPERATOR_SCRATCHPAD" && ln -s / "$LOCAL_OPERATOR_
+        # SCRATCHPAD"`` and planted the link the next call's grant would follow.
+        # ``_scratchpad_grant`` already makes such a swap harmless (it drops a
+        # symlinked pad); this closes the planting step at the kernel too.
+        # Measured with /usr/bin/sandbox-exec on macOS 27: a LATER filtered deny
+        # beats the earlier filtered allow, ``rm -rf``/``mv``/``rmdir`` of the
+        # pad answer EPERM, and create/delete of entries INSIDE it still work
+        # (an entry's unlink is checked against its own literal path).
+        pad_lock = (
+            ""
+            if self.scratchpad is None
+            else f'(deny file-write-unlink (literal "{self.scratchpad}"))\n'
+        )
         return (
             "(version 1)\n"
             "(deny default)\n"
@@ -551,7 +698,8 @@ class ToolConfinement:
             "(deny network*)\n"
             '(allow file-read-metadata (subpath "/"))\n'
             f'(allow file-read* (literal "/") {reads})\n'
-            f'(allow file-write* (subpath "{self.root}") {writes})\n'
+            f"(allow file-write* {granted} {writes})\n"
+            f"{pad_lock}"
         )
 
 

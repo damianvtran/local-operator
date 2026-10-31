@@ -26,6 +26,7 @@ import pytest
 import pytest_asyncio
 import yaml
 from fastapi import FastAPI
+from fastapi.routing import APIRoute
 from httpx import ASGITransport, AsyncClient
 
 from local_operator.config import ConfigManager
@@ -548,6 +549,25 @@ class FakeClient:
         FakeClient.behavior["last_consent_endpoint"] = endpoint_id
         return self._answer("conversation_consent")
 
+    async def conversation_agent_notify(
+        self,
+        conversation_id: str,
+        endpoint_id: str,
+        *,
+        notify: str,
+        tenant_id=None,
+        access=None,
+        expected_account_id=None,
+    ):
+        FakeClient.behavior["last_agent_notify"] = {
+            "conversation_id": conversation_id,
+            "endpoint_id": endpoint_id,
+            "notify": notify,
+            "tenant_id": tenant_id,
+            "expected_account_id": expected_account_id,
+        }
+        return self._answer("conversation_agent_notify")
+
     async def owned_agent_invitations(
         self,
         *,
@@ -607,10 +627,12 @@ class FakeClient:
         agent_label=None,
         thread_root_id=None,
         attachment_ids=None,
+        mentions=None,
         access=None,
         expected_account_id=None,
     ):
         FakeClient.behavior["last_send_attachment_ids"] = attachment_ids
+        FakeClient.behavior["last_send_mentions"] = mentions
         FakeClient.behavior["last_send"] = {
             "conversation_id": conversation_id,
             "client_ref": client_ref,
@@ -994,6 +1016,98 @@ async def test_status_v1_payload_is_unchanged_apart_from_the_additive_block(api)
         "onboarding": "",
         "session": "",
     }
+
+
+async def test_status_carries_the_screening_summary_and_survives_damage(api):
+    """PR #3189: ``screening_summary`` rides the status read; a damaged store
+    (nested categories JSON, a non-numeric ``created_at``) still answers 200."""
+
+    import sqlite3
+    import time
+
+    from local_operator.team_bridge.store import OwnerReceipt, Store, state_db_path
+    from local_operator.team_bridge.types import OwnerSnapshot
+
+    client, root, _discipline = api
+    result = (await client.get("/v1/desktop/team-bridge/status")).json()["result"]
+    assert result["screening_summary"] is None  # not enrolled
+
+    owner = OwnerSnapshot(
+        credential_id=7,
+        account_id="acc_a",
+        tenant_id="tnt_1",
+        endpoint_id="bep_1",
+        canonical_base_url="https://qa.invalid/v1",
+        enrollment_generation=1,
+    ).validated()
+    store = Store(root)
+    store.commit_enrollment(owner, OwnerReceipt("bridge_consent_v1", "ref-1"))
+    store.persist_hold(owner, "bmsg_pair1", "delivery_failed")
+    with sqlite3.connect(state_db_path(root)) as conn:
+        conn.execute("UPDATE screening_holds SET created_at = 'not-a-number'")
+        conn.execute(
+            "INSERT INTO screening_receipts (owner_key, message_id, body_sha256, "
+            "template_sha256, prompt_version, model, verdict, categories, envelope_digest, "
+            "admission_revision, policy_epoch, creator_generation, created_at) "
+            "SELECT owner_key, 'bcmsg_r1', '', '', '', '', 'reject', '[[\"x\"]]', '', '', "
+            "1, 1, ? FROM enrollments",
+            (time.time(),),
+        )
+
+    response = await client.get("/v1/desktop/team-bridge/status")
+    assert response.status_code == 200
+    summary = response.json()["result"]["screening_summary"]
+    assert summary["held"]["count"] == 1
+    assert summary["held"]["by_code"] == {"delivery_failed": 1}
+    assert summary["rejected_24h"]["by_category"] == {"unknown": 1}
+
+
+async def test_status_screening_summary_survives_non_finite_timestamps(api):
+    """PR #3189 review round 2, m4: ``created_at`` = +inf/-inf/``'NaN'`` and an
+    infinite breaker deadline still answer 200 with strict-JSON numbers. (A
+    float NaN binds as NULL, which the NOT NULL column refuses.)"""
+
+    import sqlite3
+
+    from local_operator.team_bridge.store import OwnerReceipt, Store, state_db_path
+    from local_operator.team_bridge.types import OwnerSnapshot
+
+    client, root, _discipline = api
+    owner = OwnerSnapshot(
+        credential_id=7,
+        account_id="acc_a",
+        tenant_id="tnt_1",
+        endpoint_id="bep_1",
+        canonical_base_url="https://qa.invalid/v1",
+        enrollment_generation=1,
+    ).validated()
+    store = Store(root)
+    store.commit_enrollment(owner, OwnerReceipt("bridge_consent_v1", "ref-1"))
+    for message_id in ("bmsg_inf", "bmsg_ninf", "bmsg_nan"):
+        store.persist_hold(owner, message_id, "provider_error")
+    with sqlite3.connect(state_db_path(root)) as conn:
+        for message_id, value in (
+            ("bmsg_inf", float("inf")),
+            ("bmsg_ninf", float("-inf")),
+            ("bmsg_nan", "NaN"),
+        ):
+            conn.execute(
+                "UPDATE screening_holds SET created_at = ? WHERE message_id = ?",
+                (value, message_id),
+            )
+        conn.execute(
+            "INSERT INTO screening_breaker (account_scope, failures, open_until, updated_at) "
+            "VALUES (?,?,?,?)",
+            ("https://qa.invalid/v1|acc_a", float("inf"), float("inf"), 1.0),
+        )
+
+    response = await client.get("/v1/desktop/team-bridge/status")
+    assert response.status_code == 200
+    assert "Infinity" not in response.text and "NaN" not in response.text
+    summary = response.json()["result"]["screening_summary"]
+    assert summary["held"]["count"] == 3
+    assert summary["held"]["oldest_age_s"] is None
+    assert summary["breaker"] == {"state": "closed", "failures": 0, "open_until": None}
 
 
 async def test_an_explicit_local_off_wins_over_a_served_v2(api):
@@ -3353,6 +3467,86 @@ async def test_conversation_send_without_a_thread_root_forwards_none(api):
     assert FakeClient.behavior["last_send_thread_root_id"] is None
 
 
+async def test_conversation_send_forwards_structured_mentions(api):
+    client, _root, _d = api
+    FakeClient.behavior["conversation_send"] = {"id": "bcmsg_5", "seq": 5}
+    response = await client.post(
+        "/v1/desktop/team-bridge/conversations/bcv_abc12345/messages",
+        json={
+            "client_ref": "ref-5",
+            "body": "@Ada @Scout look",
+            "mentions": [
+                {"kind": "agent", "account_id": "acc_owner", "endpoint_id": "bep_scout"},
+                {"kind": "human", "account_id": "acc_ada"},
+            ],
+        },
+    )
+    assert response.status_code == 200, response.text
+    # A human row carries no endpoint_id key at all (not ``None``): the client
+    # re-validates each row and the hub decodes a closed shape.
+    assert FakeClient.behavior["last_send_mentions"] == [
+        {"kind": "agent", "account_id": "acc_owner", "endpoint_id": "bep_scout"},
+        {"kind": "human", "account_id": "acc_ada"},
+    ]
+
+
+@pytest.mark.parametrize("payload", [{}, {"mentions": []}])
+async def test_conversation_send_without_mentions_forwards_none(api, payload):
+    # ``None`` is what makes the client omit the key, keeping an undirected
+    # send byte-identical to the pre-mention wire (pinned on the client side by
+    # test_the_client_omits_mentions_entirely_when_there_are_none).
+    client, _root, _d = api
+    FakeClient.behavior["conversation_send"] = {"id": "bcmsg_6", "seq": 6}
+    response = await client.post(
+        "/v1/desktop/team-bridge/conversations/bcv_abc12345/messages",
+        json={"client_ref": "ref-6", "body": "hello", **payload},
+    )
+    assert response.status_code == 200, response.text
+    assert FakeClient.behavior["last_send_mentions"] is None
+
+
+@pytest.mark.parametrize(
+    "mentions",
+    [
+        [{"kind": "robot", "account_id": "acc_ada"}],
+        [{"kind": "channel"}],
+        [{"kind": "human", "account_id": "acc_ada", "label": "Ada"}],
+        [{"kind": "human", "account_id": ""}],
+        [{"kind": "human", "account_id": " acc_ada"}],
+        [{"kind": "agent", "account_id": "acc_o", "endpoint_id": ""}],
+        [{"account_id": "acc_ada"}],
+        [{"kind": "human", "account_id": "acc_ada"}, {"kind": "human", "account_id": "acc_ada"}],
+        [{"kind": "human", "account_id": f"acc_{i}"} for i in range(51)],
+    ],
+    ids=[
+        "bad-kind",
+        "channel-not-offered",
+        "extra-key",
+        "blank-id",
+        "padded-id",
+        "blank-endpoint",
+        "no-kind",
+        "duplicate",
+        "over-50",
+    ],
+)
+async def test_conversation_send_refuses_a_malformed_mention_before_io(api, mentions):
+    client, _root, _d = api
+    calls_before = FakeClient.calls
+    response = await client.post(
+        "/v1/desktop/team-bridge/conversations/bcv_abc12345/messages",
+        json={"client_ref": "ref-7", "body": "x", "mentions": mentions},
+    )
+    assert response.status_code == 422, response.text
+    assert FakeClient.calls == calls_before
+
+
+async def test_send_mentions_capability_is_advertised():
+    from local_operator.server.features import feature_flags
+
+    assert feature_flags()["team_bridge_send_mentions"] == 1
+
+
 async def test_conversation_send_refuses_a_malformed_thread_root_before_io(api):
     client, _root, _d = api
     calls_before = FakeClient.calls
@@ -4016,3 +4210,208 @@ async def test_an_old_hub_through_the_mounted_boundary_is_409_outdated_hub_on_bo
         ]
         * 2
     )
+
+
+#: Delivery-state contract v1: one entry per agent recipient, exactly the shape
+#: the hub serves to a HUMAN reader. The proxy forwards it untouched — it never
+#: adds, drops or re-derives a class (the hub alone decides what a viewer may
+#: see, so a proxy-side projection would be a second, divergent policy).
+_DELIVERY_STATES = [
+    {
+        "endpoint_id": "bep_a",
+        "recipient_label": "Scout",
+        "recipient_owner_label": "Ada",
+        "state": "refused",
+        "refusal_class": "manipulation",
+    },
+    {
+        "endpoint_id": "bep_b",
+        "recipient_label": "Atlas",
+        "recipient_owner_label": "Bo",
+        "state": "held",
+    },
+    {
+        "endpoint_id": "bep_c",
+        "recipient_label": "Iris",
+        "recipient_owner_label": "Cy",
+        "state": "delivered",
+    },
+]
+
+
+async def test_delivery_states_pass_through_history_replies_and_send_unchanged(api):
+    client, _root, _d = api
+    FakeClient.behavior["conversation_messages"] = {
+        "messages": [{"id": "bcmsg_1", "seq": 1, "delivery_states": _DELIVERY_STATES}],
+        "has_more": False,
+    }
+    FakeClient.behavior["conversation_replies"] = {
+        "root": {"id": "bcmsg_root0001", "seq": 1, "delivery_states": _DELIVERY_STATES},
+        "replies": [{"id": "bcmsg_rep00001", "seq": 2, "delivery_states": _DELIVERY_STATES}],
+        "has_more": False,
+    }
+    FakeClient.behavior["conversation_send"] = {
+        "id": "bcmsg_1",
+        "seq": 1,
+        "delivery_states": _DELIVERY_STATES,
+    }
+    history = await client.get(
+        "/v1/desktop/team-bridge/conversations/bcv_abc12345/messages?tenant_id=tnt_1"
+    )
+    replies = await client.get(
+        "/v1/desktop/team-bridge/conversations/bcv_abc12345/messages/bcmsg_root0001/replies"
+        "?tenant_id=tnt_1&expected_account_id=acc_1"
+    )
+    sent = await client.post(
+        "/v1/desktop/team-bridge/conversations/bcv_abc12345/messages",
+        json={"tenant_id": "tnt_1", "client_ref": "ref-1", "body": "hello"},
+    )
+    for response in (history, replies, sent):
+        assert response.status_code == 200, response.text
+    assert history.json()["result"]["messages"][0]["delivery_states"] == _DELIVERY_STATES
+    assert replies.json()["result"]["root"]["delivery_states"] == _DELIVERY_STATES
+    assert replies.json()["result"]["replies"][0]["delivery_states"] == _DELIVERY_STATES
+    assert sent.json()["result"]["delivery_states"] == _DELIVERY_STATES
+
+
+async def test_an_absent_delivery_states_field_stays_absent(api):
+    # A third member / an older hub: the field is absent, and the proxy must not
+    # invent an empty list (the UI reads absent as "no data", [] differently).
+    client, _root, _d = api
+    FakeClient.behavior["conversation_messages"] = {
+        "messages": [{"id": "bcmsg_1", "seq": 1}],
+        "has_more": False,
+    }
+    response = await client.get(
+        "/v1/desktop/team-bridge/conversations/bcv_abc12345/messages?tenant_id=tnt_1"
+    )
+    assert response.status_code == 200, response.text
+    assert "delivery_states" not in response.json()["result"]["messages"][0]
+
+
+# --- agent-notify: the owner's per-conversation wake level for THEIR agent ---
+#
+# Wake contract (2026-10-30): agents now default to waking on every message,
+# so the owner needs "Every message / Only @-mentions / Never" per
+# conversation. The endpoint is ALWAYS the local enrolled one, never a body
+# field, and the receipt is checked against the owner before any network.
+
+AGENT_NOTIFY = "/v1/desktop/team-bridge/conversations/bcv_abcdefgh/agent-notify"
+
+
+@pytest.mark.parametrize("notify", ["all", "mention", "mute"])
+async def test_agent_notify_writes_the_local_agents_endpoint(api, notify):
+    client, root, _discipline = api
+    _enroll(root)
+    FakeClient.behavior["conversation_agent_notify"] = {
+        "id": "bcv_abcdefgh",
+        "members": [{"endpoint_id": "ep_1", "kind": "agent", "notify": notify}],
+    }
+    response = await client.put(
+        AGENT_NOTIFY,
+        json={"notify": notify, "tenant_id": "tnt_1", "expected_account_id": "acc_1"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["result"]["members"][0]["notify"] == notify
+    assert FakeClient.behavior["last_agent_notify"] == {
+        "conversation_id": "bcv_abcdefgh",
+        "endpoint_id": "ep_1",
+        "notify": notify,
+        "tenant_id": "tnt_1",
+        "expected_account_id": "acc_1",
+    }
+
+
+@pytest.mark.parametrize(
+    ("enroll", "body", "status", "code"),
+    [
+        # No enrolled agent on this machine: nothing to configure.
+        (
+            False,
+            {"notify": "all", "tenant_id": "tnt_1", "expected_account_id": "acc_1"},
+            409,
+            "not_enrolled",
+        ),
+        # A receipt captured for another account.
+        (
+            True,
+            {"notify": "all", "tenant_id": "tnt_1", "expected_account_id": "acc_2"},
+            409,
+            "owner_mismatch",
+        ),
+        # A tenant this machine did not enroll in.
+        (
+            True,
+            {"notify": "all", "tenant_id": "tnt_9", "expected_account_id": "acc_1"},
+            422,
+            "invalid_tenant",
+        ),
+    ],
+)
+async def test_agent_notify_refuses_before_any_network(api, enroll, body, status, code):
+    client, root, _discipline = api
+    if enroll:
+        _enroll(root)
+    response = await client.put(AGENT_NOTIFY, json=body)
+    assert response.status_code == status, response.text
+    assert response.json()["detail"]["code"] == code
+    assert "last_agent_notify" not in FakeClient.behavior
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"notify": "loud", "tenant_id": "tnt_1", "expected_account_id": "acc_1"},
+        {"notify": "all", "tenant_id": "tnt_1"},  # receipt is required
+        {"notify": "all", "expected_account_id": "acc_1"},  # tenant is required
+        # The endpoint is never the caller's to name.
+        {
+            "notify": "all",
+            "tenant_id": "tnt_1",
+            "expected_account_id": "acc_1",
+            "endpoint_id": "ep_x",
+        },
+    ],
+)
+async def test_agent_notify_rejects_a_malformed_body(api, body):
+    client, root, _discipline = api
+    _enroll(root)
+    response = await client.put(AGENT_NOTIFY, json=body)
+    assert response.status_code == 422, response.text
+    assert "last_agent_notify" not in FakeClient.behavior
+
+
+async def test_agent_notify_passes_a_hub_refusal_through(api):
+    client, root, _discipline = api
+    _enroll(root)
+    FakeClient.behavior["conversation_agent_notify"] = BridgeRefusal(
+        "not_found", "no such agent member", http_status=404
+    )
+    response = await client.put(
+        AGENT_NOTIFY,
+        json={"notify": "mention", "tenant_id": "tnt_1", "expected_account_id": "acc_1"},
+    )
+    assert response.status_code == 404
+    assert response.json()["detail"]["code"] == "not_found"
+
+
+async def test_agent_notify_is_advertised_with_its_required_receipt():
+    """The UI shows the wake-level control only when this flag is served; the
+    flag means "the route exists AND refuses an unguarded call", so it is
+    asserted beside the DTO's required receipt fields."""
+
+    from local_operator.server.features import static_feature_flags
+
+    assert static_feature_flags()["team_bridge_agent_notify"] == 1
+    fields = desktop_team_bridge.ConversationAgentNotifyIn.model_fields
+    assert fields["expected_account_id"].is_required()
+    assert fields["tenant_id"].is_required()
+    assert "endpoint_id" not in fields
+    # ``router.routes`` is typed as ``BaseRoute``, which has no ``path``; only
+    # APIRoute does (the same narrowing ``test_desktop_controls`` uses). The
+    # comprehension is filtered rather than ``# type: ignore``-d so CI's
+    # type-check stays honest about it (QA round 1, Q1).
+    paths = {
+        route.path for route in desktop_team_bridge.router.routes if isinstance(route, APIRoute)
+    }
+    assert "/v1/desktop/team-bridge/conversations/{conversation_id}/agent-notify" in paths

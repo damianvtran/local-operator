@@ -14,6 +14,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import pytest
+
 from local_operator.session import open_frame as of
 from local_operator.session.transcript_index import (
     Checkpoint,
@@ -487,3 +489,64 @@ def test_a_harness_chrome_user_row_is_neither_paintable_nor_a_run_head() -> None
     ]
     # A plain user row is still the run head.
     assert of.is_user_row(message("u3", "user")) is True
+
+
+def _memo_rows() -> list[dict[str, Any]]:
+    """Every strip outcome in one page: dropped custom, kept, user, chrome, compaction."""
+    return [
+        custom("c0", "checkpoint"),
+        message("u1", "user"),
+        message("a1", "assistant", provider_payload={"native_replay": "x", "details": {"k": 1}}),
+        row("cp", "compaction", {"summary": "long summary " * 10, "tokens_before": 9}),
+        message("u2", "user"),
+        message("a2", "assistant", usage={"in": 1}),
+        message("a3", "assistant"),
+    ]
+
+
+def test_a_strip_memo_returns_the_plain_strip_and_strips_each_row_once(monkeypatch: Any) -> None:
+    """``StripMemo`` is a cache, never a second rule: every helper answers exactly
+    what it answers without one, and a row is stripped once however many cuts read
+    it (openframe-cpu: ~1,310 strips for ~200 rows per open before the memo)."""
+    rows = _memo_rows()
+    plain_kept, plain_reached = of.align_page(rows, 3, extra_rows=2)
+    plain_paintable = of.paintable(rows)
+    plain_frame = of.build_frame(plain_kept, has_more=True)
+
+    calls: list[str] = []
+    real = of.strip_entry
+
+    def counted(entry: Any, *, supplements: bool = False) -> Any:
+        calls.append(str(entry.get("id")))
+        return real(entry, supplements=supplements)
+
+    monkeypatch.setattr(of, "strip_entry", counted)
+    memo = of.StripMemo()
+    kept, reached = of.align_page(rows, 3, extra_rows=2, memo=memo)
+    for _ in range(2):  # the hunt re-cuts the whole page on every attempt
+        assert of.align_page(rows, 3, extra_rows=2, memo=memo) == (kept, reached)
+        assert of.paintable(rows, memo=memo) == plain_paintable
+    frame = of.build_frame(kept, has_more=True, memo=memo)
+    assert (kept, reached) == (plain_kept, plain_reached)
+    assert json.dumps(frame.entries) == json.dumps(plain_frame.entries)
+    assert (frame.dropped_rows, frame.raw_rows) == (plain_frame.dropped_rows, plain_frame.raw_rows)
+    assert sorted(calls) == sorted(str(r["id"]) for r in rows)
+
+
+def test_a_strip_memo_keys_by_identity_not_equality() -> None:
+    """An equal but distinct row is stripped anew, so a recycled ``id()`` or a
+    look-alike row can never be served another row's answer."""
+    memo = of.StripMemo()
+    first = message("u1", "user")
+    twin = message("u1", "user")
+    assert memo(first) is memo(first)
+    assert memo(twin) == memo(first)
+    assert memo(twin) is not memo(first)
+
+
+def test_a_strip_memo_refuses_the_other_supplements_value() -> None:
+    """The strip's answer depends on ``supplements``; a memo built for one value
+    would serve its rows for the other, so the helpers refuse the mismatch."""
+    memo = of.StripMemo(supplements=False)
+    with pytest.raises(ValueError):
+        of.paintable(_memo_rows(), supplements=True, memo=memo)

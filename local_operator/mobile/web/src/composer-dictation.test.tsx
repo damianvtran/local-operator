@@ -19,6 +19,7 @@ vi.mock("./api", async (importOriginal) => {
 	return {
 		...actual,
 		getCommands: vi.fn(async () => ({ commands: [] })),
+		getSkills: vi.fn(async () => ({ skills: [] })),
 		getModels: vi.fn(async () => ({ models: [] })),
 		sendCommand: vi.fn(async (_sessionId: string, _op: Record<string, unknown>) => ({
 			ok: true,

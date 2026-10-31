@@ -1218,6 +1218,49 @@ def _anthropic_bucket(value: Any) -> tuple[float, int | None] | None:
     return utilization, _parse_iso_ms(value.get("resets_at"))
 
 
+def _anthropic_live_five_hour(
+    bucket: tuple[float, int | None] | None,
+) -> tuple[float, int | None] | None:
+    """The five-hour bucket, or ``None`` when it describes no running window.
+
+    Anthropic removed the five-hour window for verified Ultra accounts
+    (support.claude.com/en/articles/17728952; payload measured 2026-10-30),
+    but the usage endpoint did not drop the key: measured live on verified
+    Ultra accounts it
+    still sends ``five_hour: {"utilization": 0.0, "resets_at": null, ...}`` and
+    a ``limits[]`` ``session`` entry at ``percent: 0`` with ``resets_at: null``
+    and ``is_active: false``. The payload carries no plan, tier or verification
+    field to key on, and the Help Center's own rule is visual — "no Current
+    session bar means verified" — so the shape itself is the signal: zero
+    utilization AND no reset is "not reported".
+
+    Rendering that bucket as a "5 hour 0%" row shows a window that does not
+    exist, and worse, a measured window with no reset makes
+    ``account_policy.reset_candidate`` call a stale report "unknown" instead of
+    letting the exhausted weekly window bind — so failover could re-pick a
+    weekly-depleted account.
+
+    Tradeoff: an idle Max (or unverified Ultra) account, whose window has not
+    started yet, reports the same 0%/no-reset shape and loses its 0% row until
+    a request opens the window. That row carried no constraint information —
+    nothing used, nothing to wait for. Non-zero utilization is always kept,
+    even without a reset, and so is any bucket that names a reset.
+
+    Edge consequence: a payload whose ONLY window is the idle five-hour bucket
+    (no weekly, model-scoped or extra-usage data) now yields no report at all —
+    ``/usage`` shows the account as unavailable and ``reset_candidate`` reads
+    it as ``unknown`` rather than ``healthy``. Accepted because no current plan
+    sends that shape, ``unknown`` still routes through the neutral tie pool,
+    and a 0%/no-reset bucket proves no headroom anyway.
+    """
+    if bucket is None:
+        return None
+    utilization, resets_at_ms = bucket
+    if utilization == 0 and resets_at_ms is None:
+        return None
+    return bucket
+
+
 def _anthropic_limit(
     limit_id: str,
     label: str,
@@ -1418,7 +1461,8 @@ def _anthropic_notes(payload: dict[str, Any]) -> str | None:
 
 
 async def fetch_anthropic_oauth(client: httpx.AsyncClient, access_token: str) -> UsageReport | None:
-    """Anthropic subscription usage (5h / 7d windows, model-scoped tiers).
+    """Anthropic subscription usage (7d windows, model-scoped tiers, and the
+    5h window where the account reports one).
 
     The response reports each window as a ``utilization`` PERCENT inside a
     ``{"utilization": ..., "resets_at": ...}`` bucket. This fetcher previously
@@ -1433,6 +1477,13 @@ async def fetch_anthropic_oauth(client: httpx.AsyncClient, access_token: str) ->
     ``seven_day``, so they are a FALLBACK for when the named buckets are absent
     rather than extra rows — reading both unconditionally listed every window
     twice.
+
+    The five-hour window is not universal: verified Ultra accounts have none,
+    and the endpoint reports that as an idle 0%/no-reset bucket rather than
+    omitting it (see ``_anthropic_live_five_hour``), so no ``anthropic:5h`` row
+    is emitted for it. An idle Max or unverified-Ultra account, whose window
+    has not started yet, sends the same shape and likewise gets no row, so a
+    missing ``anthropic:5h`` row does not by itself mean verified Ultra.
     """
     payload = await _get_json(client, ANTHROPIC_USAGE_URL, _bearer(access_token))
     if payload is None:
@@ -1450,7 +1501,12 @@ async def fetch_anthropic_oauth(client: httpx.AsyncClient, access_token: str) ->
                 continue
             by_kind[kind] = (percent, _parse_iso_ms(item.get("resets_at")))
 
-    five_hour = _anthropic_bucket(payload.get("five_hour")) or by_kind.get("session")
+    # Filter both sources: a verified Ultra account reports the idle shape in
+    # ``five_hour`` AND in the ``session`` entry, so falling back unfiltered
+    # would resurrect the row the bucket check just dropped.
+    five_hour = _anthropic_live_five_hour(
+        _anthropic_bucket(payload.get("five_hour"))
+    ) or _anthropic_live_five_hour(by_kind.get("session"))
     seven_day = _anthropic_bucket(payload.get("seven_day")) or by_kind.get("weekly_all")
 
     candidates = [

@@ -418,6 +418,11 @@ SCRATCHPAD_REFUSED_SEGMENTS: frozenset[str] = frozenset(
         "DerivedData",
         ".terraform",
         ".lake",
+        # Go's build cache has no hyphen-qualified spelling when a task points
+        # GOCACHE at a pad-local directory (`GOCACHE=$PAD/.gocache`); the
+        # `go-build`/`go-cache` spellings are already caught by the suffix rule.
+        ".gocache",
+        "gocache",
         ".git",
     }
 )

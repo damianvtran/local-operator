@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING, Any, Final, Literal, cast
 from anyio import CancelScope
 from fastapi import HTTPException
 
+from local_operator.agent_avatar import session_row_fields
 from local_operator.harness.jobs import TRAJECTORY_SEQ_KEY
 
 # The row-visibility predicate lives in ``harness/rows.py`` beside the three row
@@ -129,6 +130,7 @@ from local_operator.session.open_frame import (
     OPEN_FRAME_MAX_RAW_PAGES,
     OPEN_FRAME_MAX_ROWS,
     OPEN_FRAME_SNAPSHOT_BUDGET_S,
+    StripMemo,
     align_page,
     build_frame,
     late_index_stop,
@@ -4089,7 +4091,7 @@ class DesktopSessionBridge:
                     "runs_state": "unsupported",
                     "head_cut": False,
                 }
-            anchored = self._wire_rows(page.entries)
+            anchored = self._wire_rows(page.entries, copy=False)
             anchored_index = await self._frame_source(deadline, [page])
             anchored_index, facts = await self._resolve_frame_source(
                 anchored_index, anchored, [page], order_ids or [], False, deadline
@@ -4097,6 +4099,7 @@ class DesktopSessionBridge:
             result = build_frame(
                 anchored,
                 supplements=supplements,
+                memo=StripMemo(supplements=supplements),
                 index=anchored_index,
                 resolved_runs=facts.runs if facts is not None else None,
                 runs_state="building",
@@ -4152,6 +4155,12 @@ class DesktopSessionBridge:
         page_rows: list[tuple[int, bool]] = []
         index_at_first_page = False
         tail_read = before_id is None and through_id is None and around_id is None
+        # ONE STRIP PER ROW PER OPEN (``open_frame.StripMemo``): the hunt below
+        # re-cuts the whole of ``collected`` on every attempt and the final cut
+        # strips it twice more. Safe because every row here is this request's own
+        # row object built by ``_wire_rows`` (its payload may be shared with the
+        # page cache, but the memo keys the request's own envelope dict).
+        strip_memo = StripMemo(supplements=supplements)
         for attempt in range(OPEN_FRAME_MAX_RAW_PAGES):
             try:
                 page = await load_transcript_page(
@@ -4191,16 +4200,16 @@ class DesktopSessionBridge:
                 cursor_missing = page.reconciled
             has_more = page.has_more
             order_pages.append(page)
-            rows = self._wire_rows(page.entries)
+            rows = self._wire_rows(page.entries, copy=False)
             if not rows:
                 break
             collected = rows + collected
             page_rows.append((len(rows), page.has_more))
             if not collected:
                 break
-            kept, reached = align_page(collected, limit, supplements=supplements)
-            paintable_rows = paintable(collected, supplements=supplements)
-            if reached and len(paintable(kept, supplements=supplements)) >= limit:
+            kept, reached = align_page(collected, limit, supplements=supplements, memo=strip_memo)
+            paintable_rows = paintable(collected, supplements=supplements, memo=strip_memo)
+            if reached and len(paintable(kept, supplements=supplements, memo=strip_memo)) >= limit:
                 break
             # THE INDEX IS FETCHED AFTER THE FIRST PAGE, DELIBERATELY: the page is
             # what the client asked for and it must not wait behind a scan, while
@@ -4264,6 +4273,7 @@ class DesktopSessionBridge:
                     index=index,
                     limit=limit,
                     supplements=supplements,
+                    memo=strip_memo,
                 )
                 if stop is not None and stop < len(page_rows):
                     collected = collected[-sum(rows for rows, _more in page_rows[:stop]) :]
@@ -4279,10 +4289,11 @@ class DesktopSessionBridge:
         index, facts = await self._resolve_frame_source(
             index, collected, order_pages, order_ids or [], tail_read, deadline
         )
-        kept, reached = align_page(collected, limit, supplements=supplements)
+        kept, reached = align_page(collected, limit, supplements=supplements, memo=strip_memo)
         result = build_frame(
             kept,
             supplements=supplements,
+            memo=strip_memo,
             index=index,
             resolved_runs=facts.runs if facts is not None else None,
             runs_state="building",
@@ -4328,7 +4339,7 @@ class DesktopSessionBridge:
         )
 
     @staticmethod
-    def _wire_rows(entries: Any) -> list[dict[str, Any]]:
+    def _wire_rows(entries: Any, *, copy: bool = True) -> list[dict[str, Any]]:
         """Journal rows as the wire states them, oldest first.
 
         THE ONE SPELLING of a local row on this plane: the same
@@ -4336,6 +4347,16 @@ class DesktopSessionBridge:
         every other local read carries, filtered by the same
         :func:`visible_transcript_rows` predicate. A second reader would be a
         second vocabulary for one screen.
+
+        ``copy=False`` IS FOR THE OPEN FRAME ONLY, and it hands back rows whose
+        payloads ARE the shared page-cache objects. Its one caller strips those
+        rows (``open_frame.strip_entry`` takes a ``dict(payload)`` before it
+        touches a key) and deep-copies only the rows it serves, in
+        :meth:`_frame_answer`. Why (openframe-cpu, 2026-10-31): copying the whole
+        raw page here was 4.6 ms of a ~9 ms warm open on a 36 MB journal, because
+        a ``limit=100`` open reads 200 raw rows (2.3 MB) and the strip then drops
+        most of those bytes — checkpoint, compaction and replay material nobody
+        paints. A caller that edits a row in place must keep the default.
         """
         return visible_transcript_rows(
             [
@@ -4343,7 +4364,7 @@ class DesktopSessionBridge:
                     "id": entry.id,
                     "ts": entry.ts,
                     "type": entry.type,
-                    "payload": _json_copy(entry.payload),
+                    "payload": _json_copy(entry.payload) if copy else entry.payload,
                     "ts_source": "entry",
                 }
                 for entry in entries
@@ -4542,8 +4563,11 @@ class DesktopSessionBridge:
         THE SAME SINGLEFLIGHT the ``building`` branch calls from inside
         :meth:`_journal_page` (``_order_correction``): a refresh already in flight
         is joined rather than started again, and one that has already landed is
-        left alone — ``fresh_resident`` answers that from the cache's own entry,
-        so the ordinary case costs a dict lookup and no stats. Nothing is awaited:
+        left alone — ``fresh_resident`` answers that from its own dict, and the
+        two branches are not the same thing: the lookup alone is paid only when
+        the dict holds no entry, while a PRESENT entry pays the two ``stat``
+        calls whether it is fresh (returned) or stale (still ``None``). It never
+        scans. Nothing is awaited:
         this request's page is already complete, and the point of arming the scan
         is the NEXT request, which then answers from the resident join instead of
         reopening the companion.
@@ -4951,9 +4975,18 @@ class DesktopSessionBridge:
         return candidate
 
     def _frame_answer(self, result: Any) -> dict[str, Any]:
-        """The frame's page as the wire states it, in the existing envelope."""
+        """The frame's page as the wire states it, in the existing envelope.
+
+        THE ONE COPY OF THE OPEN FRAME. Its rows come from ``_wire_rows(...,
+        copy=False)``, so a stripped row's nested values (content blocks,
+        ``details``, tool arguments) are still the page cache's shared objects.
+        Copying the SERVED rows here — ``limit`` of them, already stripped —
+        restores the never-alias guarantee for everything that leaves the frame,
+        at a fraction of copying the raw page. ``_json_copy`` equals the JSON
+        round trip, so the bytes cannot differ from the copy-first order.
+        """
         return {
-            "entries": result.entries,
+            "entries": [_json_copy(entry) for entry in result.entries],
             "has_more": result.has_more,
             "cursor_missing": result.cursor_missing,
             "has_newer": result.has_newer,
@@ -9190,6 +9223,8 @@ class DesktopSessions:
                             "agent": stored.agent or None if stored else None,
                             "team": stored.team or None if stored else None,
                         },
+                        # Picture identity for the row (see ``SessionRow.agent_id``).
+                        **session_row_fields(self.root, entry.id, stored.agent if stored else ""),
                         "preview": session_preview(self.root / "sessions" / entry.id),
                         # WHEN THE PERSON LAST SENT THIS SESSION A MESSAGE, for
                         # the Running section's order — and computed ONLY for

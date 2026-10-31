@@ -1,0 +1,15 @@
+import os, sys, io
+sys.path.insert(0, os.getcwd())
+from rich.cells import cell_len
+from rich.console import Console
+from local_operator.i18n import text
+from local_operator.tui.widgets.goal_panel import build_goal_body
+GOAL="Migrar el servicio de pagos al nuevo proveedor y verificar cada cobro con el equipo de finanzas antes del cierre trimestral del año " * 2
+for loc in ("en","es"):
+    text.set_active_locale(loc)
+    for cw in (66,76):   # content width = panel width - 4; 66 is the 80-col card
+        t=build_goal_body(goal=GOAL,status="done",judge=None,history=[],width=cw,cap=3,actions=True,max_rows=0)
+        row=[l for l in t.plain.split("\n") if l.startswith("▌")][0]
+        buf=io.StringIO(); Console(file=buf,width=cw,color_system=None,force_terminal=False,highlight=False).print(row,end="")
+        lines=buf.getvalue().split("\n")
+        print(f"{loc} content_width={cw} goal_row={cell_len(row)} cells painted_lines={len(lines)} last={lines[-1]!r}")

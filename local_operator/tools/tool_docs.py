@@ -212,7 +212,10 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             "``/agent promote <name>`` verb, which the user must run "
             "themselves; there is no retry through this tool. An account name "
             "collision is refused: pass ``confirm_replace`` only when the user "
-            "asked to overwrite it."
+            "asked to overwrite it.\n"
+            "- PICTURES: set/remove/show through ``bash`` "
+            "(``lop agents picture <verb> --help``); the server re-crops and strips "
+            "metadata. Refusals exit 1 with a reason word."
         ),
     ),
     # -- team ---------------------------------------------------------------
@@ -379,6 +382,14 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
                 ),
             ),
             ToolDocOp(op="network_clear", blurb="Drop the buffer."),
+            ToolDocOp(
+                op="record_start",
+                blurb="Record THIS tab's video to an .mp4 (desktop host only; see notes).",
+            ),
+            ToolDocOp(
+                op="record_stop",
+                blurb="Stop and save the recording; returns its path and size.",
+            ),
             ToolDocOp(op="recover", blurb="Recover YOUR tab."),
             ToolDocOp(op="retain", blurb="Hold it."),
             ToolDocOp(op="release", blurb="End that hold."),
@@ -404,6 +415,10 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             "'network_start' then read with 'network_read'. Bodies are opt-in "
             "per exact origin+path and land in a private session file, never in "
             "this transcript.\n"
+            "- 'record_start'/'record_stop' make an MP4 of this tab (AV1: plays "
+            "in QuickTime; not expected in Chrome's <video>); path= is approved before "
+            "capture and never overwritten, timeout_s= caps the length. Desktop "
+            "host only.\n"
             "- Hosts, setup, approvals, error meanings: ``guide://browser``."
         ),
     ),

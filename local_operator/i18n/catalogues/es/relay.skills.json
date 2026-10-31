@@ -1,0 +1,6 @@
+{
+  "relay.skills.tray.label": "Habilidades",
+  "relay.skills.tray.hidden": "oculta",
+  "relay.skills.skipped": "Enviado sin {names} — {count, plural, one {esa habilidad no tiene contenido que adjuntar} many {esas habilidades no tienen contenido que adjuntar} other {esas habilidades no tienen contenido que adjuntar}}.",
+  "relay.skills.too_large": "Estas habilidades son demasiado grandes para enviarlas juntas. Quita una habilidad y envía de nuevo."
+}

@@ -939,6 +939,165 @@
     },
     {
       "locale": "ur",
+      "namespace": "relay.skills",
+      "source_sha256": "604fa70ae72093282d048c4ca98d92ff825472c63b52bda9761dd7709cbd8e24",
+      "translator": {
+        "agent": "coder (lopdev mobile-web-skill-picker session 2f4ba11bb797)",
+        "model": "radient/auto",
+        "date": "2026-10-30"
+      },
+      "auditor": {
+        "agent": "codex (independent i18n audit via codex MCP; separate agent/model and context from the translator)",
+        "model": "codex default",
+        "date": "2026-10-30",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Skill picker copy (SKM-D6): three keys — relay.skills.tray.label, relay.skills.tray.hidden, relay.skills.skipped. Independent audit via the codex MCP (a separate agent and model from the translator, read-only on the checkout; thread 01a18d8c-4112-7e23-b40b-42272a8059e3): round 1 returned FAIL with 5 findings, all applied verbatim — fr typographic apostrophes; zh-CN spacing around {names}, dash and the count-1 plural; hi and ur attachment direction; vi's `other`-only plural. Round 2 on the corrected bytes: PASS for all seven locales, 0 findings. Terms follow the glossary's skill row (compétence, habilidad, 技能, навык, कौशल, مہارت, kỹ năng); placeholders and plural categories preserved per locale."
+    },
+    {
+      "locale": "ur",
+      "namespace": "relay.skills",
+      "source_sha256": "3d4b4e8746f8379501cc3542dfc1fa3b48494467054f5f5ee8789bde4abcb89e",
+      "translator": {
+        "agent": "coder (lopdev mobile-web-skill-picker session a3b59b458d0d)",
+        "model": "radient/auto",
+        "date": "2026-10-30"
+      },
+      "auditor": {
+        "agent": "codex (independent i18n audit via the codex CLI; separate agent/model and context from the translator)",
+        "model": "gpt-5.6-sol",
+        "date": "2026-10-30",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Skill picker copy (SKM-D6 + round-1 remediation U6): the namespace now carries four keys — relay.skills.tray.label, relay.skills.tray.hidden, relay.skills.skipped and the new relay.skills.too_large. The three existing keys are byte-identical to the bytes audited in the earlier round; the new key is the 422 `skills_too_large` refusal, which replaces a generic retry line with the cause (the skills together exceed the relay's body budget) and the remedy (remove one, send again). Independent audit this round via the codex CLI/MCP (separate agent and model from the translator, read-only on the checkout, gpt-5.6-sol, session 01a18ddc-d8ec-75a2-916d-049305cbbc6c): PASS for all seven locales, 0 findings, with a byte check (no BOM, no trailing space, no ICU braces, NFC). Terms follow the glossary's skill row (compétence, habilidad, 技能, навык, कौशल, مہارت, kỹ năng); register follows each style guide (tú / vous / 你 / вы / आप / آپ / bạn)."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "97aa224ed22d209a8eb84860bea6694f5c47fc531887d80270cbb1eee71e74fe",
+      "translator": {
+        "agent": "coder (radientdev) — PR #3189 implementer",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-30"
+      },
+      "auditor": {
+        "agent": "translation-auditor (radientdev, i18n-audit-3189), independent of the translator",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback)",
+        "date": "2026-10-30",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent audit of PR #3189 (team-bridge screening status line) at source_sha256 97aa224ed22d209a8eb84860bea6694f5c47fc531887d80270cbb1eee71e74fe (verified with catalogues.catalogue_sha256 and a raw sha256 of en/cli.team_bridge.json). Copy change: 8 keys added (status.screening, screening_healthy, screening_held, screening_held_class, screening_held_none, screening_breaker, screening_rejected, screening_rejected_none); 0 deleted, 0 updated. The whole carried namespace (53 keys) was read against the English source. Mechanical checks: key parity 53/53; every placeholder and select arm survives in all locales (2226 sentinel renders through messages.render, 0 lost or extra); plural arms rendered at counts 0/1/2/3/5/11/21/22/1000000; no Cf/bidi control characters; NFC. Translator and auditor are distinct agents in separate contexts; both run the same model family (disclosed). ur: clean, 0 findings. one/other present; Urdu ؛ used, Latin tokens ({codes}, {age}, {failure_class}) left as LTR islands with no manual bidi controls, per the RTL guide (render-layer isolation is the TUI's job). آپ register not exercised. Unresolved blocker/major: 0."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "1eee3ff395d8a346dee9574283af593c36a0953c4798db0077446e1903770707",
+      "translator": {
+        "agent": "coder (lopdev) — PR #3198 implementer",
+        "model": "unrecorded — PR #3198 does not name the implementer's model; not inferred",
+        "date": "2026-10-30"
+      },
+      "auditor": {
+        "agent": "task (lopdev, i18n-audit-3198, session 709e5957cc3c), independent of the translator",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback)",
+        "date": "2026-10-30",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent audit of PR #3198 (team-bridge probe_suspected owner notification) at source_sha256 1eee3ff395d8a346dee9574283af593c36a0953c4798db0077446e1903770707 (catalogue_sha256 and raw sha256 agree). Copy change: 2 keys added (notify.probe_suspected_title, notify.probe_suspected_body); 0 deleted, 0 updated; the other 53 keys are unchanged since the PR #3189 passed row and were not re-audited. Checked against the en context notes: same sender, last day, possibly across conversations; testing what the agent accepts; sender no longer told why; no claim the sender was notified/blocked; no conversation named. Mechanical: key parity 55/55; no placeholders; NFC; no Cf/bidi controls; rendered through messages.render after regeneration. Translator (PR #3198 coder) and auditor are distinct agents in separate sessions, same model family (disclosed). ur: 1 minor, fixed: title prefix 'ایجنٹ پیغامات' differed from the namespace product name 'ایجنٹ کے پیغامات'; aligned. Body accurate; no bidi controls (RTL ordering left to paint boundary). Unresolved blocker/major: 0. Evidence: i18n/audits/evidence/ur/cli.team_bridge/tbp3198/record.json"
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.tool_rows.bridge",
+      "source_sha256": "58e76cb3bf5872c644ad83502f9efd0e5ca304d738cfe5f430c6a04ca192ef1c",
+      "target_sha256": "df49edd0a9ad8443c16163ead4b58fb7079adce319322c8c498a0e714617405f",
+      "translator": {
+        "agent": "translator agents for PR #3203 (round 1 + delta round 2), separate from this auditor",
+        "model": "radient/auto (round 1, fallback); anthropic/claude-opus-5-5 (delta round 2)",
+        "date": "2026-10-30"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team, audit-ur, session 02f137cfd65f), independent of the translators",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback)",
+        "date": "2026-10-30",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent audit (PR #3203, Team Bridge tool rows) at source_sha256 58e76cb3bf5872c644ad83502f9efd0e5ca304d738cfe5f430c6a04ca192ef1c (catalogues.catalogue_sha256 and raw sha256 agree); target_sha256 df49edd0a9ad8443c16163ead4b58fb7079adce319322c8c498a0e714617405f is the post-fix ur file. All 85 keys read against en + context sidecar. Mechanical: key parity 85/85; 109 sentinel renders through the ICU runtime (i18n._runtime.render_message, locale ur — public render() coerces ur->en on this branch because shipped.json is en-only until regeneration), counts 0/1/2/3/5/11/21/22/1000000, 0 placeholders lost/extra; no Cf/bidi controls; NFC; outcome cells 5-23/32, short 5-9/14 (rich cell_len). Findings, all fixed in this commit (auditor-applied, 0 unresolved): UR-W1 MAJOR accept/approval collision — outcome.awaiting_acceptance «منظوری کا انتظار» and expanded.awaiting_acceptance «منظوری دینی» reused منظوری, the glossary approvals term (pending tool approvals); now «قبولیت کا انتظار» / «قبول کرنا ہو گا», matching ui.teamBridge.invitations.accept «قبول کریں». UR-W2 MINOR expanded.dm_headline «{label} کو ڈی ایم» -> «{label} کو براہ راست پیغام»: the Team Bridge UI names DMs براہ راست پیغام (ui.teamBridge.kind.dm); headline has room for the full form, the bare row fallbacks keep ڈی ایم. UR-W3 MINOR refused family «رد کر دیا گیا» -> «مسترد» (outcome.refused, expanded.refused*, 5 keys): the ur catalogues' settled refusal word is مسترد (ui.agents hub refusals, relay.approvals); 13 -> 5 cells on the status slot. Not findings: target.person «ایک ساتھی ایجنٹ» (sidecar: an agent teammate) accepted; count.conversations is a bare number by design. Translators: round 1 radient/auto, delta round 2 anthropic/claude-opus-5-5; auditor same model family, separate agent/context (disclosed)."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.errors.agent_avatar",
+      "source_sha256": "8bae15be1b460c96a9834816d9f5f40f2a409ae174c884ab905dc4d1587afacc",
+      "translator": {
+        "agent": "coder (lopdev implementer of feat/agent-avatar-core; core-avatar session 799ad130e6c0) — author of the translations and of the round-2 remediation",
+        "model": "radient/auto",
+        "date": "2026-10-30"
+      },
+      "auditor": {
+        "agent": "reviewer (independent i18n-auditor, lopdev session 941823209281, label i18n-audit-core) — auditor is independent of the translator: separate session, separate context, and it did not author or edit any copy",
+        "model": "radient/auto (actual model of the run; provider fallback chain anthropic/claude-opus-5-5 -> openai/gpt-6-astra -> kimi/k3.1-pro -> radient/auto, disclosed rather than pinned)",
+        "date": "2026-10-30",
+        "result": "passed",
+        "findings": 2,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent i18n audit of the agent-avatar wave (wire.errors.agent_avatar) at en source_sha256 8bae15be1b460c96a9834816d9f5f40f2a409ae174c884ab905dc4d1587afacc, round 2 at head 1fb179bafd1. Auditor is independent of the translator. Independent audit, round 2 at head 1fb179bafd1 (en source_sha256 verified with catalogues.catalogue_sha256). Mechanical, re-derived this round: key parity vs en (7/7 wire.errors.agent_avatar, 11/11 cli.agents_picture, 3/3 relay.agent_avatar); placeholder name+kind identical to en and every message rendered through local_operator.i18n.runtime.render_message with sentinel arguments (0 lost, 0 added); no value byte-identical to en, so no key is left in English; no ICU plural/select, and none is required (the only counts are {bytes}, where a stored picture can never be 0 or 1 bytes, and the fixed {limit_mib}=10 / {limit_mp}=40 caps), so every locale's CLDR category set is satisfied vacuously; NFC, no BOM, no trailing space, no Cf/bidi control characters (per-string RTL isolation stays the render layer's job, per the ur guide). Locale verdict: 2 MINOR, 1 NIT. تصویر is the picture term across all three namespaces and matches the cli/relay copy. Remaining, non-gating: 'extra' transliterated ایکسٹرا where the glossary keeps it Latin and ur's shipped copy reads [fetch] extra; 'امیج سپورٹ' appears only here as a loan beside تصویر (minor); too_many_pixels '{limit_mp} میگاپکسل سے کم کی تصویر' wants 'سے کم تصویر' (NIT). Urdu punctuation ۔ ، is correct and no manual bidi controls are present. Round-2 scope: the remediation diff 8f64c072385..1fb179bafd1 (hi/ur cli.agents_picture remove.none, vi cli.agents_picture and vi wire.errors.agent_avatar agent term) plus its direct neighbours; the copy this row covers was re-read at the current bytes and the unchanged namespaces it borders keep their byte-identical audit. Translator and auditor are distinct agents in separate sessions; both ran the radient/auto route after provider quota fallbacks (disclosed, not pinned). Unresolved blocker/major: 0."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.agents_picture",
+      "source_sha256": "389d0125d15d11c2ea9aecceb53aec81be87e82ef3f1d249916677576bf80fc5",
+      "translator": {
+        "agent": "coder (lopdev implementer of feat/agent-avatar-core; core-avatar session 799ad130e6c0) — author of the translations and of the round-2 remediation",
+        "model": "radient/auto",
+        "date": "2026-10-30"
+      },
+      "auditor": {
+        "agent": "reviewer (independent i18n-auditor, lopdev session 941823209281, label i18n-audit-core) — auditor is independent of the translator: separate session, separate context, and it did not author or edit any copy",
+        "model": "radient/auto (actual model of the run; provider fallback chain anthropic/claude-opus-5-5 -> openai/gpt-6-astra -> kimi/k3.1-pro -> radient/auto, disclosed rather than pinned)",
+        "date": "2026-10-30",
+        "result": "passed",
+        "findings": 2,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent i18n audit of the agent-avatar wave (cli.agents_picture) at en source_sha256 389d0125d15d11c2ea9aecceb53aec81be87e82ef3f1d249916677576bf80fc5, round 2 at head 1fb179bafd1. Auditor is independent of the translator. Independent audit, round 2 at head 1fb179bafd1 (en source_sha256 verified with catalogues.catalogue_sha256). Mechanical, re-derived this round: key parity vs en (7/7 wire.errors.agent_avatar, 11/11 cli.agents_picture, 3/3 relay.agent_avatar); placeholder name+kind identical to en and every message rendered through local_operator.i18n.runtime.render_message with sentinel arguments (0 lost, 0 added); no value byte-identical to en, so no key is left in English; no ICU plural/select, and none is required (the only counts are {bytes}, where a stored picture can never be 0 or 1 bytes, and the fixed {limit_mib}=10 / {limit_mp}=40 caps), so every locale's CLDR category set is satisfied vacuously; NFC, no BOM, no trailing space, no Cf/bidi control characters (per-string RTL isolation stays the render layer's job, per the ur guide). Locale verdict: 2 MINOR, 1 NIT. The round-1 MAJOR is fixed: remove.none now reads '{agent} کے پاس ہٹانے کے لیے کوئی تصویر نہیں ہے۔' (corpus idiom). Remaining, non-gating: 'extra'-class loan ایکسٹرا does not occur here, but help.set introduces 'امیج فائل' beside تصویر elsewhere (minor); error.read_file 'پڑھی نہیں جا سکی' agrees with فائل but not with the masculine پاتھ used in help.file (NIT). All placeholders and the JSON literal preserved. Round-2 scope: the remediation diff 8f64c072385..1fb179bafd1 (hi/ur cli.agents_picture remove.none, vi cli.agents_picture and vi wire.errors.agent_avatar agent term) plus its direct neighbours; the copy this row covers was re-read at the current bytes and the unchanged namespaces it borders keep their byte-identical audit. Translator and auditor are distinct agents in separate sessions; both ran the radient/auto route after provider quota fallbacks (disclosed, not pinned). Unresolved blocker/major: 0."
+    },
+    {
+      "locale": "ur",
+      "namespace": "relay.agent_avatar",
+      "source_sha256": "6f48f15eeebb9e81bb36f607188f4e517b906149015f076eaaed93d5d00810fe",
+      "translator": {
+        "agent": "coder (lopdev implementer of feat/agent-avatar-core; core-avatar session 799ad130e6c0) — author of the translations and of the round-2 remediation",
+        "model": "radient/auto",
+        "date": "2026-10-30"
+      },
+      "auditor": {
+        "agent": "reviewer (independent i18n-auditor, lopdev session 941823209281, label i18n-audit-core) — auditor is independent of the translator: separate session, separate context, and it did not author or edit any copy",
+        "model": "radient/auto (actual model of the run; provider fallback chain anthropic/claude-opus-5-5 -> openai/gpt-6-astra -> kimi/k3.1-pro -> radient/auto, disclosed rather than pinned)",
+        "date": "2026-10-30",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent i18n audit of the agent-avatar wave (relay.agent_avatar) at en source_sha256 6f48f15eeebb9e81bb36f607188f4e517b906149015f076eaaed93d5d00810fe, round 2 at head 1fb179bafd1. Auditor is independent of the translator. Independent audit, round 2 at head 1fb179bafd1 (en source_sha256 verified with catalogues.catalogue_sha256). Mechanical, re-derived this round: key parity vs en (7/7 wire.errors.agent_avatar, 11/11 cli.agents_picture, 3/3 relay.agent_avatar); placeholder name+kind identical to en and every message rendered through local_operator.i18n.runtime.render_message with sentinel arguments (0 lost, 0 added); no value byte-identical to en, so no key is left in English; no ICU plural/select, and none is required (the only counts are {bytes}, where a stored picture can never be 0 or 1 bytes, and the fixed {limit_mib}=10 / {limit_mp}=40 caps), so every locale's CLDR category set is satisfied vacuously; NFC, no BOM, no trailing space, no Cf/bidi control characters (per-string RTL isolation stays the render layer's job, per the ur guide). Locale verdict: clean. 0 findings. تصویر is the picture term; alt 15 / change 26 / desktop_hint 36 cells against maxCells 48, all fit; imperative forms with no trailing period, matching the en source. Round-2 scope: the remediation diff 8f64c072385..1fb179bafd1 (hi/ur cli.agents_picture remove.none, vi cli.agents_picture and vi wire.errors.agent_avatar agent term) plus its direct neighbours; the copy this row covers was re-read at the current bytes and the unchanged namespaces it borders keep their byte-identical audit. Translator and auditor are distinct agents in separate sessions; both ran the radient/auto route after provider quota fallbacks (disclosed, not pinned). Unresolved blocker/major: 0."
+    },
+    {
+      "locale": "ur",
       "namespace": "wire.settings",
       "source_sha256": "94431b0e1cd4c2c8f842dfb1010386b0eda90d79b207cce748620d48414c6590",
       "translator": {

@@ -18,6 +18,14 @@
   "cli.team_bridge.status.linger": "注销后继续运行：{state, select, yes{是（已开启lingering）} other{否——如需在注销后继续运行，执行：{command}}}",
   "cli.team_bridge.status.isolated_note": "此配置文件夹不是默认文件夹，因此不会为其安装共享接收器服务，也不会有会话自动接收它的智能体消息。要接收此文件夹的消息，需自行运行接收器：{command}",
   "cli.team_bridge.status.no_supervisor_note": "改为在前台运行接收器：{command}",
+  "cli.team_bridge.status.screening": "筛查：{held} · {breaker} · {rejected}",
+  "cli.team_bridge.status.screening_healthy": "筛查：过去24小时内没有被暂扣或拒绝的消息 · 熔断器已闭合",
+  "cli.team_bridge.status.screening_held": "{count, plural, other {#条暂扣}}（{codes}；最早一条已等待{age}）",
+  "cli.team_bridge.status.screening_held_class": "{count, plural, other {#条暂扣}}（{codes}；最早一条已等待{age}；主要原因{failure_class}）",
+  "cli.team_bridge.status.screening_held_none": "无暂扣消息",
+  "cli.team_bridge.status.screening_breaker": "熔断器{state, select, open{已断开，还需{remaining}（{failures, plural, other {#次失败}}）} failing{已闭合（近期{failures, plural, other {#次失败}}）} other{已闭合}}",
+  "cli.team_bridge.status.screening_rejected": "{count, plural, other {24小时内拒绝#条}}（{categories}）",
+  "cli.team_bridge.status.screening_rejected_none": "24小时内无拒绝",
   "cli.team_bridge.outcome.installed": "接收器已安装并正在运行。",
   "cli.team_bridge.outcome.current": "接收器已安装并正在运行；未作任何更改。",
   "cli.team_bridge.outcome.registered": "接收器已安装但未运行；现已重新启动。",
@@ -43,5 +51,7 @@
   "cli.team_bridge.setup.designation_missing": "已为{account_id}设置智能体消息，但尚未为其指定幕僚长会话。打开Local Operator应用，选择负责回复你的智能体的会话。",
   "cli.team_bridge.setup.ready": "智能体消息：已就绪。账号{account_id}，幕僚长会话{session}，接收器已就位。",
   "cli.team_bridge.setup.not_ready": "已设置智能体消息，但接收器未能就位（{service}）。{detail}",
-  "cli.team_bridge.setup.failed": "无法运行就绪检查。未作任何更改。"
+  "cli.team_bridge.setup.failed": "无法运行就绪检查。未作任何更改。",
+  "cli.team_bridge.notify.probe_suspected_title": "智能体消息：某个发送者疑似在试探",
+  "cli.team_bridge.notify.probe_suspected_body": "过去一天内，你的智能体的内容审核拒绝了同一发送者的多条消息。这种模式可能意味着有人在试探你的智能体会接受什么内容。该发送者已不再获知其消息被拒绝的原因。"
 }

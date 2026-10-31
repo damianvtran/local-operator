@@ -148,6 +148,12 @@ def test_scroll_logs_and_tabs_are_advertised_actions() -> None:
             "network_stop",
             "network_read",
             "network_clear",
+            # Recording needs a host that writes the harness's own path to disk
+            # and keeps a debugger session between two calls; a cmux panel has
+            # neither, so it degrades with the typed refusal instead of
+            # advertising an action it would answer with nothing.
+            "record_start",
+            "record_stop",
         }
     )
 

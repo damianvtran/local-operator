@@ -1,0 +1,142 @@
+{
+  "schema": 1,
+  "audit_id": "w6a1",
+  "audit_round": 1,
+  "locale": "es",
+  "namespace": "tui.hub_links",
+  "audit_date": "2026-10-30",
+  "audited_revision": "b925c2e11be36653dfe88ac78f627bc2531427df",
+  "audited_revision_note": "The es target is UNTRACKED at this revision, so HEAD does not bind its bytes. The on-disk sha256 in input_hashes.target is the binding identity, and the probe re-derives it through local_operator.i18n.catalogues.load_catalogue() in section A.",
+  "key_count": {
+    "en": 56,
+    "target": 56,
+    "context": 55
+  },
+  "verdict": "changes_requested",
+  "result": "changes_requested — 0 blocker, 1 major, 1 minor, 2 nit",
+  "verdict_reason": "Mechanical deck clean: key parity, ICU arguments, es CLDR coverage, machine tokens, layout padding, and the one maxCells budget (48; worst realistic reason 46). One major remains: refusal.revision_moved tells the user to reopen 'el aviso', the panel's own notice line, instead of the consent prompt. Consent-disclosure strings (private/public scope, unsubscribed keeping outbound pushes) are faithful; custom terms use vínculo for configured links and enlace only for a hyperlink.",
+  "auditor": {
+    "agent": "i18n-auditor (lopdev team), independent Spanish translation auditor",
+    "session_or_instance": "6a2f6fa808a7",
+    "model": "radient/auto",
+    "model_note": "Model as actually run. Session header was anthropic/claude-sonnet-5-5; three provider-failure (quota) switches occurred before any work was done: -> openai/gpt-6-astra -> kimi/k3.1-pro -> radient/auto. Every check, reading and finding in this bundle was produced under radient/auto. No claim is made for the primary model.",
+    "date": "2026-10-30",
+    "independence": "I authored none of this copy and repaired none of it. I wrote no catalogue, sidecar, ledger, allowance or generated file; only this evidence directory. Judgement is LLM reasoning against en source, the context sidecar, the shipped es catalogues and the rendering code; no translation/MT service was used to compare or back-translate."
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.hub_links.json",
+      "sha256": "7fbe6713f8ac8f312884476c498c3b74e76c5f0853bdd027f25fc47d489311bb",
+      "tracked": true
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/es/tui.hub_links.json",
+      "sha256": "1d87b68b9a249b223af91a03bb51dd9bd05e62f23a1308ed05b10261d2d5312d",
+      "tracked": false
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.hub_links.context.json",
+      "sha256": "9b81676163337d8a93e38138909dbd4801f8edd8416075c6efb994f9870c682e",
+      "tracked": true
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/es/tui.hub_links/w6a1/record.json",
+      "role": "record",
+      "sha256": "self"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.hub_links/w6a1/report.md",
+      "role": "audit report (findings, witnesses, limitations)",
+      "sha256": "2b6d66ea8823543e9653d1ca7e4a7c73ed57c8fc78532f3b59d07c78cdb662f0"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.hub_links/w6a1/audit.log",
+      "role": "execution log: validator + probe commands and their actual output",
+      "sha256": "ae5827b197c478512ea7ac6b8843530891bd48980a92e351cc526ec7156e94e0"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.hub_links/w6a1/checks.py",
+      "role": "the probe that produced sections A-D, including the negative controls",
+      "sha256": "341db1b989d0725dae8d8fdcd343a37501cb436457138a7568c871d111f92a79"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "changes_requested",
+    "unresolved_blocker_major_count": 1,
+    "finding_ids": [
+      "HL-1",
+      "HL-2",
+      "HL-3",
+      "HL-4"
+    ]
+  },
+  "findings": [
+    {
+      "id": "HL-1",
+      "severity": "major",
+      "key": "tui.hub_links.refusal.revision_moved",
+      "en": "This link changed while you were reviewing it. Reopen the prompt to confirm the latest.",
+      "current": "Este vínculo cambió mientras lo revisabas. Vuelve a abrir el aviso para confirmar la última versión.",
+      "problem": "Wrong referent. The string is shown ON the panel's notice line (hub_links_panel.py:605 assigns it to self._notice), so 'el aviso' points at the message the user is reading; the thing to reopen is the consent prompt this product elsewhere calls 'prompt' (25 shipped es uses). Spanish reserves 'aviso' for notifications/warnings (tui.notifications, tui.schedule, tui.import).",
+      "suggestion": "Este vínculo cambió mientras lo revisabas. Vuelve a abrir el prompt para confirmar la última versión. (or '… la confirmación …' to avoid the anglicism)",
+      "evidence": "hub_links_panel.py:601-607; grep of shipped es catalogues for 'prompt' (25 hits) and 'aviso' (20 hits, all notice/warning senses)"
+    },
+    {
+      "id": "HL-2",
+      "severity": "minor",
+      "key": "tui.hub_links.reason.baseline_unknown",
+      "en": "This link's history isn't known yet, so it can't publish unattended. Pull or resolve it first.",
+      "current": "Todavía no se conoce el historial de este vínculo, así que no puede publicar sin supervisión. Haz pull primero o resuélvelo.",
+      "problem": "The clitic 'lo' has two competing masculine antecedents inside one sentence (el historial, el vínculo) and the recovery differs: it is the link that must be resolved before auto-push can be enabled.",
+      "suggestion": "… así que no puede publicar sin supervisión. Primero haz pull o resuelve el vínculo.",
+      "evidence": "en source phrasing 'Resolve it first'; the U4 reason map in hub_links_panel.py:73-77"
+    },
+    {
+      "id": "HL-3",
+      "severity": "nit",
+      "key": "tui.hub_links.reason.unsafe_publication",
+      "en": "Publishing to this public location needs your explicit consent first.",
+      "current": "Publicar en esta ubicación pública requiere antes tu consentimiento explícito.",
+      "problem": "'requiere antes tu consentimiento' places the adverb between verb and object; natural Spanish says 'requiere primero …'.",
+      "suggestion": "Publicar en esta ubicación pública requiere primero tu consentimiento explícito.",
+      "evidence": "idiom judgement; meaning is correct, so this is preference only"
+    },
+    {
+      "id": "HL-4",
+      "severity": "nit",
+      "key": "tui.hub_links.action.pull",
+      "en": "Pull now",
+      "current": "Pull ahora",
+      "problem": "Two bare words read as Spanglish, where the shipped CLI copy uses 'hacer push' / 'hacer pull' (cli.teams_help). 'pull' itself is on the kept-English list, so the fix is the verb around it, not the term.",
+      "suggestion": "Hacer pull ahora (16 cells; 'Comprobar ahora' is 15, so the panel has room)",
+      "evidence": "cli.teams_help es 'Hacer push (subir) de un agente …'; glossary wave-2 kept-English set"
+    }
+  ],
+  "check_output": [
+    {
+      "cmd": "python3 scripts/i18n/check.py",
+      "result": "exit 0 — 'check.py: ok — 191 file(s) scanned, 2348 literal(s) at or below the baseline, catalogues consistent; 51 advisory finding(s)'"
+    },
+    {
+      "cmd": "PYTHONPATH=$PWD ~/local-operator/.venv/bin/python i18n/audits/evidence/es/tui.hub_links/w6a1/checks.py --namespace tui.hub_links",
+      "result": "exit 1 (findings present). 18 checks pass, 1 fails: revision_moved. Section A includes the catalogue loader digest, full CLDR coverage, per-branch arguments, printf/flags/code spans, machine tokens and layout padding; section B measures maxCells 48 (36/46/38 cells for provider-error, unsupported-precondition, baseline-unknown); the namespace has no plural messages, which the log states."
+    },
+    {
+      "cmd": "same probe, full three-namespace run (section D)",
+      "result": "10 negative controls: 10 behaved as required (8 breakages caught, 2 intended passes accepted)"
+    },
+    {
+      "cmd": "cell_len() cross-check",
+      "result": "measured with rich.cells.cell_len from ~/local-operator/.venv (the repo has no .venv here); no dependency installed. The script's local fallback agrees on all values checked."
+    }
+  ],
+  "limitations": [
+    "LLM semantic judgement; no native-speaker attestation.",
+    "No rendered TUI frame captured: widths are computed with the repo's own ruler against declared budgets, not photographed from a running app.",
+    "One en-side gap recorded, not charged to the translation: tui.hub_links.hint.engage has no context entry.",
+    "The {reason} placeholder of hint.failed receives an English humanised service code by design (hub_links_panel.py:_humanize_reason); that fallback is identical in both locales and is not a translation defect.",
+    "No repo-wide tests or generators were run; the narrow catalogue loader + parser probe is the mechanical check."
+  ]
+}

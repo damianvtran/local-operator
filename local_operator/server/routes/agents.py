@@ -23,10 +23,11 @@ from fastapi import (
     HTTPException,
     Path,
     Query,
+    Request,
     UploadFile,
 )
 from fastapi.encoders import jsonable_encoder
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError
 
 from local_operator.agents import (
@@ -1907,6 +1908,157 @@ async def delete_agent(
         status=200,
         message="Agent deleted successfully",
         result={},
+    )
+
+
+# -- Agent profile picture ---------------------------------------------------
+#
+# The backend owns the picture (see ``local_operator.agent_avatar`` for the frozen
+# contract and why). Listings carry the ``avatar`` metadata block, so a client
+# never calls GET here just to learn whether a picture exists: it builds
+# ``/v1/agents/{id}/avatar?v=<sha256>`` from the row and the browser caches by URL.
+# ``Cache-Control: no-cache`` plus the strong ETag keeps a bare URL (no ``?v=``)
+# correct too: the client revalidates and gets a 304 until the picture changes.
+#
+# SET vs SERVED Cache-Control: this family is under ``/v1/agents``, which
+# ``server.app.managed_desktop_boundary`` gates by default and stamps
+# ``no-store`` on (the same override Team Bridge's avatar route documents). The
+# boundary wins on purpose -- an agent picture is tenant data behind the bearer
+# -- so the SERVED header here is ``no-store``; the ETag/304 still lets a client
+# that keeps its own copy (the renderer's blob cache keyed by sha) revalidate
+# for free. The phone relay's twin route serves ``no-cache`` as set.
+
+
+def _avatar_refusal(exc: Exception) -> HTTPException:
+    from local_operator import agent_avatar
+
+    reason = getattr(exc, "reason", agent_avatar.UNDECODABLE)
+    return HTTPException(
+        status_code=agent_avatar.HTTP_STATUS.get(reason, 422),
+        detail=agent_avatar.refusal_envelope(reason),
+    )
+
+
+@router.get(
+    "/v1/agents/{agent_id}/avatar",
+    summary="Get an agent's profile picture",
+    description="The stored picture bytes (image/png, or image/jpeg for the over-cap "
+    "fallback) with a strong ETag equal to the metadata sha256. Answers 304 to a "
+    "matching If-None-Match and 404 when no picture is set.",
+    responses={
+        200: {"content": {"image/png": {}, "image/jpeg": {}}},
+        304: {"description": "Not modified"},
+        404: {"description": "Agent not found, or no picture set"},
+    },
+)
+async def get_agent_avatar(
+    request: Request,
+    agent_registry: AgentRegistry = Depends(get_agent_registry),
+    agent_id: str = Path(..., description="ID of the agent", examples=["agent123"]),
+) -> Response:
+    from local_operator import agent_avatar
+    from local_operator.i18n.http import etag_matches
+
+    try:
+        row = agent_registry.get_agent(agent_id)
+    except KeyError:
+        raise HTTPException(
+            status_code=404, detail=_wa.agent_not_found_id(agent_id=agent_id).envelope()
+        )
+    meta = row.avatar
+    if meta is None:
+        raise HTTPException(
+            status_code=404, detail=agent_avatar.refusal_envelope(agent_avatar.NOT_FOUND)
+        )
+    headers = {"ETag": agent_avatar.etag(meta.sha256), "Cache-Control": "no-cache"}
+    # The 304 is decided from the METADATA, before any file read: the sha is the
+    # authority, and a revalidation (every paint of a bare URL) costs no I/O.
+    if etag_matches(request.headers.get("if-none-match", ""), meta.sha256):
+        return Response(status_code=304, headers=headers)
+    try:
+        data, mime, _sha = await asyncio.to_thread(
+            agent_avatar.read, agent_registry.agents_dir / agent_id, meta
+        )
+    except agent_avatar.AvatarError as exc:
+        raise _avatar_refusal(exc)
+    return Response(content=data, media_type=mime, headers=headers)
+
+
+@router.put(
+    "/v1/agents/{agent_id}/avatar",
+    response_model=CRUDResponse[dict[str, Any]],
+    summary="Set an agent's profile picture",
+    description="Send the raw image bytes as the request body (PNG, JPEG, WebP, GIF, "
+    "or HEIC when supported; <= 10 MiB, <= 40 MP). The server re-normalises it to a "
+    "512x512 PNG with all metadata stripped (JPEG only when the PNG would exceed "
+    "1 MiB) and returns the new avatar metadata. Refusals carry the reason word "
+    "(unsupported_type, too_large, too_many_pixels, undecodable) as the error code.",
+    responses={
+        404: {"description": "Agent not found"},
+        413: {"description": "too_large"},
+        415: {"description": "unsupported_type"},
+        422: {"description": "too_many_pixels or undecodable"},
+        503: {"description": "imaging_unavailable"},
+    },
+)
+async def put_agent_avatar(
+    request: Request,
+    agent_registry: AgentRegistry = Depends(get_agent_registry),
+    agent_id: str = Path(..., description="ID of the agent", examples=["agent123"]),
+) -> CRUDResponse[dict[str, Any]]:
+    from local_operator import agent_avatar
+
+    # Read at most one byte past the cap, so an oversized body is refused as
+    # ``too_large`` without buffering all of it.
+    chunks: list[bytes] = []
+    size = 0
+    async for chunk in request.stream():
+        chunks.append(chunk)
+        size += len(chunk)
+        if size > agent_avatar.INPUT_MAX_BYTES:
+            raise _avatar_refusal(agent_avatar.AvatarError(agent_avatar.TOO_LARGE))
+    body = b"".join(chunks)
+    if not body:
+        from local_operator.i18n.keys import wire_errors_agent_avatar as _wav
+
+        raise HTTPException(status_code=400, detail=_wav.empty_body().envelope(code="empty_body"))
+    try:
+        meta = await asyncio.to_thread(agent_registry.set_agent_avatar, agent_id, body)
+    except KeyError:
+        raise HTTPException(
+            status_code=404, detail=_wa.agent_not_found_id(agent_id=agent_id).envelope()
+        )
+    except agent_avatar.AvatarError as exc:
+        raise _avatar_refusal(exc)
+    return CRUDResponse(
+        status=200,
+        message="Agent picture updated",  # i18n: ignore protocol diagnostic
+        result={"avatar": agent_avatar.meta_json(meta)},
+    )
+
+
+@router.delete(
+    "/v1/agents/{agent_id}/avatar",
+    response_model=CRUDResponse[dict[str, Any]],
+    summary="Remove an agent's profile picture",
+    description="Idempotent: removing an unset picture still answers 200, with "
+    "result.removed=false.",
+    responses={404: {"description": "Agent not found"}},
+)
+async def delete_agent_avatar(
+    agent_registry: AgentRegistry = Depends(get_agent_registry),
+    agent_id: str = Path(..., description="ID of the agent", examples=["agent123"]),
+) -> CRUDResponse[dict[str, Any]]:
+    try:
+        removed = await asyncio.to_thread(agent_registry.clear_agent_avatar, agent_id)
+    except KeyError:
+        raise HTTPException(
+            status_code=404, detail=_wa.agent_not_found_id(agent_id=agent_id).envelope()
+        )
+    return CRUDResponse(
+        status=200,
+        message="Agent picture removed",  # i18n: ignore protocol diagnostic
+        result={"removed": removed, "avatar": None},
     )
 
 

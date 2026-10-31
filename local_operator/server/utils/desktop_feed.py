@@ -650,6 +650,10 @@ class DesktopFeed:
         #: is the invalidation cadence, and a second number here would be a second
         #: clock to keep in step for no reason.
         self._authoring_probed_at = 0.0
+        #: ``{agent_id: sha256 | None}`` as of the last avatar probe, and its clock.
+        #: ``None`` until the connection baseline sets it (no replay on connect).
+        self._avatar_shas: dict[str, str | None] | None = None
+        self._avatar_probed_at = 0.0
         #: The monotone counter clients compare against, for the catalogue
         #: counter's own reason (a repeatable hash token cannot tell a client "this
         #: is new"). ``open`` reports this value, so a connecting client's view is
@@ -1229,6 +1233,9 @@ class DesktopFeed:
         # than the clock means the first tick re-probes and still publishes
         # nothing — so a change landing in that first second is still caught.
         self._authoring_token = self._authoring_probe()
+        # The AVATAR baseline, on the same no-replay rule: pictures that predate
+        # this connection are already in the rows the client is loading.
+        self._avatar_shas = self._avatar_probe()
         # The CODE-REQUEST baseline, per session and on the same rule: priming the tokens
         # (not the clock) means the first tick re-probes and still publishes nothing for a
         # list the client is already loading, while a change landing inside that first
@@ -1432,6 +1439,8 @@ class DesktopFeed:
         # test rather than left to be read as a regression of the five-stat tick
         # above — it runs on the 1 s cadence, not on the tick.
         await self._maybe_emit_authoring()
+        # 6b. THE AVATAR CHANGE SIGNAL (``agent.avatar.changed``).
+        await self._maybe_emit_avatar_changes()
         # 7. THE CODE-REQUEST INVALIDATION, per session. Outside the doorbell branch for
         # the authoring channel's reason and one of its own: the index lives under the
         # CONFIG root, which this tick's five-stat doorbell never looks at, and it is
@@ -2202,6 +2211,48 @@ class DesktopFeed:
         self._authoring_emitted_tick = self._tick_index
         self._authoring_revision += 1
         self._publish("authoring", {"revision": self._authoring_revision})
+
+    def _avatar_probe(self) -> dict[str, str | None]:
+        """``{agent_id: avatar sha256 | None}`` from the shared, stat-memoised index.
+
+        A probe of ``agent.yml`` rather than a subscription to the in-process
+        ``agent_avatar.subscribe`` hook, because the CLI (``lop agents picture``)
+        and an agent's bash call write from ANOTHER process, which no in-process
+        hook can hear -- the contract's "consumers reconcile on agent.yml". One
+        mechanism therefore covers both origins. ``agent_index`` re-parses only
+        when an ``agent.yml`` stat moved, so a quiet store costs a readdir and a
+        stat per agent per second, the authoring probe's own cost class.
+        """
+        from local_operator.agent_avatar import agent_index
+
+        return {
+            identity.agent_id: identity.avatar_sha256
+            for identity in agent_index(self.root).values()
+        }
+
+    async def _maybe_emit_avatar_changes(self) -> None:
+        """Publish ``agent.avatar.changed {agent_id, sha256|null}`` per changed agent.
+
+        One frame per agent whose sha moved (set, replaced or removed) -- unlike
+        ``authoring``'s bare revision, the payload names the agent so a client
+        swaps exactly one ``<img>`` URL and refetches nothing else. A deleted
+        agent is not announced: its rows disappear through the catalogue channel.
+        """
+        now = time.monotonic()
+        if now - self._avatar_probed_at < CATALOGUE_PROBE_INTERVAL_S:
+            return
+        self._avatar_probed_at = now
+        shas = await asyncio.to_thread(self._avatar_probe)
+        previous = self._avatar_shas
+        self._avatar_shas = shas
+        if previous is None:
+            return
+        for agent_id, sha in sorted(shas.items()):
+            if agent_id in previous and previous[agent_id] == sha:
+                continue
+            if agent_id not in previous and sha is None:
+                continue
+            self._publish("agent.avatar.changed", {"agent_id": agent_id, "sha256": sha})
 
     async def _maybe_emit_code_requests(self) -> None:
         """The per-session code-request invalidation: a conversation's PR list moved.

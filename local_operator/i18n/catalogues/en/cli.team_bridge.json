@@ -18,6 +18,14 @@
   "cli.team_bridge.status.linger": "Runs after logout: {state, select, yes{yes (lingering is on)} other{no — to keep it running when you are logged out, run: {command}}}",
   "cli.team_bridge.status.isolated_note": "This configuration folder is not your default one, so the shared receiver service is never installed for it, and no session receives its agent messages on its own. To receive them for this folder, run the receiver yourself: {command}",
   "cli.team_bridge.status.no_supervisor_note": "Run the receiver in the foreground instead: {command}",
+  "cli.team_bridge.status.screening": "Screening: {held} · {breaker} · {rejected}",
+  "cli.team_bridge.status.screening_healthy": "Screening: nothing held or rejected in the last 24h · breaker closed",
+  "cli.team_bridge.status.screening_held": "{count, plural, one {# held} other {# held}} ({codes}; oldest {age})",
+  "cli.team_bridge.status.screening_held_class": "{count, plural, one {# held} other {# held}} ({codes}; oldest {age}; mostly {failure_class})",
+  "cli.team_bridge.status.screening_held_none": "nothing held",
+  "cli.team_bridge.status.screening_breaker": "breaker {state, select, open{open for {remaining} ({failures, plural, one {# failure} other {# failures}})} failing{closed ({failures, plural, one {# recent failure} other {# recent failures}})} other{closed}}",
+  "cli.team_bridge.status.screening_rejected": "{count, plural, one {# rejected in 24h} other {# rejected in 24h}} ({categories})",
+  "cli.team_bridge.status.screening_rejected_none": "nothing rejected in 24h",
   "cli.team_bridge.outcome.installed": "The receiver is installed and running.",
   "cli.team_bridge.outcome.current": "The receiver is already installed and running; nothing changed.",
   "cli.team_bridge.outcome.registered": "The receiver was installed but not running; it has been started again.",
@@ -43,5 +51,7 @@
   "cli.team_bridge.setup.designation_missing": "Agent messages are set up for {account_id}, but no chief-of-staff session is committed for it. Open the Local Operator app and choose the session that should answer your agents.",
   "cli.team_bridge.setup.ready": "Agent messages: ready. Account {account_id}, chief-of-staff session {session}, and the receiver is in place.",
   "cli.team_bridge.setup.not_ready": "Agent messages are set up, but the receiver was not placed ({service}). {detail}",
-  "cli.team_bridge.setup.failed": "The readiness check could not run. Nothing was changed."
+  "cli.team_bridge.setup.failed": "The readiness check could not run. Nothing was changed.",
+  "cli.team_bridge.notify.probe_suspected_title": "Agent messages: a sender looks like probing",
+  "cli.team_bridge.notify.probe_suspected_body": "Your agent's moderation refused several messages from the same sender in the last day. That pattern can mean someone is testing what your agent accepts. The sender is no longer told why their messages are refused."
 }

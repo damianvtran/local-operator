@@ -296,6 +296,9 @@ _TOOL_CATEGORY: dict[str, str] = {
     "project_delete": "tool.row.name_meta",
     "send": "tool.row.name_meta",
     "sessions": "tool.row.name_meta",
+    # Team Bridge traffic is coordination with other agents and people, the
+    # same axis as `send`/`sessions`: it changes nothing on this machine.
+    "bridge": "tool.row.name_meta",
     "wake": "tool.row.name_meta",
     "ask": "tool.row.name_meta",
 }
@@ -1042,6 +1045,15 @@ def _summary_from_args(tool_name: str, args: dict[str, object]) -> str:
         from local_operator.harness.rows import sessions_row_summary
 
         return sessions_row_summary(args) or tool_name
+    if tool_name == "bridge":
+        # The generic scan painted ``bcv_b0044d… 3`` — an opaque conversation id
+        # and a stray ``limit`` — for every Team Bridge call. The tokens come
+        # from `harness/rows.py::bridge_row` and the words from
+        # `harness/bridge_copy.py`, the same pair the phone projection calls,
+        # so the two surfaces cannot drift. At call start there are no
+        # details: the running verb ("Posting in"), re-derived from the
+        # details in `_absorb_result` once the call settles.
+        return _bridge_summary(args, None) or tool_name
     parts = [
         text
         for key, value in args.items()
@@ -1050,6 +1062,27 @@ def _summary_from_args(tool_name: str, args: dict[str, object]) -> str:
     if not parts:
         parts = [text for value in args.values() if (text := _scalar_text(value))]
     return " ".join(parts[:2]) or tool_name
+
+
+def _bridge_summary(
+    args: Mapping[str, object], details: Mapping[str, Any] | None, *, failed: bool = False
+) -> str:
+    """The bridge row's summary: ``<verb> <target> · <preview>``.
+
+    The VERB rides the summary rather than the name column: the column is a
+    fixed 8-cell ledger spine that says ``bridge`` like every other tool, and
+    the verb is what separates a post from a read from a refusal. The outcome
+    word is not here — it belongs to the status cap (``_bridge_outcome``).
+    """
+    from local_operator.harness.bridge_copy import render_bridge_row
+    from local_operator.harness.rows import bridge_row
+
+    row = bridge_row(args, details)
+    in_thread = bool(_scalar_text(args.get("thread_root_id")))
+    verb, summary, _word = render_bridge_row(
+        row, running=details is None, in_thread=in_thread, failed=failed
+    )
+    return f"{verb} {summary}".strip() if summary else verb
 
 
 def _argument_text(value: object) -> str:
@@ -1776,6 +1809,20 @@ class ToolCard(ExpandableActionBlock):
         #: settled card shows `✓ 0.4s` and nothing about the session (design
         #: review round 1, D2). Set in :meth:`_absorb_result`.
         self._kernel_reset = False
+        #: The settled Team Bridge outcome word (``not posted to a conversation``,
+        #: ``refused · code``, ``delivery unconfirmed``…) and its tier
+        #: (``warn``/``error``), both "" for every other tool and for a plain
+        #: bridge success. Set in :meth:`_absorb_result` from ``details``.
+        self._bridge_word = ""
+        self._bridge_tier = ""
+        #: The narrow-row form of ``_bridge_word`` (``not posted``, ``awaiting``,
+        #: ``unconfirmed``), or the full word when it has no short form. Chosen
+        #: in :meth:`_bridge_reason` whenever the full word would not fit the
+        #: status cap.
+        self._bridge_word_short = ""
+        #: The bridge card's expanded parts (headline, body, outcome sentence,
+        #: internals), or None for every other tool. See :meth:`_append_bridge_body`.
+        self._bridge_view: dict[str, Any] | None = None
         #: Rows the card currently occupies (1 collapsed, N expanded).
         self._row_count = 1
         #: ``_row_count`` as of the last content APPLIED to the widget, or -1
@@ -3024,6 +3071,7 @@ class ToolCard(ExpandableActionBlock):
             bool(details.get("kernel_reset")) if isinstance(details, Mapping) else False
         )
         name = self.tool_name.lower()
+        self._absorb_bridge(details)
         search_output = _search_result_output(details) if name == "web_search" else []
         # A web_fetch (and a `read <url>`, which records tool_name "read" but
         # carries a fetch's details shape) leads with structured header rows and
@@ -3420,6 +3468,8 @@ class ToolCard(ExpandableActionBlock):
             # its argument block: there the args are the only account of what
             # was attempted, and the error only makes sense next to them.
             self._append_diff_body(row, width)
+        elif self._bridge_view is not None and self._state in ("success", "error"):
+            self._append_bridge_body(row, width)
         elif self.tool_name.lower() == "web_search" and self._output:
             self._append_input_body(row, width)
             self._append_search_body(row, width)
@@ -3456,6 +3506,103 @@ class ToolCard(ExpandableActionBlock):
             if note:
                 self._append_imagegen_note(row, width, note[0])
         return row
+
+    def _append_bridge_body(self, row: Text, width: int) -> None:
+        """A settled Team Bridge card: target, body, outcome, then the internals.
+
+        The generic expansion led with ``channel_id: bcv_…`` argument rows and
+        the receipt's raw ``content``, so the one question a reader opens the
+        card for — what was said, where, and was it seen — sat under the ids.
+        This order answers it top-down; the ids remain, LAST, under a dim
+        ``details`` label (the card's own expansion is the toggle: the TUI has
+        no nested disclosure). The body is model/member-written markdown and is
+        rendered through the transcript's own ``flatten`` so it reads like the
+        prose it is.
+        """
+        view = self._bridge_view or {}
+        dim = bindings.style("tool.args.dim")
+        label_ink = bindings.style("tool.args.label")
+        value_ink = bindings.style("tool.args.value")
+        secondary = bindings.style("tool.bridge.detail_value")
+        line_width = max(1, width - 2 - OUTPUT_INDENT)
+        indent = " " * OUTPUT_INDENT
+        headline = _strip_control_sequences(str(view.get("headline") or ""))
+        for line in wrap_cells(headline, line_width) if headline else []:
+            row.append("\n" + indent, style=dim)
+            row.append(line, style=value_ink)
+        body = str(view.get("body") or "")
+        if body.strip():
+            for line in self._bridge_markdown_rows(_strip_control_sequences(body), line_width):
+                row.append("\n" + indent, style=dim)
+                row.append_text(line)
+        sentence = _strip_control_sequences(str(view.get("outcome") or ""))
+        if sentence:
+            ink = (
+                bindings.style("tool.output.error")
+                if self._bridge_tier == "error"
+                else (
+                    bindings.style("tool.status.partial_glyph")
+                    if self._bridge_tier == "warn"
+                    else value_ink
+                )
+            )
+            for line in wrap_cells(sentence, line_width):
+                row.append("\n" + indent, style=dim)
+                row.append(line, style=ink)
+        internals = view.get("internals") or []
+        if internals:
+            from local_operator.harness.bridge_copy import details_label
+
+            # A section HEADING, not a body line (design round 1, D6): a blank
+            # row above it and bold primary ink. The card's own expansion is the
+            # disclosure — the TUI has no nested toggle — so the heading is
+            # what separates the readable account from the internals.
+            row.append("\n", style=dim)
+            row.append("\n" + indent, style=dim)
+            row.append(
+                truncate_cells(details_label(), line_width), style=value_ink + Style(bold=True)
+            )
+            for field, value in internals:
+                text = _strip_control_sequences(" ".join(str(value).split()))
+                head = f"{field}: "
+                # ONE line each, elided with `…` (design round 1, D4): a read's
+                # `content` is minified untrusted JSON, and wrapping it across
+                # the card is the raw-dump texture this card replaced. The ids
+                # above it fit; the full payload is what the model saw, not what
+                # the operator reads here.
+                line = truncate_cells(f"{head}{text}", line_width)
+                row.append("\n" + indent, style=dim)
+                if line.startswith(head):
+                    row.append(head, style=label_ink)
+                    row.append(line[len(head) :], style=secondary)
+                else:
+                    row.append(line, style=secondary)
+
+    def _bridge_markdown_rows(self, text: str, width: int) -> list[Text]:
+        """``text`` as markdown rows at ``width``, via the transcript's ``flatten``.
+
+        Imported at the call: ``assistant`` imports the transcript module this
+        widget is imported beside, and the bridge body is the only card body
+        that needs it. Bounded to the argument block's row cap, so a long post
+        cannot turn the card into a page.
+        """
+        from rich.markdown import Markdown
+
+        from local_operator.tui.widgets.assistant import flatten
+
+        try:
+            console = self.app.console
+        except Exception:
+            console = None
+        lines = flatten(Markdown(text), width, console).split("\n")
+        while lines and not lines[-1].plain.strip():
+            lines.pop()
+        shown = lines[:INPUT_MAX_LINES]
+        if len(lines) > len(shown):
+            hidden = len(lines) - len(shown)
+            marker = f"… {hidden} more line{'s' if hidden != 1 else ''}"
+            shown.append(Text(truncate_cells(marker, width), style=bindings.style("tool.args.dim")))
+        return shown
 
     def _append_live_body(self, row: Text, width: int) -> None:
         """The in-progress block: what state this call is in, then its output.
@@ -4469,6 +4616,66 @@ class ToolCard(ExpandableActionBlock):
             return parent.tool_name_col
         return NAME_COL
 
+    def _absorb_bridge(self, details: dict[str, Any] | None) -> None:
+        """Re-derive a bridge row's summary, outcome and expansion from ``details``.
+
+        Reset per result like the flags around it: a card rebuilt from a payload
+        must never inherit a previous body's outcome. A result with no details
+        (an error raised before the tool returned its dict) keeps the call-start
+        summary with the failed verb's ink, never a guessed outcome.
+        """
+        self._bridge_word = ""
+        self._bridge_word_short = ""
+        self._bridge_tier = ""
+        self._bridge_view = None
+        if self.tool_name.lower() != "bridge":
+            return
+        from local_operator.harness.bridge_copy import bridge_expanded, outcome_word
+        from local_operator.harness.rows import bridge_row
+
+        payload = details if isinstance(details, Mapping) else {}
+        row = bridge_row(self._args, payload)
+        self._summary = _strip_control_sequences(
+            _bridge_summary(self._args, payload, failed=self._state == "error")
+        )
+        word = outcome_word(row)
+        if word:
+            self._bridge_word = _strip_control_sequences(word)
+            # refused/failed have no short word, so a narrow cap used to cut
+            # the machine code mid-token ("refused · not_p…", design round-2
+            # D9): a half code is unsearchable and reads as garbage. Their
+            # narrow form is the bare word; the code stays in the expanded card.
+            short_row = (
+                {**row, "code": None} if row.get("outcome") in ("refused", "failed") else row
+            )
+            self._bridge_word_short = _strip_control_sequences(
+                outcome_word(short_row, short=True) or word
+            )
+            # inbox_only / awaiting_acceptance / unconfirmed are not failures —
+            # something was (or may have been) accepted — so they wear the amber
+            # partial ink: beside a success mark for the first two, beside the
+            # error mark for `unconfirmed`, whose call settled as an error but
+            # must not read as "failed" (QA round 1, Q-2). refused/failed are
+            # errors in danger ink.
+            self._bridge_tier = "error" if row.get("outcome") in ("refused", "failed") else "warn"
+        self._bridge_view = bridge_expanded(row, self._args, payload, failed=self._state == "error")
+
+    def _bridge_reason(self, cap: int, duration: str) -> str:
+        """The Team Bridge outcome word that fits ``cap``: full, else the short form.
+
+        Uncapped (the widest-status measurement) the full word. Capped, the full
+        word when it fits in front of the glyph and duration, otherwise the
+        short word (``not posted`` for ``not posted to a conversation``), which
+        then truncates like any reason if even it does not fit. The full
+        sentence always leads the expanded card.
+        """
+        if not cap:
+            return self._bridge_word
+        room = cap - cell_len(f"{ICON_SUCCESS}  ") - cell_len(duration)
+        if cell_len(self._bridge_word) <= room:
+            return self._bridge_word
+        return self._bridge_word_short or self._bridge_word
+
     def _build_row(self, width: int) -> Text:
         """The single summary row — the ONE-LINE guarantee lives here."""
         dim = bindings.style("tool.row.dim")
@@ -4507,6 +4714,10 @@ class ToolCard(ExpandableActionBlock):
 
         # Status segment (right-aligned), capped at width // 3 (D8) and then
         # hard-clamped so no state can ever push the row past its card.
+        # A Team Bridge outcome word never widens it: the row's summary (what was
+        # said, and where) keeps priority, and below the width where the full
+        # word fits this third the SHORT word carries the distinction instead
+        # (`_bridge_reason`; design round 1, UI D1 applied to the TUI).
         status_cap = max(8, width // 3)
         status_runs = _clamp_runs(self._status_runs(status_cap), max(0, width - 3))
         status_cells = sum(cell_len(text) for text, _style in status_runs)
@@ -4521,7 +4732,10 @@ class ToolCard(ExpandableActionBlock):
         label = display_name(self.tool_name)
         name_budget = width - (2 + status_cells + 2)
         if name_budget < 2 and (
-            self._state in ("error", "interrupted") or self._partial or self._kernel_reset
+            self._state in ("error", "interrupted")
+            or self._partial
+            or self._kernel_reset
+            or self._bridge_tier
         ):
             # The status is the only segment carrying free text, so it is the
             # one that gives way first. A failing row used to be the ONLY row
@@ -4936,7 +5150,12 @@ class ToolCard(ExpandableActionBlock):
             else:
                 duration = format_duration(elapsed)
             duration = duration.rjust(DURATION_COL)
-        if self._state == "success" and not self._partial and not self._kernel_reset:
+        if (
+            self._state == "success"
+            and not self._partial
+            and not self._kernel_reset
+            and self._bridge_tier != "warn"
+        ):
             # See `bindings.BY_ELEMENT["tool.status.success_glyph"].note`.
             success_ink = bindings.style("tool.status.success_glyph")
             return [(f"{ICON_SUCCESS} ", success_ink), (duration, dim)]
@@ -4963,7 +5182,18 @@ class ToolCard(ExpandableActionBlock):
         # splits from the glyph's ink (see that arm): the reason run falls back
         # to `tint` and the arms that never set it are untouched.
         word_tint: Style | None = None
-        if self._state == "success":
+        if self._state == "success" and self._bridge_tier == "warn":
+            # A Team Bridge call that RAN but whose result is not what a plain
+            # ✓ promises: accepted only into a peer's private inbox, posted to an
+            # agent not yet accepted, or not confirmed. The success glyph stays
+            # (nothing failed) in the amber partial pair the kernel-reset arm
+            # spends, and the word names which — so "sent" can never pass for
+            # "seen in a conversation" (the incident this row exists for).
+            glyph = ICON_SUCCESS
+            reason = self._bridge_reason(cap, duration)
+            tint = bindings.style("tool.status.partial_glyph")
+            abbreviates = True
+        elif self._state == "success":
             if self._partial:
                 # PARTIAL: the tool answered, but not about the whole tree it was
                 # asked about. It gets its own glyph and the state's own ink —
@@ -5016,6 +5246,17 @@ class ToolCard(ExpandableActionBlock):
         else:
             danger = bindings.style("tool.status.error_glyph")
             glyph, reason, tint = ICON_ERROR, self._send_failed_reason() or self._error, danger
+            if self._bridge_word:
+                # `refused · not_permitted` beats the tool's own sentence in a
+                # cap a third of the row wide: the code is what an operator
+                # searches for, and the sentence leads the expansion anyway.
+                reason = self._bridge_reason(cap, duration)
+            if self._bridge_tier == "warn":
+                # `delivery unconfirmed`: the hub may have taken the post, so
+                # the ✗ stays (the call did not confirm) but in the amber pair —
+                # danger ink would invite the duplicate re-post the word exists
+                # to prevent (QA round 1, Q-2).
+                tint = bindings.style("tool.status.partial_glyph")
             abbreviates = True
 
         runs: list[tuple[str, Style]] = []

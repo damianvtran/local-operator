@@ -1,0 +1,158 @@
+{
+  "schema": 1,
+  "audit_id": "w6a1",
+  "audit_round": 1,
+  "locale": "es",
+  "namespace": "tui.analytics",
+  "audit_date": "2026-10-30",
+  "audited_revision": "b925c2e11be36653dfe88ac78f627bc2531427df",
+  "audited_revision_note": "Target es catalogue is UNTRACKED at this revision (git status: '??'), so HEAD does not bind its bytes. The audit binds to the exact on-disk target sha256 recorded in input_hashes.target and re-printed by checks.py on every run.",
+  "key_count": {
+    "en": 98,
+    "target": 98,
+    "context": 98
+  },
+  "verdict": "passed",
+  "result": "passed — 0 blocker, 0 major, 2 minor, 3 nit",
+  "verdict_reason": "All 98 keys read, then every money/price and empty-vs-failed key re-read in a second pass. No money figure is understated or re-derived; the + lower-bound mark, the $— no-price mark and the three-space alignment run all survive; unpriced/priced/paid/free stay four distinct facts; 14 plural messages carry one/many/other and render the correct branch at 0/1/2/1e6/1.5e6/2e6. Two minors and three nits are recorded and do not gate: neither minor misstates meaning.",
+  "verdict_scope": "This verdict passes the namespace for the two minor and three nit findings below; they are recorded for the next pass, not waived.",
+  "auditor": {
+    "agent": "i18n-auditor (lopdev team), es-tui-audit-b",
+    "session_or_instance": "60db1cb280ee",
+    "model": "radient/auto",
+    "model_note": "Model AS ACTUALLY RUN: radient/auto. The session opened on anthropic/claude-sonnet-5-5 and hit consecutive provider failures (quota) — openai/gpt-6-astra, then kimi/k3.1-pro, then radient/auto. The glossary/style-guide reading happened before the first switch; all catalogue reading, all mechanical checks and every judgement in this record were performed under radient/auto. No primary-model audit claim is made, and no provider/model was pinned by the auditor.",
+    "date": "2026-10-30",
+    "independence": "I authored none of this copy and repaired none of it. I read the English source, every context note, the style guide and glossary, and the shipped es TUI catalogues; I compared the Spanish against the runtime parser, the real message renderer, rich.cells.cell_len and the TUI widget code that consumes these keys. I edited no catalogue, sidecar, ledger, allowance or generated file."
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.analytics.json",
+      "revision": "b925c2e11be36653dfe88ac78f627bc2531427df",
+      "sha256": "aa5221066aa84eedf0f924628d51bc8f08ccf5f26b5075638b9d40062f7b617e"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/es/tui.analytics.json",
+      "sha256": "6d6e6274c0d97a1bb5c2a723b9a2da526bbf6244d1646bdb76abded282f8e627",
+      "tracked": false
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.analytics.context.json",
+      "sha256": "04356facdf1802a34a4be9ab6d3255cc9e92826d2b4e9ae917c43f687a9325eb"
+    }
+  },
+  "key_count_source": "en target context key sets are identical (98/98/98), asserted by checks.py check_keys",
+  "findings": [
+    {
+      "id": "A1",
+      "key": "tui.analytics.totals.output_note",
+      "severity": "minor",
+      "current": "{generation} generación, {thinking} pensamiento",
+      "english": "{generation} generation, {thinking} thinking",
+      "problem": "'pensamiento' is a literal calque of 'thinking'; Spanish developer usage for a model's reasoning tokens is 'razonamiento', and 'pensamiento' reads as 'thought' rather than as the token class this row counts.",
+      "suggested": "{generation} generación, {thinking} razonamiento",
+      "gate": false
+    },
+    {
+      "id": "A2",
+      "key": "tui.analytics.hint.expand.compact",
+      "severity": "minor",
+      "current": "↑↓ · enter expandir · e todo",
+      "english": "↑↓ row · enter expand · e all",
+      "measured_cells": {
+        "es": 28,
+        "en": 29,
+        "maxCells": 31
+      },
+      "problem": "The noun is dropped, so the arrows no longer say what they move. The ladder exists to keep the row cursor (hint.rows.* -> '↑↓ fila') apart from scrolling (hint.scroll.* -> '↑↓ desplazar'); a bare '↑↓' reintroduces that ambiguity. Inverted inside the ladder too: the NARROWER hint.expand.keys tier (24/25) keeps 'fila' and drops 'expand', while this wider tier (28/31) does the opposite. The sidecar authorises dropping only 'esc back' at this tier.",
+      "suggested": "↑↓ fila · enter abrir · e todo",
+      "suggested_cells": 30,
+      "gate": false
+    },
+    {
+      "id": "A3",
+      "key": "tui.analytics.search.meta_live",
+      "severity": "nit",
+      "current": "todo el proceso · en vivo",
+      "english": "process-wide · live",
+      "problem": "'todo el proceso' parses as 'the entire process' rather than 'across the process'; the English scope word is a qualifier.",
+      "suggested": "en todo el proceso · en vivo",
+      "gate": false
+    },
+    {
+      "id": "A4",
+      "key": "tui.analytics.search.summary_free_paid",
+      "severity": "nit",
+      "current": "{free} de {priced} con precio fueron gratis · {money} pagado",
+      "english": "{free} of {priced} priced free · {money} paid",
+      "problem": "The finite past-tense verb 'fueron' breaks the noun-phrase register of every sibling rung and puts a live ledger in the past tense. Denomination and money meaning are correct.",
+      "suggested": "{free} de {priced} con precio gratis · {money} pagado",
+      "gate": false
+    },
+    {
+      "id": "A5",
+      "key": "tui.analytics.rate.legend",
+      "severity": "nit",
+      "current": "tasa de decodificación en {shown, number} de {total, number} llamadas",
+      "english": "decode rate over {shown} of {total} calls",
+      "problem": "'en' is 'in'; the source relationship is coverage ('over'), not location.",
+      "suggested": "tasa de decodificación sobre {shown, number} de {total, number} llamadas",
+      "note": "A matter of preference: the current wording is correct.",
+      "gate": false
+    }
+  ],
+  "checks": {
+    "script": "i18n/audits/evidence/es/tui.analytics/w6a1/checks.py",
+    "result": "PASS — all checks clean, every negative control tripped",
+    "exit_code": 0,
+    "families": [
+      "key parity (no added/dropped/duplicate keys, all values str)",
+      "ICU parse of every target value",
+      "argument name/kind/order tuple identical to EN",
+      "Spanish CLDR plural categories: exactly one/many/other, no few/zero/two",
+      "no empty branch; no branch lossier than its English counterpart",
+      "real render at 0/1/2/1e6/2e6/1.5e6: 0 takes other, 1 takes one, 1e6 takes many, 1.5e6 takes other",
+      "protected machine tokens byte-identical (backtick spans, --flags, <angle>, [bracket], /command, →, $—, ↑↓, ≈)",
+      "five declared maxCells budgets via rich.cells.cell_len",
+      "negation parity (no dropped or added negation)",
+      "glossary rules (daemon, tenant, caché, coste, harness, accent on sesión, es spacing)",
+      "no prose byte-identical to EN"
+    ],
+    "negative_controls": 11,
+    "negative_controls_caught": 11,
+    "cell_len_source": "rich.cells.cell_len from /Users/damian/local-operator/.venv (the function the TUI mesures rows with)"
+  },
+  "audit_notes_not_execution_log": "The prose above and in report.md is judgement, not evidence of execution. The executed commands and their real output are in audit.log; the script that produced them is checks.py in this bundle.",
+  "display_side_risk": "No value was displayed as a redaction marker. The catalogue is a plain JSON file in this worktree, read directly as a file.",
+  "limitations": [
+    "LLM semantic judgement; no native-speaker attestation (not a gate under the programme).",
+    "No rendered TUI frames were captured. Every width claim is a rich.cells.cell_len measurement of the exact rendered string — the same function the widget layer budgets with — not an estimate.",
+    "The target catalogue is untracked at the audited revision; the binding is to its on-disk sha256, which a later edit would invalidate.",
+    "This is a first-round audit of this namespace by this auditor; it is not a corroboration of an earlier round."
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [
+      "A1",
+      "A2",
+      "A3",
+      "A4",
+      "A5"
+    ],
+    "blocker_major_finding_ids": []
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/es/tui.analytics/w6a1/report.md",
+      "sha256": "7f1c0d11a7a5d4312952ea7a6ce77b281981473168aa6e1c684b159516eabc4e"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.analytics/w6a1/audit.log",
+      "sha256": "4223a6cef639fdaa5031f602777456dbecb3dc9f67d250a62c120e54130d1c9b"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.analytics/w6a1/checks.py",
+      "sha256": "5862a93debbbfb64ad8c6154fd2328e4e0058086041a02788feb9bc189d362af"
+    }
+  ]
+}

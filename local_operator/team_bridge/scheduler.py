@@ -860,15 +860,21 @@ async def run_screening_cycle(
     """
 
     from local_operator.team_bridge.model_boundary import (
+        ScreenChainRunner,
         make_screening_runner,
-        resolve_default_selection,
+        resolve_screening_chain,
     )
     from local_operator.team_bridge.screening import screen_message_async
-    from local_operator.team_bridge.store import Store, StoreRefused
+    from local_operator.team_bridge.store import Store, StoreRefused, serialize_serving
 
-    selection = resolve_default_selection(config_dir)
-    if selection is None:
+    # ONE capture of the whole hop list: hop 0 is the configured default (the
+    # published policy's model), the rest are the operator's configured
+    # fallbacks, walked by ScreenChainRunner because failover disables its
+    # own chain for isolated requests (see resolve_screening_chain).
+    chain = resolve_screening_chain(config_dir, settings)
+    if not chain:
         return None
+    selection = chain[0]
     # ACCEPTED STATUS (R8/Q3): the owner-pinned SDK status is received
     # through the normal accepted-status seam — an injected fetcher (the
     # production one calls the H1 client's own ``status`` with the PINNED
@@ -972,12 +978,26 @@ async def run_screening_cycle(
     # provider, model and approved map — so a same-version different-SHA
     # status, or a same-model provider/map change, advances the authority
     # and can never reuse an old proof (R7/Q3).
+    # THE CHAIN IS PART OF THE AUTHORITY (S-4): every hop's (provider, model)
+    # tuple is published with the policy and bound into the revision, so
+    # editing ``retry.fallbackChains`` advances revision + epoch and a receipt
+    # is always tied to the chain in force when it was minted. A single-hop
+    # chain hashes the pre-chain form byte-for-byte, so an operator with no
+    # fallback configured sees no revision change (and no epoch churn) from
+    # the upgrade.
+    serving = sorted({(hop.provider, hop.model_id) for hop in chain})
+    chain_part = (
+        "|chain=" + ",".join(f"{provider}/{model}" for provider, model in serving)
+        if len(chain) > 1
+        else ""
+    )
     revision = (
         "accepted:"
         + hashlib.sha256(
             (
                 f"{version}|{template_hash}|{selection.provider}|{selection.model_id}|"
                 + ",".join(sorted(selection.approved_identities))
+                + chain_part
             ).encode("utf-8")
         ).hexdigest()[:32]
     )
@@ -987,6 +1007,9 @@ async def run_screening_cycle(
         template_hash,
         selection.model_id,
         revision,
+        # m3: a damaged serving set must REPUBLISH, not keep holding every
+        # fallback allow as stale; it is part of what "unchanged" means.
+        serialize_serving(serving if len(chain) > 1 else None),
     )
     row = (
         None
@@ -996,6 +1019,7 @@ async def run_screening_cycle(
             current["template_sha256"],
             current["default_model"],
             current["revision"],
+            current.get("approved_serving"),
         )
     )
     if row != expected:
@@ -1008,6 +1032,9 @@ async def run_screening_cycle(
                 revision=revision,
                 expected_epoch=None if current is None else int(current["epoch"]),
                 create_only=current is None,
+                # The receipt fences accept a model in THIS set (B1/S-3); a
+                # single hop stores NULL, which reads as {default_model}.
+                approved_serving=serving if len(chain) > 1 else None,
             )
         except StoreRefused:
             # A competing publisher moved authority; screen nothing rather
@@ -1019,7 +1046,15 @@ async def run_screening_cycle(
         template_sha256=template_hash,
         default_model=selection.model_id,
         admission_revision=revision,
-        approved_serving_identities=tuple(sorted(selection.approved_identities)),
+        # The UNION of every hop's own identity, so step 13 accepts whichever
+        # hop served. Tuple exactness still holds per hop inside each hop's
+        # runner (a foreign provider serving an approved id is refused there).
+        # ``default_model`` and the revision stay hop 0's, so the published
+        # row does not churn with the chain; cached receipts are consumed by
+        # ``model = default_model`` and so only ever reuse a hop-0 verdict.
+        approved_serving_identities=tuple(
+            sorted({identity for hop in chain for identity in hop.approved_identities})
+        ),
         provider=selection.provider,
     )
     cycle = AccountScreeningCycle(store=store, owner=owner, holder=holder, ttl=ttl)
@@ -1027,19 +1062,22 @@ async def run_screening_cycle(
     async def _screen(item: "Mapping[str, Any]") -> Any:
         message_block = item.get("message")
         message_id = str(message_block.get("id")) if isinstance(message_block, Mapping) else ""
-        runner = make_screening_runner(
-            config_dir=config_dir,
-            store=store,
-            owner=owner,
-            message_id=message_id,
-            auth_store=auth_store,
-            settings=settings,
-            # The SAME capture this composition resolved — never a second
-            # resolve that could certify a different config (R8/Q3).
-            selection=selection,
-        )
-        if runner is None:
-            return None
+
+        def _hop_runner(hop: Any) -> Any:
+            # A FRESH guarded runner per hop: its own wire guard (per-send
+            # charging, route check) and dedicated client, bound to the SAME
+            # captured hop — never a second resolve (R8/Q3).
+            return make_screening_runner(
+                config_dir=config_dir,
+                store=store,
+                owner=owner,
+                message_id=message_id,
+                auth_store=auth_store,
+                settings=settings,
+                selection=hop,
+            )
+
+        runner = ScreenChainRunner(chain, _hop_runner)
         return await screen_message_async(
             owner,
             item,

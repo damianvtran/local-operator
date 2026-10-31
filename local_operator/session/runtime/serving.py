@@ -1375,6 +1375,17 @@ class ServingSessionHandle(SessionHandle):
             )
             self._notify()
             self._announce_pending("approval", tool_name, description)
+            # THE INBOX ROW, raised where the card parks and after it is on
+            # screen: a parked approval is a human-blocking condition, and
+            # before this the operator's reel had no row for it at all — only
+            # a banner that dies with its dismissal.
+            #
+            # ``request_id`` rides along because the row's key names THIS WAIT
+            # and not the tool (QA round 1, Q1/Q2): two cards for ``bash`` — a
+            # second one after the operator dismissed the first, or a parallel
+            # batch opening two at once — are two waits, and keying on the tool
+            # collapsed them into one row that could never come back.
+            await self._raise_gate_item("approval", tool_name, description, request_id)
             # Read ONCE, here: `asyncio.wait_for` fixes its deadline when the
             # wait begins, so this is the wait that applies even if a surface
             # attaches later and flips the policy (see `_record_gate_timeout`).
@@ -1467,6 +1478,12 @@ class ServingSessionHandle(SessionHandle):
                 # ``BODIES["ask"]`` vocabulary is the right fallback for it.
                 announced = "" if getattr(question, "secret", False) else prose
                 self._announce_pending("ask", prose, announced)
+                # The ask half of the same gap: a question parks the turn for
+                # exactly as long as an approval does, and the row is raised
+                # with the SAME empty detail a secret question gets — the
+                # shared vocabulary names the wait, never the credential. The
+                # per-question ``request_id`` is the wait this row belongs to.
+                await self._raise_gate_item("ask", prose, announced, request_id)
                 # Read once per question, for the same reason as the approval
                 # gate: the deadline `wait_for` enforces is fixed right here.
                 timeout_s = self._gate_timeout_s()
@@ -7052,6 +7069,46 @@ class ServingSessionHandle(SessionHandle):
                 await result
         except Exception:  # noqa: BLE001 — the denial still stands
             logger.debug("could not record the unattended gate timeout", exc_info=True)
+
+    async def _raise_gate_item(
+        self, kind: str, gate_title: str, gate_detail: str, wait_id: str
+    ) -> None:
+        """Give the session the chance to raise its inbox row for this gate.
+
+        The OWNER decision belongs to the session graph, not to this handle: a
+        delegated child inherits this very closure (``harness/subagent.py``
+        takes ``parent_session._request_approval``), so the session the gate
+        parks on is the CHILD while the conversation the operator reads is the
+        parent's. ``Session.raise_gate_item`` resolves that walk and applies the
+        rest of the inbox gate to the owner it resolves.
+
+        ``wait_id`` is the id this gate minted for THIS park (``request_id``
+        above, one per question on the ask path), and it is what the row's key
+        names — not the tool. A repeat signal inside one wait updates one row;
+        a SECOND wait, whether a concurrent card in a parallel batch or a park
+        arriving after the operator dismissed the first row, is a new row they
+        can see. The tool cannot be the key: the store revives a dismissed row
+        only on a priority escalation, and every gate row is already ``high``.
+
+        Probed with ``getattr`` like every other host-optional seam on this
+        handle (``set_ask_reach`` below, ``set_record_pending`` in
+        ``_announce_settled``): a reduced session double has no inbox, and the
+        gate must never depend on one. The raise itself never raises — the card
+        is parked by now, and the row is the thing that may be lost, never the
+        wait.
+
+        The seam is TYPED rather than left ``Any``: ``getattr``'s three-argument
+        form widens to ``object`` for the analyzer, which then cannot await the
+        result (pyright: `"object" is not awaitable` — caught by CI, not by the
+        local gate). Naming the contract also says what a reduced host would
+        have to implement to carry an inbox.
+        """
+        raiser: Callable[[str, str, str, str], Awaitable[None]] | None = getattr(
+            self._session, "raise_gate_item", None
+        )
+        if raiser is None:
+            return
+        await raiser(kind, gate_title, gate_detail, wait_id)
 
     def reannounce_pending(self) -> None:
         """Re-run the announcement for a gate that is STILL parked.

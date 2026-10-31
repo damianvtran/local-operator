@@ -1,0 +1,257 @@
+audit.log — tui.analytics (es) — audit id w6a2 — round 2 — 2026-10-30
+This file is the EXECUTION log: each block is a command and its real output.
+Judgements live in report.md and record.json; those are notes, not evidence.
+All commands run from the repository root.
+
+### 0. environment
+$ /Users/damian/local-operator/.venv/bin/python --version
+Python 3.12.13
+$ /Users/damian/local-operator/.venv/bin/python -c 'from importlib.metadata import version; print("rich", version("rich"))'
+rich 15.0.0
+[exit 0]
+
+### audited revision
+$ git rev-parse HEAD
+b925c2e11be36653dfe88ac78f627bc2531427df
+[exit 0]
+
+### the two target files are untracked in this worktree, so HEAD does not bind their bytes
+$ git status --porcelain -- local_operator/i18n/catalogues/es/tui.analytics.json local_operator/i18n/catalogues/es/tui.import.json
+?? local_operator/i18n/catalogues/es/tui.analytics.json
+?? local_operator/i18n/catalogues/es/tui.import.json
+[exit 0]
+
+### input hashes (en / target / context) recorded in record.json
+$ shasum -a 256 local_operator/i18n/catalogues/en/tui.analytics.json local_operator/i18n/catalogues/es/tui.analytics.json local_operator/i18n/catalogues/en/tui.analytics.context.json local_operator/i18n/catalogues/en/tui.import.json local_operator/i18n/catalogues/es/tui.import.json
+aa5221066aa84eedf0f924628d51bc8f08ccf5f26b5075638b9d40062f7b617e  local_operator/i18n/catalogues/en/tui.analytics.json
+0496f1b123ab06e0aee3c991f8551c0013f77b3b1fff77230b876ec4e9143657  local_operator/i18n/catalogues/es/tui.analytics.json
+04356facdf1802a34a4be9ab6d3255cc9e92826d2b4e9ae917c43f687a9325eb  local_operator/i18n/catalogues/en/tui.analytics.context.json
+932e0f87210ff80950346c684afb000907610c9ff35388125977182120b136c2  local_operator/i18n/catalogues/en/tui.import.json
+17a4dec148f5de8bfb07e79c35e0b84eaa02da13bbf713676c42dbaa4d840725  local_operator/i18n/catalogues/es/tui.import.json
+[exit 0]
+
+### tui.import has no English context sidecar (no per-key maxCells)
+$ ls -la local_operator/i18n/catalogues/en/tui.import.context.json
+ls: local_operator/i18n/catalogues/en/tui.import.context.json: No such file or directory
+[exit 1]
+
+### the repository's own catalogue validator (the checkout's interpreter: /usr/bin/python3 is 3.9 and has no tomllib)
+$ /Users/damian/local-operator/.venv/bin/python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+[exit 0]
+
+### the widget's own documented row budget and the show_move gate
+$ grep -n 'The hint row still fits at 80x24' -B2 -A6 local_operator/tui/widgets/harness_import_view.py
+506-        state = self._state
+507-        labels: dict[HintButton, str] = {}
+508:        # The hint row still fits at 80x24 (76 cells); only the 60x20 row needs
+509-        # to shed it. Gate on the measured page width, not the pane breakpoint.
+510-        show_move = state in ("sources", "sessions") and (not self._narrow or self.size.width >= 74)
+511-        if show_move:
+512-            labels[self._hint_move] = _t(_kt.hint_move())
+513-        if state == "sources":
+514-            labels[self._hint_enter] = _t(_kt.hint_open())
+[exit 0]
+
+### the two paddings that turn an 80-column terminal into a 76-cell hint row
+$ grep -n '^Screen {' -A 9 local_operator/tui/local_operator.tcss; grep -n '^\.settings-view {' -A 3 local_operator/tui/local_operator.tcss
+161:Screen {
+162-    background: $lo-bg;
+163-    color: $lo-fg;
+164-    /* Outer inset for the WHOLE app, matching the omp reference: the chrome is
+165-     * borderless, so the breathing room at the terminal's edges is what makes
+166-     * it read as a deliberate surface rather than text that ran out of room.
+167-     * One row top and bottom, one cell left and right. Children then only
+168-     * manage spacing BETWEEN themselves. */
+169-    padding: 1;
+170-    /* A second layer for the toast overlay. Layers are arranged independently
+2111:.settings-view {
+2112-    height: 1fr;
+2113-    padding: 1 1 1 1;
+2114-}
+[exit 0]
+
+### the hint seam (' · ') and the key/label join the assembler reproduces
+$ grep -n 'The seam belongs to the ROW' -B 4 -A 8 local_operator/tui/widgets/subagent_view.py
+1785-        dim = Style(color=theme_mod.semantic_color(key_token))
+1786-        faint = Style(color=theme_mod.semantic_color(label_token))
+1787-        row = Text(no_wrap=True, overflow="ellipsis")
+1788-        if lead:
+1789:            # The seam belongs to the ROW, not to the hint that follows it, so
+1790-            # it keeps its resting tone even while that hint is hovered — a
+1791-            # punctuation mark must not read as part of a control.
+1792-            row.append(" · ", style=Style(color=theme_mod.semantic_color("faint")))
+1793-        if self._key:
+1794-            row.append(self._key, style=dim)
+1795-        if label:
+1796-            row.append(f" {label}" if self._key else label, style=faint)
+1797-        return row
+[exit 0]
+
+### the per-state hint subsets and the show_move gate the rows are assembled from
+$ sed -n '505,530p' local_operator/tui/widgets/harness_import_view.py
+    def _hint_labels(self) -> dict[HintButton, str]:
+        state = self._state
+        labels: dict[HintButton, str] = {}
+        # The hint row still fits at 80x24 (76 cells); only the 60x20 row needs
+        # to shed it. Gate on the measured page width, not the pane breakpoint.
+        show_move = state in ("sources", "sessions") and (not self._narrow or self.size.width >= 74)
+        if show_move:
+            labels[self._hint_move] = _t(_kt.hint_move())
+        if state == "sources":
+            labels[self._hint_enter] = _t(_kt.hint_open())
+            labels[self._hint_reload] = _t(_kt.hint_reload())
+        elif state == "sessions":
+            labels[self._hint_space] = _t(_kt.hint_select())
+            labels[self._hint_all] = _t(_kt.all_none())
+            labels[self._hint_enter] = _t(_kt.hint_preview())
+        elif state == "preview":
+            labels[self._hint_enter] = (
+                _t(_kt.hint_confirm()) if self._only_metadata_only() else _t(_kt.hint_import())
+            )
+        elif state == "progress":
+            labels[self._hint_cancel] = _t(_kt.hint_cancel())
+        elif state == "result":
+            labels[self._hint_enter] = _t(_kt.hint_list())
+        labels[self._hint_esc] = _t(_kt.hint_back())
+        return labels
+[exit 0]
+
+### A1 cross-file evidence: razonamiento is the established es term for reasoning
+$ grep -rn 'pensamiento\|razonamiento' local_operator/i18n/catalogues/es/*.json | wc -l; grep -on 'razonamiento' local_operator/i18n/catalogues/es/*.json | cut -d: -f1 | sort | uniq -c | sort -rn
+      21
+  11 local_operator/i18n/catalogues/es/wire.settings.json
+   4 local_operator/i18n/catalogues/es/tui.notices.json
+   1 local_operator/i18n/catalogues/es/wire.slash.json
+   1 local_operator/i18n/catalogues/es/wire.errors.desktop.json
+   1 local_operator/i18n/catalogues/es/tui.analytics.json
+   1 local_operator/i18n/catalogues/es/relay.chrome.json
+   1 local_operator/i18n/catalogues/es/cli.exec_help.json
+[exit 0]
+
+### where the other word survives, and for what (the model's streamed thought, not the token class)
+$ grep -on 'pensamiento' local_operator/i18n/catalogues/es/*.json | cut -d: -f1 | sort | uniq -c
+   1 local_operator/i18n/catalogues/es/tui.notices.json
+   1 local_operator/i18n/catalogues/es/wire.settings.json
+[exit 0]
+
+### this bundle's checks — round-2 additions: augmenting rows, ladder order, the round-1 dispositions, and every negative control
+$ env PYTHONPATH=/Users/damian/lo-i18n-es /Users/damian/local-operator/.venv/bin/python /Users/damian/lo-i18n-es/i18n/audits/evidence/es/tui.analytics/w6a2/checks.py
+namespace : tui.analytics
+locale    : es
+repo root : /Users/damian/lo-i18n-es
+en        : tui.analytics.json exists=True
+target    : es/tui.analytics.json exists=True
+context   : tui.analytics.context.json exists=True
+cell_len  : rich.cells.cell_len (the function the TUI measures with)
+
+key counts: en=98 target=98 context=98
+
+== blocking checks ==
+  0 failure(s) so far
+
+== measurements ==
+  plural messages checked: 14
+  render tui.analytics.search.counted_read: 1->1 lectura | 0->0 lecturas | 2->2 lecturas | 1000000->1.000.000 de lecturas | 2000000->2.000.000 de lecturas | 1500000->1.500.000 lecturas
+  render tui.analytics.search.counted_search: 1->1 búsqueda | 0->0 búsquedas | 2->2 búsquedas | 1000000->1.000.000 de búsquedas | 2000000->2.000.000 de búsquedas | 1500000->1.500.000 búsquedas
+  render tui.analytics.search.incl_free_read: 1->incl. 1 lectura gratis | 0->incl. 0 lecturas gratis | 2->incl. 2 lecturas gratis | 1000000->incl. 1.000.000 de lecturas gratis | 2000000->incl. 2.000.000 de lecturas gratis | 1500000->incl. 1.500.000 lecturas gratis
+  render tui.analytics.search.incl_free_search: 1->incl. 1 búsqueda gratis | 0->incl. 0 búsquedas gratis | 2->incl. 2 búsquedas gratis | 1000000->incl. 1.000.000 de búsquedas gratis | 2000000->incl. 2.000.000 de búsquedas gratis | 1500000->incl. 1.500.000 búsquedas gratis
+  render tui.analytics.search.incl_unpriced_read: 1->incl. 1 lectura sin precio | 0->incl. 0 lecturas sin precio | 2->incl. 2 lecturas sin precio | 1000000->incl. 1.000.000 de lecturas sin precio | 2000000->incl. 2.000.000 de lecturas sin precio | 1500000->incl. 1.500.000 lecturas sin precio
+  render tui.analytics.search.incl_unpriced_search: 1->incl. 1 búsqueda sin precio | 0->incl. 0 búsquedas sin precio | 2->incl. 2 búsquedas sin precio | 1000000->incl. 1.000.000 de búsquedas sin precio | 2000000->incl. 2.000.000 de búsquedas sin precio | 1500000->incl. 1.500.000 búsquedas sin precio
+  render tui.analytics.search.note_read_full: 1->1 lectura · sin precio publicado | 0->0 lecturas · sin precio publicado | 2->2 lecturas · sin precio publicado | 1000000->1.000.000 de lecturas · sin precio publicado | 2000000->2.000.000 de lecturas · sin precio publicado | 1500000->1.500.000 lecturas · sin precio publicado
+  render tui.analytics.search.note_read_partial: 1->1 lectura · 1 sin precio | 0->0 lecturas · 0 sin precio | 2->2 lecturas · 2 sin precio | 1000000->1.000.000 de lecturas · 1.000.000 sin precio | 2000000->2.000.000 de lecturas · 2.000.000 sin precio | 1500000->1.500.000 lecturas · 1.500.000 sin precio
+  render tui.analytics.search.note_read_unpriced: 1->1 lectura · sin precio | 0->0 lecturas · sin precio | 2->2 lecturas · sin precio | 1000000->1.000.000 de lecturas · sin precio | 2000000->2.000.000 de lecturas · sin precio | 1500000->1.500.000 lecturas · sin precio
+  render tui.analytics.search.note_search_full: 1->1 búsqueda · sin precio publicado | 0->0 búsquedas · sin precio publicado | 2->2 búsquedas · sin precio publicado | 1000000->1.000.000 de búsquedas · sin precio publicado | 2000000->2.000.000 de búsquedas · sin precio publicado | 1500000->1.500.000 búsquedas · sin precio publicado
+  render tui.analytics.search.note_search_partial: 1->1 búsqueda · 1 sin precio | 0->0 búsquedas · 0 sin precio | 2->2 búsquedas · 2 sin precio | 1000000->1.000.000 de búsquedas · 1.000.000 sin precio | 2000000->2.000.000 de búsquedas · 2.000.000 sin precio | 1500000->1.500.000 búsquedas · 1.500.000 sin precio
+  render tui.analytics.search.note_search_unpriced: 1->1 búsqueda · sin precio | 0->0 búsquedas · sin precio | 2->2 búsquedas · sin precio | 1000000->1.000.000 de búsquedas · sin precio | 2000000->2.000.000 de búsquedas · sin precio | 1500000->1.500.000 búsquedas · sin precio
+  render tui.analytics.table.subagent_suffix: 1->+1 subagente | 0->+0 subagentes | 2->+2 subagentes | 1000000->+1.000.000 de subagentes | 2000000->+2.000.000 de subagentes | 1500000->+1.500.000 subagentes
+  render tui.analytics.totals.days_with_usage: 1->1 día con uso | 0->0 días con uso | 2->2 días con uso | 1000000->1.000.000 de días con uso | 2000000->2.000.000 de días con uso | 1500000->1.500.000 días con uso
+  protected-token comparison on 98 shared keys
+  budget tui.analytics.hint.expand.compact: es=30 en=29 cap=31 (es - cap = -1) -> within cap
+  budget tui.analytics.hint.expand.full: es=39 en=40 cap=42 (es - cap = -3) -> within cap
+  budget tui.analytics.hint.expand.full_metric: es=56 en=56 cap=57 (es - cap = -1) -> within cap
+  budget tui.analytics.hint.expand.keys: es=24 en=22 cap=25 (es - cap = -1) -> within cap
+  budget tui.analytics.hint.expand.keys_bare: es=14 en=13 cap=12 (es - cap = +2) -> OVER cap and OVER en
+      -> cap unattainable in source (en 13 > cap 12); es delta vs en = +1 cells
+  polarity: 0 lost negation(s); 9 key(s) where es adds a negative marker (reviewed by hand, not auto-failed): ['tui.analytics.model.failed', 'tui.analytics.search.incl_unpriced_read', 'tui.analytics.search.incl_unpriced_search', 'tui.analytics.search.note_read_partial', 'tui.analytics.search.note_read_unpriced', 'tui.analytics.search.note_search_partial', 'tui.analytics.search.note_search_unpriced', 'tui.analytics.search.unpriced_clause', 'tui.analytics.totals.fresh']
+  byte-identical prose values: 0
+  semantic assertions evaluated: 38
+  tier full_metric: es=56 en=56 cap=57 delta_vs_en=+0 within_cap=yes
+  tier full: es=39 en=40 cap=42 delta_vs_en=-1 within_cap=yes
+  tier compact: es=30 en=29 cap=31 delta_vs_en=+1 within_cap=yes
+  tier keys: es=24 en=22 cap=25 delta_vs_en=+2 within_cap=yes
+  tier keys_bare: es=14 en=13 cap=12 delta_vs_en=+1 within_cap=no
+  ladder order widest-first: full_metric=56 > full=39 > compact=30 > keys=24 > keys_bare=14
+  counterfactual '↑↓ fila · enter expandir · e todo' = 33 cells against the compact cap 31 -> does not fit
+  ladder verbs: compact='abrir', full/full_metric='expandir', keys/keys_bare name the key only
+  A1: APPLIED — tui.analytics.totals.output_note
+  A2: APPLIED — tui.analytics.hint.expand.compact
+  A3: NOT APPLIED — tui.analytics.search.meta_live
+  A4: NOT APPLIED — tui.analytics.search.summary_free_paid
+  A5: NOT APPLIED — tui.analytics.rate.legend
+
+== negative controls (each MUST trip its check) ==
+  negative control [keys] dropped one key: CAUGHT
+      -> [keys] 1 key(s) missing from target: ['tui.analytics.chart.daily_empty']
+  negative control [icu] renamed a placeholder argument: CAUGHT
+      -> [icu] tui.analytics.chart.metric_clause: argument tuple differs — en=(('active', 'simple'), ('other', 'simple')) target=(('renombrado', 'simple'), ('other', 'simple'))
+  negative control [plural] deleted a 'many' branch: CAUGHT
+      -> [plural] tui.analytics.search.counted_read: argument count has ['one', 'other']; es requires at least ['many', 'one', 'other']
+  negative control [plural] emptied a branch: CAUGHT
+      -> [plural] tui.analytics.search.counted_read: empty branch/branches ['other']
+  negative control [plural] added a 'few' category: CAUGHT
+      -> [plural] tui.analytics.search.counted_read: ['few'] is not a Spanish CLDR category (argument count)
+  negative control [tokens] rewrote the $— money mark: CAUGHT
+      -> [tokens] tui.analytics.legend.cost: protected tokens differ — en=['$— money mark:$—'] target=[]
+  negative control [budget] padded a declared-budget hint past maxCells: CAUGHT
+      -> [budget] tui.analytics.hint.expand.compact: 42 cells exceeds maxCells 31 (en 29 fits)
+  negative control [polarity] dropped the negation from the empty state: CAUGHT
+      -> [polarity] tui.analytics.empty.title: EN negates, target carries no negative marker
+  negative control [semantics] rendered 'free' as 'unpriced': CAUGHT
+      -> [semantics] tui.analytics.search.summary_free: hit forbidden 'sin precio' ('free' rendered as UNPRICED); got '{count} sin precio'
+  negative control [terms] used 'demonio' for daemon: CAUGHT
+      -> [terms] tui.analytics.chart.daily_empty: 'demonio' — daemon stays English (§2 amendment)
+  negative control [untranslated] left a prose value in English: CAUGHT
+      -> [untranslated] tui.analytics.chart.daily_empty: target is byte-identical to EN prose — 'no daily usage recorded yet'
+  negative control [budget] padded the compact tier past maxCells 31: CAUGHT
+      -> [budget] tui.analytics.hint.expand.compact: 36 cells exceeds maxCells 31 (en 29 fits)
+  negative control [ladder] made the KEYS tier wider than the COMPACT tier (order inverted): CAUGHT
+      -> [ladder] tui.analytics.hint.expand.keys (46 cells) is not narrower than tui.analytics.hint.expand.compact (30); the widget paints the first tier that FITS, widest-first, so this order would misorder the ladder
+
+== result ==
+  PASS — all checks clean, every negative control tripped
+[exit 0]
+
+### RIG: the /analytics card geometry at 80/90/120 columns (Screen padding 1, panel 90% with padding 1 2), and the composed Output row against it
+$ env PYTHONPATH=/Users/damian/lo-i18n-es /Users/damian/local-operator/.venv/bin/python /Users/damian/.local-operator/sessions/3add261f67ba/scratchpad/probe_analytics_geometry.py
+80x24: body_width=66 hint_width=66 panel_width=66
+    en 12.3k     row=69 note=32 -> CROPPED
+    es 12.3k     row=73 note=36 -> CROPPED
+    es 12.3k old row=72 note=35 -> CROPPED
+    en 1.2M      row=77 note=40 -> CROPPED
+    es 1.2M      row=81 note=44 -> CROPPED
+90x24: body_width=75 hint_width=75 panel_width=75
+    en 12.3k     row=69 note=32 -> FITS
+    es 12.3k     row=73 note=36 -> FITS
+    es 12.3k old row=72 note=35 -> FITS
+    en 1.2M      row=77 note=40 -> CROPPED
+    es 1.2M      row=81 note=44 -> CROPPED
+120x24: body_width=102 hint_width=102 panel_width=102
+    en 12.3k     row=69 note=32 -> FITS
+    es 12.3k     row=73 note=36 -> FITS
+    es 12.3k old row=72 note=35 -> FITS
+    en 1.2M      row=77 note=40 -> FITS
+    es 1.2M      row=81 note=44 -> FITS
+[exit 0]
+
+### the exact check scripts that produced the blocks above
+$ shasum -a 256 i18n/audits/evidence/es/tui.analytics/w6a2/checks.py i18n/audits/evidence/es/tui.import/w6a2/checks.py
+5e0247c9b628daae3c0519556e97a689e2dbc2a7c93516c905a8a88830957b06  i18n/audits/evidence/es/tui.analytics/w6a2/checks.py
+813c89aebf3aab4da43ec4ca584a1e47d7c0720ed31edeeea10aa7f0dafa5fe2  i18n/audits/evidence/es/tui.import/w6a2/checks.py
+[exit 0]
+
+
+### rig sources (provenance note, not an execution log entry)
+The rig commands above were run from this session's scratch path. Their exact
+sources are preserved beside this log as `probe_analytics_geometry.py.txt`
+(text, not a second executable tree; copy to `.py` to re-run).

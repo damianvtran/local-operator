@@ -34,6 +34,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from local_operator.team_bridge.connector.coalesce import card_is_buffered
 from local_operator.team_bridge.connector.conversation import (
     handle_conversation_available,
 )
@@ -477,7 +478,20 @@ async def retry_due_holds(
         except Exception:  # noqa: BLE001 — one row never stops the connector
             outcome = {"action": "hold", "message_id": message_id, "code": "retry_failed"}
         action = outcome.get("action")
-        if action in _TERMINAL_REDRIVE_ACTIONS:
+        if card_is_buffered(outcome.get("detail")):
+            # A BUFFERED hand-off is never terminal and never a backoff: the card
+            # is in the coalescer's memory, and the ``wake_coalescing`` row this
+            # re-drive just rewrote (``enqueue`` writes it before anything else
+            # can fail) is its ONLY durable trace until the flush posts the card
+            # and ``_settle`` retires it. Deleting the row here — the round-1
+            # behaviour, which ``action: delivered`` put into the terminal branch
+            # below — made a hard kill before the flush lose the wake, on this
+            # path and on every live re-drive of a conversation hold that ends up
+            # coalesced (review round 2, M1′). Leaving ``retry_at`` alone is also
+            # deliberate: the row is due and the flush is about to clear it, so
+            # re-coding or re-scheduling it would only risk a double card.
+            pass
+        elif action in _TERMINAL_REDRIVE_ACTIONS:
             # The pass retires the row it re-drove, by its OWN key, whatever
             # its code (PR #3063 review B1). "The receipt commit deletes the
             # hold" holds only for a FRESH screen: a re-drive served from the
@@ -648,6 +662,78 @@ async def run_iteration(
     Returns metadata only (counts/actions) — no body, no excerpt.
     """
 
+    from .coalesce import CONNECTOR_COALESCER
+
+    # WAKE COALESCING (wake contract): every card hand-off inside this
+    # iteration is buffered per (endpoint, conversation, thread) and flushed
+    # once at the end, so a burst that lands in one batch costs ONE wake. The
+    # per-message screen/admit/reserve path inside is unchanged.
+    with CONNECTOR_COALESCER.scope():
+        try:
+            summary = await _run_iteration_inner(
+                owner,
+                config_dir=config_dir,
+                access=access,
+                auth_store=auth_store,
+                settings=settings,
+            )
+        finally:
+            # Flush even when the iteration raised: messages already admitted
+            # in it are owed their card regardless of a later ref's failure.
+            # The durable-hold pass runs in its OWN finally, so a stop that
+            # cancels the flush still leaves every buffered message recoverable
+            # (review round 1, M1: the hold used to be written only after the
+            # flush, i.e. never when the flush was the thing that died).
+            try:
+                summary_wakes = await CONNECTOR_COALESCER.flush_due(
+                    deliver=_coalesced_deliver, owner_filter=owner, config_dir=config_dir
+                )
+            finally:
+                # Groups still inside their window survive a crash as holds.
+                CONNECTOR_COALESCER.persist_pending_holds(config_dir=config_dir)
+    summary["coalesced_wakes"] = summary_wakes
+    return summary
+
+
+def _events_wait_s() -> int:
+    """The long-poll park, shortened while a coalesced card is waiting.
+
+    A group still inside its window is flushed at the end of the NEXT
+    iteration; parking the full ``EVENTS_WAIT_S`` would delay that card by
+    up to 25 s on a quiet conversation. Never below 1 s, so a pending group
+    cannot turn the long poll into a hot loop.
+    """
+
+    import math
+
+    from .coalesce import CONNECTOR_COALESCER
+
+    pending = CONNECTOR_COALESCER.seconds_until_due()
+    if pending is None:
+        return EVENTS_WAIT_S
+    return max(1, min(EVENTS_WAIT_S, math.ceil(pending)))
+
+
+async def _coalesced_deliver(owner: Any, metadata: Any, **kwargs: Any) -> str:
+    """The flush's hand-off: the conversation module's own card delivery.
+
+    Resolved through the module at call time so a test that patches
+    ``conversation.deliver_wake`` sees grouped cards on the same seam.
+    """
+
+    from . import conversation as _conversation
+
+    return await _conversation._deliver_card(owner, metadata, **kwargs)
+
+
+async def _run_iteration_inner(
+    owner: Any,
+    *,
+    config_dir: Path,
+    access: Any,
+    auth_store: Any,
+    settings: Any = None,
+) -> dict[str, Any]:
     from local_operator.team_bridge import pull as _pull
     from local_operator.team_bridge.store import Store
 
@@ -670,7 +756,7 @@ async def run_iteration(
     # the typed constructor and send it as-is, 0 included.
     after = feed_seq(state["feed_seq"])
     batch = await _pull.events(
-        owner, config_dir=config_dir, access=access, after=after, wait=EVENTS_WAIT_S
+        owner, config_dir=config_dir, access=access, after=after, wait=_events_wait_s()
     )
     # The feed cursor commits BEFORE screening. A failed handler leaves its
     # durable ref behind, but the hub can now legitimately answer 204 forever.

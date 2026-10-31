@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-operator"
-version = "0.93.0"
+version = "0.94.3"
 description = "A team of proactive AI assistants that can work together behind the scenes to help you get mundane tasks done so you can focus on the fun stuff."
 readme = "README.md"
 authors = [{ name = "Radient Inc.", email = "contact@radienthq.com" }]
@@ -482,6 +482,16 @@ reportPrivateImportUsage = false
 # the ANALYZER, so the import resolves instead of being reported missing. Same reasoning
 # as the adapter entry above: a type-resolution path only, no runtime import change.
 extraPaths = ["benchmarks/osworld_v2_adapter/src", "packaging/macos"]
+# `i18n/audits/evidence` is AUDIT EVIDENCE, not source: each bundle carries the
+# `checks.py` an independent auditor ran, committed verbatim so a reader can
+# re-run the exact check. Those scripts are throwaway probes written by a
+# different agent per namespace and are never imported; making them satisfy
+# `reportMissingTypeArgument` would mean editing the evidence to look tidier,
+# which defeats the point of committing it. The same directory is already
+# excluded from flake8, black and isort for the same reason (see their entries
+# above); pyright was the one gate that had not been told, and the first
+# bundle with untyped `dict` annotations (390 errors across the Spanish TUI
+# audits) was what showed it.
 # `exclude` REPLACES pyright's built-in defaults, it does not extend them, so
 # the four defaults must be restated here alongside any addition of our own.
 # THE COUNT IS VERSION-COUPLED. It became FOUR at 1.1.414, which added
@@ -518,7 +528,7 @@ extraPaths = ["benchmarks/osworld_v2_adapter/src", "packaging/macos"]
 # code, and CI cannot catch the omission — it never builds a wheel before
 # type-checking — so the cost lands entirely on local runs of the gate command,
 # where `rm -rf build/` is folklore the next person re-derives from scratch.
-exclude = ["**/node_modules", "**/__pycache__", "**/.*", "**/__editable__.*", "docs", "benchmarks/osworld_v2_adapter/**/evaluation_examples", "build"]
+exclude = ["**/node_modules", "**/__pycache__", "**/.*", "**/__editable__.*", "docs", "benchmarks/osworld_v2_adapter/**/evaluation_examples", "build", "i18n/audits/evidence"]
 # NOTE: venvPath/venv are deliberately NOT set here, even though a bare local
 # `pyright` run resolves whatever interpreter it finds and reports spurious
 # "import could not be resolved" errors that bury the real ones.

@@ -645,6 +645,12 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         "the browser upload intake's own reason field — same family as "
         "_browser_download, locally composed",
     ),
+    ("local_operator/tools/builtin.py", "_host_holds_no_recording", "reason"): (
+        1,
+        "the browser host's own record_* refusal token, compared against a fixed set "
+        "to decide whether a capture can still be running; never rendered, and a "
+        "browser host's value, not a mesh peer's",
+    ),
     ("local_operator/tools/builtin.py", "execute_bash", "reason"): (
         2,
         "``AbortSignal.reason``: the abort's own reason, authored in this process by "

@@ -776,6 +776,7 @@ def test_the_ordinary_dry_run_points_at_the_size_view_before_the_kept_list(
 # --------------------------------------------------------------------------
 
 _GIT_ENV = {
+    "GIT_CONFIG_NOSYSTEM": "1",
     "GIT_CONFIG_SYSTEM": "/dev/null",
     "GIT_TERMINAL_PROMPT": "0",
     "GIT_AUTHOR_NAME": "t",
