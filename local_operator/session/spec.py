@@ -627,7 +627,9 @@ class SessionSpec:
         return argparse.Namespace(
             **vars(self.to_namespace()),
             birth_effort=self.birth_effort,
-            saver="inherit" if self.radient_saver is None else ("on" if self.radient_saver else "off"),
+            saver=(
+                "inherit" if self.radient_saver is None else ("on" if self.radient_saver else "off")
+            ),
             profile=self.profile,
             # THE TEAM IS FORWARDED, so ``resolve_startup`` can resolve it, refuse
             # a name this root does not hold, and fire the #2014 pair refusal —

@@ -22,6 +22,7 @@ gate will not honour, so no caller — slash, ``--saver``, ``SessionSpec`` — c
 journal an enable the copy just reported as refused, and there is no per-caller
 "do not write" rule left to drift.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -318,9 +319,7 @@ async def saver_slash(session: Any, arg: str, SlashResult: Any) -> Any:
         # 'NoneType' object has no attribute '_transcript'` out of a worker and
         # take the whole app down. Every command here answers or does nothing —
         # none may crash.
-        return SlashResult(
-            kind="notice", text=_tr(_rs.notice_no_session()), style="warning"
-        )
+        return SlashResult(kind="notice", text=_tr(_rs.notice_no_session()), style="warning")
     raw = arg or ""
     wanted = raw.strip().lower()
     if raw and not wanted:
@@ -338,11 +337,7 @@ async def saver_slash(session: Any, arg: str, SlashResult: Any) -> Any:
         # REPORT WHAT THE NEXT REQUEST WILL DO (UX round 2, U10). Answering from
         # the setting let an agent pin plus an empty balance read "on" while the
         # turn resolved `no_credit` — the same split the published flag had.
-        key = (
-            _rs.command_status_on
-            if request_state(session).on
-            else _rs.command_status_off
-        )
+        key = _rs.command_status_on if request_state(session).on else _rs.command_status_off
         return SlashResult(kind="notice", text=_tr(key()), style="info")
     if wanted in {"inherit", "global", "default", "clear"}:
         await set_saver_choice(session, None)
@@ -368,9 +363,7 @@ async def saver_slash(session: Any, arg: str, SlashResult: Any) -> Any:
     # this handler is how the "do not write" rule came to live in one caller.
     result = await set_saver_choice(session, target)
     if not result.written:
-        return SlashResult(
-            kind="notice", text=refusal_text(result.decision), style="warning"
-        )
+        return SlashResult(kind="notice", text=refusal_text(result.decision), style="warning")
     notify = getattr(session, "refresh_frontend_state", None)
     if callable(notify):
         notify()

@@ -44348,7 +44348,9 @@ class OperatorApp(App[None]):
                     from local_operator.i18n.keys import wire_radient_saver
                     from local_operator.i18n.text import tr
 
-                    self._system_notice(str(tr("wire.radient_saver")(wire_radient_saver.command_usage())), "warning")
+                    self._system_notice(
+                        str(tr("wire.radient_saver")(wire_radient_saver.command_usage())), "warning"
+                    )
                     return
                 # A BARE NAMESPACE FORM REPORTS, IT NEVER TOGGLES (QA round 3, Q1).
                 # `/radient` accepts only `saver <value>`, and the picker completes
@@ -52892,9 +52894,7 @@ class OperatorApp(App[None]):
                     description="Radient Saver for this session: status, on, off or inherit",
                 )
             ]
-        return [
-            ArgumentChoice(name=word, description=described[word]) for word in words
-        ]
+        return [ArgumentChoice(name=word, description=described[word]) for word in words]
 
     def on_refresh_argument_choices(self, message: RefreshArgumentChoices) -> None:
         """Refill an open argument list whose rows depend on a sub-slot.

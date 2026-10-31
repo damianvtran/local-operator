@@ -11,6 +11,7 @@ notice said "not available"). The shapes below make the fake impossible:
 * ``refusing`` states are asserted for the ABSENCE of a row, not only for the
   notice text.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -96,6 +97,7 @@ def test_a_missing_session_is_refused_not_dereferenced(tmp_path):
 
 def test_status_reports_the_next_request_not_the_setting(tmp_path, monkeypatch):
     """UX round 2, U10: an agent pin + empty balance read "on" while the turn refused."""
+
     async def empty() -> Availability:
         return Availability(signed_in=True, positive_balance=False)
 
@@ -176,6 +178,7 @@ def test_mode_off_refuses_and_writes_nothing(tmp_path):
 
 def test_empty_balance_refuses_with_no_credit(tmp_path, monkeypatch):
     """Review M3: `no_credit` was unreachable from the command."""
+
     async def empty() -> Availability:
         return Availability(signed_in=True, positive_balance=False)
 
@@ -397,7 +400,9 @@ def test_exec_startup_writes_before_the_first_turn(tmp_path):
     current = session(tmp_path)
     asyncio.run(apply_saver_startup(current, SimpleNamespace(saver="on")))
     assert current.radient_saver_choice is True
-    assert rows(tmp_path) == [{"custom_type": command.SAVER_CUSTOM_TYPE, "details": {"enabled": True}}]
+    assert rows(tmp_path) == [
+        {"custom_type": command.SAVER_CUSTOM_TYPE, "details": {"enabled": True}}
+    ]
 
 
 def test_saver_argv_keeps_a_prompt_that_follows_the_flag():
@@ -420,9 +425,7 @@ def test_saver_argv_keeps_a_prompt_that_follows_the_flag():
 
     parsed = build_cli_parser().parse_args(fold_saver_argv(["exec", "--saver", "do X"]))
     assert (parsed.command, parsed.saver) == ("do X", "on")
-    parsed = build_cli_parser().parse_args(
-        fold_saver_argv(["exec", "--saver=off", "do X"])
-    )
+    parsed = build_cli_parser().parse_args(fold_saver_argv(["exec", "--saver=off", "do X"]))
     assert (parsed.command, parsed.saver) == ("do X", "off")
 
 
