@@ -30,7 +30,7 @@ def _published_records(monkeypatch):
     """
     from local_operator.session.runtime import reclaim
 
-    class _Records(dict):
+    class _Records(dict[Any, Any]):
         def get(self, pid, default=None):  # noqa: ANN001
             row = reclaim.process_row(pid)
             age = float(getattr(row, "age_s", 0.0) or 30.0)

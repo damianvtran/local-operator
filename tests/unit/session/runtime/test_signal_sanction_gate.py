@@ -384,7 +384,9 @@ async def test_a_stale_marker_for_another_run_does_not_sanction_this_one(
     assert state.refusals == 1, "a marker for another pid sanctioned this run"
     assert not state.stop.is_set()
     assert receipt is None
-    assert registry.read_signal_refusals(directory)["refusals"][0]["sanction"] == "none"
+    recorded = registry.read_signal_refusals(directory)
+    assert recorded is not None
+    assert recorded["refusals"][0]["sanction"] == "none"
     await _settle(state)
 
 
@@ -489,7 +491,9 @@ async def test_a_sigquit_is_gated_like_a_sigterm(directory: Path) -> None:
     assert state.refusals == 1
     assert not state.stop.is_set() and state.draining is None
     assert receipt is None
-    assert registry.read_signal_refusals(directory)["refusals"][0]["name"] == "SIGQUIT"
+    recorded = registry.read_signal_refusals(directory)
+    assert recorded is not None
+    assert recorded["refusals"][0]["name"] == "SIGQUIT"
     await _settle(state)
 
     _stage_deliberate(directory)

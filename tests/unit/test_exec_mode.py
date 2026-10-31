@@ -20,7 +20,7 @@ import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -2551,18 +2551,22 @@ def _worker_handler(
             self.aborted = reason
 
     class _Recorder:
+        """A loop double: the handler only ever calls ``add_signal_handler``."""
+
         def __init__(self) -> None:
             self.callbacks: dict[Any, Any] = {}
 
         def add_signal_handler(self, sig: Any, callback: Any) -> None:
             self.callbacks[sig] = callback
 
-    _Session._transcript.directory = directory
+    _Session._transcript.directory = directory  # type: ignore[attr-defined]
     session = _Session()
     loop = _Recorder()
     interrupted = asyncio.Event()
     sessions: list[Any] = [session]
-    exec_worker._install_sigterm_handler(loop, sessions, interrupted, facts, job_id)
+    exec_worker._install_sigterm_handler(
+        cast(Any, loop), sessions, interrupted, facts, job_id
+    )
     return session, loop.callbacks[exec_worker.signal.SIGTERM], interrupted
 
 
