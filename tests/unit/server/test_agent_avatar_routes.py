@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+from typing import Any
 
 import pytest
 
@@ -16,6 +17,39 @@ from local_operator.agents import AgentEditFields
 from local_operator.server.app import app
 
 Image = pytest.importorskip("PIL.Image")
+
+
+def _edit_fields(**overrides: Any) -> AgentEditFields:
+    """``AgentEditFields`` with every field spelled out, overridden by the few a
+    test cares about.
+
+    pyright reads the model's synthesised ``__init__`` as requiring all of them
+    (``Field(None, ...)`` is not seen as a default), so a partial construction is
+    a ``reportCallIssue`` in CI's whole-tree type-check even though it runs. The
+    same helper, with the same reason, lives in ``tests/unit/test_agent_profiles.py``.
+    """
+    base: dict[str, Any] = dict(
+        name=None,
+        label=None,
+        description=None,
+        tags=None,
+        categories=None,
+        security_prompt=None,
+        hosting=None,
+        model=None,
+        last_message=None,
+        temperature=None,
+        top_p=None,
+        top_k=None,
+        max_tokens=None,
+        stop=None,
+        frequency_penalty=None,
+        presence_penalty=None,
+        seed=None,
+        current_working_directory=None,
+    )
+    base.update(overrides)
+    return AgentEditFields(**base)
 
 
 def _png(color=(10, 20, 30)) -> bytes:
@@ -26,7 +60,7 @@ def _png(color=(10, 20, 30)) -> bytes:
 
 @pytest.fixture
 def agent_id(test_app_client) -> str:
-    return app.state.agent_registry.create_agent(AgentEditFields(name="routebot")).id
+    return app.state.agent_registry.create_agent(_edit_fields(name="routebot")).id
 
 
 @pytest.mark.asyncio

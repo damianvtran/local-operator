@@ -5449,11 +5449,12 @@ def test_listing_rows_carry_the_bound_agents_picture_identity(root: Path) -> Non
 
     from PIL import Image
 
-    from local_operator.agents import AgentEditFields, AgentRegistry
+    from local_operator.agents import AgentRegistry
     from local_operator.resume import write_session_attachment
+    from tests.unit.test_agent_avatar import _edit_fields
 
     registry = AgentRegistry(config_dir=root, refresh_interval=0.0)
-    agent = registry.create_agent(AgentEditFields(name="coder"))
+    agent = registry.create_agent(_edit_fields(name="coder"))
     image = io.BytesIO()
     Image.new("RGB", (32, 32), (9, 9, 9)).save(image, "PNG")
     meta = registry.set_agent_avatar(agent.id, image.getvalue())

@@ -11,6 +11,7 @@ import hashlib
 import io
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -19,6 +20,39 @@ from local_operator import agent_avatar
 from local_operator.agents import AgentEditFields, AgentRegistry
 
 Image = pytest.importorskip("PIL.Image")
+
+
+def _edit_fields(**overrides: Any) -> AgentEditFields:
+    """``AgentEditFields`` with every field spelled out, overridden by the few a
+    test cares about.
+
+    pyright reads the model's synthesised ``__init__`` as requiring all of them
+    (``Field(None, ...)`` is not seen as a default), so a partial construction is
+    a ``reportCallIssue`` in CI's whole-tree type-check even though it runs. The
+    same helper, with the same reason, lives in ``tests/unit/test_agent_profiles.py``.
+    """
+    base: dict[str, Any] = dict(
+        name=None,
+        label=None,
+        description=None,
+        tags=None,
+        categories=None,
+        security_prompt=None,
+        hosting=None,
+        model=None,
+        last_message=None,
+        temperature=None,
+        top_p=None,
+        top_k=None,
+        max_tokens=None,
+        stop=None,
+        frequency_penalty=None,
+        presence_penalty=None,
+        seed=None,
+        current_working_directory=None,
+    )
+    base.update(overrides)
+    return AgentEditFields(**base)
 
 
 def _jpeg_with_exif(size=(800, 400), orientation=6) -> bytes:
@@ -48,7 +82,7 @@ def registry(tmp_path: Path) -> AgentRegistry:
 
 @pytest.fixture
 def agent(registry: AgentRegistry):
-    return registry.create_agent(AgentEditFields(name="picbot"))
+    return registry.create_agent(_edit_fields(name="picbot"))
 
 
 # -- normalise ---------------------------------------------------------------
@@ -208,7 +242,7 @@ def test_clear_removes_file_and_meta(registry, agent):
 
 def test_update_agent_keeps_avatar(registry, agent):
     meta = registry.set_agent_avatar(agent.id, _png())
-    registry.update_agent(agent.id, AgentEditFields(description="edited"))
+    registry.update_agent(agent.id, _edit_fields(description="edited"))
     assert registry.get_agent(agent.id).avatar.sha256 == meta.sha256
 
 
@@ -328,7 +362,7 @@ def test_session_row_fields_resolve_name_to_id_and_sha(registry, agent):
 def test_aida_session_without_attachment_resolves_her_row(registry):
     from local_operator.aida import state as aida_state
 
-    aida = registry.create_agent(AgentEditFields(name="aida"))
+    aida = registry.create_agent(_edit_fields(name="aida"))
     root = registry.config_dir
     (root / "sessions" / "cos1").mkdir(parents=True)
     aida_state.write_state(root, {"session_id": "cos1"})
@@ -407,10 +441,8 @@ def test_an_update_agent_rewrite_keeps_the_picture_block(registry, agent):
     editor renames rows constantly).
     """
     meta = registry.set_agent_avatar(agent.id, _png())
-    from local_operator.agents import AgentEditFields
-
     updated = registry.update_agent(
-        agent.id, AgentEditFields(name="renamed", description="new purpose")
+        agent.id, _edit_fields(name="renamed", description="new purpose")
     )
     assert updated.avatar is not None and updated.avatar.sha256 == meta.sha256
     # And it is on DISK, not only in memory.
@@ -419,7 +451,8 @@ def test_an_update_agent_rewrite_keeps_the_picture_block(registry, agent):
     assert stored["avatar"]["mime"] == "image/png"
     # A fresh registry (a new process) reads the same block back.
     fresh = AgentRegistry(config_dir=registry.config_dir, refresh_interval=0.0)
-    assert fresh.get_agent(agent.id).avatar.sha256 == meta.sha256
+    reread = fresh.get_agent(agent.id).avatar
+    assert reread is not None and reread.sha256 == meta.sha256
 
 
 def test_save_agent_round_trips_the_picture_block(registry, agent):
@@ -464,7 +497,7 @@ def test_import_drops_an_archives_picture_block(registry, agent, tmp_path):
 # -- round-1 remediation: contract filename, stale registries, hostile files -----
 
 
-def _yml(registry, agent_id) -> dict:
+def _yml(registry, agent_id) -> dict[str, Any]:
     return yaml.safe_load((registry.agents_dir / agent_id / "agent.yml").read_text())
 
 
@@ -484,7 +517,8 @@ def test_writers_always_record_the_stored_filename(registry, agent, monkeypatch)
     meta = registry.set_agent_avatar(agent.id, _png())
     assert meta.filename == "avatar.png"
     assert _yml(registry, agent.id)["avatar"]["filename"] == "avatar.png"
-    assert agent_avatar.meta_json(meta)["filename"] == "avatar.png"
+    wire = agent_avatar.meta_json(meta)
+    assert wire is not None and wire["filename"] == "avatar.png"
     monkeypatch.setattr(agent_avatar, "STORED_MAX_BYTES", 100)
     flipped = registry.set_agent_avatar(agent.id, _png())
     assert flipped.filename == "avatar.jpg" and flipped.mime == "image/jpeg"
@@ -501,7 +535,8 @@ def test_a_legacy_block_without_filename_falls_back_by_mime(registry, agent):
     assert (mime, sha) == ("image/png", meta.sha256)
     assert agent_avatar.read_stored(fresh.config_dir, agent.id)[2] == meta.sha256
     # The listing wire form always reports the EFFECTIVE name.
-    assert agent_avatar.meta_json(row.avatar)["filename"] == "avatar.png"
+    wire = agent_avatar.meta_json(row.avatar)
+    assert wire is not None and wire["filename"] == "avatar.png"
 
 
 @pytest.mark.parametrize("hostile", ["../x", "/etc/passwd", "sub/avatar.png", "avatar.jpg", "x\0y"])
@@ -517,12 +552,11 @@ def test_a_filename_that_is_not_the_plain_stored_name_reads_as_no_avatar(registr
     assert fresh.agent_avatar_path(agent.id) is None
     # ...and the row index advertises no picture for it either.
     agent_avatar._index_cache.clear()
-    assert (
-        agent_avatar.session_agent_identity(
-            fresh.config_dir, "no-such-session", agent_name="picbot"
-        ).avatar_sha256
-        is None
+    identity = agent_avatar.session_agent_identity(
+        fresh.config_dir, "no-such-session", agent_name="picbot"
     )
+    # The agent still resolves (its row is fine); only its PICTURE is withheld.
+    assert identity is not None and identity.avatar_sha256 is None
 
 
 def test_a_symlink_swapped_in_for_the_picture_is_not_served(registry, agent, tmp_path):
@@ -576,13 +610,13 @@ def test_a_nul_in_an_id_is_not_found_not_a_valueerror(registry, agent, bad):
 
 def test_a_stale_registry_update_keeps_a_picture_another_process_set(tmp_path):
     server = AgentRegistry(config_dir=tmp_path, refresh_interval=3.0)
-    agent = server.create_agent(AgentEditFields(name="racer"))
+    agent = server.create_agent(_edit_fields(name="racer"))
     server.get_agent(agent.id)  # the server's row is now cached, with avatar=None
     cli = AgentRegistry(config_dir=tmp_path, refresh_interval=0.0)
     meta = cli.set_agent_avatar(agent.id, _png())
     assert server._agents[agent.id].avatar is None  # the stale precondition holds
 
-    server.update_agent(agent.id, AgentEditFields(description="edited by the editor"))
+    server.update_agent(agent.id, _edit_fields(description="edited by the editor"))
 
     after = AgentRegistry(config_dir=tmp_path, refresh_interval=0.0).get_agent(agent.id)
     assert after.description == "edited by the editor"
@@ -592,10 +626,10 @@ def test_a_stale_registry_update_keeps_a_picture_another_process_set(tmp_path):
 
 def test_a_stale_registry_set_keeps_other_processes_edits(tmp_path):
     server = AgentRegistry(config_dir=tmp_path, refresh_interval=3.0)
-    agent = server.create_agent(AgentEditFields(name="racer2"))
+    agent = server.create_agent(_edit_fields(name="racer2"))
     server.get_agent(agent.id)
     AgentRegistry(config_dir=tmp_path, refresh_interval=0.0).update_agent(
-        agent.id, AgentEditFields(description="written by another process")
+        agent.id, _edit_fields(description="written by another process")
     )
 
     server.set_agent_avatar(agent.id, _png())
@@ -607,11 +641,11 @@ def test_a_stale_registry_set_keeps_other_processes_edits(tmp_path):
 
 def test_a_stale_registry_clear_keeps_other_processes_edits(tmp_path):
     server = AgentRegistry(config_dir=tmp_path, refresh_interval=3.0)
-    agent = server.create_agent(AgentEditFields(name="racer3"))
+    agent = server.create_agent(_edit_fields(name="racer3"))
     server.set_agent_avatar(agent.id, _png())
     server.get_agent(agent.id)
     AgentRegistry(config_dir=tmp_path, refresh_interval=0.0).update_agent(
-        agent.id, AgentEditFields(description="written by another process")
+        agent.id, _edit_fields(description="written by another process")
     )
 
     assert server.clear_agent_avatar(agent.id) is True

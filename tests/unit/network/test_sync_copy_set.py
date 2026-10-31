@@ -278,6 +278,15 @@ _PATH_SHAPED = re.compile(r"^(?!\.\.?(?:/|$))[A-Za-z0-9._-]+(?:/(?!\.\.?(?:/|$))
 #: the way the import list was. Every module with at least one candidate appears here, so
 #: "a module I did not think about" is itself a failing state.
 _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
+    "local_operator/agent_avatar.py": (
+        2,
+        "``PNG_NAME``/``JPEG_NAME`` ('avatar.png', 'avatar.jpg'): an AGENT's picture, "
+        "stored in the agent's own directory (<config>/agents/<id>/), never an entry of "
+        "a session directory -- so no session copy carries it. The picture is also "
+        "deliberately local-only on the mesh: the definitions mirror keeps the local "
+        "row's own picture and a peer can neither set, replace nor clear it, and an "
+        "agent EXPORT drops it (``AgentRegistry._is_skipped_from_archive``)",
+    ),
     "local_operator/notifications/store.py": (
         1,
         "notifications.db is the machine-wide config-root inbox, not a session "

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+from typing import Any
 
 import pytest
 from starlette.testclient import TestClient
@@ -19,6 +20,39 @@ from local_operator.mobile.daemon import MobileDaemon, SessionTable, build_app
 from local_operator.resume import write_session_attachment
 
 Image = pytest.importorskip("PIL.Image")
+
+
+def _edit_fields(**overrides: Any) -> AgentEditFields:
+    """``AgentEditFields`` with every field spelled out, overridden by the few a
+    test cares about.
+
+    pyright reads the model's synthesised ``__init__`` as requiring all of them
+    (``Field(None, ...)`` is not seen as a default), so a partial construction is
+    a ``reportCallIssue`` in CI's whole-tree type-check even though it runs. The
+    same helper, with the same reason, lives in ``tests/unit/test_agent_profiles.py``.
+    """
+    base: dict[str, Any] = dict(
+        name=None,
+        label=None,
+        description=None,
+        tags=None,
+        categories=None,
+        security_prompt=None,
+        hosting=None,
+        model=None,
+        last_message=None,
+        temperature=None,
+        top_p=None,
+        top_k=None,
+        max_tokens=None,
+        stop=None,
+        frequency_penalty=None,
+        presence_penalty=None,
+        seed=None,
+        current_working_directory=None,
+    )
+    base.update(overrides)
+    return AgentEditFields(**base)
 
 
 def _png() -> bytes:
@@ -36,7 +70,7 @@ def store(tmp_path, monkeypatch):
     _store(cfg, "aaaaaaaaaaaa", "bbbbbbbbbbbb")
     monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
     registry = AgentRegistry(config_dir=cfg, refresh_interval=0.0)
-    agent = registry.create_agent(AgentEditFields(name="coder"))
+    agent = registry.create_agent(_edit_fields(name="coder"))
     meta = registry.set_agent_avatar(agent.id, _png())
     write_session_attachment(cfg / "sessions" / "aaaaaaaaaaaa", team="", agent="coder", goal="")
     return cfg, agent, meta

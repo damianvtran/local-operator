@@ -10648,15 +10648,16 @@ async def test_a_local_row_carries_its_agents_picture_identity(draft_api) -> Non
 
     from PIL import Image
 
-    from local_operator.agents import AgentEditFields, AgentRegistry
+    from local_operator.agents import AgentRegistry
+    from tests.unit.test_agent_avatar import _edit_fields
 
     client, root = draft_api
     registry = AgentRegistry(config_dir=root, refresh_interval=0.0)
-    agent = registry.create_agent(AgentEditFields(name="coder"))
+    agent = registry.create_agent(_edit_fields(name="coder"))
     _bound_session(root, "chat0000001", agent="coder")
     _bound_session(root, "chat0000002", created=2_000.0)
 
-    async def rows() -> dict[str, dict]:
+    async def rows() -> dict[str, dict[str, Any]]:
         answer = await client.get("/v1/desktop/sessions?limit=5")
         assert answer.status_code == 200, answer.text
         return {row["id"]: row for row in answer.json()["result"]["sessions"]}

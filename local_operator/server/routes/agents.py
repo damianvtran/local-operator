@@ -1986,7 +1986,7 @@ async def get_agent_avatar(
 
 @router.put(
     "/v1/agents/{agent_id}/avatar",
-    response_model=CRUDResponse,
+    response_model=CRUDResponse[dict[str, Any]],
     summary="Set an agent's profile picture",
     description="Send the raw image bytes as the request body (PNG, JPEG, WebP, GIF, "
     "or HEIC when supported; <= 10 MiB, <= 40 MP). The server re-normalises it to a "
@@ -2005,7 +2005,7 @@ async def put_agent_avatar(
     request: Request,
     agent_registry: AgentRegistry = Depends(get_agent_registry),
     agent_id: str = Path(..., description="ID of the agent", examples=["agent123"]),
-) -> CRUDResponse:
+) -> CRUDResponse[dict[str, Any]]:
     from local_operator import agent_avatar
 
     # Read at most one byte past the cap, so an oversized body is refused as
@@ -2039,7 +2039,7 @@ async def put_agent_avatar(
 
 @router.delete(
     "/v1/agents/{agent_id}/avatar",
-    response_model=CRUDResponse,
+    response_model=CRUDResponse[dict[str, Any]],
     summary="Remove an agent's profile picture",
     description="Idempotent: removing an unset picture still answers 200, with "
     "result.removed=false.",
@@ -2048,7 +2048,7 @@ async def put_agent_avatar(
 async def delete_agent_avatar(
     agent_registry: AgentRegistry = Depends(get_agent_registry),
     agent_id: str = Path(..., description="ID of the agent", examples=["agent123"]),
-) -> CRUDResponse:
+) -> CRUDResponse[dict[str, Any]]:
     try:
         removed = await asyncio.to_thread(agent_registry.clear_agent_avatar, agent_id)
     except KeyError:
