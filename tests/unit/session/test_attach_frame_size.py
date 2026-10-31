@@ -1176,7 +1176,7 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year(
         from local_operator.providers.clients import OpenAICompatClient
 
         async def receive() -> Usage:
-            usage = {"prompt_tokens": 30000, "completion_tokens": 10}
+            usage: dict[str, Any] = {"prompt_tokens": 30000, "completion_tokens": 10}
             if cache_reported:
                 usage["prompt_tokens_details"] = {"cached_tokens": 0}
             payload = f'data: {json.dumps({"choices": [], "usage": usage})}\n\ndata: [DONE]\n\n'

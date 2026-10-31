@@ -355,6 +355,7 @@ async def test_openai_compat_preserves_cache_counter_presence(
     from local_operator.providers.failover import _stamp_serving_spec
 
     stamped = _stamp_serving_spec(StreamUsageEvent(usage=usage), _spec())
+    assert isinstance(stamped, StreamUsageEvent)
     assert stamped.usage._cache_read_reported is (expected is not None)
     assert "cache_read_reported" not in usage.model_dump()
     # Replayed numeric zero has no reliable provenance and must stay unknown.
