@@ -978,6 +978,28 @@ test_eval_tool.py` as **24 failures** that three agents in a row wrote off as
 somewhere real. Treat a standing block of "known environmental" failures as an
 unverified claim, not as weather.
 
+### One stash list is shared by every worktree of a clone
+
+Worktrees share one `.git`, so `refs/stash` — and the `stash@{n}` index that
+addresses it — is shared with them. Every worktree of a clone answers
+`git stash list` with the same entries in the same order, which makes an
+unqualified two-command sequence unsafe wherever another agent (or person) is
+working: your `git stash push` lands at `stash@{0}`, a peer's push between it
+and your `git stash pop` renumbers yours to `stash@{1}`, and the bare `pop`
+then applies THEIR work to YOUR tree. Nothing in the output says it is not
+yours, and a `pop` drops the entry it applied, so the peer's own restore later
+finds their entry gone.
+
+**Rule: for anything you intend to restore, do not use a bare `git stash` in a
+shared checkout.** Give the entry an explicit message and record the commit it
+produced — `git stash push -m "<why>"`, then `git rev-parse stash@{0}` — and
+restore that id by value (`git stash apply <sha>`), never `stash@{0}` again.
+`git stash create` skips the list entirely and hands you the id to record. This
+is a property of Git, not of this repository's layout: it applies to any clone
+running parallel agents. The conflict shape a foreign apply leaves, and how to
+recover path by path, are in "The stash list is repo-global, and `apply` lands
+whatever it resolves" under "Always capture before AND after".
+
 ### Isolating a run: `LOCAL_OPERATOR_CONFIG_DIR` alone is not enough
 
 `LOCAL_OPERATOR_CONFIG_DIR` redirects the **config** dir. It does *not* redirect
