@@ -227,6 +227,13 @@ _AMBIENT_VARS = (
     # looking like it tested the feature. The standby's own tests clear it for the
     # children they explicitly want to warm.
     "LOP_RUNTIME_STANDBY_DISABLED",
+    # WHO FORKS A RUNTIME (``session/runtime/session_host.SPAWN_AUTHORITY_ENV``).
+    # An escape hatch in the strict sense: ``1`` sends every ``launch._spawn_runtime``
+    # to a launchd-owned host instead of forking, so an inherited value would make
+    # each engaging cell ask a host that does not exist and fail -- or, worse, reach
+    # the operator's REAL host and fork a runtime into a store the cell does not own.
+    # The host's own tests set it explicitly for the cells that mean to take that route.
+    "LOP_SESSION_HOST",
     # The standby's idle window (``standby.STANDBY_IDLE_ENV``, agent review
     # round 1): it decides how long a spare waits before reaping itself, which
     # is the memory bound the standby cells and the lifecycle bench measure.
