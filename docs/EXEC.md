@@ -548,7 +548,13 @@ grant is a one-time, per-host decision.
   `0` on macOS, so the pid is the field that tells a sender from the kernel). The
   capture is claimed ONCE, by the receipt for the delivery that made it; a later
   signal on the same process carries `no-siginfo` rather than borrowing an
-  earlier sender. `sanction` is decided
+  earlier sender. This is by design and bounded to ONE
+  named sender per process: if the same actor re-sends or escalates, only the
+  first delivery is attributed and a second receipt's `no-siginfo` means "this
+  delivery was not captured", NOT "the sender is unknowable on this host". The
+  rendered reason follows the same latest-wins rule as the stop class, so after a
+  repeat it says "unidentified sender" even though the first entry in `signals`
+  names a pid. `sanction` is decided
   at write time: `marker` iff a `runtime-stop.json` for this exact run, staged no
   more than `PAIR_WINDOW_S` before the signal and never after, was on disk when it
   arrived; otherwise `none` — nobody staged a stop. `spawn_chain` is present only

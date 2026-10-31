@@ -47,14 +47,34 @@ WHAT IT DOES, PRECISELY. :func:`arm` saves the action currently installed
 
 WHY THAT DANCE RATHER THAN THE WORK IN THE HANDLER. A Python callback entered
 from a C signal frame is not async-signal-safe: CPython deliberately defers
-Python-level handlers to a pending call for that reason. So the sensor does the
-least possible — read six ints, one ``sigaction``, one ``kill`` — and hands the
-signal straight back. Because it RESTORES before re-raising, the sensor is
-spent after the first delivery: every later delivery takes the ordinary path
-with no ctypes frame, no added latency and no behavioural difference from this
-module not being loaded at all. That is also what keeps the risk bounded: the
-only code this module ever runs in a signal context runs once per process, on
-the first SIGTERM that process sees.
+Python-level handlers to a pending call for that reason. So the sensor does as
+little as it can — read six ints, one ``sigaction``, one ``kill`` — and hands
+the signal straight back. SAID PLAINLY: the sensor IS still a Python frame (a
+``ctypes`` callback takes the GIL on whichever thread the kernel chose), so the
+residual risk is a GIL-internals deadlock if the signal lands inside the
+interpreter's own GIL hand-off. That was not reproduced (an 8-thread
+GIL-churning probe completed the sensor 40/40 in review), and the mitigation is
+the bound, not a proof: it runs ONCE per process, on the first delivery.
+
+AFTER THAT FIRST DELIVERY the sensor is spent (it restored the saved action
+before re-raising), so every later delivery takes the ordinary path with no
+ctypes frame. The FIRST delivery is not behaviourally identical to this module
+being absent, and the exact limit matters:
+
+* UNDER AN ASYNCIO LOOP HANDLER (the runtime and the exec worker, the only
+  callers) it is equivalent in the way that counts: CPython's C handler writes
+  its wakeup-fd byte on the re-raised signal, the loop wakes from
+  ``select``/``kqueue`` and runs the callback.
+* UNDER A BARE ``signal.signal`` HANDLER it is NOT guaranteed equivalent. While
+  the sensor runs the signal is masked on the interrupted thread, so the
+  re-raise is delivered to another thread; CPython trips its pending flag there
+  but does not interrupt a main thread parked in a blocking wait. Measured in
+  review: with a CPU-busy thread and the main thread in ``Event.wait(5)`` the
+  handler did not run within 5 s when armed, and ran when plain. The same
+  review measured that ``SA_RESTART`` (set by :func:`arm`) keeps a main thread
+  blocked in ``read``/``recv``/``waitpid`` from taking ``EINTR``, delaying the
+  handler until the call returns. Neither affects an asyncio loop, and both are
+  recorded as deferred rather than papered over.
 
 ONE CAPTURE, ONE CLAIM (:func:`take`). Because the sensor fires once, a repeat
 delivery has no capture of its own — and the capture that DOES exist describes
