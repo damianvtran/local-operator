@@ -1,0 +1,47 @@
+{
+  "record_reference": "i18n/audits/evidence/es/wire.errors.session_host/es31a/record.json",
+  "record_sha256": "d479a0f6aa85c10c6d15b2549b0d5dfaf4d2837730aabff8624dd69bc6fbcd8a",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "task_label": "host-es-audit-a",
+    "session": "1436c962e633",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "056852035b33",
+    "actual_model_source": "Host model-switch notices: quota-triggered temporary fallback from anthropic/claude-sonnet-5-5 via anthropic/claude-opus-5-5 to openai/gpt-6.1-sol. Audit reasoning, validator execution and report performed on openai/gpt-6.1-sol."
+  },
+  "audit_date": "2026-10-31",
+  "companions": [
+    {
+      "path": "i18n/audits/evidence/es/wire.errors.session_host/es31a/report.json",
+      "sha256": "b6885d8de5b1146514f5ef141f4698e8c5923d75b02c7f64459245679094b845"
+    },
+    {
+      "path": "i18n/audits/evidence/es/wire.errors.session_host/es31a/report.md",
+      "sha256": "67e79366ed442fd060d50e23db139667a8154b08573c8459ce6db3975d73b52f"
+    },
+    {
+      "path": "i18n/audits/evidence/es/wire.errors.session_host/es31a/audit.log",
+      "sha256": "edada95785a776b41f86b43a7b11044d379a15230948bed8ac3cbb6bf818e545"
+    },
+    {
+      "path": "i18n/audits/evidence/es/wire.errors.session_host/es31a/validate_audit.py",
+      "sha256": "07d3664895306a88d7654656bf8a3ecf6ae5fca1075c084348decca96d19b288"
+    },
+    {
+      "path": "i18n/audits/evidence/es/wire.errors.session_host/es31a/validation-setup-attempt-1.log",
+      "sha256": "a737c948bea5d18b4fe2c672ea4f5c2a802a1f09f7d608c9417143362247ee72"
+    },
+    {
+      "path": "i18n/audits/evidence/es/wire.errors.session_host/es31a/translator-provenance.json",
+      "sha256": "c40948babc462d394184b2f50dbbe0ec52cfb9f309869a09d105dc98c3e66b4b"
+    },
+    {
+      "path": "i18n/audits/evidence/es/wire.errors.session_host/es31a/translator-validation.log",
+      "sha256": "054477c441136cf2969edecb34e3f70a7b52da1dc6cc51600eb04083a838d860"
+    },
+    {
+      "path": "i18n/audits/evidence/es/wire.errors.session_host/es31a/ledger-proposal.json",
+      "sha256": "f5c2a694c4c5ee1def245850c5de4eef7f4f5922c80cbc4c460f3d13c33625a0"
+    }
+  ]
+}

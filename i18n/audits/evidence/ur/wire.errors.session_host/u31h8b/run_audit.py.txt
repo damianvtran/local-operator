@@ -1,0 +1,54 @@
+"""Independent scoped parity execution; no translation service or shared writes."""
+import contextlib, hashlib, io, json, os, re, subprocess, sys
+from datetime import datetime, timezone
+from pathlib import Path
+repo=Path.home()/"local-operator"
+out=Path(__file__).resolve().parent
+commit="9c979a03d551020ce6ff1b16c8066aa69ce7bb2a"
+ns="wire.errors.session_host"
+candidate=Path('/Users/damian/.local-operator/sessions/50b1205a23e1/scratchpad/host-copy-ur/wire.errors.session_host.json')
+def source(p): return subprocess.check_output(['git','show',f'{commit}:{p}'],cwd=repo)
+def sha(b): return hashlib.sha256(b).hexdigest()
+inputs={}
+for label,p in [('en',f'local_operator/i18n/catalogues/en/{ns}.json'),('context',f'local_operator/i18n/catalogues/en/{ns}.context.json')]:
+    b=source(p); inputs[label]={'path':p,'sha256':sha(b)}
+    dest=out/'catalogues/en'/Path(p).name; dest.parent.mkdir(parents=True,exist_ok=True); dest.write_bytes(b)
+b=candidate.read_bytes(); inputs['target']={'path':f'local_operator/i18n/catalogues/ur/{ns}.json','sha256':sha(b),'audited_candidate_path':str(candidate)}
+target=out/'catalogues/ur'/candidate.name; target.parent.mkdir(parents=True,exist_ok=True); target.write_bytes(b)
+assert inputs['en']['sha256']=='b7d6561be15577c118ec333586f7c809e65471c5dfd0dd839abee700b2ed1ba0'
+assert inputs['context']['sha256']=='d26acd5a6357a0c54bbd5ed409b4ad2c060ee52b9bd76670679397c4b464f724'
+checker=source('scripts/i18n/check.py'); checkerpath=out/'check_committed.py'; checkerpath.write_bytes(checker)
+sys.path.insert(0,str(repo))
+from local_operator.i18n import catalogues, runtime
+scope={'__file__':str(checkerpath),'__name__':'independent_audit_checker'}
+# Dataclasses need the execution module registered.
+import types
+module=types.ModuleType('independent_audit_checker'); module.__file__=str(checkerpath); sys.modules[module.__name__]=module
+exec(compile(checker,str(checkerpath),'exec'),module.__dict__)
+catalogues.catalogue_root=lambda:out/'catalogues'
+log=io.StringIO()
+with contextlib.redirect_stdout(log),contextlib.redirect_stderr(log):
+    print('UTC:',datetime.now(timezone.utc).isoformat())
+    print('Source commit:',commit)
+    print('Command: committed check.py main(["--catalogues-only"]); catalogue_root redirected to isolated en+ur namespace fixture')
+    print('Checker SHA256:',sha(checker))
+    print('Runtime imports: existing primary checkout local_operator.i18n; no installation')
+    code=module.main(['--catalogues-only'])
+    print('Exit code:',code)
+    assert code==0
+    en=json.loads((out/'catalogues/en'/candidate.name).read_text()); ur=json.loads(b)
+    assert set(en)==set(ur) and len(ur)==3
+    print('Key parity: PASS (3/3; no additions/drops)')
+    for k,v in ur.items():
+        assert runtime.message_arguments(en[k])==runtime.message_arguments(v)==()
+        assert not any(c in v for c in '\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069')
+        assert re.findall(r'`[^`]*`',en[k])==re.findall(r'`[^`]*`',v)==[]
+        print(k+': JSON string; no placeholders/plural/select/markup/backticks; no manual bidi controls: PASS')
+    k=ns+'.refused'
+    for literal in ['Local Operator','logs/session-host.log']:
+        assert en[k].count(literal)==ur[k].count(literal)==1
+    print('Product/log literals: PASS (byte-identical Local Operator, logs/session-host.log)')
+    print('Input hashes:',json.dumps(inputs,sort_keys=True))
+(out/'audit.log').write_text(log.getvalue())
+(out/'inputs.json').write_text(json.dumps(inputs,indent=2)+'\n')
+print(log.getvalue())

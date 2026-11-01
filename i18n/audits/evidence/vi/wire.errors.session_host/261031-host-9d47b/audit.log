@@ -1,0 +1,10 @@
+UTC: 2026-10-31T18:08:18.020579+00:00
+CWD: /Users/damian/.local-operator/sessions/26368bfbce62/scratchpad/host-copy-vi/validation-tree
+Command: /Users/damian/local-operator/.venv/bin/python scripts/i18n/check.py --catalogues-only
+Exit code: 0
+STDOUT:
+check.py: catalogue checks: 0 problem(s)
+STDERR:
+
+Independent assertions: unique JSON keys; exact 3-key/context parity; no placeholders/plural/select forms in either source or target; markup/backticks/flags parity; per-key log path and product-name count parity; NFC: PASS
+Static measurements (not rendered fit proof): {"wire.errors.session_host.unsupported": {"characters": 145, "rich_cells_unwrapped": 145, "nfc": true, "placeholders": [], "plural_select": false, "literal_parity": true, "width_hint": null}, "wire.errors.session_host.unavailable": {"characters": 101, "rich_cells_unwrapped": 101, "nfc": true, "placeholders": [], "plural_select": false, "literal_parity": true, "width_hint": null}, "wire.errors.session_host.refused": {"characters": 173, "rich_cells_unwrapped": 173, "nfc": true, "placeholders": [], "plural_select": false, "literal_parity": true, "width_hint": null}}

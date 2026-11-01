@@ -1,0 +1,45 @@
+PASS pinned fixture validator/parser/loader inputs: 7 files byte-identical to 9c979a03d551020ce6ff1b16c8066aa69ce7bb2a
+PASS English/context/candidate SHA-256 and reused fixture input bytes
+COMMAND: /Users/damian/local-operator/.venv/bin/python scripts/i18n/check.py --catalogues-only
+CWD: /Users/damian/.local-operator/sessions/26368bfbce62/scratchpad/host-copy-vi/validation-tree
+check.py: catalogue checks: 0 problem(s)
+EXIT: 0
+PASS independent JSON/key/ICU-placeholder parity, literal preservation, NFC, control-character and format round-trip checks: 3/3 keys
+[
+  {
+    "key": "wire.errors.session_host.unsupported",
+    "chars": 145,
+    "cells": 145,
+    "en_cells": 145,
+    "maxCells": null,
+    "maxChars": null,
+    "argument_signature": [],
+    "icu_plural_select": "none",
+    "NFC": true,
+    "format_round_trip": true
+  },
+  {
+    "key": "wire.errors.session_host.unavailable",
+    "chars": 101,
+    "cells": 101,
+    "en_cells": 110,
+    "maxCells": null,
+    "maxChars": null,
+    "argument_signature": [],
+    "icu_plural_select": "none",
+    "NFC": true,
+    "format_round_trip": true
+  },
+  {
+    "key": "wire.errors.session_host.refused",
+    "chars": 173,
+    "cells": 173,
+    "en_cells": 174,
+    "maxCells": null,
+    "maxChars": null,
+    "argument_signature": [],
+    "icu_plural_select": "none",
+    "NFC": true,
+    "format_round_trip": true
+  }
+]

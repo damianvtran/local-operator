@@ -284,11 +284,15 @@ async def test_a_move_queued_while_the_session_runs_is_consumed_at_the_next_boun
         server._queued_move_task is not None and not server._queued_move_task.done()
     ), "a queued intent keeps the consumer polling until it can act"
     # 4. The turn ends: the move happens with no further wake of any kind.
+    watcher = server._queued_move_task
+    assert watcher is not None and not watcher.done()
     handle.busy = ""
-    for _ in range(60):
-        if handle.calls:
-            break
-        await asyncio.sleep(0.05)
+    # The latch is observable before announce_retiring's awaited work finishes.
+    # Await THIS consumer, not its first side effect: otherwise the test tears
+    # down its loop between begin_retire and request_stop. Preserve the old
+    # 60 * 0.05s deadlock bound and propagate an actual watcher exception.
+    await asyncio.wait_for(asyncio.shield(watcher), timeout=3)
+    assert watcher.exception() is None
     assert handle.calls == ["begin_retire:cwd-move", "request_stop"]
     assert announced == [("cwd-move", {"cwd": intent.destination_cwd})]
 

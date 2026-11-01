@@ -1,0 +1,72 @@
+{
+  "kind": "translation_handoff_not_audit",
+  "locale": "fr",
+  "namespace": "wire.errors.session_host",
+  "date": "2026-10-31",
+  "key_count": 3,
+  "source_commit": "9c979a03d551020ce6ff1b16c8066aa69ce7bb2a",
+  "translator": {
+    "agent": "i18n-translator (host-copy-fr)",
+    "session": "829abca97a25",
+    "actual_model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Latest model-switch notice before reading inputs and translating",
+    "fallback": true,
+    "fallback_history": [
+      "anthropic/claude-sonnet-5-5",
+      "anthropic/claude-opus-5-5",
+      "openai/gpt-6.1-sol"
+    ],
+    "fallback_reason": "provider failure: quota"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.errors.session_host.json",
+      "sha256": "b7d6561be15577c118ec333586f7c809e65471c5dfd0dd839abee700b2ed1ba0"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/wire.errors.session_host.context.json",
+      "sha256": "d26acd5a6357a0c54bbd5ed409b4ad2c060ee52b9bd76670679397c4b464f724"
+    },
+    "style_guide": {
+      "path": "i18n/style-guides/fr.md",
+      "sha256": "5315e1ac10c2ce57aac631ba653d08de680ee70c9a022ed3a8345ce2f9902ee7"
+    },
+    "glossary": {
+      "path": "i18n/glossary.md",
+      "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8"
+    }
+  },
+  "target": {
+    "intended_path": "local_operator/i18n/catalogues/fr/wire.errors.session_host.json",
+    "deliverable_path": "/Users/damian/.local-operator/sessions/829abca97a25/scratchpad/host-copy-fr/wire.errors.session_host.json",
+    "sha256": "87cb0f0affb5c0a98298ca1e09fd72287c53b605968af4f92ba194fc54e27ad2"
+  },
+  "ledger_row_proposal": "/Users/damian/.local-operator/sessions/829abca97a25/scratchpad/host-copy-fr/ledger-row.proposal.json",
+  "validator": {
+    "command": "~/local-operator/.venv/bin/python /Users/damian/.local-operator/sessions/829abca97a25/scratchpad/host-copy-fr/validation-tree/scripts/i18n/check.py --catalogues-only",
+    "tree": "git archive of committed local_operator/i18n, scripts/i18n, i18n plus this French catalogue; shared checkout untouched",
+    "exit_code": 0,
+    "actual_output": "check.py: catalogue checks: 0 problem(s)\n",
+    "log_path": "/Users/damian/.local-operator/sessions/829abca97a25/scratchpad/host-copy-fr/validator.log",
+    "log_sha256": "a9bba4cb0f66a924b430b9b34380bf12a842d7cb2a12639f6b3e4891729056b1"
+  },
+  "mechanical_checks": [
+    "English source hash verified against assigned digest",
+    "3 keys, exact source order",
+    "literal path and product name preserved",
+    "NFC; no Unicode Cf controls"
+  ],
+  "ambiguities": [
+    {
+      "term": "background session host",
+      "decision": "hôte de sessions en arrière-plan",
+      "reason": "Names the host role without exposing its implementation; distinguishes it from the OS service manager."
+    }
+  ],
+  "glossary_proposals": {
+    "background session host": "hôte de sessions en arrière-plan",
+    "background service manager": "gestionnaire de services en arrière-plan"
+  },
+  "length_constraints": "No maxCells/maxChars supplied in the committed context.",
+  "audit_status": "Not audited; translated only. Manager must integrate and retain evidence durably; scratch is temporary handoff."
+}

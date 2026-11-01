@@ -1,0 +1,14 @@
+{
+  "en": {
+    "path": "local_operator/i18n/catalogues/en/wire.errors.session_host.json",
+    "sha256": "b7d6561be15577c118ec333586f7c809e65471c5dfd0dd839abee700b2ed1ba0"
+  },
+  "context": {
+    "path": "local_operator/i18n/catalogues/en/wire.errors.session_host.context.json",
+    "sha256": "d26acd5a6357a0c54bbd5ed409b4ad2c060ee52b9bd76670679397c4b464f724"
+  },
+  "target": {
+    "path": "local_operator/i18n/catalogues/zh-CN/wire.errors.session_host.json",
+    "sha256": "4205cc6feda10279c524d78ff95c450bbc50981a48d13e37f82849d1705860d4"
+  }
+}

@@ -1,0 +1,92 @@
+{
+  "locale": "hi",
+  "namespace": "wire.errors.session_host",
+  "translation_date": "2026-10-31",
+  "key_count": 3,
+  "committed_ref": "9c979a03d551020ce6ff1b16c8066aa69ce7bb2a",
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "d2959affe186",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-10-31"
+  },
+  "actual_model_source": "Host model-switch message: openai/gpt-6.1-sol temporary provider-quota fallback; initially anthropic/claude-sonnet-5-5, intermediate switch anthropic/claude-opus-5-5. Translation reasoning performed on openai/gpt-6.1-sol.",
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.errors.session_host.json",
+      "sha256": "b7d6561be15577c118ec333586f7c809e65471c5dfd0dd839abee700b2ed1ba0"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/wire.errors.session_host.context.json",
+      "sha256": "d26acd5a6357a0c54bbd5ed409b4ad2c060ee52b9bd76670679397c4b464f724"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/hi/wire.errors.session_host.json",
+      "sha256": "9f9e90cfe7ef2633163f20bff9ab579e49f88b77f322eeb3e7854f208c92632d"
+    }
+  },
+  "guidance_hashes": [
+    {
+      "path": "docs/I18N.md",
+      "sha256": "3253eac7c2cfe0955ab5f80cccd09ca2377ccb477526c7d8fe745009c762cc63"
+    },
+    {
+      "path": "docs/design/i18n.md",
+      "sha256": "ade4d909428ccf1951d5ad826528db3b8c694946963b71246dbc93f6951a1dd2"
+    },
+    {
+      "path": "i18n/glossary.md",
+      "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8"
+    },
+    {
+      "path": "i18n/style-guides/hi.md",
+      "sha256": "82292dc8d13fcc93dc752457719264aed3cc20bb65ecfaba0f0e5a31f4cb40d5"
+    }
+  ],
+  "status": "translated",
+  "independent_audit": "pending; no self-audit claimed",
+  "validator": {
+    "command": "~/local-operator/.venv/bin/python scripts/i18n/check.py --catalogues-only",
+    "cwd": "/Users/damian/.local-operator/sessions/d2959affe186/scratchpad/host-copy-hi/validation-tree",
+    "setup": "git archive of committed ref: local_operator/__init__.py local_operator/i18n scripts/i18n i18n; candidate added in scratch only; no dependencies installed",
+    "exit_code": 0,
+    "actual_output": "check.py: catalogue checks: 0 problem(s)\n"
+  },
+  "ambiguities": [
+    {
+      "term": "background session host",
+      "decision": "बैकग्राउंड सत्र होस्ट",
+      "reason": "Technical background-process sense; सत्र follows the glossary. No implication that any session is running."
+    },
+    {
+      "term": "supported background service manager",
+      "decision": "समर्थित बैकग्राउंड सेवा प्रबंधक",
+      "reason": "Preserves platform support requirement without inventing platform-specific remedies."
+    }
+  ],
+  "glossary_proposals": {
+    "background": "बैकग्राउंड",
+    "session host": "सत्र होस्ट",
+    "service manager": "सेवा प्रबंधक"
+  },
+  "length_constraints": "No maxCells or maxChars in committed context sidecar.",
+  "preserved_literals": [
+    "Local Operator",
+    "logs/session-host.log"
+  ],
+  "safety_semantics": "All three state the session did not start. Unsupported directs to a supported computer without retry advice; unavailable requests a manual retry after waiting, never reconnection; refused directs to the log, with no dynamic internal host detail.",
+  "artifacts": [
+    {
+      "path": "/Users/damian/.local-operator/sessions/d2959affe186/scratchpad/host-copy-hi/wire.errors.session_host.json",
+      "sha256": "9f9e90cfe7ef2633163f20bff9ab579e49f88b77f322eeb3e7854f208c92632d"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/d2959affe186/scratchpad/host-copy-hi/ledger-row-proposal.json",
+      "sha256": "dd0983215ab0e663a4c7a91f7987be14741e2b8ba0ac0284672beec8e365f78a"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/d2959affe186/scratchpad/host-copy-hi/validator.log",
+      "sha256": "a9bba4cb0f66a924b430b9b34380bf12a842d7cb2a12639f6b3e4891729056b1"
+    }
+  ]
+}

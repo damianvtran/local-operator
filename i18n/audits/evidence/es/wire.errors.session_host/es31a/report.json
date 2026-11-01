@@ -1,0 +1,50 @@
+{
+  "locale": "es",
+  "namespace": "wire.errors.session_host",
+  "audit_date": "2026-10-31",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "task_label": "host-es-audit-a",
+    "session": "1436c962e633",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "056852035b33",
+    "actual_model_source": "Host model-switch notices: quota-triggered temporary fallback from anthropic/claude-sonnet-5-5 via anthropic/claude-opus-5-5 to openai/gpt-6.1-sol. Audit reasoning, validator execution and report performed on openai/gpt-6.1-sol."
+  },
+  "findings": [],
+  "per_key": [
+    {
+      "key": "wire.errors.session_host.unsupported",
+      "status": "passed",
+      "finding_ids": [],
+      "reasoning": "Este equipo refers naturally to the computer here. Cannot-run and not-started facts remain explicit. Usa uses required tú register; compatible correctly qualifies the background service manager. No suggestion of reconnection, automatic retry, or temporary platform support.",
+      "character_count": 178
+    },
+    {
+      "key": "wire.errors.session_host.unavailable",
+      "status": "passed",
+      "finding_ids": [],
+      "reasoning": "No ha respondido correctly reports host nonresponse without diagnosing a crash. No se ha iniciado preserves terminal startup failure. Espera un momento antes de volver a intentarlo is idiomatic tú and asks the person to retry later, not an automatic reconnection.",
+      "character_count": 143
+    },
+    {
+      "key": "wire.errors.session_host.refused",
+      "status": "passed",
+      "finding_ids": [],
+      "reasoning": "Ha rechazado iniciar esta sesión preserves refusal rather than unavailability or permission denial. Separate not-started sentence remains explicit. Revisa correctly directs log inspection before a manual retry. logs/session-host.log and Local Operator remain byte-exact.",
+      "character_count": 211
+    }
+  ],
+  "status": "passed",
+  "unresolved_blocker_major_count": 0,
+  "audit_notes_not_execution_log": true,
+  "second_independent_pass": "REQUIRED and not performed by this audit; high-visibility error copy. Do not apply ledger proposal until separately completed.",
+  "scope_limits": [
+    "No translation/MT service used.",
+    "Static/scoped catalogue validation only; no rendered terminal/client fit validation or full repository suite.",
+    "Spanish is LTR; Urdu RTL checks not applicable.",
+    "No maxCells/maxChars in committed sidecar; no overflow claimed.",
+    "No ICU plural/select messages, placeholders, Rich markup, backtick code, commands or flags in this namespace; mechanical checks vacuous where absent.",
+    "RFC §6 and docs/I18N.md specify ledger schema/update, not a named audit-ledger CLI. No ledger command invented or run.",
+    "No edits to translations, shared checkout, translator artifacts or actual ledger. No commits."
+  ]
+}

@@ -1,0 +1,5 @@
+{
+  "wire.errors.session_host.unsupported": "This computer cannot run the background session host, so the session was not started. Use a computer with a supported background service manager.",
+  "wire.errors.session_host.unavailable": "The background session host did not answer, so the session was not started. Wait a moment before trying again.",
+  "wire.errors.session_host.refused": "The background session host declined to start this session. The session was not started. Check logs/session-host.log in your Local Operator config folder before trying again."
+}

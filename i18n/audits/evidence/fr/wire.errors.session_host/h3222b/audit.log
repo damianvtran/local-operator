@@ -1,0 +1,43 @@
+UTC: 2026-10-31T18:10:40.280815+00:00
+Command: ["/Users/damian/local-operator/.venv/bin/python", "/Users/damian/.local-operator/sessions/829abca97a25/scratchpad/host-copy-fr/validation-tree/scripts/i18n/check.py", "--catalogues-only"]
+CWD: /Users/damian/.local-operator/sessions/829abca97a25/scratchpad/host-copy-fr/validation-tree
+Isolation: HOME/config in auditor scratch; CMUX_* stripped; PYTHONDONTWRITEBYTECODE=1
+Verified staged Python files against 9c979a03d551020ce6ff1b16c8066aa69ce7bb2a: 116
+Verified staged en/context/candidate byte identity.
+STDOUT:
+check.py: catalogue checks: 0 problem(s)
+STDERR:
+EXIT_CODE: 0
+Independent mechanical checks:
+[
+  {
+    "key": "wire.errors.session_host.unsupported",
+    "characters": 195,
+    "source_characters": 145,
+    "placeholders": [],
+    "plural_select": "not present",
+    "literal_parity": "passed",
+    "maxCells": null,
+    "maxChars": null
+  },
+  {
+    "key": "wire.errors.session_host.unavailable",
+    "characters": 129,
+    "source_characters": 110,
+    "placeholders": [],
+    "plural_select": "not present",
+    "literal_parity": "passed",
+    "maxCells": null,
+    "maxChars": null
+  },
+  {
+    "key": "wire.errors.session_host.refused",
+    "characters": 206,
+    "source_characters": 174,
+    "placeholders": [],
+    "plural_select": "not present",
+    "literal_parity": "passed",
+    "maxCells": null,
+    "maxChars": null
+  }
+]

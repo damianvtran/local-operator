@@ -1,0 +1,17 @@
+{
+  "wire.errors.session_host.unsupported": {
+    "role": "error",
+    "tone": "clear, factual and actionable",
+    "note": "Shown to the person through AttachedSession._ensure_bound and other startup-error surfaces. No runtime was started: never imply reconnecting or an automatic retry. Preserve the literal path logs/session-host.log and product name Local Operator. Unsupported is permanent on this platform; unavailable may be temporary; refused requires inspecting the host log. No dynamic host detail is echoed."
+  },
+  "wire.errors.session_host.unavailable": {
+    "role": "error",
+    "tone": "clear, factual and actionable",
+    "note": "Shown to the person through AttachedSession._ensure_bound and other startup-error surfaces. No runtime was started: never imply reconnecting or an automatic retry. Preserve the literal path logs/session-host.log and product name Local Operator. Unsupported is permanent on this platform; unavailable may be temporary; refused requires inspecting the host log. No dynamic host detail is echoed."
+  },
+  "wire.errors.session_host.refused": {
+    "role": "error",
+    "tone": "clear, factual and actionable",
+    "note": "Shown to the person through AttachedSession._ensure_bound and other startup-error surfaces. No runtime was started: never imply reconnecting or an automatic retry. Preserve the literal path logs/session-host.log and product name Local Operator. Unsupported is permanent on this platform; unavailable may be temporary; refused requires inspecting the host log. No dynamic host detail is echoed."
+  }
+}
