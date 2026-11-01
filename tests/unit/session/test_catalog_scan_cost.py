@@ -51,6 +51,7 @@ skip wrong is a real session invisible in the picker forever.
 
 from __future__ import annotations
 
+import gc
 import json
 import os
 import sys
@@ -107,34 +108,54 @@ def _session(
     return directory
 
 
-#: The one module whose store resolutions are the catalogue's own work. A
-#: ``realpath`` is attributed to whichever ``local_operator`` module asked for
-#: it, so a writer-lock finaliser resolving a session directory from a collector
-#: that happens to run inside the same call is not credited to the page.
+#: The module that DEFINES "the page" for provenance purposes. A store
+#: resolution counts as the page's when catalogue code is in the synchronous
+#: corridor above it -- not when the *nearest* product frame happens to be this
+#: module, which would drop work the page asked a helper in another module to do.
 CATALOG_MODULE = "local_operator/session/catalog.py"
 
 
-def _origin_module() -> str:
-    """The NEAREST ``local_operator`` frame on the stack: who asked for this call.
+def _is_page_work() -> bool:
+    """Was this call issued by the catalogue, or did it merely run during it?
 
-    Provenance, not a path prefix. A path says a syscall touched the store; only
-    the caller says whether the PAGE made it, which is the difference between a
-    walk that moved and a collector or an importer that ran at the wrong moment.
+    PROVENANCE BY CORRIDOR, walked up from the call: reaching catalogue code
+    means the page asked for this work, whether directly or through a helper in
+    another module. That is the whole point -- ``catalogue_page -> helper ->
+    resolve`` is the page's work and must be counted, because a helper is exactly
+    where a second resolution could hide.
+
+    THE FINALISER BOUNDARY IS EXPLICIT AND NARROW. Reaching a ``__del__`` before
+    catalogue code means the COLLECTOR initiated this, not the page:
+    ``compression.release_writer_from_finaliser`` resolves a session directory
+    from ``Transcript.__del__``, and that can run on this thread inside a page
+    call. Work is therefore excluded only when the collector boundary is nearer
+    than the catalogue. Catalogue code that explicitly drops an object has still
+    handed the work to a finaliser, so that is excluded too, by the same rule.
+
+    WHAT IS NOT RECOGNISED, stated rather than implied: ``__del__`` is the only
+    collector entry point this test can identify by shape. A weakref callback or
+    a queued callback is an ordinary frame, so a store resolution issued from one
+    while the page is on the stack would be counted. No such producer is known on
+    the catalogue path; the known ones are this finaliser and import machinery,
+    and both are handled here (import machinery resolves non-store paths, which
+    the path scope drops).
     """
     frame = sys._getframe(1)
     while frame is not None:
-        name = frame.f_code.co_filename.replace(os.sep, "/")
-        if "/local_operator/" in name:
-            return name
+        code = frame.f_code
+        if code.co_name == "__del__":
+            return False
+        if code.co_filename.replace(os.sep, "/").endswith(CATALOG_MODULE):
+            return True
         frame = frame.f_back
-    return ""
+    return False
 
 
 def _counting(
     names: tuple[str, ...] = ("stat", "lstat", "scandir"),
     *,
     within: Path | None = None,
-    product: str | None = None,
+    page: bool = False,
 ) -> Any:
     """Count ``os`` filesystem calls made inside the context, on THIS thread.
 
@@ -156,31 +177,40 @@ def _counting(
     how this instrument would fail silently, turning an equality of counts
     into an equality of zeros -- cannot pass vacuously.
 
-    ``within`` AND ``product`` ADD TWO NARROWER TALLIES, and they exist because
-    a window total is not a property of the walk. ``lstat`` is a realpath's
-    syscall, and realpath inside a measured window is not only the catalogue's:
-    measured on this file's own call, the first ``catalogue_page`` in a process
-    imports ``pydantic``, ``rich`` and ``sysconfig`` on the way through, and 42
-    ``lstat`` calls from import machinery landed inside one measured window;
-    ``compression.release_writer_from_finaliser`` resolves a session directory on
-    whatever thread the collector runs it on, which can be this one, mid-call.
-    Those are one-time or collector-timed, so comparing window TOTALS between two
-    calls compares process state as well as the walk -- how a shard reports
-    ``lstat 12`` against ``6`` for byte-identical code.
+    ``within`` AND ``page`` ADD TWO NARROWER TALLIES, and they exist because a
+    window total is not a property of the walk. ``lstat`` is a realpath's
+    syscall, and realpath inside a measured window is not only the catalogue's.
+    Two producers are MEASURED here, and they are what makes a total untrustworthy
+    rather than what explains any particular window: the first ``catalogue_page``
+    in a process imports ``pydantic``, ``rich`` and ``sysconfig`` on the way
+    through, and 42 ``lstat`` calls from import machinery landed inside one
+    measured window; and ``compression.release_writer_from_finaliser`` resolves a
+    session directory from ``Transcript.__del__``, on whichever thread the
+    collector runs it. They are one-time or collector-timed, so window TOTALS
+    between two calls compare process state as well as the walk.
+
+    WHAT IS NOT CLAIMED: on the CI runs this cell went red for
+    (``small lstat 12`` against ``6``), a stack-attributed probe of the same call
+    found six lstats, all at the page's own ``resolve()``. The remaining six of
+    that window are UNATTRIBUTED -- neither producer below was traced to it -- so
+    the numbers a probe recorded here are evidence that in-window work need not be
+    the walk's, not an account of that window's composition.
 
     ``counter.within`` is the calls naming a path under ``within`` (the store);
-    ``counter.product`` is the subset of those whose nearest ``local_operator``
-    frame is ``product``. The second is the one a cell should assert on, because
-    it keeps the discrimination that matters -- a second resolution OF THE STORE
-    BY THE PAGE doubles it -- while dropping work the page did not ask for.
-    Counts stay whole for the failure messages that need the entire picture.
+    ``counter.page`` is the subset of those the CATALOGUE asked for -- see
+    :func:`_is_page_work` for why that is a corridor test rather than an identity
+    test. The second is the one a cell should assert on, because it keeps the
+    discrimination that matters -- a second resolution OF THE STORE BY THE PAGE
+    doubles it, INCLUDING one delegated to a helper in another module -- while
+    dropping work the page did not ask for. Counts stay whole for the failure
+    messages that need the entire picture.
     """
 
     class Counter:
         def __init__(self) -> None:
             self.counts: dict[str, int] = {name: 0 for name in names}
             self.within: dict[str, int] = {name: 0 for name in names}
-            self.product: dict[str, int] = {name: 0 for name in names}
+            self.page: dict[str, int] = {name: 0 for name in names}
             self._originals: dict[str, Callable[..., Any]] = {}
             self._thread: int = -1
 
@@ -214,8 +244,8 @@ def _counting(
                             self.counts[name] += 1
                             if self._in_scope(args, kwargs):
                                 self.within[name] += 1
-                                if product is not None and _origin_module().endswith(product):
-                                    self.product[name] += 1
+                                if page and _is_page_work():
+                                    self.page[name] += 1
                         return real(*args, **kwargs)
 
                     return counting
@@ -388,20 +418,20 @@ def _store_realpaths(run: Callable[[], Any], root: Path) -> list[str]:
     counts a resolution however the caller wrote it -- a patch on ``Path.resolve``
     alone would miss the direct spelling and vice versa.
 
-    SCOPED TO THE STORE AND TO THE CALLER, and both halves are load-bearing.
-    Unscoped, the count includes realpath work that is not the page's: the first
-    page in a process imports ``pydantic`` and ``sysconfig`` through it, and a
-    writer-lock finaliser resolves a session directory on whatever thread
-    collects it -- measured here as 42 ``lstat`` calls from import machinery
-    inside one window. Path alone is not enough for the same reason: a finaliser
-    resolving a session directory names a path inside the store while the page
-    is running, and it is still not the page's work. So a call counts only when
-    its nearest ``local_operator`` frame is :data:`CATALOG_MODULE` -- the page's
-    own resolve -- which is what makes the number a fact about the page, and is
-    what still doubles if the page ever resolves the store twice.
+    SCOPED TO THE STORE AND TO THE PAGE'S OWN REQUEST, and both halves are
+    load-bearing. Unscoped, the count includes realpath work the page never asked
+    for: import machinery resolving a module it just reached, and
+    ``compression.release_writer_from_finaliser`` resolving a session directory
+    from ``Transcript.__del__`` -- which names a path inside the store while the
+    page runs. Path alone therefore cannot answer it, and neither can the nearest
+    module: a helper the catalogue calls is the page's work even when it lives
+    elsewhere. So the filter is :func:`_is_page_work` -- the catalogue in the
+    synchronous corridor, with the finaliser boundary excluded -- which is what
+    makes the number a fact about the page, and is what still doubles if the page
+    or a helper it delegates to resolves the store twice.
 
     Counts CALLS, not syscalls, and that is what makes it portable:
-    ``resolve()`` is a realpath whose ``lstat`` count is the DEPTH of the path it
+    ``lstat`` is a realpath's syscall whose count is the DEPTH of the path it
     walks, so one extra resolution of one store reads as ``+6`` on a CI temp path
     and ``+10`` under macOS's ``/private`` detour, and two shapes sitting on paths
     of different depth cannot be compared by that number at all.
@@ -415,7 +445,7 @@ def _store_realpaths(run: Callable[[], Any], root: Path) -> list[str]:
     thread = threading.get_ident()
 
     def counting(path: Any, *args: Any, **kwargs: Any) -> Any:
-        if threading.get_ident() == thread and _origin_module().endswith(CATALOG_MODULE):
+        if threading.get_ident() == thread and _is_page_work():
             try:
                 if Path(os.fspath(path)).is_relative_to(root):
                     calls.append(os.fspath(path))
@@ -479,9 +509,10 @@ class TestAScopedPageIsTheSameScan:
     finaliser releasing a session directory from a collector that can run on this
     thread mid-call. A shard therefore reported ``lstat 12`` against ``6`` for
     byte-identical code -- and a stack-attributed probe of the SAME call on the
-    SAME worker found six, all at ``catalog.py:1702``. So the cells below assert
-    the page's own share of those counts (see :func:`_counting`), which is the
-    term a page size or a scope must not move, and
+    SAME worker found six, all at ``catalog.py:1702``, which leaves the other six
+    UNATTRIBUTED. So the cells below assert the page's own share of those counts
+    (see :func:`_counting`), which is the term a page size or a scope must not
+    move -- including work the page delegates to a helper -- and
     ``test_the_store_root_is_resolved_once_per_page`` pins the absolute number.
     """
 
@@ -502,9 +533,9 @@ class TestAScopedPageIsTheSameScan:
         is that the TOTAL may carry work that is not the walk's while the last,
         narrowest one may not -- it is the page's own store resolutions.
         """
-        with _counting(within=root, product=CATALOG_MODULE) as counter:
+        with _counting(within=root, page=True) as counter:
             run()
-        return dict(counter.counts), dict(counter.within), dict(counter.product)
+        return dict(counter.counts), dict(counter.within), dict(counter.page)
 
     def test_the_walk_is_identical_at_every_page_size_and_scope(self, tmp_path: Path) -> None:
         _band(tmp_path, visible=40, hidden=200)
@@ -618,17 +649,14 @@ class TestAScopedPageIsTheSameScan:
         )
 
     def test_the_instrument_ignores_the_same_path_resolved_elsewhere(self, tmp_path: Path) -> None:
-        """Two-way control for the instrument the cell above is built on.
+        """Two-way control for the instrument the cells above are built on.
 
-        THE NEGATIVE HALF is what keeps that cell honest. A resolution of the
-        store root issued from THIS module names a path inside the store, so a
-        path prefix alone would credit it to the page -- and that is precisely
-        the case that must not count: ``compression.release_writer_from_finaliser``
-        resolves a session directory, inside the store, from a collector that can
-        run on this thread mid-call. Same path, different caller, not the page's
-        work. THE POSITIVE HALF runs the page through the SAME instrument and
-        requires the resolution to be counted, so a helper that attributed
-        nothing cannot pass this cell by returning empty both times.
+        THE NEGATIVE HALF is what keeps them honest. A resolution of the store
+        root issued from THIS module names a path inside the store, so a path
+        prefix alone would credit it to the page -- and that is precisely the case
+        that must not count. THE POSITIVE HALF runs the page through the SAME
+        instrument and requires the resolution to be counted, so a helper that
+        attributed nothing cannot pass this cell by returning empty both times.
         """
         _band(tmp_path, visible=40, hidden=200)
         catalogue_page(tmp_path, limit=5)
@@ -638,6 +666,111 @@ class TestAScopedPageIsTheSameScan:
         assert _store_realpaths(lambda: catalogue_page(tmp_path, limit=5), tmp_path) == [
             str(store_root)
         ]
+
+    def test_helper_delegated_resolve_is_counted_as_page_work(self, tmp_path: Path) -> None:
+        """A second resolution hidden in a HELPER is still the page's work.
+
+        REVIEW R1 and QA Q1 found the same hole, independently: filtering on the
+        identity of the *nearest* product frame made ``catalogue_page -> helper ->
+        resolve`` look exactly like unrelated work, so a gratuitous extra realpath
+        made from a helper inside the page passed every assertion (`within` 4
+        against 2, the page tally unmoved). The instrument now scopes by the SYNC
+        CORRIDOR -- catalogue code anywhere between the call and the page -- so a
+        helper's resolution doubles the count and fails the cells above.
+
+        The helper here lives in this module and is called from ``_hydrate`` on the
+        page's own stack, which is what a helper in another module is too: same
+        corridor, same accounting.
+        """
+        _band(tmp_path, visible=40, hidden=200)
+        catalogue_page(tmp_path, limit=5)
+        store_root = str(tmp_path / "sessions")
+
+        real_hydrate = session_catalog._hydrate
+        delegated: list[Path] = []
+
+        def resolve_as_a_helper(directory: Path, source: Any, entries: Any) -> Any:
+            delegated.append((directory / "sessions").resolve())
+            return real_hydrate(directory, source, entries)
+
+        session_catalog._hydrate = resolve_as_a_helper  # type: ignore[assignment]
+        try:
+            seen = _store_realpaths(lambda: catalogue_page(tmp_path, limit=5), tmp_path)
+        finally:
+            session_catalog._hydrate = real_hydrate
+
+        assert delegated == [tmp_path / "sessions"], "fixture: the helper never resolved"
+        assert seen == [store_root, store_root], seen
+
+    def test_the_instrument_ignores_a_finaliser_resolving_the_store_inside_the_call(
+        self, tmp_path: Path
+    ) -> None:
+        """The collector's work is not the page's, even mid-call and inside the store.
+
+        ``compression.release_writer_from_finaliser`` resolves a session directory
+        from ``Transcript.__del__``, on whichever thread the collector runs it on.
+        That resolution names a path INSIDE the store while the page is further out
+        on the same stack, so neither a path prefix nor "the catalogue is somewhere
+        in the stack" can exclude it. The boundary is therefore explicit: a
+        ``__del__`` nearer than catalogue code means the collector initiated it --
+        including when catalogue code itself dropped the object, because the work
+        still belongs to the finaliser.
+        """
+        _band(tmp_path, visible=40, hidden=200)
+        catalogue_page(tmp_path, limit=5)
+        store_root = str(tmp_path / "sessions")
+
+        real_hydrate = session_catalog._hydrate
+        finalised: list[Path] = []
+
+        class Finaliser:
+            def __del__(self) -> None:
+                finalised.append((tmp_path / "sessions").resolve())
+
+        def hydrating_with_a_finaliser(directory: Path, source: Any, entries: Any) -> Any:
+            dropped = Finaliser()
+            del dropped  # __del__ runs here, inside the page's own call
+            gc.collect()
+            return real_hydrate(directory, source, entries)
+
+        session_catalog._hydrate = hydrating_with_a_finaliser  # type: ignore[assignment]
+        try:
+            seen = _store_realpaths(lambda: catalogue_page(tmp_path, limit=5), tmp_path)
+        finally:
+            session_catalog._hydrate = real_hydrate
+
+        assert finalised == [tmp_path / "sessions"], "fixture: the finaliser never resolved"
+        assert seen == [store_root], seen
+
+    def test_the_instrument_ignores_a_non_store_path_resolved_inside_the_call(
+        self, tmp_path: Path
+    ) -> None:
+        """Import machinery's resolution inside a window is not the page's work.
+
+        The first ``catalogue_page`` in a process imports modules on the way
+        through, and import machinery realpaths the paths it resolves. Those name
+        paths OUTSIDE the store, so the store scope drops them; this pins it, with
+        the page's own store resolution still counted in the same window.
+        """
+        _band(tmp_path, visible=40, hidden=200)
+        catalogue_page(tmp_path, limit=5)
+        store_root = str(tmp_path / "sessions")
+
+        real_hydrate = session_catalog._hydrate
+        outside: list[Path] = []
+
+        def resolving_a_module_path(directory: Path, source: Any, entries: Any) -> Any:
+            outside.append(Path(session_catalog.__file__).resolve())
+            return real_hydrate(directory, source, entries)
+
+        session_catalog._hydrate = resolving_a_module_path  # type: ignore[assignment]
+        try:
+            seen = _store_realpaths(lambda: catalogue_page(tmp_path, limit=5), tmp_path)
+        finally:
+            session_catalog._hydrate = real_hydrate
+
+        assert outside and outside[0].is_absolute(), "fixture: no outside path resolved"
+        assert seen == [store_root], seen
 
     def test_a_warm_census_re_reads_no_binding(self, tmp_path: Path) -> None:
         """T5's stat half: an unchanged store is answered from the memo.
