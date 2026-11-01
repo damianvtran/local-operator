@@ -184,7 +184,7 @@ def test_no_proxy_keeps_host_port_scheme_and_ipv6_semantics(monkeypatch, bypass,
     _proxy_env(monkeypatch, "http://proxy.invalid:1", bypass)
     transport = deadline_http.ListingDeadlineTransport(time.monotonic() + 2)
     try:
-        assert transport._bypass(httpx.URL(url)) is expected
+        assert (transport._pool._proxy_for(httpx.URL(url)) is None) is expected
     finally:
         transport.close()
 
@@ -247,3 +247,35 @@ async def test_async_resolution_and_to_thread_inherit_same_deadline(monkeypatch)
     assert len(readings) == 2 and readings[0] is not None
     assert readings[0] == readings[1]
     assert deadline.current() is None
+
+
+def test_owned_listing_keeps_standard_httpx_transport_interception(monkeypatch):
+    """An owned deadline client must not bypass an embedding's HTTPX fixture.
+
+    The mobile catalogue exercises its complete controller through this
+    existing transport seam. Guard DNS as a negative control: a missing
+    interception must fail locally instead of fetching a public catalogue.
+    """
+    import socket
+
+    calls = []
+    network_attempts = []
+
+    def offline_dns(*args, **kwargs):
+        network_attempts.append(True)
+        raise OSError("unmocked catalogue DNS forbidden")
+
+    def fixture_response(self, request):
+        calls.append(request.url.host)
+        return httpx.Response(
+            200, json={"data": [{"id": "offline-fixture", "display_name": "Offline fixture"}]}
+        )
+
+    monkeypatch.setattr(socket, "getaddrinfo", offline_dns)
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", fixture_response)
+    rows = fetch_models(
+        "anthropic", api_key="fixture", base_url="https://catalogue.fixture.invalid", timeout=1
+    )
+    assert rows is not None and [row.id for row in rows] == ["offline-fixture"]
+    assert calls == ["catalogue.fixture.invalid"]
+    assert network_attempts == []

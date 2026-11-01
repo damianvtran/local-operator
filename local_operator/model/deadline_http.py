@@ -3,8 +3,8 @@
 httpx's timeouts cap idle operations, not a whole response: a peer dripping
 headers or body can otherwise occupy every model-switch worker indefinitely.
 The public httpcore backend seam clamps *each* network operation, including
-reads hidden inside header parsing. No timer thread, new executor, private
-httpx pool mutation, or borrowed client's lifetime is involved.
+reads hidden inside header parsing. No timer thread, new executor, or
+mutation/lifetime change to a borrowed HTTP client is involved.
 
 DNS resolution in the OS's synchronous getaddrinfo is not cancellable by this
 backend. This bounds cooperating socket/TLS I/O, not arbitrary native hangs.
@@ -106,18 +106,20 @@ class _DeadlineBackend(httpcore.NetworkBackend):
         self._backend.sleep(_remaining(self._deadline, seconds))
 
 
-class ListingDeadlineTransport(httpx.BaseTransport):
-    """One listing's HTTP transport; pagination reuses its absolute deadline.
+class _ListingDeadlinePool(httpcore.ConnectionPool):
+    """Route each request through a deadline-backed direct or proxy pool.
 
-    Environment proxy routing remains enabled explicitly: httpx disables its
-    automatic proxy mounts when handed a custom transport. Each selected proxy
-    gets the same deadline backend, TLS defaults and auth as the direct pool.
+    Routing remains request-local, so a reused client cannot send concurrent
+    requests through a mutable "current proxy" setting. HTTPX's standard
+    transport owns request/response conversion, exception mapping and its
+    established interception seam; this pool changes only actual socket work.
     """
 
     def __init__(self, deadline: float) -> None:
         self._deadline = deadline
         self._backend = _DeadlineBackend(deadline)
         self._ssl_context = httpx.create_ssl_context()
+        super().__init__(ssl_context=self._ssl_context, network_backend=self._backend)
         # Security routing must match the client's actual mount precedence,
         # not an approximate NO_PROXY parser. HTTPX has no public equivalent:
         # isolate its supported 0.27/0.28 compatibility seam here and test route
@@ -125,7 +127,7 @@ class ListingDeadlineTransport(httpx.BaseTransport):
         self._routes = sorted(
             (URLPattern(pattern), proxy) for pattern, proxy in get_environment_proxies().items()
         )
-        self._pools: dict[str, httpcore.ConnectionPool] = {}
+        self._proxy_pools: dict[str, httpcore.ConnectionPool] = {}
 
     def _proxy_for(self, url: httpx.URL) -> str | None:
         for pattern, proxy in self._routes:
@@ -133,80 +135,60 @@ class ListingDeadlineTransport(httpx.BaseTransport):
                 return proxy
         return None
 
-    def _bypass(self, url: httpx.URL) -> bool:
-        return self._proxy_for(url) is None
-
     def _pool_for(self, url: httpx.URL) -> httpcore.ConnectionPool:
         proxy_url = self._proxy_for(url)
-        key = proxy_url or ""
-        pool = self._pools.get(key)
+        if proxy_url is None:
+            return self
+        pool = self._proxy_pools.get(proxy_url)
         if pool is None:
             options: dict[str, Any] = {
                 "ssl_context": self._ssl_context,
                 "network_backend": self._backend,
             }
-            if proxy_url:
-                proxy = httpx.Proxy(proxy_url)
-                options["proxy_" + "auth"] = getattr(proxy, "raw_" + "auth")
-                if proxy.url.scheme in {"socks5", "socks5h"}:
-                    pool = httpcore.SOCKSProxy(proxy_url=str(proxy.url), **options)
-                else:
-                    pool = httpcore.HTTPProxy(
-                        proxy_url=str(proxy.url),
-                        proxy_headers=proxy.headers.raw,
-                        proxy_ssl_context=proxy.ssl_context,
-                        **options,
-                    )
+            proxy = httpx.Proxy(proxy_url)
+            options["proxy_" + "auth"] = getattr(proxy, "raw_" + "auth")
+            if proxy.url.scheme in {"socks5", "socks5h"}:
+                pool = httpcore.SOCKSProxy(proxy_url=str(proxy.url), **options)
             else:
-                pool = httpcore.ConnectionPool(**options)
-            self._pools[key] = pool
+                pool = httpcore.HTTPProxy(
+                    proxy_url=str(proxy.url),
+                    proxy_headers=proxy.headers.raw,
+                    proxy_ssl_context=proxy.ssl_context,
+                    **options,
+                )
+            self._proxy_pools[proxy_url] = pool
         return pool
 
-    def handle_request(self, request: httpx.Request) -> httpx.Response:
-        assert isinstance(request.stream, httpx.SyncByteStream)
-        # httpcore's public request helper reads AND closes the response stream
-        # in a finally. A deadline therefore returns the worker slot and closes
-        # the socket even when a listing peer never finishes its document.
-        try:
-            _remaining(self._deadline, None)
-            response = self._pool_for(request.url).request(
-                request.method,
-                httpcore.URL(
-                    scheme=request.url.raw_scheme,
-                    host=request.url.raw_host,
-                    port=request.url.port,
-                    target=request.url.raw_path,
-                ),
-                headers=request.headers.raw,
-                content=iter(request.stream),
-                extensions=request.extensions,
-            )
-        except Exception as error:
-            # Preserve the public HTTPX error contract for callers that supply
-            # domain-specific fallback handling. Specific classes precede bases.
-            for source, target in (
-                (httpcore.PoolTimeout, httpx.PoolTimeout),
-                (httpcore.ConnectTimeout, httpx.ConnectTimeout),
-                (httpcore.ReadTimeout, httpx.ReadTimeout),
-                (httpcore.WriteTimeout, httpx.WriteTimeout),
-                (httpcore.ConnectError, httpx.ConnectError),
-                (httpcore.ReadError, httpx.ReadError),
-                (httpcore.WriteError, httpx.WriteError),
-                (httpcore.LocalProtocolError, httpx.LocalProtocolError),
-                (httpcore.RemoteProtocolError, httpx.RemoteProtocolError),
-                (httpcore.ProxyError, httpx.ProxyError),
-                (httpcore.UnsupportedProtocol, httpx.UnsupportedProtocol),
-            ):
-                if isinstance(error, source):
-                    raise target(str(error), request=request) from error
-            raise
-        return httpx.Response(
-            response.status,
-            headers=response.headers,
-            content=response.content,
-            extensions=response.extensions,
+    def handle_request(self, request: httpcore.Request) -> httpcore.Response:
+        _remaining(self._deadline, None)
+        url = httpx.URL(
+            scheme=request.url.scheme.decode("ascii"),
+            host=request.url.host.decode("ascii"),
+            port=request.url.port,
+            raw_path=request.url.target,
         )
+        pool = self._pool_for(url)
+        return super().handle_request(request) if pool is self else pool.handle_request(request)
 
     def close(self) -> None:
-        for pool in self._pools.values():
-            pool.close()
+        try:
+            super().close()
+        finally:
+            for pool in self._proxy_pools.values():
+                pool.close()
+
+
+class ListingDeadlineTransport(httpx.HTTPTransport):
+    """Keep the standard HTTPX transport hook while bounding network work.
+
+    HTTPX 0.27/0.28 delegates its standard handle_request/close/context methods
+    to one _pool. Construct that pool ONCE here, rather than modifying a
+    borrowed client or bypassing HTTPTransport.handle_request. Embedders and
+    offline fixtures patching that established hook must still intercept every
+    owned listing; the former BaseTransport override silently skipped them and
+    could reach a live public catalogue. This private construction seam shares
+    the explicit version bound and parity tests of the routing adapter above.
+    """
+
+    def __init__(self, deadline: float) -> None:
+        self._pool = _ListingDeadlinePool(deadline)
