@@ -12,14 +12,13 @@ backend. This bounds cooperating socket/TLS I/O, not arbitrary native hangs.
 
 from __future__ import annotations
 
-import ipaddress
 import ssl
 import time
 from typing import Any, Iterable
-from urllib.request import getproxies, proxy_bypass
 
 import httpcore
 import httpx
+from httpx._utils import URLPattern, get_environment_proxies
 
 
 def _remaining(deadline: float, timeout: float | None) -> float:
@@ -119,53 +118,26 @@ class ListingDeadlineTransport(httpx.BaseTransport):
         self._deadline = deadline
         self._backend = _DeadlineBackend(deadline)
         self._ssl_context = httpx.create_ssl_context()
-        self._proxies = getproxies()
+        # Security routing must match the client's actual mount precedence,
+        # not an approximate NO_PROXY parser. HTTPX has no public equivalent:
+        # isolate its supported 0.27/0.28 compatibility seam here and test route
+        # parity before widening the declared version range.
+        self._routes = sorted(
+            (URLPattern(pattern), proxy) for pattern, proxy in get_environment_proxies().items()
+        )
         self._pools: dict[str, httpcore.ConnectionPool] = {}
 
+    def _proxy_for(self, url: httpx.URL) -> str | None:
+        for pattern, proxy in self._routes:
+            if pattern.matches(url):
+                return proxy
+        return None
+
     def _bypass(self, url: httpx.URL) -> bool:
-        if "no" not in self._proxies:
-            return proxy_bypass(url.netloc.decode("ascii"))
-        # Preserve HTTPX's domain/scheme/port and IPv6 NO_PROXY semantics.
-        # Passing only url.host silently drops a port-qualified security bypass.
-        for entry in self._proxies["no"].split(","):
-            entry = entry.strip()
-            if entry == "*":
-                return True
-            if not entry:
-                continue
-            try:
-                address = ipaddress.ip_address(entry)
-            except ValueError:
-                address = None
-            if address is not None:
-                if url.host == str(address):
-                    return True
-                continue
-            scoped = "://" in entry
-            pattern = httpx.URL(entry if scoped else f"all://{entry.lstrip('.')}")
-            if scoped and pattern.scheme != url.scheme:
-                continue
-            port = url.port or {"http": 80, "https": 443}.get(url.scheme)
-            if pattern.port is not None and pattern.port != port:
-                continue
-            host = pattern.host.lower()
-            actual = url.host.lower()
-            if entry.startswith("."):
-                matches = actual.endswith("." + host)
-            elif host == "localhost" or ":" in host:
-                matches = actual == host
-            else:
-                matches = actual == host or actual.endswith("." + host)
-            if matches:
-                return True
-        return False
+        return self._proxy_for(url) is None
 
     def _pool_for(self, url: httpx.URL) -> httpcore.ConnectionPool:
-        proxy_url = (
-            None
-            if self._bypass(url)
-            else (self._proxies.get(url.scheme) or self._proxies.get("all"))
-        )
+        proxy_url = self._proxy_for(url)
         key = proxy_url or ""
         pool = self._pools.get(key)
         if pool is None:

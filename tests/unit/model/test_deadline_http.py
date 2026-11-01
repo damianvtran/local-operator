@@ -21,6 +21,14 @@ from local_operator.model import deadline, deadline_http
 from local_operator.model.discovery import fetch_models
 
 
+def _proxy_env(monkeypatch, proxy, bypass=""):
+    for name in ("http_proxy", "https_proxy", "all_proxy"):
+        monkeypatch.setenv(name, proxy)
+        monkeypatch.setenv(name.upper(), proxy)
+    monkeypatch.setenv("no_proxy", bypass)
+    monkeypatch.setenv("NO_PROXY", bypass)
+
+
 @contextmanager
 def _listing_server():
     finished = threading.Event()
@@ -84,8 +92,7 @@ def test_owned_listing_deadline_closes_trickling_socket_and_recovers(phase):
 
 def test_deadline_transport_preserves_environment_proxy_routing(monkeypatch):
     with _listing_server() as (base, _, seen):
-        monkeypatch.setattr(deadline_http, "getproxies", lambda: {"http": base})
-        monkeypatch.setattr(deadline_http, "proxy_bypass", lambda _: False)
+        _proxy_env(monkeypatch, base)
         with httpx.Client(
             transport=deadline_http.ListingDeadlineTransport(time.monotonic() + 2)
         ) as client:
@@ -94,12 +101,20 @@ def test_deadline_transport_preserves_environment_proxy_routing(monkeypatch):
         assert seen == ["http://synthetic.invalid/models"]
 
 
+def test_schemeless_proxy_environment_is_normalized_like_httpx(monkeypatch):
+    with _listing_server() as (base, _, seen):
+        _proxy_env(monkeypatch, base.removeprefix("http://"))
+        with httpx.Client(
+            transport=deadline_http.ListingDeadlineTransport(time.monotonic() + 2)
+        ) as client:
+            response = client.get("http://fixture.invalid/models")
+        assert response.status_code == 200
+        assert seen == ["http://fixture.invalid/models"]
+
+
 def test_deadline_transport_preserves_no_proxy_bypass(monkeypatch):
     with _listing_server() as (base, _, seen):
-        monkeypatch.setattr(
-            deadline_http, "getproxies", lambda: {"http": "http://unreachable.invalid:1"}
-        )
-        monkeypatch.setattr(deadline_http, "proxy_bypass", lambda _: True)
+        _proxy_env(monkeypatch, "http://unreachable.invalid:1", "127.0.0.1")
         with httpx.Client(
             transport=deadline_http.ListingDeadlineTransport(time.monotonic() + 2)
         ) as client:
@@ -152,8 +167,8 @@ def test_worker_budget_does_not_reset_at_later_metadata_legs(monkeypatch):
         ("127.0.0.1:8765", "http://127.0.0.1:8765", True),
         ("127.0.0.1:8765", "http://127.0.0.1:8766", False),
         ("::1", "http://[::1]:8765", True),
-        ("[::1]:8765", "http://[::1]:8765", True),
-        ("[::1]:8765", "http://[::1]:8766", False),
+        ("http://[::1]:8765", "http://[::1]:8765", True),
+        ("http://[::1]:8765", "http://[::1]:8766", False),
         (".example.com", "http://example.com", False),
         (".example.com", "http://sub.example.com", True),
         ("example.com", "http://sub.example.com", True),
@@ -161,13 +176,12 @@ def test_worker_budget_does_not_reset_at_later_metadata_legs(monkeypatch):
         ("localhost", "http://sub.localhost", False),
         ("http://example.com:8765", "https://example.com:8765", False),
         ("http://example.com:8765", "http://example.com:8765", True),
+        ("http://example.com:8765", "http://sub.example.com:8765", False),
         ("example.com,*", "http://other.invalid", True),
     ],
 )
 def test_no_proxy_keeps_host_port_scheme_and_ipv6_semantics(monkeypatch, bypass, url, expected):
-    monkeypatch.setattr(
-        deadline_http, "getproxies", lambda: {"http": "http://proxy.invalid:1", "no": bypass}
-    )
+    _proxy_env(monkeypatch, "http://proxy.invalid:1", bypass)
     transport = deadline_http.ListingDeadlineTransport(time.monotonic() + 2)
     try:
         assert transport._bypass(httpx.URL(url)) is expected
@@ -175,12 +189,20 @@ def test_no_proxy_keeps_host_port_scheme_and_ipv6_semantics(monkeypatch, bypass,
         transport.close()
 
 
+def test_unsupported_ipv6_proxy_pattern_fails_closed_like_stock_httpx(monkeypatch):
+    _proxy_env(monkeypatch, "http://proxy.invalid:1", "[::1]:8765")
+    # HTTPX 0.27/0.28 requires a scheme for port-qualified IPv6 bypasses.
+    # Do not silently turn its invalid configuration into credential routing.
+    with pytest.raises(httpx.InvalidURL):
+        httpx.Client()
+    with pytest.raises(httpx.InvalidURL):
+        deadline_http.ListingDeadlineTransport(time.monotonic() + 2)
+
+
 def test_port_qualified_no_proxy_routes_actual_request_to_target(monkeypatch):
     with _listing_server() as (base, _, seen):
         authority = httpx.URL(base).netloc.decode()
-        monkeypatch.setattr(
-            deadline_http, "getproxies", lambda: {"http": "http://proxy.invalid:1", "no": authority}
-        )
+        _proxy_env(monkeypatch, "http://proxy.invalid:1", authority)
         with httpx.Client(
             transport=deadline_http.ListingDeadlineTransport(time.monotonic() + 2)
         ) as client:
