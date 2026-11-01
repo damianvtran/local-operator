@@ -379,6 +379,8 @@ async def push_item(
             generation=generation,
             intent=attempt.replay,
             budget=budget,
+            kind=kind,
+            org_skill=org_skill,
         )
 
     try:
@@ -443,6 +445,7 @@ async def push_item(
             outbox, operation_id, generation, "bundle-unsupported-server", state="needs-review"
         )
 
+    unpinned_org_skill = False
     if is_bundle:
         preview_document: Mapping[str, Any] | None = document
         token = ""
@@ -544,6 +547,9 @@ async def push_item(
         # A bundle commit carries NO pin, so replay must not demand one; the flag
         # is what distinguishes "no token needed" from "lost the token".
         "bundle": is_bundle,
+        # Only a successfully validated org preview may authorize a tokenless
+        # document replay; the retry also rechecks the current linked scope.
+        "unpinned_org_skill": unpinned_org_skill,
     }
     if not outbox.store_intent(operation_id, generation, intent):
         # Persisting the intent must succeed BEFORE a mutating dispatch: without
@@ -591,6 +597,8 @@ async def _replay_verbatim(
     generation: int,
     intent: Mapping[str, Any],
     budget: OperationBudget,
+    kind: Kind,
+    org_skill: bool,
 ) -> PushOutcome:
     """Resend one UNCERTAIN commit with exactly the stored bytes.
 
@@ -613,7 +621,14 @@ async def _replay_verbatim(
     accepts = list(intent.get("accept_unresolved") or [])
     expected = str(intent.get("expected_revision") or "")
     is_bundle = bool(intent.get("bundle"))
-    if not isinstance(document, Mapping) or not expected or (not token and not is_bundle):
+    unpinned_org_skill = (
+        intent.get("unpinned_org_skill") is True and kind == "skill" and org_skill and not accepts
+    )
+    if (
+        not isinstance(document, Mapping)
+        or not expected
+        or (not token and not is_bundle and not unpinned_org_skill)
+    ):
         return PushOutcome(
             "skipped", operation_id=operation_id, reason="reconciliation-intent-invalid"
         )
