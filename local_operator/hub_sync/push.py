@@ -320,6 +320,11 @@ def _refusal_of(exc: BaseException) -> str:
     return "publish-document-invalid"
 
 
+def org_skill_operation_id(operation_id: str) -> str:
+    """Keep new org intents out of paths older runtimes can rewrite."""
+    return f"{operation_id}-org-v2"
+
+
 async def push_item(
     *,
     kind: Kind,
@@ -358,11 +363,30 @@ async def push_item(
         bundle_upload=bundle_upload,
         org_skill=org_skill,
     )
-    if kind != "skill" or not org_skill:
+    if kind != "skill":
         return await _push_item_inner(**kwargs)
-    with outbox.org_skill_operation(operation_id) as acquired:
+    if not org_skill:
+        # A changed or unverified scope must not bypass an unresolved org intent
+        # by starting a fresh publication in the legacy namespace.
+        prior = outbox.read(org_skill_operation_id(operation_id))
+        if prior is not None and prior.state in ("pending", "pending-reconciliation"):
+            return PushOutcome(
+                "skipped", operation_id=operation_id, reason="org-reconciliation-required"
+            )
+        return await _push_item_inner(**kwargs)
+    # Old workers do not honor the new operation lock and may rewrite the old
+    # outbox path. A separate namespace makes the durable intent inaccessible to
+    # them; CAS still arbitrates any competing writes to the remote row.
+    scoped_id = org_skill_operation_id(operation_id)
+    with outbox.org_skill_operation(scoped_id) as acquired:
         if not acquired:
-            return PushOutcome("skipped", operation_id=operation_id, reason="operation-in-progress")
+            return PushOutcome("skipped", operation_id=scoped_id, reason="operation-in-progress")
+        legacy = outbox.read(operation_id)
+        if legacy is not None and legacy.state in ("pending", "pending-reconciliation"):
+            return PushOutcome(
+                "skipped", operation_id=operation_id, reason="legacy-reconciliation-required"
+            )
+        kwargs["operation_id"] = scoped_id
         return await _push_item_inner(**kwargs)
 
 
