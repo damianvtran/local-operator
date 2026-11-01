@@ -65,7 +65,9 @@ router = APIRouter(
 # Request bodies are intentionally tiny and streamed into a bounded buffer; an
 # invalid body must not be echoed by a validation error (it may contain secrets).
 _BODY_LIMIT = 4096
-_TOKEN_PATTERN = r"^[A-Za-z0-9_-]{43}$"
+# Registry handles bind a random action token to its random boot epoch; both
+# components are required, so a stale handle cannot survive a registry rotation.
+_TOKEN_PATTERN = r"^[A-Za-z0-9_-]{43}\.[A-Za-z0-9_-]{43}$"
 _WINDOW_PATTERN = r"^[A-Za-z0-9_-]{1,128}$"
 
 

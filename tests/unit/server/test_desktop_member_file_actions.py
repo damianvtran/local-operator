@@ -234,9 +234,28 @@ async def test_rejects_query_duplicate_json_and_injected_file_id(api):
     assert response.status_code == 422
     response = await client.post(
         PREFIX + "/begin",
-        json={"window_id": WINDOW, "context": "a" * 43, "file_id": "../../secret"},
+        json={
+            "window_id": WINDOW,
+            "context": "a" * 43 + "." + "b" * 43,
+            "file_id": "../../secret",
+        },
     )
     assert response.status_code == 422 and calls == []
+
+
+@pytest.mark.parametrize(
+    "invalid", ["a" * 43, "a" * 43 + "." + "b" * 42, "a" * 43 + "/" + "b" * 43]
+)
+async def test_rejects_malformed_registry_handles(api, invalid):
+    client, actions, registry, store, calls, state, app = api
+    context = await client.post(
+        PREFIX + "/begin", json={"window_id": WINDOW, "context": invalid, "file_id": FILE}
+    )
+    operation = await client.post(
+        PREFIX + "/bytes", json={"window_id": WINDOW, "operation": invalid}
+    )
+    assert context.status_code == 422 and operation.status_code == 422
+    assert calls == []
 
 
 async def test_wrong_window_tenant_invalidation_and_cancel(api):

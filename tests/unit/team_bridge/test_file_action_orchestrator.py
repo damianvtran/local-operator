@@ -188,7 +188,9 @@ async def test_invalidation_revokes_pending_and_fresh_generation_can_commission(
     broker.invalidate("window_1", 4)
     with pytest.raises(ActionUnavailable):
         await broker.bytes("window_1", op)
-    state["view"] = replace(state["view"], generation=5)
+    view = state["view"]
+    assert view is not None
+    state["view"] = replace(view, generation=5)
     assert await broker.commission("window_1") != context
 
 

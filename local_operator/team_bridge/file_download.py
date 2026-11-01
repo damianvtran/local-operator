@@ -215,7 +215,10 @@ async def download_human_file(
             "file_auth_refresh_required", "Sign in or refresh before downloading.", http_status=401
         )
 
-    path = f"/messaging/conversations/{conversation_id}/messages/{message_id}/attachments/{attachment_id}"
+    path = (
+        f"/messaging/conversations/{conversation_id}/messages/{message_id}"
+        f"/attachments/{attachment_id}"
+    )
 
     def guard() -> None:
         if _current_action_snapshot(client, action_fence, current_action_fence) != before:
