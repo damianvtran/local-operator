@@ -17653,6 +17653,10 @@ def main() -> int:
 
             return tunnel_main(args)
         elif args.subcommand == "team-bridge":
+            if getattr(args, "team_bridge_command", None) == "avatar":
+                from local_operator.team_bridge.cli import main as team_bridge_avatar
+
+                return team_bridge_avatar(args)
             if getattr(args, "team_bridge_command", None) == "setup":
                 from local_operator.team_bridge.setup_cli import (
                     main as team_bridge_setup,
