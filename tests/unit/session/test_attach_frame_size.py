@@ -1164,11 +1164,15 @@ def test_every_job_row_field_is_classified() -> None:
     assert not stale, f"stale entries for row fields that no longer exist: {sorted(stale)}"
 
 
+@pytest.mark.parametrize("long_context", ["none", "priced", "unpriced"])
 @pytest.mark.parametrize("cache_reported", [None, True, False])
 def test_the_attach_frame_fits_for_a_session_that_ran_all_year(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cache_reported: bool | None
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cache_reported: bool | None,
+    long_context: str,
 ) -> None:
-    """The class guard, including real compatible-provider cache evidence."""
+    """The full frame accommodates both live cache evidence and pricing tiers."""
     if cache_reported is not None:
         import httpx
 
@@ -1201,6 +1205,18 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year(
             return receipt
 
         monkeypatch.setitem(globals(), "_receipt", populated_receipt)
+    if long_context != "none":
+        previous = _receipt
+
+        def tier_receipt(index: int) -> Usage:
+            return previous(index).model_copy(
+                update={
+                    "openai_long_context": True,
+                    "usd_cost": None if long_context == "unpriced" else 0.0123,
+                }
+            )
+
+        monkeypatch.setitem(globals(), "_receipt", tier_receipt)
     jobs = [
         job.model_copy(
             update={
@@ -1565,6 +1581,13 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year(
     # fixture that only proved the frame fits would not notice the wire bound
     # being deleted.
     snapshot = frame["data"]["snapshot"]
+    if long_context != "none":
+        # The fixture deliberately restores a pre-cap 5,000-receipt state.
+        # The projection caps that tail without mutating its source.
+        assert len(state.usage_components) == 5_000
+        assert 0 < len(snapshot["usage_components"]) <= 200
+        assert state.usage_components[-1].openai_long_context is True
+        assert snapshot["usage_components"][-1]["openai_long_context"] is True
     assert snapshot["goal_history"] == [], (
         "the wire bound did not run on a frame this size, so this guard is "
         "measuring the unbounded shape (see _bound_goal_record_in_place)"
