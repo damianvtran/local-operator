@@ -73,7 +73,7 @@ this host, so the same command lands anywhere in that range (and it is the reaso
 `tests/durations.json` exists as the sharder's input). Do not treat the whole suite
 as a routine inner-loop step: run the targeted command for what you changed (see
 "Scoping the inner loop" below, and note which jobs still narrow), and let CI's
-five shards be the whole-tree run.
+six shards be the whole-tree run.
 
 **Every pytest invocation in this file is isolated, and that is not decoration.**
 Each block also carries its own `ISO=$(mktemp -d)`, because the variable lives in
@@ -652,7 +652,7 @@ narrowest scope that could hold the answer, and widen only when it shows nothing
 
 ### Running the suite locally: what it costs, and how to read a stall
 
-**CI's five shards are the whole-tree gate. A local whole-tree run is not one, and
+**CI's six shards are the whole-tree gate. A local whole-tree run is not one, and
 no session should block on it.** Measured 2026-09-24 at load average 140-200, the
 whole tree is **~84 minutes projected at the four workers this host's hook resolved**
 — the run's own line is `pytest worker cap: 4 (bound by memory, cpu arm 7, memory arm 4,
@@ -2034,7 +2034,7 @@ Warnings that still hold, each of which has already cost a release:
   rather than a stale local checkout — run it, do not read it:
 
   ```sh
-  python scripts/shard_tests.py --shard <I> --total 5 \
+  python scripts/shard_tests.py --shard <I> --total 6 \
     --out "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/shard_<I>.txt"
   ```
 
