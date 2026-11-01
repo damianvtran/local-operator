@@ -884,7 +884,9 @@ def test_a_skipped_pass_logs_nothing_at_info(caplog: pytest.LogCaptureFixture) -
 
 
 @pytest.mark.asyncio
-async def test_a_hanging_seam_costs_the_turn_only_the_wait_budget() -> None:
+async def test_a_hanging_seam_costs_the_turn_only_the_wait_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The turn pays ``waitMs``, and the answer is delivered by the next message.
 
     The operator's budget is our OWN overhead per user message, and on a real roster
@@ -901,33 +903,76 @@ async def test_a_hanging_seam_costs_the_turn_only_the_wait_budget() -> None:
     """
     index = _FakeIndex(picked=[_skill("alpha", "Alpha skill.")])
     off = await _off_block(index)
-    classifier = _FakeClassifier(
+    vendor_started = asyncio.Event()
+    release_vendor = asyncio.Event()
+    vendor_finished = asyncio.Event()
+
+    class GatedClassifier(_FakeClassifier):
+        async def recommend_resources(self, request: Any) -> _Recommendation:
+            # Only the first message has an answer: later messages must not
+            # disguise duplicate delivery with a second, identical recommendation.
+            if self.requests:
+                self.requests.append(request)
+                return _Recommendation()
+            self.requests.append(request)
+            vendor_started.set()
+            await release_vendor.wait()
+            vendor_finished.set()
+            return self.recommendation
+
+    classifier = GatedClassifier(
         _Recommendation(
             resources=(_Candidate("guide", "tunnel", "Tunnel guide.", "guide://tunnel"),),
             vendor="typesafe",
         ),
-        delay=0.35,
         timeout_s=1.5,
     )
     hooks = _hooks(_FakeIndex(picked=[_skill("alpha", "Alpha skill.")]), classifier=classifier)
     hooks.classification_wait_s = 0.05
+    observed_timeouts: list[float | None] = []
+    real_wait_for = asyncio.wait_for
 
-    started = time.monotonic()
-    first = await session_factory._select_knowledge_block(hooks, "first task", task_id="t1")
-    waited = time.monotonic() - started
+    async def observe_wait(awaitable: Any, timeout: float | None) -> Any:
+        observed_timeouts.append(timeout)
+        return await real_wait_for(awaitable, timeout=timeout)
 
-    # The BUDGET, not the vendor's 350 ms — and the prompt is byte-identical to
-    # what it would have been with no layer at all.
-    assert waited < 0.2, waited
-    assert first == off
+    monkeypatch.setattr(session_factory.asyncio, "wait_for", observe_wait)
+    try:
+        # The watchdog diagnoses deadlock, NOT latency. Event ordering and the
+        # actual configured deadline distinguish budget enforcement from awaiting
+        # the vendor even when a loaded event loop resumes after 200 ms.
+        async with asyncio.timeout(5.0):
+            first = await session_factory._select_knowledge_block(
+                hooks, "first task", task_id="t1"
+            )
+            assert observed_timeouts == [0.05]
+            assert vendor_started.is_set()
+            assert not vendor_finished.is_set()
+            assert len(hooks.classification_outstanding) == 1
+            vendor_task = hooks.classification_outstanding[0].task
+            assert not vendor_task.done(), "the wait must leave vendor work running"
+            assert first == off
 
-    await asyncio.sleep(0.4)  # the call lands after its own turn ended
-
-    second = await session_factory._select_knowledge_block(hooks, "second task", task_id="t2")
-
-    assert "guide://tunnel" in second
-    assert second.count("guide://tunnel") == 1
-    # DELIVERED ONCE, by the turn that actually carries it (the second one).
+            release_vendor.set()
+            await vendor_task
+            assert vendor_finished.is_set()
+            second = await session_factory._select_knowledge_block(
+                hooks, "second task", task_id="t2"
+            )
+            assert second.count("guide://tunnel") == 1
+            third = await session_factory._select_knowledge_block(
+                hooks, "third task", task_id="t3"
+            )
+            assert "guide://tunnel" not in third
+    finally:
+        # A failed assertion or watchdog must not leak the deliberately blocked
+        # classifier into another test or make event-loop teardown hang.
+        release_vendor.set()
+        for call in hooks.classification_outstanding:
+            call.task.cancel()
+        await asyncio.gather(
+            *(call.task for call in hooks.classification_outstanding), return_exceptions=True
+        )
 
 
 @pytest.mark.asyncio
