@@ -396,7 +396,20 @@ def test_r4_optional_registration_failure_preserves_existing_hard_timer(
         assert len(calls) == 1
         assert calls[0][0] == 300
         assert calls[0][1] == {"file": timer._handle, "repeat": False, "exit": True}
-        assert timer._path.read_text().startswith(watchdog.ARM_MARKER)
+        if failure in ("none", "normal"):
+            assert timer._path.read_text().startswith(watchdog.ARM_MARKER)
+        else:
+            assert timer._handle is not None
+            timer._handle.seek(0)
+            assert timer._handle.read().startswith(watchdog.ARM_MARKER)
+            timer._handle.seek(0, os.SEEK_END)
+            if timer._path.exists():
+                registered_info = timer._path.stat()
+                fallback_info = os.fstat(timer._handle.fileno())
+                assert (registered_info.st_dev, registered_info.st_ino) != (
+                    fallback_info.st_dev,
+                    fallback_info.st_ino,
+                )
         assert artifact.ENV_REGISTRY not in os.environ
         if failure not in ("none", "normal"):
             manifest = artifact.stage(run.parent, RUN, tmp_path / "out", registry=registry)
@@ -407,6 +420,114 @@ def test_r4_optional_registration_failure_preserves_existing_hard_timer(
             assert manifest["files"] == []
             assert not list((tmp_path / "out").glob("worker-*.log"))
     finally:
+        if timer._handle is not None:
+            timer._handle.close()
+
+
+@pytest.mark.parametrize("run_mode", [0o700, 0o500])
+@pytest.mark.parametrize("hard", [None, (300, True)])
+def test_r5_closed_handle_readonly_run_cannot_authorize_fallback(
+    tmp_path, monkeypatch, run_mode, hard
+):
+    from tests import shard_stall_watchdog as watchdog
+
+    run = tmp_path / "root" / RUN
+    run.mkdir(parents=True)
+    registry = tmp_path / "owners"
+    registry.mkdir()
+    monkeypatch.setattr(watchdog, "_RUN_DIR", run)
+    monkeypatch.setenv(artifact.ENV_REGISTRY, str(registry))
+    calls = []
+
+    class FakeTimer:
+        def dump_traceback_later(self, seconds, **kwargs):
+            calls.append((seconds, kwargs["exit"]))
+
+        def cancel_dump_traceback_later(self):
+            pass
+
+    monkeypatch.setattr(watchdog, "faulthandler", FakeTimer())
+    timer = watchdog._WorkerTimer(240, hard=hard)
+    assert timer._handle is not None
+    timer._handle.close()
+    # Actual permission failure, not a mocked marker failure: the existing log
+    # remains writable while creating any new source-directory marker is denied.
+    run.chmod(run_mode)
+    try:
+        timer.arm("tests/synthetic.py::test_fallback_must_never_be_registered")
+        assert calls == ([(300, True)] if hard else [(240, False)])
+        assert timer._armed and not timer._registered
+        result = cli(run.parent, tmp_path / "out", registry)
+        manifest = json.loads((tmp_path / "out/manifest.json").read_text())
+        assert result.returncode == 2, result.stdout
+        assert manifest["status"] == "error"
+        assert manifest["output_bytes"] == 0
+        assert manifest["files"] == []
+        assert not list((tmp_path / "out").glob("worker-*.log"))
+        # The bytes written by an unregistered writer must not modify the inode
+        # named in the earlier successful receipt, independently of denial flags.
+        assert timer._path.read_bytes() == b""
+    finally:
+        run.chmod(0o700)
+        if timer._handle is not None:
+            timer._handle.close()
+
+
+def test_r5_fallback_is_separate_even_when_both_denial_directories_are_readonly(
+    tmp_path, monkeypatch
+):
+    from tests import shard_stall_watchdog as watchdog
+
+    run = tmp_path / "root" / RUN
+    run.mkdir(parents=True)
+    registry = tmp_path / "owners"
+    registry.mkdir()
+    monkeypatch.setattr(watchdog, "_RUN_DIR", run)
+    monkeypatch.setenv(artifact.ENV_REGISTRY, str(registry))
+    calls = []
+
+    class FakeTimer:
+        def dump_traceback_later(self, seconds, **kwargs):
+            calls.append((seconds, kwargs["exit"]))
+
+        def cancel_dump_traceback_later(self):
+            pass
+
+    monkeypatch.setattr(watchdog, "faulthandler", FakeTimer())
+    timer = watchdog._WorkerTimer(240, hard=(300, True))
+    assert timer._handle is not None
+    old_snapshot = "REGISTERED SNAPSHOT BEFORE FAILURE\n"
+    timer._handle.write(old_snapshot)
+    timer._handle.close()
+    run.chmod(0o500)
+    registry.chmod(0o500)
+    try:
+        timer.arm("tests/synthetic.py::test_unregistered_fallback")
+        assert calls == [(300, True)]
+        assert timer._armed and not timer._registered
+        assert not (run / artifact.REGISTRATION_FAILURE).exists()
+        assert not (registry / artifact.REGISTRATION_FAILURE).exists()
+        assert timer._handle is not None
+        original_info = timer._path.stat()
+        fallback_info = os.fstat(timer._handle.fileno())
+        assert (original_info.st_dev, original_info.st_ino) != (
+            fallback_info.st_dev,
+            fallback_info.st_ino,
+        )
+        result = cli(run.parent, tmp_path / "out", registry)
+        assert result.returncode == 0, result.stderr
+        # Existing registered snapshots are still safe to retain if diagnostics
+        # cannot persist a denial; no fallback bytes can land in that inode.
+        manifest = json.loads((tmp_path / "out/manifest.json").read_text())
+        assert manifest["status"] == "collected"
+        assert manifest["output_bytes"] == len(old_snapshot.encode())
+        assert (tmp_path / "out" / timer._path.name).read_text() == old_snapshot
+        assert timer._path.read_text() == old_snapshot
+        timer._handle.seek(0)
+        assert "test_unregistered_fallback" in timer._handle.read()
+    finally:
+        run.chmod(0o700)
+        registry.chmod(0o700)
         if timer._handle is not None:
             timer._handle.close()
 

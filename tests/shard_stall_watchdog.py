@@ -531,23 +531,33 @@ class _WorkerTimer:
         # Only CI retention asks for a pre-test writer/ownership handoff. Keep
         # timer arming and all local-run behavior unchanged. Retention failure
         # must never disable the independent report timer or explicit hard bound.
-        from tests.shard_stall_artifact import (
-            ENV_REGISTRY,
-            note_registration_failure,
-            registered_handle,
-        )
+        from tests.shard_stall_artifact import ENV_REGISTRY, registered_handle
 
         registry = os.environ.pop(ENV_REGISTRY, "")
+        self._registry = Path(registry) if registry else None
+        self._retention_fallback = False
         self._registered = bool(registry)
         if registry:
             try:
                 self._handle = registered_handle(self._path, Path(registry))
             except (OSError, ValueError):
-                # Fail retention closed, not the existing watchdog: arm() keeps
-                # its original log-open/timer error handling and destination.
-                # Never represent a fallback writer as registered provenance.
-                self._registered = False
-                note_registration_failure(self._path.parent)
+                # Fail retention closed, not the existing watchdog. Recovery
+                # keeps timer semantics but must use a non-eligible destination,
+                # never the inode a leftover receipt can still authorize.
+                self._deny_retention()
+
+    def _deny_retention(self) -> None:
+        """Separate timer recovery from every previously registered writer inode."""
+        from tests.shard_stall_artifact import note_registration_failure
+
+        self._registered = False
+        self._retention_fallback = True
+        # These denial records explain failure, but are not the safety boundary:
+        # either directory can become read-only after registration. arm() never
+        # writes fallback bytes into an inode any old receipt can authorize.
+        note_registration_failure(self._path.parent)
+        if self._registry is not None:
+            note_registration_failure(self._registry)
 
     def bound_for(self, nodeid: str) -> tuple[float, bool]:
         """The ``(seconds, exit)`` to arm for ``nodeid``.
@@ -608,11 +618,18 @@ class _WorkerTimer:
                 # A CI registered handle must never silently reopen a replaced
                 # pathname as though it were the original writer inode.
                 if self._registered:
-                    from tests.shard_stall_artifact import note_registration_failure
+                    self._deny_retention()
+                if self._retention_fallback:
+                    import tempfile
 
-                    self._registered = False
-                    note_registration_failure(self._path.parent)
-                self._handle = self._path.open("w", encoding="utf-8")
+                    # An anonymous, non-eligible writer cannot alias the original
+                    # still-live registered inode, even if BOTH denial writes
+                    # failed. Under retention failure only, diagnostic stacks
+                    # are not recoverable by the console/artifact reader; the
+                    # independent report/hard timer still operates as before.
+                    self._handle = tempfile.TemporaryFile(mode="w+", encoding="utf-8")
+                else:
+                    self._handle = self._path.open("w", encoding="utf-8")
             self._handle.write(f"{ARM_MARKER}{nodeid} exceeded {bound:g}s; every thread follows.\n")
             self._handle.flush()
             if self._armed:

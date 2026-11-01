@@ -50,10 +50,10 @@ def note_registration_failure(directory: Path) -> None:
     """Deny retention on lifecycle failure without disabling the independent timer.
 
     This exact, empty marker is denial-only: no contents are captured or trusted
-    as worker provenance. It also overrides any receipt left by a failed final
-    registration write. Never replace unknown files. If even the original run
-    directory is unwritable, persistence is best-effort; absence of a receipt
-    still cannot authorize a log export. No console/timer behavior changes.
+    as worker provenance. Either the run directory or separate registry can deny
+    the invocation, without replacing unknown files. Persistence is best-effort:
+    the independent safety boundary is that timer fallback uses an anonymous
+    writer outside eligible files, never an inode a stale receipt can authorize.
     """
     directory_fd = marker_fd = None
     try:
@@ -247,6 +247,16 @@ class _RegistrationFailed(Exception):
     """A denial-only lifecycle marker forbids all retention for this invocation."""
 
 
+def _require_no_registration_failure(directory_fd) -> None:
+    try:
+        os.stat(REGISTRATION_FAILURE, dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        pass
+    else:
+        # Mere presence denies, including symlink/nonregular markers. No reads.
+        raise _RegistrationFailed
+
+
 def stage(
     root: Path,
     invocation: str,
@@ -269,8 +279,11 @@ def stage(
     bytes plus a failure). A missing explicitly handed registry is a protocol
     error; no handoff at all (e.g. setup skipped) is healthy absence. A persisted
     registration-failure marker yields error/no logs even if a receipt remains.
-    Optional retention failure never disables the independent report/hard timer;
-    its fallback writer is not registered for export.
+    Optional retention failure preserves report/hard timer arming by switching
+    only its diagnostic destination to an anonymous non-eligible file. Fallback
+    stacks cannot be read by the console/artifact reader. Even if neither denial
+    marker can persist, fallback bytes cannot alias an old registered inode;
+    previously registered snapshots remain eligible, not fallback data.
     Failed/partial artifacts are manifested locally but
     NOT published: the workflow emits an upload path only after a zero exit.
     A failed stage does not authorize an upload of any pre-existing directory.
@@ -305,14 +318,7 @@ def stage(
         root_fd = _directory(root)
         run_fd = _directory(invocation, dir_fd=root_fd)
         manifest["status"] = "collected"
-        try:
-            os.stat(REGISTRATION_FAILURE, dir_fd=run_fd, follow_symlinks=False)
-        except FileNotFoundError:
-            pass
-        else:
-            # Mere presence is denial-only, including symlink/nonregular markers.
-            # Never follow/read it or scan/export fallback worker files.
-            raise _RegistrationFailed
+        _require_no_registration_failure(run_fd)
         if registry is None:
             eligible = []
         else:
@@ -322,6 +328,7 @@ def stage(
                 # An absent worker log is healthy; losing a registry path that
                 # the pre-test workflow explicitly handed us is protocol failure.
                 raise OSError(errno.EIO, "registry handoff missing") from exc
+            _require_no_registration_failure(registry_fd)
             eligible = _registrations(registry_fd, invocation, run_fd, manifest)
         retained = 0
         for name, receipt in eligible:
