@@ -79,6 +79,7 @@ def page():
             "messages": [
                 {
                     "id": "bcmsg_aaaaaaaa",
+                    "seq": 1001,
                     "conversation_id": "bcv_aaaaaaaa",
                     "files": [
                         {
@@ -108,7 +109,7 @@ async def api(tmp_path, monkeypatch):
     monkeypatch.delenv("LOCAL_OPERATOR_DESKTOP_ORIGINS", raising=False)
     monkeypatch.setattr(client_module, "org_oauth_destination_allowed", lambda _: True)
     state = {
-        "view": TrustedMainView(WINDOW, 3, "tnt_alpha", "bcv_aaaaaaaa", "bcmsg_aaaaaaaa"),
+        "view": TrustedMainView(WINDOW, 3, "tnt_alpha", "bcv_aaaaaaaa", "bcmsg_aaaaaaaa", 1001),
         "status": 200,
     }
     calls, store = [], Store()
@@ -194,7 +195,11 @@ async def test_full_bound_action_and_headers_zero_byte_replay(api):
     ).status_code == 204
     assert (await client.post(PREFIX + "/verify", json=payload)).status_code == 404
     assert len(calls) == 2 and store.refreshes == 0
-    assert dict(calls[0].url.params) == {"tenant_id": "tnt_alpha", "limit": "50"}
+    assert dict(calls[0].url.params) == {
+        "tenant_id": "tnt_alpha",
+        "limit": "1",
+        "before_seq": "1002",
+    }
     assert dict(calls[1].url.params) == {"tenant_id": "tnt_alpha"}
 
 

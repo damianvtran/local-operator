@@ -13,7 +13,12 @@ the trusted owner publishes invalidation there before reporting it complete.
 Observation is not a distributed lock: main and core revocation can race and
 cannot recall an HTTP request already sent. The hub must authorize membership at
 history and download; the eventual integration must recheck before publication.
-This draft is deliberately unregistered pending security review.
+This draft is deliberately unregistered pending security review. A sequence is
+only a lookup hint: authenticated history must match the fixed selected message
+ID, conversation and sequence before any files can be commissioned. BLOCKER:
+timeline history omits thread replies; the separate replies API is oldest-first
+and no bounded targeted reply lookup is established here. Do not integrate or
+claim support for reply attachments until that lookup is securely implemented.
 """
 
 from __future__ import annotations
@@ -52,7 +57,9 @@ from local_operator.team_bridge.types import (
 )
 
 _HISTORY_MAX_BYTES = 2 * 1024 * 1024
-_HISTORY_LIMIT = 50
+# Leave room for +1 in JavaScript's exact integer range if a future UI carries
+# the hint; the hint never authorizes a message or its attachments.
+_HISTORY_MAX_SEQUENCE = (1 << 53) - 2
 
 
 @dataclass(frozen=True, repr=False)
@@ -66,6 +73,7 @@ class HistoryScope:
     conversation_id: str
     message_id: str
     registry_epoch: str
+    message_seq: int
 
 
 def _invalid() -> BridgeRefusal:
@@ -91,27 +99,17 @@ def _file_ids(body: bytes, scope: HistoryScope) -> frozenset[str]:
         )
         result = envelope["result"]
         messages = result["messages"]
-        if (
-            not isinstance(result, dict)
-            or not isinstance(messages, list)
-            or len(messages) > _HISTORY_LIMIT
-        ):
+        if not isinstance(result, dict) or not isinstance(messages, list) or len(messages) != 1:
             raise ValueError("page")
-        found: dict[str, Any] | None = None
-        seen: set[str] = set()
-        for message in messages:
-            if not isinstance(message, dict):
-                raise ValueError("message")
-            mid = message.get("id")
-            if not isinstance(mid, str) or not is_conversation_message_id(mid):
-                raise ValueError("message")
-            if mid in seen or message.get("conversation_id") != scope.conversation_id:
-                raise ValueError("ambiguous message")
-            seen.add(mid)
-            if mid == scope.message_id:
-                found = message
-        if found is None:
-            raise ValueError("message absent")
+        found = messages[0]
+        if (
+            not isinstance(found, dict)
+            or found.get("id") != scope.message_id
+            or found.get("conversation_id") != scope.conversation_id
+            or type(found.get("seq")) is not int
+            or found.get("seq") != scope.message_seq
+        ):
+            raise ValueError("message identity")
         files = found.get("files", [])
         if not isinstance(files, list) or len(files) > 16:
             raise ValueError("files")
@@ -197,8 +195,8 @@ async def commission_human_history(
 ) -> str:
     """Return only an opaque context; `current_scope` is a TRUSTED integration seam.
 
-    Caller-selected message ID chooses a message *within* the returned page; no
-    file IDs are accepted from the caller. A page that does not contain it fails.
+    Caller-selected message ID selects only a message in bounded hub history;
+    file IDs are derived solely from that message's authenticated response page.
     """
     if (
         not isinstance(scope, HistoryScope)
@@ -213,6 +211,8 @@ async def commission_human_history(
         or not isinstance(scope.conversation_id, str)
         or re.fullmatch(CONVERSATION_ID_PATTERN, scope.conversation_id) is None
         or not is_conversation_message_id(scope.message_id)
+        or type(scope.message_seq) is not int
+        or not 1 <= scope.message_seq <= _HISTORY_MAX_SEQUENCE
         or not isinstance(scope.window_id, str)
         or not scope.window_id
         or len(scope.window_id) > 256
@@ -266,6 +266,13 @@ async def commission_human_history(
         registry.require_epoch(scope.registry_epoch)
         if _native_snapshot(client, scope, current_scope) != before:
             raise BridgeRefusal(ACCOUNT_MISMATCH_CODE, ACCOUNT_MISMATCH_SENTENCE, http_status=409)
+        # The read must not outlive the same bearer admitted at its start.
+        if expires <= int(time.time() * 1000) + OAUTH_REFRESH_SKEW_MS:
+            raise BridgeRefusal(
+                "file_auth_refresh_required",
+                "Sign in or refresh before downloading.",
+                http_status=401,
+            )
 
     try:
         async with httpx.AsyncClient(
@@ -275,7 +282,11 @@ async def commission_human_history(
             async with http.stream(
                 "GET",
                 client.base_url + f"/messaging/conversations/{scope.conversation_id}/messages",
-                params={"tenant_id": scope.tenant_id, "limit": _HISTORY_LIMIT},
+                params={
+                    "tenant_id": scope.tenant_id,
+                    "limit": 1,
+                    "before_seq": scope.message_seq + 1,
+                },
                 headers={
                     "Authorization": f"Bearer {token}",
                     "Accept": "application/json",

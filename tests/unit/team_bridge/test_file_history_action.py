@@ -65,6 +65,7 @@ def scope(registry):
         "bcv_aaaaaaaa",
         "bcmsg_aaaaaaaa",
         registry.current_epoch(),
+        1001,
     )
 
 
@@ -88,6 +89,7 @@ def page(files=None):
             "messages": [
                 {
                     "id": "bcmsg_aaaaaaaa",
+                    "seq": 1001,
                     "conversation_id": "bcv_aaaaaaaa",
                     "files": files if files is not None else [file()],
                 }
@@ -125,12 +127,95 @@ async def test_exact_human_history_commissions_only_response_files(monkeypatch):
     )
     assert len(requests) == 1
     assert requests[0].url.path == "/v1/messaging/conversations/bcv_aaaaaaaa/messages"
-    assert dict(requests[0].url.params) == {"tenant_id": "tnt_alpha", "limit": "50"}
+    assert dict(requests[0].url.params) == {
+        "tenant_id": "tnt_alpha", "limit": "1", "before_seq": "1002"
+    }
     op = registry.start(handle, "batt_aaaaaaaa")
     assert registry.claim(op).binding.account_id == "acc_1"
     with pytest.raises(ActionUnavailable):
         registry.start(handle, "batt_bbbbbbbb")
     assert store.refreshes == 0
+
+
+async def test_far_older_message_uses_one_authenticated_targeted_read(monkeypatch):
+    store, registry, queries = Store(), InertFileActionRegistry(), []
+    s = scope(registry)
+
+    # Model the hub's newest-first exclusive cursor with 900 newer roots.
+    target = page()["result"]["messages"][0]
+    newer = [
+        {"id": f"bcmsg_{seq:08d}", "seq": seq, "conversation_id": "bcv_aaaaaaaa",
+         "files": [file("batt_bbbbbbbb")]}
+        for seq in range(1002, 1902)
+    ]
+
+    def handler(request):
+        queries.append(dict(request.url.params))
+        before = int(request.url.params["before_seq"])
+        messages = [m for m in [*reversed(newer), target] if m["seq"] < before]
+        return streamed_json({"result": {"messages": messages[:1]}})
+
+    handle = await history.commission_human_history(
+        client(monkeypatch, store, handler), registry, s, lambda: s
+    )
+    assert queries == [{"tenant_id": "tnt_alpha", "limit": "1", "before_seq": "1002"}]
+    registry.claim(registry.start(handle, "batt_aaaaaaaa"))
+    with pytest.raises(ActionUnavailable):
+        registry.start(handle, "batt_bbbbbbbb")
+    assert store.refreshes == 0
+
+
+@pytest.mark.parametrize("field,value", [
+    ("id", "bcmsg_bbbbbbbb"), ("conversation_id", "bcv_bbbbbbbb"),
+    ("seq", 1000), ("seq", True), ("seq", "1001"),
+])
+async def test_targeted_history_rejects_wrong_response_identity(monkeypatch, field, value):
+    store, registry, requests = Store(), InertFileActionRegistry(), []
+    s = scope(registry)
+    result = page([file("batt_bbbbbbbb")])
+    result["result"]["messages"][0][field] = value
+    c = client(monkeypatch, store, lambda r: (requests.append(r) or streamed_json(result)))
+    with pytest.raises(BridgeRefusal):
+        await history.commission_human_history(c, registry, s, lambda: s)
+    assert len(requests) == 1 and registry._contexts == {} and store.refreshes == 0
+
+
+@pytest.mark.parametrize("seq", [None, True, 0, -1, "1001", (1 << 53) - 1, 1 << 63])
+async def test_invalid_sequence_hint_never_dispatches(monkeypatch, seq):
+    store, registry, requests = Store(), InertFileActionRegistry(), []
+    s = replace(scope(registry), message_seq=seq)
+    c = client(monkeypatch, store, lambda r: (requests.append(r) or streamed_json(page())))
+    with pytest.raises(BridgeRefusal):
+        await history.commission_human_history(c, registry, s, lambda: s)
+    assert not requests and registry._contexts == {} and store.refreshes == 0
+
+
+@pytest.mark.parametrize("rotation", ["credential", "epoch", "view"])
+async def test_rotation_during_targeted_history_refuses_commission(monkeypatch, rotation):
+    from local_operator.team_bridge import file_action_registry as registry_module
+
+    monkeypatch.setattr(registry_module, "_MAX_WINDOW_TOMBSTONES", 1)
+    store, registry, requests = Store(), InertFileActionRegistry(), []
+    s = scope(registry)
+    current = [s]
+    if rotation == "epoch":
+        registry.invalidate_view("window_seed", 1)
+
+    def handler(request):
+        requests.append(request)
+        if rotation == "credential":
+            store.incarnation = "b" * 32
+        elif rotation == "epoch":
+            registry.invalidate_view("window_rotate", 1)
+        else:
+            current[0] = replace(s, view_generation=s.view_generation + 1)
+        return streamed_json(page())
+
+    with pytest.raises((BridgeRefusal, ActionUnavailable)):
+        await history.commission_human_history(
+            client(monkeypatch, store, handler), registry, s, lambda: current[0]
+        )
+    assert len(requests) == 1 and registry._contexts == {} and store.refreshes == 0
 
 
 async def test_stale_before_request_and_401_never_refresh(monkeypatch):

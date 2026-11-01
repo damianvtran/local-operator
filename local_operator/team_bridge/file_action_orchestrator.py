@@ -41,6 +41,8 @@ class TrustedMainView:
     tenant_id: str
     conversation_id: str
     message_id: str
+    # Lookup hint only; the hub must independently confirm the ID and sequence.
+    message_seq: int
 
 
 class HumanFileActionOrchestrator:
@@ -131,6 +133,7 @@ class HumanFileActionOrchestrator:
             view.conversation_id,
             view.message_id,
             epoch,
+            view.message_seq,
         )
 
         def current() -> HistoryScope:
@@ -145,6 +148,7 @@ class HumanFileActionOrchestrator:
                 latest.conversation_id,
                 latest.message_id,
                 epoch,
+                latest.message_seq,
             )
 
         return await commission_human_history(self._client, self._registry, scope, current)

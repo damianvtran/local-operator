@@ -68,6 +68,7 @@ def human_page(*, downloadable=True, conversation="bcv_aaaaaaaa"):
             "messages": [
                 {
                     "id": "bcmsg_aaaaaaaa",
+                    "seq": 1001,
                     "conversation_id": conversation,
                     "files": [
                         {
@@ -99,7 +100,7 @@ def setup(monkeypatch, *, history_status=200, download_status=200, downloadable=
     monkeypatch.setattr(client_module, "org_oauth_destination_allowed", lambda _: True)
     store, calls = Store(), []
     state: dict[str, TrustedMainView | None] = {
-        "view": TrustedMainView("window_1", 4, "tnt_alpha", "bcv_aaaaaaaa", "bcmsg_aaaaaaaa")
+        "view": TrustedMainView("window_1", 4, "tnt_alpha", "bcv_aaaaaaaa", "bcmsg_aaaaaaaa", 1001)
     }
 
     def handler(request):
@@ -131,7 +132,11 @@ async def test_commission_begin_bytes_verify_revoke(monkeypatch):
     with pytest.raises(ActionUnavailable):
         await broker.bytes("window_1", op)
     assert len(calls) == 2 and store.refreshes == 0
-    assert dict(calls[0].url.params) == {"tenant_id": "tnt_alpha", "limit": "50"}
+    assert dict(calls[0].url.params) == {
+        "tenant_id": "tnt_alpha",
+        "limit": "1",
+        "before_seq": "1002",
+    }
     assert dict(calls[1].url.params) == {"tenant_id": "tnt_alpha"}
     assert all("endpoint_id" not in r.url.params and "purpose" not in r.url.params for r in calls)
     broker.revoke("window_1", context)
@@ -198,7 +203,9 @@ async def test_invalidation_during_history_blocks_delayed_commission(monkeypatch
     monkeypatch.setattr(client_module, "org_oauth_destination_allowed", lambda _: True)
     store, registry = Store(), InertFileActionRegistry()
     entered, release = asyncio.Event(), asyncio.Event()
-    state = {"view": TrustedMainView("window_1", 4, "tnt_alpha", "bcv_aaaaaaaa", "bcmsg_aaaaaaaa")}
+    state = {
+        "view": TrustedMainView("window_1", 4, "tnt_alpha", "bcv_aaaaaaaa", "bcmsg_aaaaaaaa", 1001)
+    }
 
     async def handler(_request):
         entered.set()
