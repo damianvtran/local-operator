@@ -1,0 +1,39 @@
+{
+  "locale": "ru",
+  "namespace": "tui.analytics",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 2,
+    "nit": 0
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 1,
+      "id": "RU-007",
+      "severity": "MINOR",
+      "namespace": "tui.analytics",
+      "key": "tui.analytics.totals.row_billed",
+      "english": "Total billed",
+      "current": "Всего к оплате",
+      "problem": "Context: total billed TOKENS. «Всего к оплате» ('total amount due') makes a money/payment claim the row does not make.",
+      "suggested": "Всего тарифицировано",
+      "disposition": "fixed (remediation core-fix, session ef4f00143d56)"
+    },
+    {
+      "round": 2,
+      "id": "RU2-003",
+      "severity": "MINOR",
+      "namespace": "tui.analytics",
+      "key": "tui.analytics.totals.calls_meta",
+      "english": "{count} calls",
+      "current": "{count} вызовов",
+      "problem": "Count-agreement class (RU-002/RU-006), missed. There is no plural arm, so the bare «{count} вызовов» renders «1 вызовов», «21 вызовов» and «2 вызовов», all ungrammatical. English has no ICU plural here either, so the fix is the count-neutral label form the translator used elsewhere.",
+      "suggested": "вызовов: {count}",
+      "disposition": "open at PASS: minor/nit accepted, value unchanged"
+    }
+  ]
+}

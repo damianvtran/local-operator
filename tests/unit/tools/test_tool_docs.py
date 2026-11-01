@@ -500,7 +500,10 @@ MEASURED_TOKENS: dict[str, int] = {
     # 350 -> 351 (video phase, 2026-10-10): the ``jobs`` description now says
     # "(task/bash/video)" — the video job type is a model-visible part of what
     # ``op='list'`` shows. One token, re-measured.
-    "jobs": 347,
+    # 347 -> 292: compressing the shared jobs description removes repetition,
+    # not operations or authority. Re-measured through render_tool_doc and
+    # count_text_tokens; every other canonical ledger entry is unchanged.
+    "jobs": 292,
     "list_variables": 54,
     # NEW (Library): the six-op catalog tool's reference — filters, tag and
     # provenance rules, and the read-tier rationale. Measured through this

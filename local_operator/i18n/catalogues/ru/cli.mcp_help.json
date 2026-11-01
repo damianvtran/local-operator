@@ -1,0 +1,21 @@
+{
+  "cli.mcp_help.mcp": "Управление MCP-серверами",
+  "cli.mcp_help.list": "Список настроенных MCP-серверов (все источники объединены)",
+  "cli.mcp_help.add": "Добавить MCP-сервер (команда stdio или URL http/sse)",
+  "cli.mcp_help.add_name": "Имя сервера",
+  "cli.mcp_help.add_command": "Команда stdio для запуска сервера",
+  "cli.mcp_help.add_arg": "Аргумент команды stdio (можно повторять)",
+  "cli.mcp_help.add_env": "Переменная окружения KEY=VALUE для сервера stdio (можно повторять)",
+  "cli.mcp_help.add_url": "URL сервера HTTP/SSE (альтернатива --command)",
+  "cli.mcp_help.add_scope": "Область конфигурации для записи (по умолчанию: глобальный ~/.local-operator/mcp.json)",
+  "cli.mcp_help.add_oauth": "Включить OAuth для удалённого HTTP-сервера",
+  "cli.mcp_help.remove_server": "Удалить MCP-сервер из области конфигурации",
+  "cli.mcp_help.remove_name": "Имя удаляемого сервера",
+  "cli.mcp_help.remove_scope": "Область конфигурации, из которой удалить (по умолчанию: глобальная)",
+  "cli.mcp_help.login": "Аутентифицировать один MCP-сервер с OAuth",
+  "cli.mcp_help.login_name": "Имя сервера для аутентификации",
+  "cli.mcp_help.logout": "Удалить сохранённые учётные данные OAuth для одного MCP-сервера",
+  "cli.mcp_help.logout_name": "Имя сервера для выхода",
+  "cli.mcp_help.reauth": "Выйти из одного MCP-сервера с OAuth и выполнить новую авторизацию",
+  "cli.mcp_help.reauth_name": "Имя сервера для повторной аутентификации"
+}

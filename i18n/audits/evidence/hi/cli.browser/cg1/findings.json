@@ -1,0 +1,39 @@
+{
+  "locale": "hi",
+  "namespace": "cli.browser",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 2
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 1,
+      "id": "HI-015",
+      "severity": "NIT",
+      "namespace": "cli.browser",
+      "key": "cli.browser.unclaimed_registration",
+      "english": "\n\u001b[1;33munclaimed registration:\u001b[0m {detail}",
+      "current": "\n\u001b[1;33mअदावा पंजीकरण:\u001b[0m {detail}",
+      "problem": "\"अदावा\" is a rare legal-register word most readers will stumble on.",
+      "suggested": "\"बिना दावे का पंजीकरण:\"",
+      "disposition": "fixed (remediation core-fix, session 76bcbfdf629d)"
+    },
+    {
+      "round": 1,
+      "id": "HI-016",
+      "severity": "NIT",
+      "namespace": "cli.browser",
+      "key": "cli.browser.read_only",
+      "english": "\nRead-only. PID absence, age, and localhost URLs never authorize cleanup.",
+      "current": "\nकेवल पढ़ने के लिए। PID का न होना, आयु और localhost URL कभी क्लीनअप को अधिकृत नहीं करते।",
+      "problem": "\"केवल पढ़ने के लिए\" differs from the \"केवल पढ़ने योग्य\" used for read-only across this patch set.",
+      "suggested": "\"केवल पढ़ने योग्य। …\"",
+      "disposition": "fixed (remediation core-fix, session 76bcbfdf629d)"
+    }
+  ]
+}

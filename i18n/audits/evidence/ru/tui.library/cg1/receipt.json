@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "audit_id": "cg1",
+  "locale": "ru",
+  "namespace": "tui.library",
+  "source_sha256": "5a389b6a7d8de06621462f2685eff6dc95cd4cd6584d35dd6c26a0a19ad50b11",
+  "target_sha256": "946819a2b3112a99faaea2bed716f01a5dc1544cd7dae34def94879c93e2aa27",
+  "hashes": {
+    "audit.log": "2416a7f7e13a863f63045c6a471c0d9ac88da4436361631cb1c37a5fb3344734",
+    "findings.json": "9c5fa9dc8c2d9cadd6c0f51fd200a561119ae5e22937614b86b0e12b8d0e97fc",
+    "record.json": "5a65e214e895b19d2664c667176a432ba41faf0159f994828ceaaf04fcb87238",
+    "report.md": "43b5e3ded45c6e60ed449b21de51f165e8502c6ac1a0f96d8cf88f0ecef4a4d2"
+  }
+}

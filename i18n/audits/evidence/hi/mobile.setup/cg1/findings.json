@@ -1,0 +1,39 @@
+{
+  "locale": "hi",
+  "namespace": "mobile.setup",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 2,
+    "nit": 0
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 1,
+      "id": "HI-013",
+      "severity": "MINOR",
+      "namespace": "mobile.setup",
+      "key": "mobile.setup.cloudflared",
+      "english": "Install cloudflared 2025.4.0 or newer using your package manager (macOS: brew install cloudflared), then rerun lop tunnel setup. An agent may run the installation with normal tool approval.",
+      "current": "अपने पैकेज मैनेजर से cloudflared 2025.4.0 या नया संस्करण इंस्टॉल करें (macOS: brew install cloudflared), फिर lop tunnel setup दोबारा चलाएँ। सामान्य टूल अनुमोदन के साथ एजेंट इंस्टॉलेशन चला सकता है।",
+      "problem": "\"approval\" rendered \"अनुमोदन\" in four values (cloudflared, cloudflared_tui, mobile_bundle, and as \"स्वीकृत\" elsewhere), while glossary/hi guide fix approvals → स्वीकृति and title_quote in the same namespace already uses \"स्वीकृति\". Meaning is intact; term inconsistent on an approval string.",
+      "suggested": "\"…सामान्य टूल स्वीकृति के साथ एजेंट इंस्टॉलेशन चला सकता है।\" and likewise cloudflared_tui / mobile_bundle: \"सामान्य टूल स्वीकृति\"",
+      "disposition": "fixed (remediation core-fix, session 76bcbfdf629d)"
+    },
+    {
+      "round": 1,
+      "id": "HI-014",
+      "severity": "MINOR",
+      "namespace": "mobile.setup",
+      "key": "mobile.setup.title_supervisor",
+      "english": "Phone access needs a background service",
+      "current": "फ़ोन एक्सेस को बैकग्राउंड सर्विस चाहिए",
+      "problem": "\"सर्विस\" for service; glossary row service → सेवा (hi). Also supervisor_tui \"यूज़र सर्विस\".",
+      "suggested": "\"फ़ोन एक्सेस को बैकग्राउंड सेवा चाहिए\"; supervisor_tui: \"समर्थित यूज़र सेवा\"",
+      "disposition": "fixed (remediation core-fix, session 76bcbfdf629d)"
+    }
+  ]
+}

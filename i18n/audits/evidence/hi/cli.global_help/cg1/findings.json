@@ -1,0 +1,27 @@
+{
+  "locale": "hi",
+  "namespace": "cli.global_help",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 1,
+    "nit": 0
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 1,
+      "id": "HI-024",
+      "severity": "MINOR",
+      "namespace": "cli.global_help",
+      "key": "cli.global_help.yolo",
+      "english": "Auto-approve all tool executions (read/write/exec tiers) without prompting",
+      "current": "बिना पूछे सभी टूल निष्पादन (read/write/exec स्तर) स्वतः अनुमोदित करें",
+      "problem": "\"Auto-approve\" → \"स्वतः अनुमोदित\" here and in cli.exec_worker_help.yolo; approve/approval is fixed to स्वीकृति/स्वीकृत by the glossary and hi guide (this patch set itself uses \"स्वीकृत करें\" in cli.browser.no_changes and cli.browser_help.cleanup_yes). The --yolo safety flag should use the same verb as the approval surfaces.",
+      "suggested": "\"बिना पूछे सभी टूल निष्पादन (read/write/exec स्तर) अपने-आप स्वीकृत करें\"; exec_worker_help.yolo: \"सभी टूल स्तर अपने-आप स्वीकृत करें\"",
+      "disposition": "fixed (remediation core-fix, session 76bcbfdf629d)"
+    }
+  ]
+}

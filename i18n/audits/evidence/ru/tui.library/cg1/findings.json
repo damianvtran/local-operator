@@ -1,0 +1,39 @@
+{
+  "locale": "ru",
+  "namespace": "tui.library",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 2,
+    "nit": 0
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 1,
+      "id": "RU-010",
+      "severity": "MINOR",
+      "namespace": "tui.library",
+      "key": "tui.library.hint_move",
+      "english": "move",
+      "current": "переместить",
+      "problem": "Footer key hint for cursor navigation (↑↓ move, as tui.import.hint_move renders «перейти»). «переместить» reads as moving the asset itself — a different, non-existent action.",
+      "suggested": "перейти",
+      "disposition": "fixed (remediation core-fix, session ef4f00143d56)"
+    },
+    {
+      "round": 2,
+      "id": "RU2-004",
+      "severity": "MINOR",
+      "namespace": "tui.library",
+      "key": "tui.library.building",
+      "english": "Building the index · {scanned} of {total} conversations",
+      "current": "Построение индекса · {scanned} из {total} разговоров",
+      "problem": "Count-agreement class, missed. «{scanned} из {total} разговоров» is wrong whenever total ends in 1 («из 21 разговоров» should be «из 21 разговора»). It has no plural arm.",
+      "suggested": "Построение индекса · разговоров: {scanned} из {total}",
+      "disposition": "open at PASS: minor/nit accepted, value unchanged"
+    }
+  ]
+}

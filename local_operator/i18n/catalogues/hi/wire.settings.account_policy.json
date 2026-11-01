@@ -1,0 +1,16 @@
+{
+  "wire.settings.account_policy.label": "खाता चयन नीति",
+  "wire.settings.account_policy.help": "एक ही प्रोवाइडर और क्रेडेंशियल स्तर के भीतर पात्र सहोदर खाते चुनता है। सफल अनुरोध से मिला संगत, समाप्त न हुआ लीज़ हर नीति में प्राथमिकता पाता है; यह कैश हिट की गारंटी नहीं देता। जल्द रीसेट निकटतम साप्ताहिक रीफ़िल को पसंद करता है, फिर एक-मिनट की बराबरी में पाँच-घंटे का रीफ़िल। स्पष्ट नीति पुरानी usage-aware चयन सेटिंग को अधिलेखित करती है।",
+  "wire.settings.account_policy.reset_soonest.label": "जल्द रीसेट",
+  "wire.settings.account_policy.reset_soonest.description": "निकटतम शामिल-योजना रीसेट को प्राथमिकता दें; बराबरी और अज्ञात रिपोर्ट को निर्धारक ढंग से फैलाएँ। नए कॉन्फ़िगरेशन के लिए डिफ़ॉल्ट।",
+  "wire.settings.account_policy.headroom.label": "सबसे अधिक गुंजाइश",
+  "wire.settings.account_policy.headroom.description": "कैश किए गए शेष कोटा को प्राथमिकता दें, सर्वश्रेष्ठ के दस प्रतिशत अंकों के भीतर खातों को फैलाएँ।",
+  "wire.settings.account_policy.fair.label": "समान वितरण",
+  "wire.settings.account_policy.fair.description": "कैश किए रीसेट या शेष कोटा को क्रमबद्ध करने के बजाय स्थिर सत्र-आधारित वितरण का उपयोग करें।",
+  "wire.settings.account_policy.legacy.label": "पुराना usage-aware चयन",
+  "wire.settings.account_policy.legacy.help": "संगतता सेटिंग, केवल तब उपयोग होती है जब खाता चयन नीति अनुपस्थित हो: true सबसे अधिक गुंजाइश चुनता है; false समान वितरण चुनता है। स्पष्ट खाता चयन नीति प्राथमिकता रखती है। जल्द रीसेट बहाल करने और पुराने ओवरराइड साफ़ करने के लिए खाता चयन नीति पंक्ति रीसेट करें।",
+  "wire.settings.account_policy.error.unavailable": "खाता रूटिंग उपलब्ध नहीं है।",
+  "wire.settings.account_policy.error.invalid_shape": "केवल value फ़ील्ड अपेक्षित थी।",
+  "wire.settings.account_policy.error.invalid_json": "JSON ऑब्जेक्ट अपेक्षित था।",
+  "wire.settings.account_policy.error.write_failed": "सेटिंग सहेजी नहीं जा सकी। इस कंप्यूटर पर कॉन्फ़िगरेशन अनुमतियाँ जाँचें और फिर कोशिश करें।"
+}

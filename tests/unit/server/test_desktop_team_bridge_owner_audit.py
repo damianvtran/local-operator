@@ -385,7 +385,7 @@ def test_the_hubs_uniform_404_passes_through_with_no_store(proxy, path, code):
         (f"{BASE}/{CID}/messages", "&before_seq=-1"),
         (f"{BASE}/{CID}/messages", "&limit=ten"),
         (f"{BASE}/{CID}/messages", "&tenant_id=org-b"),  # repeated name
-        (f"{BASE}/{CID}/messages/{ROOT}/replies", "&before_seq=4"),
+        (f"{BASE}/{CID}/messages/{ROOT}/replies", "&before_seq=0"),
         (BASE, "&cursor=a&cursor=b"),
         (f"{BASE}/{CID}/messages/{MID}/attachments/{AID}", "&endpoint_id=bep-a"),
     ],
@@ -510,3 +510,72 @@ def test_the_contract_types_are_published_in_openapi() -> None:
     assert "agent_delivery_status" in message and "body" in message
     paths = set(schema["paths"])
     assert BASE in paths and f"{BASE}/{{conversation_id}}/messages" in paths
+
+
+@pytest.mark.parametrize("family", ["member", "owner"])
+def test_reply_backward_contract_real_http(proxy, family):
+    """Real desktop auth/client/HTTP/projection; only credentials and hub are synthetic."""
+    from urllib.parse import parse_qs, urlsplit
+
+    client, calls, state, _ = proxy
+    base = BASE if family == "owner" else "/v1/desktop/team-bridge/conversations"
+    path = f"{base}/{CID}/messages/{ROOT}/replies"
+    replies = [
+        _message("bcmsg_" + f"{seq:016d}", seq, "synthetic", thread_root_id=ROOT)
+        for seq in range(101, 151)
+    ]
+    state["override"] = {
+        "root": THREAD["root"],
+        "replies": replies,
+        "has_more": True,
+        "next_before_seq": 101,
+        "order": "desc",
+    }
+    first = client.get(path + _q("&order=desc&limit=50"))
+    assert first.status_code == 200, first.text
+    result = first.json()["result"]
+    assert len(result["replies"]) == 50 and result["order"] == "desc"
+    assert [row["seq"] for row in result["replies"]] == list(range(101, 151))
+    assert result["next_before_seq"] == 101
+    query = parse_qs(urlsplit(calls[-1][1]).query)
+    assert query == {"tenant_id": ["org-a"], "limit": ["50"], "order": ["desc"]}
+    # Empty terminal pages MUST retain the mode echo, not resemble an old hub.
+    state["override"] = {"root": THREAD["root"], "replies": [], "has_more": False, "order": "desc"}
+    older = client.get(path + _q("&before_seq=101&order=desc&limit=50"))
+    assert older.status_code == 200, older.text
+    assert older.json()["result"]["order"] == "desc"
+    assert older.json()["result"]["replies"] == []
+    assert "after_seq" not in parse_qs(urlsplit(calls[-1][1]).query)
+    for suffix in (
+        "&before_seq=0",
+        "&order=ASC",
+        "&after_seq=0&order=desc",
+        "&before_seq=101&order=asc",
+        "&before_seq=101&after_seq=0",
+        "&limit=101",
+    ):
+        before = len(calls)
+        response = client.get(path + _q(suffix))
+        assert response.status_code == 422, (suffix, response.text)
+        assert len(calls) == before
+    before = len(calls)
+    refused = client.get(
+        path + _q("&order=desc"),
+        headers={"authorization": "Bearer invalid-rig-only"},
+    )
+    assert refused.status_code == 401
+    assert len(calls) == before
+    print(
+        {
+            "family": family,
+            "first_status": first.status_code,
+            "rows": len(result["replies"]),
+            "order": result["order"],
+            "next_before": result["next_before_seq"],
+            "terminal_status": older.status_code,
+            "terminal_rows": 0,
+            "auth_status": refused.status_code,
+            "malformed_cases": 6,
+            "after_omitted": True,
+        }
+    )
