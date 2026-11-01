@@ -64,6 +64,7 @@ class _GatedSession(FakeSession):
         super().__init__()
         self.gate = asyncio.Event()
         self.title = ""
+        self.history_opener_text: str | None = None
         #: Per-call replies, consumed in order BEFORE ``title``. The acceptance
         #: cascade spends up to two samples per attempt (sample + corrective or
         #: hedged resample), so a test that wants a wrapped FIRST sample spells

@@ -91,14 +91,16 @@ async def test_missing_required_corrects_once_or_stops(name, field, value, corre
     recovery = next(
         message
         for message in recovery_request.messages
-        if message.text == MISSING_ARGUMENTS_RECOVERY_PROMPT
+        if isinstance(message, Message) and message.text == MISSING_ARGUMENTS_RECOVERY_PROMPT
     )
     # The exact persisted text is visible to the model, but suppressed by the
     # shared replay predicate; ordinary user text mentioning it remains visible.
     assert is_harness_chrome(recovery.text)
     assert recovery.provider_payload == {"harness_injected": True}
     assert not any(
-        isinstance(event, MessageStartEvent) and event.message.text == recovery.text
+        isinstance(event, MessageStartEvent)
+        and isinstance(event.message, Message)
+        and event.message.text == recovery.text
         for event in events
     )
     assert is_harness_chrome(f" {recovery.text}\n")
