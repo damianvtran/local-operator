@@ -1,0 +1,27 @@
+{
+  "locale": "ru",
+  "namespace": "cli.update_help",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 1,
+    "nit": 0
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 2,
+      "id": "RU2-001",
+      "severity": "MINOR",
+      "namespace": "cli.update_help",
+      "key": "cli.update_help.no_services",
+      "english": "Do not bring the `lop serve` daemons onto the new build; the supervised daemons are still repaired. Use this only when something else will start the serves, e.g. a script that owns their launch.",
+      "current": "Не переводить демоны `lop serve` на новую сборку; демоны под надзором всё равно чинятся. Используйте, только если запуск serve возьмёт на себя что-то другое, например скрипт, которому он принадлежит.",
+      "problem": "Missed recurrence of RU-022 (supervised). Glossary §2 says supervised → «под управлением», and the translator applied that across cli.services_help, but this key still reads «демоны под надзором». «чинятся» is also colloquial for 'are repaired'.",
+      "suggested": "Не переводить демоны `lop serve` на новую сборку; демоны под управлением всё равно восстанавливаются. Используйте, только если запуск serve возьмёт на себя что-то другое, например скрипт, которому он принадлежит.",
+      "disposition": "open at PASS: minor/nit accepted, value unchanged"
+    }
+  ]
+}

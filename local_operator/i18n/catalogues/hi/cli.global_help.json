@@ -1,0 +1,19 @@
+{
+  "cli.global_help.debug": "विस्तृत आउटपुट के लिए डीबग मोड चालू करें",
+  "cli.global_help.agent": "पुराना नामित एजेंट चुनें (न हो तो बनाता है)। --train के बिना, अलग सहेजे गए सत्र का उपयोग करें; exec --profile इसके बजाय पुन: प्रयोज्य भूमिका अटैच करता है।",
+  "cli.global_help.train": "अलग सत्र के बजाय पुरानी एजेंट इतिहास डायरेक्टरी (या ऑटोसेव एजेंट) का उपयोग करें। सामान्य सत्र भी सहेजे जाते हैं और फिर शुरू किए जा सकते हैं; --resume इस डायरेक्टरी चयन पर प्राथमिकता रखता है।",
+  "cli.global_help.description": "\n    Local Operator - लोकल डिवाइस पर कार्य करने वाले एजेंटिक AI मॉडलों के लिए एक वातावरण।\n\n    DeepSeek, OpenAI, Anthropic, Ollama, Kimi और Alibaba सहित कई होस्टिंग प्लेटफ़ॉर्म का समर्थन करता है।\n    सुविधाओं में इंटरैक्टिव चैट, सुरक्षित कोड निष्पादन, संदर्भ-सचेत बातचीत इतिहास और\n    अंतर्निहित सुरक्षा जाँचें शामिल हैं।\n\n    कमांड लाइन आर्गुमेंट से अपना पसंदीदा मॉडल और होस्टिंग प्लेटफ़ॉर्म कॉन्फ़िगर करें। आपकी\n    कॉन्फ़िगरेशन फ़ाइल ~/.local-operator/config.yml पर है और सीधे संपादित की जा सकती है।\n",
+  "cli.global_help.resume": "id द्वारा पिछला सत्र फिर शुरू करें, उसकी ट्रांसक्रिप्ट दोहराते हुए। यह id वही है जो Ctrl+C दो बार दबाकर सत्र रोकने पर छपती है, और ~/.local-operator/sessions के अंतर्गत डायरेक्टरी का नाम है। सबसे हाल का सत्र फिर खोलने के लिए बिना id के --resume दें।",
+  "cli.global_help.version": "प्रोग्राम का संस्करण नंबर दिखाएँ और बाहर निकलें",
+  "cli.global_help.hosting": "उपयोग करने के लिए होस्टिंग प्लेटफ़ॉर्म (radient, deepseek, openai, anthropic, ollama, kimi, alibaba, google, mistral, test, openrouter, xai, zai)",
+  "cli.global_help.model": "उपयोग करने के लिए मॉडल (जैसे gpt-6-astra, claude-opus-5-5, deepseek-flash, grok-4.7, glm-5.3, gemini-3.8-flash, qwen3.8-max, kimi-k3, mistral-medium-latest, anthropic/claude-opus-5.5)। वैकल्पिक: छोड़ने पर प्रोवाइडर का सुझाया मॉडल उपयोग होता है।",
+  "cli.global_help.run_in": "वह कार्यशील डायरेक्टरी जिसमें ऑपरेटर चलाना है।  मान्य डायरेक्टरी होनी चाहिए।",
+  "cli.global_help.yolo": "बिना पूछे सभी टूल निष्पादन (read/write/exec स्तर) अपने-आप स्वीकृत करें",
+  "cli.global_help.no_tui": "फ़ुल-स्क्रीन TUI बंद करें; इसके बजाय सादा हेडलेस REPL उपयोग करें",
+  "cli.global_help.tui": "stdout के tty न होने पर भी फ़ुल-स्क्रीन TUI लागू करें (TUI बिना tty चल न सके तो साफ़ त्रुटि देता है)",
+  "cli.global_help.yolo_conditional": "इस क्रिया के पीयर create के लिए शर्तीय: सत्र बिना निगरानी तभी शुरू होता है जब लक्ष्य डिवाइस इसे `unattended` क्षमता देता है",
+  "cli.global_help.propagated_resume": "id द्वारा पिछला सत्र फिर शुरू करें। सबसे हाल के लिए बिना id दें।",
+  "cli.global_help.propagated_hosting": "इस रन के लिए होस्टिंग प्लेटफ़ॉर्म (जैसे anthropic, openai, openrouter)",
+  "cli.global_help.propagated_model": "इस रन के लिए उपयोग किया जाने वाला मॉडल",
+  "cli.global_help.propagated_run_in": "वह कार्यशील डायरेक्टरी जिसमें ऑपरेटर चलाना है"
+}

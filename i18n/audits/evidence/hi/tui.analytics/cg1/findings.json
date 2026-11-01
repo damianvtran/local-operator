@@ -1,0 +1,54 @@
+{
+  "locale": "hi",
+  "namespace": "tui.analytics",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 1,
+    "nit": 0
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 1,
+      "id": "HI-009",
+      "severity": "MINOR",
+      "namespace": "tui.analytics",
+      "key": "tui.analytics.search.by_provider",
+      "english": "By provider",
+      "current": "प्रदाता के अनुसार",
+      "problem": "Systemic term drift: the patch set renders \"provider\" as \"प्रदाता\" (21 values across tui.analytics, tui.app, cli.login*/logout/global_help, wire.errors.auth/media, wire.settings.account_policy), while every shipped hi catalogue uses \"प्रोवाइडर\" (41 values, e.g. wire.settings). One concept would have two names in the same product.",
+      "suggested": "\"प्रोवाइडर के अनुसार\" here and in table.by_provider; replace प्रदाता→प्रोवाइडर (with inflection) in all 21 values",
+      "disposition": "fixed (remediation core-fix, session 76bcbfdf629d)"
+    },
+    {
+      "round": "targeted-argorder",
+      "auditor_session": "d8fb2395abc5",
+      "id": "HI-ARG-02",
+      "severity": "NIT",
+      "namespace": "tui.analytics",
+      "key": "tui.analytics.search.summary_free_paid",
+      "english": "{free} of {priced} priced free · {money} paid",
+      "current": "{free} मुफ़्त (कुल {priced} मूल्य-वाले) · {money} भुगतान",
+      "problem": "Meaning preserved (free out of priced; money paid). 'मूल्य-वाले' is hyphenated and stiff; 'कीमत वाले' is more natural.",
+      "suggested": "{free} मुफ़्त (कुल {priced} कीमत वाले) · {money} भुगतान",
+      "disposition": "accepted unchanged"
+    },
+    {
+      "round": "targeted-argorder",
+      "auditor_session": "d8fb2395abc5",
+      "id": "HI-ARG-03",
+      "severity": "NIT",
+      "namespace": "tui.analytics",
+      "key": "tui.analytics.rate.legend",
+      "english": "decode rate over {shown, number} of {total, number} calls",
+      "current": "decode दर {shown, number} कॉल पर (कुल {total, number})",
+      "problem": "Meaning preserved (decode rate over {shown} of {total} calls). '(कुल {total})' is fine, but '(कुल {total} में से)' says outright that {shown} is a subset and keeps the argument order.",
+      "suggested": "decode दर {shown, number} कॉल पर (कुल {total, number} में से)",
+      "disposition": "accepted unchanged"
+    }
+  ],
+  "counts_scope": "counts, result and gate_status describe locale-wide rounds 1-2 as recorded in the ledger; findings with round \"targeted-argorder\" come from session d8fb2395abc5 (read only the rephrased keys) and are not in those counts"
+}

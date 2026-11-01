@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "audit_id": "cg1",
+  "locale": "hi",
+  "namespace": "relay.login",
+  "source_sha256": "9a59686bcd0e3641a5a807ea2b778cb385e591060c26c7fb994bea95e4de5bc5",
+  "target_sha256": "2632df631f0875c4d093ce8533f9eb2d01cadb0bf7c7891e54aab3da4360bd2f",
+  "hashes": {
+    "audit.log": "41e74f66b58e0bfea32904b39a91720d483c7b772a486ffa1ac2726a8c400ba4",
+    "findings.json": "96a97708e85fb0d7882d21936a6b1d01abf2850a75bb051b6d48d6a3189b5128",
+    "record.json": "ef17f92a6514fde07db254d18982b142807a339cc7f1b7052517360797375c48",
+    "report.md": "4423b230cffadbf169812097624e6f28c2621e2983b95f07a1fd6b94f41601ef"
+  }
+}

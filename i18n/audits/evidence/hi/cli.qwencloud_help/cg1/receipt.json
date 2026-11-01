@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "audit_id": "cg1",
+  "locale": "hi",
+  "namespace": "cli.qwencloud_help",
+  "source_sha256": "6406143d97b406ca752a3fedecf2a69c22d635a5f2e1daf2fd2370ac393ff13b",
+  "target_sha256": "b61617c9858f85a70acc55168594517be3b890b1843f8d8ac86f8390ebe7b5cc",
+  "hashes": {
+    "audit.log": "21e3d7bdd10ea2bb552c22fdfdaf3874484f10e5121cd6fc345c61d53d4a0042",
+    "findings.json": "4af2470394fef32e03234081b83fdf47bba2290bf2553e93f728bacc06abcc66",
+    "record.json": "c21a3eece8114faabfe677b281c4e0efc82d9e66aa7a53792ced655d5536ac95",
+    "report.md": "2095dacef949f684d110afbb8695010e8a3ac7766cad1a542b3ea74968e8afa9"
+  }
+}

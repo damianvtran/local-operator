@@ -1,0 +1,7 @@
+{
+  "cli.model_help.model": "Переключить модель другой работающей сессии lop (как /model там)",
+  "cli.model_help.target": "имя разговора / id сессии / подстрока cwd (без учёта регистра). Не указывайте при адресации через --pid/--session.",
+  "cli.model_help.selector": "модель для переключения, например deepseek/deepseek-flash",
+  "cli.model_help.pid": "выбрать по точному pid",
+  "cli.model_help.session": "выбрать по точному id сессии"
+}

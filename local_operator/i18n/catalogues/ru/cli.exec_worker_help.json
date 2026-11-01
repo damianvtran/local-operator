@@ -1,0 +1,13 @@
+{
+  "cli.exec_worker_help.agent": "Селектор имени агента",
+  "cli.exec_worker_help.agent_id": "ID агента",
+  "cli.exec_worker_help.control": "Опубликовать запись сессии и обслуживать управляющий сокет для этого запуска",
+  "cli.exec_worker_help.hosting": "Переопределение платформы размещения",
+  "cli.exec_worker_help.job_id": "ID задания в журнале; если задан, при выходе процесс добавляет в JSONL-журнал завершающую запись (finished_at + exit_code)",
+  "cli.exec_worker_help.json": "Выводить по одной JSON-строке на событие агента",
+  "cli.exec_worker_help.model": "Переопределение модели",
+  "cli.exec_worker_help.prompt": "Промпт для выполнения",
+  "cli.exec_worker_help.resume": "Возобновить предыдущую сессию по id (или ''@latest'')",
+  "cli.exec_worker_help.train": "Режим обучения: добавлять транскрипт в каталог агента (устаревший --train)",
+  "cli.exec_worker_help.yolo": "Автоматически одобрять все уровни инструментов"
+}

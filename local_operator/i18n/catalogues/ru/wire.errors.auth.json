@@ -1,0 +1,14 @@
+{
+  "wire.errors.auth.account_not_found": "Учётная запись провайдера не найдена",
+  "wire.errors.auth.auth_refusal": "{error}",
+  "wire.errors.auth.credentials_missing": "Для этого провайдера не найдено сохранённых учётных данных.",
+  "wire.errors.auth.input_invalid": "Введите непустое значение не длиннее 32768 символов.",
+  "wire.errors.auth.key_not_accepted": "Этот провайдер не принимает ключ API.",
+  "wire.errors.auth.key_rejected": "Провайдер отклонил этот ключ API.",
+  "wire.errors.auth.local_server_only": "Проверить можно только сервер локального провайдера.",
+  "wire.errors.auth.provider_refusal": "{error}",
+  "wire.errors.auth.server_address_missing": "У этого провайдера нет адреса сервера для проверки.",
+  "wire.errors.auth.sign_in_missing": "Этот вход больше недоступен. Начните заново.",
+  "wire.errors.auth.sign_in_not_waiting": "Этот вход не ожидает ввода.",
+  "wire.errors.auth.store_unreadable": "Не удалось прочитать хранилище учётных данных — оно нужно для перечня провайдеров."
+}

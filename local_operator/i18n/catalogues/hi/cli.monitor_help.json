@@ -1,0 +1,8 @@
+{
+  "cli.monitor_help.monitor": "स्थायी मॉनिटर का निरीक्षण करें और बंद सत्र पर एक को रद्द करें",
+  "cli.monitor_help.status": "इस मशीन का हर मॉनिटर, सबसे जल्दी वाला पहले",
+  "cli.monitor_help.json": "मशीन-पठनीय आउटपुट",
+  "cli.monitor_help.cancel": "जिस सत्र का कोई रनटाइम खुला नहीं है उस पर मॉनिटर रद्द करें (लाइव सत्र अपने मॉनिटर भीतर से बदलता है)",
+  "cli.monitor_help.session": "वह सत्र id जिसका मॉनिटर है",
+  "cli.monitor_help.monitor_id": "मॉनिटर id (m1, m2, …)"
+}

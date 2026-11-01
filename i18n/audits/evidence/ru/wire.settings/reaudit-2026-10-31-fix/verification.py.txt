@@ -1,0 +1,68 @@
+import hashlib
+import importlib.util
+import json
+from pathlib import Path
+import re
+import subprocess
+import sys
+
+root = Path(sys.argv[1]).resolve()
+sys.path.insert(0, str(root))
+from local_operator.i18n import catalogues, runtime
+from rich.cells import cell_len
+
+spec = importlib.util.spec_from_file_location('audit_i18n_check', root / 'scripts/i18n/check.py')
+checker = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = checker
+spec.loader.exec_module(checker)
+head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=root, text=True).strip()
+assert head == '727e5b5b969da813e0cadf1fd1d9fbd1ae106665'
+print('head=' + head)
+print('runtime=' + str(Path(runtime.__file__).relative_to(root)))
+p = root / 'local_operator/i18n/catalogues'
+rel = 'local_operator/i18n/catalogues/ru/wire.settings.json'
+old = json.loads(subprocess.check_output(['git', 'show', 'HEAD^:' + rel], cwd=root))
+en = catalogues.load_catalogue('en', 'wire.settings')
+ru = catalogues.load_catalogue('ru', 'wire.settings')
+context = json.loads((p / 'en/wire.settings.context.json').read_text())
+assert len(en) == len(ru) == len(old) == 825
+assert list(old) == list(ru) == list(en)
+print('PASS: 825 keys; source/target exact parity and source/parent/target order identical')
+changed = [k for k in ru if old[k] != ru[k]]
+assert len(changed) == 13
+print('PASS: exactly 13 changed values; 812 unchanged values byte-equivalent as decoded strings')
+plural = json.loads((root / 'local_operator/i18n/data/plural_rules.json').read_text())
+for k in en:
+    assert checker.arguments_match(runtime.message_arguments(en[k]), runtime.message_arguments(ru[k]), translated_source=ru[k], locale='ru', plural=plural), k
+print('PASS: repository arguments_match parity across all 825 keys (not a semantic re-audit)')
+for k in changed:
+    assert runtime.message_arguments(en[k]) == runtime.message_arguments(ru[k]) == ()
+    assert runtime.render_message(ru[k], {}, 'ru') == ru[k]
+    # The reviewed values have no ICU, code spans, flags, or Rich tags. The
+    # angle-delimited URL is a command argument literal, not a Rich tag.
+    for token in re.findall(r'`[^`]+`|--[a-zA-Z][\w-]*|<[^>]+>', en[k]):
+        assert token in ru[k], (k, token)
+    meta = context.get(k, {})
+    for field, actual in [('maxCells', cell_len(ru[k])), ('maxChars', len(ru[k]))]:
+        if field in meta:
+            assert actual <= meta[field], (k, field, actual, meta[field])
+    print(f'FORMAT PASS: {k}; chars={len(ru[k])}; cells={cell_len(ru[k])}; context={json.dumps(meta, ensure_ascii=False)}')
+key = 'wire.settings.remote_compute_enabled.help'
+assert cell_len(ru[key]) <= 74
+print(f'PASS: remote help prose width limit 74; actual={cell_len(ru[key])}')
+assert 'read <url>' in ru['wire.settings.web_fetch_enabled.help']
+assert 'read <url>' not in old['wire.settings.web_fetch_enabled.help']
+print('PASS: original command-corruption reproduced on parent; fixed head preserves read <url>')
+preview_changed = [k for k in changed if 'Preview' in en[k] or 'preview' in en[k]]
+assert preview_changed == ['wire.settings.remote_compute.description', 'wire.settings.remote_compute_enabled.help']
+assert all(ru[k].startswith('Предварительная версия:') for k in preview_changed)
+print('PASS: only two prerelease Preview strings changed; no visual-preview string changed')
+assert not checker.arguments_match(runtime.message_arguments(en[changed[0]]), runtime.message_arguments(ru[changed[0]] + ' {unexpected}'), translated_source=ru[changed[0]] + ' {unexpected}', locale='ru', plural=plural)
+try:
+    runtime.render_message('{missing}', {}, 'ru')
+except runtime.MessageFormatError:
+    print('NEGATIVE CONTROL PASS: repository runtime rejects missing format parameter')
+else:
+    raise AssertionError('Missing parameter was not rejected')
+print('NEGATIVE CONTROL PASS: repository arguments_match rejects injected placeholder mismatch')
+print('ALL SCOPED MECHANICAL CHECKS PASS')

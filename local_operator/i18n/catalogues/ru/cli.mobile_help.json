@@ -1,0 +1,17 @@
+{
+  "cli.mobile_help.mobile": "Доступ с телефона: управление сессиями lop на этой машине",
+  "cli.mobile_help.install": "Установить демон, пароль и LaunchAgent",
+  "cli.mobile_help.status": "Состояние демона, шлюз и живые сессии",
+  "cli.mobile_help.daemon_action": "{action, select, start{Запустить демон} stop{Остановить демон} restart{Перезапустить демон} other{{action} демон}}",
+  "cli.mobile_help.logs": "Показать конец журналов демона и рантаймов",
+  "cli.mobile_help.logs_lines": "Строк на файл (читается до двух)",
+  "cli.mobile_help.logs_follow": "Следить по имени, чтобы был виден журнал, созданный или ротированный во время наблюдения (слежение по дескриптору пропускает оба случая)",
+  "cli.mobile_help.password": "Показать или сменить пароль портала",
+  "cli.mobile_help.devices": "Список push-устройств этого компьютера либо отзыв/возврат одного из них",
+  "cli.mobile_help.devices_command": "list (по умолчанию), revoke <device_id> или unrevoke <device_id>",
+  "cli.mobile_help.devices_device_id": "device_id, который показывает `lop mobile devices`; обязателен для revoke/unrevoke",
+  "cli.mobile_help.devices_port": "порт мобильного демона (по умолчанию — собственный порт демона)",
+  "cli.mobile_help.uninstall": "Удалить LaunchAgent",
+  "cli.mobile_help.uninstall_purge": "Также удалить пароль",
+  "cli.mobile_help.serve": "Запустить демон (на переднем плане)"
+}

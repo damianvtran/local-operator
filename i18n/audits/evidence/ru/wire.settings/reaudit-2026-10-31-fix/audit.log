@@ -1,0 +1,45 @@
+check.py: catalogue checks: 0 problem(s)
+validator_exit=0
+
+COMMAND: isolated Python verification.py.txt <audited worktree>
+head=727e5b5b969da813e0cadf1fd1d9fbd1ae106665
+runtime=local_operator/i18n/runtime.py
+PASS: 825 keys; source/target exact parity and source/parent/target order identical
+PASS: exactly 13 changed values; 812 unchanged values byte-equivalent as decoded strings
+PASS: repository arguments_match parity across all 825 keys (not a semantic re-audit)
+Traceback (most recent call last):
+  File "/Users/damian/local-operator/.worktrees/ru-reaudit-a897/i18n/audits/evidence/ru/wire.settings/reaudit-2026-10-31-fix/verification.py.txt", line 39, in <module>
+    assert runtime.message_arguments(en[k]) == runtime.message_arguments(ru[k]) == {}
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError
+scoped_verification_exit=1
+
+RERUN: verification harness corrected empty-argument expectation from dict to tuple; no product change.
+COMMAND: isolated Python verification.py.txt <audited worktree>
+head=727e5b5b969da813e0cadf1fd1d9fbd1ae106665
+runtime=local_operator/i18n/runtime.py
+PASS: 825 keys; source/target exact parity and source/parent/target order identical
+PASS: exactly 13 changed values; 812 unchanged values byte-equivalent as decoded strings
+PASS: repository arguments_match parity across all 825 keys (not a semantic re-audit)
+FORMAT PASS: wire.settings.compaction_keep_recent_tokens.help; chars=50; cells=50; context={}
+FORMAT PASS: wire.settings.librarian_cadence_at.help; chars=100; cells=100; context={}
+FORMAT PASS: wire.settings.monitor.description; chars=82; cells=82; context={}
+FORMAT PASS: wire.settings.monitor.title; chars=10; cells=10; context={}
+FORMAT PASS: wire.settings.monitor_classifymaxchars.help; chars=136; cells=136; context={}
+FORMAT PASS: wire.settings.monitor_maxconsecutivefailures.help; chars=85; cells=85; context={}
+FORMAT PASS: wire.settings.monitor_maxdeliveriesperhour.help; chars=86; cells=86; context={}
+FORMAT PASS: wire.settings.providers.description; chars=73; cells=73; context={}
+FORMAT PASS: wire.settings.providers_openai_api.label; chars=14; cells=14; context={}
+FORMAT PASS: wire.settings.providers_openrouter_preferred_min_throughput.help; chars=193; cells=193; context={}
+FORMAT PASS: wire.settings.remote_compute.description; chars=124; cells=124; context={"role": "settings section description", "tone": "plain, honest about preview status", "note": "Desktop-only section header sentence. Must say the feature is a PREVIEW and that work runs on Radient-hosted compute. 'Mesh network' is the product term for the user's device network; do not translate it as a social network or a Wi-Fi network."}
+FORMAT PASS: wire.settings.remote_compute_enabled.help; chars=71; cells=71; context={"role": "settings row help", "tone": "plain, precise", "note": "Must state this is a preview, that it sends the user's work to Radient-hosted compute, and that the run is bound to ONE of the user's mesh networks — the tenant claim. The old wording said 'in your mesh network', which read as containment and is not what the slice enforces. 'Radient' is a product name: keep it unchanged. Keep near 67 cells (en is 66; the 80x24 detail line sheds longer copy, so stay within 74)."}
+FORMAT PASS: wire.settings.web_fetch_enabled.help; chars=80; cells=80; context={}
+PASS: remote help prose width limit 74; actual=71
+PASS: original command-corruption reproduced on parent; fixed head preserves read <url>
+PASS: only two prerelease Preview strings changed; no visual-preview string changed
+NEGATIVE CONTROL PASS: repository runtime rejects missing format parameter
+NEGATIVE CONTROL PASS: repository arguments_match rejects injected placeholder mismatch
+ALL SCOPED MECHANICAL CHECKS PASS
+scoped_verification_exit=0
+
+PROVENANCE: See adjacent record.json; auditor session a89765333244, actual model openai/gpt-6.1-sol.

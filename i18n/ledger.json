@@ -5955,25 +5955,6 @@
     },
     {
       "locale": "hi",
-      "namespace": "wire.slash",
-      "source_sha256": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
-      "translator": {
-        "agent": "i18n-translator (session d5ec953fe384)",
-        "model": "radient/auto",
-        "date": "2026-10-29"
-      },
-      "auditor": {
-        "agent": "i18n-auditor (session 80b132698268; instance 80b132698268-slash2-hi)",
-        "model": "radient/auto",
-        "date": "2026-10-29",
-        "result": "passed",
-        "findings": 0
-      },
-      "status": "passed",
-      "note": "PR #3088 width rewrite, re-audited at the committed bytes. 8 of 52 values rewritten by i18n-translator (session d5ec953fe384) (actual model radient/auto; provider-quota fallback); round-1 audit 610f8d957d36-slash-hi rejected the shortened bytes (0B/1M/3m/3n) and round-2 independent audit 80b132698268-slash2-hi on the new bytes passed 0B/0M/1m/1n. target sha256 da022ae8f9e0777ae0d7d7cb53e593a769400ace0a090f282cf79fe646a98b48; en source unchanged (b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202). Evidence: i18n/audits/evidence/hi/wire.slash/hi29s2/record.json (receipt.json + verdicts copied verbatim). Previous rows for this pair described audits of the pre-rewrite values and are superseded."
-    },
-    {
-      "locale": "hi",
       "namespace": "cli.team_bridge",
       "source_sha256": "f029ae6953f2fce31d126e7315beaf120bc63da0fc7398fbc6b31413b962222f",
       "translator": {
@@ -6357,24 +6338,1122 @@
     },
     {
       "locale": "hi",
-      "namespace": "wire.errors.session_host",
-      "source_sha256": "b7d6561be15577c118ec333586f7c809e65471c5dfd0dd839abee700b2ed1ba0",
+      "namespace": "cli.agents_help",
+      "source_sha256": "d8118ece7b59b99295fde3496bd3c9ff3184455d75ed31dcee50e5e515fd3bf3",
       "translator": {
-        "agent": "i18n-translator",
-        "session": "d2959affe186",
-        "model": "openai/gpt-6.1-sol",
+        "agent": "i18n-translator lane f0a2d7ee0d2e (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) 76bcbfdf629d, 539fc5515ce6",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
         "date": "2026-10-31"
       },
       "auditor": {
-        "agent": "i18n-auditor",
-        "session": "39a4a8de4f1c",
-        "model": "openai/gpt-6.1-sol",
+        "agent": "i18n-auditor, sessions 68a6549527ad, e9c85b728add (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
         "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 21 keys at source_sha256 d8118ece7b59b99295fde3496bd3c9ff3184455d75ed31dcee50e5e515fd3bf3; target catalogue_sha256 = 2314ed5190ad8cb8e27ba5ae05e6622ce1d7f2837e926535d401a5eed357a1b3. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/hi/cli.agents_help/cg1/record.json"
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.aida_help",
+      "source_sha256": "31e8445b6d8a9540ef524988b0fca3efca111362188f2ba41d6f857499828423",
+      "translator": {
+        "agent": "i18n-translator lane f0a2d7ee0d2e (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) 76bcbfdf629d, 539fc5515ce6",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 68a6549527ad, e9c85b728add (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 4 keys at source_sha256 31e8445b6d8a9540ef524988b0fca3efca111362188f2ba41d6f857499828423; target catalogue_sha256 = e0b475c9595b2b6c91dcdcb4a263eee6e672f04ccddf8eb31e31700f07fc1597. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/hi/cli.aida_help/cg1/record.json"
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.browser",
+      "source_sha256": "a9841deed81927762716c7592a592bb4e3f069d16f6ba0def6becb755b728321",
+      "translator": {
+        "agent": "i18n-translator lane f0a2d7ee0d2e (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) 76bcbfdf629d, 539fc5515ce6",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 68a6549527ad, e9c85b728add (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 2,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 64 keys at source_sha256 a9841deed81927762716c7592a592bb4e3f069d16f6ba0def6becb755b728321; target catalogue_sha256 = 34e4b9688bee6b71b867e7013aaa17f5bd30899ee4a5d8101dd620d50436ef53. Independent audit rounds: R1 0B/0M/0m/2n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 2 finding(s), 2 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/hi/cli.browser/cg1/record.json"
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.browser_help",
+      "source_sha256": "7fd47199bb8d443a0fbf7469d635453cd6f57bb7c14efec91862c6b5b0c1b1e6",
+      "translator": {
+        "agent": "i18n-translator lane f0a2d7ee0d2e (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) 76bcbfdf629d, 539fc5515ce6",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 68a6549527ad, e9c85b728add (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 20 keys at source_sha256 7fd47199bb8d443a0fbf7469d635453cd6f57bb7c14efec91862c6b5b0c1b1e6; target catalogue_sha256 = d33692dd55c005697bd8c025f7f6ce0c69773755a457e68b3125206b21571bb7. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/hi/cli.browser_help/cg1/record.json"
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.config_help",
+      "source_sha256": "97f625f6c6e26f8723e471569a0227f8e4da18518f2ab50e444fe93345ab2c8c",
+      "translator": {
+        "agent": "i18n-translator lane f0a2d7ee0d2e (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) 76bcbfdf629d, 539fc5515ce6",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 68a6549527ad, e9c85b728add (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 9 keys at source_sha256 97f625f6c6e26f8723e471569a0227f8e4da18518f2ab50e444fe93345ab2c8c; target catalogue_sha256 = 8f4ec0e0eeb8bf60c093afd96408186d7711cb882a050c11f1eee638c3daea0c. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/hi/cli.config_help/cg1/record.json"
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.credential_help",
+      "source_sha256": "2757dc32f5d75d81f639bf689b6423ef64614ad1e91289bb67655e9681266418",
+      "translator": {
+        "agent": "i18n-translator lane f0a2d7ee0d2e (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) 76bcbfdf629d, 539fc5515ce6",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 68a6549527ad, e9c85b728add (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 5 keys at source_sha256 2757dc32f5d75d81f639bf689b6423ef64614ad1e91289bb67655e9681266418; target catalogue_sha256 = a224960a1f69f293cc0335894f15272e904e37c1d88bb1968df0100f38a7fa8b. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/hi/cli.credential_help/cg1/record.json"
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.exec_help",
+      "source_sha256": "1a44c9ea283ce8c4a9bb8ffab403e9cb36cf4a73fce832d91e79f355448b02eb",
+      "translator": {
+        "agent": "i18n-translator lane f0a2d7ee0d2e (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) 76bcbfdf629d, 539fc5515ce6",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 68a6549527ad, e9c85b728add (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 2,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 20 keys at source_sha256 1a44c9ea283ce8c4a9bb8ffab403e9cb36cf4a73fce832d91e79f355448b02eb; target catalogue_sha256 = 50f9bf5a86fe32aae45338d6ca7f533af193bfc0474390776a5cf09b0834b6b4. Independent audit rounds: R1 0B/0M/2m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 2 finding(s), 2 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/hi/cli.exec_help/cg1/record.json"
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.exec_runtime",
+      "source_sha256": "3eee7ca31076e48ccf7e1c8854c5647d0859e5341b26b10c8043e53825de72fd",
+      "translator": {
+        "agent": "i18n-translator lane f0a2d7ee0d2e (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) 76bcbfdf629d, 539fc5515ce6",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 68a6549527ad, e9c85b728add (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 11 keys at source_sha256 3eee7ca31076e48ccf7e1c8854c5647d0859e5341b26b10c8043e53825de72fd; target catalogue_sha256 = 0ead22d75c70782090798d6b3233ca213bdeee97b7f831e173f40a212ec4c235. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/hi/cli.exec_runtime/cg1/record.json"
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.exec_worker_help",
+      "source_sha256": "aa501d6d894fdb20462595582d43e435364f200e677a50e52fd8d2b93706a957",
+      "translator": {
+        "agent": "i18n-translator lane f0a2d7ee0d2e (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) 76bcbfdf629d, 539fc5515ce6",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 68a6549527ad, e9c85b728add (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 11 keys at source_sha256 aa501d6d894fdb20462595582d43e435364f200e677a50e52fd8d2b93706a957; target catalogue_sha256 = e2b7ca3112ad278f59c70b2dd208d51fefda1fea3b67873aad0ffbef8b7b3c6f. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/hi/cli.exec_worker_help/cg1/record.json"
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.global_help",
+      "source_sha256": "c6e91dda89a9b792587f4ac9c594e188b78b8cd529fa1acf51ca783422c3152f",
+      "translator": {
+        "agent": "i18n-translator lane f0a2d7ee0d2e (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) 76bcbfdf629d, 539fc5515ce6",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 68a6549527ad, e9c85b728add (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 17 keys at source_sha256 c6e91dda89a9b792587f4ac9c594e188b78b8cd529fa1acf51ca783422c3152f; target catalogue_sha256 = e37461bb23a127c74879d97c323fa6070e958550ccd09bd15291538e4035e561. Independent audit rounds: R1 0B/0M/1m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 1 finding(s), 1 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/hi/cli.global_help/cg1/record.json"
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.hub_help",
+      "source_sha256": "df519de9acb3cdd99fa5ae4cc0c5753b090c43b79f8870c543258c0f4fcdfec6",
+      "translator": {
+        "agent": "i18n-translator lane f0a2d7ee0d2e (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) 76bcbfdf629d, 539fc5515ce6",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 68a6549527ad, e9c85b728add (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 12 keys at source_sha256 df519de9acb3cdd99fa5ae4cc0c5753b090c43b79f8870c543258c0f4fcdfec6; target catalogue_sha256 = cec5e30ed089f954bee6421e8dfa6a657e70cc18bcd21db14ee73937297eb4bb. Independent audit rounds: R1 0B/0M/0m/1n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 1 finding(s), 1 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/hi/cli.hub_help/cg1/record.json"
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.hub_shared_help",
+      "source_sha256": "5d40860430e36224bd77e95ff8298bd4b80f052f3d910a532947af6e78632b44",
+      "translator": {
+        "agent": "i18n-translator lane f0a2d7ee0d2e (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) 76bcbfdf629d, 539fc5515ce6",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 68a6549527ad, e9c85b728add (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 12 keys at source_sha256 5d40860430e36224bd77e95ff8298bd4b80f052f3d910a532947af6e78632b44; target catalogue_sha256 = c2edf3b0dd1e84e2451848c7ad7538bec180c9f95d418e7ff3c263cecd629c33. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/hi/cli.hub_shared_help/cg1/record.json"
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.install_help",
+      "source_sha256": "f242bfdbf8e80bd7f956ae361985180d7eb797dd4223da8423dc678b6fec61e7",
+      "translator": {
+        "agent": "i18n-translator lane f0a2d7ee0d2e (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) 76bcbfdf629d, 539fc5515ce6",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 68a6549527ad, e9c85b728add (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 5 keys at source_sha256 f242bfdbf8e80bd7f956ae361985180d7eb797dd4223da8423dc678b6fec61e7; target catalogue_sha256 = fa568d67aa14eb21670eebb5f420b61f20bf36dafd822db81bb8a617d06d14fd. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/hi/cli.install_help/cg1/record.json"
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.login_help",
+      "source_sha256": "66ae3d9bfe16c2830bb0a78ef7b5c768ae194f9f4d972379bbe9d752b35502f7",
+      "translator": {
+        "agent": "i18n-translator lane f0a2d7ee0d2e (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) 76bcbfdf629d, 539fc5515ce6",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 68a6549527ad, e9c85b728add (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 2 keys at source_sha256 66ae3d9bfe16c2830bb0a78ef7b5c768ae194f9f4d972379bbe9d752b35502f7; target catalogue_sha256 = b5aabd0c9cc7daafd1e8b046ba884feedf96337ef6752828acc9f11df592d947. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/hi/cli.login_help/cg1/record.json"
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.login_status_help",
+      "source_sha256": "17ef2629c0ad8a20c7e0a939d8fb38e594936e0c5dd47a3a1600300c1bf3f0f3",
+      "translator": {
+        "agent": "i18n-translator lane f0a2d7ee0d2e (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) 76bcbfdf629d, 539fc5515ce6",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 68a6549527ad, e9c85b728add (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 2 keys at source_sha256 17ef2629c0ad8a20c7e0a939d8fb38e594936e0c5dd47a3a1600300c1bf3f0f3; target catalogue_sha256 = 606fbd7ac5d521c41eaf6ba309e5aea50dcef87a31e7ba9adcd96af901c5076c. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/hi/cli.login_status_help/cg1/record.json"
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.logout_help",
+      "source_sha256": "2f479fa8e75a73f8897ec74902345bd36ca7117ae275dbf7a9bfbc98a830e453",
+      "translator": {
+        "agent": "i18n-translator lane f0a2d7ee0d2e (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) 76bcbfdf629d, 539fc5515ce6",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 68a6549527ad, e9c85b728add (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 2 keys at source_sha256 2f479fa8e75a73f8897ec74902345bd36ca7117ae275dbf7a9bfbc98a830e453; target catalogue_sha256 = 2d0c78eaceaf55b41b628d0a3b4e5f95d8aca2527441fe5a3b96127602166e00. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/hi/cli.logout_help/cg1/record.json"
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.mcp_help",
+      "source_sha256": "3f5e0f11b186501e6a708ffaba4af294ebdb663175722b58c24143dbf0173417",
+      "translator": {
+        "agent": "i18n-translator lane f0a2d7ee0d2e (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) 76bcbfdf629d, 539fc5515ce6",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 68a6549527ad, e9c85b728add (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 19 keys at source_sha256 3f5e0f11b186501e6a708ffaba4af294ebdb663175722b58c24143dbf0173417; target catalogue_sha256 = 511fb17302935e1c976633b978640d8486e1534dc72ea4d4d1aa5b7d05433a04. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/hi/cli.mcp_help/cg1/record.json"
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.memory_help",
+      "source_sha256": "b3b63aeb9c1b27d3e686c2c6ab7378130577255ac5e999296a583cd5bf0c3a13",
+      "translator": {
+        "agent": "i18n-translator lane f0a2d7ee0d2e (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) 76bcbfdf629d, 539fc5515ce6",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 68a6549527ad, e9c85b728add (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 1 keys at source_sha256 b3b63aeb9c1b27d3e686c2c6ab7378130577255ac5e999296a583cd5bf0c3a13; target catalogue_sha256 = 8770aa9fd7e7597ba6af71a691eebbf44112cd86c3cd5510b065e658310ba585. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/hi/cli.memory_help/cg1/record.json"
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.mobile_help",
+      "source_sha256": "88681bae09adf93216e3e3b990652f7f57654a0438f6bc8c3cc5dd9ebb6eb947",
+      "translator": {
+        "agent": "i18n-translator lane f0a2d7ee0d2e (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) 76bcbfdf629d, 539fc5515ce6",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 68a6549527ad, e9c85b728add (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 2,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 15 keys at source_sha256 88681bae09adf93216e3e3b990652f7f57654a0438f6bc8c3cc5dd9ebb6eb947; target catalogue_sha256 = fb88944aece1882c9b0809803c905687e7cd65010d12ca7fea7c07d45a377be7. Independent audit rounds: R1 0B/1M/0m/1n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 2 finding(s), 2 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/hi/cli.mobile_help/cg1/record.json"
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.model_help",
+      "source_sha256": "3b28b1bac7b2bd3d05f781585d27770940a12e549f3d8df456a107b61605008f",
+      "translator": {
+        "agent": "i18n-translator lane f0a2d7ee0d2e (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) 76bcbfdf629d, 539fc5515ce6",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 68a6549527ad, e9c85b728add (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 5 keys at source_sha256 3b28b1bac7b2bd3d05f781585d27770940a12e549f3d8df456a107b61605008f; target catalogue_sha256 = 4221a4a2877c92279df91646506e7aee0098075e5b634ca701d85e89316f0d2b. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/hi/cli.model_help/cg1/record.json"
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.monitor_help",
+      "source_sha256": "766f6162643fec0c473dd4ffd822e5f1f9590e32caa2bc98793e9d65061161ab",
+      "translator": {
+        "agent": "i18n-translator lane f0a2d7ee0d2e (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) 76bcbfdf629d, 539fc5515ce6",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 68a6549527ad, e9c85b728add (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 6 keys at source_sha256 766f6162643fec0c473dd4ffd822e5f1f9590e32caa2bc98793e9d65061161ab; target catalogue_sha256 = b3d85054baf5c4b4ceb024694e44fd353705d041c16538cf7d3f42af118be97b. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/hi/cli.monitor_help/cg1/record.json"
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.qwencloud_help",
+      "source_sha256": "6406143d97b406ca752a3fedecf2a69c22d635a5f2e1daf2fd2370ac393ff13b",
+      "translator": {
+        "agent": "i18n-translator lane f0a2d7ee0d2e (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) 76bcbfdf629d, 539fc5515ce6",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 68a6549527ad, e9c85b728add (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 5 keys at source_sha256 6406143d97b406ca752a3fedecf2a69c22d635a5f2e1daf2fd2370ac393ff13b; target catalogue_sha256 = b61617c9858f85a70acc55168594517be3b890b1843f8d8ac86f8390ebe7b5cc. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/hi/cli.qwencloud_help/cg1/record.json"
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.refresh_help",
+      "source_sha256": "b7168f0a70be23ed3637b1a91abef6dce1eb0d47a21b9fefc9d6104556be730f",
+      "translator": {
+        "agent": "i18n-translator lane f0a2d7ee0d2e (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) 76bcbfdf629d, 539fc5515ce6",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 68a6549527ad, e9c85b728add (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 7 keys at source_sha256 b7168f0a70be23ed3637b1a91abef6dce1eb0d47a21b9fefc9d6104556be730f; target catalogue_sha256 = 791ba224d76354cec116be6ab2a6cf40bf42ea1090d1a93c3a706906cab2c24c. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/hi/cli.refresh_help/cg1/record.json"
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.resume_click_help",
+      "source_sha256": "36caf0cd5f4c9f8081281e41a57d0cb7adb573f944ce14f6d0e087e04535a73e",
+      "translator": {
+        "agent": "i18n-translator lane f0a2d7ee0d2e (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) 76bcbfdf629d, 539fc5515ce6",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 68a6549527ad, e9c85b728add (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 1 keys at source_sha256 36caf0cd5f4c9f8081281e41a57d0cb7adb573f944ce14f6d0e087e04535a73e; target catalogue_sha256 = 2b9d0a47bb83acb541e530027e0a73209cb2a3d18dd5e9f3f21cff41c0a05b81. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/hi/cli.resume_click_help/cg1/record.json"
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.send_help",
+      "source_sha256": "ab7d3c4a3ac0696b935d613c2b7596c56dbd3b32a8fdabe29ff2bc3a93a1bfb9",
+      "translator": {
+        "agent": "i18n-translator lane f0a2d7ee0d2e (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) 76bcbfdf629d, 539fc5515ce6",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 68a6549527ad, e9c85b728add (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 7 keys at source_sha256 ab7d3c4a3ac0696b935d613c2b7596c56dbd3b32a8fdabe29ff2bc3a93a1bfb9; target catalogue_sha256 = b983763ac2a8dc16fd9c4a615a959289960f94926dad35a6be0182b5c37d8e12. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/hi/cli.send_help/cg1/record.json"
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.serve_help",
+      "source_sha256": "bd0b51271edc67c23978ca23688a9af1ef94a5623b0e86a5e3bbb418a5b243f0",
+      "translator": {
+        "agent": "i18n-translator lane f0a2d7ee0d2e (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) 76bcbfdf629d, 539fc5515ce6",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 68a6549527ad, e9c85b728add (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 5 keys at source_sha256 bd0b51271edc67c23978ca23688a9af1ef94a5623b0e86a5e3bbb418a5b243f0; target catalogue_sha256 = 2749003ab4753f6fac47c18f183b24142e473d0abc0f3460536fcdad81c239ff. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/hi/cli.serve_help/cg1/record.json"
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.services_help",
+      "source_sha256": "76aca39fb3bfe46be1d31fbfde2176ee525b7ac650961104894a894f71751935",
+      "translator": {
+        "agent": "i18n-translator lane f0a2d7ee0d2e (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) 76bcbfdf629d, 539fc5515ce6",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 68a6549527ad, e9c85b728add (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 9 keys at source_sha256 76aca39fb3bfe46be1d31fbfde2176ee525b7ac650961104894a894f71751935; target catalogue_sha256 = ac706d72cff14a4c681d7d32fbf6bd59978c816a490a7b7044ef18fc4a7e7de1. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/hi/cli.services_help/cg1/record.json"
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.sessions_help",
+      "source_sha256": "a250a185a780ab330187560c23dfe5e8d95956da24d417b22e1fc8bb121c2a6a",
+      "translator": {
+        "agent": "i18n-translator lane f0a2d7ee0d2e (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) 76bcbfdf629d, 539fc5515ce6",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 68a6549527ad, e9c85b728add (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 3,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 47 keys at source_sha256 a250a185a780ab330187560c23dfe5e8d95956da24d417b22e1fc8bb121c2a6a; target catalogue_sha256 = a594bcb73a0d65693765e9ed96c6cea18470a8f0662f0067aa02d0c2be46da9c. Independent audit rounds: R1 0B/0M/1m/1n; R2 0B/0M/1m/0n; final verdict PASS (locale-wide). Dispositions: 3 finding(s), 2 fixed by remediation, 1 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/hi/cli.sessions_help/cg1/record.json"
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.stop_help",
+      "source_sha256": "ab8ae153e8749888e2426614c06d1ba672c70bad33d2a44bed46c00004f33d28",
+      "translator": {
+        "agent": "i18n-translator lane f0a2d7ee0d2e (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) 76bcbfdf629d, 539fc5515ce6",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 68a6549527ad, e9c85b728add (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 9 keys at source_sha256 ab8ae153e8749888e2426614c06d1ba672c70bad33d2a44bed46c00004f33d28; target catalogue_sha256 = f6b27ed94736649533b1b20ef0d9413ceba88021fb59f05265223e5985d9f407. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/hi/cli.stop_help/cg1/record.json"
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.teams_help",
+      "source_sha256": "400637df631f938b7c144cf500a64bd5976f3157b25944d4ea3b701d79c69738",
+      "translator": {
+        "agent": "i18n-translator lane f0a2d7ee0d2e (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) 76bcbfdf629d, 539fc5515ce6",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 68a6549527ad, e9c85b728add (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 34 keys at source_sha256 400637df631f938b7c144cf500a64bd5976f3157b25944d4ea3b701d79c69738; target catalogue_sha256 = f0735748fd5a2eb3a6f300b0be875b09359dbe4f0196000deb8e4dd9dc834d94. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/hi/cli.teams_help/cg1/record.json"
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.update_help",
+      "source_sha256": "78da39b393ee77900255ddfdf92a17220a6eedbecba340e7d925a2fbdf01abf9",
+      "translator": {
+        "agent": "i18n-translator lane f0a2d7ee0d2e (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) 76bcbfdf629d, 539fc5515ce6",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 68a6549527ad, e9c85b728add (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 6 keys at source_sha256 78da39b393ee77900255ddfdf92a17220a6eedbecba340e7d925a2fbdf01abf9; target catalogue_sha256 = da372a2bb7548c53c97db0b026e7c8cd2f83786a09664f4c05374f1861982368. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/hi/cli.update_help/cg1/record.json"
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.wake_help",
+      "source_sha256": "eff6775fe3ad39c228dd4c360b22011d9a95c887fa5b7839744f4b532a31ac8a",
+      "translator": {
+        "agent": "i18n-translator lane f0a2d7ee0d2e (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) 76bcbfdf629d, 539fc5515ce6",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 68a6549527ad, e9c85b728add (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 17 keys at source_sha256 eff6775fe3ad39c228dd4c360b22011d9a95c887fa5b7839744f4b532a31ac8a; target catalogue_sha256 = 25bbfc724fa28949efc7d90742262cec8e56467f16524b6349028e56a9070805. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/hi/cli.wake_help/cg1/record.json"
+    },
+    {
+      "locale": "hi",
+      "namespace": "mobile.setup",
+      "source_sha256": "6249b10379beb9b2433746416fa7baff061265a1b9315d47465140cd5fcf61e9",
+      "translator": {
+        "agent": "i18n-translator lane f0a2d7ee0d2e (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) 76bcbfdf629d, 539fc5515ce6",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 68a6549527ad, e9c85b728add (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 2,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 76 keys at source_sha256 6249b10379beb9b2433746416fa7baff061265a1b9315d47465140cd5fcf61e9; target catalogue_sha256 = ad319c7b6d07c6a83dd01431983af2dc462230f4ed2cefaceb85aa02816181a7. Independent audit rounds: R1 0B/0M/2m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 2 finding(s), 2 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/hi/mobile.setup/cg1/record.json"
+    },
+    {
+      "locale": "hi",
+      "namespace": "relay.login",
+      "source_sha256": "9a59686bcd0e3641a5a807ea2b778cb385e591060c26c7fb994bea95e4de5bc5",
+      "translator": {
+        "agent": "i18n-translator lane f0a2d7ee0d2e (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) 76bcbfdf629d, 539fc5515ce6",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 68a6549527ad, e9c85b728add (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 4 keys at source_sha256 9a59686bcd0e3641a5a807ea2b778cb385e591060c26c7fb994bea95e4de5bc5; target catalogue_sha256 = 2632df631f0875c4d093ce8533f9eb2d01cadb0bf7c7891e54aab3da4360bd2f. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/hi/relay.login/cg1/record.json"
+    },
+    {
+      "locale": "hi",
+      "namespace": "tui.analytics",
+      "source_sha256": "aa5221066aa84eedf0f924628d51bc8f08ccf5f26b5075638b9d40062f7b617e",
+      "translator": {
+        "agent": "i18n-translator lane f0a2d7ee0d2e (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) 76bcbfdf629d, 539fc5515ce6",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 68a6549527ad, e9c85b728add, d8fb2395abc5 (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 98 keys at source_sha256 aa5221066aa84eedf0f924628d51bc8f08ccf5f26b5075638b9d40062f7b617e; target catalogue_sha256 = dbbb7c0c938785de0464fe7ad88dd6af2bc1fb5faf27295601d211774d6ccd27. Independent audit rounds: R1 0B/0M/1m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 1 finding(s), 1 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. ICU argument-order rephrases made after the locale-wide audit (tui.analytics.rate.legend, tui.analytics.search.summary_free_paid) were audited separately by targeted session d8fb2395abc5: PASS, keys_read=10 blocker=0 major=0 minor=1 nit=2. Targeted argument-order audit findings, all accepted unchanged: HI-ARG-02 (NIT, tui.analytics.search.summary_free_paid); HI-ARG-03 (NIT, tui.analytics.rate.legend). Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/hi/tui.analytics/cg1/record.json"
+    },
+    {
+      "locale": "hi",
+      "namespace": "tui.app",
+      "source_sha256": "7e5f39df72438663a66afca0e5338e90b7b984bdca6b562195ce976945bd7875",
+      "translator": {
+        "agent": "i18n-translator lane f0a2d7ee0d2e (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) 76bcbfdf629d, 539fc5515ce6",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 68a6549527ad, e9c85b728add, d8fb2395abc5 (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 2,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 46 keys at source_sha256 7e5f39df72438663a66afca0e5338e90b7b984bdca6b562195ce976945bd7875; target catalogue_sha256 = d54d007f4cb313c1261bba9fe671b8949ef7df8f0e63cf63506e946853221f16. Independent audit rounds: R1 0B/1M/1m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 2 finding(s), 2 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. ICU argument-order rephrases made after the locale-wide audit (tui.app.aida.extras_used) were audited separately by targeted session d8fb2395abc5: PASS, keys_read=10 blocker=0 major=0 minor=1 nit=2. Targeted argument-order audit raised no finding in this namespace. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/hi/tui.app/cg1/record.json"
+    },
+    {
+      "locale": "hi",
+      "namespace": "tui.hub_links",
+      "source_sha256": "7fbe6713f8ac8f312884476c498c3b74e76c5f0853bdd027f25fc47d489311bb",
+      "translator": {
+        "agent": "i18n-translator lane f0a2d7ee0d2e (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) 76bcbfdf629d, 539fc5515ce6",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 68a6549527ad, e9c85b728add, d8fb2395abc5 (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 56 keys at source_sha256 7fbe6713f8ac8f312884476c498c3b74e76c5f0853bdd027f25fc47d489311bb; target catalogue_sha256 = 963b12d02f85edd1f20bd07e7d850469ebd407b2e33223bdb02e3e1adbfa70e7. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. ICU argument-order rephrases made after the locale-wide audit (tui.hub_links.mark.available, tui.hub_links.mark.retry, tui.hub_links.policy.save_failed) were audited separately by targeted session d8fb2395abc5: PASS, keys_read=10 blocker=0 major=0 minor=1 nit=2. Targeted argument-order audit findings, all accepted unchanged: HI-ARG-01 (MINOR, tui.hub_links.mark.retry). Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/hi/tui.hub_links/cg1/record.json"
+    },
+    {
+      "locale": "hi",
+      "namespace": "tui.import",
+      "source_sha256": "932e0f87210ff80950346c684afb000907610c9ff35388125977182120b136c2",
+      "translator": {
+        "agent": "i18n-translator lane f0a2d7ee0d2e (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) 76bcbfdf629d, 539fc5515ce6",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 68a6549527ad, e9c85b728add (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 87 keys at source_sha256 932e0f87210ff80950346c684afb000907610c9ff35388125977182120b136c2; target catalogue_sha256 = ade0ed26368a31530337eab1b45bde90f6b97259a929389b3a2f969946d30506. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/hi/tui.import/cg1/record.json"
+    },
+    {
+      "locale": "hi",
+      "namespace": "tui.library",
+      "source_sha256": "5a389b6a7d8de06621462f2685eff6dc95cd4cd6584d35dd6c26a0a19ad50b11",
+      "translator": {
+        "agent": "i18n-translator lane f0a2d7ee0d2e (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) 76bcbfdf629d, 539fc5515ce6",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 68a6549527ad, e9c85b728add, d8fb2395abc5 (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 2,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 108 keys at source_sha256 5a389b6a7d8de06621462f2685eff6dc95cd4cd6584d35dd6c26a0a19ad50b11; target catalogue_sha256 = 82635c681b6035ce9805ee67821e13e06d10f12d84ba9b9c12e1866f6a6a4020. Independent audit rounds: R1 0B/0M/0m/2n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 2 finding(s), 2 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. ICU argument-order rephrases made after the locale-wide audit (tui.library.building) were audited separately by targeted session d8fb2395abc5: PASS, keys_read=10 blocker=0 major=0 minor=1 nit=2. Targeted argument-order audit raised no finding in this namespace. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/hi/tui.library/cg1/record.json"
+    },
+    {
+      "locale": "hi",
+      "namespace": "tui.projects",
+      "source_sha256": "aeb473eb7de44143822962b44b6be239d63f930710e754ce5205781ca4b4ae91",
+      "translator": {
+        "agent": "i18n-translator lane f0a2d7ee0d2e (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) 76bcbfdf629d, 539fc5515ce6",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 68a6549527ad, e9c85b728add (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 3,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 97 keys at source_sha256 aeb473eb7de44143822962b44b6be239d63f930710e754ce5205781ca4b4ae91; target catalogue_sha256 = d855bcf8e5f7249b2e241785c92c5b33793ef427495214fddc6f782a824861e1. Independent audit rounds: R1 0B/0M/2m/1n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 3 finding(s), 3 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/hi/tui.projects/cg1/record.json"
+    },
+    {
+      "locale": "hi",
+      "namespace": "tui.small",
+      "source_sha256": "16d49c4ba2a514bbde7da494443abade26a3b28c0389e6bca124d00aa7d0ed75",
+      "translator": {
+        "agent": "i18n-translator lane f0a2d7ee0d2e (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) 76bcbfdf629d, 539fc5515ce6",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 68a6549527ad, e9c85b728add, d8fb2395abc5 (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 8,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 137 keys at source_sha256 16d49c4ba2a514bbde7da494443abade26a3b28c0389e6bca124d00aa7d0ed75; target catalogue_sha256 = 3b7f81d547c410156f59dab6780c33e875cec95e9e6dc16cc8f555e44c935161. Independent audit rounds: R1 0B/0M/5m/1n; R2 0B/0M/0m/2n; final verdict PASS (locale-wide). Dispositions: 8 finding(s), 6 fixed by remediation, 2 minor/nit accepted unchanged, 0 unresolved blocker/major. ICU argument-order rephrases made after the locale-wide audit (tui.small.model_picker.window_position, tui.small.wake_panel.monitors_need_attention) were audited separately by targeted session d8fb2395abc5: PASS, keys_read=10 blocker=0 major=0 minor=1 nit=2. Targeted argument-order audit raised no finding in this namespace. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/hi/tui.small/cg1/record.json"
+    },
+    {
+      "locale": "hi",
+      "namespace": "tui.usage",
+      "source_sha256": "5aeaec254352896101bf2825ac03d06f74c95e3598cda23536c5fe28507a2f8b",
+      "translator": {
+        "agent": "i18n-translator lane f0a2d7ee0d2e (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) 76bcbfdf629d, 539fc5515ce6",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 68a6549527ad, e9c85b728add (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 21 keys at source_sha256 5aeaec254352896101bf2825ac03d06f74c95e3598cda23536c5fe28507a2f8b; target catalogue_sha256 = 71107509a774a0d290c838b88f8fb2047df1cd17f3d56e6b0b15580696f3f047. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/hi/tui.usage/cg1/record.json"
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.aida_cadence",
+      "source_sha256": "3bb421a58f2ffa4fec089421d9cb91257fa626d66b2e215b3e120c068bb8e5dd",
+      "translator": {
+        "agent": "i18n-translator lane f0a2d7ee0d2e (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) 76bcbfdf629d, 539fc5515ce6",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 68a6549527ad, e9c85b728add (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 2 keys at source_sha256 3bb421a58f2ffa4fec089421d9cb91257fa626d66b2e215b3e120c068bb8e5dd; target catalogue_sha256 = 10d5be748d9cbd9af96d465992e2adcd03b3791910d5c99338daececfc665f93. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/hi/wire.aida_cadence/cg1/record.json"
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.console",
+      "source_sha256": "1a591fbc1f6a939651cfe9bc5c4ff619a5a4ade2099cc9cfb348534d09a0011b",
+      "translator": {
+        "agent": "i18n-translator lane f0a2d7ee0d2e (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) 76bcbfdf629d, 539fc5515ce6",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 68a6549527ad, e9c85b728add (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 8 keys at source_sha256 1a591fbc1f6a939651cfe9bc5c4ff619a5a4ade2099cc9cfb348534d09a0011b; target catalogue_sha256 = 6f47a9862f25e733d39f8578db9f26720222dafbcdb7b9a7066fcf6a0e309fdc. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/hi/wire.console/cg1/record.json"
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.errors.agents",
+      "source_sha256": "7800f04d031a9a97222f383dea74878acadb12d9d9382b16ba638990b77627c7",
+      "translator": {
+        "agent": "i18n-translator lane f0a2d7ee0d2e (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) 76bcbfdf629d, 539fc5515ce6",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 68a6549527ad, e9c85b728add, d8fb2395abc5 (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 44 keys at source_sha256 7800f04d031a9a97222f383dea74878acadb12d9d9382b16ba638990b77627c7; target catalogue_sha256 = 8a35b6da63d654fed77d996e3a9de10c8c354340a6b2831718653024463b5e25. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. ICU argument-order rephrases made after the locale-wide audit (wire.errors.agents.variable_not_found) were audited separately by targeted session d8fb2395abc5: PASS, keys_read=10 blocker=0 major=0 minor=1 nit=2. Targeted argument-order audit raised no finding in this namespace. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/hi/wire.errors.agents/cg1/record.json"
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.errors.auth",
+      "source_sha256": "9d48edaa61269239e132201224c1c7d6cf89ef198598f0ec6c99c1f3ade542f6",
+      "translator": {
+        "agent": "i18n-translator lane f0a2d7ee0d2e (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) 76bcbfdf629d, 539fc5515ce6",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 68a6549527ad, e9c85b728add (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 12 keys at source_sha256 9d48edaa61269239e132201224c1c7d6cf89ef198598f0ec6c99c1f3ade542f6; target catalogue_sha256 = f9047d7af85aad1193399f6d9a5c88ac8072c71e5302cb9e1fe43dd9ff19c08b. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/hi/wire.errors.auth/cg1/record.json"
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.errors.files",
+      "source_sha256": "ccfeb1ea55e0fed62213846cb669f28075b20e91e361f380456772d433983f64",
+      "translator": {
+        "agent": "i18n-translator lane f0a2d7ee0d2e (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) 76bcbfdf629d, 539fc5515ce6",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 68a6549527ad, e9c85b728add (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 11 keys at source_sha256 ccfeb1ea55e0fed62213846cb669f28075b20e91e361f380456772d433983f64; target catalogue_sha256 = 33306ac7fa9e1d88f123b1bbbd1872e7baef99d81149acc5f8603f2ce8fef850. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/hi/wire.errors.files/cg1/record.json"
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.errors.media",
+      "source_sha256": "1c109f63b8d3ce00657a47836199ce8ff924bb8e4bd999fda9f1d64f760a823b",
+      "translator": {
+        "agent": "i18n-translator lane f0a2d7ee0d2e (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) 76bcbfdf629d, 539fc5515ce6",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 68a6549527ad, e9c85b728add (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 20 keys at source_sha256 1c109f63b8d3ce00657a47836199ce8ff924bb8e4bd999fda9f1d64f760a823b; target catalogue_sha256 = 86d0f989bee8785adb31942af369d734456cbb4ba50b4344d5360946ab0ed788. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/1n; final verdict PASS (locale-wide). Dispositions: 1 finding(s), 0 fixed by remediation, 1 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/hi/wire.errors.media/cg1/record.json"
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.errors.sdk_spec",
+      "source_sha256": "a92bc479321cd0ee938d338cff05c1fced88590df3d43ec39d14f4d7b3cf5855",
+      "translator": {
+        "agent": "i18n-translator lane f0a2d7ee0d2e (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) 76bcbfdf629d, 539fc5515ce6",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 68a6549527ad, e9c85b728add (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 21 keys at source_sha256 a92bc479321cd0ee938d338cff05c1fced88590df3d43ec39d14f4d7b3cf5855; target catalogue_sha256 = 699a108813b47c2e1d0fd7f674d06f14884a21c7807b26d6173c8771ee456f53. Independent audit rounds: R1 0B/0M/1m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 1 finding(s), 1 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/hi/wire.errors.sdk_spec/cg1/record.json"
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.errors.sdk_startup",
+      "source_sha256": "5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd",
+      "translator": {
+        "agent": "i18n-translator lane f0a2d7ee0d2e (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) 76bcbfdf629d, 539fc5515ce6",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 68a6549527ad, e9c85b728add (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 4 keys at source_sha256 5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd; target catalogue_sha256 = 3362b1bc1a45d94c3f8455557cad031ebe2b6475b8d0c4171d465fb65e771c50. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/hi/wire.errors.sdk_startup/cg1/record.json"
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.host_speed",
+      "source_sha256": "e193473d58c0de1779bcefab06d0e9b1734ee493aea30ea827e4499510282b8c",
+      "translator": {
+        "agent": "i18n-translator lane f0a2d7ee0d2e (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) 76bcbfdf629d, 539fc5515ce6",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 68a6549527ad, e9c85b728add (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 2 keys at source_sha256 e193473d58c0de1779bcefab06d0e9b1734ee493aea30ea827e4499510282b8c; target catalogue_sha256 = 3af4ffa2273f12fe17c40220b2b601c64fae6cbaed3639521089d8ef0a46af47. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/hi/wire.host_speed/cg1/record.json"
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.settings.account_policy",
+      "source_sha256": "1ad13f8198e28cb19fe0ecb2a6ef9b2a6990bc0d047566b71f5dd5322f594b25",
+      "translator": {
+        "agent": "i18n-translator lane f0a2d7ee0d2e (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) 76bcbfdf629d, 539fc5515ce6",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 68a6549527ad, e9c85b728add (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 14 keys at source_sha256 1ad13f8198e28cb19fe0ecb2a6ef9b2a6990bc0d047566b71f5dd5322f594b25; target catalogue_sha256 = ac1e8d8fa83f3f45b66f08d230d47818f18c4e991956cf96fe9e8f1a21afdddd. Independent audit rounds: R1 0B/0M/1m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 1 finding(s), 1 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/hi/wire.settings.account_policy/cg1/record.json"
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.settings.hub_defaults",
+      "source_sha256": "8720b5719479b638eab24b081f76f97c44ce8d8554cb1b8280f6980182b6740c",
+      "translator": {
+        "agent": "i18n-translator lane f0a2d7ee0d2e (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) 76bcbfdf629d, 539fc5515ce6",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 68a6549527ad, e9c85b728add (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 9 keys at source_sha256 8720b5719479b638eab24b081f76f97c44ce8d8554cb1b8280f6980182b6740c; target catalogue_sha256 = 95b2a56770ca17a68ddbffc3eeabf24cba51e390dba866f9087e1a2bd2528610. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/hi/wire.settings.hub_defaults/cg1/record.json"
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.slash.library",
+      "source_sha256": "0f8615f2ed9ffaf3aeb0288a4ff4b8fc8becd46017a931db9d4b3d9ec32fce46",
+      "translator": {
+        "agent": "i18n-translator lane f0a2d7ee0d2e (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) 76bcbfdf629d, 539fc5515ce6",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 68a6549527ad, e9c85b728add (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 2 keys at source_sha256 0f8615f2ed9ffaf3aeb0288a4ff4b8fc8becd46017a931db9d4b3d9ec32fce46; target catalogue_sha256 = cb26dd7987e6051cbe51a4f1418452122afc97d181c51c43ea5b1fa4a77a58ee. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/hi/wire.slash.library/cg1/record.json"
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.tunnel_setup",
+      "source_sha256": "3854be7dce54dd3aeb9564921ed6a50f0560b32c7ac40955d81be93acd7e2ac1",
+      "translator": {
+        "agent": "i18n-translator lane f0a2d7ee0d2e (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) 76bcbfdf629d, 539fc5515ce6",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 68a6549527ad, e9c85b728add (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 5 keys at source_sha256 3854be7dce54dd3aeb9564921ed6a50f0560b32c7ac40955d81be93acd7e2ac1; target catalogue_sha256 = e7be566c58d2f153083a1221115e6d30de6331573875760d204b805fc924c128. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/hi/wire.tunnel_setup/cg1/record.json"
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.slash",
+      "source_sha256": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
+      "translator": {
+        "agent": "i18n-translator (session d5ec953fe384)",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session 80b132698268; instance 80b132698268-slash2-hi)",
+        "model": "radient/auto",
+        "date": "2026-10-29",
         "result": "passed",
         "findings": 0
       },
       "status": "passed",
-      "note": "Dual blind passes: i18n/audits/evidence/hi/wire.errors.session_host/h31a/record.json; i18n/audits/evidence/hi/wire.errors.session_host/h31-39a4b/record.json. Both pass, 0 findings; actual quota fallback model recorded."
+      "note": "PR #3088 width rewrite, re-audited at the committed bytes. 8 of 52 values rewritten by i18n-translator (session d5ec953fe384) (actual model radient/auto; provider-quota fallback); round-1 audit 610f8d957d36-slash-hi rejected the shortened bytes (0B/1M/3m/3n) and round-2 independent audit 80b132698268-slash2-hi on the new bytes passed 0B/0M/1m/1n. target sha256 da022ae8f9e0777ae0d7d7cb53e593a769400ace0a090f282cf79fe646a98b48; en source unchanged (b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202). Evidence: i18n/audits/evidence/hi/wire.slash/hi29s2/record.json (receipt.json + verdicts copied verbatim). Previous rows for this pair described audits of the pre-rewrite values and are superseded."
     },
     {
       "locale": "ru",
@@ -7494,25 +8573,6 @@
     },
     {
       "locale": "ru",
-      "namespace": "wire.slash",
-      "source_sha256": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
-      "translator": {
-        "agent": "i18n-translator (session aec007cb64fd)",
-        "model": "radient/auto",
-        "date": "2026-10-29"
-      },
-      "auditor": {
-        "agent": "i18n-auditor (session 1ad20cd0410c; instance 1ad20cd0410c-slash2-ru)",
-        "model": "radient/auto",
-        "date": "2026-10-29",
-        "result": "passed",
-        "findings": 0
-      },
-      "status": "passed",
-      "note": "PR #3088 width rewrite, re-audited at the committed bytes. 13 of 52 values rewritten by i18n-translator (session aec007cb64fd) (actual model radient/auto; provider-quota fallback); round-1 audit 2c04d4b44ec7-slash-ru rejected the shortened bytes (0B/3M/5m/5n) and round-2 independent audit 1ad20cd0410c-slash2-ru on the new bytes passed 0B/0M/6m/5n. target sha256 09b51528fb14e80fd3db33367624762ef33c47a4668a1a99e6946f451bd5761f; en source unchanged (b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202). Evidence: i18n/audits/evidence/ru/wire.slash/ru29s2/record.json (receipt.json + verdicts copied verbatim). Previous rows for this pair described audits of the pre-rewrite values and are superseded."
-    },
-    {
-      "locale": "ru",
       "namespace": "cli.team_bridge",
       "source_sha256": "f029ae6953f2fce31d126e7315beaf120bc63da0fc7398fbc6b31413b962222f",
       "translator": {
@@ -7813,6 +8873,1145 @@
       },
       "status": "passed",
       "note": "Dual blind passes: i18n/audits/evidence/ru/wire.errors.session_host/host-ru-a1/record.json; i18n/audits/evidence/ru/wire.errors.session_host/host3222b/record.json. Both pass, 0 findings; actual quota fallback model recorded."
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.agents_help",
+      "source_sha256": "d8118ece7b59b99295fde3496bd3c9ff3184455d75ed31dcee50e5e515fd3bf3",
+      "translator": {
+        "agent": "i18n-translator lane edc8a6e5fda2 (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) ef4f00143d56",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 4f28a4bcc8e2, 4586ac33eefc (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 21 keys at source_sha256 d8118ece7b59b99295fde3496bd3c9ff3184455d75ed31dcee50e5e515fd3bf3; target catalogue_sha256 = 2499d3e8cce5597073772e72f600aa9126015ef579147dcbdcf0d1414f442e66. Independent audit rounds: R1 0B/0M/1m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 1 finding(s), 1 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/ru/cli.agents_help/cg1/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.aida_help",
+      "source_sha256": "31e8445b6d8a9540ef524988b0fca3efca111362188f2ba41d6f857499828423",
+      "translator": {
+        "agent": "i18n-translator lane edc8a6e5fda2 (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) ef4f00143d56",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 4f28a4bcc8e2, 4586ac33eefc (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 4 keys at source_sha256 31e8445b6d8a9540ef524988b0fca3efca111362188f2ba41d6f857499828423; target catalogue_sha256 = 48308443cc693013d99198cbd0d4f6b780d9adc30845551ad5d89f86c108ff87. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/ru/cli.aida_help/cg1/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.browser",
+      "source_sha256": "a9841deed81927762716c7592a592bb4e3f069d16f6ba0def6becb755b728321",
+      "translator": {
+        "agent": "i18n-translator lane edc8a6e5fda2 (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) ef4f00143d56",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 4f28a4bcc8e2, 4586ac33eefc (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 64 keys at source_sha256 a9841deed81927762716c7592a592bb4e3f069d16f6ba0def6becb755b728321; target catalogue_sha256 = e04446f2cf4fbbee131147e68bd02b83ce61898784be8c6e516b68212ba4e2a9. Independent audit rounds: R1 0B/0M/1m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 1 finding(s), 1 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/ru/cli.browser/cg1/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.browser_help",
+      "source_sha256": "7fd47199bb8d443a0fbf7469d635453cd6f57bb7c14efec91862c6b5b0c1b1e6",
+      "translator": {
+        "agent": "i18n-translator lane edc8a6e5fda2 (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) ef4f00143d56",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 4f28a4bcc8e2, 4586ac33eefc (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 20 keys at source_sha256 7fd47199bb8d443a0fbf7469d635453cd6f57bb7c14efec91862c6b5b0c1b1e6; target catalogue_sha256 = 19cab042cc7a841d770a9fc0a4dd5e856aaf4f186f8370db98426348f63f0301. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/ru/cli.browser_help/cg1/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.config_help",
+      "source_sha256": "97f625f6c6e26f8723e471569a0227f8e4da18518f2ab50e444fe93345ab2c8c",
+      "translator": {
+        "agent": "i18n-translator lane edc8a6e5fda2 (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) ef4f00143d56",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 4f28a4bcc8e2, 4586ac33eefc (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 9 keys at source_sha256 97f625f6c6e26f8723e471569a0227f8e4da18518f2ab50e444fe93345ab2c8c; target catalogue_sha256 = 58bcf3829678625f38ecdca1f2f4bf553e94decbd85db14b48fc12304b5fc799. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/ru/cli.config_help/cg1/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.credential_help",
+      "source_sha256": "2757dc32f5d75d81f639bf689b6423ef64614ad1e91289bb67655e9681266418",
+      "translator": {
+        "agent": "i18n-translator lane edc8a6e5fda2 (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) ef4f00143d56",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 4f28a4bcc8e2, 4586ac33eefc (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 5 keys at source_sha256 2757dc32f5d75d81f639bf689b6423ef64614ad1e91289bb67655e9681266418; target catalogue_sha256 = 849e9e018881cf938638a63fd1d1fc24edcde2101a71e8e7529f684475f7e28c. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/ru/cli.credential_help/cg1/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.exec_help",
+      "source_sha256": "1a44c9ea283ce8c4a9bb8ffab403e9cb36cf4a73fce832d91e79f355448b02eb",
+      "translator": {
+        "agent": "i18n-translator lane edc8a6e5fda2 (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) ef4f00143d56",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 4f28a4bcc8e2, 4586ac33eefc (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 20 keys at source_sha256 1a44c9ea283ce8c4a9bb8ffab403e9cb36cf4a73fce832d91e79f355448b02eb; target catalogue_sha256 = d4d6fdcd2f64c1cb26ab53aacdc6a9cbe9126c86664f6360df49113215474596. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/ru/cli.exec_help/cg1/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.exec_runtime",
+      "source_sha256": "3eee7ca31076e48ccf7e1c8854c5647d0859e5341b26b10c8043e53825de72fd",
+      "translator": {
+        "agent": "i18n-translator lane edc8a6e5fda2 (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) ef4f00143d56",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 4f28a4bcc8e2, 4586ac33eefc (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 11 keys at source_sha256 3eee7ca31076e48ccf7e1c8854c5647d0859e5341b26b10c8043e53825de72fd; target catalogue_sha256 = 217175e76e1e801b058df0b62d91694192ab8c091ae58d05bc4636b44ceca72f. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/ru/cli.exec_runtime/cg1/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.exec_worker_help",
+      "source_sha256": "aa501d6d894fdb20462595582d43e435364f200e677a50e52fd8d2b93706a957",
+      "translator": {
+        "agent": "i18n-translator lane edc8a6e5fda2 (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) ef4f00143d56",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 4f28a4bcc8e2, 4586ac33eefc (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 11 keys at source_sha256 aa501d6d894fdb20462595582d43e435364f200e677a50e52fd8d2b93706a957; target catalogue_sha256 = 8f16e9034b41ef0d30ecff01778bd658671ab377736af608cb0cdd20a3e0974f. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/ru/cli.exec_worker_help/cg1/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.global_help",
+      "source_sha256": "c6e91dda89a9b792587f4ac9c594e188b78b8cd529fa1acf51ca783422c3152f",
+      "translator": {
+        "agent": "i18n-translator lane edc8a6e5fda2 (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) ef4f00143d56",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 4f28a4bcc8e2, 4586ac33eefc (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 17 keys at source_sha256 c6e91dda89a9b792587f4ac9c594e188b78b8cd529fa1acf51ca783422c3152f; target catalogue_sha256 = 737eaf1f0c27e9ec02fd534ae8831fdff637f9405baba80f4f1ee067479a26f5. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/ru/cli.global_help/cg1/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.hub_help",
+      "source_sha256": "df519de9acb3cdd99fa5ae4cc0c5753b090c43b79f8870c543258c0f4fcdfec6",
+      "translator": {
+        "agent": "i18n-translator lane edc8a6e5fda2 (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) ef4f00143d56",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 4f28a4bcc8e2, 4586ac33eefc (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 12 keys at source_sha256 df519de9acb3cdd99fa5ae4cc0c5753b090c43b79f8870c543258c0f4fcdfec6; target catalogue_sha256 = 1adb3324b11d2f6d36614833f0d5e78a368aa3409194845497608c044355db2b. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/ru/cli.hub_help/cg1/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.hub_shared_help",
+      "source_sha256": "5d40860430e36224bd77e95ff8298bd4b80f052f3d910a532947af6e78632b44",
+      "translator": {
+        "agent": "i18n-translator lane edc8a6e5fda2 (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) ef4f00143d56",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 4f28a4bcc8e2, 4586ac33eefc (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 12 keys at source_sha256 5d40860430e36224bd77e95ff8298bd4b80f052f3d910a532947af6e78632b44; target catalogue_sha256 = fa6bb02f75bc4358c7dd12ef3f69f4c7998d0689b2536cded25e995d68618511. Independent audit rounds: R1 0B/1M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 1 finding(s), 1 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/ru/cli.hub_shared_help/cg1/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.install_help",
+      "source_sha256": "f242bfdbf8e80bd7f956ae361985180d7eb797dd4223da8423dc678b6fec61e7",
+      "translator": {
+        "agent": "i18n-translator lane edc8a6e5fda2 (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) ef4f00143d56",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 4f28a4bcc8e2, 4586ac33eefc (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 5 keys at source_sha256 f242bfdbf8e80bd7f956ae361985180d7eb797dd4223da8423dc678b6fec61e7; target catalogue_sha256 = f753ade165dcb25718f799a2d149bd5641a64dd4db464a6d3cc5a9e5494e2e92. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/ru/cli.install_help/cg1/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.login_help",
+      "source_sha256": "66ae3d9bfe16c2830bb0a78ef7b5c768ae194f9f4d972379bbe9d752b35502f7",
+      "translator": {
+        "agent": "i18n-translator lane edc8a6e5fda2 (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) ef4f00143d56",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 4f28a4bcc8e2, 4586ac33eefc (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 2 keys at source_sha256 66ae3d9bfe16c2830bb0a78ef7b5c768ae194f9f4d972379bbe9d752b35502f7; target catalogue_sha256 = c4fa9648d07098aeb33ba43afa778d70b6d60b064b3800cb15c2f54ca59c66a0. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/ru/cli.login_help/cg1/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.login_status_help",
+      "source_sha256": "17ef2629c0ad8a20c7e0a939d8fb38e594936e0c5dd47a3a1600300c1bf3f0f3",
+      "translator": {
+        "agent": "i18n-translator lane edc8a6e5fda2 (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) ef4f00143d56",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 4f28a4bcc8e2, 4586ac33eefc (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 2 keys at source_sha256 17ef2629c0ad8a20c7e0a939d8fb38e594936e0c5dd47a3a1600300c1bf3f0f3; target catalogue_sha256 = 0cfd663705efb8df46e980d15d872e652ef8d258d187a0731cbd367ae2348fa7. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/ru/cli.login_status_help/cg1/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.logout_help",
+      "source_sha256": "2f479fa8e75a73f8897ec74902345bd36ca7117ae275dbf7a9bfbc98a830e453",
+      "translator": {
+        "agent": "i18n-translator lane edc8a6e5fda2 (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) ef4f00143d56",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 4f28a4bcc8e2, 4586ac33eefc (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 2 keys at source_sha256 2f479fa8e75a73f8897ec74902345bd36ca7117ae275dbf7a9bfbc98a830e453; target catalogue_sha256 = 291254bf8499108ef8cd09078ec883271307b061a368f4da79f676fca7e8ae34. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/ru/cli.logout_help/cg1/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.mcp_help",
+      "source_sha256": "3f5e0f11b186501e6a708ffaba4af294ebdb663175722b58c24143dbf0173417",
+      "translator": {
+        "agent": "i18n-translator lane edc8a6e5fda2 (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) ef4f00143d56",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 4f28a4bcc8e2, 4586ac33eefc (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 19 keys at source_sha256 3f5e0f11b186501e6a708ffaba4af294ebdb663175722b58c24143dbf0173417; target catalogue_sha256 = d7cdc18b60cece6613f6fd713971489e49627c6186bc260f010b4c6534401ae9. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/ru/cli.mcp_help/cg1/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.memory_help",
+      "source_sha256": "b3b63aeb9c1b27d3e686c2c6ab7378130577255ac5e999296a583cd5bf0c3a13",
+      "translator": {
+        "agent": "i18n-translator lane edc8a6e5fda2 (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) ef4f00143d56",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 4f28a4bcc8e2, 4586ac33eefc (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 1 keys at source_sha256 b3b63aeb9c1b27d3e686c2c6ab7378130577255ac5e999296a583cd5bf0c3a13; target catalogue_sha256 = 3b82cfc11bc35ce262137ebc6dde213abedd2b676d90b025fd3e7796c9fb52b0. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/ru/cli.memory_help/cg1/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.mobile_help",
+      "source_sha256": "88681bae09adf93216e3e3b990652f7f57654a0438f6bc8c3cc5dd9ebb6eb947",
+      "translator": {
+        "agent": "i18n-translator lane edc8a6e5fda2 (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) ef4f00143d56",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 4f28a4bcc8e2, 4586ac33eefc (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 15 keys at source_sha256 88681bae09adf93216e3e3b990652f7f57654a0438f6bc8c3cc5dd9ebb6eb947; target catalogue_sha256 = ec554153d84ac1f1190a2cfd982d3f5953879712875efc8f72fda49eb31e6e9d. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/ru/cli.mobile_help/cg1/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.model_help",
+      "source_sha256": "3b28b1bac7b2bd3d05f781585d27770940a12e549f3d8df456a107b61605008f",
+      "translator": {
+        "agent": "i18n-translator lane edc8a6e5fda2 (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) ef4f00143d56",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 4f28a4bcc8e2, 4586ac33eefc (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 5 keys at source_sha256 3b28b1bac7b2bd3d05f781585d27770940a12e549f3d8df456a107b61605008f; target catalogue_sha256 = f2ff2221ea21dc602f880186625c1d8e5522ed901728f11de33c4a88de4a9bc4. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/ru/cli.model_help/cg1/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.monitor_help",
+      "source_sha256": "766f6162643fec0c473dd4ffd822e5f1f9590e32caa2bc98793e9d65061161ab",
+      "translator": {
+        "agent": "i18n-translator lane edc8a6e5fda2 (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) ef4f00143d56",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 4f28a4bcc8e2, 4586ac33eefc (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 6 keys at source_sha256 766f6162643fec0c473dd4ffd822e5f1f9590e32caa2bc98793e9d65061161ab; target catalogue_sha256 = d4c63b49cb904c2f2b55ddf5c8fb62180d0f4290cd311e765368da82096b9ba9. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/ru/cli.monitor_help/cg1/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.qwencloud_help",
+      "source_sha256": "6406143d97b406ca752a3fedecf2a69c22d635a5f2e1daf2fd2370ac393ff13b",
+      "translator": {
+        "agent": "i18n-translator lane edc8a6e5fda2 (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) ef4f00143d56",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 4f28a4bcc8e2, 4586ac33eefc (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 5 keys at source_sha256 6406143d97b406ca752a3fedecf2a69c22d635a5f2e1daf2fd2370ac393ff13b; target catalogue_sha256 = 69e9d15dcf4a17940a2089f44c97dca0d2d17d4a101b84498f98ccbaf7414339. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/ru/cli.qwencloud_help/cg1/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.refresh_help",
+      "source_sha256": "b7168f0a70be23ed3637b1a91abef6dce1eb0d47a21b9fefc9d6104556be730f",
+      "translator": {
+        "agent": "i18n-translator lane edc8a6e5fda2 (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) ef4f00143d56",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 4f28a4bcc8e2, 4586ac33eefc (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 7 keys at source_sha256 b7168f0a70be23ed3637b1a91abef6dce1eb0d47a21b9fefc9d6104556be730f; target catalogue_sha256 = 10ea5f8029f26187c136581d3cff78530f9f8c03bf4586cc4c6c7176caf15139. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/ru/cli.refresh_help/cg1/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.resume_click_help",
+      "source_sha256": "36caf0cd5f4c9f8081281e41a57d0cb7adb573f944ce14f6d0e087e04535a73e",
+      "translator": {
+        "agent": "i18n-translator lane edc8a6e5fda2 (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) ef4f00143d56",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 4f28a4bcc8e2, 4586ac33eefc (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 1 keys at source_sha256 36caf0cd5f4c9f8081281e41a57d0cb7adb573f944ce14f6d0e087e04535a73e; target catalogue_sha256 = 9ace6471075d374c87ee6fe2376a4a07603c398aee7942090375a3231eb51d68. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/ru/cli.resume_click_help/cg1/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.send_help",
+      "source_sha256": "ab7d3c4a3ac0696b935d613c2b7596c56dbd3b32a8fdabe29ff2bc3a93a1bfb9",
+      "translator": {
+        "agent": "i18n-translator lane edc8a6e5fda2 (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) ef4f00143d56",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 4f28a4bcc8e2, 4586ac33eefc (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 7 keys at source_sha256 ab7d3c4a3ac0696b935d613c2b7596c56dbd3b32a8fdabe29ff2bc3a93a1bfb9; target catalogue_sha256 = ea4b49749ab4a4fecd2517a9845e283e9f107f41680b4f538fa312f9c25f30f9. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/ru/cli.send_help/cg1/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.serve_help",
+      "source_sha256": "bd0b51271edc67c23978ca23688a9af1ef94a5623b0e86a5e3bbb418a5b243f0",
+      "translator": {
+        "agent": "i18n-translator lane edc8a6e5fda2 (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) ef4f00143d56",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 4f28a4bcc8e2, 4586ac33eefc (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 5 keys at source_sha256 bd0b51271edc67c23978ca23688a9af1ef94a5623b0e86a5e3bbb418a5b243f0; target catalogue_sha256 = 5160ea2807b6ed50aa130c42cb7be31a2ebeb7a3a4aa2ece30389f4fd6dc2fb3. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/ru/cli.serve_help/cg1/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.services_help",
+      "source_sha256": "76aca39fb3bfe46be1d31fbfde2176ee525b7ac650961104894a894f71751935",
+      "translator": {
+        "agent": "i18n-translator lane edc8a6e5fda2 (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) ef4f00143d56",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 4f28a4bcc8e2, 4586ac33eefc (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 3,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 9 keys at source_sha256 76aca39fb3bfe46be1d31fbfde2176ee525b7ac650961104894a894f71751935; target catalogue_sha256 = 9b4aa7e37dcad11c3b868b1dd7177fb4f1be9b2fc9f8ffa594d28000c1cc6087. Independent audit rounds: R1 0B/0M/2m/1n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 3 finding(s), 3 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/ru/cli.services_help/cg1/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.sessions_help",
+      "source_sha256": "a250a185a780ab330187560c23dfe5e8d95956da24d417b22e1fc8bb121c2a6a",
+      "translator": {
+        "agent": "i18n-translator lane edc8a6e5fda2 (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) ef4f00143d56",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 4f28a4bcc8e2, 4586ac33eefc (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 47 keys at source_sha256 a250a185a780ab330187560c23dfe5e8d95956da24d417b22e1fc8bb121c2a6a; target catalogue_sha256 = 0e3170cda8d31b8e3b2bbd767ffa3d0640bdb9b91c5c30c3e0b2a7c11760a424. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/ru/cli.sessions_help/cg1/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.stop_help",
+      "source_sha256": "ab8ae153e8749888e2426614c06d1ba672c70bad33d2a44bed46c00004f33d28",
+      "translator": {
+        "agent": "i18n-translator lane edc8a6e5fda2 (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) ef4f00143d56",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 4f28a4bcc8e2, 4586ac33eefc (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 9 keys at source_sha256 ab8ae153e8749888e2426614c06d1ba672c70bad33d2a44bed46c00004f33d28; target catalogue_sha256 = c4c3efcd352160b28b2f53ae84040334b9c041338d703ad6703ef3ee05786438. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/ru/cli.stop_help/cg1/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.teams_help",
+      "source_sha256": "400637df631f938b7c144cf500a64bd5976f3157b25944d4ea3b701d79c69738",
+      "translator": {
+        "agent": "i18n-translator lane edc8a6e5fda2 (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) ef4f00143d56",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 4f28a4bcc8e2, 4586ac33eefc (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 34 keys at source_sha256 400637df631f938b7c144cf500a64bd5976f3157b25944d4ea3b701d79c69738; target catalogue_sha256 = 8ff084d669cf6ee8327e13f336a554f3dfef086ae016796fa52bfdc304f967d7. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/ru/cli.teams_help/cg1/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.update_help",
+      "source_sha256": "78da39b393ee77900255ddfdf92a17220a6eedbecba340e7d925a2fbdf01abf9",
+      "translator": {
+        "agent": "i18n-translator lane edc8a6e5fda2 (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) ef4f00143d56",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 4f28a4bcc8e2, 4586ac33eefc (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 6 keys at source_sha256 78da39b393ee77900255ddfdf92a17220a6eedbecba340e7d925a2fbdf01abf9; target catalogue_sha256 = e732df64b1981fb2aa3c3e603647eda0e92134b7bd2b0523213eb38dcbdef0c7. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/1m/0n; final verdict PASS (locale-wide). Dispositions: 1 finding(s), 0 fixed by remediation, 1 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/ru/cli.update_help/cg1/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.wake_help",
+      "source_sha256": "eff6775fe3ad39c228dd4c360b22011d9a95c887fa5b7839744f4b532a31ac8a",
+      "translator": {
+        "agent": "i18n-translator lane edc8a6e5fda2 (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) ef4f00143d56",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 4f28a4bcc8e2, 4586ac33eefc (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 17 keys at source_sha256 eff6775fe3ad39c228dd4c360b22011d9a95c887fa5b7839744f4b532a31ac8a; target catalogue_sha256 = 4f6c1c8fb22ac9e1d2c0b245bbef5f41b61eea2b1bb4c63c01f3aaba30a66cf8. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/ru/cli.wake_help/cg1/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "mobile.setup",
+      "source_sha256": "6249b10379beb9b2433746416fa7baff061265a1b9315d47465140cd5fcf61e9",
+      "translator": {
+        "agent": "i18n-translator lane edc8a6e5fda2 (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) ef4f00143d56",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 4f28a4bcc8e2, 4586ac33eefc (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 3,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 76 keys at source_sha256 6249b10379beb9b2433746416fa7baff061265a1b9315d47465140cd5fcf61e9; target catalogue_sha256 = 1cb725c9e457cba6d17f6ec4baf6c482e1282fe20bfd3e31b5f71d4fb2556ba5. Independent audit rounds: R1 0B/0M/2m/0n; R2 0B/0M/1m/0n; final verdict PASS (locale-wide). Dispositions: 3 finding(s), 2 fixed by remediation, 1 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/ru/mobile.setup/cg1/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "relay.login",
+      "source_sha256": "9a59686bcd0e3641a5a807ea2b778cb385e591060c26c7fb994bea95e4de5bc5",
+      "translator": {
+        "agent": "i18n-translator lane edc8a6e5fda2 (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) ef4f00143d56",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 4f28a4bcc8e2, 4586ac33eefc (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 4 keys at source_sha256 9a59686bcd0e3641a5a807ea2b778cb385e591060c26c7fb994bea95e4de5bc5; target catalogue_sha256 = 6235f9f3f058fe859194f37879d485199449345c1692beeda2dc767f691dfaa1. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/ru/relay.login/cg1/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "tui.analytics",
+      "source_sha256": "aa5221066aa84eedf0f924628d51bc8f08ccf5f26b5075638b9d40062f7b617e",
+      "translator": {
+        "agent": "i18n-translator lane edc8a6e5fda2 (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) ef4f00143d56",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 4f28a4bcc8e2, 4586ac33eefc (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 2,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 98 keys at source_sha256 aa5221066aa84eedf0f924628d51bc8f08ccf5f26b5075638b9d40062f7b617e; target catalogue_sha256 = 68d662b160461d5d497da52fe85e12d12466cb93b2c4a21bfcf1a0e48dd95cae. Independent audit rounds: R1 0B/0M/1m/0n; R2 0B/0M/1m/0n; final verdict PASS (locale-wide). Dispositions: 2 finding(s), 1 fixed by remediation, 1 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/ru/tui.analytics/cg1/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "tui.app",
+      "source_sha256": "7e5f39df72438663a66afca0e5338e90b7b984bdca6b562195ce976945bd7875",
+      "translator": {
+        "agent": "i18n-translator lane edc8a6e5fda2 (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) ef4f00143d56",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 4f28a4bcc8e2, 4586ac33eefc (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 4,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 46 keys at source_sha256 7e5f39df72438663a66afca0e5338e90b7b984bdca6b562195ce976945bd7875; target catalogue_sha256 = b2d2ed4dbf4a0d730ea1ac234bbdae0777ddd6dff440d2421d1ebf236befe5c9. Independent audit rounds: R1 0B/0M/2m/1n; R2 0B/0M/0m/1n; final verdict PASS (locale-wide). Dispositions: 4 finding(s), 3 fixed by remediation, 1 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/ru/tui.app/cg1/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "tui.hub_links",
+      "source_sha256": "7fbe6713f8ac8f312884476c498c3b74e76c5f0853bdd027f25fc47d489311bb",
+      "translator": {
+        "agent": "i18n-translator lane edc8a6e5fda2 (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) ef4f00143d56",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 4f28a4bcc8e2, 4586ac33eefc (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 3,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 56 keys at source_sha256 7fbe6713f8ac8f312884476c498c3b74e76c5f0853bdd027f25fc47d489311bb; target catalogue_sha256 = 9d708d9cc2eccc5f70a7851ef9c12e953ba4cccfc161f0016102c167878057dc. Independent audit rounds: R1 0B/2M/0m/0n; R2 0B/0M/0m/1n; final verdict PASS (locale-wide). Dispositions: 3 finding(s), 2 fixed by remediation, 1 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/ru/tui.hub_links/cg1/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "tui.import",
+      "source_sha256": "932e0f87210ff80950346c684afb000907610c9ff35388125977182120b136c2",
+      "translator": {
+        "agent": "i18n-translator lane edc8a6e5fda2 (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) ef4f00143d56",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 4f28a4bcc8e2, 4586ac33eefc (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 87 keys at source_sha256 932e0f87210ff80950346c684afb000907610c9ff35388125977182120b136c2; target catalogue_sha256 = 1ee6f5305b7489af93e482b8d3a53d8a496035147aa966466f7325d51b52f228. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/ru/tui.import/cg1/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "tui.library",
+      "source_sha256": "5a389b6a7d8de06621462f2685eff6dc95cd4cd6584d35dd6c26a0a19ad50b11",
+      "translator": {
+        "agent": "i18n-translator lane edc8a6e5fda2 (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) ef4f00143d56",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 4f28a4bcc8e2, 4586ac33eefc (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 2,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 108 keys at source_sha256 5a389b6a7d8de06621462f2685eff6dc95cd4cd6584d35dd6c26a0a19ad50b11; target catalogue_sha256 = 946819a2b3112a99faaea2bed716f01a5dc1544cd7dae34def94879c93e2aa27. Independent audit rounds: R1 0B/0M/1m/0n; R2 0B/0M/1m/0n; final verdict PASS (locale-wide). Dispositions: 2 finding(s), 1 fixed by remediation, 1 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/ru/tui.library/cg1/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "tui.projects",
+      "source_sha256": "aeb473eb7de44143822962b44b6be239d63f930710e754ce5205781ca4b4ae91",
+      "translator": {
+        "agent": "i18n-translator lane edc8a6e5fda2 (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) ef4f00143d56",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 4f28a4bcc8e2, 4586ac33eefc (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 2,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 97 keys at source_sha256 aeb473eb7de44143822962b44b6be239d63f930710e754ce5205781ca4b4ae91; target catalogue_sha256 = 6fa3e7c6bda5e6fa614fc92314a39e90ce131876ee01c57e1425ff394c7f2d11. Independent audit rounds: R1 0B/0M/1m/1n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 2 finding(s), 2 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/ru/tui.projects/cg1/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "tui.small",
+      "source_sha256": "16d49c4ba2a514bbde7da494443abade26a3b28c0389e6bca124d00aa7d0ed75",
+      "translator": {
+        "agent": "i18n-translator lane edc8a6e5fda2 (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) ef4f00143d56",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 4f28a4bcc8e2, 4586ac33eefc (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 5,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 137 keys at source_sha256 16d49c4ba2a514bbde7da494443abade26a3b28c0389e6bca124d00aa7d0ed75; target catalogue_sha256 = 2f093aee1f19c2bcc07699b1c55011616ebe068ea7c3ccb90f49767fff34f6e5. Independent audit rounds: R1 0B/0M/3m/0n; R2 0B/0M/0m/2n; final verdict PASS (locale-wide). Dispositions: 5 finding(s), 3 fixed by remediation, 2 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/ru/tui.small/cg1/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "tui.usage",
+      "source_sha256": "5aeaec254352896101bf2825ac03d06f74c95e3598cda23536c5fe28507a2f8b",
+      "translator": {
+        "agent": "i18n-translator lane edc8a6e5fda2 (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) ef4f00143d56",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 4f28a4bcc8e2, 4586ac33eefc (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 21 keys at source_sha256 5aeaec254352896101bf2825ac03d06f74c95e3598cda23536c5fe28507a2f8b; target catalogue_sha256 = 3ace6490fb4006afcd259ef217fde5f9fdd4c975492e2d49e39d2f2d1b56a4ef. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/ru/tui.usage/cg1/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.aida_cadence",
+      "source_sha256": "3bb421a58f2ffa4fec089421d9cb91257fa626d66b2e215b3e120c068bb8e5dd",
+      "translator": {
+        "agent": "i18n-translator lane edc8a6e5fda2 (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) ef4f00143d56",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 4f28a4bcc8e2, 4586ac33eefc (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 2 keys at source_sha256 3bb421a58f2ffa4fec089421d9cb91257fa626d66b2e215b3e120c068bb8e5dd; target catalogue_sha256 = 2c462541a1d50b09f9fc44d4ed2ced0485e42891a3ff5add94c57b8b2d214977. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/ru/wire.aida_cadence/cg1/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.console",
+      "source_sha256": "1a591fbc1f6a939651cfe9bc5c4ff619a5a4ade2099cc9cfb348534d09a0011b",
+      "translator": {
+        "agent": "i18n-translator lane edc8a6e5fda2 (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) ef4f00143d56",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 4f28a4bcc8e2, 4586ac33eefc (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 8 keys at source_sha256 1a591fbc1f6a939651cfe9bc5c4ff619a5a4ade2099cc9cfb348534d09a0011b; target catalogue_sha256 = acfbc00800d0c6012b910f6f35286d1de7b7da98af668c18aed6dc957fe92815. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/ru/wire.console/cg1/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.errors.agents",
+      "source_sha256": "7800f04d031a9a97222f383dea74878acadb12d9d9382b16ba638990b77627c7",
+      "translator": {
+        "agent": "i18n-translator lane edc8a6e5fda2 (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) ef4f00143d56",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 4f28a4bcc8e2, 4586ac33eefc (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 44 keys at source_sha256 7800f04d031a9a97222f383dea74878acadb12d9d9382b16ba638990b77627c7; target catalogue_sha256 = 9d941865f5c508f4e9c564bdf59c918d91d9a35d94cf1dde897c1141e02946c0. Independent audit rounds: R1 0B/0M/1m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 1 finding(s), 1 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/ru/wire.errors.agents/cg1/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.errors.auth",
+      "source_sha256": "9d48edaa61269239e132201224c1c7d6cf89ef198598f0ec6c99c1f3ade542f6",
+      "translator": {
+        "agent": "i18n-translator lane edc8a6e5fda2 (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) ef4f00143d56",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 4f28a4bcc8e2, 4586ac33eefc (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 12 keys at source_sha256 9d48edaa61269239e132201224c1c7d6cf89ef198598f0ec6c99c1f3ade542f6; target catalogue_sha256 = a96ec067819073d73cb14222d3c4c01006c64c378bd74c6238ac18d2e637d381. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/ru/wire.errors.auth/cg1/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.errors.files",
+      "source_sha256": "ccfeb1ea55e0fed62213846cb669f28075b20e91e361f380456772d433983f64",
+      "translator": {
+        "agent": "i18n-translator lane edc8a6e5fda2 (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) ef4f00143d56",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 4f28a4bcc8e2, 4586ac33eefc (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 11 keys at source_sha256 ccfeb1ea55e0fed62213846cb669f28075b20e91e361f380456772d433983f64; target catalogue_sha256 = 4adca869f26a3330e7e1e4c384b22b891fb9fb8ad9539841087f9d2e952f4948. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/ru/wire.errors.files/cg1/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.errors.media",
+      "source_sha256": "1c109f63b8d3ce00657a47836199ce8ff924bb8e4bd999fda9f1d64f760a823b",
+      "translator": {
+        "agent": "i18n-translator lane edc8a6e5fda2 (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) ef4f00143d56",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 4f28a4bcc8e2, 4586ac33eefc (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 20 keys at source_sha256 1c109f63b8d3ce00657a47836199ce8ff924bb8e4bd999fda9f1d64f760a823b; target catalogue_sha256 = bcb9c42a93f472e4d67d5f6023b3447afe7916d061d56899fc0b5675fdffd114. Independent audit rounds: R1 0B/0M/0m/1n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 1 finding(s), 1 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/ru/wire.errors.media/cg1/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.errors.sdk_spec",
+      "source_sha256": "a92bc479321cd0ee938d338cff05c1fced88590df3d43ec39d14f4d7b3cf5855",
+      "translator": {
+        "agent": "i18n-translator lane edc8a6e5fda2 (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) ef4f00143d56",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 4f28a4bcc8e2, 4586ac33eefc (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 21 keys at source_sha256 a92bc479321cd0ee938d338cff05c1fced88590df3d43ec39d14f4d7b3cf5855; target catalogue_sha256 = 6f917f6a44d7bbb4b50e2b78cb3e76906478bf9b8d3c309af91f0f92871e11c8. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/ru/wire.errors.sdk_spec/cg1/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.errors.sdk_startup",
+      "source_sha256": "5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd",
+      "translator": {
+        "agent": "i18n-translator lane edc8a6e5fda2 (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) ef4f00143d56",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 4f28a4bcc8e2, 4586ac33eefc (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 4 keys at source_sha256 5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd; target catalogue_sha256 = a78344f18145f9016b018d451d0c7d09906a09ff9937ceff36356c297328930f. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/ru/wire.errors.sdk_startup/cg1/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.exec",
+      "source_sha256": "041ca802dd4e1329cf1f1b2984311c628f314223f5941b35a7007f5b3d198c94",
+      "translator": {
+        "agent": "i18n-translator lane edc8a6e5fda2 (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) ef4f00143d56",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 4f28a4bcc8e2, 4586ac33eefc (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 2,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 17 keys at source_sha256 041ca802dd4e1329cf1f1b2984311c628f314223f5941b35a7007f5b3d198c94; target catalogue_sha256 = 983a6a608d9fad6e1ff1413443e458e23317708704c0df0d20956b6178864a07. Independent audit rounds: R1 0B/0M/1m/1n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 2 finding(s), 2 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/ru/wire.exec/cg1/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.host_speed",
+      "source_sha256": "e193473d58c0de1779bcefab06d0e9b1734ee493aea30ea827e4499510282b8c",
+      "translator": {
+        "agent": "i18n-translator lane edc8a6e5fda2 (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) ef4f00143d56",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 4f28a4bcc8e2, 4586ac33eefc (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 2 keys at source_sha256 e193473d58c0de1779bcefab06d0e9b1734ee493aea30ea827e4499510282b8c; target catalogue_sha256 = 5a23cd56fc47661f48821f8a0b4504b601169bdcc61bf577cf913fab8f090676. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/ru/wire.host_speed/cg1/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.settings.account_policy",
+      "source_sha256": "1ad13f8198e28cb19fe0ecb2a6ef9b2a6990bc0d047566b71f5dd5322f594b25",
+      "translator": {
+        "agent": "i18n-translator lane edc8a6e5fda2 (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) ef4f00143d56",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 4f28a4bcc8e2, 4586ac33eefc (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 14 keys at source_sha256 1ad13f8198e28cb19fe0ecb2a6ef9b2a6990bc0d047566b71f5dd5322f594b25; target catalogue_sha256 = 34aceb2f57251c4e31f259637916a24a32f978240466ef030cec10466e84bc73. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/ru/wire.settings.account_policy/cg1/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.settings.hub_defaults",
+      "source_sha256": "8720b5719479b638eab24b081f76f97c44ce8d8554cb1b8280f6980182b6740c",
+      "translator": {
+        "agent": "i18n-translator lane edc8a6e5fda2 (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) ef4f00143d56",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 4f28a4bcc8e2, 4586ac33eefc (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 9 keys at source_sha256 8720b5719479b638eab24b081f76f97c44ce8d8554cb1b8280f6980182b6740c; target catalogue_sha256 = 52ef90c99136322e5050cb0620c5c13d3fff912b87aa8bfbc80d0a5c924f0976. Independent audit rounds: R1 0B/0M/1m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 1 finding(s), 1 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/ru/wire.settings.hub_defaults/cg1/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.slash.library",
+      "source_sha256": "0f8615f2ed9ffaf3aeb0288a4ff4b8fc8becd46017a931db9d4b3d9ec32fce46",
+      "translator": {
+        "agent": "i18n-translator lane edc8a6e5fda2 (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) ef4f00143d56",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 4f28a4bcc8e2, 4586ac33eefc (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 2 keys at source_sha256 0f8615f2ed9ffaf3aeb0288a4ff4b8fc8becd46017a931db9d4b3d9ec32fce46; target catalogue_sha256 = e5ec66b6ab1fc8ec4c50e3e9f55d1f474ac7ca4104f6cb2b27a38066b2f221a1. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/ru/wire.slash.library/cg1/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.tunnel_setup",
+      "source_sha256": "3854be7dce54dd3aeb9564921ed6a50f0560b32c7ac40955d81be93acd7e2ac1",
+      "translator": {
+        "agent": "i18n-translator lane edc8a6e5fda2 (task subagent of manager session 3ef6295a5545) plus remediation translator session(s) ef4f00143d56",
+        "model": "anthropic/claude-sonnet-5-5 (original lane); anthropic/claude-opus-5-5 (remediation sessions)",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, sessions 4f28a4bcc8e2, 4586ac33eefc (one fresh session per round, independent of the translators)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Core catalogue gap, 5 keys at source_sha256 3854be7dce54dd3aeb9564921ed6a50f0560b32c7ac40955d81be93acd7e2ac1; target catalogue_sha256 = dd61db5eaab630453d2b7f6a72cac1aad6d03fcb476cbc910715b55cdcbb025b. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/ru/wire.tunnel_setup/cg1/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.slash",
+      "source_sha256": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
+      "translator": {
+        "agent": "i18n-translator (session aec007cb64fd)",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session 1ad20cd0410c; instance 1ad20cd0410c-slash2-ru)",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PR #3088 width rewrite, re-audited at the committed bytes. 13 of 52 values rewritten by i18n-translator (session aec007cb64fd) (actual model radient/auto; provider-quota fallback); round-1 audit 2c04d4b44ec7-slash-ru rejected the shortened bytes (0B/3M/5m/5n) and round-2 independent audit 1ad20cd0410c-slash2-ru on the new bytes passed 0B/0M/6m/5n. target sha256 09b51528fb14e80fd3db33367624762ef33c47a4668a1a99e6946f451bd5761f; en source unchanged (b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202). Evidence: i18n/audits/evidence/ru/wire.slash/ru29s2/record.json (receipt.json + verdicts copied verbatim). Previous rows for this pair described audits of the pre-rewrite values and are superseded."
     },
     {
       "locale": "ru",
