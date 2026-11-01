@@ -253,41 +253,33 @@ def test_the_final_recensus_is_what_reports_an_unproven_cleanup(wrapper, monkeyp
     assert rc == 126, (rc, output.getvalue())
 
 
-def test_the_signal_path_never_enrols_a_new_member(wrapper, monkeypatch):
-    """Q3(b): a member that appeared after capture is refused, never enrolled.
+def test_a_member_forked_after_capture_is_adopted_under_the_pin(wrapper, monkeypatch):
+    """The OLD contract's case (a), inverted: adoption is the pin's job.
 
-    With the signal-time gate: REFUSED and no syscall. Change ``signal`` to enrol
-    and the same member is adopted and signalled (verdict VERIFIED, count 1).
+    A member that appears after capture used to be refused, because authority
+    lived in the member set. Under the reservation the number is ours, so the
+    member is ours too — and the control proves the difference is the pin, not
+    the membership: delete the leader row and the same shape is refused with no
+    syscall.
     """
     world = World()
     cap = world.capture(send=world.calls.append)
     assert cap.last.status == "VERIFIED"
     world.rows[11] = (world.pgid, world.pgid, world.pgid, "late")
     verdict = cap.signal(signal.SIGTERM, deadline=time_budget())
-    assert verdict.status == "REFUSED", verdict.reason
-    assert world.calls == []
+    assert verdict.status == "SIGNALED", verdict.reason
+    assert verdict.anchor == "leader-live"
+    assert world.calls == [(world.pgid, signal.SIGTERM)]
 
-
-def test_a_refused_cleanup_after_a_nonzero_gate_keeps_the_child_status(wrapper, monkeypatch):
-    """Only a PASSING gate is re-labelled; a failing one keeps its own code."""
-    world = World()
-    cap = world.capture(send=world.calls.append)
-    world.rows[world.pgid] = (world.parent, world.pgid, world.pgid, "FOREIGN")
-    monkeypatch.setattr(
-        wrapper,
-        "owned_process_group",
-        NS(OwnedGroup=NS(capture=lambda *a, **k: cap), Verdict=owned.Verdict),
-    )
-    monkeypatch.setattr(
-        wrapper,
-        "subprocess",
-        NS(Popen=lambda *a, **k: _fake_process(1), TimeoutExpired=subprocess.TimeoutExpired),
-    )
-    monkeypatch.setattr(
-        wrapper, "_memory_budget", lambda _: (NS(ceiling_mb=0, reason="fixture"), "fixture")
-    )
-    assert wrapper.run(["synthetic"], timeout=None, grace=0.05, stream=io.StringIO()) == 1
-    assert world.calls == []
+    # The pin-lost control: same members, no reservation above them.
+    lost = World()
+    cap_lost = lost.capture(send=lost.calls.append)
+    lost.rows[11] = (lost.pgid, lost.pgid, lost.pgid, "late")
+    del lost.rows[lost.pgid]
+    refused = cap_lost.signal(signal.SIGTERM, deadline=time_budget())
+    assert refused.status == "REFUSED", refused.reason
+    assert refused.refusal_class == "pin_lost"
+    assert lost.calls == []
 
 
 def _load_without_killpg():

@@ -527,6 +527,11 @@ def test_child_memory_loop_preserves_owned_cleanup_contract(
                 "OBSERVED_EMPTY" if process.status is not None else "VERIFIED", "fake"
             )
 
+        def leader_terminal(self, deadline):
+            # The seam that replaced Popen.poll(): the same mode gating, asked of
+            # the capability instead of the child handle, so the loop never reaps.
+            return process.status is not None
+
         def signal(self, signum, **kwargs):
             group_calls.append((self.pgid, signum))
             process.status = -int(signum)

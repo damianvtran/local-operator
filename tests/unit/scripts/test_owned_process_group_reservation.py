@@ -298,3 +298,84 @@ def test_the_grace_loop_costs_no_census_and_signals_cost_at_most_two(
         kernel.censuses - before,
         kernel.sent,
     )
+
+
+def _wrapper_owner(wrapper, monkeypatch, cap, process):
+    monkeypatch.setattr(
+        wrapper,
+        "owned_process_group",
+        NS(OwnedGroup=NS(capture=lambda *a, **k: cap), Verdict=owned.Verdict),
+    )
+    monkeypatch.setattr(
+        wrapper,
+        "subprocess",
+        NS(Popen=lambda *a, **k: process, TimeoutExpired=subprocess.TimeoutExpired),
+    )
+    monkeypatch.setattr(
+        wrapper, "_memory_budget", lambda _: (NS(ceiling_mb=0, reason="fixture"), "fixture")
+    )
+
+
+def test_the_leader_is_not_reaped_before_the_terminal_census(wrapper, monkeypatch, tmp_path):
+    """Design test 3: poll()/wait() must not run while the pin is still needed."""
+    kernel = Kernel()
+    cap = kernel.cap()
+    kernel.corpses.add(kernel.leader)
+    kernel.rows[20] = (kernel.leader, kernel.leader, kernel.leader, "child")
+
+    class Process:
+        pid = 10
+
+        def poll(self):
+            assert kernel.sent, "poll() would reap the leader before the census"
+            return 0
+
+        def wait(self, **_):
+            assert kernel.sent, "wait() would reap the leader before the census"
+            return 0
+
+    _wrapper_owner(wrapper, monkeypatch, cap, Process())
+    monkeypatch.setenv("LOCAL_OPERATOR_SCRATCHPAD", str(tmp_path))
+    out = io.StringIO()
+    assert wrapper.run(["synthetic"], timeout=None, grace=0.05, stream=out) == 0, out.getvalue()
+    assert kernel.sent, "the run must have signalled before any reap"
+
+
+def test_sigchld_ignored_at_entry_is_refused_with_a_named_reason(monkeypatch):
+    """Design test 4: no corpse, no pin — refuse by name, never proceed."""
+    kernel = Kernel()
+    monkeypatch.setattr(
+        owned,
+        "signal",
+        NS(
+            SIGCHLD=signal.SIGCHLD, SIG_IGN=signal.SIG_IGN, getsignal=lambda _signum: signal.SIG_IGN
+        ),
+    )
+    cap = kernel.cap()
+    assert cap.last.status == "REFUSED", cap.last.reason
+    assert cap.last.refusal_class == "no_corpse_sigchld"
+    assert kernel.censuses == 0, "the premise is void before any census runs"
+
+
+def test_a_zombie_grandchild_does_not_hold_the_cleanup_unproven(wrapper, monkeypatch, tmp_path):
+    """Design test 8, the 0 arm: corpses hold no code, so they do not hold the run."""
+    kernel = Kernel()
+    cap = kernel.cap()
+    kernel.corpses.update({kernel.leader, 20})
+    kernel.rows[20] = (kernel.leader, kernel.leader, kernel.leader, "grandchild")
+
+    class Process:
+        pid = 10
+
+        def poll(self):
+            return 0
+
+        def wait(self, **_):
+            return 0
+
+    _wrapper_owner(wrapper, monkeypatch, cap, Process())
+    monkeypatch.setenv("LOCAL_OPERATOR_SCRATCHPAD", str(tmp_path))
+    out = io.StringIO()
+    assert wrapper.run(["synthetic"], timeout=None, grace=0.05, stream=out) == 0, out.getvalue()
+    # Nothing live: the run reports clean, and it did so without a signal.
+    assert kernel.sent == []

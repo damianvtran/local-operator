@@ -511,6 +511,9 @@ class OwnedGroup:
                 raise PinLost("reservation lost during proof")
             self.probe["proof"] = _identities(self.receipts, samples, members)
             self.probe["residuals"] = []
+            # Sticky: the record must be able to say HOW ownership was established
+            # even though the run's final verdict is the terminal OBSERVED_EMPTY.
+            self.probe["anchor"] = pin
             self.last = Verdict(
                 "VERIFIED",
                 "leader pin holds; members are the reservation's contents",

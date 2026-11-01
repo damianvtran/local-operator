@@ -61,23 +61,24 @@ def _refresh_points(wrapper, monkeypatch, constant):
     """Poll counts at which the loop refreshed authority, for a given constant."""
     world = World()
 
+    ticks = {"n": 0}
+
     class Clock:
         def monotonic(self):
             return world.clock()
 
         def sleep(self, seconds):
             world.now += seconds
+            ticks["n"] += 1  # one loop iteration, now that no poll drives it
 
     monkeypatch.setattr(wrapper, "time", Clock())
-
-    polls = {"count": 0}
 
     class Process:
         pid = 10
 
         def poll(self):
-            polls["count"] += 1
-            return 0 if polls["count"] >= 40 else None
+            # Never consulted before cleanup: the corpse is left unreaped.
+            return 0
 
         def wait(self, **_):
             return 0
@@ -97,7 +98,7 @@ def _refresh_points(wrapper, monkeypatch, constant):
     original = cap.refresh
 
     def counting(**kwargs):
-        points.append(polls["count"])
+        points.append(ticks["n"])
         return original(**kwargs)
 
     cap.refresh = counting
@@ -116,26 +117,23 @@ def _refresh_points(wrapper, monkeypatch, constant):
     )
     monkeypatch.setattr(wrapper, "_AUTHORITY_REFRESH_SECONDS", constant)
     assert wrapper.run(["synthetic"], timeout=None, grace=0.05, stream=io.StringIO()) == 0
-    return points, polls["count"]
+    return points, ticks["n"]
 
 
 def test_a_constant_longer_than_the_run_means_no_in_loop_refresh(wrapper, monkeypatch):
-    """Pin the constant: the loop must not refresh once per poll.
+    """Pin the constant: the loop must not refresh once per iteration.
 
-    With a cadence longer than the whole run, every refresh that happens belongs
-    to capture or final cleanup — none may occur while the loop is still polling.
+    The corpse is already pending when the loop starts, so the loop's whole life
+    is a single tick. With a cadence longer than that run, no refresh may be
+    attributed to tick 0 — every refresh in the list belongs to capture or to the
+    final cleanup, which run outside the loop.
     """
-    points, polls = _refresh_points(wrapper, monkeypatch, 3_600.0)
-    assert polls == 40
-    early = [point for point in points if point < 39]
-    assert early == [], early
+    points, iterations = _refresh_points(wrapper, monkeypatch, 3_600.0)
+    assert iterations >= 1
+    assert 0 not in points, points
 
 
 def test_the_constant_is_what_drives_the_cadence(wrapper, monkeypatch):
-    """The same run with a zero cadence refreshes immediately: the discriminator.
-
-    This is the mutation control for the first test: if the loop ignored the
-    constant, both cases would look alike and only one of the two can pass.
-    """
-    points, _polls = _refresh_points(wrapper, monkeypatch, 0.0)
-    assert [point for point in points if point < 5], points
+    """The discriminator: a zero cadence refreshes on the loop's FIRST tick."""
+    points, _iterations = _refresh_points(wrapper, monkeypatch, 0.0)
+    assert 0 in points, points

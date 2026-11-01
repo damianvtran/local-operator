@@ -262,6 +262,9 @@ def test_no_timeout_refusal_exits_without_unknown_signal_or_unbounded_wait(
         receipts={},
         last=bad if phase != "midrun" else owned.Verdict("VERIFIED", "acquired"),
         refresh=refresh,
+        # The loop asks the capability, never the child handle: terminal is a
+        # sampled fact now, so the fake answers through the same seam.
+        leader_terminal=lambda deadline: process.poll() is not None,
         signal=lambda *a, **k: pytest.fail("signal after proof failure"),
     )
     monkeypatch.setattr(
