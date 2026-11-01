@@ -363,12 +363,13 @@ def test_convergence_cues_reach_delegated_prompt(tmp_path, role, cue) -> None:
     silently rewrite an operator's role. The negative control proves that this
     receipt distinguishes starter rollout from an already-installed override.
     """
-    from types import SimpleNamespace
-
     from local_operator.harness.subagent import _effective_prompt
+    from tests.unit.session.test_session import ScriptedStream, make_session
 
     registry = AgentRegistry(tmp_path)
-    parent = SimpleNamespace(agent_registry=registry, active_team=None)
+    # Exercise the typed launch boundary with a real, offline Session rather
+    # than a look-alike that only happens to expose today's two consumed fields.
+    parent = make_session(tmp_path, ScriptedStream([]), agent_registry=registry)
     brief = "Synthetic bounded review task"
     packaged = seed(role)
     initial, profile = _effective_prompt(brief, role, parent)
