@@ -68,8 +68,10 @@ def main():
         case = root / mode
         case.mkdir(mode=0o700)
         observations, errors = {}, []
-        sink = Path(os.environ["LOCAL_OPERATOR_SCRATCHPAD"]) / "run-bounded-refusals"
-        previous_refusals = set(sink.glob("*.json"))
+        # The CURRENT record location: every spawned run writes <run_id>.spawn.json
+        # and <run_id>.exit.json here, not the pre-A2 refusal-only directory.
+        sink = Path(os.environ["LOCAL_OPERATOR_SCRATCHPAD"]) / "run-bounded-runs"
+        previous_records = set(sink.glob("*.json"))
         released = False
         def observed(self, **kwargs):
             nonlocal released
@@ -121,10 +123,15 @@ def main():
         outcome = {"mode": mode, "rc": rc, "expected": expected, "released": released,
                    "effective_memory_mb": budget.ceiling_mb, "budget_source": budget_source,
                    "observer_errors": errors, "groups": census, "identity_samples": facts,
-                   "refusals": [str(p) for p in set(sink.glob("*.json")) - previous_refusals]}
+                   "records": [str(p) for p in set(sink.glob("*.json")) - previous_records]}
         persist(case / "outcome.json", outcome)
         print(json.dumps(outcome), flush=True)
-        if (rc != expected or not released or errors or any(census.values()) or outcome["refusals"]
+        if not outcome["records"]:
+            # Loudly, not silently: a canary whose glob finds nothing is proving
+            # less than it reports, so this case fails instead of passing quietly.
+            print(json.dumps({"mode": mode, "missing_record_under": str(sink)}), flush=True)
+            return 1
+        if (rc != expected or not released or errors or any(census.values())
                 or any(f["exists"] is not False for f in facts.values())):
             return 1
     return 0

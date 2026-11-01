@@ -10,11 +10,14 @@ a relabelled path would still pass a string match.
 """
 from __future__ import annotations
 
+import ast
+import builtins
 import io
 import os
 import signal
 import subprocess
-from types import SimpleNamespace as NS
+from pathlib import Path
+from types import ModuleType, SimpleNamespace as NS
 
 import pytest
 
@@ -55,6 +58,11 @@ class World:
         self.rows.pop(pgid or self.pgid, None)
 
 
+#: Real kernel primitives: skip where the platform has no POSIX process groups.
+posix_only = pytest.mark.skipif(not hasattr(os, "killpg"),
+                                reason="POSIX process-group authority")
+
+
 def _free_process_group() -> int:
     """A process group that provably does not exist. Signal 0 delivers nothing."""
     for candidate in range(900_000, 900_400):
@@ -89,6 +97,7 @@ def _install(wrapper, monkeypatch, world, send, process):
     return cap
 
 
+@posix_only
 def test_real_killpg_esrch_is_observed_absent_not_a_refusal():
     """The classification under test is the REAL one; only the facts are fake."""
     pgid = _free_process_group()
@@ -107,6 +116,7 @@ def time_budget():
     return time.monotonic() + 1.0
 
 
+@posix_only
 def test_permission_error_from_the_checked_boundary_stays_a_refusal():
     world = World()
 
@@ -134,6 +144,38 @@ def test_a_passing_gate_keeps_rc_zero_when_the_group_is_already_gone(
     assert rc == 0, output.getvalue()
 
 
+def _foreign_birth_run(wrapper, monkeypatch, module):
+    """One run whose leader is reaped into a DIFFERENT birth before cleanup.
+
+    Returns ``(exit code, signal count)`` — the two values the deletion control
+    discriminates on. ``module`` is the real module or a mutated copy of it.
+    """
+    world = World()
+
+    def sender(pgid, signum):
+        """A delivered signal on a live group: it records, and the group goes away."""
+        world.calls.append((pgid, signum))
+        world.rows.pop(pgid, None)
+    cap = module.OwnedGroup.capture(
+        world.pgid, parent_pid=world.parent, census=world.census,
+        samples=world.samples, identity=world.identity, scheme=lambda: world.scheme,
+        clock=world.clock, signal_group=sender)
+
+    def reaped():
+        world.rows[world.pgid] = (world.parent, world.pgid, world.pgid, "FOREIGN")
+        return 0
+    monkeypatch.setattr(wrapper, "owned_process_group",
+                        NS(OwnedGroup=NS(capture=lambda *a, **k: cap), Verdict=module.Verdict))
+    monkeypatch.setattr(wrapper, "subprocess",
+                        NS(Popen=lambda *a, **k: NS(pid=10, poll=reaped, wait=lambda **_: 0),
+                           TimeoutExpired=subprocess.TimeoutExpired))
+    monkeypatch.setattr(wrapper, "_memory_budget",
+                        lambda _: (NS(ceiling_mb=0, reason="fixture"), "fixture"))
+    output = io.StringIO()
+    rc = wrapper.run(["synthetic"], timeout=None, grace=0.05, stream=output)
+    return rc, len(world.calls), output.getvalue()
+
+
 def test_deleting_the_identity_check_fails_on_exit_code_and_signal_count(wrapper, monkeypatch):
     """The mutation control: remove the identity check and BOTH assertions break.
 
@@ -141,20 +183,67 @@ def test_deleting_the_identity_check_fails_on_exit_code_and_signal_count(wrapper
     syscall is attempted and the passed gate reports 126 (cleanup unproven).
     Without it: the same run would signal a stranger (count 1) and return 0.
     """
+    rc, calls, output = _foreign_birth_run(wrapper, monkeypatch, owned)
+    assert calls == 0, output
+    assert rc == 126, (rc, output)
+
+
+COMPARISON_REMOVED = (
+    "return sample is not None and sample.is_birth(receipt.scheme, receipt.birth) is True",
+    "return sample is not None",
+)
+
+
+def test_mutating_the_birth_comparison_flips_exit_code_and_signal_count(wrapper, monkeypatch):
+    """B3: the control must fail on the NEGATIVE assertion, not merely pass positive.
+
+    Mutant applied to a COPY of the module: ``matching`` accepts any sample whose
+    pid is present, so a stale/reused birth compares equal. The healthy arm must
+    be (126, 0) and the mutant arm (0, 1); if the mutant ever matched the healthy
+    values, this test fails — that is the property the deletion controls rest on.
+    """
+    source = Path(owned.__file__).read_text()
+    before, after = COMPARISON_REMOVED
+    assert before in source, "the comparison moved; update this control rather than dropping it"
+    mutant = ModuleType("owned_process_group_mutant")
+    mutant.__file__ = owned.__file__
+    exec(compile(source.replace(before, after), "owned_process_group_mutant", "exec"),
+         mutant.__dict__)
+
+    healthy = _foreign_birth_run(wrapper, monkeypatch, owned)[:2]
+    mutated = _foreign_birth_run(wrapper, monkeypatch, mutant)[:2]
+    assert healthy == (126, 0), healthy
+    assert mutated == (0, 1), mutated
+
+
+def test_the_final_recensus_is_what_reports_an_unproven_cleanup(wrapper, monkeypatch):
+    """Q3(a): a group that outlives every kill must not be reported as clean.
+
+    The fake syscall accepts the signal but the member stays, so the ONLY place
+    that can notice is the final re-census before the wrapper returns. Delete it
+    and this run reports 0 — which is the mutant this test exists to catch.
+    """
     world = World()
-    cap = _install(wrapper, monkeypatch, world, lambda *a: world.calls.append(a), _fake_process(0))
-
-    def reaped():
-        world.rows[world.pgid] = (world.parent, world.pgid, world.pgid, "FOREIGN")
-        return 0
-
-    wrapper.subprocess = NS(Popen=lambda *a, **k: NS(pid=10, poll=reaped,
-                                                     wait=lambda **_: 0),
-                            TimeoutExpired=subprocess.TimeoutExpired)
+    _install(wrapper, monkeypatch, world, lambda *a: world.calls.append(a), _fake_process(0))
     output = io.StringIO()
     rc = wrapper.run(["synthetic"], timeout=None, grace=0.05, stream=output)
-    assert world.calls == [], "a lost identity must not reach the syscall"
+    assert world.calls, "the cleanup attempted at least one checked signal"
     assert rc == 126, (rc, output.getvalue())
+
+
+def test_the_signal_path_never_enrols_a_new_member(wrapper, monkeypatch):
+    """Q3(b): a member that appeared after capture is refused, never enrolled.
+
+    With the signal-time gate: REFUSED and no syscall. Change ``signal`` to enrol
+    and the same member is adopted and signalled (verdict VERIFIED, count 1).
+    """
+    world = World()
+    cap = world.capture(send=world.calls.append)
+    assert cap.last.status == "VERIFIED"
+    world.rows[11] = (world.pgid, world.pgid, world.pgid, "late")
+    verdict = cap.signal(signal.SIGTERM, deadline=time_budget())
+    assert verdict.status == "REFUSED", verdict.reason
+    assert world.calls == []
 
 
 def test_a_refused_cleanup_after_a_nonzero_gate_keeps_the_child_status(wrapper, monkeypatch):
@@ -171,3 +260,71 @@ def test_a_refused_cleanup_after_a_nonzero_gate_keeps_the_child_status(wrapper, 
                         lambda _: (NS(ceiling_mb=0, reason="fixture"), "fixture"))
     assert wrapper.run(["synthetic"], timeout=None, grace=0.05, stream=io.StringIO()) == 1
     assert world.calls == []
+
+
+def _load_without_killpg():
+    """The real module text, executed with an ``os`` that has no ``killpg``.
+
+    This is how Windows sees the module: the attribute is simply absent. Nothing
+    here touches the real ``os`` module or the host.
+    """
+    source = Path(owned.__file__).read_text()
+    real_import = builtins.__import__
+
+    class NoKillpg:
+        def __getattr__(self, name):
+            if name == "killpg":
+                raise AttributeError(name)
+            return getattr(os, name)
+
+    def fake_import(name, *args, **kwargs):
+        return NoKillpg() if name == "os" else real_import(name, *args, **kwargs)
+
+    namespace = {"__name__": "owned_process_group_no_killpg", "__file__": owned.__file__,
+                 "__builtins__": dict(builtins.__dict__, __import__=fake_import)}
+    exec(compile(source, "owned_process_group_no_killpg", "exec"), namespace)
+    return namespace
+
+
+def test_importing_without_the_signal_primitive_succeeds_and_refuses():
+    """W1: the primitive must not be evaluated at import time.
+
+    RED on the reviewed head: `signal_group=os.killpg` is a keyword default, so
+    this exec raised AttributeError while defining the class (CI
+    xplat-probe-windows, job 124804637518). Now it imports, and the unsupported
+    platform is a REFUSED verdict instead of an exception.
+    """
+    namespace = _load_without_killpg()
+    world = World()
+    cap = namespace["OwnedGroup"].capture(
+        world.pgid, parent_pid=world.parent, census=world.census, samples=world.samples,
+        identity=world.identity, scheme=lambda: "fixture", clock=world.clock)
+    assert cap.last.status == "VERIFIED"
+    verdict = cap.signal(signal.SIGTERM, deadline=time_budget())
+    assert verdict.status == "REFUSED", verdict.reason
+    assert "unsupported" in verdict.reason
+
+
+#: ``os`` attributes Windows does not have. A default expression naming one is
+#: evaluated at import, which is how W1 became an ImportError instead of a refusal.
+POSIX_ONLY_OS_ATTRIBUTES = frozenset(
+    {"killpg", "getpgid", "getsid", "fork", "forkpty", "setsid", "waitpid",
+     "setpgrp", "wait3", "wait4"})
+
+
+def test_no_posix_only_os_attribute_is_evaluated_in_a_default_expression():
+    """The structural guard for W1, for every default in the module, present and future.
+
+    ``os.listdir``/``os.stat`` defaults stay legal: they exist on every platform.
+    """
+    tree = ast.parse(Path(owned.__file__).read_text())
+    offenders = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            defaults = list(node.args.defaults) + [d for d in node.args.kw_defaults if d]
+            for default in defaults:
+                for sub in ast.walk(default):
+                    if (isinstance(sub, ast.Attribute) and isinstance(sub.value, ast.Name)
+                            and sub.value.id == "os" and sub.attr in POSIX_ONLY_OS_ATTRIBUTES):
+                        offenders.append((node.name, sub.attr))
+    assert offenders == [], offenders

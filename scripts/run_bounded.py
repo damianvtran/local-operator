@@ -217,9 +217,13 @@ def _record_dir() -> Path:
 
 
 def _safe_token(value: object, limit: int = 64) -> str:
-    """A filename/phase-safe token: no separators, no traversal, bounded length."""
-    token = re.sub(r"[^A-Za-z0-9._-]", "-", str(value))[:limit].strip(".-")
-    return token or "phase"
+    """A filename/phase-safe token: no separators, no traversal, bounded length.
+
+    Returns ``""`` on failure instead of a placeholder: a sentinel such as
+    ``"phase"`` would collide with a caller who legitimately chose
+    ``--run-id phase``, so each caller decides what an unusable token means.
+    """
+    return re.sub(r"[^A-Za-z0-9._-]", "-", str(value))[:limit].strip(".-")
 
 
 def _resolve_run_id(supplied: str | None) -> str:
@@ -228,7 +232,7 @@ def _resolve_run_id(supplied: str | None) -> str:
     raw = supplied if supplied is not None else os.environ.get(RUN_ID_ENV)
     if raw:
         token = _safe_token(raw)
-        if token != "phase":
+        if token:
             return token
     return "run-" + uuid.uuid4().hex[:12]
 
@@ -253,11 +257,14 @@ def _record_run(owner, stream, run_id: str, phase: str, *, command=None, verdict
     convention: ``<record dir>/<run_id>.<phase>.json``. No argv, no environment
     and no capability descriptor is written.
 
-    Nothing here may raise: this path can already be a safety failure, and a
-    second capture error must not replace the original one. The filesystem work is
-    bounded by ``_RECORD_BUDGET_SECONDS`` — the deadline is checked before each
-    step is STARTED, which is the most a cooperative bound can promise (an
-    in-flight ``fsync`` is not preemptible).
+    NOTHING HERE MAY RAISE: this path can already be a safety failure, and a second
+    capture error must not replace the original one — only warn.
+
+    A4: the record must never be the thing that hangs. The JSON body is serialised
+    before any filesystem call, and the deadline is then checked immediately before
+    each step that STARTS — mkdir, open, write, flush and fsync. An in-flight
+    syscall is not preemptible from user space, so the promise is "no new step
+    begins past the budget", which is exactly what this code does and no more.
     """
     import json
     from dataclasses import asdict
@@ -275,7 +282,6 @@ def _record_run(owner, stream, run_id: str, phase: str, *, command=None, verdict
         "wall_clock_end_utc": end_utc,
         "elapsed_seconds": elapsed,
         "exit_code": exit_code,
-        "monotonic": time.monotonic(),
         "actors": [asdict(receipt) for receipt in getattr(owner, "receipts", {}).values()],
         "believed": getattr(owner, "probe", {}) or {},
         "verdict": asdict(verdict) if verdict is not None else None,
@@ -284,10 +290,15 @@ def _record_run(owner, stream, run_id: str, phase: str, *, command=None, verdict
     }
     base = _record_dir()
     try:
+        # Serialise BEFORE any filesystem call: after this the write itself is the
+        # only step left, and every step that STARTS is checked against the budget.
+        body = json.dumps(payload, sort_keys=True)
         if time.monotonic() >= deadline:
             raise TimeoutError("record budget spent before write")
         base.mkdir(mode=0o700, parents=True, exist_ok=True)
-        path = base / f"{run_id}.{_safe_token(phase)}.json"
+        path = base / f"{run_id}.{_safe_token(phase) or 'record'}.json"
+        if time.monotonic() >= deadline:
+            raise TimeoutError("record budget spent before open")
         try:
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         except FileExistsError:
@@ -296,13 +307,20 @@ def _record_run(owner, stream, run_id: str, phase: str, *, command=None, verdict
             path = base / f"{run_id}.{_safe_token(phase)}.{os.getpid()}.json"
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w") as handle:
-            json.dump(payload, handle)
+            if time.monotonic() >= deadline:
+                raise TimeoutError("record budget spent before write")
+            handle.write(body)
+            if time.monotonic() >= deadline:
+                raise TimeoutError("record budget spent before flush")
             handle.flush()
             if time.monotonic() < deadline:
                 os.fsync(handle.fileno())
         _report(stream, f"[run_bounded] record ({phase}) run_id={run_id} path={path}")
         return path
-    except (OSError, ValueError, TimeoutError) as exc:
+    except (OSError, TypeError, ValueError) as exc:
+        # ValueError/TypeError: a payload that cannot be serialised is a bug, not a
+        # reason to take the run's status down; OSError (TimeoutError included, it
+        # IS an OSError) is the filesystem. Either way: warn and carry on.
         _report(stream, f"[run_bounded] record write failed ({phase}): "
                         f"{type(exc).__name__} errno={getattr(exc, 'errno', None)}")
         return None

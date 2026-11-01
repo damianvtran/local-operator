@@ -224,7 +224,15 @@ class OwnedGroup:
     @classmethod
     def capture(cls, leader, *, deadline, parent_pid=None, census=strict_census,
                 samples=None, identity=kernel_identity,
-                scheme=procstate.birth_scheme, clock=time.monotonic, signal_group=os.killpg):
+                scheme=procstate.birth_scheme, clock=time.monotonic, signal_group=None):
+        if signal_group is None:
+            # Resolved HERE, never as a keyword default: a default is evaluated when
+            # the class body runs — at IMPORT — and `os.killpg` does not exist on
+            # Windows, so `signal_group=os.killpg` turned an unsupported platform
+            # into an ImportError for every caller of this module (CI
+            # xplat-probe-windows, job 124804637518). None means "this platform has
+            # no checked signalling", which the signal path already refuses.
+            signal_group = getattr(os, "killpg", None)
         cap = cls(_SEAL, leader, census=census, samples=samples, identity=identity,
                   scheme=scheme, clock=clock, signal_group=signal_group)
         parent = os.getpid() if parent_pid is None else parent_pid
@@ -287,10 +295,16 @@ class OwnedGroup:
                 raise Unknown(self.initial_error)
             known = dict(self.receipts)
             before = self._samples(set(members) | set(known), deadline)
+            # Keep the record honest: what the LAST attempt saw, not only what the
+            # first capture did. Every refresh replaces these fields.
+            self.probe["members"] = list(members)
+            self.probe["observed"] = _observed(before, None)
             views = {p: self.identity(p) for p in members}
             # Same rule as `capture`: a scheme this build cannot produce is not
             # proof, and writing a scheme-less receipt would merely read as
             # "unreadable" one step later instead of refusing at the point of proof.
+            stamp = self.scheme()
+            self.probe["scheme"] = stamp or None
             if not stamp:
                 raise Unknown("birth scheme unavailable at enrolment")
             def matching(pid, receipt, sample):
@@ -323,6 +337,7 @@ class OwnedGroup:
                 if not progressed:
                     raise Unknown("member has no authenticated live ancestry")
             after = self._samples(set(members) | set(known), deadline)
+            self.probe["observed"] = _observed(before, after)
             for pid in members:
                 if (not matching(pid, known[pid], after.get(pid)) or self.identity(pid) != views[pid]
                         or views[pid][1:] != (self.pgid, self.sid)):
@@ -339,12 +354,19 @@ class OwnedGroup:
             self.last = Verdict("VERIFIED", "fresh complete enrolled group", tuple(members), 0.0)
         except Exception as exc:
             self.last = Verdict("REFUSED", type(exc).__name__ + ":" + str(exc), tuple(members))
+            self.probe["error"] = type(exc).__name__ + ":" + str(exc)
         return self.last
 
     def signal(self, signum, *, deadline):
         result = self.refresh(deadline=deadline, enrol=False)
         if result.status != "VERIFIED":
             return result
+        if self._send is None:
+            # A platform without the checked primitive: refuse, do not raise. Same
+            # bounded refusal the capability reports for any other unusable sender.
+            self.last = Verdict("REFUSED", "checked signal unsupported on this platform",
+                                result.members)
+            return self.last
         checked = self.clock()
         if checked >= deadline:
             self.last = Verdict("REFUSED", "expired before syscall", result.members)

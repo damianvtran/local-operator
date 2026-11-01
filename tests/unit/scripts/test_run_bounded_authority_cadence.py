@@ -49,7 +49,8 @@ def wrapper(memory_wrapper, monkeypatch, tmp_path):
     return memory_wrapper
 
 
-def test_the_census_runs_on_a_cadence_not_once_per_poll(wrapper, monkeypatch):
+def _refresh_points(wrapper, monkeypatch, constant):
+    """Poll counts at which the loop refreshed authority, for a given constant."""
     world = World()
 
     class Clock:
@@ -76,16 +77,42 @@ def test_the_census_runs_on_a_cadence_not_once_per_poll(wrapper, monkeypatch):
         10, parent_pid=1, census=world.census, samples=world.samples,
         identity=world.identity, scheme=lambda: "fixture", clock=world.clock,
         signal_group=world.send)
+    points = []
+    original = cap.refresh
+
+    def counting(**kwargs):
+        points.append(polls["count"])
+        return original(**kwargs)
+    cap.refresh = counting
     monkeypatch.setattr(wrapper, "owned_process_group",
                         NS(OwnedGroup=NS(capture=lambda *a, **k: cap), Verdict=owned.Verdict))
     monkeypatch.setattr(wrapper, "subprocess",
-                        NS(Popen=lambda *a, **k: Process(), TimeoutExpired=subprocess.TimeoutExpired))
+                        NS(Popen=lambda *a, **k: Process(),
+                           TimeoutExpired=subprocess.TimeoutExpired))
     monkeypatch.setattr(wrapper, "_memory_budget",
                         lambda _: (NS(ceiling_mb=0, reason="fixture"), "fixture"))
-
+    monkeypatch.setattr(wrapper, "_AUTHORITY_REFRESH_SECONDS", constant)
     assert wrapper.run(["synthetic"], timeout=None, grace=0.05, stream=io.StringIO()) == 0
-    assert polls["count"] == 40
-    # 40 polls: the per-poll sweep produced two censuses for each of them (>= 80).
-    # A cadence keeps the count well under the poll count, and the exact number
-    # is deliberately not pinned (capture and the final cleanup run their own).
-    assert world.censuses < polls["count"], (world.censuses, polls["count"])
+    return points, polls["count"]
+
+
+def test_a_constant_longer_than_the_run_means_no_in_loop_refresh(wrapper, monkeypatch):
+    """Pin the constant: the loop must not refresh once per poll.
+
+    With a cadence longer than the whole run, every refresh that happens belongs
+    to capture or final cleanup — none may occur while the loop is still polling.
+    """
+    points, polls = _refresh_points(wrapper, monkeypatch, 3_600.0)
+    assert polls == 40
+    early = [point for point in points if point < 39]
+    assert early == [], early
+
+
+def test_the_constant_is_what_drives_the_cadence(wrapper, monkeypatch):
+    """The same run with a zero cadence refreshes immediately: the discriminator.
+
+    This is the mutation control for the first test: if the loop ignored the
+    constant, both cases would look alike and only one of the two can pass.
+    """
+    points, _polls = _refresh_points(wrapper, monkeypatch, 0.0)
+    assert [point for point in points if point < 5], points

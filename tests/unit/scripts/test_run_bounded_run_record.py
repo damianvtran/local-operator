@@ -75,9 +75,24 @@ def _records(tmp_path, suffix):
     return sorted((tmp_path / "run-bounded-runs").glob("*.%s.json" % suffix))
 
 
+class FrozenClock:
+    """An explicit, non-advancing clock: elapsed time is 0.0, not "approximately".
+
+    Pinning the elapsed assertion to a frozen clock keeps the test deterministic
+    on a loaded host without inventing a tolerance constant.
+    """
+
+    def monotonic(self):
+        return 1_000.0
+
+    def sleep(self, _seconds):
+        return None
+
+
 def test_a_successful_run_writes_spawn_and_exit_records(wrapper, monkeypatch, tmp_path):
     world = World()
     _install(wrapper, monkeypatch, world.capture())
+    monkeypatch.setattr(wrapper, "time", FrozenClock())
     output = io.StringIO()
     assert wrapper.run(["synthetic"], timeout=None, grace=0.05, stream=output,
                        run_id="qa-1234") == 0, output.getvalue()
@@ -97,7 +112,7 @@ def test_a_successful_run_writes_spawn_and_exit_records(wrapper, monkeypatch, tm
     assert exit_record["run_id"] == "qa-1234"
     assert exit_record["exit_code"] == 0
     assert exit_record["wall_clock_end_utc"].endswith("Z")
-    assert exit_record["elapsed_seconds"] >= 0
+    assert exit_record["elapsed_seconds"] == 0.0
     assert exit_record["verdict"]["status"] in {"VERIFIED", "OBSERVED_EMPTY", "SIGNALED"}
     assert "span run_id=qa-1234 wrapper_pid=" in output.getvalue()
     assert "record (exit)" in output.getvalue()
@@ -132,6 +147,8 @@ def test_run_id_comes_from_the_flag_then_the_environment(wrapper, monkeypatch):
     # Path traversal and separators cannot reach the filename.
     assert wrapper._resolve_run_id("../../etc/passwd") == "etc-passwd"
     assert wrapper._resolve_run_id("x" * 200) == "x" * 64
+    # N1: "phase" is a legal caller id — the old placeholder sentinel ate it.
+    assert wrapper._resolve_run_id("phase") == "phase"
 
 
 def test_the_flag_reaches_the_run_contract(wrapper, monkeypatch):
