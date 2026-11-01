@@ -381,7 +381,7 @@ def test_owner_audit_failing_log_sink_preserves_refusal_without_sensitive_stderr
         def flush(self):
             pass
 
-    class FailingHandler(logging.StreamHandler):
+    class FailingHandler(logging.StreamHandler[BrokenStream]):
         def emit(self, record):
             active_exceptions.append(sys.exception())
             try:
