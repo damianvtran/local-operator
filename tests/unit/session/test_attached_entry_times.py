@@ -82,6 +82,23 @@ def _viewer(tmp_path: Path) -> AttachedSession:
     return viewer
 
 
+@pytest.mark.parametrize("human", [None, "Please investigate the tool warning"])
+def test_nonwindow_opener_skips_legacy_recovery(tmp_path: Path, human: str | None) -> None:
+    from local_operator.harness.chrome_prompts import (
+        MISSING_ARGUMENTS_RECOVERY_PROMPT,
+        REPEATED_TOOL_ERRORS_RECOVERY_PROMPT,
+    )
+
+    viewer = _viewer(tmp_path)
+    viewer._history = [  # noqa: SLF001 — exercising the non-window facade path
+        Message.user(MISSING_ARGUMENTS_RECOVERY_PROMPT),
+        Message.user(REPEATED_TOOL_ERRORS_RECOVERY_PROMPT),
+    ]
+    if human:
+        viewer._history.append(Message.user(human))  # noqa: SLF001
+    assert viewer.history_opener_text == (human or "")
+
+
 @pytest.mark.asyncio
 async def test_the_initial_window_installs_the_owners_join(tmp_path: Path) -> None:
     viewer = _viewer(tmp_path)

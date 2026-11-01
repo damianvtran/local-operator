@@ -9184,10 +9184,9 @@ class RelayServer:
         which is why the move's step calls this method rather than reaching for
         ``_engage_locally`` beside it.
 
-        Both callers go through ``_engage_locally``, the single entry point every
-        engage path in the product uses (a viewer's first message, a wake,
-        ``lop exec``), so INV-1's guard and the lease arbitration that decides WHO
-        RUNS (``launch.engage_runtime``) apply here unchanged. A caller that arrives
+        Both callers go through ``_engage_locally``, which delegates to the
+        canonical ``launch.engage_runtime`` arbitration. INV-1's guard and the
+        transcript lease that decides WHO RUNS therefore apply here unchanged. A caller that arrives
         after a runtime already holds the lease therefore loses there — by joining
         the winner or by a sentence — rather than by a check of its own.
 
@@ -10304,10 +10303,12 @@ class RelayServer:
         two callers (create, engage) can put the sentence in their own frame
         without either of them inventing a second error vocabulary.
 
-        ``cwd`` defaults to this device's home when the caller supplied none —
-        §5.3 step 2: an omitted working directory means "the peer decides", and
-        the peer's decision is its own home rather than the requesting
-        device's path, which would not exist here.
+        ``cwd=""`` means "the peer decides" (§5.3 step 2), NOT an explicit
+        request for this device's home. Preserve that sentinel to the spawn
+        boundary: converting omission to HOME here destroys a recorded move,
+        because the resolver must honour a deliberate HOME request unchanged.
+        The spawn boundary chooses the recorded destination first, and home
+        only when no directory has been recorded or explicitly requested.
 
         ``initial_model`` is the BIRTH SAMPLE the desktop's draft chip already
         sends (``launch.WarmErrand.initial_model``), and a create that names an
@@ -10337,12 +10338,11 @@ class RelayServer:
             errand = WarmErrand(initial_model=initial_model)
         if not (self.root / "sessions" / session_id).is_dir():
             return f"{self._own_label()} does not hold a session {session_id}"
-        started = cwd or str(Path.home())
         try:
             asyncio.run(
                 engage(
                     session_id,
-                    started,
+                    cwd,
                     # Delivers nothing: warming is the whole job here, and the
                     # runtime materialises what it needs when real work arrives.
                     errand,

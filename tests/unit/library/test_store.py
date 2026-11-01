@@ -465,6 +465,9 @@ def test_thumbnail_liveness_never_hashes_the_source(tmp_path, monkeypatch) -> No
 
     from local_operator.library.store import thumb_source_stamp
 
+    # This store-only test owns the synthetic thumbnail row. Starting the real
+    # indexer during listing lets its startup producer overwrite that same width.
+    monkeypatch.setattr(service, "ensure_started", lambda _root: None)
     root = config_root(monkeypatch, tmp_path)
     image = root.parent / "photo.png"
     image.write_bytes(png())

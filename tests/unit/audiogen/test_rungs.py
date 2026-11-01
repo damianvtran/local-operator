@@ -757,12 +757,11 @@ async def test_elevenlabs_sound_effect_body_carries_the_required_duration():
     assert body["duration_seconds"] == 3.5
     assert body["prompt_influence"] == 0.7
     assert body["loop"] is True
-    assert body["model_id"] == "eleven_text_to_sound_v2"
-    # 3.5 s is FOUR started seconds: the estimate prices whole units, the same
-    # count the ledger row carries (a fractional 3.5 × rate under-quoted it).
-    assert outcome.cost_usd == pytest.approx(0.002 * 4)
-    assert outcome.cost_source == "rate_table"
-    assert outcome.billing_basis == "estimated"
+    assert body["model_id"] == "eleven_text_to_sound_v3"
+    # A v2 rate must not masquerade as verified v3 BYOK spending.
+    assert outcome.cost_usd is None
+    assert outcome.cost_source is None
+    assert outcome.billing_basis is None
 
 
 @pytest.mark.asyncio
@@ -1328,3 +1327,57 @@ async def test_byok_legs_carry_a_duration_read_from_the_bytes(direction):
     asset = outcome.assets[0]
     assert asset.duration_s is not None, "a BYOK asset without a duration renders no player"
     assert asset.duration_s == pytest.approx(expected, abs=1e-9), "the bytes are the source"
+
+
+@pytest.mark.parametrize(
+    "duration,amount,units",
+    [(0.5, 0.001, 1), (1.25, 0.0025, 2), (2.1, 0.0042, 3), (0, 0, 0)],
+)
+def test_exact_billable_duration_survives_receipt_and_handle(duration, amount, units):
+    # Match the real backend receipt fields independently: compatibility units
+    # must not replace the exact fractional quantity or reconstruct the money.
+    payload = {
+        "cost": {
+            "amount_usd": amount,
+            "basis": "billed",
+            "units": units,
+            "unit": "second",
+            "billable_duration_seconds": duration,
+            "price_version": "sound-effects-requested-seconds@2026-11-01",
+            "usage_record_id": "synthetic-usage",
+        }
+    }
+    handle = CancelHandle()
+    audio_rungs._observe_cost(handle, payload, terminal=True)
+    normalized = audio_rungs._cost_from_payload(payload)
+    assert normalized is not None and handle.cost == normalized
+    assert normalized["billable_duration_seconds"] == duration
+    assert normalized["units"] == units
+    assert normalized["amount_usd"] == amount
+    assert normalized["price_version"] == payload["cost"]["price_version"]
+    assert normalized["usage_record_id"] == "synthetic-usage"
+    assert normalized["basis"] == "billed" and handle.terminal
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [None, True, False, -0.5, float("nan"), float("inf"), float("-inf"), "not-a-duration"],
+)
+def test_invalid_optional_billable_duration_is_omitted(invalid):
+    cost = audio_rungs._cost_from_payload(
+        {"cost": {"amount_usd": 0.0025, "basis": "billed", "billable_duration_seconds": invalid}}
+    )
+    assert cost is not None and cost["amount_usd"] == 0.0025
+    assert "billable_duration_seconds" not in cost
+
+
+def test_historical_and_unknown_costs_do_not_invent_billable_duration():
+    legacy = audio_rungs._cost_from_payload({"cost": {"amount_usd": 0.002, "units": 1}})
+    assert legacy is not None and "billable_duration_seconds" not in legacy
+    assert audio_rungs._cost_from_payload({"cost": None}) is None
+    assert (
+        audio_rungs._cost_from_payload(
+            {"cost": {"amount_usd": None, "billable_duration_seconds": 1.25}}
+        )
+        is None
+    )

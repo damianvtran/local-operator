@@ -1899,7 +1899,7 @@ async def _engaged_outcome(
     try:
         outcome = await engage_runtime(
             session_id,
-            cwd or os.path.expanduser("~"),
+            cwd,
             PeerMessageErrand(
                 text=text,
                 mode=mode,
