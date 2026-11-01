@@ -1114,6 +1114,87 @@ def _document_fields(*, seed: str = "a") -> dict[str, Any]:
     return SkillDocument.from_json(data).to_json()
 
 
+@pytest.mark.parametrize("landed", [False, True])
+def test_unpinned_org_crash_recovers_verbatim(tmp_path: Path, landed: bool) -> None:
+    class CrashTransport(FakeTransport):
+        async def preview(self, *, document, expected_revision, budget):
+            self.preview_calls.append(
+                {"document": dict(document), "expected_revision": expected_revision}
+            )
+            return {
+                "revision": "rev-a",
+                "status": "unchanged",
+                "document": dict(document),
+                "unresolved": [],
+                "changes": [],
+                "transform": {"model": "not_applied"},
+            }
+
+        async def commit(self, **kwargs):
+            raise RuntimeError("simulated process death after intent persistence")
+
+    args = dict(
+        kind="skill",
+        captured_local=_document_fields(),
+        accepted=_document_fields(),
+        current_local=_document_fields(seed="b"),
+        remote_latest=_document_fields(),
+        org_skill=True,
+    )
+    with pytest.raises(RuntimeError, match="simulated process death"):
+        asyncio.run(_run(tmp_path, transport=CrashTransport(), **args))
+    record = _stored(Outbox(tmp_path), "op1")
+    assert record.state == "pending" and record.intent is not None
+    saved = dict(record.intent)
+    healthy = FakeTransport(fail_commit=RemoteRevisionChanged() if landed else None)
+    replay, _, _ = asyncio.run(_run(tmp_path, transport=healthy, **args))
+    assert replay.state == ("conflict" if landed else "pushed")
+    assert healthy.preview_calls == []
+    assert healthy.commit_calls[0]["document"] == saved["document"]
+    assert healthy.commit_calls[0]["expected_revision"] == saved["expected_revision"]
+
+
+def test_concurrent_org_workers_do_not_fence_or_replay_active_dispatch(tmp_path: Path) -> None:
+    async def run():
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        class SlowTransport(FakeTransport):
+            async def preview(self, *, document, expected_revision, budget):
+                return {
+                    "revision": "rev-a",
+                    "status": "unchanged",
+                    "document": dict(document),
+                    "unresolved": [],
+                    "changes": [],
+                    "transform": {"model": "not_applied"},
+                }
+
+            async def commit(self, **kwargs):
+                entered.set()
+                await release.wait()
+                return await super().commit(**kwargs)
+
+        args = dict(
+            kind="skill",
+            captured_local=_document_fields(),
+            accepted=_document_fields(),
+            current_local=_document_fields(seed="b"),
+            remote_latest=_document_fields(),
+            org_skill=True,
+        )
+        first_transport, second_transport = SlowTransport(), FakeTransport()
+        task = asyncio.create_task(_run(tmp_path, transport=first_transport, **args))
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        second, _, _ = await _run(tmp_path, transport=second_transport, **args)
+        assert second.state == "skipped" and second.reason == "operation-in-progress"
+        assert not second_transport.preview_calls and not second_transport.commit_calls
+        release.set()
+        first, _, _ = await task
+        assert first.state == "pushed" and len(first_transport.commit_calls) == 1
+
+    asyncio.run(run())
+
+
 def test_unpinned_org_commit_timeout_replays_after_restart(tmp_path: Path) -> None:
     class OrgTransport(FakeTransport):
         async def preview(self, *, document, expected_revision, budget):
