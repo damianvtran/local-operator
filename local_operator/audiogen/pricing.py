@@ -21,10 +21,10 @@ ElevenLabs bills credits against a plan, OpenAI bills tokens, and both can
 change their price pages without changing this table — which is exactly why
 :data:`PRICE_VERSION` exists.
 
-**What is deliberately NOT here.** Radient rates: the platform's quote and
-settled figures arrive per request on the wire, and a client-side copy of the
-server's prices would be a second source of truth for money the server already
-states.
+**Radient estimates are approval-only.** The sound-effects row estimates the
+published platform policy for approval summaries, never as a receipt or
+settlement fallback. Radient's authoritative quote and settled figures arrive
+per request on the wire; this table must not replace money the server states.
 """
 
 from __future__ import annotations
