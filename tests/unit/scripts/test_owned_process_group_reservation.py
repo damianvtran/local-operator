@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import signal
 import subprocess
 import sys
@@ -30,11 +31,15 @@ SCHEME = "reservation-fixture"
 class Kernel:
     """Synthetic /proc: rows of (parent, pgid, sid, birth), plus a corpse flag."""
 
-    def __init__(self, leader=10, parent=1, birth="leader"):
-        self.leader, self.parent = leader, parent
+    def __init__(self, leader=10, parent=None, birth="birth"):
+        # C1: the witness only means anything if WE are the child's parent, so the
+        # fixtures model a real child of this process. Tests that need the refusal
+        # arm pass an explicit foreign parent.
+        self.leader = leader
+        self.parent = os.getpid() if parent is None else parent
         self.rows = {
-            parent: (0, parent, parent, "creator"),
-            leader: (parent, leader, leader, birth),
+            self.parent: (0, self.parent, self.parent, "creator"),
+            leader: (self.parent, leader, leader, birth),
         }
         self.corpses: set[int] = set()
         self.now = 0.0
@@ -115,14 +120,31 @@ def test_a_zombie_leader_holds_the_pin_and_its_members_are_ours():
     assert {row["pid"] for row in cap.probe["proof"]} == {10, 20}
 
 
-def test_a_reaped_leader_is_pin_lost_and_nothing_is_signalled():
+def test_a_missing_leader_row_is_unreadable_not_pin_lost():
+    """CONTRACT: unreadable column. A missing map entry is the READER failing.
+
+    It is not proof of a reap, and calling it `pin_lost` was the collapse the
+    contract forbids: only a readable foreign birth proves loss.
+    """
     kernel = Kernel()
     cap = kernel.cap()
     kernel.rows[20] = (kernel.leader, kernel.leader, kernel.leader, "grandchild")
-    del kernel.rows[kernel.leader]  # reaped: the number is no longer reserved
+    del kernel.rows[kernel.leader]
     verdict = cap.signal(signal.SIGKILL, deadline=kernel.clock() + 5.0)
     assert verdict.status == "REFUSED", verdict.reason
-    assert verdict.refusal_class == "pin_lost"
+    assert verdict.refusal_class == "unproven", verdict.reason
+    assert kernel.sent == []
+
+
+def test_a_readable_foreign_birth_is_pin_lost_and_nothing_is_signalled():
+    """CONTRACT: reaped-gone / readable foreign birth -> REFUSED(pin_lost), every column."""
+    kernel = Kernel()
+    cap = kernel.cap()
+    kernel.rows[20] = (kernel.leader, kernel.leader, kernel.leader, "grandchild")
+    kernel.rows[kernel.leader] = (kernel.parent, kernel.leader, kernel.leader, "foreign")
+    verdict = cap.signal(signal.SIGKILL, deadline=kernel.clock() + 5.0)
+    assert verdict.status == "REFUSED", verdict.reason
+    assert verdict.refusal_class == "pin_lost", verdict.reason
     assert kernel.sent == []
 
 
@@ -134,13 +156,12 @@ def test_a_live_leader_is_live_leader_only_and_still_signals():
     assert verdict.anchor == "leader-live"
 
 
-def test_c1_a_zombie_leader_the_census_cannot_see_is_refused_not_assumed():
-    """No visible corpse means no claimed reservation — reached, not skipped.
+def test_a_zombie_leader_omitted_from_the_census_still_signals():
+    """CONTRACT: held-zombie + live members -> VERIFIED+SIGNAL.
 
-    The member has to EXIST: an empty census answers OBSERVED_EMPTY before the
-    visibility arm is ever consulted, which is how the earlier version of this
-    test passed without testing anything. Here the grandchild is listed and only
-    the leader is invisible, which is the platform state the arm exists for.
+    Census residence is NOT the predicate: a corpse the enumeration omits while it
+    lists the live grandchild is a diagnostic gap, not lost authority. The held
+    creation receipt is the witness.
     """
     kernel = Kernel()
     cap = kernel.cap()
@@ -153,9 +174,26 @@ def test_c1_a_zombie_leader_the_census_cannot_see_is_refused_not_assumed():
 
     cap.census = without_leader
     verdict = cap.signal(signal.SIGKILL, deadline=kernel.clock() + 5.0)
+    assert verdict.status == "SIGNALED", verdict.reason
+    assert verdict.anchor == "leader-reservation"
+
+
+def test_the_same_omitted_corpse_with_a_foreign_birth_still_refuses():
+    """The discriminating arm: the SAME census, a readable foreign birth -> pin_lost."""
+    kernel = Kernel()
+    cap = kernel.cap()
+    kernel.corpses.add(kernel.leader)
+    kernel.rows[20] = (kernel.leader, kernel.leader, kernel.leader, "grandchild")
+    kernel.rows[kernel.leader] = (kernel.parent, kernel.leader, kernel.leader, "foreign")
+    original = kernel.census
+
+    def without_leader(pgid, deadline):
+        return [pid for pid in original(pgid, deadline) if pid != kernel.leader]
+
+    cap.census = without_leader
+    verdict = cap.signal(signal.SIGKILL, deadline=kernel.clock() + 5.0)
     assert verdict.status == "REFUSED", verdict.reason
-    assert verdict.refusal_class == "pin_lost"
-    assert "no visible reservation on this platform" in verdict.reason
+    assert verdict.refusal_class == "pin_lost", verdict.reason
     assert kernel.sent == []
 
 
@@ -225,8 +263,8 @@ def test_c4_pid_one_and_our_own_group_are_never_signalled(monkeypatch):
 #: comment claimed. The slice below runs from the marker to the end of the
 #: residency block, and nothing outside it.
 RESIDENCY_REMOVED = (
-    "        # RESIDENCY RE-CHECK IMMEDIATELY BEFORE THE SYSCALL -- THE C3 MUTATION",
-    "        # MUTANT: the residency re-check is deleted here; refresh keeps its own.\n"
+    "        # WITNESS RE-CHECK IMMEDIATELY BEFORE THE SYSCALL -- THE MUTATION ANCHOR",
+    "        # MUTANT: the pre-send witness re-check is deleted here; refresh keeps its own.\n"
     "        if False:\n"
     "            pass",
 )
@@ -236,7 +274,7 @@ def _mutant_source(source):
     """Return `source` with ONLY the signal-path residency check deleted."""
     before, after = RESIDENCY_REMOVED
     marker = source.index(before)
-    check = source.index("if self._leader_reservation(deadline) is None:", marker)
+    check = source.index("        final_state, _ = self._leader_witness(deadline)", marker)
     tail = source.index("            return self.last\n", check) + len(
         "            return self.last\n"
     )
@@ -266,7 +304,13 @@ def test_c3_removing_the_residency_re_check_lets_a_stranger_die():
     original = kernel.samples
 
     def reaped_mid_proof(pids):
-        if kernel.sent == [] and capped["calls"] >= 4:
+        # The witness disappears EXACTLY at the pre-send re-check: every earlier
+        # sample is real, so only that one check can catch it. Anchored on the
+        # check's semantics, not on a call count.
+        # Semantic anchor: the witness is unreadable only when the LEADER is asked
+        # about on its own, after the proof has already been made once. A call-count
+        # anchor drifts every time the predicate asks for one more sample.
+        if kernel.sent == [] and pids == [kernel.leader] and capped["calls"] >= 3:
             return {}
         capped["calls"] += 1
         return original(pids)
@@ -275,7 +319,9 @@ def test_c3_removing_the_residency_re_check_lets_a_stranger_die():
     cap.samples = reaped_mid_proof
     verdict = cap.signal(signal.SIGKILL, deadline=kernel.clock() + 5.0)
     assert verdict.status == "REFUSED", verdict.reason
-    assert verdict.refusal_class == "pin_lost"
+    # An unreadable witness at the last instant is the READER failing: `unproven`,
+    # never `pin_lost` (that word is reserved for a readable foreign birth).
+    assert verdict.refusal_class == "unproven", verdict.reason
     assert kernel.sent == []
 
     mutant = _mutant()
@@ -471,11 +517,12 @@ def test_a_darwin_shaped_identity_provider_does_not_refuse_the_incident_shape():
     assert kernel.sent == [(10, signal.SIGKILL)]
 
 
-def test_a_member_that_exits_between_census_and_sample_is_recorded_not_refused():
-    """The union keeps amnesty: a vanished member is gone, not unproven.
+def test_a_member_sample_that_cannot_be_read_refuses_as_unproven():
+    """CONTRACT: unreadable column — an unresolved member sample is not absence.
 
-    Refusing here would report a healthy gate as a cleanup failure, which is the
-    opposite of what the union's "recorded, not set-equal" contract promises.
+    "The member exited" and "we could not read the member" are different facts,
+    and only the first is allowed to be non-blocking. Inferring departure from a
+    missing sample is how an unobserved member becomes false absence.
     """
     kernel = Kernel()
     cap = kernel.cap()
@@ -483,13 +530,39 @@ def test_a_member_that_exits_between_census_and_sample_is_recorded_not_refused()
     original = kernel.samples
 
     def vanishing(pids):
-        # 20 is seen by the census, then exits before the sample is taken.
         return {pid: sample for pid, sample in original(pids).items() if pid != 20}
 
     cap.samples = vanishing
     verdict = cap.signal(signal.SIGKILL, deadline=kernel.clock() + 5.0)
-    assert verdict.status == "SIGNALED", verdict.reason
-    assert cap.probe.get("vanished") == [20]
+    assert verdict.status == "REFUSED", verdict.reason
+    assert verdict.refusal_class == "unproven", verdict.reason
+    assert kernel.sent == []
+
+
+def test_a_member_seen_by_one_census_and_gone_from_the_next_is_recorded():
+    """The UNION's amnesty survives: a pid seen once was inside our number.
+
+    Distinct from the case above: here the member is genuinely gone between the
+    two CENSUSES (which the union tolerates and records), not unreadable at
+    sample time.
+    """
+    kernel = Kernel()
+    cap = kernel.cap()
+    kernel.rows[20] = (kernel.leader, kernel.leader, kernel.leader, "grandchild")
+    scans = {"n": 0}
+    original = kernel.census
+
+    def two_scans(pgid, deadline):
+        scans["n"] += 1
+        rows = original(pgid, deadline)
+        if scans["n"] == 2:
+            return [pid for pid in rows if pid != 20]
+        return rows
+
+    cap.census = two_scans
+    verdict = cap.signal(signal.SIGKILL, deadline=kernel.clock() + 5.0)
+    assert verdict.status in {"SIGNALED", "OBSERVED_EMPTY"}, verdict.reason
+    assert 20 in cap.probe["members"]
 
 
 def test_a_run_without_a_timeout_no_longer_compares_against_none(wrapper, monkeypatch, tmp_path):
@@ -646,3 +719,33 @@ def test_a_terminal_observed_empty_still_records_the_anchor_and_the_proof(
     assert {row["pid"] for row in ownership["proof"]} == {10, 20}, ownership["proof"]
     # The terminal verdict owns no declined set of its own, and must not inherit one.
     assert ownership["residuals"] == [], ownership["residuals"]
+
+
+def test_c1_a_child_that_is_not_ours_refuses_as_not_exclusive_reaper():
+    """C1: exclusive reap ownership is ESTABLISHED, or named as absent.
+
+    The witness only means something if nobody else can consume the corpse. A
+    leader whose kernel-recorded parent is another process cannot be witnessed by
+    us, and the refusal names the reason instead of implying a proof we lack.
+    """
+    kernel = Kernel(parent=1)  # observe a foreign parent, not our own pid
+    cap = kernel.cap()
+    # ACQUISITION refuses: there is no witness to hold, so nothing downstream may
+    # pretend to have proved anything. Asserted on the capture verdict, because a
+    # later `signal` would only restate that no receipt exists.
+    assert cap.last.status == "REFUSED", cap.last.reason
+    assert cap.last.refusal_class == "not_exclusive_reaper", cap.last.reason
+    assert kernel.sent == []
+
+
+def test_c2_same_second_reuse_is_encoded_unsupported_not_waived():
+    """C2: the pin cannot distinguish a same-second reuse, and says so.
+
+    `ps` lstart has second resolution, so two processes with the same pid, parent
+    and second collide in the birth token. The honest outcome is a named
+    UNSUPPORTED, not a silent claim of safety and not a fabricated discriminator.
+    """
+    assert owned.SECOND_RESOLUTION_REUSE == "UNSUPPORTED"
+    doc = owned.__doc__ or ""
+    assert "SECOND-RESOLUTION" in doc.upper(), "the scope must be documented"
+    assert "does not cover" in doc.lower(), "C3: say what the pin does NOT cover"

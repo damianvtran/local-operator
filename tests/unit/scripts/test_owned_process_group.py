@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import signal
 
 import pytest
@@ -15,8 +16,8 @@ class Fake:
         #: birth is `str | None` on purpose: an unreadable birth is a fact the
         #: capability has to refuse, so the fixture must be able to express it.
         self.rows: dict[int, tuple[int, int, int, str | None, bool]] = {
-            1: (0, 1, 1, "wrapper", False),
-            10: (1, 10, 10, "leader", False),
+            os.getpid(): (0, os.getpid(), os.getpid(), "wrapper", False),
+            10: (os.getpid(), 10, 10, "leader", False),
         }
         self.calls = []
         self.now = 0.0
@@ -37,7 +38,7 @@ class Fake:
     def cap(self):
         return owned.OwnedGroup.capture(
             10,
-            parent_pid=1,
+            parent_pid=os.getpid(),
             census=self.census,
             samples=self.samples,
             identity=self.identity,
@@ -48,28 +49,37 @@ class Fake:
         )
 
 
-@pytest.mark.parametrize("case", ["mismatch", "mixed", "unreadable", "reaped", "expired"])
-def test_refuses_when_the_reservation_is_not_provably_ours(monkeypatch, case):
-    """The pin, not the membership, is what authority rests on.
-
-    Each case destroys the RESERVATION rather than a member's ancestry: a birth
-    that is not the receipt's, a group/session the member does not share, an
-    unreadable birth, a reaped leader (number released), and an expired budget.
-    """
+@pytest.mark.parametrize(
+    "case,refusal_class",
+    [
+        # CONTRACT: a readable FOREIGN birth is reuse -- the world changed.
+        ("mismatch", "pin_lost"),
+        # Everything else is the READER failing to read, and must not be spelled
+        # as `pin_lost`: a missing row is not proof of a reap, and `is_birth(...)
+        # is None` is not False.
+        ("missing-row", "unproven"),
+        ("mixed", "unproven"),
+        ("unreadable", "unproven"),
+        ("expired", "unproven"),
+    ],
+)
+def test_refuses_with_the_class_the_contract_assigns(monkeypatch, case, refusal_class):
     fake = Fake()
     monkeypatch.setattr(owned.procstate, "birth_scheme", lambda: "fixture")
     cap = fake.cap()
     if case == "mismatch":
-        fake.rows[10] = (1, 10, 10, "foreign", False)
-    if case == "mixed":
-        fake.rows[10] = (1, 10, 99, "leader", False)
-    if case == "unreadable":
-        fake.rows[10] = (1, 10, 10, None, False)
-    if case == "reaped":
+        fake.rows[10] = (os.getpid(), 10, 10, "foreign", False)
+    if case == "missing-row":
         del fake.rows[10]
+    if case == "mixed":
+        fake.rows[10] = (os.getpid(), 10, 99, "leader", False)
+    if case == "unreadable":
+        fake.rows[10] = (os.getpid(), 10, 10, None, False)
     if case == "expired":
         fake.now = 6
-    assert cap.signal(signal.SIGKILL, deadline=5).status == "REFUSED"
+    verdict = cap.signal(signal.SIGKILL, deadline=5)
+    assert verdict.status == "REFUSED", verdict.reason
+    assert verdict.refusal_class == refusal_class, verdict.reason
     assert fake.calls == []
 
 
@@ -127,21 +137,33 @@ def test_unknown_facts_cannot_be_authority(monkeypatch, failure):
     assert fake.calls == []
 
 
-def test_an_empty_complete_census_is_absence_not_a_refusal(monkeypatch):
-    """A: the enumeration answered and found nothing — the run finished.
+def test_an_empty_complete_census_under_a_held_witness_is_absence(monkeypatch):
+    """CONTRACT: held (zombie) + empty-complete -> OBSERVED_ABSENT.
 
-    Refusing here refused every healthy run whose child had already exited, which
-    is what cb5f53c8 did. A reaped-reservation refusal belongs where a census still
-    holds members but the pin is gone; that case is
-    `test_refuses_when_the_reservation_is_not_provably_ours[reaped]`.
+    The witness must still be READABLE: the leader is a retained corpse, the census
+    completed and listed no live member. Deleting the leader row instead is the
+    unreadable column (next test), and the two must never collapse.
     """
+    fake = Fake()
+    monkeypatch.setattr(owned.procstate, "birth_scheme", lambda: "fixture")
+    cap = fake.cap()
+    fake.rows[10] = (os.getpid(), 10, 10, "leader", True)  # retained corpse
+    fake.rows.pop(20, None)
+    verdict = cap.signal(signal.SIGKILL, deadline=5)
+    assert verdict.status == "OBSERVED_EMPTY", verdict.reason
+    assert verdict.refusal_class is None
+    assert fake.calls == []
+
+
+def test_a_missing_witness_row_refuses_rather_than_reporting_absence(monkeypatch):
+    """CONTRACT: unreadable column. A missing entry is not proof of a reap."""
     fake = Fake()
     monkeypatch.setattr(owned.procstate, "birth_scheme", lambda: "fixture")
     cap = fake.cap()
     del fake.rows[10]
     verdict = cap.signal(signal.SIGKILL, deadline=5)
-    assert verdict.status == "OBSERVED_EMPTY", verdict.reason
-    assert verdict.refusal_class is None
+    assert verdict.status == "REFUSED", verdict.reason
+    assert verdict.refusal_class == "unproven", verdict.reason
     assert fake.calls == []
 
 

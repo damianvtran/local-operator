@@ -12,9 +12,21 @@ reservation cannot survive. Members are re-verified against the group and sessio
 before any signal, and the reservation is re-checked between that check and the
 send. A reaped leader is not a reservation, and is refused by name.
 
-The residual risk this rests on, in one sentence: no platform frees a group
-number while a member or a corpse still holds it -- Linux by the struct-pid's
+The residual risk this rests on, in one sentence: no platform frees a PID or a
+group number while a member or a corpse still holds it -- Linux by the struct-pid's
 group reference, Darwin by pid-number reservation.
+
+WHAT THE PIN DOES NOT COVER, in one sentence: it is owner-alive plus
+exclusive-reap plus SECOND-RESOLUTION birth identity, so a group that disappears
+and is recreated inside one birth-token tick is UNSUPPORTED -- indistinguishable
+here, and named rather than claimed safe. No supervisor, keeper or system-wide
+owner is introduced; escaped or new-session descendants stay outside this group's
+authority.
+
+CENSUS RESIDENCE IS NOT THE PREDICATE. A census lists targets; continuity is the
+leader's creation receipt (a readable sample whose birth matches, live or
+zombie-unreaped). Whether an enumeration lists a corpse is a diagnostic, and its
+completeness is UNKNOWN on any platform not directly measured.
 
 This is a checked owner-alive USER-SPACE boundary, NOT an atomic kernel handle:
 a member may exit between the final observation and the send, and birth tokens
@@ -70,6 +82,12 @@ class PinLost(Unknown):
     read it" would retry the wrong one.
     """
 
+
+#: Reuse inside one birth-token tick is UNSUPPORTED, not safe: the token has
+#: second resolution (``ps`` lstart), so two processes with the same pid and the
+#: same parent in the same second are indistinguishable here -- named so the
+#: authority claim stays honest rather than implying a discriminator we lack.
+SECOND_RESOLUTION_REUSE = "UNSUPPORTED"
 
 #: ``proc_listpids``'s "every live pid" selector. Unlike ``PROC_PGRP_ONLY`` (2),
 #: this is not restricted to the caller's session, which is the whole reason the
@@ -431,11 +449,28 @@ class OwnedGroup:
             members = cap._members(deadline)
             cap.probe["members"] = list(members)
             if not members:
-                cap.last = Verdict("OBSERVED_EMPTY", "strict initial empty census")
-                return cap
+                raise Unknown("strict initial empty census: no observable group to own")
             before = cap._samples([leader, parent], deadline)
             cap.probe["observed"] = _observed(before, None)
+            # C1 -- EXCLUSIVE REAP OWNERSHIP. The receipt only witnesses anything
+            # if nobody else can consume the corpse: we must still be the child's
+            # parent, SIGCHLD must not be ignored (checked above), and the leader
+            # must not have been reparented by a competing reaper. A child whose
+            # parent is not us cannot be witnessed at all, and naming that is the
+            # difference between "we could not prove it" and "we proved it".
             view = identity(leader)
+            if view[0] != os.getpid():
+                # The kernel's answer about who this child's parent IS, not what a
+                # caller claims: only our own child can be held as a witness, and a
+                # competing reaper would take the corpse before we could bracket it.
+                cap.last = Verdict(
+                    "REFUSED",
+                    "leader is not our child: exclusive reap ownership absent",
+                    (),
+                    refusal_class="not_exclusive_reaper",
+                )
+                cap.probe["error"] = "not_exclusive_reaper"
+                return cap
             after = cap._samples([leader, parent], deadline)
             cap.probe["observed"] = _observed(before, after)
             stamp = scheme()
@@ -522,21 +557,46 @@ class OwnedGroup:
         a zombie, so `kernel_identity` raises `Unknown: actual parent/PG/SID
         unavailable` for exactly the process this design exists to keep as its
         witness. The terminal path therefore reads the corpse from the group
-        census plus the RECORDED birth token (`_leader_reservation`), never from
+        census plus the RECORDED birth token (`_leader_witness`), never from
         a function that asks the kernel about a live session.
         """
         sample = self._samples([self.leader], deadline).get(self.leader)
         return sample is None or sample.zombie
 
-    def _leader_reservation(self, deadline):
-        """The leader's current sample if it still holds THIS receipt, else None."""
+    def _leader_witness(self, deadline):
+        """The leader as a CREATION-RECEIPT witness: state plus its sample.
+
+        CONTINUITY IS THE RECEIPT, NOT CENSUS RESIDENCE. A readable leader sample
+        whose birth matches the recorded receipt is our witness whether it is LIVE
+        or ZOMBIE-UNREAPED; whether a census lists the corpse is irrelevant to the
+        predicate (it is a diagnostic, not evidence). The retained process lifetime
+        is what forbids a new process taking PID N, and POSIX forbids a group N
+        being recreated without a process PID N.
+
+        THREE-VALUED ON PURPOSE: ``is_birth(...) is None`` is NOT False. Unreadable
+        is a fact about the READER (missing entry, missing birth, unknown scheme,
+        provider error, deadline) and refuses as unreadable; a readable mismatched
+        birth is a fact about the WORLD (reuse) and refuses as ``pin_lost``.
+
+        Returns ``(state, sample)`` with state in ``held`` / ``reaped`` /
+        ``unreadable``.
+        """
         anchor = self.receipts.get(self.leader)
         if anchor is None:
-            return None
-        sample = self._samples([self.leader], deadline).get(self.leader)
-        if sample is None or sample.is_birth(anchor.scheme, anchor.birth) is not True:
-            return None
-        return sample
+            return "unreadable", None
+        try:
+            samples = self._samples([self.leader], deadline)
+        except Exception:  # noqa: BLE001 - a failed sample is unreadable, never absent
+            return "unreadable", None
+        sample = samples.get(self.leader)
+        if sample is None or sample.birth is None:
+            return "unreadable", sample
+        held = sample.is_birth(anchor.scheme, anchor.birth)
+        if held is True:
+            return "held", sample
+        if held is None:
+            return "unreadable", sample
+        return "reaped", sample
 
     def refresh(self, *, deadline):
         """Prove the group is still ours by RESERVATION, not by membership.
@@ -570,74 +630,53 @@ class OwnedGroup:
             second = self._members(deadline)
             members = sorted(set(first) | set(second))
             self.probe["members"] = list(members)
-            if not members:
-                # A COMPLETED census that lists nothing means the group is gone,
-                # and that is the state a finishing run wants. Refusing here refused
-                # every healthy run whose child had already exited (rc 126 where 0
-                # is correct). The reaped-reservation refusal lives BELOW, where a
-                # census that STILL HOLDS members meets a leader whose reservation is
-                # gone -- failed ownership proof, which is not absence.
-                self.last = Verdict("OBSERVED_EMPTY", "two strict censuses: no members")
-                return self.last
-            lead = self._leader_reservation(deadline)
-            if lead is None:
+            state, witness = self._leader_witness(deadline)
+            if state == "unreadable":
+                # Continuity present but the witness cannot be read: not absence.
+                raise Unknown("leader witness unreadable")
+            if state == "reaped":
                 raise PinLost("leader reaped or birth mismatch: reservation released")
-            if lead.zombie:
-                if self.leader not in first and self.leader not in second:
-                    # The pin needs the corpse to be VISIBLE in the group census.
-                    # Both platforms this ships for report it (measured: Darwin
-                    # `strict_census -> [pid]`, `ps` row `Z <defunct>`), so this arm
-                    # guards an unreachable platform rather than describing ours.
-                    raise PinLost(
-                        "zombie leader not reported by the group census: "
-                        "no visible reservation on this platform"
+            if not members:
+                # EMPTY-COMPLETE. A census that COMPLETED and listed nothing is a
+                # fact about the world; but a still-LIVE leader must itself be a
+                # live member, so that combination is contradictory and refuses.
+                if witness is not None and witness.zombie:
+                    self.probe["anchor"] = "leader-reservation"
+                    self.last = Verdict(
+                        "OBSERVED_EMPTY", "retained corpse and complete no-live-member census"
                     )
-                pin = "leader-reservation"
-            else:
-                pin = "leader-live"
+                    return self.last
+                raise Unknown("live leader absent from a complete census: contradictory")
             samples = self._samples(set(members) | {self.leader}, deadline)
             self.probe["observed"] = _observed(samples, None)
             live = [pid for pid in members if pid in samples and not samples[pid].zombie]
             if not live:
-                # A CENSUS OF CORPSES STILL NEEDS ITS RESERVATION. If the pin is
-                # gone the group number was given up, and "nothing live here" would
-                # be a refused proof dressed as an observation -- exactly the
-                # conflation the three-way rule forbids. Only a held pin may report
-                # an empty live set.
-                if self._leader_reservation(deadline) is None:
-                    raise PinLost("no live member and no reservation: pin lost mid-proof")
-                # Corpses only: there is nothing left to signal, and holding the
-                # group "open" for them would report a live group that is not one.
-                # OBSERVED_EMPTY is the honest state — the same answer ESRCH gets.
+                # Corpse-only: allowed ONLY under a retained matching witness.
+                still, _ = self._leader_witness(deadline)
+                if still != "held":
+                    raise Unknown("no live member and no readable witness")
+                self.probe["anchor"] = "leader-reservation"
                 self.last = Verdict(
                     "OBSERVED_EMPTY", "reserved group holds no live member", tuple(members)
                 )
                 return self.last
-            # PG/SID IS PROVEN OVER THE LIVE SET ONLY. The unreaped corpse is the
-            # RESERVATION, never an identity proof: on Darwin `getsid` fails on a
-            # zombie, so `kernel_identity` raises `Unknown: actual parent/PG/SID
-            # unavailable` for exactly the process this design exists to keep
-            # (`_leader_reservation` already reads the corpse from the census plus
-            # the recorded birth for the same reason). Asking the session API about
-            # the corpse would refuse the incident shape on the one platform whose
-            # answer was measured — corpse leader, live grandchild, rc 126, child
-            # still running.
-            #
-            # A member that exited between the census and the sample is GONE, not
-            # unproven: refusing on it would revoke the union's amnesty and report
-            # a healthy gate as a cleanup failure.
-            vanished = [pid for pid in members if pid not in samples]
-            if vanished:
-                self.probe["vanished"] = vanished
+            # A member whose sample is missing is UNREADABLE, not vanished: a
+            # missing map entry cannot prove departure, and inferring it would turn
+            # an unobserved member into false absence.
+            absent = [pid for pid in members if pid not in samples]
+            if absent:
+                raise Unknown("census member sample unreadable")
             for pid in live:
                 parent, group, sid = self.identity(pid)
                 if (group, sid) != (self.pgid, self.sid):
                     raise Unknown("member outside the recorded group/session")
-            # The reservation must still hold at the END of the proof, not only at
-            # its start: a reap mid-proof would make the census describe a number
-            # that is no longer ours.
-            if self._leader_reservation(deadline) is None:
+            # The witness must still hold at the END of the proof.
+            final_state, final_witness = self._leader_witness(deadline)
+            if final_state == "reaped":
                 raise PinLost("reservation lost during proof")
+            if final_state == "unreadable":
+                raise Unknown("witness unreadable during proof")
+            pin = "leader-reservation" if final_witness.zombie else "leader-live"
             self.probe["proof"] = _identities(self.receipts, samples, members)
             self.probe["residuals"] = []
             # Sticky: the record must be able to say HOW ownership was established
@@ -691,22 +730,26 @@ class OwnedGroup:
         if checked >= deadline:
             self.last = Verdict("REFUSED", "expired before syscall", result.members)
             return self.last
-        # RESIDENCY RE-CHECK IMMEDIATELY BEFORE THE SYSCALL -- THE C3 MUTATION
-        # ANCHOR: this exact check is what a deletion control removes. `refresh`
-        # carries its own end-of-proof check for a different reason (a reap during
-        # the proof), so a mutation names this one and cannot take both by
-        # accident. The census above proved the reservation held a moment ago;
-        # between it and killpg the only thing that could free the number is a
-        # reap of this corpse. One sample answers that, and it is the difference
-        # between "proven" and "proven a while ago" — the non-atomicity this module
-        # discloses rather than hides.
-        if self._leader_reservation(deadline) is None:
+        # WITNESS RE-CHECK IMMEDIATELY BEFORE THE SYSCALL -- THE MUTATION ANCHOR.
+        # This exact block is what a deletion control removes; `refresh` carries its
+        # own end-of-proof check for a different reason (a reap during the proof),
+        # so a mutation names this one and cannot take both by accident. The census
+        # proved the witness held a moment ago; between it and the send the only
+        # thing that could free the number is a reap of this process, and one sample
+        # answers that. It is the difference between "proven" and "proven a while
+        # ago" -- the non-atomicity this module discloses rather than hides.
+        final_state, _ = self._leader_witness(deadline)
+        if final_state != "held":
             self.last = Verdict(
                 "REFUSED",
-                "reservation lost between census and syscall",
+                (
+                    "witness lost between census and syscall"
+                    if final_state == "reaped"
+                    else "witness unreadable between census and syscall"
+                ),
                 result.members,
                 anchor=result.anchor,
-                refusal_class="pin_lost",
+                refusal_class="pin_lost" if final_state == "reaped" else "unproven",
             )
             self.probe["residuals"] = _identities(self.receipts, {}, result.members)
             self.probe["anchor"] = result.anchor
