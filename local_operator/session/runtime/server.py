@@ -2846,6 +2846,12 @@ class RuntimeServer:
         # still be sleeping when close tears down the runtime loop, producing
         # an orphan warning and proving teardown returned before its work ended.
         self._push_task: asyncio.Task[None] | None = None
+        # Post-reply reconciliation must not hold the switch ordering lane.
+        # One owned, dirty-coalesced worker prevents overlapping roster scans;
+        # the revision also invalidates repaints built before a newer switch.
+        self._switch_refresh_task: asyncio.Task[None] | None = None
+        self._switch_refresh_dirty = False
+        self._switch_revision = 0
         self._heartbeat_task: asyncio.Task[None] | None = None
         self._attention_task: asyncio.Task[None] | None = None
         # Shutdown is represented by one owner-loop task so synchronous close,
@@ -3919,6 +3925,10 @@ class RuntimeServer:
             self._attention_task.cancel()
         if self._push_task is not None:
             self._push_task.cancel()
+        if self._switch_refresh_task is not None:
+            self._switch_refresh_task.cancel()
+            await asyncio.gather(self._switch_refresh_task, return_exceptions=True)
+            self._switch_refresh_task = None
         for task in list(self._event_sends):
             task.cancel()
         self._event_sends.clear()
@@ -6982,9 +6992,14 @@ class RuntimeServer:
                     # could carry.
                     may_loosen=self._connection_may_loosen(frame, conn),
                 )
+                if _is_switch_frame(frame):
+                    self._switch_revision += 1
                 await self._send_to(conn, {"op": "result", "req": req, "data": data})
-                await self._handle.refresh()
-                await self._push()
+                if _is_switch_frame(frame):
+                    self._schedule_switch_refresh()
+                else:
+                    await self._handle.refresh()
+                    await self._push()
                 return
             else:
                 duplicate = await self._already_admitted(op, frame)
@@ -7021,6 +7036,8 @@ class RuntimeServer:
                     # carries the state itself is read the same way rather than
                     # dropped -- see ``_ack_frame_parts``.
                     detail, extra = _ack_frame_parts(outcome)
+                if not duplicate and _is_switch_frame(frame):
+                    self._switch_revision += 1
                 ack_frame = {
                     "op": "ack",
                     "req": req,
@@ -7050,8 +7067,11 @@ class RuntimeServer:
                 else:
                     await self._send_to(conn, ack_frame)
                 if not duplicate:
-                    await self._handle.refresh()
-                    await self._push()
+                    if _is_switch_frame(frame):
+                        self._schedule_switch_refresh()
+                    else:
+                        await self._handle.refresh()
+                        await self._push()
                 return
             await self._send_to(conn, {"op": "ack", "req": req, "detail": detail})
             # Mutations change the projection; push what every front end
@@ -9725,6 +9745,29 @@ class RuntimeServer:
             if not (conn.wants_events and conn.wants_frontend)
         ]
 
+    def _schedule_switch_refresh(self) -> None:
+        """Reconcile after a reply without keeping the mutation's chain alive.
+
+        The switch has committed and replied; roster reconciliation and legacy
+        projection serialization are maintenance, not part of its ordering
+        fence. A dirty bit preserves a subsequent switch's refresh even when
+        the first pass is parked. Shutdown cancels and joins this owned task.
+        """
+        self._switch_refresh_dirty = True
+        if self._switch_refresh_task is None or self._switch_refresh_task.done():
+            self._switch_refresh_task = asyncio.create_task(self._refresh_switches())
+
+    async def _refresh_switches(self) -> None:
+        try:
+            while self._switch_refresh_dirty:
+                self._switch_refresh_dirty = False
+                await self._handle.refresh()
+                await self._push()
+        except Exception:
+            # A maintenance failure cannot retract an already delivered reply.
+            # Consume it here rather than leaving an unobserved task exception.
+            logger.warning("session runtime: post-switch refresh failed", exc_info=True)
+
     async def _push(self) -> None:
         """Broadcast projection repaints, preserving daemon bytes exactly.
 
@@ -9760,7 +9803,13 @@ class RuntimeServer:
         # itself (the writer and its lock are loop-owned objects), and the
         # per-connection frames are derived from ``ordinary`` on the loop after
         # the hop returns, so the wire bytes are unchanged.
+        revision = self._switch_revision
         ordinary = await asyncio.to_thread(self._projection_payload)
+        if revision != self._switch_revision:
+            # A worker may finish an old model's frame after the next switch
+            # commits. Never publish that stale selection over its newer event.
+            self._push_soon()
+            return
         await asyncio.gather(
             *(self._send_to(conn, self._projection_frame(conn, ordinary)) for conn in recipients)
         )

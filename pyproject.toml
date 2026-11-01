@@ -29,7 +29,12 @@ dependencies = [
     "packaging>=24.0",
     # HTTP + data model. httpx drives every provider client and the OAuth
     # flows; pydantic is the schema layer the whole harness is typed against.
-    "httpx>=0.27",
+    # Exact environment routing uses one isolated HTTPX mount-pattern
+    # compatibility seam; verify proxy parity before widening this range.
+    "httpx>=0.27,<0.29",
+    # Listing deadlines wrap public network-backend APIs rather than httpx's
+    # private pools. Declare that direct contract instead of a transitive import.
+    "httpcore>=1.0.9,<2",
     # The <2.14 cap shipped in #2063 is lifted here: its named exit condition —
     # the two TypeAdapter sites (output_contract.py:303, frontend_state.py:7963)
     # — is discharged by this change (#2085), which migrates them to
