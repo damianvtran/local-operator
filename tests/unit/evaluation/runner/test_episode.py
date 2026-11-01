@@ -2418,7 +2418,9 @@ async def test_unknown_summary_blocks_next_dispatch_and_preserves_usage(
         assert isinstance(cancellation_error.__cause__, _EvidenceFailure)
         assert verify_bundle(root).terminal_state != "sealed"
         if summary_case == "summary-cancel-abandon-failure":
-            assert "bundle remains unsealed" in " ".join(getattr(cancellation_error, "__notes__", ()))
+            assert "bundle remains unsealed" in " ".join(
+                getattr(cancellation_error, "__notes__", ())
+            )
             assert "synthetic abandon failure" not in " ".join(
                 getattr(cancellation_error, "__notes__", ())
             )
