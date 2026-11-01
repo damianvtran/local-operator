@@ -285,8 +285,10 @@ async def test_a_move_queued_while_the_session_runs_is_consumed_at_the_next_boun
     ), "a queued intent keeps the consumer polling until it can act"
     # 4. The turn ends: the move happens with no further wake of any kind.
     handle.busy = ""
+    # Announcing retirement yields between the latch and stop; observing the
+    # latch alone does not mean the cutover has completed.
     for _ in range(60):
-        if handle.calls:
+        if handle.calls == ["begin_retire:cwd-move", "request_stop"]:
             break
         await asyncio.sleep(0.05)
     assert handle.calls == ["begin_retire:cwd-move", "request_stop"]
