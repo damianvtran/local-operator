@@ -4325,6 +4325,7 @@ async def execute_bash(
         if wrapped is None:
             return _error(tool_call_id, "bash", shell_write.spawn_refusal())
         shell_argv = wrapped
+    spawn_options = detached_popen_kwargs()
     try:
         process = await asyncio.create_subprocess_exec(
             *shell_argv,
@@ -4340,7 +4341,7 @@ async def execute_bash(
             # could take it down. procstate.detached_popen_kwargs() returns the
             # kwargs that really detach on the host, and is exactly
             # `start_new_session=True` on POSIX.
-            **detached_popen_kwargs(),
+            **spawn_options,
         )
     except OSError as exc:
         # A `bash.shell` pointing at a missing or non-executable file made the
@@ -4409,22 +4410,31 @@ async def execute_bash(
     # and owner-liveness-only by construction: the group is reaped iff THIS
     # process is dead, never by runtime/CPU/idle, so a legit long-runner (a 10h
     # trainer) is safe while its session lives. See tools/group_reaper.py.
-    # suppress(Exception): os.getpgid is POSIX-only (absent on Windows), and
-    # registration must never be the reason a command fails to run. The pgid is
-    # held so the clean-death paths below can unregister the exact line.
-    spawned_pgid: int | None = None
-    with contextlib.suppress(Exception):
-        spawned_pgid = os.getpgid(process.pid)
-        group_reaper.register_group(
-            spawned_pgid,
-            params.command,
-            session_id=(context.session_id if context else "") or "",
-        )
+    # A successful POSIX start_new_session spawn proves PGID == child PID:
+    # setsid runs before exec and before the parent receives this Process. Do
+    # not look up the leader again: a short shell may already be reaped while
+    # its background children still hold the detached group. A late getpgid
+    # then raises and used to skip registration AND survivor settlement. This
+    # identity comes from our actual spawn options, never PID/PGID discovery;
+    # Windows detachment has no POSIX group and must not arm its memory guard.
+    # Registration remains best-effort; it must not prevent a command running.
+    spawned_pgid: int | None = (
+        process.pid
+        if os.name == "posix" and spawn_options.get("start_new_session") is True
+        else None
+    )
+    if spawned_pgid is not None:
+        with contextlib.suppress(Exception):
+            group_reaper.register_group(
+                spawned_pgid,
+                params.command,
+                session_id=(context.session_id if context else "") or "",
+            )
 
     # The memory guard, bound to EXACTLY the group we just spawned. It is built
-    # only when we actually captured a pgid AND the budget resolved to something
-    # armed: a command whose group id could not be read is Windows-shaped (the
-    # guard is a POSIX feature — os.killpg/getpgid do not exist there) and runs
+    # only when our POSIX detached spawn proved its pgid AND the budget resolved
+    # to something armed: a Windows-shaped spawn has no POSIX group (the guard
+    # relies on POSIX group sampling/signalling) and runs
     # unguarded, and a `source="disabled"` budget (config off, non-measurable
     # host) is the pre-guard behaviour. The guard can only ever read and kill
     # THIS pgid: it never discovers a group of its own, so it cannot touch the
