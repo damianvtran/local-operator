@@ -4747,6 +4747,10 @@ class ChatRequest(BaseModel):
             raise OneTurnSecretScopeError("An armed one-turn secret request cannot be rewritten.")
         return candidate
 
+    # Shared only by the main turn's request clones; never serialized to a
+    # transcript, telemetry row, helper call or independent conversation.
+    _codex_turn_state: Any = PrivateAttr(default=None)
+
     _one_turn_secrets: dict[str, SecretStr] = PrivateAttr(default_factory=dict)
 
     @property

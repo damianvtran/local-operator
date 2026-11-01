@@ -2971,6 +2971,23 @@ class OpenAICompatClient:
         affinity = str(uuid.uuid5(uuid.NAMESPACE_URL, f"local-operator:codex-cache:{key}"))
         return {"session-id": affinity, "thread-id": affinity}
 
+    def codex_turn_state_scope(
+        self, request: ChatRequest, api_key: str | None, oauth_access: "OAuthAccess | None"
+    ) -> tuple[str, str] | None:
+        """Only the built-in OAuth route may acquire or echo server turn state."""
+        if (
+            self._base_url != "https://api.openai.com/v1"
+            or request.model.provider not in {"openai", "openai-device"}
+            or not self._codex_responses_mode(oauth_access)
+        ):
+            return None
+        from local_operator.providers.replay import credential_scope
+
+        # Model switches may change the server's routing even within one turn.
+        return request.model.provider, (
+            credential_scope(api_key, oauth_access) + ":" + request.model.model_id
+        )
+
     def _grok_conv_headers(self, request: ChatRequest, url: str) -> dict[str, str]:
         """Keep one conversation on one xAI cache server via ``x-grok-conv-id``.
 
@@ -3969,6 +3986,17 @@ class OpenAICompatClient:
         )
         headers = self._headers(api_key, oauth_access)
         headers.update(self._codex_affinity_headers(request, oauth_access, url))
+        turn_state = request._codex_turn_state
+        turn_generation = None
+        if turn_state is not None:
+            turn_scope = self.codex_turn_state_scope(request, api_key, oauth_access)
+            turn_state.observe_attempt(*(turn_scope or ("", "")))
+            turn_generation, token = turn_state.bind_endpoint(url)
+            if turn_scope is not None and url == CODEX_RESPONSES_URL:
+                if token is not None:
+                    headers["x-codex-turn-state"] = token
+            else:
+                turn_generation = None
         headers.update(self._grok_conv_headers(request, url))
         headers.update(self._radient_correlation_headers(request, url))
         usage: Usage | None = None
@@ -4088,6 +4116,8 @@ class OpenAICompatClient:
                 self._observe_responses_headers(response.headers)
                 self._observe_responses_error(response)
                 raise_for_status(response)
+            if turn_state is not None and turn_generation is not None:
+                turn_state.receive(turn_generation, response.headers.get("x-codex-turn-state"))
             self._observe_responses_headers(response.headers)
             async for data in _iter_sse_lines(response):
                 if data == "[DONE]":

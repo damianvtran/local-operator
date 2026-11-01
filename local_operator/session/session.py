@@ -19349,6 +19349,12 @@ class Session:
             # "the stream was iterated" the observable, so the pre-aborted path
             # leaves the flag False while every dispatched round-trip sets it.
             base_stream_fn = self._stream_fn
+            from local_operator.providers.turn_state import CodexTurnState
+
+            # This wrapper belongs to one attention turn, including tool rounds
+            # and provider retries. Helpers use the base stream directly and
+            # must not share the server's turn routing with unrelated work.
+            codex_turn_state = CodexTurnState()
 
             def marking_stream_fn(
                 request: ChatRequest, stream_signal: AbortSignal | None = None
@@ -19359,6 +19365,8 @@ class Session:
                     # frame. Refuse dispatch, rather than just stopping future
                     # transforms after these bytes have crossed the boundary.
                     raise RuntimeError("bridge body authority changed before dispatch")
+                request = request.model_copy()
+                request._codex_turn_state = codex_turn_state
                 inner = base_stream_fn(request, stream_signal)
                 # The context this request was built from, taken before any
                 # later boundary can extend it.
