@@ -267,9 +267,8 @@ def test_link_close_keeps_the_descriptor_until_its_reader_exits(
     server_a, server_b, _host, _port = p
     _pair_settled(p, monkeypatch, role="admin")
     observed = threading.Event()  # the reader left the read that owns the descriptor
-    exited = threading.Event()  # ...or its thread left the read loop entirely
-    woken = threading.Event()  # either of the two, so the gate has one thing to wait on
-    close_requested = threading.Event()  # the cell's own close is under way
+    woken = threading.Event()  # that, or the reader leaving its read loop entirely
+    close_requested = threading.Event()  # diagnostic only: the cell's close was ASKED for
     release = threading.Event()
     seams: list[str] = []
     read_exits: list[str] = []
@@ -311,6 +310,7 @@ def test_link_close_keeps_the_descriptor_until_its_reader_exits(
             f"close_requested={close_requested.is_set()} "
             f"closing={getattr(link, 'closing', None)} "
             f"closed={link._closed.is_set() if link is not None else None} "
+            f"in_read={reader in in_read if reader is not None else None} "
             f"read_exits={read_exits or ['none']} seams={seams}"
         )
 
@@ -321,18 +321,24 @@ def test_link_close_keeps_the_descriptor_until_its_reader_exits(
         instant its wait returns, so a record written afterwards would be read
         half-made and would misname the path that just failed.
 
-        A wake is recorded only once this cell's own close is under way. An exit
-        that happened earlier is real evidence and is kept — but crediting it to
-        the close would let a read that had already ended satisfy the gate, which
-        is exactly the no-op wake assertion this cell must not become. Such a
-        reader is instead reported by the loop hook below, naming its path.
+        A wake is credited on ``link.closing`` — the state ``close()`` itself sets on
+        entry — and NEVER on an intention this cell recorded first. The distinction
+        is not cosmetic: a flag set on the line above ``link.close(...)`` stays true
+        for a close that never ran (and ``close()`` early-returns on a link that
+        already died), so crediting on it would let ordinary traffic satisfy the
+        gate about a shutdown that never happened. An exit recorded while
+        ``closing`` is still false is real evidence and is kept, but it is not a
+        wake: the loop hook below reports a reader that really left, and the gate
+        names the exit path it can see.
         """
         if not is_target_reader():
             # Another link's reader (this package keeps several, and an xdist worker
             # can still be draining a leaked one) is not evidence about this cell.
             return
         link = owner.get("link")
-        after_close = close_requested.is_set() or bool(getattr(link, "closing", False))
+        # ``closing`` is set by ``PeerLink.close`` on its first line, so it answers
+        # "had the close begun when this read left" — nothing this cell controls.
+        after_close = bool(getattr(link, "closing", False))
         read_exits.append(
             f"+{time.monotonic() - bound_at:.3f}s {path}"
             + ("" if exc is None else f" {type(exc).__name__}: {exc!r}")
@@ -395,7 +401,6 @@ def test_link_close_keeps_the_descriptor_until_its_reader_exits(
             real_loop(link_self)
         finally:
             if is_target_reader():
-                exited.set()
                 woken.set()
 
     monkeypatch.setattr(wire.FrameReader, "_fill", reading_from_socket)
@@ -430,8 +435,8 @@ def test_link_close_keeps_the_descriptor_until_its_reader_exits(
         # close can be credited with — the next assertion names which one happened.
         assert woken.wait(timeout=WAKE_S), (
             f"the close did not wake retained reader {reader.name} within "
-            f"{WAKE_S:.0f}s: it is still inside the socket read it entered, so no "
-            f"exit has been recorded since the close began; {state()}"
+            f"{WAKE_S:.0f}s: no exit from its read and none from its read loop was "
+            f"credited to the close; {state()}"
         )
         assert observed.is_set(), (
             f"{reader.name} left its read loop instead of leaving the read this "
