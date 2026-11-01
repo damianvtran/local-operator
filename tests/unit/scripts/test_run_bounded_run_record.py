@@ -8,6 +8,7 @@ Asserted here: the CLI contract, the on-disk schema, the success path, the
 acquisition-failure path (believed identity, empty actors, still a record), and
 that a broken filesystem degrades to a recorded warning rather than a hang.
 """
+
 from __future__ import annotations
 
 import io
@@ -35,8 +36,11 @@ class World:
         return sorted(pid for pid, row in self.rows.items() if row[1] == pgid)
 
     def samples(self, pids):
-        return {pid: owned.procstate.ProcessSample(False, self.rows[pid][3])
-                for pid in pids if pid in self.rows}
+        return {
+            pid: owned.procstate.ProcessSample(False, self.rows[pid][3])
+            for pid in pids
+            if pid in self.rows
+        }
 
     def identity(self, pid):
         return self.rows[pid][:3]
@@ -48,27 +52,43 @@ class World:
 
     def capture(self, send=None, identity=None):
         return owned.OwnedGroup.capture(
-            10, parent_pid=1, census=self.census, samples=self.samples,
-            identity=identity or self.identity, scheme=lambda: "fixture",
-            clock=self.clock, signal_group=send or self.send)
+            10,
+            deadline=self.clock() + 5.0,
+            parent_pid=1,
+            census=self.census,
+            samples=self.samples,
+            identity=identity or self.identity,
+            scheme=lambda: "fixture",
+            clock=self.clock,
+            signal_group=send or self.send,
+        )
 
 
 @pytest.fixture
-def wrapper(memory_wrapper, monkeypatch, tmp_path):
+def wrapper(request, monkeypatch, tmp_path):
+    module = request.getfixturevalue("memory_wrapper")
     monkeypatch.setenv("LOCAL_OPERATOR_SCRATCHPAD", str(tmp_path))
-    monkeypatch.delenv(memory_wrapper.RUN_ID_ENV, raising=False)
-    return memory_wrapper
+    monkeypatch.delenv(module.RUN_ID_ENV, raising=False)
+    return module
 
 
 def _install(wrapper, monkeypatch, cap, status=0):
-    monkeypatch.setattr(wrapper, "owned_process_group",
-                        NS(OwnedGroup=NS(capture=lambda *a, **k: cap), Verdict=owned.Verdict))
-    monkeypatch.setattr(wrapper, "subprocess",
-                        NS(Popen=lambda *a, **k: NS(pid=10, poll=lambda: status,
-                                                    wait=lambda **_: status),
-                           TimeoutExpired=subprocess.TimeoutExpired))
-    monkeypatch.setattr(wrapper, "_memory_budget",
-                        lambda _: (NS(ceiling_mb=0, reason="fixture"), "fixture"))
+    monkeypatch.setattr(
+        wrapper,
+        "owned_process_group",
+        NS(OwnedGroup=NS(capture=lambda *a, **k: cap), Verdict=owned.Verdict),
+    )
+    monkeypatch.setattr(
+        wrapper,
+        "subprocess",
+        NS(
+            Popen=lambda *a, **k: NS(pid=10, poll=lambda: status, wait=lambda **_: status),
+            TimeoutExpired=subprocess.TimeoutExpired,
+        ),
+    )
+    monkeypatch.setattr(
+        wrapper, "_memory_budget", lambda _: (NS(ceiling_mb=0, reason="fixture"), "fixture")
+    )
 
 
 def _records(tmp_path, suffix):
@@ -94,8 +114,9 @@ def test_a_successful_run_writes_spawn_and_exit_records(wrapper, monkeypatch, tm
     _install(wrapper, monkeypatch, world.capture())
     monkeypatch.setattr(wrapper, "time", FrozenClock())
     output = io.StringIO()
-    assert wrapper.run(["synthetic"], timeout=None, grace=0.05, stream=output,
-                       run_id="qa-1234") == 0, output.getvalue()
+    assert (
+        wrapper.run(["synthetic"], timeout=None, grace=0.05, stream=output, run_id="qa-1234") == 0
+    ), output.getvalue()
 
     spawn = json.loads(_records(tmp_path, "spawn")[0].read_text())
     assert spawn["schema"] == "run-bounded-run/v1"
@@ -121,8 +142,10 @@ def test_a_successful_run_writes_spawn_and_exit_records(wrapper, monkeypatch, tm
 def test_acquisition_failure_still_leaves_a_record_with_the_run_id(wrapper, monkeypatch, tmp_path):
     """`actors` is necessarily empty here — `believed` must not be."""
     world = World()
+
     def unusable(_pid):
         raise PermissionError(1, "Operation not permitted")
+
     _install(wrapper, monkeypatch, world.capture(identity=unusable))
     output = io.StringIO()
     rc = wrapper.run(["synthetic"], timeout=None, grace=0.05, stream=output, run_id="qa-fail")
@@ -153,24 +176,37 @@ def test_run_id_comes_from_the_flag_then_the_environment(wrapper, monkeypatch):
 
 def test_the_flag_reaches_the_run_contract(wrapper, monkeypatch):
     seen = []
+
     def fake_run(argv, **kwargs):
         seen.append((list(argv), kwargs))
         return 0
+
     monkeypatch.setattr(wrapper, "run", fake_run)
     assert wrapper.main(["--run-id", "qa-cli", "--", "true"]) == 0
-    assert seen == [(["true"], {"timeout": None, "grace": wrapper.DEFAULT_GRACE_SECONDS,
-                                "memory_mb": None, "run_id": "qa-cli"})]
+    assert seen == [
+        (
+            ["true"],
+            {
+                "timeout": None,
+                "grace": wrapper.DEFAULT_GRACE_SECONDS,
+                "memory_mb": None,
+                "run_id": "qa-cli",
+            },
+        )
+    ]
 
 
 def test_a_broken_record_directory_warns_and_does_not_change_the_gate(
-        wrapper, monkeypatch, tmp_path):
+    wrapper, monkeypatch, tmp_path
+):
     blocker = tmp_path / "not-a-directory"
     blocker.write_text("")
     monkeypatch.setattr(wrapper, "_record_dir", lambda: blocker / "run-bounded-runs")
     world = World()
     _install(wrapper, monkeypatch, world.capture())
     output = io.StringIO()
-    assert wrapper.run(["synthetic"], timeout=None, grace=0.05, stream=output,
-                       run_id="qa-broken") == 0
+    assert (
+        wrapper.run(["synthetic"], timeout=None, grace=0.05, stream=output, run_id="qa-broken") == 0
+    )
     assert "record write failed (spawn)" in output.getvalue()
     assert "record write failed (exit)" in output.getvalue()

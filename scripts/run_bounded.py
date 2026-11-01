@@ -206,14 +206,23 @@ def _report(stream, text):
 
 def _utc_now() -> str:
     import datetime
-    return datetime.datetime.now(datetime.timezone.utc).isoformat(
-        timespec="seconds").replace("+00:00", "Z")
+
+    return (
+        datetime.datetime.now(datetime.timezone.utc)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z")
+    )
 
 
 def _record_dir() -> Path:
-    return Path(os.environ.get("LOCAL_OPERATOR_SCRATCHPAD") or
-                os.environ.get("LOCAL_OPERATOR_CONFIG_DIR") or
-                str(Path.home() / ".local-operator")) / "run-bounded-runs"
+    return (
+        Path(
+            os.environ.get("LOCAL_OPERATOR_SCRATCHPAD")
+            or os.environ.get("LOCAL_OPERATOR_CONFIG_DIR")
+            or str(Path.home() / ".local-operator")
+        )
+        / "run-bounded-runs"
+    )
 
 
 def _safe_token(value: object, limit: int = 64) -> str:
@@ -229,6 +238,7 @@ def _safe_token(value: object, limit: int = 64) -> str:
 def _resolve_run_id(supplied: str | None) -> str:
     """The caller's ``--run-id``, else ``$LOCAL_OPERATOR_RUN_ID``, else generated."""
     import uuid
+
     raw = supplied if supplied is not None else os.environ.get(RUN_ID_ENV)
     if raw:
         token = _safe_token(raw)
@@ -237,8 +247,19 @@ def _resolve_run_id(supplied: str | None) -> str:
     return "run-" + uuid.uuid4().hex[:12]
 
 
-def _record_run(owner, stream, run_id: str, phase: str, *, command=None, verdict=None,
-                start_utc=None, end_utc=None, elapsed=None, exit_code=None):
+def _record_run(
+    owner,
+    stream,
+    run_id: str,
+    phase: str,
+    *,
+    command=None,
+    verdict=None,
+    start_utc=None,
+    end_utc=None,
+    elapsed=None,
+    exit_code=None,
+):
     """Durable, bounded evidence binding THIS run to the group it drove.
 
     WHY A RECORD AND NOT JUST A REFUSAL RECEIPT: a caller that invoked the wrapper
@@ -285,8 +306,11 @@ def _record_run(owner, stream, run_id: str, phase: str, *, command=None, verdict
         "actors": [asdict(receipt) for receipt in getattr(owner, "receipts", {}).values()],
         "believed": getattr(owner, "probe", {}) or {},
         "verdict": asdict(verdict) if verdict is not None else None,
-        "cleanup": ("REFUSED; residuals named here, not claimed absent" if verdict is not None
-                    else "record only; cleanup outcome not claimed"),
+        "cleanup": (
+            "REFUSED; residuals named here, not claimed absent"
+            if verdict is not None
+            else "record only; cleanup outcome not claimed"
+        ),
     }
     base = _record_dir()
     try:
@@ -321,8 +345,11 @@ def _record_run(owner, stream, run_id: str, phase: str, *, command=None, verdict
         # ValueError/TypeError: a payload that cannot be serialised is a bug, not a
         # reason to take the run's status down; OSError (TimeoutError included, it
         # IS an OSError) is the filesystem. Either way: warn and carry on.
-        _report(stream, f"[run_bounded] record write failed ({phase}): "
-                        f"{type(exc).__name__} errno={getattr(exc, 'errno', None)}")
+        _report(
+            stream,
+            f"[run_bounded] record write failed ({phase}): "
+            f"{type(exc).__name__} errno={getattr(exc, 'errno', None)}",
+        )
         return None
 
 
@@ -480,18 +507,23 @@ def run(
     run_started_utc = _utc_now()
     # The caller-readable binding, emitted the moment the group exists: an
     # invocation that never returns still leaves this id/pgid pairing in its log.
-    _report(stream, f"[run_bounded] span run_id={run_id} wrapper_pid={os.getpid()} "
-                    f"pgid={pgid} utc={run_started_utc} command={os.path.basename(argv[0])}")
+    _report(
+        stream,
+        f"[run_bounded] span run_id={run_id} wrapper_pid={os.getpid()} "
+        f"pgid={pgid} utc={run_started_utc} command={os.path.basename(argv[0])}",
+    )
     # Provisional numeric identity grants NO signal authority. Capture before ANY
     # poll/wait can reap this leader; failed capture remains a bounded refusal.
     owner = owned_process_group.OwnedGroup.capture(
-        proc.pid, deadline=min(deadline if deadline is not None else float("inf"),
-                               time.monotonic() + 3.0))
+        proc.pid,
+        deadline=min(deadline if deadline is not None else float("inf"), time.monotonic() + 3.0),
+    )
     # Written even when capture failed: the acquisition-failure run is the one
     # whose evidence matters most, and a record carrying only the believed
     # identity is still distinguishable from "no record at all".
-    _record_run(owner, stream, run_id, "spawn", command=os.path.basename(argv[0]),
-                start_utc=run_started_utc)
+    _record_run(
+        owner, stream, run_id, "spawn", command=os.path.basename(argv[0]), start_utc=run_started_utc
+    )
     refused = False
     proof_failed = False
     cleanup_deadline = None
@@ -502,8 +534,15 @@ def run(
     def fail_proof(result, phase):
         nonlocal refused, proof_failed
         refused = proof_failed = True
-        _record_run(owner, stream, run_id, phase, command=os.path.basename(argv[0]),
-                    verdict=result, start_utc=run_started_utc)
+        _record_run(
+            owner,
+            stream,
+            run_id,
+            phase,
+            command=os.path.basename(argv[0]),
+            verdict=result,
+            start_utc=run_started_utc,
+        )
 
     def require(result, phase):
         if result.status == "REFUSED":
@@ -549,23 +588,45 @@ def run(
             # inside `signal()`. Between signals the census runs on a bounded
             # cadence rather than once per poll: see _AUTHORITY_REFRESH_SECONDS.
             if signum or timed_out or now >= next_probe:
-                probe_until = (begin_cleanup(grace + 0.25) if signum or timed_out else
-                               min(deadline if deadline is not None else float("inf"),
-                                   now + 3.0))
+                probe_until = (
+                    begin_cleanup(grace + 0.25)
+                    if signum or timed_out
+                    else min(deadline if deadline is not None else float("inf"), now + 3.0)
+                )
                 require(owner.refresh(deadline=probe_until), "required-refresh")
                 next_probe = now + _AUTHORITY_REFRESH_SECONDS
             if signum:
                 until = begin_cleanup(grace + 0.25)
                 send(signum, "forward", until)
-                _reap(owner, grace, proc.poll, stream, reason=f"signal {signum} received",
-                      send=send, require=require, deadline=until - 0.25)
+                _reap(
+                    owner,
+                    grace,
+                    proc.poll,
+                    stream,
+                    reason=f"signal {signum} received",
+                    send=send,
+                    require=require,
+                    deadline=until - 0.25,
+                )
                 rc = 128 + signum
                 break
             if timed_out:
                 until = begin_cleanup(grace + 0.25)
-                _reap(owner, grace, proc.poll, stream, reason=f"timeout after {timeout:g}s",
-                      send=send, require=require, deadline=until - 0.25)
-                _report(stream, f"[run_bounded] BOUND ({timeout:g}s) fired, not the gate failing; --timeout sets the bound")
+                _reap(
+                    owner,
+                    grace,
+                    proc.poll,
+                    stream,
+                    reason=f"timeout after {timeout:g}s",
+                    send=send,
+                    require=require,
+                    deadline=until - 0.25,
+                )
+                _report(
+                    stream,
+                    f"[run_bounded] BOUND ({timeout:g}s) fired, not the gate failing; "
+                    "--timeout sets the bound",
+                )
                 break
             status = proc.poll()
             if status is not None:
@@ -584,7 +645,9 @@ def run(
                 if notice:
                     _report(stream, f"[run_bounded] {notice} (advisory only)")
                 if sample.bytes_used is None and not unmeasured_reported:
-                    _report(stream, "[run_bounded] memory charge unavailable; no measured cap proof")
+                    _report(
+                        stream, "[run_bounded] memory charge unavailable; no measured cap proof"
+                    )
                     unmeasured_reported = True
             time.sleep(_POLL_SECONDS)
     except AuthorityRefused:
@@ -595,9 +658,15 @@ def run(
         _report(stream, f"[run_bounded] owned-child monitor failed: {type(exc).__name__}")
         # This run reached a group and then failed: it must not vanish from the
         # record set just because it leaves through an exception.
-        _record_run(owner, stream, run_id, "monitor-error",
-                    command=os.path.basename(argv[0]), verdict=owner.last,
-                    start_utc=run_started_utc)
+        _record_run(
+            owner,
+            stream,
+            run_id,
+            "monitor-error",
+            command=os.path.basename(argv[0]),
+            verdict=owner.last,
+            start_utc=run_started_utc,
+        )
         raise
     finally:
         try:
@@ -626,16 +695,31 @@ def run(
             if terminal.status != "OBSERVED_EMPTY":
                 refused = True
                 terminal = owned_process_group.Verdict(
-                    "REFUSED", "group not observed empty: " + terminal.reason, terminal.members)
-                _record_run(owner, stream, run_id, "residual-census",
-                            command=os.path.basename(argv[0]), verdict=terminal,
-                            start_utc=run_started_utc)
+                    "REFUSED", "group not observed empty: " + terminal.reason, terminal.members
+                )
+                _record_run(
+                    owner,
+                    stream,
+                    run_id,
+                    "residual-census",
+                    command=os.path.basename(argv[0]),
+                    verdict=terminal,
+                    start_utc=run_started_utc,
+                )
             if not bounded_wait(until):
                 refused = True
-                result = owned_process_group.Verdict("REFUSED", "leader wait exceeded remaining cleanup allowance")
-                _record_run(owner, stream, run_id, "bounded-wait",
-                            command=os.path.basename(argv[0]), verdict=result,
-                            start_utc=run_started_utc)
+                result = owned_process_group.Verdict(
+                    "REFUSED", "leader wait exceeded remaining cleanup allowance"
+                )
+                _record_run(
+                    owner,
+                    stream,
+                    run_id,
+                    "bounded-wait",
+                    command=os.path.basename(argv[0]),
+                    verdict=result,
+                    start_utc=run_started_utc,
+                )
         finally:
             for sig, handler in previous.items():
                 signal.signal(sig, handler)
@@ -646,10 +730,22 @@ def run(
         rc = EXIT_CLEANUP_UNPROVEN
     # The record a SUCCESSFUL run must leave behind: callers bind admission to it,
     # so it is written before the wrapper returns and after the leader is gone.
-    _record_run(owner, stream, run_id, "exit", command=os.path.basename(argv[0]),
-                verdict=owner.last, start_utc=run_started_utc, end_utc=_utc_now(),
-                elapsed=time.monotonic() - started, exit_code=rc)
-    _report(stream, f"[run_bounded] {os.path.basename(argv[0])} rc={rc} wall={time.monotonic() - started:.1f}s")
+    _record_run(
+        owner,
+        stream,
+        run_id,
+        "exit",
+        command=os.path.basename(argv[0]),
+        verdict=owner.last,
+        start_utc=run_started_utc,
+        end_utc=_utc_now(),
+        elapsed=time.monotonic() - started,
+        exit_code=rc,
+    )
+    _report(
+        stream,
+        f"[run_bounded] {os.path.basename(argv[0])} rc={rc} wall={time.monotonic() - started:.1f}s",
+    )
     return rc
 
 
@@ -721,8 +817,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     command = list(args.command)
     if command[:1] == ["--"]:
         command = command[1:]
-    return run(command, timeout=args.timeout, grace=args.grace, memory_mb=args.memory_mb,
-               run_id=args.run_id)
+    return run(
+        command,
+        timeout=args.timeout,
+        grace=args.grace,
+        memory_mb=args.memory_mb,
+        run_id=args.run_id,
+    )
 
 
 if __name__ == "__main__":

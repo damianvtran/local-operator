@@ -507,23 +507,38 @@ def test_child_memory_loop_preserves_owned_cleanup_contract(
         spawned.append(kwargs)
         return process
 
-    monkeypatch.setattr(wrapper, "subprocess", SimpleNamespace(Popen=popen, TimeoutExpired=subprocess.TimeoutExpired))
+    monkeypatch.setattr(
+        wrapper,
+        "subprocess",
+        SimpleNamespace(Popen=popen, TimeoutExpired=subprocess.TimeoutExpired),
+    )
 
     # This memory-policy matrix fakes the authority boundary. The separate
     # owned-group matrix exercises real authority with injected kernel facts.
     opg = wrapper.owned_process_group
+
     class Owner:
         pgid = process.pid
         receipts = {}
         last = opg.Verdict("VERIFIED", "fake acquisition")
+
         def refresh(self, **kwargs):
-            return opg.Verdict("OBSERVED_EMPTY" if process.status is not None else "VERIFIED", "fake")
+            return opg.Verdict(
+                "OBSERVED_EMPTY" if process.status is not None else "VERIFIED", "fake"
+            )
+
         def signal(self, signum, **kwargs):
             group_calls.append((self.pgid, signum))
             process.status = -int(signum)
             return opg.Verdict("SIGNALED", "fake")
-    monkeypatch.setattr(wrapper, "owned_process_group", SimpleNamespace(
-        OwnedGroup=SimpleNamespace(capture=lambda *args, **kwargs: Owner()), Verdict=opg.Verdict))
+
+    monkeypatch.setattr(
+        wrapper,
+        "owned_process_group",
+        SimpleNamespace(
+            OwnedGroup=SimpleNamespace(capture=lambda *args, **kwargs: Owner()), Verdict=opg.Verdict
+        ),
+    )
     real_guard = mg.Guard
 
     def guard(pgid, resolved):

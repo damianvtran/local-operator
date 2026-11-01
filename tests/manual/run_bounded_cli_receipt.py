@@ -7,6 +7,7 @@ Nothing happens at import time: this file is a payload with two subcommands, and
 an import that set ``sys.path`` or parsed argv would be a side effect a reviewer
 cannot see.
 """
+
 import json
 import os
 import sys
@@ -21,6 +22,7 @@ def _owned():
     if str(ROOT) not in sys.path:
         sys.path.insert(0, str(ROOT))
     from local_operator import owned_process_group
+
     return owned_process_group
 
 
@@ -34,12 +36,20 @@ def _record(path: Path) -> None:
         sample = samples.get(pid)
         if sample is None or not sample.birth or sample.zombie:
             raise SystemExit("CLI startup identity unavailable")
-        rows.append({"pid": pid, "birth": sample.birth, "scheme": scheme,
-                     "pgid": os.getpgid(pid), "sid": os.getsid(pid)})
+        rows.append(
+            {
+                "pid": pid,
+                "birth": sample.birth,
+                "scheme": scheme,
+                "pgid": os.getpgid(pid),
+                "sid": os.getsid(pid),
+            }
+        )
     fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     with os.fdopen(fd, "w") as stream:
-        json.dump({"source": str(ROOT), "identities": rows,
-                   "workload_pgid": rows[0]["pgid"]}, stream)
+        json.dump(
+            {"source": str(ROOT), "identities": rows, "workload_pgid": rows[0]["pgid"]}, stream
+        )
         stream.flush()
         os.fsync(stream.fileno())
     print("ROOT_CLI_VALID", flush=True)
@@ -52,9 +62,14 @@ def _census(path: Path) -> None:
     for row in record["identities"]:
         samples = owned.bounded_samples([row["pid"]], time.monotonic() + 1)
         sample = samples.get(row["pid"])
-        facts.append({**row, "exists": owned.resources._pid_exists(row["pid"]),
-                      "same_birth": sample.is_birth(row["scheme"], row["birth"]) if sample else None,
-                      "zombie": sample.zombie if sample else None})
+        facts.append(
+            {
+                **row,
+                "exists": owned.resources._pid_exists(row["pid"]),
+                "same_birth": sample.is_birth(row["scheme"], row["birth"]) if sample else None,
+                "zombie": sample.zombie if sample else None,
+            }
+        )
     members = owned.strict_census(record["workload_pgid"], time.monotonic() + 1)
     print(json.dumps({"facts": facts, "workload_group": members}), flush=True)
     if members or any(f["exists"] is not False for f in facts):

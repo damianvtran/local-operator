@@ -6,6 +6,7 @@ authority and aborted healthy gates. Signals still re-prove inside ``signal()``;
 this pins the *between-signals* cadence so a future edit cannot quietly restore
 the per-poll sweep.
 """
+
 from __future__ import annotations
 
 import io
@@ -33,8 +34,11 @@ class World:
         return sorted(pid for pid, row in self.rows.items() if row[1] == pgid)
 
     def samples(self, pids):
-        return {pid: owned.procstate.ProcessSample(False, self.rows[pid][3])
-                for pid in pids if pid in self.rows}
+        return {
+            pid: owned.procstate.ProcessSample(False, self.rows[pid][3])
+            for pid in pids
+            if pid in self.rows
+        }
 
     def identity(self, pid):
         return self.rows[pid][:3]
@@ -44,9 +48,10 @@ class World:
 
 
 @pytest.fixture
-def wrapper(memory_wrapper, monkeypatch, tmp_path):
+def wrapper(request, monkeypatch, tmp_path):
+    module = request.getfixturevalue("memory_wrapper")
     monkeypatch.setenv("LOCAL_OPERATOR_SCRATCHPAD", str(tmp_path))
-    return memory_wrapper
+    return module
 
 
 def _refresh_points(wrapper, monkeypatch, constant):
@@ -59,6 +64,7 @@ def _refresh_points(wrapper, monkeypatch, constant):
 
         def sleep(self, seconds):
             world.now += seconds
+
     monkeypatch.setattr(wrapper, "time", Clock())
 
     polls = {"count": 0}
@@ -74,23 +80,37 @@ def _refresh_points(wrapper, monkeypatch, constant):
             return 0
 
     cap = owned.OwnedGroup.capture(
-        10, parent_pid=1, census=world.census, samples=world.samples,
-        identity=world.identity, scheme=lambda: "fixture", clock=world.clock,
-        signal_group=world.send)
+        10,
+        deadline=world.clock() + 5.0,
+        parent_pid=1,
+        census=world.census,
+        samples=world.samples,
+        identity=world.identity,
+        scheme=lambda: "fixture",
+        clock=world.clock,
+        signal_group=world.send,
+    )
     points = []
     original = cap.refresh
 
     def counting(**kwargs):
         points.append(polls["count"])
         return original(**kwargs)
+
     cap.refresh = counting
-    monkeypatch.setattr(wrapper, "owned_process_group",
-                        NS(OwnedGroup=NS(capture=lambda *a, **k: cap), Verdict=owned.Verdict))
-    monkeypatch.setattr(wrapper, "subprocess",
-                        NS(Popen=lambda *a, **k: Process(),
-                           TimeoutExpired=subprocess.TimeoutExpired))
-    monkeypatch.setattr(wrapper, "_memory_budget",
-                        lambda _: (NS(ceiling_mb=0, reason="fixture"), "fixture"))
+    monkeypatch.setattr(
+        wrapper,
+        "owned_process_group",
+        NS(OwnedGroup=NS(capture=lambda *a, **k: cap), Verdict=owned.Verdict),
+    )
+    monkeypatch.setattr(
+        wrapper,
+        "subprocess",
+        NS(Popen=lambda *a, **k: Process(), TimeoutExpired=subprocess.TimeoutExpired),
+    )
+    monkeypatch.setattr(
+        wrapper, "_memory_budget", lambda _: (NS(ceiling_mb=0, reason="fixture"), "fixture")
+    )
     monkeypatch.setattr(wrapper, "_AUTHORITY_REFRESH_SECONDS", constant)
     assert wrapper.run(["synthetic"], timeout=None, grace=0.05, stream=io.StringIO()) == 0
     return points, polls["count"]

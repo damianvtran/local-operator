@@ -1,8 +1,8 @@
 """Strict signal authority controls. Synthetic identities NEVER reach OS probes."""
+
 from __future__ import annotations
 
 import signal
-from types import SimpleNamespace
 
 import pytest
 
@@ -12,7 +12,12 @@ from local_operator.procstate import ProcessSample
 
 class Fake:
     def __init__(self):
-        self.rows = {1: (0, 1, 1, "wrapper", False), 10: (1, 10, 10, "leader", False)}
+        #: birth is `str | None` on purpose: an unreadable birth is a fact the
+        #: capability has to refuse, so the fixture must be able to express it.
+        self.rows: dict[int, tuple[int, int, int, str | None, bool]] = {
+            1: (0, 1, 1, "wrapper", False),
+            10: (1, 10, 10, "leader", False),
+        }
         self.calls = []
         self.now = 0.0
         self.scheme = "fixture"
@@ -30,9 +35,17 @@ class Fake:
         return self.rows[pid][:3]
 
     def cap(self):
-        return owned.OwnedGroup.capture(10, parent_pid=1, census=self.census, samples=self.samples,
-            identity=self.identity, scheme=lambda: self.scheme, clock=self.clock,
-            signal_group=lambda pg, sig: self.calls.append((pg, sig)), deadline=5)
+        return owned.OwnedGroup.capture(
+            10,
+            parent_pid=1,
+            census=self.census,
+            samples=self.samples,
+            identity=self.identity,
+            scheme=lambda: self.scheme,
+            clock=self.clock,
+            signal_group=lambda pg, sig: self.calls.append((pg, sig)),
+            deadline=5,
+        )
 
 
 @pytest.mark.parametrize("case", ["reuse", "unknown", "mixed", "unreadable", "terminal", "expired"])
@@ -40,12 +53,18 @@ def test_refuses_group_without_fresh_complete_enrolled_live_identity(monkeypatch
     fake = Fake()
     monkeypatch.setattr(owned.procstate, "birth_scheme", lambda: "fixture")
     cap = fake.cap()
-    if case == "reuse": fake.rows[10] = (1, 10, 10, "foreign", False)
-    if case == "unknown": fake.rows[20] = (1, 10, 10, "new", False)
-    if case == "mixed": fake.rows[10] = (1, 10, 99, "leader", False)
-    if case == "unreadable": fake.rows[10] = (1, 10, 10, None, False)
-    if case == "terminal": fake.rows[10] = (1, 10, 10, "leader", True)
-    if case == "expired": fake.now = 6
+    if case == "reuse":
+        fake.rows[10] = (1, 10, 10, "foreign", False)
+    if case == "unknown":
+        fake.rows[20] = (1, 10, 10, "new", False)
+    if case == "mixed":
+        fake.rows[10] = (1, 10, 99, "leader", False)
+    if case == "unreadable":
+        fake.rows[10] = (1, 10, 10, None, False)
+    if case == "terminal":
+        fake.rows[10] = (1, 10, 10, "leader", True)
+    if case == "expired":
+        fake.now = 6
     assert cap.signal(signal.SIGKILL, deadline=5).status == "REFUSED"
     assert fake.calls == []
 
@@ -77,16 +96,23 @@ def test_unknown_facts_cannot_be_authority(monkeypatch, failure):
     fake = Fake()
     monkeypatch.setattr(owned.procstate, "birth_scheme", lambda: fake.scheme)
     cap = fake.cap()
-    if failure == "missing": cap.samples = lambda _: {}
+    if failure == "missing":
+        cap.samples = lambda _: {}
     elif failure == "permission":
-        def denied(_): raise PermissionError("fake kernel denial")
+
+        def denied(_):
+            raise PermissionError("fake kernel denial")
+
         cap.identity = denied
-    elif failure == "sid": fake.rows[10] = (1, 10, 0, "leader", False)
+    elif failure == "sid":
+        fake.rows[10] = (1, 10, 0, "leader", False)
     elif failure == "parent":
         fake.rows[20] = (10, 10, 10, "child", False)
         fake.rows[10] = (1, 10, 10, None, False)
-    elif failure == "scheme": fake.scheme = "changed"
-    else: cap.census = lambda *args: None
+    elif failure == "scheme":
+        fake.scheme = "changed"
+    else:
+        cap.census = lambda *args: None
     assert cap.signal(signal.SIGKILL, deadline=5).status == "REFUSED"
     assert fake.calls == []
 

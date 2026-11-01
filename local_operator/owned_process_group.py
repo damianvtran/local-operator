@@ -13,6 +13,7 @@ a member/anchor may exit between the final observation and killpg, and canonical
 birth tokens have finite resolution. No zero-recipient-race or hard-SIGKILL
 owner cleanup guarantee is claimed. No keeper process is introduced.
 """
+
 from __future__ import annotations
 
 import ctypes
@@ -46,20 +47,26 @@ def strict_darwin(pgid, deadline, *, listpids=None, clock=time.monotonic):
             raise Unknown("strict census deadline/capacity exhausted")
         buffer = (ctypes.c_int * capacity)()
         written = call(2, pgid, buffer, ctypes.sizeof(buffer))
-        if type(written) is not int or written < 0 or written > ctypes.sizeof(buffer) or written % size:
+        if (
+            type(written) is not int
+            or written < 0
+            or written > ctypes.sizeof(buffer)
+            or written % size
+        ):
             raise Unknown("malformed libproc result length")
         if written == ctypes.sizeof(buffer):
             capacity *= 2
             continue
-        pids = list(buffer[:written // size])
+        pids = list(buffer[: written // size])
         if any(p <= 0 for p in pids) or len(set(pids)) != len(pids):
             raise Unknown("malformed libproc PID rows")
         return sorted(pids)
     raise Unknown("saturated libproc census")
 
 
-def strict_linux(pgid, deadline, *, listdir=os.listdir, read=None, stat=os.stat,
-                 clock=time.monotonic):
+def strict_linux(
+    pgid, deadline, *, listdir=os.listdir, read=None, stat=os.stat, clock=time.monotonic
+):
     """Refuse omitted /proc rows; only proved ENOENT can exclude a vanished PID.
 
     Re-listing detects arrivals during the scan, not ownership or an atomic
@@ -101,7 +108,7 @@ def strict_linux(pgid, deadline, *, listdir=os.listdir, read=None, stat=os.stat,
             except (OSError, UnicodeError) as exc:
                 raise Unknown("unreadable /proc row") from exc
             try:
-                left, tail = raw[:raw.index("(")].strip(), raw[raw.rindex(")") + 1:].split()
+                left, tail = raw[: raw.index("(")].strip(), raw[raw.rindex(")") + 1 :].split()
                 if int(left) != int(entry) or len(tail) < 3 or len(tail[0]) != 1:
                     raise ValueError("invalid process stat")
                 parent, group = int(tail[1]), int(tail[2])
@@ -177,8 +184,7 @@ def _observed(before, after):
     rows = {}
     for stage, samples in (("before", before or {}), ("after", after or {})):
         for pid, sample in samples.items():
-            rows.setdefault(str(pid), {})[stage] = {
-                "birth": sample.birth, "zombie": sample.zombie}
+            rows.setdefault(str(pid), {})[stage] = {"birth": sample.birth, "zombie": sample.zombie}
     return rows
 
 
@@ -214,17 +220,32 @@ class OwnedGroup:
         self.sid = leader
         self.receipts = {}
         #: Attempted/observed identity, kept even when proof fails.
-        self.probe = {"leader": leader, "parent": None, "members": [], "observed": {},
-                      "scheme": None}
+        self.probe = {
+            "leader": leader,
+            "parent": None,
+            "members": [],
+            "observed": {},
+            "scheme": None,
+        }
         self.census, self.samples, self.identity = census, samples, identity
         self.scheme, self.clock, self._send = scheme, clock, signal_group
         self.initial_error = "unproven initial identity"
         self.last = Verdict("REFUSED", self.initial_error)
 
     @classmethod
-    def capture(cls, leader, *, deadline, parent_pid=None, census=strict_census,
-                samples=None, identity=kernel_identity,
-                scheme=procstate.birth_scheme, clock=time.monotonic, signal_group=None):
+    def capture(
+        cls,
+        leader,
+        *,
+        deadline,
+        parent_pid=None,
+        census=strict_census,
+        samples=None,
+        identity=kernel_identity,
+        scheme=procstate.birth_scheme,
+        clock=time.monotonic,
+        signal_group=None,
+    ):
         if signal_group is None:
             # Resolved HERE, never as a keyword default: a default is evaluated when
             # the class body runs — at IMPORT — and `os.killpg` does not exist on
@@ -233,10 +254,21 @@ class OwnedGroup:
             # xplat-probe-windows, job 124804637518). None means "this platform has
             # no checked signalling", which the signal path already refuses.
             signal_group = getattr(os, "killpg", None)
-        cap = cls(_SEAL, leader, census=census, samples=samples, identity=identity,
-                  scheme=scheme, clock=clock, signal_group=signal_group)
+        cap = cls(
+            _SEAL,
+            leader,
+            census=census,
+            samples=samples,
+            identity=identity,
+            scheme=scheme,
+            clock=clock,
+            signal_group=signal_group,
+        )
         parent = os.getpid() if parent_pid is None else parent_pid
         cap.probe["parent"] = parent
+        # Bound before the try: the refusal verdict reports it even when the census
+        # itself raised, which is exactly the case a reader needs to see.
+        members: list[int] = []
         try:
             members = cap._members(deadline)
             cap.probe["members"] = list(members)
@@ -255,22 +287,48 @@ class OwnedGroup:
             if not stamp or any(p not in before or p not in after for p in [leader, parent]):
                 raise Unknown("leader/parent birth unavailable")
             for pid in [leader, parent]:
-                if before[pid].zombie or after[pid].zombie or after[pid].is_birth(stamp, before[pid].birth) is not True:
+                if (
+                    before[pid].zombie
+                    or after[pid].zombie
+                    or after[pid].is_birth(stamp, before[pid].birth) is not True
+                ):
                     raise Unknown("leader/parent not a matching live creation chain")
-            cap.receipts[leader] = Receipt(leader, stamp, before[leader].birth, parent,
-                                           before[parent].birth, leader, leader, clock())
+            # A receipt carries PROVEN births only. The predicate above already
+            # refuses an unreadable birth; saying it here makes the refusal
+            # explicit instead of relying on `is_birth(...) is not True` to imply it.
+            ledger_birth, parent_birth = before[leader].birth, before[parent].birth
+            if ledger_birth is None or parent_birth is None:
+                raise Unknown("leader/parent birth unavailable")
+            cap.receipts[leader] = Receipt(
+                leader,
+                stamp,
+                ledger_birth,
+                parent,
+                parent_birth,
+                leader,
+                leader,
+                clock(),
+            )
             cap.initial_error = ""
             cap.refresh(deadline=deadline)
         except Exception as exc:
             cap.probe["error"] = type(exc).__name__ + ":" + str(exc)
-            cap.last = Verdict("REFUSED", type(exc).__name__ + ":" + str(exc), tuple(members) if 'members' in locals() else ())
+            cap.last = Verdict(
+                "REFUSED",
+                type(exc).__name__ + ":" + str(exc),
+                tuple(members) if "members" in locals() else (),
+            )
         return cap
 
     def _members(self, deadline):
         if self.clock() >= deadline:
             raise Unknown("ownership deadline exhausted")
         members = self.census(self.pgid, deadline)
-        if members is None or any(type(p) is not int or p <= 0 for p in members) or len(set(members)) != len(members):
+        if (
+            members is None
+            or any(type(p) is not int or p <= 0 for p in members)
+            or len(set(members)) != len(members)
+        ):
             raise Unknown("incomplete/malformed membership")
         return sorted(members)
 
@@ -307,14 +365,22 @@ class OwnedGroup:
             self.probe["scheme"] = stamp or None
             if not stamp:
                 raise Unknown("birth scheme unavailable at enrolment")
+
             def matching(pid, receipt, sample):
                 return sample is not None and sample.is_birth(receipt.scheme, receipt.birth) is True
+
             # Observed reuse is not excused by another otherwise-valid survivor.
             for pid, receipt in known.items():
                 if pid in before and not matching(pid, receipt, before[pid]):
                     raise Unknown("recorded PID birth reused/unreadable")
-            anchors = {p for p in members if p in known and matching(p, known[p], before.get(p))
-                       and not before[p].zombie and views[p][1:] == (self.pgid, self.sid)}
+            anchors = {
+                p
+                for p in members
+                if p in known
+                and matching(p, known[p], before.get(p))
+                and not before[p].zombie
+                and views[p][1:] == (self.pgid, self.sid)
+            }
             if not anchors:
                 raise Unknown("no previously authenticated LIVE anchor")
             pending = set(members) - set(known)
@@ -327,11 +393,20 @@ class OwnedGroup:
                     if parent not in known or parent not in members:
                         continue
                     ps, child = before.get(parent), before.get(pid)
-                    if (ps is None or child is None or ps.zombie or child.zombie
-                            or not matching(parent, known[parent], ps) or not child.birth
-                            or (group, sid) != (self.pgid, self.sid)):
+                    if (
+                        ps is None
+                        or child is None
+                        or ps.zombie
+                        or child.zombie
+                        or not matching(parent, known[parent], ps)
+                        or not child.birth
+                        or ps.birth is None
+                        or (group, sid) != (self.pgid, self.sid)
+                    ):
                         raise Unknown("unprovable live ancestry enrolment")
-                    known[pid] = Receipt(pid, stamp, child.birth, parent, ps.birth, group, sid, self.clock())
+                    known[pid] = Receipt(
+                        pid, stamp, child.birth, parent, ps.birth, group, sid, self.clock()
+                    )
                     pending.remove(pid)
                     progressed = True
                 if not progressed:
@@ -339,14 +414,25 @@ class OwnedGroup:
             after = self._samples(set(members) | set(known), deadline)
             self.probe["observed"] = _observed(before, after)
             for pid in members:
-                if (not matching(pid, known[pid], after.get(pid)) or self.identity(pid) != views[pid]
-                        or views[pid][1:] != (self.pgid, self.sid)):
+                if (
+                    not matching(pid, known[pid], after.get(pid))
+                    or self.identity(pid) != views[pid]
+                    or views[pid][1:] != (self.pgid, self.sid)
+                ):
                     raise Unknown("member birth/actual PG/SID changed or unreadable")
                 if pid not in self.receipts:
                     parent = known[pid].parent
-                    if after[pid].zombie or parent not in after or after[parent].zombie or not matching(parent, known[parent], after[parent]):
+                    if (
+                        after[pid].zombie
+                        or parent not in after
+                        or after[parent].zombie
+                        or not matching(parent, known[parent], after[parent])
+                    ):
                         raise Unknown("enrolment chain did not remain live")
-            if not any(p in after and not after[p].zombie and matching(p, self.receipts[p], after[p]) for p in anchors):
+            if not any(
+                p in after and not after[p].zombie and matching(p, self.receipts[p], after[p])
+                for p in anchors
+            ):
                 raise Unknown("live continuity anchor lost during proof")
             if self._members(deadline) != members:
                 raise Unknown("group membership changed during proof")
@@ -364,8 +450,9 @@ class OwnedGroup:
         if self._send is None:
             # A platform without the checked primitive: refuse, do not raise. Same
             # bounded refusal the capability reports for any other unusable sender.
-            self.last = Verdict("REFUSED", "checked signal unsupported on this platform",
-                                result.members)
+            self.last = Verdict(
+                "REFUSED", "checked signal unsupported on this platform", result.members
+            )
             return self.last
         checked = self.clock()
         if checked >= deadline:
@@ -379,15 +466,23 @@ class OwnedGroup:
             # lost authority — mapping it to REFUSED turned a completed gate into
             # "125: did not run" whenever its residual members exited in the
             # window between the final census and this call.
-            self.last = Verdict("OBSERVED_EMPTY", "checked signal: group absent (ESRCH)",
-                                result.members)
+            self.last = Verdict(
+                "OBSERVED_EMPTY", "checked signal: group absent (ESRCH)", result.members
+            )
             return self.last
         except PermissionError:
             # EPERM is genuine doubt: the group exists and we could not reach it.
             self.last = Verdict("REFUSED", "checked signal denied (EPERM)", result.members)
             return self.last
         except OSError as exc:
-            self.last = Verdict("REFUSED", "checked signal failed:" + type(exc).__name__, result.members)
+            self.last = Verdict(
+                "REFUSED", "checked signal failed:" + type(exc).__name__, result.members
+            )
             return self.last
-        self.last = Verdict("SIGNALED", "checked owner-alive signal; non-atomic race remains", result.members, self.clock() - checked)
+        self.last = Verdict(
+            "SIGNALED",
+            "checked owner-alive signal; non-atomic race remains",
+            result.members,
+            self.clock() - checked,
+        )
         return self.last

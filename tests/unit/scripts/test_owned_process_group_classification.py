@@ -8,6 +8,7 @@ classification inside the real module and move only the kernel facts.
 The deletion controls assert on EXIT CODE and SIGNAL COUNT, never on a message:
 a relabelled path would still pass a string match.
 """
+
 from __future__ import annotations
 
 import ast
@@ -17,7 +18,8 @@ import os
 import signal
 import subprocess
 from pathlib import Path
-from types import ModuleType, SimpleNamespace as NS
+from types import ModuleType
+from types import SimpleNamespace as NS
 
 import pytest
 
@@ -42,25 +44,36 @@ class World:
         return sorted(pid for pid, row in self.rows.items() if row[1] == pgid)
 
     def samples(self, pids):
-        return {pid: owned.procstate.ProcessSample(False, self.rows[pid][3])
-                for pid in pids if pid in self.rows}
+        return {
+            pid: owned.procstate.ProcessSample(False, self.rows[pid][3])
+            for pid in pids
+            if pid in self.rows
+        }
 
     def identity(self, pid):
         return self.rows[pid][:3]
 
     def capture(self, *, send, pgid=None):
         return owned.OwnedGroup.capture(
-            pgid or self.pgid, parent_pid=self.parent, census=self.census,
-            samples=self.samples, identity=self.identity, scheme=lambda: self.scheme,
-            clock=self.clock, signal_group=send)
+            pgid or self.pgid,
+            # Explicit and finite: `capture` has no default deadline on purpose,
+            # so every caller states the budget it is willing to spend.
+            deadline=self.clock() + 5.0,
+            parent_pid=self.parent,
+            census=self.census,
+            samples=self.samples,
+            identity=self.identity,
+            scheme=lambda: self.scheme,
+            clock=self.clock,
+            signal_group=send,
+        )
 
     def forget(self, pgid=None):
         self.rows.pop(pgid or self.pgid, None)
 
 
 #: Real kernel primitives: skip where the platform has no POSIX process groups.
-posix_only = pytest.mark.skipif(not hasattr(os, "killpg"),
-                                reason="POSIX process-group authority")
+posix_only = pytest.mark.skipif(not hasattr(os, "killpg"), reason="POSIX process-group authority")
 
 
 def _free_process_group() -> int:
@@ -76,10 +89,16 @@ def _free_process_group() -> int:
 
 
 @pytest.fixture
-def wrapper(memory_wrapper, monkeypatch, tmp_path):
-    """The real wrapper module, isolated scratch, real capability object."""
+def wrapper(request, monkeypatch, tmp_path):
+    """The real wrapper module, isolated scratch, real capability object.
+
+    Resolved by NAME rather than as a parameter: the shared fixture is imported
+    into this module (that import is how pytest sees it), and a parameter of the
+    same name shadows it — F811, and a trap for the next reader.
+    """
+    module = request.getfixturevalue("memory_wrapper")
     monkeypatch.setenv("LOCAL_OPERATOR_SCRATCHPAD", str(tmp_path))
-    return memory_wrapper
+    return module
 
 
 def _fake_process(poll_status):
@@ -88,12 +107,19 @@ def _fake_process(poll_status):
 
 def _install(wrapper, monkeypatch, world, send, process):
     cap = world.capture(send=send)
-    monkeypatch.setattr(wrapper, "owned_process_group",
-                        NS(OwnedGroup=NS(capture=lambda *a, **k: cap), Verdict=owned.Verdict))
-    monkeypatch.setattr(wrapper, "subprocess",
-                        NS(Popen=lambda *a, **k: process, TimeoutExpired=subprocess.TimeoutExpired))
-    monkeypatch.setattr(wrapper, "_memory_budget",
-                        lambda _: (NS(ceiling_mb=0, reason="fixture"), "fixture"))
+    monkeypatch.setattr(
+        wrapper,
+        "owned_process_group",
+        NS(OwnedGroup=NS(capture=lambda *a, **k: cap), Verdict=owned.Verdict),
+    )
+    monkeypatch.setattr(
+        wrapper,
+        "subprocess",
+        NS(Popen=lambda *a, **k: process, TimeoutExpired=subprocess.TimeoutExpired),
+    )
+    monkeypatch.setattr(
+        wrapper, "_memory_budget", lambda _: (NS(ceiling_mb=0, reason="fixture"), "fixture")
+    )
     return cap
 
 
@@ -113,6 +139,7 @@ def test_real_killpg_esrch_is_observed_absent_not_a_refusal():
 
 def time_budget():
     import time
+
     return time.monotonic() + 1.0
 
 
@@ -122,12 +149,12 @@ def test_permission_error_from_the_checked_boundary_stays_a_refusal():
 
     def denied(_pgid, _signum):
         raise PermissionError(1, "Operation not permitted")
+
     cap = world.capture(send=denied)
     assert cap.signal(signal.SIGKILL, deadline=time_budget()).status == "REFUSED"
 
 
-def test_a_passing_gate_keeps_rc_zero_when_the_group_is_already_gone(
-        wrapper, monkeypatch):
+def test_a_passing_gate_keeps_rc_zero_when_the_group_is_already_gone(wrapper, monkeypatch):
     """A1's reachable window: the leader passed, the residual group exited first.
 
     RED on the reviewed head: the ESRCH was mapped to REFUSED, so a green gate
@@ -138,6 +165,7 @@ def test_a_passing_gate_keeps_rc_zero_when_the_group_is_already_gone(
     def gone(pgid, _signum):
         world.forget(pgid)
         raise ProcessLookupError(3, "No such process")
+
     _install(wrapper, monkeypatch, world, gone, _fake_process(0))
     output = io.StringIO()
     rc = wrapper.run(["synthetic"], timeout=None, grace=0.05, stream=output)
@@ -156,21 +184,39 @@ def _foreign_birth_run(wrapper, monkeypatch, module):
         """A delivered signal on a live group: it records, and the group goes away."""
         world.calls.append((pgid, signum))
         world.rows.pop(pgid, None)
+
     cap = module.OwnedGroup.capture(
-        world.pgid, parent_pid=world.parent, census=world.census,
-        samples=world.samples, identity=world.identity, scheme=lambda: world.scheme,
-        clock=world.clock, signal_group=sender)
+        world.pgid,
+        deadline=world.clock() + 5.0,
+        parent_pid=world.parent,
+        census=world.census,
+        samples=world.samples,
+        identity=world.identity,
+        scheme=lambda: world.scheme,
+        clock=world.clock,
+        signal_group=sender,
+    )
 
     def reaped():
         world.rows[world.pgid] = (world.parent, world.pgid, world.pgid, "FOREIGN")
         return 0
-    monkeypatch.setattr(wrapper, "owned_process_group",
-                        NS(OwnedGroup=NS(capture=lambda *a, **k: cap), Verdict=module.Verdict))
-    monkeypatch.setattr(wrapper, "subprocess",
-                        NS(Popen=lambda *a, **k: NS(pid=10, poll=reaped, wait=lambda **_: 0),
-                           TimeoutExpired=subprocess.TimeoutExpired))
-    monkeypatch.setattr(wrapper, "_memory_budget",
-                        lambda _: (NS(ceiling_mb=0, reason="fixture"), "fixture"))
+
+    monkeypatch.setattr(
+        wrapper,
+        "owned_process_group",
+        NS(OwnedGroup=NS(capture=lambda *a, **k: cap), Verdict=module.Verdict),
+    )
+    monkeypatch.setattr(
+        wrapper,
+        "subprocess",
+        NS(
+            Popen=lambda *a, **k: NS(pid=10, poll=reaped, wait=lambda **_: 0),
+            TimeoutExpired=subprocess.TimeoutExpired,
+        ),
+    )
+    monkeypatch.setattr(
+        wrapper, "_memory_budget", lambda _: (NS(ceiling_mb=0, reason="fixture"), "fixture")
+    )
     output = io.StringIO()
     rc = wrapper.run(["synthetic"], timeout=None, grace=0.05, stream=output)
     return rc, len(world.calls), output.getvalue()
@@ -207,8 +253,10 @@ def test_mutating_the_birth_comparison_flips_exit_code_and_signal_count(wrapper,
     assert before in source, "the comparison moved; update this control rather than dropping it"
     mutant = ModuleType("owned_process_group_mutant")
     mutant.__file__ = owned.__file__
-    exec(compile(source.replace(before, after), "owned_process_group_mutant", "exec"),
-         mutant.__dict__)
+    exec(
+        compile(source.replace(before, after), "owned_process_group_mutant", "exec"),
+        mutant.__dict__,
+    )
 
     healthy = _foreign_birth_run(wrapper, monkeypatch, owned)[:2]
     mutated = _foreign_birth_run(wrapper, monkeypatch, mutant)[:2]
@@ -251,13 +299,19 @@ def test_a_refused_cleanup_after_a_nonzero_gate_keeps_the_child_status(wrapper, 
     world = World()
     cap = world.capture(send=world.calls.append)
     world.rows[world.pgid] = (world.parent, world.pgid, world.pgid, "FOREIGN")
-    monkeypatch.setattr(wrapper, "owned_process_group",
-                        NS(OwnedGroup=NS(capture=lambda *a, **k: cap), Verdict=owned.Verdict))
-    monkeypatch.setattr(wrapper, "subprocess",
-                        NS(Popen=lambda *a, **k: _fake_process(1),
-                           TimeoutExpired=subprocess.TimeoutExpired))
-    monkeypatch.setattr(wrapper, "_memory_budget",
-                        lambda _: (NS(ceiling_mb=0, reason="fixture"), "fixture"))
+    monkeypatch.setattr(
+        wrapper,
+        "owned_process_group",
+        NS(OwnedGroup=NS(capture=lambda *a, **k: cap), Verdict=owned.Verdict),
+    )
+    monkeypatch.setattr(
+        wrapper,
+        "subprocess",
+        NS(Popen=lambda *a, **k: _fake_process(1), TimeoutExpired=subprocess.TimeoutExpired),
+    )
+    monkeypatch.setattr(
+        wrapper, "_memory_budget", lambda _: (NS(ceiling_mb=0, reason="fixture"), "fixture")
+    )
     assert wrapper.run(["synthetic"], timeout=None, grace=0.05, stream=io.StringIO()) == 1
     assert world.calls == []
 
@@ -280,8 +334,11 @@ def _load_without_killpg():
     def fake_import(name, *args, **kwargs):
         return NoKillpg() if name == "os" else real_import(name, *args, **kwargs)
 
-    namespace = {"__name__": "owned_process_group_no_killpg", "__file__": owned.__file__,
-                 "__builtins__": dict(builtins.__dict__, __import__=fake_import)}
+    namespace = {
+        "__name__": "owned_process_group_no_killpg",
+        "__file__": owned.__file__,
+        "__builtins__": dict(builtins.__dict__, __import__=fake_import),
+    }
     exec(compile(source, "owned_process_group_no_killpg", "exec"), namespace)
     return namespace
 
@@ -297,8 +354,15 @@ def test_importing_without_the_signal_primitive_succeeds_and_refuses():
     namespace = _load_without_killpg()
     world = World()
     cap = namespace["OwnedGroup"].capture(
-        world.pgid, parent_pid=world.parent, census=world.census, samples=world.samples,
-        identity=world.identity, scheme=lambda: "fixture", clock=world.clock)
+        world.pgid,
+        deadline=world.clock() + 5.0,
+        parent_pid=world.parent,
+        census=world.census,
+        samples=world.samples,
+        identity=world.identity,
+        scheme=lambda: "fixture",
+        clock=world.clock,
+    )
     assert cap.last.status == "VERIFIED"
     verdict = cap.signal(signal.SIGTERM, deadline=time_budget())
     assert verdict.status == "REFUSED", verdict.reason
@@ -308,8 +372,19 @@ def test_importing_without_the_signal_primitive_succeeds_and_refuses():
 #: ``os`` attributes Windows does not have. A default expression naming one is
 #: evaluated at import, which is how W1 became an ImportError instead of a refusal.
 POSIX_ONLY_OS_ATTRIBUTES = frozenset(
-    {"killpg", "getpgid", "getsid", "fork", "forkpty", "setsid", "waitpid",
-     "setpgrp", "wait3", "wait4"})
+    {
+        "killpg",
+        "getpgid",
+        "getsid",
+        "fork",
+        "forkpty",
+        "setsid",
+        "waitpid",
+        "setpgrp",
+        "wait3",
+        "wait4",
+    }
+)
 
 
 def test_no_posix_only_os_attribute_is_evaluated_in_a_default_expression():
@@ -324,7 +399,11 @@ def test_no_posix_only_os_attribute_is_evaluated_in_a_default_expression():
             defaults = list(node.args.defaults) + [d for d in node.args.kw_defaults if d]
             for default in defaults:
                 for sub in ast.walk(default):
-                    if (isinstance(sub, ast.Attribute) and isinstance(sub.value, ast.Name)
-                            and sub.value.id == "os" and sub.attr in POSIX_ONLY_OS_ATTRIBUTES):
+                    if (
+                        isinstance(sub, ast.Attribute)
+                        and isinstance(sub.value, ast.Name)
+                        and sub.value.id == "os"
+                        and sub.attr in POSIX_ONLY_OS_ATTRIBUTES
+                    ):
                         offenders.append((node.name, sub.attr))
     assert offenders == [], offenders

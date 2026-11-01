@@ -10,6 +10,7 @@ CI's Linux leg carries this; it skips cleanly on Darwin, where the census is one
 ``proc_listpids`` syscall. Bounded: the child self-limits and the wrapper carries
 a timeout, so a wedged run fails rather than hangs.
 """
+
 from __future__ import annotations
 
 import io
@@ -29,27 +30,32 @@ pytestmark = pytest.mark.skipif(
 
 #: Children live briefly and exit on their own: this is churn, not a cleanup
 #: test, so the group empties before the final census and the run is deterministic.
-CHURN = textwrap.dedent(
-    """
+CHURN = textwrap.dedent("""
     import subprocess, sys, time
     for _ in range(20):
         subprocess.Popen([sys.executable, "-S", "-c", "import time; time.sleep(0.05)"])
         time.sleep(0.01)
     sys.exit(0)
-    """
-)
+    """)
 
 
-def test_a_healthy_gate_survives_spawn_churn_and_records_its_group(
-        memory_wrapper, monkeypatch, tmp_path):  # noqa: F811
-    wrapper = memory_wrapper
+def test_a_healthy_gate_survives_spawn_churn_and_records_its_group(request, monkeypatch, tmp_path):
+    # By name: the shared fixture is imported for pytest to see it, and a
+    # same-named parameter would shadow that import (F811).
+    wrapper = request.getfixturevalue("memory_wrapper")
     monkeypatch.setenv("LOCAL_OPERATOR_SCRATCHPAD", str(tmp_path))
     inherited = os.environ.get(wrapper.memory_guard.RESOLVED_MEMORY_MB_ENV, "")
     memory_mb = int(inherited) if inherited.isdigit() and int(inherited) > 0 else 0
 
     output = io.StringIO()
-    rc = wrapper.run([sys.executable, "-S", "-c", CHURN], timeout=30, grace=1.0,
-                     memory_mb=memory_mb, stream=output, run_id="linux-churn")
+    rc = wrapper.run(
+        [sys.executable, "-S", "-c", CHURN],
+        timeout=30,
+        grace=1.0,
+        memory_mb=memory_mb,
+        stream=output,
+        run_id="linux-churn",
+    )
 
     assert rc == 0, output.getvalue()
     record_dir = tmp_path / "run-bounded-runs"

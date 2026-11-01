@@ -5,6 +5,7 @@ The observation hook only releases a command barrier after real child enrolment.
 No numeric-PG fallback or cleanup helper; uncertainty stops dispatch. Run only
 under a separately approved safe bootstrap, not the historic unsafe wrapper.
 """
+
 from __future__ import annotations
 
 import json
@@ -19,15 +20,15 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 from local_operator import owned_process_group as owned  # noqa: E402
 
-CHILD = r'''
+CHILD = r"""
 import os,signal,sys,time
 from pathlib import Path
 signal.signal(signal.SIGTERM, signal.SIG_IGN)
 p=Path(sys.argv[1]); (p/'child-ready').write_text(str(os.getpid()))
 deadline=time.monotonic()+8
 while time.monotonic()<deadline: time.sleep(.01)
-'''
-LEADER = r'''
+"""
+LEADER = r"""
 import os,signal,subprocess,sys,time
 from pathlib import Path
 p=Path(sys.argv[1]); mode=sys.argv[2]
@@ -39,7 +40,7 @@ while time.monotonic()<deadline:
     if mode=='leader-exit' and (p/'enrolled').exists(): sys.exit(0)
     time.sleep(.01)
 sys.exit(2)
-'''
+"""
 
 
 def persist(path, value):
@@ -73,28 +74,44 @@ def main():
         sink = Path(os.environ["LOCAL_OPERATOR_SCRATCHPAD"]) / "run-bounded-runs"
         previous_records = set(sink.glob("*.json"))
         released = False
+
         def observed(self, **kwargs):
             nonlocal released
             result = original(self, **kwargs)
             # Successful enrolment is a protocol barrier, not a guessed sleep.
-            if not released and result.status == "VERIFIED" and (case / "child-ready").exists() and (case / "child-pid").exists():
+            if (
+                not released
+                and result.status == "VERIFIED"
+                and (case / "child-ready").exists()
+                and (case / "child-pid").exists()
+            ):
                 try:
                     child = int((case / "child-pid").read_text())
                     if child in self.receipts:
                         observations.update(self.receipts)
                         from dataclasses import asdict
-                        persist(case / "enrolled-identities.json", [asdict(r) for r in observations.values()])
+
+                        persist(
+                            case / "enrolled-identities.json",
+                            [asdict(r) for r in observations.values()],
+                        )
                         (case / "enrolled").write_text("ready")
                         released = True
-                        if mode == "forward": os.kill(os.getpid(), signal.SIGTERM)
+                        if mode == "forward":
+                            os.kill(os.getpid(), signal.SIGTERM)
                 except (OSError, ValueError) as exc:
                     errors.append(type(exc).__name__)
             return result  # observer I/O can never replace real authority
+
         owned.OwnedGroup.refresh = observed
         rc = None
         try:
-            rc = wrapper["run"]([sys.executable, "-S", "-c", LEADER, str(case), mode, CHILD],
-                                timeout=3, grace=1, memory_mb=None)
+            rc = wrapper["run"](
+                [sys.executable, "-S", "-c", LEADER, str(case), mode, CHILD],
+                timeout=3,
+                grace=1,
+                memory_mb=None,
+            )
         except Exception as exc:
             errors.append("wrapper:" + type(exc).__name__)
         finally:
@@ -115,15 +132,27 @@ def main():
         except Exception as exc:
             samples = {}
             errors.append("samples:" + type(exc).__name__)
-        facts = {str(pid): {"sample_present": pid in samples,
-                            "same_birth": samples[pid].is_birth(r.scheme, r.birth) if pid in samples else None,
-                            "zombie": samples[pid].zombie if pid in samples else None,
-                            "exists": owned.resources._pid_exists(pid)}
-                 for pid, r in observations.items()}
-        outcome = {"mode": mode, "rc": rc, "expected": expected, "released": released,
-                   "effective_memory_mb": budget.ceiling_mb, "budget_source": budget_source,
-                   "observer_errors": errors, "groups": census, "identity_samples": facts,
-                   "records": [str(p) for p in set(sink.glob("*.json")) - previous_records]}
+        facts = {
+            str(pid): {
+                "sample_present": pid in samples,
+                "same_birth": samples[pid].is_birth(r.scheme, r.birth) if pid in samples else None,
+                "zombie": samples[pid].zombie if pid in samples else None,
+                "exists": owned.resources._pid_exists(pid),
+            }
+            for pid, r in observations.items()
+        }
+        outcome = {
+            "mode": mode,
+            "rc": rc,
+            "expected": expected,
+            "released": released,
+            "effective_memory_mb": budget.ceiling_mb,
+            "budget_source": budget_source,
+            "observer_errors": errors,
+            "groups": census,
+            "identity_samples": facts,
+            "records": [str(p) for p in set(sink.glob("*.json")) - previous_records],
+        }
         persist(case / "outcome.json", outcome)
         print(json.dumps(outcome), flush=True)
         if not outcome["records"]:
@@ -131,8 +160,13 @@ def main():
             # less than it reports, so this case fails instead of passing quietly.
             print(json.dumps({"mode": mode, "missing_record_under": str(sink)}), flush=True)
             return 1
-        if (rc != expected or not released or errors or any(census.values())
-                or any(f["exists"] is not False for f in facts.values())):
+        if (
+            rc != expected
+            or not released
+            or errors
+            or any(census.values())
+            or any(f["exists"] is not False for f in facts.values())
+        ):
             return 1
     return 0
 
