@@ -495,11 +495,16 @@ class _LeasedFleet:
         cwd: str,
         *,
         defer_materialise: bool,
+        config_dir: Path | None = None,
         warm: bool = False,
         initial_model: Any = None,
         model_selection_override: bool = False,
     ) -> None:
-        """``launch._spawn_runtime``'s own signature, so the real caller is unchanged."""
+        """Keep the fork boundary's store argument, not just its old signature."""
+        # The real engage now carries the resolver's store to the fork. A stale
+        # double failed before taking its lease, so the contention test never
+        # reached the arbitration it was supposed to exercise.
+        assert config_dir is None or config_dir == self.config_dir
         self.spawns += 1
         directory = self.config_dir / "sessions" / session_id
         directory.mkdir(parents=True, exist_ok=True)

@@ -40,6 +40,24 @@ from __future__ import annotations
 #: attach a result to, and the transcript row cannot be replayed on any wire --
 #: so this message is the only record of why the conversation continues. It
 #: names the one repair the model can make: re-send the call with a name.
+#: Persisted for the model and replay, but never attributed to the user.
+MISSING_ARGUMENTS_RECOVERY_PROMPT = (
+    "Harness recovery notice: required tool arguments were omitted. "
+    "No rejected call ran. Supply the named required fields "
+    "inside each call's argument object, including each "
+    "parallel child's parameters; "
+    "do not resend empty objects or invent values. If the values are "
+    "unavailable, explain the blocker. An unchanged retry will stop."
+)
+
+#: Same producer as missing-argument recovery; older journal rows lack a stamp.
+REPEATED_TOOL_ERRORS_RECOVERY_PROMPT = (
+    "Harness recovery notice: the last three tool batches repeated "
+    "the same arguments and errors. Inspect the error and change approach; "
+    "do not repeat the unchanged failing calls. If an external condition "
+    "must change, use a supported wait operation or explain the blocker."
+)
+
 #: Harness chrome -- see ``harness.rows.harness_chrome_prompts``.
 NAMELESS_CALL_RECOVERY_PROMPT = (
     "Harness recovery notice: a tool call in your last message arrived without "

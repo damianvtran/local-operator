@@ -24,7 +24,10 @@ def test_every_row_carries_the_pinned_version_and_source():
     for (provider, model), rate in pricing.SOUND_EFFECT_RATES_PER_SECOND.items():
         estimate = pricing.sound_effect_estimate(provider, model, 10)
         assert estimate is not None and estimate.amount_usd == rate * 10
-        assert estimate.price_version == pricing.PRICE_VERSION
+        version = (
+            pricing.SOUND_EFFECT_PRICE_VERSION if provider == "radient" else pricing.PRICE_VERSION
+        )
+        assert estimate.price_version == version
 
 
 def test_unknown_provider_or_model_is_none_never_zero():
@@ -53,7 +56,7 @@ def test_sound_effects_price_whole_started_seconds():
         (4.01, 5, 0.0100),
     ]
     for duration, units, amount in cases:
-        estimate = pricing.sound_effect_estimate("elevenlabs", None, duration)
+        estimate = pricing.sound_effect_estimate("elevenlabs", "eleven_text_to_sound_v2", duration)
         assert estimate is not None, duration
         assert estimate.units == units, duration
         assert estimate.unit == "seconds"
@@ -103,15 +106,9 @@ def test_an_unpinned_model_prices_on_what_the_rung_would_run():
     assert unpinned.units == 1000.0 and unpinned.unit == "chars"
 
 
-def test_every_byok_model_the_rungs_send_is_priceable():
-    """A model the rung sends MUST have a rate row, or every estimate is None.
-
-    The table keys are literals (it is data), so this is the drift pin: the
-    ids the rungs default to — voiceover and Flash voiceover per provider, and
-    the sound-effect model — are exactly the ids the table prices.
-    """
+def test_known_voiceover_defaults_have_published_rate_rows():
+    """Published voiceover prices remain pinned independently of the SFX migration."""
     from local_operator.audiogen.models import (
-        ELEVENLABS_SOUND_EFFECT_MODEL,
         ELEVENLABS_VOICEOVER_FLASH_MODEL,
         ELEVENLABS_VOICEOVER_MODEL,
         OPENAI_VOICEOVER_MODEL,
@@ -121,8 +118,40 @@ def test_every_byok_model_the_rungs_send_is_priceable():
     assert ("elevenlabs", ELEVENLABS_VOICEOVER_MODEL) in voiceover_keys
     assert ("elevenlabs", ELEVENLABS_VOICEOVER_FLASH_MODEL) in voiceover_keys
     assert ("openai", OPENAI_VOICEOVER_MODEL) in voiceover_keys
-    assert ("elevenlabs", ELEVENLABS_SOUND_EFFECT_MODEL) in set(
-        pricing.SOUND_EFFECT_RATES_PER_SECOND
-    )
     # And no row prices a model the lane cannot send (a typo would be dead data).
     assert all(provider in {"elevenlabs", "openai"} for provider, _model in voiceover_keys)
+
+
+def test_v3_default_has_no_unverified_v2_price():
+    from local_operator.audiogen.models import ELEVENLABS_SOUND_EFFECT_MODEL
+
+    assert ELEVENLABS_SOUND_EFFECT_MODEL == "eleven_text_to_sound_v3"
+    assert pricing.sound_effect_estimate("elevenlabs", None, 5) is None
+    assert pricing.sound_effect_estimate("elevenlabs", ELEVENLABS_SOUND_EFFECT_MODEL, 5) is None
+    # Explicit legacy requests retain their historical estimate.
+    legacy = pricing.sound_effect_estimate("elevenlabs", "eleven_text_to_sound_v2", 5)
+    assert legacy is not None and legacy.amount_usd == 0.01
+
+
+def test_radient_published_policy_is_independent_of_byok_unknown_price():
+    estimate = pricing.sound_effect_estimate("radient", None, 0.5)
+    assert estimate is not None and estimate.amount_usd == 0.001
+    assert "radient/sound-effects" in estimate.provenance
+
+
+@pytest.mark.parametrize(
+    "duration,amount",
+    [(0.5, 0.001), (0.75, 0.0015), (1.25, 0.0025), (2.1, 0.0042), (30, 0.06), (0.5003, 0.001001)],
+)
+def test_radient_fractional_request_policy(duration, amount):
+    estimate = pricing.sound_effect_estimate("radient", None, duration)
+    assert estimate is not None
+    assert estimate.amount_usd == pytest.approx(amount)
+    assert estimate.units == duration
+    assert estimate.price_version == pricing.SOUND_EFFECT_PRICE_VERSION
+    assert pricing.SOUND_EFFECT_PRICE_VERSION in estimate.provenance
+
+
+def test_batch_rounds_per_item_before_summing():
+    items = [pricing.sound_effect_estimate("radient", None, 0.5003) for _ in range(10)]
+    assert sum(item.amount_usd for item in items if item) == pytest.approx(0.01001)

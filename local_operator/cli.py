@@ -17653,6 +17653,10 @@ def main() -> int:
 
             return tunnel_main(args)
         elif args.subcommand == "team-bridge":
+            if getattr(args, "team_bridge_command", None) == "avatar":
+                from local_operator.team_bridge.cli import main as team_bridge_avatar
+
+                return team_bridge_avatar(args)
             if getattr(args, "team_bridge_command", None) == "setup":
                 from local_operator.team_bridge.setup_cli import (
                     main as team_bridge_setup,
@@ -18428,6 +18432,9 @@ def main() -> int:
                     # The owner's directory, not this terminal's: the band paints
                     # it before the bind lands, and a live conversation's cwd is
                     # the one it is working in.
+                    # CLI invocation is a deliberate local directory choice:
+                    # unlike a remote engage, its shell cwd is not a placeholder.
+                    # Keep intentional HOME resumes winning over a recorded move.
                     paint_first_cwd = str(record.cwd or os.getcwd())
                     record = None
                 if record is not None:
@@ -18476,6 +18483,8 @@ def main() -> int:
                 viewer = await AttachedSession.cold(
                     session_id,
                     config_dir=config_directory,
+                    # No remote omission here: this is the user's CLI shell
+                    # directory, including an intentional HOME (see above).
                     cwd=paint_first_cwd or os.getcwd(),
                     takeover_factory=take_over,
                     initial_model=initial_model,

@@ -798,7 +798,7 @@ def _engage_successor(record: Any, *, root: Path, deadline_s: float) -> str:
         asyncio.run(
             engage_runtime(
                 session_id,
-                str(record.cwd or Path.home()),
+                str(record.cwd or ""),
                 WarmErrand(),
                 config_dir=root,
                 deadline_s=deadline_s,

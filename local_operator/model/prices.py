@@ -345,7 +345,25 @@ def _fetch(timeout: float, cache_dir: Path | None) -> dict[str, Any]:
     etag = previous.get("etag") if previous is not None else None
     if isinstance(etag, str) and etag:
         headers["If-None-Match"] = etag
-    response = httpx.get(MODELS_DEV_URL, headers=headers, timeout=timeout, follow_redirects=True)
+    from local_operator.model.deadline import check, current, remaining
+
+    check()
+    if current() is None:
+        response = httpx.get(
+            MODELS_DEV_URL, headers=headers, timeout=timeout, follow_redirects=True
+        )
+    else:
+        # Foreground switch discovery and its price fallback share ONE absolute
+        # budget; a slow provider must not earn a new price-fetch worker lease.
+        from local_operator.model.deadline_http import ListingDeadlineTransport
+
+        ceiling = remaining(timeout)
+        with httpx.Client(
+            transport=ListingDeadlineTransport(time.monotonic() + ceiling),
+            timeout=ceiling,
+            follow_redirects=True,
+        ) as client:
+            response = client.get(MODELS_DEV_URL, headers=headers)
     if response.status_code == 304 and previous is not None:
         logger.debug("models.dev catalogue unchanged (304, etag %s)", etag)
         return dict(previous)
