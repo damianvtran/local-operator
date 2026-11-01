@@ -802,8 +802,14 @@ def run(
             terminal = owner.refresh(deadline=until)
             if terminal.status != "OBSERVED_EMPTY":
                 refused = True
+                # KEEP THE CLASS. Dropping it made the record say only "not observed
+                # empty", which is how three separate causes (lost pin, unreadable
+                # census, live member) all looked identical in CI.
                 terminal = owned_process_group.Verdict(
-                    "REFUSED", "group not observed empty: " + terminal.reason, terminal.members
+                    "REFUSED",
+                    "group not observed empty: " + terminal.reason,
+                    terminal.members,
+                    refusal_class=terminal.refusal_class,
                 )
                 _record_run(
                     owner,

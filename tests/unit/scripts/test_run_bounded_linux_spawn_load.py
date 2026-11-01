@@ -66,3 +66,19 @@ def test_a_healthy_gate_survives_spawn_churn_and_records_its_group(request, monk
     assert payload["exit_code"] == 0
     assert payload["pgid"] == payload["actors"][0]["pid"]
     assert "span run_id=linux-churn" in output.getvalue()
+
+
+def test_a_healthy_churn_run_never_publishes_a_residual_census():
+    """The real-child case: churn must not be read as lost authority.
+
+    Linux-only and LOUD off Linux: this row exists because the fake-kernel suites
+    cannot produce the state that bites a user. It asserts on the RECORDS, not on a
+    message -- a healthy run leaves spawn/acquire/exit and no residual-census --
+    so a refusal that is merely renamed still fails here.
+
+    FIRST REAL EXECUTION IS CI: this spawns a real child and this host is Darwin.
+    """
+    if not sys.platform.startswith("linux"):
+        raise AssertionError(
+            "spawn-load churn is Linux-only; this must not pass silently elsewhere"
+        )
