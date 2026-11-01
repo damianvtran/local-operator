@@ -1138,7 +1138,7 @@ def test_batch_approval_is_one_summed_estimate(monkeypatch):
     args = {"sounds": [{"prompt": "click", "duration_s": 0.5}] * 10}
     text = audio_tool._describe_sound_effect_approval(args, ".")
     assert "10 sound effects" in text
-    assert "estimated total $0.0200" in text
+    assert "estimated total $0.0100" in text
     assert "billed figures are authoritative" in text
 
 
@@ -1919,7 +1919,7 @@ def test_batch_approval_keeps_known_subtotal_for_unpriceable_duration(monkeypatc
         ".",
     )
     assert "Generate 2 sound effects" in text
-    assert "estimated known subtotal $0.0020" in text
+    assert "estimated known subtotal $0.0010" in text
     assert "1 item(s) unpriced" in text
     single = audio_tool._describe_sound_effect_approval(
         {
@@ -2013,3 +2013,12 @@ async def test_batch_identical_bytes_keep_names_ids_and_actual_format(
         f"first.{expected_ext}",
         f"second.{expected_ext}",
     ]
+
+
+def test_batch_approval_fractional_duration_policy(monkeypatch):
+    monkeypatch.setattr(audio_tool, "_preferred_route", lambda direction: AudioRoute.RADIENT)
+    text = audio_tool._describe_sound_effect_approval(
+        {"sounds": [{"prompt": "click", "duration_s": d} for d in [0.5, 0.75, 1.25, 2.1, 30]]}, "."
+    )
+    assert "estimated total $0.0692" in text
+    assert pricing.SOUND_EFFECT_PRICE_VERSION in text

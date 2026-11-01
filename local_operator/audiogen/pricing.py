@@ -9,14 +9,16 @@ contract's cost rules demand: labelled ``estimated`` at ``rate_table`` source
 with :data:`PRICE_VERSION` naming the table — never written as a charge, never
 mixed into a billed figure.
 
-**One table, one version.** Every rate lives HERE and nowhere else. The
+**One table, versioned policies.** Every rate lives HERE and nowhere else. The
 version string travels in the cost provenance of every estimate, so a future
 price move is a new version plus new rows, and a row that cannot be priced
 answers ``None`` (unknown → None — an unpriceable call is "amount not stated",
 which the ledger already renders honestly, never a fabricated zero).
 
-**Provenance and dates.** Rates below were read on 2026-10-17; each row names
-its source. They are ESTIMATES for a receipt, not billing authority:
+**Provenance and dates.** Legacy rates were read on 2026-10-17. Radient SFX
+requested-duration billing was verified from account USD exports on 2026-11-01;
+its separate policy token leaves voiceover and historical BYOK rates unchanged.
+They are ESTIMATES for a receipt, not billing authority:
 ElevenLabs bills credits against a plan, OpenAI bills tokens, and both can
 change their price pages without changing this table — which is exactly why
 :data:`PRICE_VERSION` exists.
@@ -44,6 +46,7 @@ __all__ = [
 #: ``price_version``/provenance, making an estimate visible instead of hidden
 #: (the design §4.3 convention the web-search table established).
 PRICE_VERSION = "audio-rates@2026-10-17"
+SOUND_EFFECT_PRICE_VERSION = "sound-effects-requested-seconds@2026-11-01"
 
 #: USD per 1,000 characters, voiceover, keyed ``(provider, model)``.
 #: Sources read 2026-10-17:
@@ -68,8 +71,10 @@ VOICEOVER_RATES_PER_1K_CHARS: dict[tuple[str, str], float] = {
 #: row exists — deliberately absent rather than zeroed.
 SOUND_EFFECT_RATES_PER_SECOND: dict[tuple[str, str], float] = {
     ("elevenlabs", "eleven_text_to_sound_v2"): 0.002,
-    # The platform publishes its own quoted USD policy. This is not evidence
-    # of a model-specific v3 vendor price for a user's BYOK account.
+    # Account USD exports verified 2026-11-01: four requests totaling 4.35
+    # requested seconds cost $0.0087, including 1.25s=$0.0025 and 2.1s=$0.0042.
+    # The manager confirmed this probe key equals the production key in memory.
+    # Approval-only platform policy, not portable pricing for every BYOK account.
     ("radient", "radient/sound-effects"): 0.002,
 }
 
@@ -87,9 +92,9 @@ class PriceEstimate:
     provenance: str
 
 
-def _source_line(provider: str, model: str) -> str:
+def _source_line(provider: str, model: str, version: str = PRICE_VERSION) -> str:
     return (
-        f"{provider} {model} at the central audio rate table ({PRICE_VERSION}); "
+        f"{provider} {model} at the central audio rate table ({version}); "
         "an estimate from published vendor rates, not a billed figure"
     )
 
@@ -124,22 +129,10 @@ def voiceover_estimate(provider: str, model: str | None, chars: int) -> PriceEst
 
 
 def sound_effect_units(duration_s: float) -> int:
-    """The integer count a sound effect is metered in: whole started seconds.
+    """Legacy integer compatibility count, not the exact billed SFX duration.
 
-    The platform's own sound-effect lane charges the REQUESTED duration in
-    whole seconds, rounded up (``units = ceil(requested)``): the ledger's
-    count is an integer and a started second is the charged unit. So 0.5 s is
-    one unit and 4.01 s is five. The rate is per second, so multiplying the
-    rate by a FRACTIONAL duration under-estimates a sub-second request at half
-    its true cost (the merged lane did exactly that: 0.5 s priced at $0.0010
-    against the $0.0020 the server charges).
-
-    Shared by the estimate and the channel row so the amount and the count
-    cannot disagree. A non-positive duration has no units, and a NON-FINITE one
-    (``nan``/``inf``, which JSON's ``1e999`` produces) is not a count at all:
-    it answers 0 — the ledger's own "no count" — rather than raising out of a
-    receipt. The estimator additionally answers ``None`` for it, so a consent
-    card says "amount not stated" instead of losing its summary.
+    Radient charges requested fractional seconds; existing integer usage schemas
+    retain ceil counts. Never multiply this count to reconstruct fractional money.
     """
     if not math.isfinite(duration_s):
         return 0
@@ -151,11 +144,9 @@ def sound_effect_estimate(
 ) -> PriceEstimate | None:
     """The estimated sound-effect cost for ``duration_s`` seconds, or ``None``.
 
-    Priced over whole started seconds (:func:`sound_effect_units`), matching
-    the ledger's integer count and the server lane's billing rule — never over
-    the raw fractional duration, which would quote half the real unit cost for
-    anything under a second. ``None`` stays the honest answer for an unknown
-    provider/model ("amount not stated"), never a zero.
+    Radient prices requested fractional duration, rounded per item to USD
+    microdollars. Explicit legacy BYOK v2 estimates keep their historical rule;
+    portable v3 BYOK cost remains unknown, never inferred from plan credits.
     """
     if not math.isfinite(duration_s) or duration_s <= 0:
         return None
@@ -169,11 +160,15 @@ def sound_effect_estimate(
     rate = SOUND_EFFECT_RATES_PER_SECOND.get((provider, resolved))
     if rate is None:
         return None
-    units = sound_effect_units(duration_s)
+    units = duration_s if provider == "radient" else sound_effect_units(duration_s)
+    version = SOUND_EFFECT_PRICE_VERSION if provider == "radient" else PRICE_VERSION
+    # Match the server's positive-value math.Round at microdollar precision,
+    # not Python's ties-to-even round; batches sum these per-item rounded quotes.
+    amount = math.floor(rate * units * 1_000_000 + 0.5) / 1_000_000
     return PriceEstimate(
-        amount_usd=rate * units,
+        amount_usd=amount,
         units=float(units),
         unit="seconds",
-        price_version=PRICE_VERSION,
-        provenance=_source_line(provider, resolved),
+        price_version=version,
+        provenance=_source_line(provider, resolved, version),
     )

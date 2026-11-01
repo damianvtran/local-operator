@@ -24,7 +24,10 @@ def test_every_row_carries_the_pinned_version_and_source():
     for (provider, model), rate in pricing.SOUND_EFFECT_RATES_PER_SECOND.items():
         estimate = pricing.sound_effect_estimate(provider, model, 10)
         assert estimate is not None and estimate.amount_usd == rate * 10
-        assert estimate.price_version == pricing.PRICE_VERSION
+        version = (
+            pricing.SOUND_EFFECT_PRICE_VERSION if provider == "radient" else pricing.PRICE_VERSION
+        )
+        assert estimate.price_version == version
 
 
 def test_unknown_provider_or_model_is_none_never_zero():
@@ -132,5 +135,23 @@ def test_v3_default_has_no_unverified_v2_price():
 
 def test_radient_published_policy_is_independent_of_byok_unknown_price():
     estimate = pricing.sound_effect_estimate("radient", None, 0.5)
-    assert estimate is not None and estimate.amount_usd == 0.002
+    assert estimate is not None and estimate.amount_usd == 0.001
     assert "radient/sound-effects" in estimate.provenance
+
+
+@pytest.mark.parametrize(
+    "duration,amount",
+    [(0.5, 0.001), (0.75, 0.0015), (1.25, 0.0025), (2.1, 0.0042), (30, 0.06), (0.5003, 0.001001)],
+)
+def test_radient_fractional_request_policy(duration, amount):
+    estimate = pricing.sound_effect_estimate("radient", None, duration)
+    assert estimate is not None
+    assert estimate.amount_usd == pytest.approx(amount)
+    assert estimate.units == duration
+    assert estimate.price_version == pricing.SOUND_EFFECT_PRICE_VERSION
+    assert pricing.SOUND_EFFECT_PRICE_VERSION in estimate.provenance
+
+
+def test_batch_rounds_per_item_before_summing():
+    items = [pricing.sound_effect_estimate("radient", None, 0.5003) for _ in range(10)]
+    assert sum(item.amount_usd for item in items if item) == pytest.approx(0.01001)
