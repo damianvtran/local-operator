@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import time
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
 import pytest
@@ -37,7 +38,66 @@ def _isolate_module_state(monkeypatch, tmp_path: Path):
     monkeypatch.delenv(watchdog.ENV_RUN_DIR, raising=False)
     monkeypatch.setattr(watchdog, "_CONTROLLER", None)
     monkeypatch.setattr(watchdog, "_WORKER", None)
-    yield
+    controllers = []
+    start = watchdog._Controller.start
+
+    def start_owned(controller):
+        # Track starts, not the final global: a test may replace _CONTROLLER,
+        # and restoring that global cannot stop its still-running reporter.
+        controllers.append(controller)
+        start(controller)
+
+    monkeypatch.setattr(watchdog._Controller, "start", start_owned)
+    try:
+        yield
+    finally:
+        # Stop every owned reporter before joining, including on assertion
+        # failures. Never touch a controller belonging to the enclosing run.
+        for controller in controllers:
+            controller.stop()
+        threads = [
+            controller._thread for controller in controllers if controller._thread is not None
+        ]
+        for thread in threads:
+            thread.join(timeout=5)
+        assert all(
+            not thread.is_alive() for thread in threads
+        ), "test-owned shard-stall reporter did not stop"
+
+
+@pytest.mark.parametrize("body_fails", [False, True])
+def test_module_isolation_joins_owned_reporters_even_after_failure(
+    monkeypatch, tmp_path, body_fails
+):
+    """Exercise fixture teardown, including a controller lost by global replacement.
+
+    The final safety net reaps the threads even when testing broken cleanup, so
+    the negative control cannot itself contaminate later shard diagnostics.
+    """
+    controllers = []
+    expected = (
+        pytest.raises(AssertionError, match="synthetic body failure")
+        if body_fails
+        else nullcontext()
+    )
+    try:
+        with monkeypatch.context() as scoped, expected:
+            with contextmanager(_isolate_module_state.__wrapped__)(scoped, tmp_path):
+                for _ in range(2):
+                    controller = watchdog._install_controller_for_test(900, _Sink())
+                    controllers.append(controller)
+                    controller.start()
+                    assert controller._thread is not None and controller._thread.is_alive()
+                if body_fails:
+                    raise AssertionError("synthetic body failure")
+        assert len(controllers) == 2
+        assert all(not controller._thread.is_alive() for controller in controllers)
+    finally:
+        for controller in controllers:
+            controller.stop()
+        for controller in controllers:
+            if controller._thread is not None:
+                controller._thread.join(timeout=5)
 
 
 class _Sink:
