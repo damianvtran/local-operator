@@ -28,7 +28,7 @@ import hashlib
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Any, Literal, Mapping, NewType
+from typing import Any, Literal, Mapping, NewType, TypedDict
 
 # WHY the two imports differ from the branch's original pair: ``quote`` /
 # ``unquote`` left with #2856 (durable refs no longer carry display labels, so
@@ -45,6 +45,7 @@ __all__ = [
     "RECIPIENT_KEYS",
     "RECIPIENT_NAME_SHAPE",
     "RECIPIENT_TEACHING",
+    "ReplyWindowParams",
     "SCOPE_ALLOWLIST",
     "SCOPE_CONVERSATION",
     "SEND_RECIPIENT_DESCRIPTION",
@@ -1243,17 +1244,31 @@ def project_events_batch(result: Mapping[str, Any]) -> tuple[FeedSeq, tuple[str,
     return cursor, tuple(refs), not refs
 
 
+class ReplyWindowParams(TypedDict, total=False):
+    """Per-key types survive keyword expansion into both client signatures.
+
+    A homogeneous int|str dictionary loses which value belongs to which keyword:
+    validation at runtime does not narrow **kwargs for a static caller. Optional
+    keys also preserve omitted legacy hints instead of manufacturing defaults.
+    """
+
+    limit: int
+    after_seq: int
+    before_seq: int
+    order: Literal["asc", "desc"]
+
+
 def reply_window_params(
     *, limit: int | str | None = None, after_seq: int | str | None = None,
     before_seq: int | str | None = None, order: str | None = None,
-) -> dict[str, int | str]:
+) -> ReplyWindowParams:
     """The shared member/owner thread query contract, without synthetic defaults.
 
     Legacy after is inclusive/ascending; backward before is exclusive/descending.
     Never manufacture after=0 for a newest request: the hub rejects mixed modes.
     Keeping raw parsing here makes the two HTTP routes and direct client agree.
     """
-    result: dict[str, int | str] = {}
+    result: ReplyWindowParams = {}
     for name, raw, minimum, maximum in (
         ("limit", limit, 1, 100), ("after_seq", after_seq, 0, (1 << 63) - 1),
         ("before_seq", before_seq, 1, (1 << 63) - 1),
@@ -1267,11 +1282,18 @@ def reply_window_params(
         value = int(raw)
         if value < minimum or maximum is not None and value > maximum:
             raise ValueError("invalid thread paging query")
-        result[name] = value
-    if order is not None:
-        if order not in ("asc", "desc"):
-            raise ValueError("invalid thread paging query")
-        result["order"] = order
+        if name == "limit":
+            result["limit"] = value
+        elif name == "after_seq":
+            result["after_seq"] = value
+        else:
+            result["before_seq"] = value
+    if order == "asc":
+        result["order"] = "asc"
+    elif order == "desc":
+        result["order"] = "desc"
+    elif order is not None:
+        raise ValueError("invalid thread paging query")
     if (
         (after_seq is not None and before_seq is not None)
         or (before_seq is not None and order == "asc")

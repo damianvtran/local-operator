@@ -52,3 +52,18 @@ async def test_reply_client_serializes_only_explicit_cursors(method, monkeypatch
     with pytest.raises(ValueError):
         await call("bcv_abc12345", "bcmsg_root0001", after_seq=0, order="desc", **owner)
     assert len(captured) == count
+
+
+def test_reply_window_keyword_types_are_per_key_and_optional():
+    # A homogeneous dictionary passed runtime tests but broke both typed HTTP
+    # dispatches. Keep the public helper contract precise without casts/ignores.
+    from typing import Literal, get_type_hints, is_typeddict
+
+    result_type = get_type_hints(reply_window_params)["return"]
+    assert is_typeddict(result_type)
+    assert get_type_hints(result_type) == {
+        "limit": int, "after_seq": int, "before_seq": int,
+        "order": Literal["asc", "desc"],
+    }
+    assert result_type.__required_keys__ == frozenset()
+    assert result_type.__optional_keys__ == frozenset({"limit", "after_seq", "before_seq", "order"})
