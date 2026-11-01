@@ -1483,16 +1483,27 @@ def test_the_probe_resolves_the_installed_execnet_gateway_process(
     execnet = pytest.importorskip("execnet")
     group = execnet.Group()
     gateway = group.makegateway("popen//id=probe")
+    popen = getattr(getattr(gateway, "_io", None), "popen", None)
     try:
-        popen = getattr(getattr(gateway, "_io", None), "popen", None)
         assert isinstance(popen, subprocess.Popen), (
             "execnet no longer exposes gateway._io.popen as a subprocess.Popen; "
             "the probe's attribute path has moved"
         )
         assert hook_module._worker_process(_GatewayNode(gateway)) is popen
     finally:
-        gateway.exit()
+        # NOT `gateway.exit(); group.terminate()`. `exit()` unregisters the
+        # gateway, so a following `terminate()` finds an empty group and never
+        # runs its join/`_io.wait()` loop -- the loop that reaps the child. That
+        # pair was the teardown here and leaked the gateway process (review round
+        # 2, R3), so `terminate()` is called on the intact group instead.
         group.terminate()
+    # Prove the child was REAPED, not merely that terminate() returned: only a
+    # collected wait sets `returncode`, and a reaped pid is no longer our child.
+    assert isinstance(popen, subprocess.Popen)
+    assert popen.returncode is not None, "the gateway's child was never reaped"
+    if sys.platform != "win32":
+        with pytest.raises(ChildProcessError):
+            os.waitpid(popen.pid, os.WNOHANG)
 
 
 def test_the_cgroup_line_reads_memory_events_or_stays_silent(
