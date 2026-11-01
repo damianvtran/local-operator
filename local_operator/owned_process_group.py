@@ -113,6 +113,35 @@ def strict_census(pgid, deadline):
     raise Unknown("strict group census unsupported")
 
 
+def bounded_samples(pids, deadline, clock=time.monotonic):
+    """Use canonical native tokens first; budget only the fixed ps fallback.
+
+    Native readers are fork-free. An unavailable native reader is NOT permission
+    to spend its canonical one-second subprocess fallback in a 0.25s cleanup.
+    Missing per-PID samples remain unknown, never invented births or absence.
+    """
+    wanted = sorted(set(pids))
+    if clock() >= deadline:
+        raise Unknown("birth sample deadline exhausted")
+    if sys.platform == "darwin":
+        result = procstate._sysctl_samples(wanted)
+        if result is not None:
+            if clock() >= deadline:
+                raise Unknown("native birth sample exceeded deadline")
+            return result
+    elif sys.platform.startswith("linux"):
+        result = procstate._proc_samples(wanted)
+        if clock() >= deadline:
+            raise Unknown("native birth sample exceeded deadline")
+        return result
+    if deadline - clock() < 1.0:
+        raise Unknown("remaining deadline cannot cover canonical ps fallback")
+    result = procstate.process_samples(wanted)
+    if clock() >= deadline:
+        raise Unknown("canonical birth fallback exceeded deadline")
+    return result
+
+
 def kernel_identity(pid):
     pair = resources.direct_ppid_pgid(pid)
     if pair is None or not hasattr(os, "getsid"):
@@ -198,11 +227,14 @@ class OwnedGroup:
         return sorted(members)
 
     def _samples(self, pids, deadline):
-        # Canonical ps fallback has a fixed ONE SECOND timeout. Never start it
-        # when the caller's remaining allowance cannot cover that bound.
-        if deadline - self.clock() < 1.0:
-            raise Unknown("remaining deadline cannot cover canonical 1s birth probe")
-        return self.samples(sorted(set(pids)))
+        if self.clock() >= deadline:
+            raise Unknown("ownership sample deadline exhausted")
+        if self.samples is None:
+            return bounded_samples(pids, deadline, self.clock)
+        result = self.samples(sorted(set(pids)))
+        if self.clock() >= deadline:
+            raise Unknown("injected sample exceeded deadline")
+        return result
 
     def refresh(self, *, deadline, enrol=True):
         members = []

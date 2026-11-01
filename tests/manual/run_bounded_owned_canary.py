@@ -54,6 +54,15 @@ def main():
     root = Path(sys.argv[1]).resolve()
     root.mkdir(mode=0o700, parents=True, exist_ok=False)
     wrapper = runpy.run_path(str(ROOT / "scripts/run_bounded.py"))
+    # Detached groups are not priced by an outer bash PG. Require the actual
+    # allocation and let the production resolver preserve/tighten it, never zero.
+    grant_key = wrapper["memory_guard"].RESOLVED_MEMORY_MB_ENV
+    raw = os.environ.get(grant_key, "")
+    if not raw.isdigit() or int(raw) <= 0:
+        raise SystemExit("positive central memory grant required before dispatch")
+    budget, budget_source = wrapper["_memory_budget"](None)
+    if budget.ceiling_mb <= 0 or budget.ceiling_mb > int(raw):
+        raise SystemExit("effective child ceiling must not disable/widen the grant")
     original = owned.OwnedGroup.refresh
     for mode in ("leader-exit", "timeout", "forward"):
         case = root / mode
@@ -83,7 +92,7 @@ def main():
         rc = None
         try:
             rc = wrapper["run"]([sys.executable, "-S", "-c", LEADER, str(case), mode, CHILD],
-                                timeout=3, grace=1, memory_mb=0)
+                                timeout=3, grace=1, memory_mb=None)
         except Exception as exc:
             errors.append("wrapper:" + type(exc).__name__)
         finally:
@@ -110,6 +119,7 @@ def main():
                             "exists": owned.resources._pid_exists(pid)}
                  for pid, r in observations.items()}
         outcome = {"mode": mode, "rc": rc, "expected": expected, "released": released,
+                   "effective_memory_mb": budget.ceiling_mb, "budget_source": budget_source,
                    "observer_errors": errors, "groups": census, "identity_samples": facts,
                    "refusals": [str(p) for p in set(sink.glob("*.json")) - previous_refusals]}
         persist(case / "outcome.json", outcome)

@@ -138,3 +138,45 @@ def test_handlers_only_latch_and_all_signal_sites_take_capabilities():
     forward = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "_forward")
     assert not any(isinstance(n, ast.Call) for n in ast.walk(forward))
     assert not any(isinstance(n, ast.Attribute) and n.attr == "killpg" for n in ast.walk(tree))
+
+
+@pytest.mark.parametrize("phase", ["acquire", "midrun", "zombie"])
+def test_no_timeout_refusal_exits_without_unknown_signal_or_unbounded_wait(memory_wrapper, monkeypatch, phase):
+    wrapper = memory_wrapper
+    handlers, receipts, polls = {}, [], []
+    class Clock:
+        now = 0
+        def monotonic(self):
+            self.now += 0.001
+            return self.now
+        def sleep(self, seconds): self.now += seconds
+    monkeypatch.setattr(wrapper, "time", Clock())
+    def install(sig, handler):
+        old = handlers.get(sig)
+        handlers[sig] = handler
+        return old
+    monkeypatch.setattr(wrapper, "signal", NS(**{**vars(signal), "signal": install}))
+    def wait(*, timeout):
+        assert timeout == 0
+        raise subprocess.TimeoutExpired("fake live or zombie child", timeout)
+    def poll():
+        polls.append(True)
+        assert len(polls) <= 1, "unbounded run kept polling after authority loss"
+        return None
+    process = NS(pid=10, poll=poll, wait=wait)
+    monkeypatch.setattr(wrapper, "subprocess", NS(Popen=lambda *a, **k: process,
+                                                   TimeoutExpired=subprocess.TimeoutExpired))
+    state = [0]
+    reason = "terminal-only is not absence" if phase == "zombie" else "unknown identity"
+    bad = owned.Verdict("REFUSED", reason, (10,))
+    def refresh(**kwargs):
+        state[0] += 1
+        return owned.Verdict("VERIFIED", "first proof") if phase == "midrun" and state[0] == 1 else bad
+    cap = NS(pgid=10, receipts={}, last=bad if phase != "midrun" else owned.Verdict("VERIFIED", "acquired"),
+             refresh=refresh, signal=lambda *a, **k: pytest.fail("signal after proof failure"))
+    monkeypatch.setattr(wrapper, "owned_process_group", NS(OwnedGroup=NS(capture=lambda *a, **k: cap),
+                                                           Verdict=owned.Verdict))
+    monkeypatch.setattr(wrapper, "_memory_budget", lambda _: (NS(ceiling_mb=0, reason="fake"), "fixture"))
+    monkeypatch.setattr(wrapper, "_refusal_receipt", lambda owner, stage, verdict, stream: receipts.append(stage))
+    assert wrapper.run(["synthetic"], timeout=None, grace=0.05, stream=io.StringIO()) == 125
+    assert receipts and all(handler is None for handler in handlers.values())

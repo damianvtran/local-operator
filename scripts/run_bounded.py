@@ -184,14 +184,14 @@ def _refusal_receipt(owner, phase, verdict, stream):
         _report(stream, f"[run_bounded] residual capture failed: {type(exc).__name__} errno={getattr(exc, 'errno', None)}")
 
 
-def _reap(owner, grace, poll, stream, *, reason, send, deadline):
+def _reap(owner, grace, poll, stream, *, reason, send, require, deadline):
     """TERM and KILL EACH obtain fresh authority; refusal never enters a wait."""
     _report(stream, f"[run_bounded] {reason} — requesting checked SIGTERM")
     verdict = send(signal.SIGTERM, reason + ":term", deadline)
     if verdict.status == "REFUSED":
         return
     while time.monotonic() < deadline:
-        owner.refresh(deadline=deadline)  # retain ancestry BEFORE reaping leader
+        require(owner.refresh(deadline=deadline), reason + ":grace-refresh")
         if poll() is not None:
             return
         time.sleep(min(_POLL_SECONDS, max(0, deadline - time.monotonic())))
@@ -332,7 +332,22 @@ def run(
         proc.pid, deadline=min(deadline if deadline is not None else float("inf"),
                                time.monotonic() + 3.0))
     refused = False
+    proof_failed = False
     cleanup_deadline = None
+
+    class AuthorityRefused(Exception):
+        """Local control transfer: refusal must not leave timeout=None polling."""
+
+    def fail_proof(result, phase):
+        nonlocal refused, proof_failed
+        refused = proof_failed = True
+        _refusal_receipt(owner, phase, result, stream)
+
+    def require(result, phase):
+        if result.status == "REFUSED":
+            fail_proof(result, phase)
+            raise AuthorityRefused
+        return result
 
     def begin_cleanup(allowance):
         nonlocal cleanup_deadline
@@ -341,12 +356,7 @@ def run(
         return cleanup_deadline
 
     def send(signum, phase, until):
-        nonlocal refused
-        result = _signal_group(owner, signum, deadline=until)
-        if result.status == "REFUSED":
-            refused = True
-            _refusal_receipt(owner, phase, result, stream)
-        return result
+        return require(_signal_group(owner, signum, deadline=until), phase)
 
     def bounded_wait(until):
         try:
@@ -356,34 +366,41 @@ def run(
             return False
         return True
 
-    rc = EXIT_NOT_STARTED
+    rc = 128 + stop["signum"] if stop["signum"] else EXIT_NOT_STARTED
     try:
+        require(owner.last, "acquire")
         guard = memory_guard.Guard(pgid, budget) if budget.ceiling_mb > 0 else None
         next_sample = started
         unmeasured_reported = False
         while True:
             # Enrolment needs a still-live creation chain; do this before poll
             # can reap the only authenticated ancestor. Unknown stays unknown.
-            owner.refresh(deadline=min(deadline if deadline is not None else float("inf"),
-                                       time.monotonic() + 3.0))
             signum = stop["signum"]
+            timed_out = deadline is not None and time.monotonic() >= deadline
+            if signum:
+                rc = 128 + signum
+            elif timed_out:
+                rc = EXIT_TIMEOUT
+            probe_until = (begin_cleanup(grace + 0.25) if signum or timed_out else
+                           min(deadline if deadline is not None else float("inf"),
+                               time.monotonic() + 3.0))
+            require(owner.refresh(deadline=probe_until), "required-refresh")
             if signum:
                 until = begin_cleanup(grace + 0.25)
                 send(signum, "forward", until)
                 _reap(owner, grace, proc.poll, stream, reason=f"signal {signum} received",
-                      send=send, deadline=until - 0.25)
+                      send=send, require=require, deadline=until - 0.25)
                 rc = 128 + signum
+                break
+            if timed_out:
+                until = begin_cleanup(grace + 0.25)
+                _reap(owner, grace, proc.poll, stream, reason=f"timeout after {timeout:g}s",
+                      send=send, require=require, deadline=until - 0.25)
+                _report(stream, f"[run_bounded] BOUND ({timeout:g}s) fired, not the gate failing; --timeout sets the bound")
                 break
             status = proc.poll()
             if status is not None:
                 rc = 128 - status if status < 0 else status
-                break
-            if deadline is not None and time.monotonic() >= deadline:
-                until = begin_cleanup(grace + 0.25)
-                _reap(owner, grace, proc.poll, stream, reason=f"timeout after {timeout:g}s",
-                      send=send, deadline=until - 0.25)
-                rc = EXIT_TIMEOUT
-                _report(stream, f"[run_bounded] BOUND ({timeout:g}s) fired, not the gate failing; --timeout sets the bound")
                 break
             now = time.monotonic()
             if guard is not None and now >= next_sample:
@@ -391,8 +408,8 @@ def run(
                 next_sample = now + guard.tick_s
                 if guard.should_kill(sample):
                     _report(stream, f"[run_bounded] {guard.over_budget_message(sample)}")
-                    send(signal.SIGKILL, "memory", begin_cleanup(0.25))
                     rc = EXIT_MEMORY
+                    send(signal.SIGKILL, "memory", begin_cleanup(0.25))
                     break
                 notice = guard.soft_notice(sample)
                 if notice:
@@ -401,6 +418,10 @@ def run(
                     _report(stream, "[run_bounded] memory charge unavailable; no measured cap proof")
                     unmeasured_reported = True
             time.sleep(_POLL_SECONDS)
+    except AuthorityRefused:
+        # The existing error/timeout/RAM/signal status is retained. In particular
+        # timeout=None cannot leave this wrapper polling an unowned live child.
+        pass
     except Exception as exc:
         _report(stream, f"[run_bounded] owned-child monitor failed: {type(exc).__name__}")
         raise
@@ -410,9 +431,17 @@ def run(
             # grace period per pass. Never claim a requested signal means reaped.
             until = begin_cleanup(0.25)
             for attempt in range(5):
-                owner.refresh(deadline=until)
+                if proof_failed:
+                    break  # no automatic signal retry after loss of authority
+                check = owner.refresh(deadline=until)
+                if check.status == "REFUSED":
+                    fail_proof(check, "finally-refresh")
+                    break
                 proc.poll()  # refresh before reaping; then strictly observe again
-                result = send(signal.SIGKILL, "finally", until)
+                try:
+                    result = send(signal.SIGKILL, "finally", until)
+                except AuthorityRefused:
+                    break
                 if result.status in {"REFUSED", "OBSERVED_EMPTY"}:
                     break
                 if time.monotonic() >= until:

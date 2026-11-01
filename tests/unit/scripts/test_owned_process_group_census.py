@@ -73,7 +73,7 @@ def test_linux_disappeared_requires_directory_absence():
 
 def test_linux_disappeared_row_reappearing_cannot_be_omitted():
     def absent(_): raise FileNotFoundError("fake")
-    with pytest.raises(o.Unknown, match="changed"):
+    with pytest.raises(o.Unknown, match="unstable /proc census"):
         o.strict_linux(10, 5, listdir=lambda _: ["10"], read=absent,
                        stat=absent, clock=lambda: 0)
 

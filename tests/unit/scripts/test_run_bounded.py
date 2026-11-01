@@ -514,6 +514,7 @@ def test_child_memory_loop_preserves_owned_cleanup_contract(
     class Owner:
         pgid = process.pid
         receipts = {}
+        last = opg.Verdict("VERIFIED", "fake acquisition")
         def refresh(self, **kwargs):
             return opg.Verdict("OBSERVED_EMPTY" if process.status is not None else "VERIFIED", "fake")
         def signal(self, signum, **kwargs):
