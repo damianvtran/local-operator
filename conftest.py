@@ -638,8 +638,7 @@ def _dead_worker_exit_line(node: object) -> str:
     except Exception as exc:  # see the docstring: unknown, never raise
         reason = " ".join(str(exc).split()) or type(exc).__name__
         return (
-            f"DEAD WORKER EXIT: {worker} unknown "
-            f"(probe raised {type(exc).__name__}: {reason})"
+            f"DEAD WORKER EXIT: {worker} unknown " f"(probe raised {type(exc).__name__}: {reason})"
         )
 
 

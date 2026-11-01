@@ -1270,9 +1270,7 @@ def test_a_dead_worker_reports_its_process_exit_status(
     """
     process = _exited_process(7)
     hook_module._DEAD_WORKERS.clear()
-    hook_module.pytest_testnodedown(
-        _node_with_process("gw4", process), "Not properly terminated"
-    )
+    hook_module.pytest_testnodedown(_node_with_process("gw4", process), "Not properly terminated")
 
     err = capsys.readouterr().err
     assert "DEAD WORKER:" in err  # the message every existing grep matches
@@ -1342,9 +1340,7 @@ def test_a_process_shaped_object_is_never_polled_and_is_reported_unknown(
     stub = _BlockingPollStub()
     started = time.monotonic()
     hook_module._DEAD_WORKERS.clear()
-    hook_module.pytest_testnodedown(
-        _node_with_process("gw7", stub), "Not properly terminated"
-    )
+    hook_module.pytest_testnodedown(_node_with_process("gw7", stub), "Not properly terminated")
     elapsed = time.monotonic() - started
 
     err = capsys.readouterr().err
@@ -1542,8 +1538,7 @@ def test_the_cgroup_line_reads_memory_events_or_stays_silent(
     monkeypatch.setattr(hook_module, "pathlib", types.SimpleNamespace(Path=_FakePath))
 
     assert hook_module._dead_worker_cgroup_line() == (
-        "DEAD WORKER CGROUP: oom_kill=1 oom=3 "
-        "(/sys/fs/cgroup/ci/shared/memory.events)"
+        "DEAD WORKER CGROUP: oom_kill=1 oom=3 " "(/sys/fs/cgroup/ci/shared/memory.events)"
     )
 
     readable.clear()  # nothing readable at all: no /proc on macOS, no v2 cgroup
