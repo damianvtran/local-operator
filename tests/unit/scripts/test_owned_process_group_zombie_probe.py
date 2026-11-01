@@ -118,13 +118,44 @@ def test_a_new_session_child_is_visible_to_the_census():
         try:
             os.close(read_fd)
             os.setsid()
-            os.write(write_fd, str(os.getpid()).encode())
+            # FRAMED, ONE LINE: pid plus the child's own monotonic start marker, so
+            # the parent has a fact to check liveness against instead of inferring
+            # it from the census it is about to test.
+            line = "%d %.6f\n" % (os.getpid(), time.monotonic())
+            os.write(write_fd, line.encode())
+            os.close(write_fd)
             time.sleep(30)
         finally:
             os._exit(0)
     os.close(write_fd)
     with os.fdopen(read_fd, "rb") as handle:
-        child = int(handle.read())
+        # BOUNDED READ of a framed line. `read()` with no size blocks to EOF, and
+        # the child holds the write end across its sleep: the parent then measured
+        # a process that had already exited (measured: ~32 s, ProcessLookupError).
+        frame = handle.readline(64).decode().split()
+    child = int(frame[0])
+    try:
+        # INDEPENDENT ALIVE CHECK BEFORE ANY CENSUS CALL. The census must never be
+        # the instrument that decides whether the child exists.
+        deadline_probe = time.monotonic() + 5.0
+        while True:
+            try:
+                os.kill(child, 0)
+                break
+            except ProcessLookupError:
+                if time.monotonic() >= deadline_probe:
+                    raise AssertionError("the forked child did not survive its own handshake")
+                time.sleep(0.01)
+    except BaseException:
+        try:
+            os.kill(child, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            os.waitpid(child, 0)
+        except ChildProcessError:
+            pass
+        raise
     try:
         # The census is measured while the child is ALIVE (it sleeps for 30 s), so
         # a lookup miss is a census answer rather than a race with an exit.

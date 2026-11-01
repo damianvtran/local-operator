@@ -174,19 +174,33 @@ def strict_darwin(pgid, deadline, *, listpids=None, clock=time.monotonic):
     """
     if listpids is None:
         members = []
+        unknown = []
         for pid in _darwin_all_pids(deadline, clock):
             if clock() >= deadline:
                 raise Unknown("strict census deadline")
             try:
                 group = os.getpgid(pid)
             except ProcessLookupError:
-                continue  # exited between the listing and the query: gone, not ours
+                # ESRCH is the only tolerated outcome: the pid went away between
+                # the listing and the query, so it cannot be a member.
+                if pid == pgid:
+                    # ...unless it is the pid we were ASKED about. Then the answer
+                    # is unknown, not absent: an unprovable membership must never
+                    # be folded into an empty group.
+                    unknown.append(pid)
+                continue
             except PermissionError:
-                raise Unknown("pid outside this user: census cannot be complete")
-            except OSError as exc:
-                raise Unknown("unreadable process group") from exc
+                unknown.append(pid)
+                continue
+            except OSError:
+                unknown.append(pid)
+                continue
             if group == pgid:
                 members.append(pid)
+        if unknown:
+            raise Unknown(
+                "strict census membership unknown: %d pid(s) could not be asked" % len(unknown)
+            )
         if pgid not in members:
             _report_census_miss(pgid, deadline)
         return sorted(members)

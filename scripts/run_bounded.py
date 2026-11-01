@@ -197,6 +197,15 @@ _RECORD_BUDGET_SECONDS = 0.25
 RUN_ID_ENV = "LOCAL_OPERATOR_RUN_ID"
 
 
+#: Bound on ONE probe wait inside the run loop. The child's lifetime is not
+#: bounded -- a `--timeout`-less run may wait for it forever -- but no single
+#: instrument call may block the loop past this.
+_PROBE_BUDGET_SECONDS = 0.5
+#: Consecutive unanswered probes before the instrument is called BROKEN. At the
+#: 50 ms poll cadence this is ~2 s of silence, so a busy sampler is not broken.
+_PROBE_STREAK_LIMIT = 40
+
+
 def _signal_group(owner, signum: int, *, deadline: float):
     """One capability boundary; numeric groups cannot be supplied as authority."""
     return owner.signal(signum, deadline=deadline)
@@ -648,6 +657,7 @@ def run(
     # "did not run". A forwarded signal still carries its own status.
     rc = 128 + stop["signum"] if stop["signum"] else EXIT_CLEANUP_UNPROVEN
     exited = False
+    unanswered = 0
     try:
         require(owner.last, "acquire")
         guard = memory_guard.Guard(pgid, budget) if budget.ceiling_mb > 0 else None
@@ -702,7 +712,30 @@ def run(
                     "--timeout sets the bound",
                 )
                 break
-            if owner.leader_terminal(deadline):
+            # EACH ITERATION BOUNDS ITS OWN WAIT, and a probe that cannot ANSWER
+            # for a sustained streak refuses BY NAME instead of spinning. An
+            # unbounded wait for a live CHILD is the user's contract and stays;
+            # what must never happen is an unbounded wait on a broken instrument,
+            # which is how this loop became unreachable by any signal boundary
+            # (precedent: the probe-streak rule in session/runtime/process.py).
+            probe_until = min(deadline, time.monotonic() + _PROBE_BUDGET_SECONDS)
+            try:
+                terminal_now = owner.leader_terminal(probe_until)
+            except Exception:
+                unanswered += 1
+                if unanswered >= _PROBE_STREAK_LIMIT:
+                    require(
+                        owned_process_group.Verdict(
+                            "REFUSED",
+                            "owned-group probe unanswered for %d consecutive attempts"
+                            % unanswered,
+                        ),
+                        "probe-streak",
+                    )
+                terminal_now = False
+            else:
+                unanswered = 0
+            if terminal_now:
                 # TERMINAL, NOT REAPED. The leader is deliberately left a corpse:
                 # reaping it frees the group number and destroys the reservation
                 # the cleanup below depends on. The status is read after the
