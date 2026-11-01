@@ -599,6 +599,13 @@ class OwnedGroup:
             self.probe["observed"] = _observed(samples, None)
             live = [pid for pid in members if pid in samples and not samples[pid].zombie]
             if not live:
+                # A CENSUS OF CORPSES STILL NEEDS ITS RESERVATION. If the pin is
+                # gone the group number was given up, and "nothing live here" would
+                # be a refused proof dressed as an observation -- exactly the
+                # conflation the three-way rule forbids. Only a held pin may report
+                # an empty live set.
+                if self._leader_reservation(deadline) is None:
+                    raise PinLost("no live member and no reservation: pin lost mid-proof")
                 # Corpses only: there is nothing left to signal, and holding the
                 # group "open" for them would report a live group that is not one.
                 # OBSERVED_EMPTY is the honest state — the same answer ESRCH gets.

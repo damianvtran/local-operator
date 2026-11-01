@@ -199,14 +199,24 @@ def test_c2_sigchld_ignored_refuses_with_a_named_reason(monkeypatch):
 
 
 def test_c4_pid_one_and_our_own_group_are_never_signalled(monkeypatch):
-    for pgid in (1, 4242):
-        kernel = Kernel(leader=pgid, parent=1)
-        cap = kernel.cap()
-        monkeypatch.setattr(owned.os, "getpgrp", lambda pgid=pgid: pgid if pgid == 4242 else 99)
-        monkeypatch.setattr(owned.os, "getpid", lambda: 77)
-        verdict = cap.signal(signal.SIGKILL, deadline=kernel.clock() + 5.0)
-        assert verdict.status == "REFUSED", (pgid, verdict.reason)
-        assert kernel.sent == []
+    """pid 1 is excluded BY CONSTRUCTION; our own group is excluded at the syscall.
+
+    Adjudicated 2026-11-01: the test used to build authority for pid 1 through
+    `capture`, which refuses to construct one at all ("numeric PGID alone cannot
+    construct signal authority") -- so the exclusion had already fired a level
+    earlier and the assertion could never be reached. The construction refusal IS
+    the pid-1 exclusion, and it is asserted here instead.
+    """
+    with pytest.raises(ValueError):
+        Kernel(leader=1, parent=1).cap()
+
+    kernel = Kernel(leader=4242, parent=1)
+    cap = kernel.cap()
+    monkeypatch.setattr(owned.os, "getpgrp", lambda: 4242)
+    monkeypatch.setattr(owned.os, "getpid", lambda: 77)
+    verdict = cap.signal(signal.SIGKILL, deadline=kernel.clock() + 5.0)
+    assert verdict.status == "REFUSED", verdict.reason
+    assert kernel.sent == []
 
 
 #: The C3 marker is what makes this mutation take ONE check: `refresh` holds a
@@ -248,12 +258,15 @@ def test_c3_removing_the_residency_re_check_lets_a_stranger_die():
     """The mutation must fail in the RIGHT direction — a stranger dies."""
     kernel = Kernel()
     cap = kernel.cap()
-    kernel.corpses.add(kernel.leader)
+    # Adjudicated 2026-11-01: the control used a CORPSE-ONLY census, which the
+    # three-way rule now refuses on its own (no live member and no reservation is
+    # a lost pin, not an observation). The mutation has to isolate the PRE-SYSCALL
+    # check, so the group is alive and the leader's sample disappears only on the
+    # fourth `_samples` call -- the one `signal` makes immediately before the send.
     original = kernel.samples
 
     def reaped_mid_proof(pids):
-        # Proof passes; the corpse disappears exactly at the pre-syscall check.
-        if kernel.sent == [] and capped["calls"] >= 3:
+        if kernel.sent == [] and capped["calls"] >= 4:
             return {}
         capped["calls"] += 1
         return original(pids)
@@ -278,11 +291,10 @@ def test_c3_removing_the_residency_re_check_lets_a_stranger_die():
         signal_group=lambda *a: kernel2.sent.append(a),
         deadline=kernel2.clock() + 5.0,
     )
-    kernel2.corpses.add(kernel2.leader)
     capped2 = {"calls": 0}
 
     def reaped_mid_proof2(pids):
-        if capped2["calls"] >= 3:
+        if capped2["calls"] >= 4:
             return {}
         capped2["calls"] += 1
         return kernel2.samples(pids)
