@@ -42,6 +42,17 @@ def _fixture():
     return json.loads((REPO / "tests/unit/i18n/fixtures/cli_global_help_base_ast.json").read_text())
 
 
+def _is_parser_constructor(func):
+    # The failure-localisation subclass preserves constructor/help semantics;
+    # the frozen BASE predates it, so both spellings must remain visible.
+    return (
+        isinstance(func, ast.Attribute)
+        and isinstance(func.value, ast.Name)
+        and func.value.id == "argparse"
+        and func.attr == "ArgumentParser"
+    ) or (isinstance(func, ast.Name) and func.id == "LocalizedArgumentParser")
+
+
 def _shape(key):
     return f'_gh.{key}().envelope(locale=help_locale)["text"]'
 
@@ -91,23 +102,20 @@ def test_all_pinned_copy_sites_render_from_the_existing_snapshot():
     for node in ast.walk(build):
         if (
             not isinstance(node, ast.Call)
-            or not isinstance(node.func, ast.Attribute)
-            or not isinstance(node.func.value, ast.Name)
+            or not isinstance(node.func, (ast.Attribute, ast.Name))
+            or (isinstance(node.func, ast.Attribute) and not isinstance(node.func.value, ast.Name))
         ):
             continue
-        owner = node.func.value.id
+        owner = node.func.value.id if isinstance(node.func, ast.Attribute) else None
         for kw in node.keywords:
             if (
                 owner in {"parser", "parent_parser"}
                 and kw.arg == "help"
+                and isinstance(node.func, ast.Attribute)
                 and node.func.attr == "add_argument"
             ):
                 actual.append((kw.value.lineno, kw.value.col_offset, owner, kw.value))
-            elif (
-                kw.arg == "description"
-                and isinstance(node.func, ast.Attribute)
-                and node.func.attr == "ArgumentParser"
-            ):
+            elif kw.arg == "description" and _is_parser_constructor(node.func):
                 actual.append((kw.value.lineno, kw.value.col_offset, "parser", kw.value))
     for node in ast.walk(propagated):
         if (
@@ -319,6 +327,17 @@ def _restore_global_copy():
 
     class Restore(ast.NodeTransformer):
         count = 0
+
+        def visit_Call(self, node):
+            # Normalize only the constructor identity for the historical help
+            # protocol comparison; keep every argument and keyword pinned.
+            if isinstance(node.func, ast.Name) and node.func.id == "LocalizedArgumentParser":
+                node.func = ast.Attribute(
+                    value=ast.Name(id="argparse", ctx=ast.Load()),
+                    attr="ArgumentParser",
+                    ctx=ast.Load(),
+                )
+            return self.generic_visit(node)
 
         def visit_Subscript(self, node):
             key = ast.dump(node)

@@ -62,6 +62,7 @@ from local_operator.config import ConfigManager
 from local_operator.env import get_env_config
 from local_operator.i18n.boot import activate_resolved_locale
 from local_operator.i18n.cli_failures import LocalizedArgumentParser
+from local_operator.i18n.cli_help import help_text as _tr
 from local_operator.i18n.keys import cli_agents_help as _ag
 from local_operator.i18n.keys import cli_aida_help as _ad
 from local_operator.i18n.keys import cli_browser as _b
@@ -2276,12 +2277,14 @@ def build_cli_parser() -> LocalizedArgumentParser:
         parents=[parent_parser],
     )
 
+    # wire.exec is deferred from client bundles: render these plain-string
+    # argparse consumers in-process, using the parser build's locale snapshot.
     exec_parser = subparsers.add_parser(
         "exec",
-        help=_wd.exec_help().envelope(locale=help_locale)["text"],
+        help=_tr(_wd.exec_help(), help_locale),
         parents=[parent_parser],
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=_wd.exec_epilog().envelope(locale=help_locale)["text"],
+        epilog=_tr(_wd.exec_epilog(), help_locale),
     )
     exec_parser.add_argument(
         "command",
