@@ -8,7 +8,6 @@ slice 2 and is deliberately absent here.
 
 from __future__ import annotations
 
-import time
 from pathlib import Path
 from typing import Any
 
@@ -290,19 +289,17 @@ def test_info_reports_a_queued_move_and_why_it_is_held(tmp_path: Path) -> None:
     body = _sessions_info_body({"session_id": OWN, "state": "ready"}, fields, context, is_own=True)
     assert "is queued" in body and queued.destination_cwd in body
     assert "still" in body, "the cwd in force is named, not implied"
-    # A hold is reported as a hold.
-    cwd_move.mark_blocked(tmp_path, OWN, "no_capable_viewer")
+    # A TRANSIENT hold is reported as a hold -- in WORDS with a next step, never
+    # as a bare code (UX round 2, U10) and never as "at the next idle point".
+    cwd_move.mark_blocked(tmp_path, OWN, "destination_unavailable")
     held = _sessions_pending_move_fields(context, OWN, is_own=True)
     held_body = _sessions_info_body(
         {"session_id": OWN, "state": "ready"}, held, context, is_own=True
     )
-    # ...in WORDS with a next step, never a bare code (UX round 2, U10), and
-    # never as "at the next idle point".
     assert "queued but held" in held_body
-    assert "nothing attached can follow it" in held_body and "cwd='.'" in held_body
-    assert "no_capable_viewer" not in held_body and "next idle point" not in held_body
-    # A CANCEL reads as one (UX round 2, U14), and a lapsed request is reported as
-    # expired by info ITSELF, not only once a runtime ticks (agent review m-e).
+    assert "is gone" in held_body and "cwd='.'" in held_body
+    assert "destination_unavailable" not in held_body and "next idle point" not in held_body
+    # A CANCEL reads as one (UX round 2, U14).
     cwd_move.enqueue_self_move(
         tmp_path, OWN, requested_cwd=str(tmp_path), effective_cwd=str(tmp_path), owner_pid=1
     )
@@ -313,12 +310,20 @@ def test_info_reports_a_queued_move_and_why_it_is_held(tmp_path: Path) -> None:
         is_own=True,
     )
     assert "was cancelled" in cancelled and "superseded" not in cancelled
-    cwd_move.enqueue_self_move(
+    # A RECORDED HANDOFF says the session is stopping rather than still running:
+    # the one stage a caller must not misread as "it is still here".
+    handoff = cwd_move.enqueue_self_move(
         tmp_path, OWN, requested_cwd=str(destination), effective_cwd=str(tmp_path), owner_pid=1
     )
-    cwd_move.mark_blocked(
-        tmp_path, OWN, "no_capable_viewer", now=time.time() - cwd_move.QUEUED_MOVE_TTL_S - 1
+    cwd_move.accept_handoff(tmp_path, OWN, handoff)
+    handed = _sessions_pending_move_fields(context, OWN, is_own=True)
+    assert handed["move_stage"] == cwd_move.STAGE_HANDOFF
+    assert "is recorded" in _sessions_info_body(
+        {"session_id": OWN, "state": "ready"}, handed, context, is_own=True
     )
+    # A marker an OLDER build aged out is still reported, once, in words.
+    expired = cwd_move._with_stage(handoff, cwd_move.STAGE_EXPIRED)
+    cwd_move._write(tmp_path, expired)
     lapsed = _sessions_pending_move_fields(context, OWN, is_own=True)
     assert lapsed["move_stage"] == cwd_move.STAGE_EXPIRED
     assert "expired without happening" in _sessions_info_body(
@@ -345,35 +350,41 @@ def test_the_approval_card_names_the_directory_the_move_really_uses(tmp_path: Pa
     used = cwd_move.resolve_destination("../dest", effective_cwd=str(link))
     assert used == str((tmp_path / "x" / "dest").resolve())
     card = _describe_sessions_approval({"op": "move", "cwd": "../dest"}, str(link))
-    assert card.startswith(f"move to {used} after this turn (now in "), card
+    assert card.startswith(f"move to {used} (now in "), card
     assert str(tmp_path.resolve() / "a" / "dest") not in card
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("readiness", "recorded", "promised"),
+    ("readiness", "recorded", "shape"),
     [
-        ("ready", "", True),
-        ("no_capable_viewer", "", False),
-        ("host_cannot_restart", "", False),
-        # Q3 / m-b: a REPEAT call while a hold is already on the marker.
-        ("ready", "no_capable_viewer", False),
-        ("", "no_capable_viewer", False),
+        ("ready", "", "idle-point"),
+        # Nobody can follow: the runtime writes the destination and stops, so the
+        # reply promises a restart at the NEXT ENGAGE, not at an idle point.
+        ("handoff", "", "handoff"),
+        # A REPEAT call while a transient hold is on the marker (Q3 / m-b), with
+        # or without a runtime in this process.
+        ("ready", "destination_unavailable", "held"),
+        ("", "destination_unavailable", "held"),
     ],
-    ids=["can-act", "nobody-can-follow", "host-cannot-restart", "repeat-ready", "repeat-unhosted"],
+    ids=["viewer-follows", "nobody-can-follow", "repeat-ready", "repeat-unhosted"],
 )
-async def test_the_result_promises_the_idle_point_only_when_the_runtime_can_act(
+async def test_the_result_says_which_way_the_session_will_move(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     readiness: str,
     recorded: str,
-    promised: bool,
+    shape: str,
 ) -> None:
-    """U9's real defect, m-b and Q3: "next idle point" is said only when it is true.
+    """U9's real defect, m-b and Q3: the promise must match what will happen.
 
-    ``notify_move_queued`` reports what the hosting runtime can do; a predicted
-    hold, or one already recorded on the marker, is reported as a hold with its
-    reason and next step instead.
+    ``notify_move_queued`` reports what the hosting runtime will do -- follow the
+    move with a viewer, hand the destination to the next engage, or (refused
+    before this point) never act at all. The reply is worded from that answer, so
+    "at the next idle point" is said only when a successor really follows, and the
+    handoff case says the session STOPS and starts elsewhere when it is next used.
+    A transient hold already recorded on the marker is reported as a hold with its
+    reason and the way out.
     """
     import local_operator.session.runtime.server as server_module
 
@@ -387,11 +398,113 @@ async def test_the_result_promises_the_idle_point_only_when_the_runtime_can_act(
         cwd_move.mark_blocked(tmp_path, OWN, recorded)
     result = await _move(_ctx(tmp_path), cwd=str(destination))
     assert not result.is_error, result.text
-    assert ("next idle point" in result.text) is promised, result.text
-    if not promised:
+    if shape == "idle-point":
+        assert "next idle point" in result.text, result.text
+        assert (result.details or {})["handoff"] is False
+    elif shape == "handoff":
+        assert "next idle point" not in result.text, result.text
+        assert result.text.startswith("handing off: "), "the shape leads, not a third clause"
+        # THE STOP IS BOUNDED BY IDLENESS, NOT BY THE TURN (design review D3): a
+        # parked gate or a background job defers it past the turn end.
+        assert "next point of idleness" in result.text, result.text
+        assert "stops when this turn ends" not in result.text, result.text
+        assert (result.details or {})["handoff"] is True, "the shape is machine-readable too"
+    else:
         assert result.text.startswith("queued but held: "), result.text
         assert "cwd='.'" in result.text, "the way out is named"
-        assert (result.details or {})["held"] in {readiness, recorded}
+        assert (result.details or {})["held"] == recorded
+
+
+@pytest.mark.asyncio
+async def test_a_host_that_can_never_restart_is_refused_at_the_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A request that could only ever sit there is not recorded at all.
+
+    ``host_cannot_restart`` used to be a hold: the tool queued the move, the
+    runtime recorded why it could not act, and thirty minutes later the request
+    lapsed. With the TTL gone such a request would sit ``queued`` for ever, so the
+    call refuses it -- AND DOES SO BEFORE RECORDING ANYTHING (agent review NIT-3):
+    a marker published first would be a request a runtime in another process could
+    already be acting on when the refusal is returned.
+    """
+    import local_operator.session.runtime.server as server_module
+
+    monkeypatch.setattr(
+        server_module,
+        "move_host_refusal",
+        lambda *_: "host_cannot_restart",
+    )
+    destination = tmp_path / "elsewhere"
+    destination.mkdir()
+    result = await _move(_ctx(tmp_path), cwd=str(destination))
+    assert _code(result) == "host_cannot_restart", result.text
+    assert "cannot restart it in another directory" in result.text, result.text
+    assert cwd_move.read_move_intent(tmp_path, OWN) is None, "nothing was recorded"
+
+
+@pytest.mark.asyncio
+async def test_a_destination_outside_the_confinement_is_refused_and_withdrawn(
+    tmp_path: Path,
+) -> None:
+    """THE BOUNDARY THE TOOLS ENFORCE IS THE BOUNDARY THE MOVE RESPECTS.
+
+    ``_sessions_move`` consulted ``context.job_id`` but never
+    ``context.confinement_root``, so a confined session could queue a move outside
+    its world root -- and every tool in the relocated session would then refuse the
+    directory it had been moved into.
+
+    THE REFUSAL SPEAKS IN THE BOUNDARY'S OWN WORDS (design review D2): the check
+    already computes "this session is confined to <root>, and its working directory
+    (<path>) is outside it", which is the one fact an agent needs to pick a
+    directory it may use; a static remedy withheld it. Nothing is recorded either --
+    the check runs before the enqueue (agent review NIT-3).
+    """
+    inside = tmp_path / "world"
+    outside = tmp_path / "outside"
+    inside.mkdir()
+    outside.mkdir()
+    context = ToolContext(
+        cwd=str(inside),
+        session_id=OWN,
+        session_dir=str(tmp_path / "sessions" / OWN),
+        confinement_root=str(inside),
+    )
+    result = await _move(context, cwd=str(outside))
+    assert _code(result) == "sessions_move_outside_confinement", result.text
+    assert "confined" in result.text, result.text
+    assert result.text.count("refused") == 1, result.text
+    # The root and the offending path, both named: that is what makes the refusal
+    # actionable without provoking a second tool's error.
+    assert str(inside.resolve()) in result.text, result.text
+    assert str(outside.resolve()) in result.text, result.text
+    assert cwd_move.read_move_intent(tmp_path, OWN) is None, "nothing was recorded"
+    # INSIDE the boundary the same call is the ordinary queued move.
+    inner = inside / "sub"
+    inner.mkdir()
+    allowed = await _move(context, cwd=str(inner))
+    assert not allowed.is_error, allowed.text
+    assert (allowed.details or {})["stage"] == cwd_move.STAGE_QUEUED
+
+
+def test_info_renders_a_recorded_handoff(tmp_path: Path) -> None:
+    """``info`` names the handoff stage in words a caller can plan around."""
+    from local_operator.tools.builtin import _sessions_move_state_sentence
+
+    destination, source = tmp_path / "dest", tmp_path / "src"
+    destination.mkdir()
+    source.mkdir()
+    text = _sessions_move_state_sentence(
+        {
+            "move_stage": cwd_move.STAGE_HANDOFF,
+            "move_destination": str(destination),
+            "move_source": str(source),
+        }
+    )
+    assert "is recorded" in text, text
+    assert "once it is idle it stops" in text, "idleness bounds the stop, not the turn"
+    assert "the next thing to start it" in text, text
+    assert str(destination) in text and str(source) in text
 
 
 @pytest.mark.asyncio
@@ -416,3 +529,72 @@ def test_the_tool_row_tells_a_move_from_a_cancel() -> None:
     assert sessions_row_summary({"op": "move", "cwd": "~/work/dest"}) == "move · ~/work/dest"
     assert sessions_row_summary({"op": "move", "cwd": "."}) == "move · ."
     assert sessions_row_summary({"op": "move"}) == "move · ?"
+
+
+def test_the_help_reference_describes_what_move_really_does(tmp_path: Path) -> None:
+    """THE CONTRACT A MODEL READS BEFORE IT CALLS `move` (design review D1).
+
+    It used to say the op NEEDS a viewer, that with none the move is HELD, and
+    that a hold EXPIRES — three statements this change makes false. It also
+    omitted the two refusals the op now has. A model that plans around a held move
+    that lapses plans around a request that never lapses and never holds.
+    """
+    from local_operator.tools.builtin import (
+        _SESSIONS_OP_DOCS,
+        render_sessions_reference,
+    )
+
+    rendered = render_sessions_reference()
+    move_doc = _SESSIONS_OP_DOCS["move"]
+    text = move_doc.summary + " " + " ".join(move_doc.refusals)
+    assert "It needs a viewer" not in text, "a viewer is not a precondition"
+    assert "and expires" not in text.lower(), "nothing expires any more"
+    assert "nothing expires" in text.lower(), "and the reference says so"
+    assert "with none, the move is held" not in text.lower()
+    assert "the next engage — a message, a wake, or `lop exec` — starts it there" in text, text
+    for code in ("host_cannot_restart", "sessions_move_outside_confinement"):
+        assert code in text, f"{code} is a refusal of this op"
+    assert "`move`" in rendered
+
+
+def test_the_approval_card_names_the_stop_when_nothing_can_follow(tmp_path: Path) -> None:
+    """The card IS the approval, so the viewer-less consequence is on it.
+
+    With nothing attached the session stops first; a card promising only a restart
+    approved a restart the operator may not get (agent review round 1, NIT-1).
+    """
+    from local_operator.tools.builtin import _describe_sessions_approval
+
+    source = tmp_path / "src"
+    destination = tmp_path / "dest"
+    source.mkdir()
+    destination.mkdir()
+    card = _describe_sessions_approval({"op": "move", "cwd": "../dest"}, str(source))
+    assert "with nothing attached, it stops and resumes there on the next engage" in card, card
+
+
+def test_a_repeat_request_does_not_demote_a_recorded_handoff(tmp_path: Path) -> None:
+    """m2 / Q2: the same destination is the same request, at ANY unobserved stage.
+
+    At ``handoff`` the identical request used to fall through to the supersede
+    branch, withdraw the destination the engage guard was honouring and mint a
+    fresh ``queued`` request whose source is the caller's cwd — so the next engage
+    booted back in the SOURCE.
+    """
+    (tmp_path / "sessions" / OWN).mkdir(parents=True)
+    source, destination = tmp_path / "src", tmp_path / "dest"
+    source.mkdir()
+    destination.mkdir()
+    first = cwd_move.enqueue_self_move(
+        tmp_path, OWN, requested_cwd=str(destination), effective_cwd=str(source), owner_pid=1
+    )
+    handoff = cwd_move.accept_handoff(tmp_path, OWN, first)
+    assert handoff is not None and handoff.stage == cwd_move.STAGE_HANDOFF
+    again = cwd_move.enqueue_self_move(
+        tmp_path, OWN, requested_cwd=str(destination), effective_cwd=str(destination), owner_pid=1
+    )
+    assert again.request_id == handoff.request_id, "a retry is one request"
+    assert again.stage == cwd_move.STAGE_HANDOFF, "and it is still the recorded truth"
+    stored = cwd_move.read_move_intent(tmp_path, OWN)
+    assert stored is not None and stored.destination_cwd == str(destination.resolve())
+    assert stored.stage == cwd_move.STAGE_HANDOFF
