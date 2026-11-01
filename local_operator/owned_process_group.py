@@ -452,12 +452,14 @@ class OwnedGroup:
                 raise Unknown("strict initial empty census: no observable group to own")
             before = cap._samples([leader, parent], deadline)
             cap.probe["observed"] = _observed(before, None)
-            # C1 -- EXCLUSIVE REAP OWNERSHIP. The receipt only witnesses anything
-            # if nobody else can consume the corpse: we must still be the child's
-            # parent, SIGCHLD must not be ignored (checked above), and the leader
-            # must not have been reparented by a competing reaper. A child whose
-            # parent is not us cannot be witnessed at all, and naming that is the
-            # difference between "we could not prove it" and "we proved it".
+            # C1 -- EXCLUSIVE REAP OWNERSHIP, split honestly into what is ENFORCED
+            # here and what is ASSUMED of the caller. Enforced: the kernel's observed
+            # parent must be THIS process, and SIGCHLD must not be ignored (checked
+            # above) -- either failure refuses by name. Assumed: that no competing
+            # waiter or consuming handler could take the corpse, which this module
+            # cannot observe. That third is a PRECONDITION OF THE CALLER, not a
+            # claim, and it is why the witness is only as strong as the wrapper's
+            # own no-reap discipline.
             view = identity(leader)
             if view[0] != os.getpid():
                 # The kernel's answer about who this child's parent IS, not what a
@@ -630,17 +632,26 @@ class OwnedGroup:
             second = self._members(deadline)
             members = sorted(set(first) | set(second))
             self.probe["members"] = list(members)
+            # WITNESS FIRST, AND BRACKETED. The creation receipt is the predicate;
+            # census data is target evidence. Inspecting it first is also what keeps
+            # `pin_lost` precedence: a readable foreign birth is positive proof of
+            # loss and must not be degraded to a generic unreadable because a census
+            # happened to fail in the same pass.
             state, witness = self._leader_witness(deadline)
-            if state == "unreadable":
-                # Continuity present but the witness cannot be read: not absence.
-                raise Unknown("leader witness unreadable")
+            self.probe["witness"] = state
             if state == "reaped":
                 raise PinLost("leader reaped or birth mismatch: reservation released")
+            if state == "unreadable":
+                raise Unknown("leader witness unreadable")
             if not members:
-                # EMPTY-COMPLETE. A census that COMPLETED and listed nothing is a
-                # fact about the world; but a still-LIVE leader must itself be a
-                # live member, so that combination is contradictory and refuses.
+                # EMPTY-COMPLETE, bracketed on both sides: a retained matching
+                # witness before AND after, or no absence may be claimed.
                 if witness is not None and witness.zombie:
+                    after_state, _ = self._leader_witness(deadline)
+                    if after_state == "reaped":
+                        raise PinLost("reservation lost during the empty proof")
+                    if after_state != "held":
+                        raise Unknown("witness unreadable during the empty proof")
                     self.probe["anchor"] = "leader-reservation"
                     self.last = Verdict(
                         "OBSERVED_EMPTY", "retained corpse and complete no-live-member census"
@@ -649,7 +660,15 @@ class OwnedGroup:
                 raise Unknown("live leader absent from a complete census: contradictory")
             samples = self._samples(set(members) | {self.leader}, deadline)
             self.probe["observed"] = _observed(samples, None)
-            live = [pid for pid in members if pid in samples and not samples[pid].zombie]
+            # UNRESOLVED MEMBER SAMPLES ARE REFUSED BEFORE ANY EMPTINESS VERDICT.
+            # A missing map entry cannot prove departure, so certifying "no live
+            # members" while one member is unresolved would be false cleanup through
+            # a second door.
+            absent = [pid for pid in members if pid not in samples]
+            if absent:
+                self.probe["unresolved"] = absent
+                raise Unknown("census member sample unreadable")
+            live = [pid for pid in members if not samples[pid].zombie]
             if not live:
                 # Corpse-only: allowed ONLY under a retained matching witness.
                 still, _ = self._leader_witness(deadline)
@@ -660,12 +679,6 @@ class OwnedGroup:
                     "OBSERVED_EMPTY", "reserved group holds no live member", tuple(members)
                 )
                 return self.last
-            # A member whose sample is missing is UNREADABLE, not vanished: a
-            # missing map entry cannot prove departure, and inferring it would turn
-            # an unobserved member into false absence.
-            absent = [pid for pid in members if pid not in samples]
-            if absent:
-                raise Unknown("census member sample unreadable")
             for pid in live:
                 parent, group, sid = self.identity(pid)
                 if (group, sid) != (self.pgid, self.sid):

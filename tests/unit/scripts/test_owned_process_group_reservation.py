@@ -292,31 +292,29 @@ def _mutant():
     return module
 
 
+def _witness_fails_at_the_presend_check(kernel, state):
+    """ONE trigger for both arms: the witness is unreadable only at the last check.
+
+    Both the intact run and the mutant run use this exact schedule, so the ONLY
+    difference between them is the guard itself. A second, looser schedule in the
+    mutant arm would let the control pass while the guard was restored.
+    """
+    original = kernel.samples
+
+    def samples(pids):
+        if kernel.sent == [] and pids == [kernel.leader] and state["calls"] >= 3:
+            return {}
+        state["calls"] += 1
+        return original(pids)
+
+    return samples
+
+
 def test_c3_removing_the_residency_re_check_lets_a_stranger_die():
     """The mutation must fail in the RIGHT direction — a stranger dies."""
     kernel = Kernel()
     cap = kernel.cap()
-    # Adjudicated 2026-11-01: the control used a CORPSE-ONLY census, which the
-    # three-way rule now refuses on its own (no live member and no reservation is
-    # a lost pin, not an observation). The mutation has to isolate the PRE-SYSCALL
-    # check, so the group is alive and the leader's sample disappears only on the
-    # fourth `_samples` call -- the one `signal` makes immediately before the send.
-    original = kernel.samples
-
-    def reaped_mid_proof(pids):
-        # The witness disappears EXACTLY at the pre-send re-check: every earlier
-        # sample is real, so only that one check can catch it. Anchored on the
-        # check's semantics, not on a call count.
-        # Semantic anchor: the witness is unreadable only when the LEADER is asked
-        # about on its own, after the proof has already been made once. A call-count
-        # anchor drifts every time the predicate asks for one more sample.
-        if kernel.sent == [] and pids == [kernel.leader] and capped["calls"] >= 3:
-            return {}
-        capped["calls"] += 1
-        return original(pids)
-
-    capped = {"calls": 0}
-    cap.samples = reaped_mid_proof
+    cap.samples = _witness_fails_at_the_presend_check(kernel, {"calls": 0})
     verdict = cap.signal(signal.SIGKILL, deadline=kernel.clock() + 5.0)
     assert verdict.status == "REFUSED", verdict.reason
     # An unreadable witness at the last instant is the READER failing: `unproven`,
@@ -337,15 +335,8 @@ def test_c3_removing_the_residency_re_check_lets_a_stranger_die():
         signal_group=lambda *a: kernel2.sent.append(a),
         deadline=kernel2.clock() + 5.0,
     )
-    capped2 = {"calls": 0}
-
-    def reaped_mid_proof2(pids):
-        if capped2["calls"] >= 4:
-            return {}
-        capped2["calls"] += 1
-        return kernel2.samples(pids)
-
-    cap2.samples = reaped_mid_proof2
+    # THE SAME TRIGGER as the intact arm, deliberately.
+    cap2.samples = _witness_fails_at_the_presend_check(kernel2, {"calls": 0})
     mutated = cap2.signal(signal.SIGKILL, deadline=kernel2.clock() + 5.0)
     assert mutated.status == "SIGNALED", mutated.reason
     assert kernel2.sent == [(10, signal.SIGKILL)]
@@ -554,15 +545,23 @@ def test_a_member_seen_by_one_census_and_gone_from_the_next_is_recorded():
 
     def two_scans(pgid, deadline):
         scans["n"] += 1
-        rows = original(pgid, deadline)
         if scans["n"] == 2:
-            return [pid for pid in rows if pid != 20]
-        return rows
+            # GENUINE departure: the row is gone from the kernel, not merely hidden
+            # from one scan. Hiding it would test census disagreement, which is a
+            # different fact from a member that exited between the two scans.
+            kernel.rows.pop(20, None)
+        return original(pgid, deadline)
 
     cap.census = two_scans
     verdict = cap.signal(signal.SIGKILL, deadline=kernel.clock() + 5.0)
-    assert verdict.status in {"SIGNALED", "OBSERVED_EMPTY"}, verdict.reason
-    assert 20 in cap.probe["members"]
+    # THE AMNESTY IS ABOUT THE UNION, NOT ABOUT SAMPLES. A pid seen by either scan
+    # is recorded as a member of our number; if it then cannot be SAMPLED, the
+    # contract calls the proof unreadable rather than absent -- so this refuses
+    # while still recording membership. That is the distinction from the test
+    # above, which never sees the pid in a census at all.
+    assert verdict.status == "REFUSED", verdict.reason
+    assert verdict.refusal_class == "unproven", verdict.reason
+    assert 20 in cap.probe["members"], cap.probe.get("members")
 
 
 def test_a_run_without_a_timeout_no_longer_compares_against_none(wrapper, monkeypatch, tmp_path):
@@ -752,3 +751,27 @@ def test_c2_same_second_reuse_is_encoded_unsupported_not_waived():
     doc = owned.__doc__ or ""
     assert "SECOND-RESOLUTION" in doc.upper(), "the scope must be documented"
     assert "does not cover" in doc.lower(), "C3: say what the pin does NOT cover"
+
+
+def test_a_retained_zombie_with_an_unreadable_member_refuses_not_absent():
+    """BLOCKER: absence may never be certified while a member is unresolved.
+
+    A retained corpse satisfied the witness and the readable samples contained no
+    LIVE member, so the run published OBSERVED_ABSENT while one descendant was
+    simply unreadable. "No live member" is not a fact you can state about a process
+    you could not read.
+    """
+    kernel = Kernel()
+    cap = kernel.cap()
+    kernel.corpses.add(kernel.leader)
+    kernel.rows[20] = (kernel.leader, kernel.leader, kernel.leader, "grandchild")
+    original = kernel.samples
+
+    def missing_grandchild(pids):
+        return {pid: sample for pid, sample in original(pids).items() if pid != 20}
+
+    cap.samples = missing_grandchild
+    verdict = cap.signal(signal.SIGKILL, deadline=kernel.clock() + 5.0)
+    assert verdict.status == "REFUSED", verdict.reason
+    assert verdict.refusal_class == "unproven", verdict.reason
+    assert kernel.sent == []
