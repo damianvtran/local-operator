@@ -1,6 +1,9 @@
 """Capture identifiers are structure, never content for the secret-shape guard."""
 
 import asyncio
+import json
+import sqlite3
+import uuid
 
 import pytest
 
@@ -80,16 +83,72 @@ def test_malformed_marker_is_refused(store, marker):
 
 
 @pytest.mark.parametrize("field", ["session", "entry"])
-def test_source_identifiers_are_structural(field):
-    fact = {
-        "title": "Index",
-        "body": "Use SQLite",
-        "source": {"kind": "compaction", field: COLLISION},
-    }
-    assert validate_fact(fact)["source"][field] == COLLISION
-    fact["source"][field] = "../escape"
+@pytest.mark.parametrize(
+    "value", [COLLISION, "DE89370400440532013000", "GB82WEST12345698765432", "4111111111111111"]
+)
+def test_untrusted_source_identifiers_cannot_bypass_content_guard(store, field, value):
+    # These are the reviewer's exact put payloads: source is caller-controlled,
+    # not trusted provenance merely because a field is called session or entry.
+    fact = {"title": "Audit", "body": "Use SQLite", "source": {"kind": "reported", field: value}}
     with pytest.raises(MemoryError):
         validate_fact(fact)
+    with pytest.raises(MemoryError):
+        store.put("session", fact)
+    with store.connection() as db:
+        assert db.execute("SELECT count(*) FROM ops").fetchone()[0] == 0
+        assert db.execute("SELECT count(*) FROM current").fetchone()[0] == 0
+
+
+def test_caller_cannot_override_host_session(store):
+    prepared = store.prepare_fact(
+        {"title": "Audit", "body": "Use SQLite", "source": {"kind": "reported", "session": "other"}}
+    )
+    assert prepared["source"]["session"] == store.identity.session_id
+
+
+def test_host_minted_capture_keeps_marker_out_of_fact_content(store):
+    marker = uuid.uuid4().hex
+    rows = memory_capture.extract("", "## Key Decisions\n- Use SQLite for the local index")
+    assert memory_capture.persist(store, marker, rows, "ok") == ("ok", None)
+    with store.connection() as db:
+        fact = json.loads(db.execute("SELECT fact FROM current").fetchone()[0])
+        assert "entry" not in fact["source"]
+        assert marker not in json.dumps(fact)
+        assert tuple(db.execute("SELECT compaction, status, n FROM captures").fetchone()) == (
+            marker,
+            "ok",
+            1,
+        )
+    assert memory_capture.capture_detail(store, marker) is not None
+
+
+def test_persist_fault_records_failed_with_same_collision_marker(store, monkeypatch):
+    calls = []
+    original = memory_capture.persist
+
+    def fail_first(*args, **kwargs):
+        calls.append((args[1], args[3]))
+        if len(calls) == 1:
+            raise sqlite3.OperationalError("synthetic transient store fault")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(memory_capture, "persist", fail_first)
+
+    async def run():
+        async def scan():
+            return memory_capture.extract("", "## Key Decisions\n- Use SQLite for the local index")
+
+        return await memory_capture.finish(store, COLLISION, asyncio.create_task(scan()), "")
+
+    assert asyncio.run(run()) == "failed"
+    assert calls == [(COLLISION, "ok"), (COLLISION, "failed")]
+    with store.connection() as db:
+        assert tuple(db.execute("SELECT compaction, status, n FROM captures").fetchone()) == (
+            COLLISION,
+            "failed",
+            0,
+        )
+        assert db.execute("SELECT count(*) FROM current").fetchone()[0] == 0
 
 
 @pytest.mark.parametrize("field", ["author", "uri", "tool"])

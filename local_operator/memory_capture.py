@@ -1468,9 +1468,12 @@ def persist(
     Returns the terminal ``(status, reason)`` actually recorded, so ``finish`` reports
     the same outcome the store holds.
     """
-    # This is a minted lookup id, not user content. The same structural rule
-    # applies when it rides source.entry (guard_fact); mod-97 coincidences must
-    # not refuse either the capture or _record_failure's terminal-marker retry.
+    # A minted UUID hex can coincidentally pass IBAN mod-97 (6 of 20,000
+    # draws, about 1/3,333 in the reported sample). This host lookup id belongs
+    # only in captures/meta via _capture_key, never the guarded fact's source:
+    # that mapping is also caller-controlled on put, so a field-name exemption
+    # would admit real IBANs. Keep content guards intact, not a hex exemption.
+    # Structural validation also lets _record_failure record the same marker.
     safe_segment(marker_id, structural=True)
     if skipped is None:
         skipped = getattr(rows, "skipped", 0)
@@ -1507,7 +1510,6 @@ def persist(
                     expires_at=expires_at,
                     source={
                         "session": store.identity.session_id,
-                        "entry": marker_id,
                         "kind": "compaction",
                         "author": CAPTURE_AUTHOR,
                     },

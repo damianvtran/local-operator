@@ -1037,32 +1037,11 @@ FACT_STATUSES = ("active", "candidate", "disputed", "superseded", "expired")
 MAX_FACT_TIMESTAMP = 32503680000
 
 
-def guard_fact(raw: Any) -> None:
-    """Guard content, validating source lookup identifiers as structure instead.
-
-    A minted UUID hex can coincidentally pass IBAN mod-97 (6 of 20,000 draws,
-    about 1/3,333 in the reported sample). Identifiers must not enter either
-    the recursive content guard or its serialized-text check: capture's marker
-    also rides source.entry, so fixing only persist's first check loses facts.
-    No hex-shaped exemption belongs in guard(); the same bytes in body text
-    must still be refused. Other source metadata remains guarded user content.
-    """
-    content = raw
-    if isinstance(raw, dict) and isinstance(raw.get("source"), dict):
-        source = dict(raw["source"])
-        for key in ("session", "entry"):
-            if source.get(key):
-                safe_segment(source[key], structural=True)
-                del source[key]
-        content = {**raw, "source": source}
-    guard(content)
-    guard(_dump(content))
-
-
 def validate_fact(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise MemoryError("Memory content must be a JSON object; read guide://memory.")
-    guard_fact(raw)
+    guard(raw)
+    guard(_dump(raw))
     for key in ("title", "body", "subject", "tags", "aliases"):
         if key in raw:
             guard(raw[key], opaque=True)
@@ -1141,7 +1120,7 @@ def validate_fact(raw: Any) -> dict[str, Any]:
             "Source kind must be reported, observed, inferred, compaction or summary."
         )
     if source.get("session"):
-        safe_segment(source["session"], structural=True)
+        safe_segment(source["session"])
     if fact["replaces"]:
         safe_segment(fact["replaces"])
     # Two bounds, two questions. CONTENT tokens are what the writer chose to say,
@@ -1896,15 +1875,19 @@ class MemoryStore:
         """Pure host stamping/validation, usable before an index-repair write."""
         if not isinstance(fact, dict):
             raise MemoryError("Memory content must be a JSON object.")
-        guard_fact(fact)
+        # Caller-supplied source metadata is content, even when its keys look
+        # like identifiers. Guard BEFORE stamping so an overridden value cannot
+        # smuggle a secret into storage or silently evade validation.
+        guard(fact)
         source = fact.get("source", {})
         if not isinstance(source, dict):
             raise MemoryError("Memory source must be an object.")
         source = {
-            "session": self.identity.session_id,
             "kind": "reported",
             "author": self.identity.agent_id or "anonymous",
             **source,
+            # Session provenance belongs to the host, never the JSON caller.
+            "session": self.identity.session_id,
         }
         return validate_fact(
             dict(
