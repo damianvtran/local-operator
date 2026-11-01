@@ -1353,6 +1353,32 @@ CWD_MOVE_READY = "ready"
 CWD_MOVE_HANDOFF = "handoff"
 
 
+def move_host_refusal(session_id: str, root: Path) -> str:
+    """The reason this process's runtime could never act on a cwd move, or ``""``.
+
+    ASKED BEFORE A REQUEST IS RECORDED, and it does NOT wake the consumer:
+    :func:`notify_move_queued` starts the watcher as part of its job, which is
+    wrong for a call that may still be refused (the watcher would find no intent
+    and exit, then be re-armed by the real notification anyway). The two answer
+    from the same predicate, so they cannot disagree about the host.
+
+    Returns the same reason ``notify_move_queued`` would — today only
+    ``host_cannot_restart`` — and ``""`` when no runtime here hosts the session,
+    which is a normal answer: the durable marker is then exactly what a later open
+    consumes.
+    """
+    if not session_id:
+        return ""
+    wanted = os.path.realpath(str(root))
+    for hosted_id, server in list(_HOSTED_RUNTIMES.items()):
+        if hosted_id != session_id or server._closed.is_set():
+            continue
+        if os.path.realpath(str(getattr(server, "_config_root", "") or "")) != wanted:
+            continue
+        return server._cwd_move_predicted_hold()
+    return ""
+
+
 def notify_move_queued(session_id: str, root: Path) -> str:
     """Wake this process's runtime for ``session_id``, and say what it will do.
 

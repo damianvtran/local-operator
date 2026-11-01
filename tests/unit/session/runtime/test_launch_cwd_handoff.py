@@ -192,3 +192,73 @@ async def test_the_spawn_receives_the_destination_not_the_callers_directory(
             timeout=30,
         )
     assert seen == [str(destination)], "the fork is handed the recorded destination"
+
+
+def test_a_destination_that_vanished_refuses_instead_of_adopting_it(
+    tree: tuple[Path, Path, Path],
+) -> None:
+    """M1: a handoff is DESIGNED to wait, so its destination can be gone by then.
+
+    The consumer has always re-checked the destination before retiring
+    (``destination_unavailable``); the engage side did not, so a dead destination
+    was substituted anyway, the successor was forked with a cwd that did not
+    exist, and the boot reconcile settled the request ``committed`` — which
+    nothing rolls back. The refusal keeps the record intact, so a directory that
+    comes back is still honoured.
+    """
+    config, source, destination = tree
+    _handoff(config, source=source, destination=destination)
+    destination.rmdir()
+    with pytest.raises(RuntimeStartupError) as refused:
+        _engage_cwd_for_recorded_move(config, OWN, str(source))
+    assert "can no longer be entered" in str(refused.value), str(refused.value)
+    assert refused.value.actionable, "the guidance must survive AttachedSession's re-wrap"
+    # STILL PENDING, not superseded and not committed: the move is not lost.
+    fresh = cwd_move.read_move_intent(config, OWN)
+    assert fresh is not None and fresh.stage == cwd_move.STAGE_HANDOFF
+    # The directory comes back and the SAME record is honoured.
+    destination.mkdir()
+    assert _engage_cwd_for_recorded_move(config, OWN, str(source)) == str(destination)
+
+
+def test_an_unreadable_record_refusal_is_actionable(tree: tuple[Path, Path, Path]) -> None:
+    """MINOR-1: a bare ``RuntimeStartupError`` loses its guidance at the surface.
+
+    ``AttachedSession`` re-raises a ``RuntimeStartupError`` as a plain
+    ``ConnectionError`` unless it carries ``actionable``, and the generic sentence
+    that replaces it tells nobody to delete or repair the file.
+    """
+    config, source, _destination = tree
+    marker = cwd_move.marker_path(config, OWN)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text("{not json")
+    with pytest.raises(RuntimeStartupError) as refused:
+        _engage_cwd_for_recorded_move(config, OWN, str(source))
+    assert refused.value.actionable and "delete that file" in refused.value.actionable
+    assert str(marker) in refused.value.actionable
+
+
+def test_every_spawn_path_shares_one_resolver(tree: tuple[Path, Path, Path]) -> None:
+    """The property the whole fix rests on: ONE decision, several spawn sites.
+
+    ``engage_runtime`` is not the only place a runtime is started — the mobile
+    daemon's resume route and ``lop exec --resume`` start one too, and both call
+    this function rather than re-deriving the rule. ``None`` for
+    ``requested_cwd``/third-directory handling therefore holds for all three.
+    """
+    from local_operator.session.cwd_move import spawn_cwd_for_session
+
+    config, source, destination = tree
+    third = source.parent / "third"
+    third.mkdir()
+    # No record: the caller's directory, untouched.
+    assert spawn_cwd_for_session(config, OWN, str(third)) == str(third)
+    _handoff(config, source=source, destination=destination)
+    # The record wins over a caller who names its source, or nothing.
+    assert spawn_cwd_for_session(config, OWN, str(source)) == str(destination)
+    assert spawn_cwd_for_session(config, OWN, "") == str(destination)
+    # An explicit third directory still wins, and the record stays pending until a
+    # boot settles it.
+    assert spawn_cwd_for_session(config, OWN, str(third)) == str(third)
+    pending = cwd_move.read_move_intent(config, OWN)
+    assert pending is not None and pending.stage == cwd_move.STAGE_HANDOFF

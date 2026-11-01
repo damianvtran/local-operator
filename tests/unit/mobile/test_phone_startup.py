@@ -593,3 +593,56 @@ async def test_phone_callbacks_cannot_follow_rebind_or_overwrite_replacement(mon
         assert entry.projection.session_id == "view12345678"
     finally:
         await daemon.close_phone_views()
+
+
+@pytest.mark.asyncio
+async def test_the_resume_route_starts_the_session_in_its_recorded_move(tmp_path, monkeypatch):
+    """A RECORDED MOVE SURVIVES BEING OPENED FROM THE PHONE (agent review M2).
+
+    This route spawned at ``Path.home()``, so a session whose last runtime had
+    recorded a move came back in ``$HOME`` and its boot reconcile settled the
+    request ``superseded`` — a terminal state meaning "the caller asked to go
+    somewhere else", which nobody did. The route now resolves the directory
+    through the same function ``engage_runtime`` and ``lop exec`` use.
+    """
+    from local_operator.paths import config_dir
+    from local_operator.resume import resolve_resume_id
+    from local_operator.session import cwd_move
+
+    session_id = "feedc0ffee01"
+    source = tmp_path / "src"
+    destination = tmp_path / "dest"
+    source.mkdir()
+    destination.mkdir()
+    (config_dir() / "sessions" / session_id).mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("local_operator.resume.resolve_resume_id", lambda *_a, **_k: session_id)
+    intent = cwd_move.enqueue_self_move(
+        config_dir(),
+        session_id,
+        requested_cwd=str(destination),
+        effective_cwd=str(source),
+        owner_pid=1,
+    )
+    assert cwd_move.accept_handoff(config_dir(), session_id, intent) is not None
+    assert resolve_resume_id  # the route's own lookup is the patched one above
+
+    daemon = MobileDaemon(password="pw")
+    spawned: list[str] = []
+
+    async def fake_spawn(cwd: str, provider=None, model_id=None, resume=None) -> int:
+        spawned.append(cwd)
+        return 4242
+
+    monkeypatch.setattr(daemon, "spawn_session", fake_spawn)
+    monkeypatch.setattr(
+        "local_operator.resume.resume_dir", lambda *_a, **_k: config_dir() / "sessions" / session_id
+    )
+    app = build_app(daemon)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://fixture",
+        cookies={COOKIE_NAME: sign_cookie("pw")},
+    ) as client:
+        response = await client.post("/api/sessions/resume", json={"session_id": session_id})
+    assert response.status_code == 200, response.text
+    assert spawned == [str(destination.resolve())], spawned

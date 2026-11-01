@@ -276,7 +276,9 @@ def enqueue_self_move(
     behind it. Naming the directory the caller is ALREADY IN is the CANCEL: it
     supersedes such a request and returns it at stage ``superseded``, which is
     how a move is withdrawn without inventing a third destination (UX round 1,
-    U4) — including a ``handoff`` a runtime recorded moments before exiting.
+    U4) — including a ``handoff`` a runtime recorded moments before exiting. A
+    repeat naming the REQUEST's own destination is neither: it returns that
+    request unchanged, whatever stage it reached.
     With nothing supersedable it raises :class:`CwdMoveRefused`, as before.
     """
     destination = resolve_destination(requested_cwd, effective_cwd=effective_cwd)
@@ -292,6 +294,15 @@ def enqueue_self_move(
     # request is withdrawn, so a call that would have been refused for pointing
     # at the current directory must first get the chance to mean "cancel"
     # (UX round 1, U4).
+    # A REPEAT OF THE SAME DESTINATION IS THE SAME REQUEST, at every unobserved
+    # stage — and it is checked BEFORE the cancel branch, because a caller already
+    # standing in the request's own destination would otherwise read as "move back
+    # to where I am" and withdraw the destination the engage guard is honouring
+    # (agent review round 1, MINOR-2; QA round 1, Q2). ``queued`` short-circuited
+    # this way before; ``handoff`` did not, so a retry demoted the recorded truth
+    # and the next engage booted back in the SOURCE.
+    if displaceable is not None and same_directory(displaceable.destination_cwd, destination):
+        return displaceable
     if same_directory(destination, effective_cwd):
         if displaceable is not None:
             cancelled = _with_stage(displaceable, STAGE_SUPERSEDED)
@@ -299,8 +310,6 @@ def enqueue_self_move(
             return cancelled
         raise CwdMoveRefused("sessions_move_destination_is_current", requested_cwd=destination)
     if displaceable is not None:
-        if displaceable.stage == STAGE_QUEUED and displaceable.destination_cwd == destination:
-            return displaceable
         _write(root, _with_stage(displaceable, STAGE_SUPERSEDED))
     intent = MoveIntent(
         request_id=uuid.uuid4().hex,
@@ -436,38 +445,47 @@ def rollback_handoff(root: Path, session_id: str, intent: MoveIntent) -> MoveInt
     return queued
 
 
-def withdraw_queued_move(root: Path, session_id: str) -> MoveIntent | None:
-    """Supersede a request that nothing has observed yet, so nothing acts on it.
+class HandoffRefused(Exception):
+    """A recorded move that cannot be honoured right now, as a code plus a path.
 
-    Used by a caller that has to REFUSE a move it has just recorded (a
-    destination outside the session's confinement, a host that can never
-    restart it): leaving the request in force would either move the session
-    somewhere the caller refused, or sit `queued` for ever, which is exactly the
-    silent lapse the handoff design removes. The document keeps its identity at
-    stage ``superseded``, so every reader sees the request was withdrawn rather
-    than never made.
-    """
-    current = read_move_intent(root, session_id)
-    if current is None or current.stage not in DISPLACEABLE_STAGES:
-        return None
-    withdrawn = _with_stage(current, STAGE_SUPERSEDED)
-    _write(root, withdrawn)
-    return withdrawn
+    Raised towards callers that are about to choose a directory to boot a session
+    in, and always in preference to guessing. The two candidate answers there are
+    not symmetric: refusing costs one spawn a sentence, while guessing starts the
+    session in a directory the document may have said not to — a wrong spawn,
+    which is worse than a sentence.
 
-
-class HandoffUnreadable(Exception):
-    """A move document exists but cannot be understood, so the destination is unknown.
-
-    Raised only by :func:`pending_handoff`, and only towards callers that are
-    about to choose a directory to boot a session in. The two candidate answers
-    there are not symmetric: refusing costs one engage a sentence, while
-    guessing spawns the session in a directory the document may have said not
-    to — a wrong spawn, which is worse than a sentence.
+    ``code`` is a technical identifier (no prose); ``message`` is the diagnostic
+    a caller may show after its own framing, exactly as ``RuntimeStartupError``
+    does it.
     """
 
-    def __init__(self, path: str) -> None:
+    code = "handoff_refused"
+
+    def __init__(self, path: str, message: str = "") -> None:
         self.path = path
-        super().__init__(path)
+        self.message = message or path
+        super().__init__(self.message)
+
+
+class HandoffUnreadable(HandoffRefused):
+    """The document exists but cannot be understood, so the destination is unknown."""
+
+    code = "handoff_unreadable"
+
+
+class HandoffDestinationUnavailable(HandoffRefused):
+    """The recorded destination cannot be entered any more, so the move cannot be made.
+
+    THE ENGAGE-SIDE HALF OF THE DESTINATION CHECK the runtime's own consumer has
+    always made (``_apply_queued_cwd_move`` step 3): a handoff is DESIGNED to
+    wait, and a scratch or mounted destination can be gone by the time the next
+    engage arrives. Substituting it anyway forked the session into a directory
+    that was not there and the boot then reconciled the request ``committed``,
+    which nothing rolls back (agent review round 1, MAJOR-1). Refusing keeps the
+    handoff intact, so a directory that comes back is still honoured.
+    """
+
+    code = "handoff_destination_unavailable"
 
 
 def pending_handoff(root: Path, session_id: str) -> MoveIntent | None:
@@ -493,10 +511,67 @@ def pending_handoff(root: Path, session_id: str) -> MoveIntent | None:
         return None
     intent = read_move_intent(root, session_id)
     if intent is None:
-        raise HandoffUnreadable(str(path))
+        raise HandoffUnreadable(
+            str(path),
+            f"a working-directory move is recorded at {path} but cannot be read, so there is "
+            "no telling which directory to start this session in — delete that file to start "
+            "it where the caller asked, or repair it and retry",
+        )
     if intent.stage != STAGE_HANDOFF:
         return None
     return intent
+
+
+def spawn_cwd_for_session(root: Path, session_id: str, requested_cwd: str) -> str:
+    """The directory to START a session in, honouring a recorded handoff.
+
+    THE ONE RESOLVER EVERY SPAWN PATH CALLS. A session's cwd is a spawn input, so
+    "the session moved" can only be honoured where the next process is started —
+    and that is not one place: ``engage_runtime``, the mobile daemon's resume and
+    ``lop exec`` each start a runtime, and a measured review round found that two
+    of the three ignored the record entirely (agent review round 1, MAJOR-2; QA
+    round 1, Q1). Putting the decision here, rather than in each caller, is what
+    makes "every path that starts a session without an explicit destination
+    honours the move" a property instead of a claim.
+
+    WHOSE DIRECTORY WINS:
+
+    * ``requested_cwd`` empty, or naming the record's SOURCE, is a caller asking
+      for the session and getting the destination. That is the ordinary case: a
+      wake, a peer message, a phone re-open, or a shell still standing in the old
+      directory all name what they remember, which is what the move superseded;
+    * ``requested_cwd`` naming the DESTINATION is already right;
+    * ``requested_cwd`` naming a THIRD directory is an explicit choice, and an
+      explicit choice wins: no substitution and no silent redirect. The runtime
+      that boots there reconciles the record as ``superseded``, which is how the
+      cancelled move is reported.
+
+    FAIL CLOSED, TWICE. An unreadable record raises :class:`HandoffUnreadable`
+    and a destination that cannot be entered any more raises
+    :class:`HandoffDestinationUnavailable`; a caller that cannot proceed must say
+    so rather than start the session somewhere the record contradicts.
+
+    Cost on the ordinary path is one `stat` — no record, no work.
+    """
+    pending = pending_handoff(root, session_id)
+    if pending is None:
+        return requested_cwd
+    if (
+        requested_cwd.strip()
+        and not same_directory(requested_cwd, pending.source_cwd)
+        and not same_directory(requested_cwd, pending.destination_cwd)
+    ):
+        return requested_cwd
+    try:
+        resolve_destination(pending.destination_cwd, effective_cwd=pending.destination_cwd)
+    except CwdMoveRefused as refused:
+        raise HandoffDestinationUnavailable(
+            pending.destination_cwd,
+            f"this session's recorded move is to {pending.destination_cwd}, which can no "
+            f"longer be entered ({refused.code}) — recreate that directory, or move the "
+            "session somewhere else",
+        ) from refused
+    return pending.destination_cwd
 
 
 def reconcile_move(root: Path, session_id: str, *, effective_cwd: str) -> MoveIntent | None:
