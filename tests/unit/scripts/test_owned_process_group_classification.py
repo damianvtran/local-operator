@@ -43,6 +43,8 @@ class World:
         self.sample_calls = 0
         #: Set by a test that wants the leader to become an unreaped corpse.
         self.corpse = False
+        #: Pids that stay LIVE no matter what the cleanup signals.
+        self.survivors = set()
 
     def clock(self):
         self.now += 0.001
@@ -58,7 +60,10 @@ class World:
         # a corpse mid-capture and made every arm report absence.
         self.sample_calls += 1
         return {
-            pid: owned.procstate.ProcessSample(self.corpse and pid == self.pgid, self.rows[pid][3])
+            pid: owned.procstate.ProcessSample(
+                self.corpse and pid == self.pgid and pid not in self.survivors,
+                self.rows[pid][3],
+            )
             for pid in pids
             if pid in self.rows
         }
@@ -293,10 +298,29 @@ def test_the_final_recensus_is_what_reports_an_unproven_cleanup(wrapper, monkeyp
     """
     world = World()
     _install(wrapper, monkeypatch, world, lambda *a: world.calls.append(a), _fake_process(0, world))
+    # A LIVE MEMBER THAT OUTLIVES EVERY SIGNAL. Without it the terminal census
+    # legitimately observes an empty group and attempts no signal at all -- the
+    # permissive row, which is a different test below.
+    world.rows[11] = (world.pgid, world.pgid, world.pgid, "survivor")
+    world.survivors = {11}
     output = io.StringIO()
     rc = wrapper.run(["synthetic"], timeout=None, grace=0.05, stream=output)
     assert world.calls, "the cleanup attempted at least one checked signal"
     assert rc == 126, (rc, output.getvalue())
+
+
+def test_an_empty_residual_group_attempts_no_signal_and_reports_clean(wrapper, monkeypatch):
+    """The permissive row: members gone, nothing to signal, clean verdict."""
+    world = World()
+
+    def gone(pgid, _signum):
+        world.forget(pgid, keep_leader=True)
+        raise ProcessLookupError(3, "No such process")
+
+    _install(wrapper, monkeypatch, world, gone, _fake_process(0, world))
+    output = io.StringIO()
+    rc = wrapper.run(["synthetic"], timeout=None, grace=0.05, stream=output)
+    assert rc == 0, (rc, output.getvalue())
 
 
 def test_a_member_forked_after_capture_is_adopted_under_the_pin(wrapper, monkeypatch):

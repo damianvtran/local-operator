@@ -241,9 +241,7 @@ def _report_census_miss(pgid, deadline):
     if sample is not None:
         state = "zombie" if sample.zombie else "live"
     recorded = _LAST_ENUMERATION.get("_first")
-    raw = (
-        [int(pid) for pid in recorded] if isinstance(recorded, list) else []
-    )
+    raw = [int(pid) for pid in recorded] if isinstance(recorded, list) else []
     facts = dict(_LAST_ENUMERATION)
     facts.pop("_first", None)
     facts.update(
@@ -552,9 +550,14 @@ class OwnedGroup:
             if not stamp or any(p not in before or p not in after for p in [leader, parent]):
                 raise Unknown("leader/parent birth unavailable")
             for pid in [leader, parent]:
+                # A HELD, UNREAPED LEADER IS A VALID WITNESS even as a corpse: the
+                # number it holds is the reservation this design is built on, so
+                # "terminal" must not be read as "no receipt". The PARENT is the
+                # process asking, so it must genuinely be live.
+                terminal_ok = pid == leader
                 if (
-                    before[pid].zombie
-                    or after[pid].zombie
+                    (before[pid].zombie and not terminal_ok)
+                    or (after[pid].zombie and not terminal_ok)
                     or after[pid].is_birth(stamp, before[pid].birth) is not True
                 ):
                     raise Unknown("leader/parent not a matching live creation chain")
