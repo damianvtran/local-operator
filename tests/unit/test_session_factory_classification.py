@@ -942,9 +942,7 @@ async def test_a_hanging_seam_costs_the_turn_only_the_wait_budget(
         # actual configured deadline distinguish budget enforcement from awaiting
         # the vendor even when a loaded event loop resumes after 200 ms.
         async with asyncio.timeout(5.0):
-            first = await session_factory._select_knowledge_block(
-                hooks, "first task", task_id="t1"
-            )
+            first = await session_factory._select_knowledge_block(hooks, "first task", task_id="t1")
             assert observed_timeouts == [0.05]
             assert vendor_started.is_set()
             assert not vendor_finished.is_set()
@@ -960,9 +958,7 @@ async def test_a_hanging_seam_costs_the_turn_only_the_wait_budget(
                 hooks, "second task", task_id="t2"
             )
             assert second.count("guide://tunnel") == 1
-            third = await session_factory._select_knowledge_block(
-                hooks, "third task", task_id="t3"
-            )
+            third = await session_factory._select_knowledge_block(hooks, "third task", task_id="t3")
             assert "guide://tunnel" not in third
     finally:
         # A failed assertion or watchdog must not leak the deliberately blocked
