@@ -9671,9 +9671,7 @@ class EditParams(BaseModel):
     path: str = Field(description="File to edit.")
     edits: list[EditHunk] = Field(
         default_factory=list,
-        description=(
-            "Ordered hunks; prefer for several changes to one file (one call)."
-        ),
+        description="Ordered hunks; prefer for several changes to one file (one call).",
     )
     old_text: str | None = Field(
         default=None,
@@ -9686,9 +9684,7 @@ class EditParams(BaseModel):
     )
     anchor_line: int | None = Field(
         default=None,
-        description=(
-            "Optional 1-based line to disambiguate repeated matches; its window wins."
-        ),
+        description="Optional 1-based line to disambiguate repeated matches; its window wins.",
     )
 
     @model_validator(mode="after")
