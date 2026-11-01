@@ -1143,7 +1143,7 @@ def test_unpinned_org_crash_recovers_verbatim(tmp_path: Path, landed: bool) -> N
     )
     with pytest.raises(RuntimeError, match="simulated process death"):
         asyncio.run(_run(tmp_path, transport=CrashTransport(), **args))
-    record = _stored(Outbox(tmp_path), "op1")
+    record = _stored(Outbox(tmp_path), "op1-org-v2")
     assert record.state == "pending" and record.intent is not None
     saved = dict(record.intent)
     healthy = FakeTransport(fail_commit=RemoteRevisionChanged() if landed else None)
@@ -1195,6 +1195,82 @@ def test_concurrent_org_workers_do_not_fence_or_replay_active_dispatch(tmp_path:
     asyncio.run(run())
 
 
+def test_legacy_worker_cannot_erase_new_org_intent(tmp_path: Path) -> None:
+    async def run():
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        class SlowOrg(FakeTransport):
+            async def preview(self, *, document, expected_revision, budget):
+                return {
+                    "revision": "rev-a",
+                    "status": "unchanged",
+                    "document": dict(document),
+                    "unresolved": [],
+                    "changes": [],
+                    "transform": {"model": "not_applied"},
+                }
+
+            async def commit(self, **kwargs):
+                entered.set()
+                await release.wait()
+                raise OperationDeadlineExceeded("uncertain")
+
+        args = dict(
+            kind="skill",
+            captured_local=_document_fields(),
+            accepted=_document_fields(),
+            current_local=_document_fields(seed="b"),
+            remote_latest=_document_fields(),
+            org_skill=True,
+        )
+        task = asyncio.create_task(_run(tmp_path, transport=SlowOrg(), **args))
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        out = Outbox(tmp_path)
+        prior = _stored(out, "op1-org-v2")
+        assert prior.intent is not None
+        # This is the pre-upgrade begin_attempt behavior and operation ID: it
+        # knows nothing about the v2 operation lock or its outbox record.
+        old = out.begin_attempt("op1", kind="skill", local_id="a1", input_fp="old")
+        assert old is not None
+        assert out.settle("op1", old.generation, error_class="unsupported-precondition")
+        release.set()
+        result, _, _ = await task
+        assert result.state == "pending-reconciliation"
+        after = _stored(out, "op1-org-v2")
+        assert after.state == "pending-reconciliation" and after.intent == prior.intent
+        assert after.generation == prior.generation
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("state", ["pending", "pending-reconciliation"])
+def test_legacy_uncertain_intent_blocks_new_org_dispatch(tmp_path: Path, state: str) -> None:
+    from dataclasses import replace
+
+    out = Outbox(tmp_path)
+    legacy = out.enqueue(
+        operation_id="op1", kind="skill", local_id="a1", direction="push", generation=1
+    )
+    out._atomic_write(replace(legacy, state=state, intent={"document": {"legacy": "intent"}}))
+    transport = FakeTransport()
+    result, _, _ = asyncio.run(
+        _run(
+            tmp_path,
+            transport=transport,
+            kind="skill",
+            captured_local=_document_fields(),
+            accepted=_document_fields(),
+            current_local=_document_fields(seed="b"),
+            remote_latest=_document_fields(),
+            org_skill=True,
+        )
+    )
+    assert result.state == "skipped" and result.reason == "legacy-reconciliation-required"
+    assert not transport.preview_calls and not transport.commit_calls
+    assert _stored(out, "op1").intent == {"document": {"legacy": "intent"}}
+    assert out.read("op1-org-v2") is None
+
+
 def test_unpinned_org_commit_timeout_replays_after_restart(tmp_path: Path) -> None:
     class OrgTransport(FakeTransport):
         async def preview(self, *, document, expected_revision, budget):
@@ -1220,7 +1296,7 @@ def test_unpinned_org_commit_timeout_replays_after_restart(tmp_path: Path) -> No
     )
     first, out, _ = asyncio.run(_run(tmp_path, transport=OrgTransport(hang_commit=True), **args))
     assert first.state == "pending-reconciliation"
-    saved = dict(_stored(out, "op1").intent or {})
+    saved = dict(_stored(out, "op1-org-v2").intent or {})
     healthy = OrgTransport()
     replay, _, _ = asyncio.run(_run(tmp_path, transport=healthy, **args))
     assert replay.state == "pushed"
@@ -1255,7 +1331,7 @@ def test_unpinned_org_replay_requires_valid_intent_and_scope(tmp_path: Path, cas
     )
     first, out, _ = asyncio.run(_run(tmp_path, transport=OrgTransport(hang_commit=True), **args))
     assert first.state == "pending-reconciliation"
-    record = _stored(out, "op1")
+    record = _stored(out, "op1-org-v2")
     intent = dict(record.intent or {})
     assert intent["unpinned_org_skill"] is True
     if case == "missing_marker":
@@ -1270,6 +1346,8 @@ def test_unpinned_org_replay_requires_valid_intent_and_scope(tmp_path: Path, cas
     assert transport.preview_calls == []
     if case == "landed":
         assert replay.state == "conflict" and len(transport.commit_calls) == 1
+    elif case == "wrong_scope":
+        assert replay.reason == "org-reconciliation-required" and not transport.commit_calls
     else:
         assert replay.reason == "reconciliation-intent-invalid" and not transport.commit_calls
 
