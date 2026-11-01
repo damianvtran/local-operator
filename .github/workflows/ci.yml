@@ -1079,6 +1079,8 @@ jobs:
         # the directory name so a later attempt cannot mix evidence with an
         # earlier one.
         env:
+          # Step-local: a later serial pytest invocation must not share this ID.
+          LOCAL_OPERATOR_SHARD_STALL_INVOCATION: ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.python-version }}-${{ matrix.shard }}
           LOCAL_OPERATOR_SHARD_MEMORY_DIR: ${{ runner.temp }}/lo-shard-memory/${{ matrix.python-version }}-${{ matrix.shard }}-attempt-${{ github.run_attempt }}
         # The six serial controls are deselected here (see SERIAL_CONTROLS above).
         # The `.coverage` rename is NOT done here any more: shard 0 appends the
@@ -1233,6 +1235,30 @@ jobs:
           path: ${{ runner.temp }}/lo-shard-memory/${{ matrix.python-version }}-${{ matrix.shard }}-attempt-${{ github.run_attempt }}/**
           retention-days: 7
           if-no-files-found: ignore
+
+      - name: Stage current-invocation timeout files
+        id: stage_stall
+        if: always()
+        env:
+          LOCAL_OPERATOR_SHARD_STALL_INVOCATION: ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.python-version }}-${{ matrix.shard }}
+        # Security allowlist: only numeric worker-*.log from this exact invocation,
+        # no symlink inputs or arbitrary scratch; 1 MiB/file, 8 MiB/32 files total.
+        # Existing timeout text may expose fixture paths, so keep only one day.
+        # This does not capture locals/env/argv or guarantee a fatal-crash stack.
+        run: |
+          python -m tests.shard_stall_artifact \
+            --root "${TMPDIR:-/tmp}/lo-shard-stall" \
+            --invocation "$LOCAL_OPERATOR_SHARD_STALL_INVOCATION" \
+            --output "$RUNNER_TEMP/lo-stall-artifact"
+
+      - name: Upload current-invocation timeout files
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: shard-timeout-files-${{ matrix.python-version }}-${{ matrix.shard }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/lo-stall-artifact
+          if-no-files-found: warn
+          retention-days: 1
 
       - name: Print the shard stall report
         # `always()` unconditionally: the report exists exactly when this job is

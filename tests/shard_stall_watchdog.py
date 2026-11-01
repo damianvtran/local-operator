@@ -890,7 +890,20 @@ def install(config, on_ci: bool = False) -> None:
         # Made here rather than lazily on the first dump, so that the directory a
         # reader (or the workflow's report step) is pointed at exists for the
         # whole run. An empty one is removed by :meth:`_Controller.cleanup`.
-        _RUN_DIR = DUMP_ROOT / f"run-{os.getpid()}"
+        # CI and its always-step share an explicit invocation identity, so the
+        # artifact never needs to search neighboring/stale pytest directories.
+        # Invalid protocol input disables that handoff, not pytest itself.
+        from tests.shard_stall_artifact import ENV_INVOCATION, provenance
+
+        # Consume the handoff: test-created nested pytest controllers must not
+        # inherit this identity and mix their dumps into the ordinary shard.
+        # Workers inherit ENV_RUN_DIR instead, as they already did.
+        identity = os.environ.pop(ENV_INVOCATION, "")
+        try:
+            provenance(identity)
+        except ValueError:
+            identity = f"run-{os.getpid()}"
+        _RUN_DIR = DUMP_ROOT / identity
         with contextlib.suppress(OSError):
             _RUN_DIR.mkdir(parents=True, exist_ok=True)
         os.environ[ENV_RUN_DIR] = str(_RUN_DIR)
