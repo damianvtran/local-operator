@@ -417,6 +417,27 @@ async def test_recovery_never_becomes_a_provisional_title(human: str | None) -> 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("human", [None, "Please investigate the tool warning"])
+async def test_window_opener_never_titles_footer_with_recovery(tmp_path, human: str | None) -> None:
+    from local_operator.harness.chrome_prompts import MISSING_ARGUMENTS_RECOVERY_PROMPT
+    from local_operator.session.transcript import Transcript
+    from tests.unit.session.test_history_window import window
+
+    transcript = Transcript(tmp_path / "opener")
+    messages = [Message.user(MISSING_ARGUMENTS_RECOVERY_PROMPT)]
+    if human:
+        messages.append(Message.user(human))
+    await transcript.append_messages(messages)
+    opener = window(transcript).opener_text
+    app, session = await _boot()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _ready(pilot, app)
+        session.history_opener_text = opener
+        app._restore_resumed_name(session)
+        assert app._provisional_name == (naming.provisional_title(human) if human else "")
+
+
+@pytest.mark.asyncio
 async def test_frontend_updates_preserve_the_provisional_name() -> None:
     """Canonical control snapshots must not repaint an unnamed tab as its cwd.
 
