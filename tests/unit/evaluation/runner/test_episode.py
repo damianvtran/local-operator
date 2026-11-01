@@ -2209,13 +2209,14 @@ async def test_cancelled_decision_preserves_partial_paid_usage(
 
 
 @pytest.mark.parametrize(
-    ("raw_usage", "expected_calls", "known"),
+    ("raw_usage", "tier", "expected_calls", "known"),
     [
-        ({}, 1, False),
-        ({"prompt_tokens": 100}, 1, False),
-        ({"completion_tokens": 10}, 1, False),
-        ({"prompt_tokens": 0, "completion_tokens": 0}, 2, True),
-        ({"cost": 0.0}, 2, True),
+        ({}, "default", 1, False),
+        ({"prompt_tokens": 100}, "default", 1, False),
+        ({"completion_tokens": 10}, "default", 1, False),
+        ({"prompt_tokens": 0, "completion_tokens": 0}, "default", 2, True),
+        ({"prompt_tokens": 0, "completion_tokens": 0}, None, 1, False),
+        ({"cost": 0.0}, None, 2, True),
     ],
 )
 @pytest.mark.asyncio
@@ -2224,6 +2225,7 @@ async def test_compat_adapter_missing_counts_stops_capped_episode(
     episode_id: str,
     monkeypatch: pytest.MonkeyPatch,
     raw_usage: dict[str, Any],
+    tier: str | None,
     expected_calls: int,
     known: bool,
 ) -> None:
@@ -2251,10 +2253,12 @@ async def test_compat_adapter_missing_counts_stops_capped_episode(
         reply = json.dumps(
             {"actions": [{"kind": "wait", "observation_id": match.group(1), "duration_ms": 1}]}
         )
-        chunk = {
+        chunk: dict[str, Any] = {
             "choices": [{"delta": {"content": reply}, "finish_reason": "stop"}],
             "usage": raw_usage,
         }
+        if tier is not None:
+            chunk["service_tier"] = tier
         body = "data: " + json.dumps(chunk) + "\n\ndata: [DONE]\n\n"
         return httpx.Response(200, text=body, headers={"content-type": "text/event-stream"})
 

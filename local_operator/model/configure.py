@@ -7957,6 +7957,7 @@ class SessionStreamFn:
                     cache_write_tokens=int(usage.cache_write_tokens),
                     cache_write_1h_tokens=int(getattr(usage, "cache_write_1h_tokens", 0)),
                     openai_long_context=bool(getattr(usage, "openai_long_context", False)),
+                    openai_service_tier=getattr(usage, "openai_service_tier", None),
                     reasoning_tokens=int(getattr(usage, "reasoning_tokens", 0)),
                     context_tokens=int(context_tokens or 0),
                     component_chars=component_chars,
@@ -8209,6 +8210,18 @@ _OPENAI_LONG_CONTEXT_MODELS = re.compile(
 )
 
 
+# https://developers.openai.com/api/docs/pricing publishes Fast rates exactly
+# twice Standard for these families, including their long-context rates. Other
+# tiers cannot inherit this rule: some have a different premium or no quote.
+_OPENAI_FAST_DOUBLE_MODELS = re.compile(
+    r"^(?:gpt-6-astra|gpt-6\.1-sol|gpt-6\.1-terra|gpt-6-luna|gpt-6-sol|"
+    r"gpt-5\.6-sol|gpt-5\.6-terra|gpt-5\.6-luna)(?:-\d{4}-\d{2}-\d{2})?$"
+)
+# These two older Fast rows have only a short-context quote and one is 2.5x,
+# not 2x. A dated snapshot uses the same published model family rate.
+_OPENAI_FAST_OLD_SHORT_MODELS = re.compile(r"^gpt-5\.(4|5)(?:-\d{4}-\d{2}-\d{2})?$")
+
+
 def cost_for_usage(
     provider: str,
     model_info: ModelInfo,
@@ -8242,7 +8255,9 @@ def cost_for_usage(
 
     The caller is responsible for deciding whether ``model_info`` is priced at
     all; this returns 0.0 for a zero-priced model, which is arithmetically true
-    and is exactly why a UI must not render it blindly.
+    and is exactly why a UI must not render it blindly. Raises ``ValueError``
+    when a first-party receipt has an unknown or unsupported service tier, or
+    an unqualified cache write whose TTL is needed to choose the published rate.
     """
     reported = _usage_cost(usage)
     if reported is not None:
@@ -8252,8 +8267,37 @@ def cost_for_usage(
     from local_operator.providers.registry import credential_provider_id
 
     provider = credential_provider_id(provider)
+    tier = (
+        usage.get("openai_service_tier")
+        if isinstance(usage, Mapping)
+        else getattr(usage, "openai_service_tier", None)
+    )
+    long_context = bool(
+        usage.get("openai_long_context", False)
+        if isinstance(usage, Mapping)
+        else getattr(usage, "openai_long_context", False)
+    )
+    fast_multiplier = 1.0
+    # The provider's own USD receipt has already won above. Never turn a
+    # first-party call whose final tier is unknown into a confident base price.
+    if provider == "openai":
+        if tier not in (None, "default", "fast"):
+            raise ValueError("OpenAI service tier is not priceable")
+        if tier == "fast":
+            old_short = _OPENAI_FAST_OLD_SHORT_MODELS.fullmatch(model_info.id)
+            if _OPENAI_FAST_DOUBLE_MODELS.fullmatch(model_info.id):
+                fast_multiplier = 2.0
+            elif old_short and not long_context:
+                fast_multiplier = 2.5 if old_short.group(1) == "5" else 2.0
+            else:
+                raise ValueError("OpenAI Fast tariff is not published for this model/tier")
     read = _usage_field(usage, "cache_read_tokens")
     written = _usage_field(usage, "cache_write_tokens")
+    if provider == "openai" and tier in ("default", "fast") and written:
+        # Standard and Fast distinguish 30-minute and 12-hour cache writes,
+        # but this receipt has no OpenAI TTL provenance. Neither is safe.
+        # Unstamped legacy/gateway receipts keep their pre-existing behavior.
+        raise ValueError("OpenAI cache write TTL is unknown")
     plain = _usage_field(usage, "input_tokens")
     if _cache_tokens_are_inside_input(provider):
         # Subtract, floored at zero: the buckets must stay disjoint, and a
@@ -8263,11 +8307,7 @@ def cost_for_usage(
     output = float(_usage_field(usage, "output_tokens"))
     if (
         provider == "openai"
-        and bool(
-            usage.get("openai_long_context", False)
-            if isinstance(usage, Mapping)
-            else getattr(usage, "openai_long_context", False)
-        )
+        and long_context
         and _OPENAI_LONG_CONTEXT_MODELS.fullmatch(model_info.id)
     ):
         # The higher rates apply to the entire request, not just the excess.
@@ -8278,6 +8318,7 @@ def cost_for_usage(
         output *= 1.5
     price_moment = tariff.moment_for(model_info, usage, moment)
     cost = calculate_cost(model_info, plain, output, read, written, moment=price_moment)
+    cost *= fast_multiplier
     if provider == "anthropic":
         # Anthropic's receipt identifies the 1h subset; its documented price is
         # 2x base, not the catalog's ordinary 5m write rate. A malformed subset

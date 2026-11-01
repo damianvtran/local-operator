@@ -32,7 +32,7 @@ import unicodedata
 import uuid
 from collections.abc import AsyncIterator, Mapping, Sequence
 from datetime import timezone
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 import httpx
 
@@ -340,6 +340,40 @@ def _compat_cache_usage(raw_usage: Mapping[str, Any]) -> tuple[int | None, int]:
             cache_read = parsed
             break
     return cache_read, _usage_token(details, "cache_write_tokens")
+
+
+def _openai_service_tier_receipt(
+    request: ChatRequest, url: str, tier: Any, input_tokens: int | None = None
+) -> Literal["default", "fast", "unknown"] | None:
+    """Capture terminal tier only on actual first-party OpenAI routes.
+
+    A project can use Fast on models without a local /fast toggle, so capture
+    provenance for every first-party model; the pricing layer separately gates
+    the actual tariff on published model IDs. A request or intermediate event
+    never proves billed service: OAuth can request priority and finish at default.
+    """
+    from local_operator.providers.registry import credential_provider_id
+
+    if credential_provider_id(request.model.provider) != "openai" or url not in {
+        "https://api.openai.com/v1/chat/completions",
+        "https://api.openai.com/v1/responses",
+        CODEX_RESPONSES_URL,
+    }:
+        return None
+    if tier == "default":
+        return "default"
+    if tier in ("priority", "fast"):
+        # The older Fast table says <272K while its general footnote says
+        # <=272K. Decide on the original call, never a folded token sum.
+        # At or above the disputed boundary the published rate is unknown.
+        if (
+            input_tokens is not None
+            and input_tokens >= 272_000
+            and re.fullmatch(r"gpt-5\.(?:4|5)(?:-\d{4}-\d{2}-\d{2})?", request.model.model_id)
+        ):
+            return "unknown"
+        return "fast"
+    return "unknown"
 
 
 def _openai_long_context_receipt(request: ChatRequest, url: str, input_tokens: int) -> bool:
@@ -3605,6 +3639,9 @@ class OpenAICompatClient:
         served_provider: str | None = None
         direct_deepseek = request.model.provider == "deepseek"
         done_received = False
+        # Only a finish chunk or its later usage trailer can identify the
+        # actual service tier. Earlier streaming chunks are provisional.
+        finish_service_tier: Any = None
         # DeepSeek-family models behind a gateway leak residue of their native
         # tool-call markup into ``delta.content`` beside the parsed
         # ``tool_calls`` (seen live on radient/auto). Filtering the deltas here
@@ -3673,14 +3710,40 @@ class OpenAICompatClient:
                         # the turn was accepted only once it has already finished.
                         started = True
                         yield StreamStartEvent(response_id=_stream_id(chunk.get("id")))
+                    chunk_choices = chunk.get("choices") or []
+                    chunk_finished = bool(
+                        chunk_choices
+                        and isinstance(chunk_choices[0], Mapping)
+                        and chunk_choices[0].get("finish_reason")
+                    )
+                    if chunk_finished:
+                        finish_service_tier = chunk.get("service_tier")
                     if isinstance(chunk.get("usage"), Mapping):
                         raw = chunk["usage"]
+                        terminal_tier = (
+                            chunk.get("service_tier", finish_service_tier)
+                            if finish_reason is not None or chunk_finished
+                            else None
+                        )
+                        if (
+                            finish_service_tier is not None
+                            and "service_tier" in chunk
+                            and _openai_service_tier_receipt(request, url, finish_service_tier)
+                            != _openai_service_tier_receipt(request, url, terminal_tier)
+                        ):
+                            # Two terminal claims disagree; neither is a safe
+                            # basis for a confident price. "fast"/"priority"
+                            # normalize to the same service tier.
+                            terminal_tier = None
                         cache_read, cache_write = _compat_cache_usage(raw)
                         completion_details = raw.get("completion_tokens_details") or {}
                         usage = Usage(
                             input_tokens=int(raw.get("prompt_tokens", 0)),
                             openai_long_context=_openai_long_context_receipt(
                                 request, url, int(raw.get("prompt_tokens", 0))
+                            ),
+                            openai_service_tier=_openai_service_tier_receipt(
+                                request, url, terminal_tier, int(raw.get("prompt_tokens", 0))
                             ),
                             output_tokens=int(raw.get("completion_tokens", 0)),
                             cache_read_tokens=cache_read if cache_read is not None else 0,
@@ -4145,6 +4208,12 @@ class OpenAICompatClient:
                             input_tokens=int(raw.get("input_tokens", 0)),
                             openai_long_context=_openai_long_context_receipt(
                                 request, url, int(raw.get("input_tokens", 0))
+                            ),
+                            openai_service_tier=_openai_service_tier_receipt(
+                                request,
+                                url,
+                                response_obj.get("service_tier"),
+                                int(raw.get("input_tokens", 0)),
                             ),
                             output_tokens=int(raw.get("output_tokens", 0)),
                             cache_read_tokens=_usage_token(details, "cached_tokens"),

@@ -682,6 +682,50 @@ def test_rebuild_sums_every_row_and_never_claims_a_floor_from_a_marker(
     assert spend.knowledge() is CostKnowledge.PARTIAL
 
 
+def test_rebuild_keeps_zero_token_unknown_service_tier(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An observed unpriceable receipt cannot disappear on transcript replay."""
+    from local_operator.model import configure
+    from local_operator.model.registry import ModelInfo
+
+    directory = tmp_path / "sess"
+    directory.mkdir()
+    transcript = Transcript(directory)
+
+    async def seed() -> None:
+        await transcript.append_message(
+            Message.assistant("a", usage=receipt("openrouter", "x", 2.0))
+        )
+        await transcript.append_message(
+            Message.assistant(
+                "b",
+                usage=Usage(
+                    provider="openai",
+                    model_id="gpt-6-astra",
+                    input_tokens=0,
+                    output_tokens=0,
+                    openai_service_tier="unknown",
+                ),
+            )
+        )
+
+    asyncio.run(seed())
+    model = ModelInfo(
+        id="gpt-6-astra", name="synthetic", description="synthetic", input_price=10, output_price=50
+    )
+    monkeypatch.setattr(configure, "resolve_model_info", lambda *_: model)
+    session = make_session(tmp_path)
+    asyncio.run(session._rebuild_spend())
+    assert session.spend.micro == 2_000_000
+    assert (session.spend.calls, session.spend.priced_calls, session.spend.unpriced_calls) == (
+        2,
+        1,
+        1,
+    )
+    assert session.spend.knowledge() is CostKnowledge.PARTIAL
+
+
 def test_rebuild_is_once_per_session_per_process(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
