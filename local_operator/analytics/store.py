@@ -316,6 +316,8 @@ CREATE TABLE IF NOT EXISTS calls (
   -- (DEFAULT_RETENTION_DAYS); beyond that, price the split when it ships.
   cache_write_1h_tokens INTEGER NOT NULL DEFAULT 0,
   openai_long_context INTEGER NOT NULL DEFAULT 0,
+  -- Null is legacy/unrelated; never infer the original billed tier later.
+  openai_service_tier TEXT,
   request_id TEXT NOT NULL DEFAULT '',
   parent_session_id TEXT NOT NULL DEFAULT '',
   purpose TEXT NOT NULL DEFAULT 'unknown',
@@ -635,6 +637,7 @@ _CALL_COLUMNS = (
     *(f"c_{key}" for key in COMPONENT_KEYS),
     "cache_write_1h_tokens",
     "openai_long_context",
+    "openai_service_tier",
     "request_id",
     "parent_session_id",
     "purpose",
@@ -678,6 +681,7 @@ _MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (
     # 0 here is the truth for them, not a placeholder.
     ("cache_write_1h_tokens", "INTEGER NOT NULL DEFAULT 0"),
     ("openai_long_context", "INTEGER NOT NULL DEFAULT 0"),
+    ("openai_service_tier", "TEXT"),
     ("request_id", "TEXT NOT NULL DEFAULT ''"),
     ("parent_session_id", "TEXT NOT NULL DEFAULT ''"),
     ("purpose", "TEXT NOT NULL DEFAULT 'unknown'"),
@@ -1239,6 +1243,7 @@ def _row_values(
         *(components[key] for key in COMPONENT_KEYS),
         snapshot.cache_write_1h_tokens,
         int(snapshot.openai_long_context),
+        snapshot.openai_service_tier,
         snapshot.request_id,
         snapshot.parent_session_id,
         snapshot.purpose,

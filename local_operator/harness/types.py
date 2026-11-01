@@ -1272,7 +1272,7 @@ def _omit_unset_usage_stamp(data: dict[str, Any]) -> dict[str, Any]:
     invisibly, until the attach frame crosses its 1 MiB socket line limit again
     (review round 1, MINOR 2).
     """
-    for field in ("at_ms", "billing_basis"):
+    for field in ("at_ms", "billing_basis", "openai_service_tier"):
         if data.get(field) is None:
             data.pop(field, None)
     if not data.get("openai_long_context"):
@@ -1343,6 +1343,10 @@ class Usage(BaseModel):
     # unknown legacy/gateway receipts stay false. Omitted when false to avoid
     # adding bytes to every usage on the bounded attach frame.
     openai_long_context: bool = False
+    # Only first-party dispatches can identify this tier. None is legacy or
+    # unrelated; "unknown" means a qualifying call had no trustworthy terminal
+    # tier. Persist it per call so a fold cannot turn uncertainty into a price.
+    openai_service_tier: Literal["default", "fast", "unknown"] | None = None
     input_tokens: int = 0
     output_tokens: int = 0
     cache_read_tokens: int = 0

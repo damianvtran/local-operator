@@ -716,8 +716,8 @@ def _folded_components(components: Sequence[Any]) -> list[Any]:
         _usage_field,
     )
 
-    folded: dict[tuple[str, str, str, str | None, bool], Any] = {}
-    order: list[tuple[str, str, str, str | None, bool]] = []
+    folded: dict[tuple[str, str, str, str | None, bool, str | None], Any] = {}
+    order: list[tuple[str, str, str, str | None, bool, str | None]] = []
     passthrough: list[Any] = []
     for raw_component in components:
         provider = str(getattr(raw_component, "provider", "") or "")
@@ -783,6 +783,7 @@ def _folded_components(components: Sequence[Any]) -> list[Any]:
             mode,
             getattr(component, "billing_basis", None),
             component.openai_long_context,
+            component.openai_service_tier,
         )
         existing = folded.get(key)
         if existing is None:
