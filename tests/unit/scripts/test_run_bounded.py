@@ -444,7 +444,7 @@ def test_child_memory_unsupported_positive_refuses_before_spawn(memory_wrapper, 
     ],
 )
 def test_child_memory_loop_preserves_owned_cleanup_contract(
-    memory_wrapper, monkeypatch, mode, expected
+    memory_wrapper, monkeypatch, tmp_path, mode, expected
 ):
     """Exercise real Guard decisions; fake only readings/process/clock/syscalls.
 
@@ -455,6 +455,7 @@ def test_child_memory_loop_preserves_owned_cleanup_contract(
     from types import SimpleNamespace
 
     wrapper = memory_wrapper
+    monkeypatch.setenv("LOCAL_OPERATOR_SCRATCHPAD", str(tmp_path))
     mg = wrapper.memory_guard
     budget = _test_budget(48)
     monkeypatch.setattr(wrapper, "_memory_budget", lambda value: (budget, "inherited"))

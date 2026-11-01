@@ -1,4 +1,7 @@
-"""Checkout-local, stdlib-only signal authority for the bounded gate runner.
+"""Checkout-local signal authority for the bounded gate runner.
+
+Stdlib plus this checkout's own leaves (``procstate``, ``mobile.resources``); no
+third-party import and no installation, so ``python -S`` bootstrap holds.
 
 A remembered PGID is NOT ownership. Enrolment needs a living authenticated
 creation chain; signalling needs a fresh complete census and matching births,
@@ -64,7 +67,11 @@ def strict_linux(pgid, deadline, *, listdir=os.listdir, read=None, stat=os.stat,
     Existing lenient resource-monitor readers are intentionally unchanged.
     """
     read = read or (lambda p: Path(p).read_text(encoding="utf-8"))
-    for _ in range(4):
+    # More attempts than the four that used to abort a healthy gate: each attempt
+    # is a fresh complete scan, so retrying cannot manufacture identity — it only
+    # stops ordinary fork churn from being read as lost authority. The deadline,
+    # not this count, bounds the work.
+    for _ in range(6):
         if clock() >= deadline:
             raise Unknown("strict /proc census deadline")
         first = {n for n in listdir("/proc") if n.isdigit()}
@@ -82,7 +89,15 @@ def strict_linux(pgid, deadline, *, listdir=os.listdir, read=None, stat=os.stat,
                 except FileNotFoundError:
                     disappeared.add(entry)
                     continue
-                raise Unknown("stat row missing for existing PID")
+                # The directory exists but the row did not read: retry it once.
+                # A transient miss during churn is not a malformed row, and only a
+                # second miss is genuinely unreadable identity.
+                try:
+                    raw = read(path + "/stat")
+                except FileNotFoundError:
+                    raise Unknown("stat row missing for existing PID")
+                except (OSError, UnicodeError) as exc:
+                    raise Unknown("unreadable /proc row") from exc
             except (OSError, UnicodeError) as exc:
                 raise Unknown("unreadable /proc row") from exc
             try:
@@ -152,9 +167,25 @@ def kernel_identity(pid):
     return parent, group, os.getsid(pid)
 
 
+def _observed(before, after):
+    """What the capability BELIEVED about each pid, for a receipt that must not be empty.
+
+    On the acquisition-failure path ``receipts`` is empty by construction, and that
+    is exactly the run whose evidence a caller needs, so the attempts are kept
+    separately from the enrolled proof.
+    """
+    rows = {}
+    for stage, samples in (("before", before or {}), ("after", after or {})):
+        for pid, sample in samples.items():
+            rows.setdefault(str(pid), {})[stage] = {
+                "birth": sample.birth, "zombie": sample.zombie}
+    return rows
+
+
 @dataclass(frozen=True)
 class Receipt:
     pid: int
+    #: Never empty: both enrolment paths refuse a falsy scheme before writing one.
     scheme: str
     birth: str
     parent: int
@@ -182,6 +213,9 @@ class OwnedGroup:
         self.leader = self.pgid = leader
         self.sid = leader
         self.receipts = {}
+        #: Attempted/observed identity, kept even when proof fails.
+        self.probe = {"leader": leader, "parent": None, "members": [], "observed": {},
+                      "scheme": None}
         self.census, self.samples, self.identity = census, samples, identity
         self.scheme, self.clock, self._send = scheme, clock, signal_group
         self.initial_error = "unproven initial identity"
@@ -194,15 +228,20 @@ class OwnedGroup:
         cap = cls(_SEAL, leader, census=census, samples=samples, identity=identity,
                   scheme=scheme, clock=clock, signal_group=signal_group)
         parent = os.getpid() if parent_pid is None else parent_pid
+        cap.probe["parent"] = parent
         try:
             members = cap._members(deadline)
+            cap.probe["members"] = list(members)
             if not members:
                 cap.last = Verdict("OBSERVED_EMPTY", "strict initial empty census")
                 return cap
             before = cap._samples([leader, parent], deadline)
+            cap.probe["observed"] = _observed(before, None)
             view = identity(leader)
             after = cap._samples([leader, parent], deadline)
+            cap.probe["observed"] = _observed(before, after)
             stamp = scheme()
+            cap.probe["scheme"] = stamp or None
             if view != (parent, leader, leader) or identity(leader) != view:
                 raise Unknown("Popen leader parent/PG/SID not pinned")
             if not stamp or any(p not in before or p not in after for p in [leader, parent]):
@@ -215,6 +254,7 @@ class OwnedGroup:
             cap.initial_error = ""
             cap.refresh(deadline=deadline)
         except Exception as exc:
+            cap.probe["error"] = type(exc).__name__ + ":" + str(exc)
             cap.last = Verdict("REFUSED", type(exc).__name__ + ":" + str(exc), tuple(members) if 'members' in locals() else ())
         return cap
 
@@ -248,7 +288,11 @@ class OwnedGroup:
             known = dict(self.receipts)
             before = self._samples(set(members) | set(known), deadline)
             views = {p: self.identity(p) for p in members}
-            stamp = self.scheme()
+            # Same rule as `capture`: a scheme this build cannot produce is not
+            # proof, and writing a scheme-less receipt would merely read as
+            # "unreadable" one step later instead of refusing at the point of proof.
+            if not stamp:
+                raise Unknown("birth scheme unavailable at enrolment")
             def matching(pid, receipt, sample):
                 return sample is not None and sample.is_birth(receipt.scheme, receipt.birth) is True
             # Observed reuse is not excused by another otherwise-valid survivor.
@@ -307,6 +351,19 @@ class OwnedGroup:
             return self.last
         try:
             self._send(self.pgid, signum)
+        except ProcessLookupError:
+            # ESRCH from the checked syscall: the kernel says this group is
+            # already gone. That is the state a passing gate wants to reach, NOT
+            # lost authority — mapping it to REFUSED turned a completed gate into
+            # "125: did not run" whenever its residual members exited in the
+            # window between the final census and this call.
+            self.last = Verdict("OBSERVED_EMPTY", "checked signal: group absent (ESRCH)",
+                                result.members)
+            return self.last
+        except PermissionError:
+            # EPERM is genuine doubt: the group exists and we could not reach it.
+            self.last = Verdict("REFUSED", "checked signal denied (EPERM)", result.members)
+            return self.last
         except OSError as exc:
             self.last = Verdict("REFUSED", "checked signal failed:" + type(exc).__name__, result.members)
             return self.last

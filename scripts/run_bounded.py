@@ -68,7 +68,9 @@ else (a `kill -9`, the OOM killer, a job runner), which a shell would report the
 same way; `137` for a measured owned-group memory breach, identified by the
 `MEMORY LIMIT EXCEEDED` diagnostic (status 137 alone also covers an external
 SIGKILL); `125` when the command could not start or its memory budget was refused
-before spawn, or a previously successful gate whose cleanup was REFUSED.
+before spawn; `126` when the command ran but its owned group's cleanup could not
+be proved — kept apart from 125 precisely so an interrupted cleanup is never
+reported as a gate that did not run.
 Timeout/RAM/signal/nonzero child statuses are retained with secondary residual
 receipts on refusal; a requested signal is never reported as proven reaping.
 
@@ -87,6 +89,28 @@ No keeper, tokenless fallback, or existing monitor-policy changes are introduced
 DIAGNOSTICS go to stderr, never stdout: the lint/format gates' stdout is
 parseable output and the suite's `-q` output is parsed too (the same rule the
 pytest worker cap follows in `conftest.py`).
+
+RUN RECORD
+----------
+Every SPAWNED run writes two JSON records under
+`$LOCAL_OPERATOR_SCRATCHPAD` (else `$LOCAL_OPERATOR_CONFIG_DIR`, else
+`~/.local-operator`) + `/run-bounded-runs/`:
+`<run_id>.spawn.json` at spawn, before the leader can be reaped, and
+`<run_id>.exit.json` before the wrapper returns. Both carry
+`schema: run-bounded-run/v1`, `run_id`, `wrapper_pid`, `pgid`, the command's
+basename, `wall_clock_start_utc` (and end/elapsed/exit code at exit), `verdict`,
+`actors` (each enrolled receipt: pid, scheme, birth, parent, parent_birth, pgid,
+sid) and `believed` (what was attempted/observed). No argv, environment or
+capability descriptor is written, and stdout stays the child's alone.
+
+A caller binds its evidence with `--run-id TOKEN` (or `$LOCAL_OPERATOR_RUN_ID`);
+the token is sanitised to `[A-Za-z0-9._-]` and capped at 64 characters, then
+reused for both filenames and the `span run_id=... pgid=...` stderr line emitted
+at spawn. An acquisition failure still writes both records — with `actors` empty
+and `believed` naming the attempted identities — so "refused with a record" is
+distinguishable from "no record", which means no run was spawned. The record
+filesystem work is bounded by `_RECORD_BUDGET_SECONDS`, so a wedged home
+directory costs that budget rather than the gate.
 """
 
 from __future__ import annotations
@@ -115,10 +139,17 @@ EXIT_TIMEOUT = 124
 #: local gate spellings need the analyzer headroom, not just the Makefile recipe.
 NODE_HEAP_MB = 6144
 
-#: The command never started (missing interpreter, bad path). Distinguished from
-#: any status the command itself can produce, so a gate that did not run cannot
-#: be read as a passing gate.
+#: The command never started (missing interpreter, bad path, refused budget).
+#: Distinguished from any status the command itself can produce, so a gate that
+#: did not run cannot be read as a passing gate.
 EXIT_NOT_STARTED = 125
+
+#: The command RAN and produced its own status, but the owned group could not be
+#: proved cleaned up. Deliberately distinct from 125: "did not run" and "ran,
+#: residuals unknown" call for different follow-up, and conflating them made an
+#: interrupted cleanup look like a gate that never executed (the same conflation
+#: turned an already-gone group into a false red).
+EXIT_CLEANUP_UNPROVEN = 126
 
 #: A measured owned-group memory breach is SIGKILL, not the timeout 124 path.
 EXIT_MEMORY = 128 + signal.SIGKILL
@@ -141,6 +172,23 @@ FORWARDED_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUI
 #: get control back in time to bound the group.
 _POLL_SECONDS = 0.05
 
+#: How often authority is re-proved while waiting for the leader. NOT the poll
+#: cadence: one refresh runs two complete strict censuses (Darwin: a syscall;
+#: Linux: a full ``/proc`` scan), so refreshing on every 50 ms poll was ~40
+#: censuses a second and made ordinary fork churn on Linux read as lost
+#: authority. Signals still re-prove inside ``signal()``; this paces enrolment
+#: between them.
+_AUTHORITY_REFRESH_SECONDS = 1.0
+
+#: Wall-clock ceiling for one run record's filesystem work. Every other step of a
+#: refusal is deadline-bounded; a wedged home directory must not be the one
+#: unbounded operation on a path that is already refusing.
+_RECORD_BUDGET_SECONDS = 0.25
+
+#: Environment fallback for a caller that wants its own run identifier without
+#: changing argv.
+RUN_ID_ENV = "LOCAL_OPERATOR_RUN_ID"
+
 
 def _signal_group(owner, signum: int, *, deadline: float):
     """One capability boundary; numeric groups cannot be supplied as authority."""
@@ -156,40 +204,118 @@ def _report(stream, text):
         pass
 
 
-def _refusal_receipt(owner, phase, verdict, stream):
-    """Durable residual facts only: no argv, environment, capability or nonce."""
-    import json
+def _utc_now() -> str:
+    import datetime
+    return datetime.datetime.now(datetime.timezone.utc).isoformat(
+        timespec="seconds").replace("+00:00", "Z")
+
+
+def _record_dir() -> Path:
+    return Path(os.environ.get("LOCAL_OPERATOR_SCRATCHPAD") or
+                os.environ.get("LOCAL_OPERATOR_CONFIG_DIR") or
+                str(Path.home() / ".local-operator")) / "run-bounded-runs"
+
+
+def _safe_token(value: object, limit: int = 64) -> str:
+    """A filename/phase-safe token: no separators, no traversal, bounded length."""
+    token = re.sub(r"[^A-Za-z0-9._-]", "-", str(value))[:limit].strip(".-")
+    return token or "phase"
+
+
+def _resolve_run_id(supplied: str | None) -> str:
+    """The caller's ``--run-id``, else ``$LOCAL_OPERATOR_RUN_ID``, else generated."""
     import uuid
+    raw = supplied if supplied is not None else os.environ.get(RUN_ID_ENV)
+    if raw:
+        token = _safe_token(raw)
+        if token != "phase":
+            return token
+    return "run-" + uuid.uuid4().hex[:12]
+
+
+def _record_run(owner, stream, run_id: str, phase: str, *, command=None, verdict=None,
+                start_utc=None, end_utc=None, elapsed=None, exit_code=None):
+    """Durable, bounded evidence binding THIS run to the group it drove.
+
+    WHY A RECORD AND NOT JUST A REFUSAL RECEIPT: a caller that invoked the wrapper
+    has no other way to learn which process group it owned. A refused run needs it
+    to name residuals; a SUCCESSFUL run needs it for admission — the consuming
+    lanes are expected to pass, and a green gate that emits no ownership record
+    leaves them nothing to bind. There is therefore a record at spawn and one at
+    exit, both keyed by the same caller-supplied run id, both on disk before the
+    wrapper returns, and both announced on stderr as they are written.
+
+    Schema ``run-bounded-run/v1``: ``run_id``, ``wrapper_pid``, ``pgid``, the
+    command's basename, ``wall_clock_start_utc``/``wall_clock_end_utc``,
+    ``elapsed_seconds``, ``exit_code``, ``phase``, ``verdict``, ``actors`` (each
+    enrolled receipt: pid, scheme, birth, parent, parent_birth, pgid, sid) and
+    ``believed`` (what was attempted/observed even when proof failed). Path
+    convention: ``<record dir>/<run_id>.<phase>.json``. No argv, no environment
+    and no capability descriptor is written.
+
+    Nothing here may raise: this path can already be a safety failure, and a
+    second capture error must not replace the original one. The filesystem work is
+    bounded by ``_RECORD_BUDGET_SECONDS`` — the deadline is checked before each
+    step is STARTED, which is the most a cooperative bound can promise (an
+    in-flight ``fsync`` is not preemptible).
+    """
+    import json
     from dataclasses import asdict
 
-    base = Path(os.environ.get("LOCAL_OPERATOR_SCRATCHPAD") or
-                os.environ.get("LOCAL_OPERATOR_CONFIG_DIR") or
-                str(Path.home() / ".local-operator")) / "run-bounded-refusals"
+    deadline = time.monotonic() + _RECORD_BUDGET_SECONDS
+    started = start_utc or _utc_now()
+    payload = {
+        "schema": "run-bounded-run/v1",
+        "run_id": run_id,
+        "wrapper_pid": os.getpid(),
+        "pgid": getattr(owner, "pgid", None),
+        "command": command,
+        "phase": phase,
+        "wall_clock_start_utc": started,
+        "wall_clock_end_utc": end_utc,
+        "elapsed_seconds": elapsed,
+        "exit_code": exit_code,
+        "monotonic": time.monotonic(),
+        "actors": [asdict(receipt) for receipt in getattr(owner, "receipts", {}).values()],
+        "believed": getattr(owner, "probe", {}) or {},
+        "verdict": asdict(verdict) if verdict is not None else None,
+        "cleanup": ("REFUSED; residuals named here, not claimed absent" if verdict is not None
+                    else "record only; cleanup outcome not claimed"),
+    }
+    base = _record_dir()
     try:
+        if time.monotonic() >= deadline:
+            raise TimeoutError("record budget spent before write")
         base.mkdir(mode=0o700, parents=True, exist_ok=True)
-        path = base / (uuid.uuid4().hex + ".json")
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        path = base / f"{run_id}.{_safe_token(phase)}.json"
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            # Same run id, same phase: a retry or two wrappers sharing a caller
+            # id. Keep both rather than overwrite one lane's evidence.
+            path = base / f"{run_id}.{_safe_token(phase)}.{os.getpid()}.json"
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w") as handle:
-            json.dump({"phase": phase, "pgid": owner.pgid,
-                       "verdict": asdict(verdict),
-                       "receipts": [asdict(r) for r in owner.receipts.values()],
-                       "monotonic": time.monotonic(),
-                       "cleanup": "REFUSED; residuals not claimed absent"}, handle)
+            json.dump(payload, handle)
             handle.flush()
-            os.fsync(handle.fileno())
-        _report(stream, f"[run_bounded] safety refusal ({phase}); residual receipt: {path}")
-    except (OSError, ValueError) as exc:
-        # This is already a nonzero safety failure, not a recovered cleanup. Do
-        # not replace an original monitor exception with a second capture error.
-        _report(stream, f"[run_bounded] residual capture failed: {type(exc).__name__} errno={getattr(exc, 'errno', None)}")
+            if time.monotonic() < deadline:
+                os.fsync(handle.fileno())
+        _report(stream, f"[run_bounded] record ({phase}) run_id={run_id} path={path}")
+        return path
+    except (OSError, ValueError, TimeoutError) as exc:
+        _report(stream, f"[run_bounded] record write failed ({phase}): "
+                        f"{type(exc).__name__} errno={getattr(exc, 'errno', None)}")
+        return None
 
 
 def _reap(owner, grace, poll, stream, *, reason, send, require, deadline):
     """TERM and KILL EACH obtain fresh authority; refusal never enters a wait."""
     _report(stream, f"[run_bounded] {reason} — requesting checked SIGTERM")
-    verdict = send(signal.SIGTERM, reason + ":term", deadline)
-    if verdict.status == "REFUSED":
-        return
+    # ``send`` is ``require(...)``: a refusal raises AuthorityRefused at this call
+    # site, so this function never enters its wait with a lost capability. The
+    # exception is the enforcement point; a returned-REFUSED branch here read like
+    # one and could never run.
+    send(signal.SIGTERM, reason + ":term", deadline)
     while time.monotonic() < deadline:
         require(owner.refresh(deadline=deadline), reason + ":grace-refresh")
         if poll() is not None:
@@ -248,12 +374,18 @@ def run(
     grace: float,
     memory_mb: int | None = None,
     stream: IO[str] = sys.stderr,
+    run_id: str | None = None,
 ) -> int:
     """Run `argv` as a fresh process group and return its status.
 
     `timeout` is None for an unbounded run: the group is still reaped on exit,
     because the orphan in this module's docstring is produced by an ordinary exit
     as well as by a bound (the wrapper exits, the node child does not).
+
+    `run_id` binds the returned evidence to this invocation: it is sanitised into
+    a filename token, recorded at spawn and again at exit under
+    ``run-bounded-runs/<run_id>.<phase>.json``, and echoed on stderr. Callers that
+    pass none get ``$LOCAL_OPERATOR_RUN_ID`` or a generated id.
     """
     if not argv:
         stream.write("[run_bounded] no command was given\n")
@@ -326,11 +458,22 @@ def run(
         return EXIT_NOT_STARTED
     pgid = proc.pid
     deadline = None if timeout is None else started + timeout
+    run_id = _resolve_run_id(run_id)
+    run_started_utc = _utc_now()
+    # The caller-readable binding, emitted the moment the group exists: an
+    # invocation that never returns still leaves this id/pgid pairing in its log.
+    _report(stream, f"[run_bounded] span run_id={run_id} wrapper_pid={os.getpid()} "
+                    f"pgid={pgid} utc={run_started_utc} command={os.path.basename(argv[0])}")
     # Provisional numeric identity grants NO signal authority. Capture before ANY
     # poll/wait can reap this leader; failed capture remains a bounded refusal.
     owner = owned_process_group.OwnedGroup.capture(
         proc.pid, deadline=min(deadline if deadline is not None else float("inf"),
                                time.monotonic() + 3.0))
+    # Written even when capture failed: the acquisition-failure run is the one
+    # whose evidence matters most, and a record carrying only the believed
+    # identity is still distinguishable from "no record at all".
+    _record_run(owner, stream, run_id, "spawn", command=os.path.basename(argv[0]),
+                start_utc=run_started_utc)
     refused = False
     proof_failed = False
     cleanup_deadline = None
@@ -341,7 +484,8 @@ def run(
     def fail_proof(result, phase):
         nonlocal refused, proof_failed
         refused = proof_failed = True
-        _refusal_receipt(owner, phase, result, stream)
+        _record_run(owner, stream, run_id, phase, command=os.path.basename(argv[0]),
+                    verdict=result, start_utc=run_started_utc)
 
     def require(result, phase):
         if result.status == "REFUSED":
@@ -366,25 +510,32 @@ def run(
             return False
         return True
 
-    rc = 128 + stop["signum"] if stop["signum"] else EXIT_NOT_STARTED
+    # The command is spawned: from here every failure names residuals, never
+    # "did not run". A forwarded signal still carries its own status.
+    rc = 128 + stop["signum"] if stop["signum"] else EXIT_CLEANUP_UNPROVEN
     try:
         require(owner.last, "acquire")
         guard = memory_guard.Guard(pgid, budget) if budget.ceiling_mb > 0 else None
         next_sample = started
+        next_probe = started + _AUTHORITY_REFRESH_SECONDS
         unmeasured_reported = False
         while True:
-            # Enrolment needs a still-live creation chain; do this before poll
-            # can reap the only authenticated ancestor. Unknown stays unknown.
+            now = time.monotonic()
             signum = stop["signum"]
-            timed_out = deadline is not None and time.monotonic() >= deadline
+            timed_out = deadline is not None and now >= deadline
             if signum:
                 rc = 128 + signum
             elif timed_out:
                 rc = EXIT_TIMEOUT
-            probe_until = (begin_cleanup(grace + 0.25) if signum or timed_out else
-                           min(deadline if deadline is not None else float("inf"),
-                               time.monotonic() + 3.0))
-            require(owner.refresh(deadline=probe_until), "required-refresh")
+            # Enrolment needs a still-live creation chain, and any signal re-proves
+            # inside `signal()`. Between signals the census runs on a bounded
+            # cadence rather than once per poll: see _AUTHORITY_REFRESH_SECONDS.
+            if signum or timed_out or now >= next_probe:
+                probe_until = (begin_cleanup(grace + 0.25) if signum or timed_out else
+                               min(deadline if deadline is not None else float("inf"),
+                                   now + 3.0))
+                require(owner.refresh(deadline=probe_until), "required-refresh")
+                next_probe = now + _AUTHORITY_REFRESH_SECONDS
             if signum:
                 until = begin_cleanup(grace + 0.25)
                 send(signum, "forward", until)
@@ -424,6 +575,11 @@ def run(
         pass
     except Exception as exc:
         _report(stream, f"[run_bounded] owned-child monitor failed: {type(exc).__name__}")
+        # This run reached a group and then failed: it must not vanish from the
+        # record set just because it leaves through an exception.
+        _record_run(owner, stream, run_id, "monitor-error",
+                    command=os.path.basename(argv[0]), verdict=owner.last,
+                    start_utc=run_started_utc)
         raise
     finally:
         try:
@@ -453,17 +609,28 @@ def run(
                 refused = True
                 terminal = owned_process_group.Verdict(
                     "REFUSED", "group not observed empty: " + terminal.reason, terminal.members)
-                _refusal_receipt(owner, "residual-census", terminal, stream)
+                _record_run(owner, stream, run_id, "residual-census",
+                            command=os.path.basename(argv[0]), verdict=terminal,
+                            start_utc=run_started_utc)
             if not bounded_wait(until):
                 refused = True
                 result = owned_process_group.Verdict("REFUSED", "leader wait exceeded remaining cleanup allowance")
-                _refusal_receipt(owner, "bounded-wait", result, stream)
+                _record_run(owner, stream, run_id, "bounded-wait",
+                            command=os.path.basename(argv[0]), verdict=result,
+                            start_utc=run_started_utc)
         finally:
             for sig, handler in previous.items():
                 signal.signal(sig, handler)
 
     if refused and rc == 0:
-        rc = EXIT_NOT_STARTED
+        # The gate ran and passed; what is missing is proof of cleanup. Say that,
+        # rather than reusing 125, which callers read as "the gate did not run".
+        rc = EXIT_CLEANUP_UNPROVEN
+    # The record a SUCCESSFUL run must leave behind: callers bind admission to it,
+    # so it is written before the wrapper returns and after the leader is gone.
+    _record_run(owner, stream, run_id, "exit", command=os.path.basename(argv[0]),
+                verdict=owner.last, start_utc=run_started_utc, end_utc=_utc_now(),
+                elapsed=time.monotonic() - started, exit_code=rc)
     _report(stream, f"[run_bounded] {os.path.basename(argv[0])} rc={rc} wall={time.monotonic() - started:.1f}s")
     return rc
 
@@ -476,9 +643,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         # callers consulting --help still need the diagnostic that distinguishes
         # our memory stop from another process delivering SIGKILL (same status).
         epilog=(
-            "Exit status: child status normally; 124 on timeout; 125 on start or "
-            "budget refusal; 137 with MEMORY LIMIT EXCEEDED on a measured memory "
-            "breach. Status 137 alone can also mean external SIGKILL; inspect stderr."
+            "Exit status: child status normally; 124 on timeout; 125 when the "
+            "command never started (or its memory budget was refused before "
+            "spawn); 126 when the command ran but its owned group's cleanup "
+            "could not be proved; 137 with MEMORY LIMIT EXCEEDED on a measured "
+            "memory breach. Status 137 alone can also mean external SIGKILL; "
+            "inspect stderr. Every spawned run also writes "
+            "run-bounded-runs/<run_id>.spawn.json and .exit.json naming the "
+            "group it owned and the identities it believed."
         ),
     )
     parser.add_argument(
@@ -514,6 +686,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--run-id",
+        default=None,
+        help=(
+            "caller-supplied identifier recorded with this run's owned-group "
+            "evidence (filename token and stderr line; default "
+            f"${RUN_ID_ENV}, else generated). Sanitised to [A-Za-z0-9._-], max 64."
+        ),
+    )
+    parser.add_argument(
         "command",
         nargs=argparse.REMAINDER,
         help="the command to run, after a `--` separator",
@@ -522,7 +703,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     command = list(args.command)
     if command[:1] == ["--"]:
         command = command[1:]
-    return run(command, timeout=args.timeout, grace=args.grace, memory_mb=args.memory_mb)
+    return run(command, timeout=args.timeout, grace=args.grace, memory_mb=args.memory_mb,
+               run_id=args.run_id)
 
 
 if __name__ == "__main__":

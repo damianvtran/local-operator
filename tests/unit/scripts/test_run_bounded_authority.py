@@ -20,12 +20,13 @@ from tests.unit.scripts.test_run_bounded import memory_wrapper  # noqa: F401
 
 
 @pytest.mark.parametrize("mode,expected", [
-    ("reuse-finally", 125), ("finally-reuse", 125), ("grace-reuse", 124),
+    ("reuse-finally", 126), ("finally-reuse", 124), ("grace-reuse", 124),
     ("forward-unknown", 143), ("memory-unknown", 137), ("monitor-error", None),
     ("spawn-signal", 143),
 ])
-def test_each_wrapper_path_reauthorizes_without_unbounded_wait(memory_wrapper, monkeypatch, mode, expected):
+def test_each_wrapper_path_reauthorizes_without_unbounded_wait(memory_wrapper, monkeypatch, tmp_path, mode, expected):
     wrapper = memory_wrapper
+    monkeypatch.setenv("LOCAL_OPERATOR_SCRATCHPAD", str(tmp_path))
     fake = Fake()
     monkeypatch.setattr(owned.procstate, "birth_scheme", lambda: "fixture")
     real_capture = owned.OwnedGroup.capture
@@ -85,7 +86,7 @@ def test_each_wrapper_path_reauthorizes_without_unbounded_wait(memory_wrapper, m
         return cap
     monkeypatch.setattr(wrapper, "owned_process_group", NS(
         OwnedGroup=NS(capture=capture), Verdict=owned.Verdict))
-    monkeypatch.setattr(wrapper, "_refusal_receipt", lambda owner, phase, verdict, stream: phases.append((phase, verdict)))
+    monkeypatch.setattr(wrapper, "_record_run", lambda owner, stream, run_id, phase, **kw: phases.append((phase, kw.get("verdict"))))
     budget = NS(ceiling_mb=1, reason="fake")
     monkeypatch.setattr(wrapper, "_memory_budget", lambda _: (budget, "fixture"))
     def sample():
@@ -141,8 +142,9 @@ def test_handlers_only_latch_and_all_signal_sites_take_capabilities():
 
 
 @pytest.mark.parametrize("phase", ["acquire", "midrun", "zombie"])
-def test_no_timeout_refusal_exits_without_unknown_signal_or_unbounded_wait(memory_wrapper, monkeypatch, phase):
+def test_no_timeout_refusal_exits_without_unknown_signal_or_unbounded_wait(memory_wrapper, monkeypatch, tmp_path, phase):
     wrapper = memory_wrapper
+    monkeypatch.setenv("LOCAL_OPERATOR_SCRATCHPAD", str(tmp_path))
     handlers, receipts, polls = {}, [], []
     class Clock:
         now = 0
@@ -177,6 +179,6 @@ def test_no_timeout_refusal_exits_without_unknown_signal_or_unbounded_wait(memor
     monkeypatch.setattr(wrapper, "owned_process_group", NS(OwnedGroup=NS(capture=lambda *a, **k: cap),
                                                            Verdict=owned.Verdict))
     monkeypatch.setattr(wrapper, "_memory_budget", lambda _: (NS(ceiling_mb=0, reason="fake"), "fixture"))
-    monkeypatch.setattr(wrapper, "_refusal_receipt", lambda owner, stage, verdict, stream: receipts.append(stage))
-    assert wrapper.run(["synthetic"], timeout=None, grace=0.05, stream=io.StringIO()) == 125
+    monkeypatch.setattr(wrapper, "_record_run", lambda owner, stream, run_id, stage, **kw: receipts.append(stage))
+    assert wrapper.run(["synthetic"], timeout=None, grace=0.05, stream=io.StringIO()) == 126
     assert receipts and all(handler is None for handler in handlers.values())
