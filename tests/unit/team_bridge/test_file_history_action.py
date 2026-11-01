@@ -11,6 +11,10 @@ import pytest
 from local_operator.team_bridge import client as client_module
 from local_operator.team_bridge import file_history_action as history
 from local_operator.team_bridge.client import BridgeRefusal, TeamBridgeClient
+from local_operator.team_bridge.file_action_orchestrator import (
+    HumanFileActionOrchestrator,
+    TrustedMainView,
+)
 from local_operator.team_bridge.file_action_registry import (
     ActionUnavailable,
     InertFileActionRegistry,
@@ -210,6 +214,126 @@ async def test_rotation_during_targeted_history_refuses_commission(monkeypatch, 
         else:
             current[0] = replace(s, view_generation=s.view_generation + 1)
         return streamed_json(page())
+
+    with pytest.raises((BridgeRefusal, ActionUnavailable)):
+        await history.commission_human_history(
+            client(monkeypatch, store, handler), registry, s, lambda: current[0]
+        )
+    assert len(requests) == 1 and registry._contexts == {} and store.refreshes == 0
+
+
+def thread_page():
+    reply = page()["result"]["messages"][0]
+    reply["thread_root_id"] = "bcmsg_rootaaaa"
+    return {
+        "result": {
+            "root": {"id": "bcmsg_rootaaaa", "conversation_id": "bcv_aaaaaaaa", "seq": 1},
+            "replies": [reply],
+        }
+    }
+
+
+async def test_distant_thread_reply_is_selected_with_inclusive_cursor(monkeypatch):
+    store, registry, queries = Store(), InertFileActionRegistry(), []
+    s = replace(scope(registry), thread_root_id="bcmsg_rootaaaa")
+    target = thread_page()["result"]["replies"][0]
+    older = [dict(target, id=f"bcmsg_{seq:08d}", seq=seq, files=[file("batt_bbbbbbbb")])
+             for seq in range(1, 901)]
+
+    def handler(request):
+        queries.append((request.url.path, dict(request.url.params)))
+        after = int(request.url.params["after_seq"])
+        result = thread_page()
+        result["result"]["replies"] = [m for m in [*older, target] if m["seq"] >= after][:1]
+        return streamed_json(result)
+
+    handle = await history.commission_human_history(
+        client(monkeypatch, store, handler), registry, s, lambda: s
+    )
+    assert queries == [("/v1/messaging/conversations/bcv_aaaaaaaa/messages/bcmsg_rootaaaa/replies",
+                        {"tenant_id": "tnt_alpha", "limit": "1", "after_seq": "1001"})]
+    registry.claim(registry.start(handle, "batt_aaaaaaaa"))
+    with pytest.raises(ActionUnavailable):
+        registry.start(handle, "batt_bbbbbbbb")
+    binding = registry.inspect_context(handle)
+    assert binding.thread_root_id == "bcmsg_rootaaaa"
+    view = TrustedMainView(
+        "window_1", 4, "tnt_alpha", "bcv_aaaaaaaa", "bcmsg_aaaaaaaa", 1001, "bcmsg_rootaaaa"
+    )
+    assert HumanFileActionOrchestrator._same_view(binding, view)
+    assert not HumanFileActionOrchestrator._same_view(
+        binding, replace(view, thread_root_id="bcmsg_otheraaa")
+    )
+    assert store.refreshes == 0
+
+
+@pytest.mark.parametrize("part,field,value", [
+    ("root", "id", "bcmsg_otheraaa"),
+    ("root", "conversation_id", "bcv_bbbbbbbb"),
+    ("root", "thread_root_id", "bcmsg_otheraaa"),
+    ("reply", "id", "bcmsg_bbbbbbbb"),
+    ("reply", "conversation_id", "bcv_bbbbbbbb"),
+    ("reply", "thread_root_id", "bcmsg_otheraaa"),
+    ("reply", "seq", 1000),
+    ("reply", "seq", True),
+])
+async def test_thread_reply_identity_is_independently_checked(monkeypatch, part, field, value):
+    store, registry, requests = Store(), InertFileActionRegistry(), []
+    s = replace(scope(registry), thread_root_id="bcmsg_rootaaaa")
+    result = thread_page()
+    item = result["result"]["root"] if part == "root" else result["result"]["replies"][0]
+    item[field] = value
+    c = client(monkeypatch, store, lambda r: (requests.append(r) or streamed_json(result)))
+    with pytest.raises(BridgeRefusal):
+        await history.commission_human_history(c, registry, s, lambda: s)
+    assert len(requests) == 1 and registry._contexts == {} and store.refreshes == 0
+
+
+@pytest.mark.parametrize("shape", ["multiple", "oversized"])
+async def test_thread_reply_response_limits_fail_closed(monkeypatch, shape):
+    store, registry, requests = Store(), InertFileActionRegistry(), []
+    s = replace(scope(registry), thread_root_id="bcmsg_rootaaaa")
+    result = thread_page()
+    if shape == "multiple":
+        result["result"]["replies"].append(result["result"]["replies"][0])
+    else:
+        result["result"]["root"]["padding"] = "x" * history._HISTORY_MAX_BYTES
+    c = client(monkeypatch, store, lambda r: (requests.append(r) or streamed_json(result)))
+    with pytest.raises(BridgeRefusal):
+        await history.commission_human_history(c, registry, s, lambda: s)
+    assert len(requests) == 1 and registry._contexts == {} and store.refreshes == 0
+
+
+@pytest.mark.parametrize("root", ["../../bad", "bcmsg_aaaaaaaa", 1])
+async def test_invalid_trusted_thread_root_never_dispatches(monkeypatch, root):
+    store, registry, requests = Store(), InertFileActionRegistry(), []
+    s = replace(scope(registry), thread_root_id=root)
+    c = client(monkeypatch, store, lambda r: (requests.append(r) or streamed_json(thread_page())))
+    with pytest.raises(BridgeRefusal):
+        await history.commission_human_history(c, registry, s, lambda: s)
+    assert not requests and registry._contexts == {} and store.refreshes == 0
+
+
+@pytest.mark.parametrize("rotation", ["view", "credential", "epoch"])
+async def test_thread_rotation_invalidates_current_scope(monkeypatch, rotation):
+    from local_operator.team_bridge import file_action_registry as registry_module
+
+    monkeypatch.setattr(registry_module, "_MAX_WINDOW_TOMBSTONES", 1)
+    store, registry, requests = Store(), InertFileActionRegistry(), []
+    if rotation == "epoch":
+        registry.invalidate_view("window_seed", 1)
+    s = replace(scope(registry), thread_root_id="bcmsg_rootaaaa")
+    current = [s]
+
+    def handler(request):
+        requests.append(request)
+        if rotation == "view":
+            current[0] = replace(s, thread_root_id="bcmsg_otheraaa")
+        elif rotation == "credential":
+            store.incarnation = "b" * 32
+        else:
+            registry.invalidate_view("window_rotate", 1)
+        return streamed_json(thread_page())
 
     with pytest.raises((BridgeRefusal, ActionUnavailable)):
         await history.commission_human_history(

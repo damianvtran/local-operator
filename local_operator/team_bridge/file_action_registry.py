@@ -49,6 +49,7 @@ class InertActionBinding:
     conversation_id: str
     message_id: str
     file_ids: frozenset[str]
+    thread_root_id: str | None = None
 
 
 @dataclass(frozen=True, repr=False)
@@ -93,6 +94,7 @@ def _valid_binding(binding: object) -> bool:
                 binding.message_id,
             )
         )
+        and (binding.thread_root_id is None or _bounded_text(binding.thread_root_id))
         and isinstance(binding.login_incarnation, str)
         and len(binding.login_incarnation) == 32
         and all(char in "0123456789abcdef" for char in binding.login_incarnation)

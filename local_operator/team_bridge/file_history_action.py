@@ -15,10 +15,10 @@ cannot recall an HTTP request already sent. The hub must authorize membership at
 history and download; the eventual integration must recheck before publication.
 This draft is deliberately unregistered pending security review. A sequence is
 only a lookup hint: authenticated history must match the fixed selected message
-ID, conversation and sequence before any files can be commissioned. BLOCKER:
-timeline history omits thread replies; the separate replies API is oldest-first
-and no bounded targeted reply lookup is established here. Do not integrate or
-claim support for reply attachments until that lookup is securely implemented.
+ID, conversation and sequence before any files can be commissioned. Thread
+replies use the hub's inclusive, oldest-first replies cursor, bound to a root
+selected by the trusted view owner. The production trusted owner is absent;
+do not integrate this draft until its provenance and gesture are established.
 """
 
 from __future__ import annotations
@@ -74,6 +74,7 @@ class HistoryScope:
     message_id: str
     registry_epoch: str
     message_seq: int
+    thread_root_id: str | None = None
 
 
 def _invalid() -> BridgeRefusal:
@@ -98,14 +99,32 @@ def _file_ids(body: bytes, scope: HistoryScope) -> frozenset[str]:
             parse_constant=lambda _: (_ for _ in ()).throw(ValueError("constant")),
         )
         result = envelope["result"]
-        messages = result["messages"]
-        if not isinstance(result, dict) or not isinstance(messages, list) or len(messages) != 1:
+        if not isinstance(result, dict):
+            raise ValueError("page")
+        if scope.thread_root_id is None:
+            messages = result["messages"]
+        else:
+            root = result["root"]
+            if (
+                not isinstance(root, dict)
+                or root.get("id") != scope.thread_root_id
+                or root.get("conversation_id") != scope.conversation_id
+                or root.get("thread_root_id") not in (None, "")
+            ):
+                raise ValueError("thread root")
+            messages = result["replies"]
+        if not isinstance(messages, list) or len(messages) != 1:
             raise ValueError("page")
         found = messages[0]
         if (
             not isinstance(found, dict)
             or found.get("id") != scope.message_id
             or found.get("conversation_id") != scope.conversation_id
+            or (
+                found.get("thread_root_id") not in (None, "")
+                if scope.thread_root_id is None
+                else found.get("thread_root_id") != scope.thread_root_id
+            )
             or type(found.get("seq")) is not int
             or found.get("seq") != scope.message_seq
         ):
@@ -213,6 +232,14 @@ async def commission_human_history(
         or not is_conversation_message_id(scope.message_id)
         or type(scope.message_seq) is not int
         or not 1 <= scope.message_seq <= _HISTORY_MAX_SEQUENCE
+        or (
+            scope.thread_root_id is not None
+            and (
+                not isinstance(scope.thread_root_id, str)
+                or not is_conversation_message_id(scope.thread_root_id)
+                or scope.thread_root_id == scope.message_id
+            )
+        )
         or not isinstance(scope.window_id, str)
         or not scope.window_id
         or len(scope.window_id) > 256
@@ -279,14 +306,18 @@ async def commission_human_history(
             timeout=REQUEST_TIMEOUT_S, transport=client._transport, follow_redirects=False
         ) as http:
             guard()
+            path = f"/messaging/conversations/{scope.conversation_id}/messages"
+            params: dict[str, str | int] = {"tenant_id": scope.tenant_id, "limit": 1}
+            if scope.thread_root_id is None:
+                params["before_seq"] = scope.message_seq + 1
+            else:
+                # Hub ListReplies is oldest-first and uses an inclusive lower bound.
+                path += f"/{scope.thread_root_id}/replies"
+                params["after_seq"] = scope.message_seq
             async with http.stream(
                 "GET",
-                client.base_url + f"/messaging/conversations/{scope.conversation_id}/messages",
-                params={
-                    "tenant_id": scope.tenant_id,
-                    "limit": 1,
-                    "before_seq": scope.message_seq + 1,
-                },
+                client.base_url + path,
+                params=params,
                 headers={
                     "Authorization": f"Bearer {token}",
                     "Accept": "application/json",
@@ -339,6 +370,7 @@ async def commission_human_history(
             conversation_id=scope.conversation_id,
             message_id=scope.message_id,
             file_ids=files,
+        thread_root_id=scope.thread_root_id,
         ),
         ttl_seconds=30,
         expected_epoch=scope.registry_epoch,

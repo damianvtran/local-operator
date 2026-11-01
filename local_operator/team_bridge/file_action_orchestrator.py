@@ -43,6 +43,8 @@ class TrustedMainView:
     message_id: str
     # Lookup hint only; the hub must independently confirm the ID and sequence.
     message_seq: int
+    # Supplied by the trusted view owner, never by the file-action request body.
+    thread_root_id: str | None = None
 
 
 class HumanFileActionOrchestrator:
@@ -110,12 +112,14 @@ class HumanFileActionOrchestrator:
             binding.tenant_id,
             binding.conversation_id,
             binding.message_id,
+            binding.thread_root_id,
         ) == (
             view.window_id,
             view.generation,
             view.tenant_id,
             view.conversation_id,
             view.message_id,
+            view.thread_root_id,
         )
 
     async def commission(self, window_id: str) -> str:
@@ -134,6 +138,7 @@ class HumanFileActionOrchestrator:
             view.message_id,
             epoch,
             view.message_seq,
+            view.thread_root_id,
         )
 
         def current() -> HistoryScope:
@@ -149,6 +154,7 @@ class HumanFileActionOrchestrator:
                 latest.message_id,
                 epoch,
                 latest.message_seq,
+                latest.thread_root_id,
             )
 
         return await commission_human_history(self._client, self._registry, scope, current)
