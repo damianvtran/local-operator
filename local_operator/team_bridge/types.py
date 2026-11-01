@@ -55,6 +55,7 @@ __all__ = [
     "ResolutionScope",
     "is_account_id",
     "resolve_member_by_name",
+    "reply_window_params",
     "validate_member_mention",
     "validate_recipient_shape",
     "validate_send_recipient",
@@ -1240,3 +1241,41 @@ def project_events_batch(result: Mapping[str, Any]) -> tuple[FeedSeq, tuple[str,
         raise TeamBridgeTypeError("events result.cursor is required on a 200 answer")
     cursor = feed_seq(raw_cursor)
     return cursor, tuple(refs), not refs
+
+
+def reply_window_params(
+    *, limit: int | str | None = None, after_seq: int | str | None = None,
+    before_seq: int | str | None = None, order: str | None = None,
+) -> dict[str, int | str]:
+    """The shared member/owner thread query contract, without synthetic defaults.
+
+    Legacy after is inclusive/ascending; backward before is exclusive/descending.
+    Never manufacture after=0 for a newest request: the hub rejects mixed modes.
+    Keeping raw parsing here makes the two HTTP routes and direct client agree.
+    """
+    result: dict[str, int | str] = {}
+    for name, raw, minimum, maximum in (
+        ("limit", limit, 1, 100), ("after_seq", after_seq, 0, (1 << 63) - 1),
+        ("before_seq", before_seq, 1, (1 << 63) - 1),
+    ):
+        if raw is None:
+            continue
+        if isinstance(raw, bool) or not (
+            isinstance(raw, int) or isinstance(raw, str) and re.fullmatch(r"[0-9]+", raw)
+        ):
+            raise ValueError("invalid thread paging query")
+        value = int(raw)
+        if value < minimum or maximum is not None and value > maximum:
+            raise ValueError("invalid thread paging query")
+        result[name] = value
+    if order is not None:
+        if order not in ("asc", "desc"):
+            raise ValueError("invalid thread paging query")
+        result["order"] = order
+    if (
+        (after_seq is not None and before_seq is not None)
+        or (before_seq is not None and order == "asc")
+        or (after_seq is not None and order == "desc")
+    ):
+        raise ValueError("conflicting thread paging modes")
+    return result

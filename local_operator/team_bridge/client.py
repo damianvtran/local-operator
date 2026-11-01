@@ -108,6 +108,7 @@ from local_operator.team_bridge.settings import (
 )
 from local_operator.team_bridge.types import (
     ATTACHMENT_ID_PATTERN,
+    reply_window_params,
     validate_member_mention,
     validate_send_recipient,
 )
@@ -3225,11 +3226,13 @@ class TeamBridgeClient:
         tenant_id: str | None = None,
         limit: int | None = None,
         after_seq: int | None = None,
+        before_seq: int | None = None,
+        order: str | None = None,
         endpoint_id: str | None = None,
         access: OAuthAccess | None = None,
         expected_account_id: str | None = None,
     ) -> dict[str, Any]:
-        """One thread: ``{root, replies (oldest-first), has_more, next_after_seq?}``.
+        """A bounded thread window; replies within each page stay chronological.
 
         Same membership gate and body rule as history: for an agent member a
         reply's body is present only after that endpoint admitted it, so a
@@ -3241,13 +3244,11 @@ class TeamBridgeClient:
         dispatch snapshot in :meth:`_authorized` and is never sent upstream.
         """
 
-        params: dict[str, Any] = {}
+        params: dict[str, Any] = dict(reply_window_params(
+            limit=limit, after_seq=after_seq, before_seq=before_seq, order=order,
+        ))
         if tenant_id:
             params["tenant_id"] = tenant_id
-        if limit is not None:
-            params["limit"] = int(limit)
-        if after_seq is not None:
-            params["after_seq"] = int(after_seq)
         if endpoint_id:
             params["endpoint_id"] = endpoint_id
         return await self._send(
@@ -3481,19 +3482,19 @@ class TeamBridgeClient:
         tenant_id: str | None = None,
         limit: int | None = None,
         after_seq: int | None = None,
+        before_seq: int | None = None,
+        order: str | None = None,
     ) -> dict[str, Any]:
-        """One audited thread: ``{root, replies (oldest-first), has_more, next_after_seq?}``.
+        """One audited thread window, chronological within each page.
 
         Same window as the timeline (the root must be inside it). HUMAN-ONLY.
         """
 
-        params: dict[str, Any] = {}
+        params: dict[str, Any] = dict(reply_window_params(
+            limit=limit, after_seq=after_seq, before_seq=before_seq, order=order,
+        ))
         if tenant_id:
             params["tenant_id"] = tenant_id
-        if limit is not None:
-            params["limit"] = int(limit)
-        if after_seq is not None:
-            params["after_seq"] = int(after_seq)
         with _owner_audit_scope():
             return await self._send(
                 "GET",

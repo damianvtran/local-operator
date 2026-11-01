@@ -111,6 +111,7 @@ from local_operator.team_bridge.types import (
     ATTACHMENT_ID_PATTERN,
     CONVERSATION_ID_PATTERN,
     is_account_id,
+    reply_window_params,
 )
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, never imported at runtime
@@ -1820,7 +1821,7 @@ class ConversationReactIn(_Strict):
 #: ``tenant_id`` are REQUIRED (see ``_required_owner_query``); the rest are the
 #: history route's paging/endpoint hints.
 _REPLIES_QUERY = frozenset(
-    {"expected_account_id", "tenant_id", "limit", "after_seq", "endpoint_id"}
+    {"expected_account_id", "tenant_id", "limit", "after_seq", "before_seq", "order", "endpoint_id"}
 )
 #: The reaction DELETE's query: the receipt only. ``actor_endpoint_id`` is
 #: deliberately absent, so the desktop can never remove an agent's reaction.
@@ -3074,6 +3075,8 @@ async def conversation_replies(
     request: Request,
     limit: str | None = Query(default=None),
     after_seq: str | None = Query(default=None),
+    before_seq: str | None = Query(default=None),
+    order: str | None = Query(default=None),
     endpoint_id: str | None = Query(default=None),
     config_manager: ConfigManager = Depends(get_config_manager),
 ) -> CRUDResponse[Any]:
@@ -3098,11 +3101,10 @@ async def conversation_replies(
     _require_message_id(message_id)
     owner = _required_owner_query(request, _REPLIES_QUERY)
     try:
-        parsed_limit = int(limit) if limit is not None else None
-        parsed_after = int(after_seq) if after_seq else None
+        paging = reply_window_params(
+            limit=limit, after_seq=after_seq, before_seq=before_seq, order=order
+        )
     except ValueError:
-        _raise_read("invalid_request")
-    if parsed_after is not None and parsed_after < 0:
         _raise_read("invalid_request")
     client = _conversation_client(config_manager)
     return reply(
@@ -3112,8 +3114,7 @@ async def conversation_replies(
                 message_id,
                 tenant_id=owner.tenant_id,
                 expected_account_id=owner.expected_account_id,
-                limit=parsed_limit,
-                after_seq=parsed_after,
+                **paging,
                 endpoint_id=endpoint_id,
             )
         )
@@ -3540,17 +3541,25 @@ async def owner_audit_replies(
     response: Response,
     config_manager: ConfigManager = Depends(get_config_manager),
 ) -> CRUDResponse[Any]:
-    """One audited thread (``OwnerAuditThread``): root + replies, oldest-first."""
+    """One audited thread: root plus chronological replies in the requested window."""
 
     with _owner_audit_no_store():
         response.headers["Cache-Control"] = OWNER_AUDIT_CACHE_CONTROL
         _require_conversation_id(conversation_id)
         _require_message_id(message_id)
         query = _owner_audit_query(
-            request, frozenset({"expected_account_id", "tenant_id", "limit", "after_seq"})
+            request,
+            frozenset(
+                {"expected_account_id", "tenant_id", "limit", "after_seq", "before_seq", "order"}
+            ),
         )
-        limit = _owner_audit_int(query, "limit")
-        after_seq = _owner_audit_int(query, "after_seq")
+        try:
+            paging = reply_window_params(
+                limit=query.get("limit"), after_seq=query.get("after_seq"),
+                before_seq=query.get("before_seq"), order=query.get("order"),
+            )
+        except ValueError:
+            _raise_read("invalid_request")
         client = _conversation_client(config_manager)
         return await _owner_audit_reply(
             client.owner_audit_replies(
@@ -3558,8 +3567,7 @@ async def owner_audit_replies(
                 message_id,
                 expected_account_id=query["expected_account_id"],
                 tenant_id=query.get("tenant_id"),
-                limit=limit,
-                after_seq=after_seq,
+                **paging,
             ),
             OwnerAuditThread,
         )
