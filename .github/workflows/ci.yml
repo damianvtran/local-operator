@@ -958,7 +958,7 @@ jobs:
       matrix:
         # BOTH ends of `requires-python` on `main`, the minimum only on pull
         # requests.
-        python-version: fromJSON('["3.13"]')
+        python-version: ${{ fromJSON('["3.13"]') }}
         shard: [0]
     env:
       # Seconds of no completed test before the controller reports which tests
