@@ -27,19 +27,41 @@ names remain readable only with the interval check. Raw XML is stored under the
 cache; run/head/attempt/job/artifact IDs and per-file observation counts are
 committed in `tests/durations.json` under `_provenance`.
 
-For PR events, the Actions API's `head_sha` is the branch head, not the execution
-merge. The generator reads the full identity SHA immediately following the
-attempt job's actions/checkout group (`git log -1 --format=%H`), verifies that
-merge has the run head as a parent, and fetches the workflow at that immutable
-SHA. It never resolves today's mutable PR merge ref or main. For push events,
-checkout must equal the recorded head. Source YAML is safely composed without
-expression evaluation: duplicate keys, aliases, dynamic shard expressions and
-matrix include/exclude fail closed. Only literal contiguous five/six matrices
-are supported; broader workflow forms need an explicitly validated schema.
+### Supported execution-source contract
 
-This depends on retained job logs and source content. Expired/unreadable logs,
-missing/multiple checkout identities, wrong ancestry, or failed source fetches
-abort; falling back to branch HEAD could certify the wrong matrix.
+A code checkout is not automatically the revision that created a workflow job.
+Online ingestion supports only `pull_request` and `push`, with this repository's
+first, unmodified `actions/checkout@v7` step (no custom name, inputs, condition,
+repository/ref, or subsequent checkout). Unsupported forms reject rather than
+attempt a general workflow interpretation.
+
+The attempt's Jobs API must identify exactly one successful checkout action at
+step 2 with timestamps. Only server-timestamped log lines inside that step's
+window are eligible, including its action marker and identity command. Test-only
+checkout-shaped output is not source evidence. The logged checkout command must
+name the **default execution ref**: `refs/remotes/pull/<PR>/merge` for a PR, or the
+normal remote branch checkout for push. Explicit alternate checkout refs reject.
+PR number comes from authenticated run metadata; closed PRs may disappear there,
+so a unique same-repository association at `commits/<immutable-head>/pulls` is
+also supported. Missing or ambiguous associations reject; log text never supplies
+the PR identity.
+
+For PR events, API `head_sha` is the branch head, not the execution merge. Verify
+merge ancestry, fetch workflow bytes at that immutable merge, and additionally
+require them to be byte-identical (including blob ID) to workflow content fetched
+independently at the immutable API head. Divergent head/merge workflows are
+unsupported—even if valid—and fail closed. Thus printed checkout text cannot
+substitute a five-shard source for the authenticated six-shard head schema.
+For push, the default branch checkout SHA must equal the recorded execution head.
+In both cases, the fetched source must actually declare the supported default
+checkout action. No mutable main/PR merge lookup is used.
+
+Source YAML is safely composed without expression evaluation: duplicate keys,
+aliases, dynamic shard expressions and matrix include/exclude fail closed. Only
+literal contiguous five/six matrices are supported. This contract depends on
+retained job logs and source content; expired/unreadable logs, absent action/step
+metadata, missing/multiple checkout identities, wrong ancestry, incompatible
+head/merge source, or failed API fetches abort without weakening the contract.
 
 | Run | Executed merge workflow SHA | Workflow blob |
 |---|---|---|

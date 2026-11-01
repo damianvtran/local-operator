@@ -47,6 +47,7 @@ import sys
 import xml.etree.ElementTree as ET
 import zipfile
 from collections import defaultdict
+from datetime import datetime, timedelta
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -165,11 +166,11 @@ def percentile_weights(runs: list[dict[str, float]]) -> dict[str, float]:
     }
 
 
-def _gh_json(endpoint: str) -> dict[str, Any]:
+def _gh_json(endpoint: str) -> Any:
     return json.loads(subprocess.check_output(["gh", "api", endpoint]))
 
 
-def _workflow_shards(workflow: str) -> list[int]:
+def _workflow_shards(workflow: str, *, require_default_checkout: bool = False) -> list[int]:
     """Read a literal source matrix, never execute Actions expressions or YAML.
 
     Safe composition retains duplicate keys (safe_load would silently overwrite
@@ -196,6 +197,25 @@ def _workflow_shards(workflow: str) -> list[int]:
             raise ValueError("source workflow: aliases/anchors are not a literal matrix schema")
         root = mapping(yaml.compose(workflow, Loader=yaml.SafeLoader))
         job = mapping(mapping(root.get("jobs")).get("test"))
+        if require_default_checkout:
+            steps = job.get("steps")
+            if not isinstance(steps, SequenceNode) or not steps.value:
+                raise ValueError("source workflow: missing default checkout action")
+            first = mapping(steps.value[0])
+            uses = first.get("uses")
+            # This intentionally supports only this repo's first, unmodified
+            # checkout action. Any inputs/name/condition/custom checkout needs
+            # a separately validated contract, not execution-ref guesswork.
+            if (
+                set(first) != {"uses"}
+                or not isinstance(uses, ScalarNode)
+                or uses.value != "actions/checkout@v7"
+            ):
+                raise ValueError("source workflow: unsupported/custom checkout action")
+            for step in steps.value[1:]:
+                action = mapping(step).get("uses")
+                if isinstance(action, ScalarNode) and "checkout" in action.value:
+                    raise ValueError("source workflow: multiple checkout actions are unsupported")
         matrix = mapping(mapping(job.get("strategy")).get("matrix"))
         if "include" in matrix or "exclude" in matrix:
             raise ValueError("source workflow: matrix include/exclude is unsupported")
@@ -216,14 +236,60 @@ def _workflow_shards(workflow: str) -> list[int]:
 
 
 def _source_matrix(run: dict[str, Any], job: dict[str, Any]) -> tuple[list[int], dict[str, str]]:
-    """Pin PR workflow content to the executed merge, not the moving PR ref.
+    """Bind the supported default checkout to execution semantics, not job text.
 
-    Actions' run.head_sha names the PR branch HEAD, NOT its tested merge. The
-    attempt job's checkout log records the full git-log SHA. Require that merge
-    to contain the recorded run head, then fetch the workflow by immutable SHA.
-    No current main, PR head, or refs/pull/.../merge lookup is a valid fallback.
-    Missing/ambiguous checkout evidence fails closed (including expired logs).
+    Checkout SHA alone is not workflow identity. Require authenticated checkout
+    step metadata, its bounded logs and default event ref, then validate actual
+    source action configuration. PR API head names the branch, not the merge:
+    ancestry PLUS independently byte-compatible head/merge workflows are required.
+    Custom refs, divergent workflows and unavailable evidence fail closed. There
+    is no mutable-main/PR-merge lookup or arbitrary-log provenance fallback.
     """
+    event = run.get("event")
+    if event not in ("pull_request", "push"):
+        raise ValueError("source workflow: unsupported execution event")
+    checkout_steps = [
+        step for step in job.get("steps", []) if step.get("name") == "Run actions/checkout@v7"
+    ]
+    if len(checkout_steps) != 1:
+        raise ValueError("source workflow: missing/ambiguous checkout action step metadata")
+    step = checkout_steps[0]
+    try:
+        if (
+            step.get("number") != 2
+            or step.get("status") != "completed"
+            or step.get("conclusion") != "success"
+        ):
+            raise ValueError("source workflow: unsupported checkout action step metadata")
+        step_start = datetime.fromisoformat(step["started_at"].replace("Z", "+00:00"))
+        step_end = datetime.fromisoformat(step["completed_at"].replace("Z", "+00:00")) + timedelta(
+            seconds=1
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("source workflow: missing/invalid checkout step metadata") from exc
+    if event == "pull_request":
+        pulls = run.get("pull_requests", [])
+        if not pulls:
+            # Closed PRs disappear from historical run.pull_requests. The
+            # authenticated commit association is independent of job text;
+            # require exactly one same-repository PR, never infer its number
+            # from a printed checkout ref or look up today's mutable head.
+            pulls = _gh_json(f"repos/damianvtran/local-operator/commits/{run['head_sha']}/pulls")
+            if not isinstance(pulls, list) or any(
+                pull.get("base", {}).get("repo", {}).get("full_name")
+                != "damianvtran/local-operator"
+                for pull in pulls
+            ):
+                raise ValueError("source workflow: missing/ambiguous commit PR association")
+        if len(pulls) != 1 or type(pulls[0].get("number")) is not int:
+            raise ValueError("source workflow: missing/ambiguous run PR identity")
+        target = f"refs/remotes/pull/{pulls[0]['number']}/merge"
+        expected_checkout = ["--progress", "--force", target]
+    else:
+        branch = run.get("head_branch")
+        if not isinstance(branch, str) or not branch:
+            raise ValueError("source workflow: missing push branch identity")
+        expected_checkout = ["--progress", "--force", "-B", branch, f"refs/remotes/origin/{branch}"]
     logs = subprocess.check_output(
         [
             "gh",
@@ -233,7 +299,19 @@ def _source_matrix(run: dict[str, Any], job: dict[str, Any]) -> tuple[list[int],
         ],
         text=True,
     )
-    lines = [re.sub(r"^\d{4}-\d{2}-\d{2}T\S+ ", "", line) for line in logs.splitlines()]
+    # Server timestamps plus the Jobs API step window exclude test-produced
+    # checkout-shaped text. Untimestamped text is never runner evidence.
+    lines = []
+    for line in logs.splitlines():
+        stamp, separator, text = line.partition(" ")
+        try:
+            instant = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+            if separator and step_start <= instant < step_end:
+                lines.append(text)
+        except ValueError:
+            continue
+    if lines.count("##[group]Run actions/checkout@v7") != 1:
+        raise ValueError("source workflow: checkout action log is not bound to step metadata")
     # actions/checkout emits the identity command immediately after its checkout
     # group. Later test output can contain arbitrary SHA/command-looking text;
     # it is not checkout evidence and must never select a workflow revision.
@@ -243,6 +321,13 @@ def _source_matrix(run: dict[str, Any], job: dict[str, Any]) -> tuple[list[int],
         end = next(
             (i for i in range(start + 1, len(lines)) if lines[i] == "##[endgroup]"), len(lines)
         )
+        checkout_commands = [
+            line.split("/git checkout ", 1)[1]
+            for line in lines[start:end]
+            if re.fullmatch(r"\[command\].*/git checkout .*", line)
+        ]
+        if checkout_commands != [" ".join(expected_checkout)]:
+            raise ValueError("source workflow: checkout is not the default execution ref")
         if (
             end + 2 < len(lines)
             and re.fullmatch(r"\[command\].*/git log -1 --format=%H", lines[end + 1])
@@ -269,7 +354,27 @@ def _source_matrix(run: dict[str, Any], job: dict[str, Any]) -> tuple[list[int],
         workflow = base64.b64decode(source["content"]).decode("utf-8")
     except (ValueError, UnicodeError) as exc:
         raise ValueError("source workflow: unreadable source content") from exc
-    return _workflow_shards(workflow), {"workflow_sha": revision, "workflow_blob": source["sha"]}
+    expected = _workflow_shards(workflow, require_default_checkout=True)
+    if event == "pull_request":
+        # The run's immutable branch HEAD is independently authenticated by
+        # GitHub. Require its workflow bytes to match the default merge's:
+        # checkout-shaped text cannot switch a six-shard head to a five-shard
+        # source. Divergent base/merge workflow changes are unsupported rather
+        # than guessed; these historical timing sources are byte-compatible.
+        head_source = _gh_json(
+            "repos/damianvtran/local-operator/contents/.github/workflows/ci.yml"
+            f"?ref={run['head_sha']}"
+        )
+        if (
+            head_source.get("encoding") != "base64"
+            or head_source.get("sha") != source["sha"]
+            or base64.b64decode(head_source.get("content", "")) != workflow.encode("utf-8")
+        ):
+            raise ValueError(
+                "source workflow: immutable head/execution workflow diverge; "
+                "unsupported source binding"
+            )
+    return expected, {"workflow_sha": revision, "workflow_blob": source["sha"]}
 
 
 def ci_run(run_id: int, attempt: int, cache: Path) -> tuple[dict[str, float], dict[str, Any]]:

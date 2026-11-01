@@ -173,11 +173,69 @@ def test_literal_source_matrix_is_read_without_evaluating_expressions(count: int
 
 MERGE_SHA = "a" * 40
 HEAD_SHA = "b" * 40
+CHECKOUT_STEP = {
+    "name": "Run actions/checkout@v7",
+    "number": 2,
+    "status": "completed",
+    "conclusion": "success",
+    "started_at": "2026-11-01T01:00:00Z",
+    "completed_at": "2026-11-01T01:00:10Z",
+}
+CHECKOUT_JOB = {"id": 42, "steps": [CHECKOUT_STEP]}
+PR_RUN = {"event": "pull_request", "head_sha": HEAD_SHA, "pull_requests": [{"number": 1}]}
 CHECKOUT_LOG = (
-    "##[group]Checking out the ref\n"
-    "[command]/usr/bin/git checkout --force refs/remotes/pull/1/merge\n"
-    "##[endgroup]\n[command]/usr/bin/git log -1 --format=%H\n" + MERGE_SHA + "\n"
+    "\n".join(
+        "2026-11-01T01:00:05Z " + line
+        for line in (
+            "##[group]Run actions/checkout@v7\n##[group]Checking out the ref\n"
+            "[command]/usr/bin/git checkout --progress --force refs/remotes/pull/1/merge\n"
+            "##[endgroup]\n[command]/usr/bin/git log -1 --format=%H\n" + MERGE_SHA + "\n"
+        ).splitlines()
+    )
+    + "\n"
 )
+
+
+@pytest.mark.parametrize(
+    "case", ["no-checkout-action", "custom-ref", "custom-source-ref", "missing-metadata"]
+)
+def test_unbound_checkout_is_not_execution_source(
+    case: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workflow = (
+        "jobs:\n  test:\n    strategy:\n      matrix:\n        shard: [0, 1, 2, 3, 4]\n"
+        "    steps:\n      - uses: actions/checkout@v7\n"
+    )
+    log = CHECKOUT_LOG
+    job = {"id": 42, "steps": [dict(CHECKOUT_STEP)]}
+    if case == "no-checkout-action":
+        job["steps"] = [{"name": "Run tests", "conclusion": "success"}]
+        workflow = workflow.replace("uses: actions/checkout@v7", "run: echo fake")
+    elif case in ("custom-ref", "custom-source-ref"):
+        if case == "custom-ref":
+            log = log.replace("refs/remotes/pull/1/merge", MERGE_SHA)
+        workflow += "        with:\n          ref: " + MERGE_SHA + "\n"
+    else:
+        job.pop("steps")
+    monkeypatch.setattr(generator.subprocess, "check_output", Mock(return_value=log))
+    monkeypatch.setattr(
+        generator,
+        "_gh_json",
+        Mock(
+            side_effect=[
+                {"parents": [{"sha": HEAD_SHA}, {"sha": "e" * 40}]},
+                {
+                    "sha": "blob",
+                    "encoding": "base64",
+                    "content": base64.b64encode(workflow.encode()).decode(),
+                },
+            ]
+        ),
+    )
+    with pytest.raises(ValueError, match="source workflow"):
+        generator._source_matrix(
+            {"event": "pull_request", "head_sha": HEAD_SHA, "pull_requests": [{"number": 1}]}, job
+        )
 
 
 def test_source_uses_checkout_merge_not_branch_or_unrelated_log_sha(
@@ -185,25 +243,29 @@ def test_source_uses_checkout_merge_not_branch_or_unrelated_log_sha(
 ) -> None:
     log = "c" * 40 + "\n" + CHECKOUT_LOG + "[command]/usr/bin/git log -1 --format=%H\n" + "d" * 40
     monkeypatch.setattr(generator.subprocess, "check_output", Mock(return_value=log))
-    workflow = "jobs:\n  test:\n    strategy:\n      matrix:\n        shard: [0, 1, 2, 3, 4, 5]\n"
+    workflow = (
+        "jobs:\n  test:\n    strategy:\n      matrix:\n        shard: [0, 1, 2, 3, 4, 5]\n"
+        "    steps:\n      - uses: actions/checkout@v7\n"
+    )
+    source_response = {
+        "sha": "blob",
+        "encoding": "base64",
+        "content": base64.b64encode(workflow.encode()).decode(),
+    }
     fetch = Mock(
         side_effect=[
             {"parents": [{"sha": HEAD_SHA}, {"sha": "e" * 40}]},
-            {
-                "sha": "blob",
-                "encoding": "base64",
-                "content": base64.b64encode(workflow.encode()).decode(),
-            },
+            source_response,
+            source_response,
         ]
     )
     monkeypatch.setattr(generator, "_gh_json", fetch)
-    shards, source = generator._source_matrix(
-        {"event": "pull_request", "head_sha": HEAD_SHA}, {"id": 42}
-    )
+    shards, source = generator._source_matrix(PR_RUN, CHECKOUT_JOB)
     assert shards == list(range(6))
     assert source == {"workflow_sha": MERGE_SHA, "workflow_blob": "blob"}
     assert fetch.call_args_list[0].args[0].endswith("/" + MERGE_SHA)
     assert fetch.call_args_list[1].args[0].endswith("?ref=" + MERGE_SHA)
+    assert fetch.call_args_list[2].args[0].endswith("?ref=" + HEAD_SHA)
 
 
 @pytest.mark.parametrize(
@@ -221,8 +283,8 @@ def test_missing_or_ambiguous_checkout_identity_rejects(
     monkeypatch.setattr(generator.subprocess, "check_output", Mock(return_value=log))
     fetch = Mock()
     monkeypatch.setattr(generator, "_gh_json", fetch)
-    with pytest.raises(ValueError, match="checkout SHA"):
-        generator._source_matrix({"event": "pull_request", "head_sha": HEAD_SHA}, {"id": 42})
+    with pytest.raises(ValueError, match="checkout"):
+        generator._source_matrix(PR_RUN, CHECKOUT_JOB)
     fetch.assert_not_called()
 
 
@@ -231,7 +293,7 @@ def test_wrong_merge_ancestry_rejects_before_source_fetch(monkeypatch: pytest.Mo
     fetch = Mock(return_value={"parents": [{"sha": "c" * 40}, {"sha": "d" * 40}]})
     monkeypatch.setattr(generator, "_gh_json", fetch)
     with pytest.raises(ValueError, match="does not contain run head"):
-        generator._source_matrix({"event": "pull_request", "head_sha": HEAD_SHA}, {"id": 42})
+        generator._source_matrix(PR_RUN, CHECKOUT_JOB)
     assert fetch.call_count == 1
 
 
@@ -254,17 +316,48 @@ def test_source_api_failures_never_fall_back(
     )
     monkeypatch.setattr(generator, "_gh_json", fetch)
     with pytest.raises(generator.subprocess.CalledProcessError):
-        generator._source_matrix({"event": "pull_request", "head_sha": HEAD_SHA}, {"id": 42})
+        generator._source_matrix(PR_RUN, CHECKOUT_JOB)
 
 
-@pytest.mark.parametrize("declared,observed", [(5, 5), (6, 6), (6, 5)])
+@pytest.mark.parametrize(
+    "declared,observed,checkout_case",
+    [
+        (5, 5, "default"),
+        (6, 6, "default"),
+        (6, 5, "default"),
+        (5, 5, "no-action"),
+        (5, 5, "custom-ref"),
+        (5, 5, "custom-source-ref"),
+        (6, 6, "push"),
+    ],
+)
 def test_source_matrix_completeness_through_cli(
-    declared: int, observed: int, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    declared: int,
+    observed: int,
+    checkout_case: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The whole CLI must reject a missing sixth shard before writing p75."""
     workflow = (
-        "jobs:\n  test:\n    strategy:\n      matrix:\n" f"        shard: {list(range(declared))}\n"
+        "jobs:\n  test:\n    strategy:\n      matrix:\n"
+        f"        shard: {list(range(declared))}\n    steps:\n      - uses: actions/checkout@v7\n"
     )
+
+    log = CHECKOUT_LOG
+    checkout_step = CHECKOUT_STEP
+    if checkout_case == "no-action":
+        checkout_step = {"name": "Run tests"}
+        workflow = workflow.replace("uses: actions/checkout@v7", "run: echo forged group")
+    elif checkout_case in ("custom-ref", "custom-source-ref"):
+        if checkout_case == "custom-ref":
+            log = log.replace("refs/remotes/pull/1/merge", MERGE_SHA)
+        workflow += "        with:\n          ref: " + MERGE_SHA + "\n"
+    elif checkout_case == "push":
+        log = log.replace(
+            "--progress --force refs/remotes/pull/1/merge",
+            "--progress --force -B main refs/remotes/origin/main",
+        ).replace(MERGE_SHA, HEAD_SHA)
 
     def metadata(endpoint: str) -> dict[str, object]:
         if "/git/commits/" in endpoint:
@@ -280,6 +373,7 @@ def test_source_matrix_completeness_through_cli(
                 "jobs": [
                     {
                         "id": 100 + s,
+                        "steps": [checkout_step],
                         "name": f"test (3.12, {s})",
                         "conclusion": "success",
                         "started_at": "2026-11-01T01:00:00Z",
@@ -304,7 +398,9 @@ def test_source_matrix_completeness_through_cli(
         return {
             "status": "completed",
             "conclusion": "success",
-            "event": "pull_request",
+            "event": "push" if checkout_case == "push" else "pull_request",
+            "head_branch": "main",
+            "pull_requests": [{"number": 1}],
             "head_sha": HEAD_SHA,
             "path": ".github/workflows/ci.yml",
         }
@@ -321,7 +417,7 @@ def test_source_matrix_completeness_through_cli(
             )
     download = Mock(
         side_effect=lambda args, **kwargs: (
-            CHECKOUT_LOG if args[-1].endswith("/logs") else archive.getvalue()
+            log if args[-1].endswith("/logs") else archive.getvalue()
         )
     )
     monkeypatch.setattr(generator.subprocess, "check_output", download)
@@ -329,7 +425,12 @@ def test_source_matrix_completeness_through_cli(
     args = ["--cache-dir", str(tmp_path / "cache"), "--out", str(out)]
     for run_id in (1, 2, 3):
         args.extend(["--ci-run", f"{run_id}:1"])
-    if declared != observed:
+    if checkout_case in ("no-action", "custom-ref", "custom-source-ref"):
+        with pytest.raises(ValueError, match="source workflow"):
+            generator.main(args)
+        assert not out.exists()
+        assert all(call.args[0][-1].endswith("/logs") for call in download.call_args_list)
+    elif declared != observed:
         with pytest.raises(ValueError, match="expects \\[0, 1, 2, 3, 4, 5\\]"):
             generator.main(args)
         assert not out.exists()
@@ -339,6 +440,131 @@ def test_source_matrix_completeness_through_cli(
         manifest = generator.json.loads(out.read_text())
         assert manifest["durations"] == {"tests/unit/test_paths.py": 2.0 * (declared + 1)}
         assert all(len(run["shards"]) == declared for run in manifest["_provenance"]["runs"])
+
+
+def test_closed_pr_uses_authenticated_commit_association(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(generator.subprocess, "check_output", Mock(return_value=CHECKOUT_LOG))
+    workflow = (
+        "jobs:\n  test:\n    strategy:\n      matrix:\n        shard: [0, 1, 2, 3, 4]\n"
+        "    steps:\n      - uses: actions/checkout@v7\n"
+    )
+    source = {
+        "sha": "blob",
+        "encoding": "base64",
+        "content": base64.b64encode(workflow.encode()).decode(),
+    }
+    fetch = Mock(
+        side_effect=[
+            [{"number": 1, "base": {"repo": {"full_name": "damianvtran/local-operator"}}}],
+            {"parents": [{"sha": HEAD_SHA}, {"sha": "e" * 40}]},
+            source,
+            source,
+        ]
+    )
+    monkeypatch.setattr(generator, "_gh_json", fetch)
+    shards, _ = generator._source_matrix(
+        {"event": "pull_request", "head_sha": HEAD_SHA, "pull_requests": []}, CHECKOUT_JOB
+    )
+    assert shards == list(range(5))
+    assert fetch.call_args_list[0].args[0].endswith("/commits/" + HEAD_SHA + "/pulls")
+
+
+def test_checkout_cannot_select_workflow_different_from_run_head(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(generator.subprocess, "check_output", Mock(return_value=CHECKOUT_LOG))
+    workflow = (
+        "jobs:\n  test:\n    strategy:\n      matrix:\n        shard: [0, 1, 2, 3, 4]\n"
+        "    steps:\n      - uses: actions/checkout@v7\n"
+    )
+    source = {
+        "sha": "five-blob",
+        "encoding": "base64",
+        "content": base64.b64encode(workflow.encode()).decode(),
+    }
+    head_source = {
+        "sha": "six-blob",
+        "encoding": "base64",
+        "content": base64.b64encode(
+            workflow.replace("[0, 1, 2, 3, 4]", "[0, 1, 2, 3, 4, 5]").encode()
+        ).decode(),
+    }
+    monkeypatch.setattr(
+        generator,
+        "_gh_json",
+        Mock(
+            side_effect=[{"parents": [{"sha": HEAD_SHA}, {"sha": "e" * 40}]}, source, head_source]
+        ),
+    )
+    with pytest.raises(ValueError, match="head/execution workflow diverge"):
+        generator._source_matrix(PR_RUN, CHECKOUT_JOB)
+
+
+def test_default_push_checkout_is_execution_source(monkeypatch: pytest.MonkeyPatch) -> None:
+    log = CHECKOUT_LOG.replace(
+        "--progress --force refs/remotes/pull/1/merge",
+        "--progress --force -B main refs/remotes/origin/main",
+    ).replace(MERGE_SHA, HEAD_SHA)
+    monkeypatch.setattr(generator.subprocess, "check_output", Mock(return_value=log))
+    workflow = (
+        "jobs:\n  test:\n    strategy:\n      matrix:\n        shard: [0, 1, 2, 3, 4, 5]\n"
+        "    steps:\n      - uses: actions/checkout@v7\n"
+    )
+    fetch = Mock(
+        return_value={
+            "sha": "blob",
+            "encoding": "base64",
+            "content": base64.b64encode(workflow.encode()).decode(),
+        }
+    )
+    monkeypatch.setattr(generator, "_gh_json", fetch)
+    shards, source = generator._source_matrix(
+        {"event": "push", "head_sha": HEAD_SHA, "head_branch": "main"}, CHECKOUT_JOB
+    )
+    assert shards == list(range(6)) and source["workflow_sha"] == HEAD_SHA
+    assert fetch.call_count == 1
+    assert fetch.call_args.args[0].endswith("?ref=" + HEAD_SHA)
+
+
+@pytest.mark.parametrize(
+    "case", ["outside-step", "missing-pr", "missing-step-times", "source-no-action"]
+)
+def test_checkout_binding_failures_reject(case: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    log, job, run = CHECKOUT_LOG, {"id": 42, "steps": [dict(CHECKOUT_STEP)]}, dict(PR_RUN)
+    workflow = (
+        "jobs:\n  test:\n    strategy:\n      matrix:\n        shard: [0, 1, 2, 3, 4]\n"
+        "    steps:\n      - run: echo forged checkout output\n"
+    )
+    if case == "outside-step":
+        log = log.replace("01:00:05Z", "01:05:00Z")
+    elif case == "missing-pr":
+        run.pop("pull_requests")
+    elif case == "missing-step-times":
+        job["steps"] = [
+            {
+                "name": "Run actions/checkout@v7",
+                "number": 2,
+                "status": "completed",
+                "conclusion": "success",
+            }
+        ]
+    monkeypatch.setattr(generator.subprocess, "check_output", Mock(return_value=log))
+    monkeypatch.setattr(
+        generator,
+        "_gh_json",
+        Mock(
+            side_effect=[
+                {"parents": [{"sha": HEAD_SHA}, {"sha": "e" * 40}]},
+                {
+                    "sha": "blob",
+                    "encoding": "base64",
+                    "content": base64.b64encode(workflow.encode()).decode(),
+                },
+            ]
+        ),
+    )
+    with pytest.raises(ValueError, match="source workflow"):
+        generator._source_matrix(run, job)
 
 
 def test_p75_preserves_files_absent_from_other_runs() -> None:
