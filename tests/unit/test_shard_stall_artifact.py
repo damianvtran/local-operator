@@ -22,15 +22,23 @@ def isolated_handoff(monkeypatch):
     # install() exports the run directory to workers; restore it between controls.
     monkeypatch.delenv(watchdog.ENV_RUN_DIR, raising=False)
     monkeypatch.delenv(artifact.ENV_INVOCATION, raising=False)
+    monkeypatch.delenv(artifact.ENV_REGISTRY, raising=False)
+
+
+def owned_file(path, payload):
+    registry = path.parent.parent.parent / "owners"
+    registry.mkdir(exist_ok=True)
+    with artifact.registered_handle(path, registry) as handle:
+        handle.buffer.write(payload)
 
 
 def collect(tmp_path, payload=b"[shard stall] armed\n", **limits):
     root = tmp_path / "lo-shard-stall"
     run = root / RUN
     run.mkdir(parents=True)
-    (run / "worker-42.log").write_bytes(payload)
+    owned_file(run / "worker-42.log", payload)
     out = tmp_path / "artifact"
-    manifest = artifact.stage(root, RUN, out, **limits)
+    manifest = artifact.stage(root, RUN, out, registry=tmp_path / "owners", **limits)
     return root, run, out, manifest
 
 
@@ -57,7 +65,7 @@ def test_exact_invocation_excludes_stale_and_neighbor_files(tmp_path):
     for name in ("run-999", "ci-123-1-3.12-0", "ci-123-2-3.12-1"):
         (root / name).mkdir()
         (root / name / "worker-999.log").write_text("stale")
-    manifest = artifact.stage(root, RUN, tmp_path / "second")
+    manifest = artifact.stage(root, RUN, tmp_path / "second", registry=tmp_path / "owners")
     assert [f["name"] for f in manifest["files"]] == ["worker-42.log"]
     assert not (out / "worker-999.log").exists()
 
@@ -76,13 +84,15 @@ def test_symlinks_and_nonregular_inputs_rejected(tmp_path, kind):
     else:
         (root / RUN).mkdir()
         target = root / RUN / "worker-1.log"
+        owned_file(target, b"original writer")
+        target.unlink()
         if kind == "worker":
             secret = outside / "secret"
             secret.write_text("must not export")
             target.symlink_to(secret)
         else:
             os.mkfifo(target)
-    manifest = artifact.stage(root, RUN, tmp_path / "artifact")
+    manifest = artifact.stage(root, RUN, tmp_path / "artifact", registry=tmp_path / "owners")
     assert "rejected" in [manifest["status"], *[f["status"] for f in manifest["files"]]]
     assert not list((tmp_path / "artifact").glob("worker-*.log"))
 
@@ -103,9 +113,17 @@ def test_nontext_not_exported(tmp_path, data):
 
 def test_file_total_and_count_caps_are_truthful(tmp_path):
     root, run, _, _ = collect(tmp_path, b"a" * 20)
-    (run / "worker-43.log").write_bytes(b"b" * 20)
-    (run / "worker-44.log").write_bytes(b"c" * 20)
-    manifest = artifact.stage(root, RUN, tmp_path / "capped", file_cap=8, total_cap=10, count_cap=2)
+    owned_file(run / "worker-43.log", b"b" * 20)
+    owned_file(run / "worker-44.log", b"c" * 20)
+    manifest = artifact.stage(
+        root,
+        RUN,
+        tmp_path / "capped",
+        file_cap=8,
+        total_cap=10,
+        count_cap=2,
+        registry=tmp_path / "owners",
+    )
     assert [f["status"] for f in manifest["files"]] == ["truncated", "truncated", "omitted-cap"]
     assert [f["output_bytes"] for f in manifest["files"]] == [8, 2, 0]
     assert [f["original_bytes"] for f in manifest["files"]] == [20, 20, 20]
@@ -125,7 +143,8 @@ def test_identity_protocol_fails_closed(tmp_path, run_id):
 def test_missing_empty_run_is_explicit(tmp_path):
     root = tmp_path / "root"
     (root / RUN).mkdir(parents=True)
-    manifest = artifact.stage(root, RUN, tmp_path / "artifact")
+    (tmp_path / "owners").mkdir()
+    manifest = artifact.stage(root, RUN, tmp_path / "artifact", registry=tmp_path / "owners")
     assert manifest["status"] == "missing"
     assert manifest["reason"] == "no-current-invocation-worker-files"
 
@@ -134,8 +153,8 @@ def test_hardlinks_and_arbitrary_scratch_are_not_exported(tmp_path):
     root, run, _, _ = collect(tmp_path)
     (run / "worker-43.log").hardlink_to(run / "worker-42.log")
     (run / "fixture-private.txt").write_text("private scratch")
-    manifest = artifact.stage(root, RUN, tmp_path / "second")
-    assert len(manifest["files"]) == 2
+    manifest = artifact.stage(root, RUN, tmp_path / "second", registry=tmp_path / "owners")
+    assert len(manifest["files"]) == 1
     assert all(f["status"] == "rejected" for f in manifest["files"])
     assert not list((tmp_path / "second").glob("*.log"))
 
@@ -143,8 +162,8 @@ def test_hardlinks_and_arbitrary_scratch_are_not_exported(tmp_path):
 def test_directory_scan_and_manifest_are_bounded(tmp_path):
     root, run, _, _ = collect(tmp_path)
     for index in range(artifact.SCAN_CAP + 5):
-        (run / f"worker-{1000 + index}.log").write_text("stack")
-    manifest = artifact.stage(root, RUN, tmp_path / "second")
+        owned_file(run / f"worker-{1000 + index}.log", b"stack")
+    manifest = artifact.stage(root, RUN, tmp_path / "second", registry=tmp_path / "owners")
     assert len(manifest["files"]) <= artifact.SCAN_CAP
     assert manifest["directory_tail"]["status"] == "omitted-cap"
     assert manifest["directory_tail"]["count"] is None
@@ -160,8 +179,10 @@ def test_utf8_cap_does_not_invent_encoding_damage(tmp_path):
 
 def test_total_cap_independent_of_count_cap(tmp_path):
     root, run, _, _ = collect(tmp_path, b"abc")
-    (run / "worker-43.log").write_text("xyz")
-    manifest = artifact.stage(root, RUN, tmp_path / "second", total_cap=3)
+    owned_file(run / "worker-43.log", b"xyz")
+    manifest = artifact.stage(
+        root, RUN, tmp_path / "second", total_cap=3, registry=tmp_path / "owners"
+    )
     assert [f["status"] for f in manifest["files"]] == ["retained", "omitted-cap"]
     assert manifest["output_bytes"] == 3
 
@@ -179,7 +200,7 @@ def test_source_replacement_cannot_follow_symlink(tmp_path, monkeypatch):
         return original_open(path, flags, *args, **kwargs)
 
     monkeypatch.setattr(artifact.os, "open", swapped_open)
-    manifest = artifact.stage(root, RUN, tmp_path / "second")
+    manifest = artifact.stage(root, RUN, tmp_path / "second", registry=tmp_path / "owners")
     assert manifest["files"][0]["status"] == "rejected"
     assert not (tmp_path / "second/worker-42.log").exists()
 
@@ -194,7 +215,7 @@ def test_source_disappearing_during_collection_is_missing(tmp_path, monkeypatch)
         return original_open(path, flags, *args, **kwargs)
 
     monkeypatch.setattr(artifact.os, "open", vanished_open)
-    manifest = artifact.stage(root, RUN, tmp_path / "second")
+    manifest = artifact.stage(root, RUN, tmp_path / "second", registry=tmp_path / "owners")
     assert manifest["files"][0]["status"] == "missing"
 
 
@@ -249,27 +270,32 @@ def test_controller_identity_and_real_cli_workflow_contract(tmp_path, monkeypatc
     watchdog.install(object(), on_ci=True)
     assert watchdog.run_dir().name == f"run-{os.getpid()}"
     monkeypatch.setattr(watchdog, "_RUN_DIR", tmp_path / "lo-shard-stall" / RUN)
-    (watchdog.run_dir() / "worker-1.log").write_text("Timeout (0:04:00)!\nfirst\nlater\n")
+    owned_file(watchdog.run_dir() / "worker-1.log", b"Timeout (0:04:00)!\nfirst\nlater\n")
     workflow = yaml.safe_load((Path(__file__).parents[2] / ".github/workflows/ci.yml").read_text())
     steps = workflow["jobs"]["test"]["steps"]
     stage = next(s for s in steps if s.get("id") == "stage_stall")
     pytest_step = next(s for s in steps if s.get("id") == "shard_pytest")
     assert stage["env"][artifact.ENV_INVOCATION] == pytest_step["env"][artifact.ENV_INVOCATION]
+    assert stage["env"][artifact.ENV_REGISTRY] == "${{ steps.shard_pytest.outputs.stall_registry }}"
+    assert pytest_step["run"].index("export " + artifact.ENV_REGISTRY) < pytest_step["run"].index(
+        "pytest $("
+    )
     upload = next(s for s in steps if s.get("name") == "Upload current-invocation timeout files")
     assert upload["with"]["retention-days"] == 1
-    assert upload["with"]["path"] == "${{ runner.temp }}/lo-stall-artifact"
+    assert upload["with"]["path"] == "${{ steps.stage_stall.outputs.artifact }}"
     command = stage["run"].replace(
         '"${TMPDIR:-/tmp}/lo-shard-stall"', '"' + str(tmp_path / "lo-shard-stall") + '"'
     )
-    command = command.replace(
-        '"$RUNNER_TEMP/lo-stall-artifact"', '"' + str(tmp_path / "cli-output") + '"'
-    )
+    outputs = tmp_path / "github-outputs"
     result = subprocess.run(
         ["bash", "-eu", "-c", command],
         cwd=Path(__file__).parents[2],
         env={
             **os.environ,
             artifact.ENV_INVOCATION: RUN,
+            artifact.ENV_REGISTRY: str(tmp_path / "owners"),
+            "GITHUB_OUTPUT": str(outputs),
+            "RUNNER_TEMP": str(tmp_path),
             "PATH": str(Path(sys.executable).parent) + os.pathsep + os.environ["PATH"],
         },
         text=True,
@@ -277,7 +303,6 @@ def test_controller_identity_and_real_cli_workflow_contract(tmp_path, monkeypatc
         timeout=10,
     )
     assert result.returncode == 0, result.stderr
-    assert (
-        json.loads((tmp_path / "cli-output/manifest.json").read_text())["files"][0]["status"]
-        == "retained"
-    )
+    output = Path(outputs.read_text().strip().removeprefix("artifact="))
+    assert output.parent.name.startswith("lo-stall-stage.")
+    assert json.loads((output / "manifest.json").read_text())["files"][0]["status"] == "retained"

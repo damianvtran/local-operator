@@ -10,6 +10,7 @@ locals, environment or argv. The console reporter intentionally stays reduced.
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import json
 import os
@@ -19,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 ENV_INVOCATION = "LOCAL_OPERATOR_SHARD_STALL_INVOCATION"
+ENV_REGISTRY = "LOCAL_OPERATOR_SHARD_STALL_REGISTRY"
 _ID = re.compile(r"ci-([0-9]+)-([0-9]+)-([0-9]+\.[0-9]+)-([0-9]+)", re.ASCII)
 _WORKER = re.compile(r"worker-[0-9]+\.log", re.ASCII)
 FILE_CAP = 1024 * 1024
@@ -43,7 +45,108 @@ def _directory(path, *, dir_fd=None):
     return os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dir_fd)
 
 
-def _copy_worker(run_fd, name, output, budget):
+def registered_handle(path: Path, registry: Path):
+    """Open/register a worker writer at configure time, before test code runs.
+
+    The workflow allocates this registry outside the fixture/dump directory.
+    Workers consume its environment handoff, pin source inode/device from their
+    actual writer handle, and keep that handle for the existing timer. This
+    excludes ordinary fixture-created numeric files and path replacements; it
+    is NOT authentication against hostile Python in the same uid/process that
+    can introspect handles, discover/modify the registry, or rewrite an inode.
+    """
+    provenance(path.parent.name)
+    if not _WORKER.fullmatch(path.name):
+        raise ValueError("invalid worker name")
+    run_fd = registry_fd = fd = None
+    try:
+        run_fd = _directory(path.parent)
+        registry_fd = _directory(registry)
+        fd = os.open(
+            path.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=run_fd
+        )
+        info, directory = os.fstat(fd), os.fstat(run_fd)
+        receipt = {
+            "schema": 1,
+            "invocation": path.parent.name,
+            "name": path.name,
+            "device": info.st_dev,
+            "inode": info.st_ino,
+            "directory_device": directory.st_dev,
+            "directory_inode": directory.st_ino,
+        }
+        receipt_fd = os.open(
+            path.name + ".json",
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=registry_fd,
+        )
+        with os.fdopen(receipt_fd, "w", encoding="utf-8") as target:
+            json.dump(receipt, target)
+        handle = os.fdopen(fd, "w", encoding="utf-8")
+        fd = None
+        return handle
+    finally:
+        for opened in (fd, registry_fd, run_fd):
+            if opened is not None:
+                os.close(opened)
+
+
+def _registrations(registry_fd, invocation, run_fd, manifest):
+    """Bounded metadata-only allowlist, never a scan of fixture worker files."""
+    owners = []
+    directory = os.fstat(run_fd)
+    with os.scandir(registry_fd) as entries:
+        for index, entry in enumerate(entries):
+            if index == SCAN_CAP:
+                manifest["directory_tail"] = {
+                    "status": "omitted-cap",
+                    "count": None,
+                    "original_bytes": None,
+                    "output_bytes": 0,
+                }
+                break
+            name = entry.name.removesuffix(".json")
+            if not entry.name.endswith(".json") or not _WORKER.fullmatch(name):
+                continue
+            fd = None
+            try:
+                fd = os.open(
+                    entry.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=registry_fd
+                )
+                info = os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 4096:
+                    raise ValueError("unsafe registration")
+                data = os.read(fd, 4097)
+                if len(data) > 4096:
+                    raise ValueError("oversize registration")
+                receipt = json.loads(data)
+                if (
+                    not isinstance(receipt, dict)
+                    or receipt.get("schema") != 1
+                    or receipt.get("invocation") != invocation
+                    or receipt.get("name") != name
+                    or any(
+                        type(receipt.get(key)) is not int
+                        for key in ("device", "inode", "directory_device", "directory_inode")
+                    )
+                    or receipt["directory_device"] != directory.st_dev
+                    or receipt["directory_inode"] != directory.st_ino
+                ):
+                    raise ValueError("registration mismatch")
+                owners.append((name, receipt))
+            except (OSError, ValueError, UnicodeError) as exc:
+                # Do not reflect malformed registration contents/paths into logs.
+                manifest["registration_errors"] += 1
+                if isinstance(exc, OSError) and exc.errno not in (errno.ELOOP, errno.ENOTDIR):
+                    manifest["registration_io_errors"] += 1
+            finally:
+                if fd is not None:
+                    os.close(fd)
+    return sorted(owners)
+
+
+def _copy_worker(run_fd, name, output, budget, receipt):
     entry = {"name": name, "status": "rejected", "original_bytes": None, "output_bytes": 0}
     fd = None
     try:
@@ -54,6 +157,9 @@ def _copy_worker(run_fd, name, output, budget):
         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
             # A hard link can alias unrelated scratch just as a symlink can.
             entry["reason"] = "not-regular-or-hardlinked"
+            return entry
+        if (info.st_dev, info.st_ino) != (receipt["device"], receipt["inode"]):
+            entry["reason"] = "writer-inode-mismatch"
             return entry
         if budget <= 0:
             entry.update(status="omitted-cap", reason="file-count-or-total-bytes")
@@ -97,10 +203,13 @@ def _copy_worker(run_fd, name, output, budget):
         )
     except FileNotFoundError:
         entry.update(status="missing", reason="disappeared-before-open")
-    except OSError:
-        # No exception text: an attacker-controlled path must not become a
-        # secondary channel for exporting scratch names or filesystem content.
-        entry["reason"] = "unsafe-or-unreadable"
+    except OSError as exc:
+        # No exception text: attacker-controlled paths must not become a second
+        # channel. Boundary rejection and actual I/O failure remain distinct.
+        entry.update(
+            status="rejected" if exc.errno in (errno.ELOOP, errno.ENOTDIR) else "error",
+            reason="unsafe-or-unreadable",
+        )
     finally:
         if fd is not None:
             os.close(fd)
@@ -115,21 +224,32 @@ def stage(
     file_cap=FILE_CAP,
     total_cap=TOTAL_CAP,
     count_cap=COUNT_CAP,
+    registry: Path | None = None,
 ) -> dict[str, Any]:
     """Create a fresh isolated artifact with bounded files and a truthful manifest.
 
     Root is the workflow's trusted dump base, not a test-provided source path.
-    Only its exact invocation child and numeric worker filenames are eligible.
+    Only its exact invocation child and registered writer inodes are eligible.
     Limits may be lowered for synthetic controls, never raised above policy.
+
+    Exit 0: missing (healthy, including cleaned unfired files), collected, or
+    limited (explicit policy truncation/omission, never a completeness claim).
+    Exit 2: rejected (boundary/protocol), error (I/O), or partial (some retained
+    bytes plus a failure). A missing explicitly handed registry is a protocol
+    error; no handoff at all (e.g. setup skipped) is healthy absence.
+    Failed/partial artifacts are manifested locally but
+    NOT published: the workflow emits an upload path only after a zero exit.
+    A failed stage does not authorize an upload of any pre-existing directory.
     """
     source = provenance(invocation)
     if not (0 < file_cap <= FILE_CAP and 0 < total_cap <= TOTAL_CAP and 0 < count_cap <= COUNT_CAP):
         raise ValueError("limits must be positive and within retention policy")
     output.mkdir(parents=True, exist_ok=False)
     manifest = {
-        "schema": 1,
+        "schema": 2,
         "invocation": invocation,
         "provenance": source,
+        "source_protocol": "pre-test-worker-writer-inode-v1",
         "status": "missing",
         "limits": {
             "file_bytes": file_cap,
@@ -139,35 +259,34 @@ def stage(
         },
         "files": [],
         "output_bytes": 0,
+        "registration_errors": 0,
+        "registration_io_errors": 0,
         "notice": (
             "Timeout-file prefixes only; marker presence is not proof of a complete stack "
             "or fatal crash. Text may include fixture paths. No locals/env/argv capture added."
         ),
     }
-    root_fd = run_fd = None
+    root_fd = run_fd = registry_fd = None
     try:
         root_fd = _directory(root)
         run_fd = _directory(invocation, dir_fd=root_fd)
         manifest["status"] = "collected"
-        eligible = []
-        with os.scandir(run_fd) as entries:
-            for index, entry in enumerate(entries):
-                if index == SCAN_CAP:
-                    manifest["directory_tail"] = {
-                        "status": "omitted-cap",
-                        "count": None,
-                        "original_bytes": None,
-                        "output_bytes": 0,
-                    }
-                    break
-                if _WORKER.fullmatch(entry.name):
-                    eligible.append(entry.name)
+        if registry is None:
+            eligible = []
+        else:
+            try:
+                registry_fd = _directory(registry)
+            except FileNotFoundError as exc:
+                # An absent worker log is healthy; losing a registry path that
+                # the pre-test workflow explicitly handed us is protocol failure.
+                raise OSError(errno.EIO, "registry handoff missing") from exc
+            eligible = _registrations(registry_fd, invocation, run_fd, manifest)
         retained = 0
-        for name in sorted(eligible):
+        for name, receipt in eligible:
             budget = (
                 min(file_cap, total_cap - manifest["output_bytes"]) if retained < count_cap else 0
             )
-            entry = _copy_worker(run_fd, name, output, budget)
+            entry = _copy_worker(run_fd, name, output, budget, receipt)
             manifest["files"].append(entry)
             manifest["output_bytes"] += entry["output_bytes"]
             if entry["status"] in ("retained", "truncated"):
@@ -178,13 +297,32 @@ def stage(
             else:
                 manifest.update(status="missing", reason="no-current-invocation-worker-files")
     except FileNotFoundError:
-        manifest["reason"] = "current-invocation-directory-missing"
-    except OSError:
-        manifest.update(status="rejected", reason="unsafe-or-unreadable-source-directory")
+        manifest.update(status="missing", reason="current-invocation-directory-or-registry-missing")
+    except OSError as exc:
+        manifest.update(
+            status="rejected" if exc.errno in (errno.ELOOP, errno.ENOTDIR) else "error",
+            reason="unsafe-or-unreadable-source-directory",
+        )
     finally:
-        for fd in (run_fd, root_fd):
+        for fd in (registry_fd, run_fd, root_fd):
             if fd is not None:
                 os.close(fd)
+    failures = manifest["registration_errors"] or any(
+        item["status"] in ("rejected", "error") for item in manifest["files"]
+    )
+    if failures:
+        has_io_error = manifest["registration_io_errors"] or any(
+            item["status"] == "error" for item in manifest["files"]
+        )
+        manifest["status"] = (
+            "partial" if manifest["output_bytes"] else ("error" if has_io_error else "rejected")
+        )
+    elif manifest["status"] == "collected" and (
+        "directory_tail" in manifest
+        or any(item["status"] in ("truncated", "omitted-cap") for item in manifest["files"])
+    ):
+        manifest["status"] = "limited"
+    manifest["exit_code"] = 2 if manifest["status"] in ("partial", "rejected", "error") else 0
     (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     return manifest
 
@@ -194,16 +332,22 @@ def main(argv=None):
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--invocation", required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--registry", default=None)
     args = parser.parse_args(argv)
     try:
-        manifest = stage(args.root, args.invocation, args.output)
+        manifest = stage(
+            args.root,
+            args.invocation,
+            args.output,
+            registry=Path(args.registry) if args.registry else None,
+        )
     except (OSError, ValueError) as exc:
         parser.exit(2, f"timeout-file staging refused: {type(exc).__name__}\n")
     print(
         f"timeout-file artifact: {manifest['status']}; "
         f"{manifest['output_bytes']} bytes; see manifest.json"
     )
-    return 0
+    return manifest["exit_code"]
 
 
 if __name__ == "__main__":
