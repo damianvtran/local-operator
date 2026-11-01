@@ -952,14 +952,14 @@ jobs:
     # the guard passes, so reweighting moves no runner's speed. More shards
     # would spend the 20-job concurrency budget. Weights, workers, partition,
     # and the per-test and stall watchdogs are unchanged.
-    timeout-minutes: 38
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         # BOTH ends of `requires-python` on `main`, the minimum only on pull
         # requests.
-        python-version: ${{ github.event_name == 'pull_request' && fromJSON('["3.12"]') || fromJSON('["3.12", "3.13"]') }}
-        shard: [0, 1, 2, 3, 4]
+        python-version: fromJSON('["3.13"]')
+        shard: [0]
     env:
       # Seconds of no completed test before the controller reports which tests
       # are still in flight, and the per-item bound after which a worker dumps
@@ -1076,6 +1076,16 @@ jobs:
         # earlier one.
         env:
           LOCAL_OPERATOR_SHARD_MEMORY_DIR: ${{ runner.temp }}/lo-shard-memory/${{ matrix.python-version }}-${{ matrix.shard }}-attempt-${{ github.run_attempt }}
+          # DIAGNOSTIC-ONLY (throwaway branch, never merged): the fence instrument
+          # records lock identity per acquisition. PYTEST_PLUGINS loads it; the
+          # source-provenance assertion inside refuses the run if any relevant
+          # module resolves outside this workspace.
+          PYTEST_PLUGINS: fence_diag
+          PYTHONPATH: ${{ github.workspace }}
+          FENCE_DIAG_OUT: ${{ runner.temp }}/fence-diag/${{ matrix.python-version }}-${{ matrix.shard }}
+          FENCE_DIAG_WORKTREE: ${{ github.workspace }}
+          FENCE_DIAG_MAX_EVENTS: '20000'
+          LOCAL_OPERATOR_CONFIG_DIR: ${{ runner.temp }}/lo-config
         # The six serial controls are deselected here (see SERIAL_CONTROLS above).
         # The `.coverage` rename is NOT done here any more: shard 0 appends the
         # serial run's data to this file first, so the rename moved to the
@@ -1084,6 +1094,14 @@ jobs:
           pytest $(cat shard_tests.txt | tr '\n' ' ') $(printf -- '--deselect %s ' $SERIAL_CONTROLS) \
             --cov --cov-fail-under=0 --cov-report= \
             --junit-xml=junit-${{ matrix.python-version }}-${{ matrix.shard }}.xml
+
+      - name: Upload fence diagnostic
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fence-diag-${{ matrix.python-version }}-${{ matrix.shard }}-a${{ github.run_attempt }}
+          path: ${{ runner.temp }}/fence-diag/**
+          if-no-files-found: error
 
       - name: Prove the serial controls were deselected from this shard
         id: serial_absent
