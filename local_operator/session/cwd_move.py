@@ -488,19 +488,29 @@ class HandoffDestinationUnavailable(HandoffRefused):
     code = "handoff_destination_unavailable"
 
 
-def pending_handoff(root: Path, session_id: str) -> MoveIntent | None:
-    """The handoff waiting for this session's next runtime, or ``None``.
+def recorded_move(root: Path, session_id: str) -> MoveIntent | None:
+    """The move that says where this session LIVES, or ``None``.
+
+    TWO STAGES QUALIFY, and the second one is not a refinement — it is the
+    difference between a move that survives one start and a move that holds. A
+    ``handoff`` is a destination waiting for its first successor. A ``committed``
+    move is one that has ALREADY been observed there, and its destination is
+    still where the session lives: a caller that keeps naming the old source (a
+    shell in the old directory, a wake row, the daemon's placeholder) would
+    otherwise start the session back where it came from, which is a recorded move
+    silently undone one start after it succeeded (QA round 2, observed as
+    ``['src', 'dst', 'src']``).
 
     THE ONE READER THE ENGAGE PATH USES, and it is deliberately stricter than
     :func:`read_move_intent`:
 
     * no document file at all -> ``None`` (one `stat`, which is the cost paid on
       every ordinary engage),
-    * a document that is not a ``handoff`` -> ``None``: every other stage says
-      nothing about where the next process should start,
-    * a ``handoff`` document that cannot be parsed -> :class:`HandoffUnreadable`,
-      never ``None``. Falling through to the caller's own cwd there would spawn
-      the session in the directory the move was explicitly leaving.
+    * a document at any other stage -> ``None``: every other stage is history
+      (superseded, expired) and says nothing about where the next process starts,
+    * a ``handoff``/``committed`` document that cannot be parsed ->
+      :class:`HandoffUnreadable`, never ``None``. Falling through to the caller's
+      own cwd there would spawn the session in a directory the record contradicts.
 
     The whole intent is returned, not just the destination: a caller that has to
     decide between "substitute the destination" and "this caller named a third
@@ -517,12 +527,12 @@ def pending_handoff(root: Path, session_id: str) -> MoveIntent | None:
             "no telling which directory to start this session in — delete that file to start "
             "it where the caller asked, or repair it and retry",
         )
-    if intent.stage != STAGE_HANDOFF:
+    if intent.stage not in (STAGE_HANDOFF, STAGE_COMMITTED):
         return None
     return intent
 
 
-def spawn_cwd_for_session(root: Path, session_id: str, requested_cwd: str) -> str:
+def spawn_cwd_for_session(root: Path, session_id: str, requested_cwd: str | None) -> str:
     """The directory to START a session in, honouring a recorded handoff.
 
     THE ONE RESOLVER EVERY SPAWN PATH CALLS. A session's cwd is a spawn input, so
@@ -551,25 +561,28 @@ def spawn_cwd_for_session(root: Path, session_id: str, requested_cwd: str) -> st
     :class:`HandoffDestinationUnavailable`; a caller that cannot proceed must say
     so rather than start the session somewhere the record contradicts.
 
-    Cost on the ordinary path is one `stat` — no record, no work.
+    Cost on the ordinary path is one `stat` — no record, no work. ``None`` is
+    accepted as "no directory given" for the duck-typed callers that carry an
+    optional (agent review round 2, NIT).
     """
-    pending = pending_handoff(root, session_id)
+    pending = recorded_move(root, session_id)
+    requested = str(requested_cwd or "")
     if pending is None:
-        return requested_cwd
+        return requested
     if (
-        requested_cwd.strip()
-        and not same_directory(requested_cwd, pending.source_cwd)
-        and not same_directory(requested_cwd, pending.destination_cwd)
+        requested.strip()
+        and not same_directory(requested, pending.source_cwd)
+        and not same_directory(requested, pending.destination_cwd)
     ):
-        return requested_cwd
+        return requested
     try:
         resolve_destination(pending.destination_cwd, effective_cwd=pending.destination_cwd)
     except CwdMoveRefused as refused:
         raise HandoffDestinationUnavailable(
             pending.destination_cwd,
             f"this session's recorded move is to {pending.destination_cwd}, which can no "
-            f"longer be entered ({refused.code}) — recreate that directory, or move the "
-            "session somewhere else",
+            "longer be entered — recreate that directory, or ask the session to move "
+            "somewhere else (sessions op='move') and try again",
         ) from refused
     return pending.destination_cwd
 

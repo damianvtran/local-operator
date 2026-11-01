@@ -13,6 +13,7 @@ import json
 import re
 import sys
 import uuid
+from pathlib import Path
 
 import httpx
 import pytest
@@ -646,3 +647,68 @@ async def test_the_resume_route_starts_the_session_in_its_recorded_move(tmp_path
         response = await client.post("/api/sessions/resume", json={"session_id": session_id})
     assert response.status_code == 200, response.text
     assert spawned == [str(destination.resolve())], spawned
+
+
+@pytest.mark.asyncio
+async def test_a_message_to_a_stopped_session_engages_in_its_recorded_destination(
+    tmp_path, monkeypatch
+):
+    """THE SHARED ENGAGE SEAM, NOT EACH CALLER (agent review round 2, MAJOR).
+
+    Every surface that turns "no runtime" into "a runtime" comes through
+    ``engage_session_client``, and it passed ``Path.home()`` for all of them. A
+    phone MESSAGE to a session with a recorded move therefore started it in home
+    and its boot reconcile settled the move ``superseded`` — while the resume route
+    beside it was already fixed. Home is a PLACEHOLDER, not a choice: it is what a
+    caller passes when it has no opinion, so the record decides.
+
+    Driven here through the real helper with the real resolver, and the engage it
+    reaches is captured to show the destination is what travels.
+    """
+    from local_operator.mobile import attach_client as attach_module
+    from local_operator.paths import config_dir
+    from local_operator.session import cwd_move
+
+    session_id = "feedc0ffee02"
+    source, destination = tmp_path / "src", tmp_path / "dest"
+    source.mkdir()
+    destination.mkdir()
+    (config_dir() / "sessions" / session_id).mkdir(parents=True, exist_ok=True)
+    intent = cwd_move.enqueue_self_move(
+        config_dir(),
+        session_id,
+        requested_cwd=str(destination),
+        effective_cwd=str(source),
+        owner_pid=1,
+    )
+    cwd_move.accept_handoff(config_dir(), session_id, intent)
+
+    # The resolver half: the placeholder is no opinion, the record decides, and a
+    # real third directory is still an explicit choice.
+    assert attach_module._engage_cwd(config_dir(), session_id, str(Path.home())) == str(
+        destination.resolve()
+    )
+    third = tmp_path / "third"
+    third.mkdir()
+    assert attach_module._engage_cwd(config_dir(), session_id, str(third)) == str(third)
+    assert attach_module._engage_cwd(config_dir(), "no-such-session", str(Path.home())) == str(
+        Path.home()
+    )
+
+    # The seam half: what the helper resolved is what the engage is given.
+    seen: list[str] = []
+
+    async def fake_engage(session_id: str, cwd: str, work, **kwargs):
+        seen.append(cwd)
+        raise TimeoutError("captured")
+
+    # The helper imports ``engage_runtime`` INSIDE the function, from this module,
+    # so this one patch is the whole seam.
+    from local_operator.session.runtime import launch as launch_module
+
+    monkeypatch.setattr(launch_module, "engage_runtime", fake_engage)
+    with pytest.raises(TimeoutError):
+        await attach_module.engage_session_client(
+            config_dir(), session_id, object()  # type: ignore[arg-type]
+        )
+    assert seen == [str(destination.resolve())], seen

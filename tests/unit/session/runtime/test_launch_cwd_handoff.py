@@ -149,12 +149,26 @@ def test_an_unreadable_record_refuses_the_engage(tree: tuple[Path, Path, Path]) 
     assert "cannot be read" in str(refused.value)
 
 
-def test_a_committed_move_is_not_replayed(tree: tuple[Path, Path, Path]) -> None:
-    """Once OBSERVED, the record stops redirecting: the session is there already."""
+def test_a_committed_move_still_says_where_the_session_lives(
+    tree: tuple[Path, Path, Path],
+) -> None:
+    """ONCE OBSERVED, THE DESTINATION IS THE SESSION'S ADDRESS, not a one-shot hint.
+
+    This cell used to assert the opposite — that a committed record stops
+    redirecting — and that reading is what made a successful move survive exactly
+    one start: a wake row, a shell still standing in the old directory, or the
+    daemon's placeholder then started the session back at the source, with the
+    record saying it lives somewhere else (QA round 2 measured `['src','dst','src']`).
+
+    A caller naming a THIRD directory is still an explicit choice and still wins;
+    that half lives in the resolver's own cell.
+    """
     config, source, destination = tree
     _handoff(config, source=source, destination=destination)
     cwd_move.reconcile_move(config, OWN, effective_cwd=str(destination))
-    assert _engage_cwd_for_recorded_move(config, OWN, str(source)) == str(source)
+    assert cwd_move.read_move_intent(config, OWN).stage == cwd_move.STAGE_COMMITTED
+    assert _engage_cwd_for_recorded_move(config, OWN, str(source)) == str(destination)
+    assert _engage_cwd_for_recorded_move(config, OWN, "") == str(destination)
 
 
 @pytest.mark.asyncio

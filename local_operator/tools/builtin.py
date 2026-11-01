@@ -16772,15 +16772,15 @@ _SESSIONS_OP_DOCS: dict[str, _SessionsOpDoc] = {
         ),
     ),
     "move": _SessionsOpDoc(
-        summary="move THIS session's own working directory: queued, it takes effect at"
-        " the next idle point, when the session restarts there; until then the working"
-        " directory is unchanged. A viewer that can follow it (the desktop app or a"
-        " `lop` terminal) keeps the session hot across the restart. With NOTHING"
-        " attached it still moves: the destination is recorded and the session stops,"
-        " then starts there the next time it is engaged — a message, a wake, or"
-        " `lop exec` — and it stays stopped until then. Nothing expires; naming the"
-        " current directory cancels a queued move. Write-tier, approved like one where"
-        " approval is required.",
+        summary="move THIS session's own working directory: queued, and it takes effect"
+        " when the session next runs in the destination; until then the working"
+        " directory is unchanged. WITH a viewer that can follow it (the desktop app or a"
+        " `lop` terminal) that is this session's next idle point: it restarts there and"
+        " carries on. With NOTHING attached it still moves: the destination is recorded,"
+        " the session stops at its next idle point, and the next engage — a message, a"
+        " wake, or `lop exec` — starts it there; it stays stopped until then. Nothing"
+        " expires; naming the current directory cancels a queued move. Write-tier,"
+        " approved like one where approval is required.",
         example="sessions(op='move', cwd='~/work/project'); back: cwd='.'",
         refusals=(
             "`cwd` alone: a move acts on THIS runtime, so a `session`, `pid`,"
@@ -17274,14 +17274,15 @@ def _describe_sessions_approval(args: dict[str, Any], cwd: str) -> str:
             # NAMING THE CURRENT DIRECTORY CANCELS (U17): the call restarts
             # nothing, so the card must not promise a restart.
             return f"stay in {destination} — cancels any queued move; nothing restarts"
-        # THE STOP IS PART OF THE CONSEQUENCE (agent review round 1, NIT-1). With a
-        # viewer that follows, the session restarts there and carries on; with
-        # nothing attached it stops first and starts again when it is next used. The
-        # card is the approval, so both halves are said — one clause that is true in
-        # either case rather than a promise of a seamless restart.
+        # WHAT IS GUARANTEED IS THE RESTART, NOT WHEN (agent review NIT-1; design
+        # review round 2, D9). A viewer that follows makes it seamless; with nothing
+        # attached the session stops first and starts there when it is next used. The
+        # card is the approval, so it says the guarantee and not the schedule — and
+        # "after this turn" no longer reads as the moment it happens, because a busy
+        # boundary defers the stop.
         return (
-            f"move to {destination} after this turn (now in {source}) — the session "
-            "restarts there, after stopping if nothing is attached to follow it"
+            f"move to {destination} (now in {source}) — the session restarts there, "
+            "stopping first if nothing is attached to follow it"
         )
     if op == "stop":
         if peer:

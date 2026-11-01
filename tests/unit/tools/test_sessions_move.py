@@ -350,7 +350,7 @@ def test_the_approval_card_names_the_directory_the_move_really_uses(tmp_path: Pa
     used = cwd_move.resolve_destination("../dest", effective_cwd=str(link))
     assert used == str((tmp_path / "x" / "dest").resolve())
     card = _describe_sessions_approval({"op": "move", "cwd": "../dest"}, str(link))
-    assert card.startswith(f"move to {used} after this turn (now in "), card
+    assert card.startswith(f"move to {used} (now in "), card
     assert str(tmp_path.resolve() / "a" / "dest") not in card
 
 
@@ -550,7 +550,7 @@ def test_the_help_reference_describes_what_move_really_does(tmp_path: Path) -> N
     assert "and expires" not in text.lower(), "nothing expires any more"
     assert "nothing expires" in text.lower(), "and the reference says so"
     assert "with none, the move is held" not in text.lower()
-    assert "stops, then starts there the next time it is engaged" in text, text
+    assert "the next engage — a message, a wake, or `lop exec` — starts it there" in text, text
     for code in ("host_cannot_restart", "sessions_move_outside_confinement"):
         assert code in text, f"{code} is a refusal of this op"
     assert "`move`" in rendered
@@ -569,7 +569,7 @@ def test_the_approval_card_names_the_stop_when_nothing_can_follow(tmp_path: Path
     source.mkdir()
     destination.mkdir()
     card = _describe_sessions_approval({"op": "move", "cwd": "../dest"}, str(source))
-    assert "restarts there" in card and "after stopping if nothing is attached" in card, card
+    assert "restarts there" in card and "stopping first if nothing is attached" in card, card
 
 
 def test_a_repeat_request_does_not_demote_a_recorded_handoff(tmp_path: Path) -> None:
