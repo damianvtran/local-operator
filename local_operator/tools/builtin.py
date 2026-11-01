@@ -18156,9 +18156,9 @@ def _sessions_pending_move_fields(
 
     session_dir_value = str(getattr(context, "session_dir", "") or "")
     root = Path(session_dir_value).parent.parent if session_dir_value else config_dir()
-    # THE SAME BOUNDED LIFE THE CONSUMER APPLIES (agent review round 2, m-e): a
-    # raw read reported a lapsed request as still queued until a runtime ticked.
-    intent = cwd_move.expire_stale_intent(root, session_id)
+    # ONE READ, THE SAME ONE THE CONSUMER MAKES: nothing ages a request any
+    # more, so a stage read here is the stage a runtime would act on.
+    intent = cwd_move.read_move_intent(root, session_id)
     if intent is None:
         return {}
     return {
@@ -18223,9 +18223,11 @@ def _sessions_move_state_sentence(extras: Mapping[str, Any]) -> str:
     """The pending move, in the words that stop a caller acting on a stale cwd.
 
     Model-facing, so plain English (AGENTS.md "Internationalization"); the point
-    is that "queued" is not "done" — the cwd in force is still the source until
-    the successor boots, and a hold (a runtime that could not guarantee one)
-    says so rather than looking like a move that simply has not happened yet.
+    is that "queued" is not "done": the cwd in force is still the source until
+    a successor is OBSERVED there, a transient hold says why nothing has
+    happened yet, and a HANDOFF says the session is going to stop rather than
+    restart in place — which is the one stage a caller must not misread as
+    "still running here".
     """
     stage = str(extras.get("move_stage") or "")
     # Spelled the way the card and the notices spell them (UX round 3, U19), so
@@ -18244,6 +18246,18 @@ def _sessions_move_state_sentence(extras: Mapping[str, Any]) -> str:
         return (
             f"a move from {source} to {destination} is queued: it happens at the next idle "
             f"point, when this session restarts there, and the working directory is still {source}"
+        )
+    if stage == "handoff":
+        # THE DESTINATION IS ALREADY RECORDED, and this is the shape that tells
+        # a caller the session will NOT be running here: it stops (or has
+        # stopped) and the next engage of any kind starts it in the destination.
+        # Nothing has been observed there yet — only a boot commits — so this is
+        # worded as recorded, not as done.
+        return (
+            f"this session's move from {source} to {destination} is recorded and no viewer "
+            f"is attached to follow it: it stops when its turn ends and starts in "
+            f"{destination} the next time it is engaged (a message, a wake, or `lop exec`). "
+            f"Nothing runs in either directory until then"
         )
     if stage == "committed":
         return f"this session moved from {source} to {destination}"
@@ -20466,6 +20480,16 @@ def _sessions_params_error(
 #: tool are full sentences that name the way out; ``move`` was the one op whose
 #: model was left to guess. Model-facing text, so it lives here in English rather
 #: than in the copy catalogue (AGENTS.md "Internationalization").
+#: ONE SENTENCE, TWO READERS: the refusal a tool call gets when its host can never
+#: restart the session, and the notice a runtime paints and journals when a marker
+#: queued by another host reaches one. Two copies of the same fact in two words is
+#: how the tool and the notice start disagreeing.
+_HOST_CANNOT_RESTART_SENTENCE = (
+    "the program hosting this session cannot restart it in another directory — open the "
+    "session from a `lop` terminal or the desktop app, which run it in a runtime that can move"
+)
+
+
 _SESSIONS_MOVE_REMEDIES: dict[str, str] = {
     "sessions_move_cwd_required": "`cwd` is required — the directory to move to, absolute or "
     "relative to this session's working directory",
@@ -20480,24 +20504,30 @@ _SESSIONS_MOVE_REMEDIES: dict[str, str] = {
     "to move — reopen the session and retry",
     "sessions_move_child_has_no_runtime": "a background job or delegated child has no runtime of "
     "its own to move — ask the parent session to move instead",
+    "host_cannot_restart": _HOST_CANNOT_RESTART_SENTENCE,
+    "sessions_move_outside_confinement": "this session is confined to its world root and that "
+    "directory is outside it — name a directory inside the confinement",
 }
 
 
-#: Why a queued move is HELD, and what to do about it — one sentence per hold
-#: code the runtime records (``RuntimeServer._apply_queued_cwd_move``).
+#: Why a move is WAITING right now, and what to do about it — one sentence per
+#: reason the runtime records (``RuntimeServer._apply_queued_cwd_move``).
 #:
 #: THE SAME CONVENTION AS :data:`_SESSIONS_MOVE_REMEDIES`: a bare code in ``info``
 #: told nobody anything (UX round 2, U10). Read by three surfaces — the tool
-#: result, ``info``, and the runtime's hold notice (painted for the user and
-#: journalled for the agent) — so they cannot word one hold three ways. English,
-#: because the same string is the model-facing incident (AGENTS.md
+#: result, ``info``, and the runtime's notice (painted for the user and journalled
+#: for the agent) — so they cannot word one reason three ways. English, because
+#: the same string is the model-facing incident (AGENTS.md
 #: "Internationalization": model-facing prompts stay English by design).
+#:
+#: ``no_capable_viewer`` is GONE with the wait it named: with nothing attached to
+#: follow, the destination is written to the marker and the next engage boots there,
+#: so the same fact is now a reply shape (``CWD_MOVE_HANDOFF``) rather than a hold.
+#: ``host_cannot_restart`` normally refuses the CALL these days, but a marker queued
+#: by another host still reaches a runtime that cannot act on it, and that reader
+#: needs the same sentence.
 _SESSIONS_MOVE_HOLDS: dict[str, str] = {
-    "no_capable_viewer": "nothing attached can follow it to the new directory — open this "
-    "session in the desktop app or a `lop` terminal and it moves once a turn ends",
-    "host_cannot_restart": "the program hosting this session cannot restart it in another "
-    "directory — open the session from a `lop` terminal or the desktop app, which run it "
-    "in a runtime that can move",
+    "host_cannot_restart": _HOST_CANNOT_RESTART_SENTENCE,
     "destination_unavailable": "that directory is gone or can no longer be entered — "
     "recreate it, or move somewhere else",
     "boundary_unreadable": "this runtime could not tell whether it is idle — it retries "
@@ -20506,11 +20536,13 @@ _SESSIONS_MOVE_HOLDS: dict[str, str] = {
 
 
 def sessions_move_hold_sentence(reason: str, destination: str) -> str:
-    """The user- and model-facing account of a held move (see ``_SESSIONS_MOVE_HOLDS``).
+    """The user- and model-facing account of a move that is waiting right now.
 
-    Names the destination, the reason in plain words, and both ways out —
-    resolve the reason, or cancel by naming the current directory — and that the
-    request lapses if the hold persists, so a hold is never a silent wait.
+    Names the destination, the reason in plain words, and the way out — resolve
+    the reason, or cancel by naming the current directory. There is no deadline
+    clause any more: nothing ages a request out, so saying "it is dropped after N
+    minutes" would be a promise the code no longer keeps (it was the TTL's
+    sentence, and the TTL is gone with the hold it bounded).
 
     ONE SENTENCE FOR BOTH READERS (painted for the user, journalled for the
     agent), so it is worded for both (UX round 3, U18): "this session's", not
@@ -20520,26 +20552,24 @@ def sessions_move_hold_sentence(reason: str, destination: str) -> str:
     every locale; this sentence stays model-facing English.
     """
     why = _SESSIONS_MOVE_HOLDS.get(reason, f"the runtime is holding it ({reason})")
-    minutes = int(_cwd_move_ttl_s() // 60)
     return (
         f"This session's move to {_approval_directory_label(destination)} is waiting: "
-        f"{why}. To cancel it, ask for a move back to the current directory (cwd='.'); "
-        f"it is dropped if still held after {minutes} minutes."
+        f"{why}. To cancel it, ask for a move back to the current directory (cwd='.')."
     )
 
 
 def sessions_move_expiry_sentence(destination: str, source: str) -> str:
-    """The account of a move that lapsed — announced, never deleted in silence."""
+    """The account of a move a PREVIOUS build let lapse — announced, not deleted.
+
+    Nothing expires a request any more (a move ends committed or at an explicit
+    reason), but a marker an older build aged out is still on disk, and silence
+    about it is exactly what U10 was about, so the one-time announcement stays.
+    """
     return (
-        f"The move to {_approval_directory_label(destination)} expired without happening; "
-        f"this session stays in {_approval_directory_label(source)}. Ask again to retry."
+        f"The move to {_approval_directory_label(destination)} expired without happening "
+        f"under an older build; this session stays in {_approval_directory_label(source)}. "
+        f"Ask again to retry."
     )
-
-
-def _cwd_move_ttl_s() -> float:
-    from local_operator.session.cwd_move import QUEUED_MOVE_TTL_S
-
-    return QUEUED_MOVE_TTL_S
 
 
 async def _sessions_move(
@@ -20568,7 +20598,12 @@ async def _sessions_move(
     """
     from local_operator.paths import config_dir
     from local_operator.session import cwd_move
-    from local_operator.session.runtime.server import CWD_MOVE_READY, notify_move_queued
+    from local_operator.session.runtime.server import (
+        CWD_MOVE_HANDOFF,
+        CWD_MOVE_READY,
+        notify_move_queued,
+    )
+    from local_operator.tools.confinement import ToolConfinement
 
     def refuse(code: str, **fields: Any) -> ToolResult:
         # EVERY REFUSAL CARRIES ITS REMEDY. The code alone told a model nothing
@@ -20621,17 +20656,55 @@ async def _sessions_move(
             f"{_approval_directory_label(source_label)} (request {intent.request_id})",
             details={"op": "move", **intent.as_fields(effective_cwd=effective_cwd)},
         )
-    # THE PROMISE IS WORDED FROM WHAT THE RUNTIME CAN DO, not from whether one
-    # exists (UX round 2, U9; agent review round 2, m-b; QA round 2, Q3). "At the
-    # next idle point" is said only when the hosting runtime can carry the move
-    # out; a hold — predicted now, or already recorded on a repeat call — is
-    # reported as a hold with its reason and next step; and a process hosting no
-    # runtime says the move waits for the next open.
+
+    # ---------------------------------------------------------------------
+    # TWO REFUSALS THAT MUST HAPPEN AT THE CALL, NOW THAT THE REQUEST CANNOT LAPSE.
+    # ---------------------------------------------------------------------
+    # Both are decidable the moment the call is made, and both used to be
+    # discovered later (a hold that aged out, or a move that quietly relocated the
+    # session outside the boundary its tools enforce). Because nothing expires a
+    # request any more, recording one of these and walking away would leave it
+    # `queued` for ever — so the request is WITHDRAWN before the refusal is
+    # returned, and the reply says so. The withdrawal runs after the enqueue rather
+    # than before it because "is this a cancel" and "is this a repeat of the same
+    # request" are the enqueue's own rules, and re-deriving them here would be a
+    # second implementation of the same decision.
+    confinement = ToolConfinement.from_context(context)
+    denial = confinement.cwd_denial(intent.destination_cwd) if confinement else None
+    if denial is not None:
+        # The SAME boundary the shell, the path tools and public_copy consult: a
+        # confined session's runtime must not be relocated outside its world root,
+        # or every tool would refuse the directory the session had been moved into.
+        cwd_move.withdraw_queued_move(root, own_session_id)
+        return refuse("sessions_move_outside_confinement", requested_cwd=intent.destination_cwd)
+
+    # THE ANSWER IS READ BEFORE THE PROMISE IS WORDED, and what it says decides
+    # both. A process hosting no runtime answers "" — the durable marker is still
+    # exactly what the next open consumes. A host that cannot restart this runtime
+    # can never honour the request, so it is refused here instead of waiting.
     readiness = notify_move_queued(own_session_id, root)
-    hold = intent.blocked_reason or (readiness if readiness != CWD_MOVE_READY else "")
+    if readiness == "host_cannot_restart":
+        cwd_move.withdraw_queued_move(root, own_session_id)
+        return refuse("host_cannot_restart", requested_cwd=intent.destination_cwd)
+
+    hold = intent.blocked_reason or (
+        readiness if readiness not in (CWD_MOVE_READY, CWD_MOVE_HANDOFF) else ""
+    )
     if hold:
         head = "queued but held"
         when = sessions_move_hold_sentence(hold, intent.destination_cwd)
+    elif readiness == CWD_MOVE_HANDOFF:
+        # NOBODY CAN FOLLOW THE SESSION, so the runtime will write the destination
+        # and stop: the session goes cold until it is engaged again, and that
+        # engage starts it in the new directory. Saying "it restarts at the next
+        # idle point" here would be the promise that made the old behaviour
+        # unreadable — a session that simply stopped.
+        head = "queued"
+        when = (
+            "Nothing is attached to follow it, so the session stops when this turn ends and "
+            "starts in the new directory the next time it is engaged — a message, a wake, or "
+            "`lop exec`."
+        )
     elif readiness:
         head = "queued"
         when = "It happens at the next idle point after this turn, when the session restarts there."
@@ -20658,6 +20731,7 @@ async def _sessions_move(
             **intent.as_fields(effective_cwd=effective_cwd),
             "watcher_armed": bool(readiness),
             "held": hold,
+            "handoff": readiness == CWD_MOVE_HANDOFF,
         },
     )
 

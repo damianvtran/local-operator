@@ -6,25 +6,39 @@ ACTS, by booting in the destination. The request therefore has to outlive the
 asking process — a crash, a lost acknowledgement, or a retire that lands between
 the two — so it is a document on disk, not state in memory.
 
-THE STAGES ARE THE RECONCILIATION AXIS, and there are four:
+THE STAGES ARE THE RECONCILIATION AXIS, and there are five:
 
-* ``queued``     — asked for, not yet observed. The effective cwd is unchanged.
-* ``committed``  — a successor was observed running in the destination.
+* ``queued``    — asked for, not yet observed. The effective cwd is unchanged.
+  A LIVE runtime consumes it at its next idle point, by retiring.
+* ``handoff``   — the destination is now the session's RECORDED TRUTH, written
+  just before the asking runtime retires. Nothing has been observed running
+  there yet; the next engage boots at the destination and THAT boot promotes
+  this stage (see :func:`reconcile_move`). This is what makes a viewer optional
+  rather than a precondition: a headless session has nobody to re-engage it, so
+  the destination has to survive the gap on its own (design note, option (d)).
+* ``committed`` — a successor was OBSERVED running in the destination.
 * ``superseded`` — a later request replaced this one before it committed, OR the
   caller asked to move back to where the session already is, which is this
   module's CANCEL: it is the only request that can undo a queued one without
-  minting a third destination (UX round 1, U4).
-* ``expired``    — HELD for longer than :data:`QUEUED_MOVE_TTL_S`. A bounded
-  life is what keeps an intent whose successor never came from blocking the
-  session forever: without it, every boot would re-consume a request nothing
-  satisfies (UX round 1, U4; agent review round 1, B2). The clock is the HOLD's
-  (``blocked_at``), never the request's: see :func:`hold_lapsed`.
+  minting a third destination (UX round 1, U4). A ``handoff`` whose successor
+  booted somewhere else is superseded the same way, once, naming that reason.
+* ``expired``   — RETIRED AS AN OUTCOME, kept as a value only so an OLD marker
+  still reports honestly. It used to mean "held for longer than a TTL", and
+  the hold-then-lapse state is exactly the defect the handoff replaces: a
+  headless session could never move itself, so its request aged out with the
+  cwd unchanged. Nothing writes this stage any more.
+
+WHY A TTL IS GONE. ``QUEUED_MOVE_TTL_S`` bounded a request no successor ever
+satisfied, because the loop it guarded re-armed on every boot. The handoff
+closes that loop by construction — the boot now lands at the destination, and a
+boot that lands elsewhere settles the request as ``superseded`` — so there is
+nothing left for a clock to bound. A move is either observed (``committed``) or
+ends with an explicit reason; it never lapses into silence.
 
 NOTHING HERE RETIRES A RUNTIME. This module owns the DOCUMENT; the runtime that
 consumes it (``session/runtime/server._apply_queued_cwd_move``) owns the
-retirement, and it refuses to retire toward a move it cannot guarantee a
-successor for — leaving the intent ``queued`` is a legal, visible state rather
-than a failure.
+retirement, and it writes :func:`accept_handoff` BEFORE it stops so the
+destination outlives the process (design note, crash semantics).
 
 NOTHING ROLLS A DESTINATION BACK. Once ``committed``, the destination may be the
 tree a successor is already running in, and "restoring" the old directory would
@@ -68,28 +82,21 @@ MOVE_MARKER_NAME = "runtime-cwd-move.json"
 #: that meets an unknown stage must treat the document as unusable rather than
 #: guess which way the move went.
 STAGE_QUEUED = "queued"
+STAGE_HANDOFF = "handoff"
 STAGE_COMMITTED = "committed"
 STAGE_SUPERSEDED = "superseded"
 STAGE_EXPIRED = "expired"
-STAGES = frozenset({STAGE_QUEUED, STAGE_COMMITTED, STAGE_SUPERSEDED, STAGE_EXPIRED})
+STAGES = frozenset({STAGE_QUEUED, STAGE_HANDOFF, STAGE_COMMITTED, STAGE_SUPERSEDED, STAGE_EXPIRED})
 
-#: How long a ``queued`` intent may stay HELD before it expires.
-#:
-#: MEASURED FROM THE START OF THE HOLD, not from the request (UX round 2, U10).
-#: A move is asked for inside a turn, and an agent turn that runs past half an
-#: hour is ordinary here: aged from ``created_at``, the request expired before the
-#: first idle point it could ever have acted at (reproduced: busy -> expired ->
-#: idle, with nobody told). A runtime that is merely busy is not holding anything,
-#: so the clock only runs while a consumer has said WHY it cannot act.
-#:
-#: BOUNDED ON PURPOSE. A queued intent is consumed by a runtime repeating "is
-#: the successor here yet", and a request no successor ever satisfies would
-#: otherwise re-arm on every boot for the life of the session — the state that
-#: made a session unopenable (agent review round 1, B2). Thirty minutes is longer
-#: than a turn the user is watching and shorter than "the operator forgot about
-#: it": past that, the honest answer is that the request lapsed, and the message
-#: says so rather than the move happening hours later out of nowhere.
-QUEUED_MOVE_TTL_S = 30 * 60.0
+#: The payload's schema version. 2 added ``handoff``; a reader does not gate on
+#: it (an older marker is still readable), it is here so a DOWNGRADED build can
+#: be told, in the document itself, that it is looking at something it predates.
+PAYLOAD_VERSION = 2
+
+#: The stages a new request may displace: the two that have not been observed
+#: yet. Every other stage is history, and a later request starts a new document
+#: rather than editing one that already reached an outcome.
+DISPLACEABLE_STAGES = frozenset({STAGE_QUEUED, STAGE_HANDOFF})
 
 
 class CwdMoveRefused(Exception):
@@ -108,11 +115,13 @@ class CwdMoveRefused(Exception):
 
 @dataclass(frozen=True)
 class MoveIntent:
-    """One move request as it is stored, with the stage it is at.
+    """The move request in force for this session, with the stage it reached.
 
     ``source_cwd`` is the effective cwd AT ENQUEUE, recorded because the commit
     has to be able to tell "the successor is where we asked" from "somebody else
-    moved this session meanwhile" — a destination is not proof on its own.
+    moved this session meanwhile" — a destination is not proof on its own (and
+    the engage guard needs the source to decide whether a caller is asking to go
+    where the session already IS, or somewhere new).
     """
 
     request_id: str
@@ -122,12 +131,13 @@ class MoveIntent:
     stage: str
     owner_pid: int
     created_at: float
-    #: Why the consumer is holding this intent ``queued`` instead of acting on
-    #: it, as a code (``""`` when nothing is blocking), and when it first said
-    #: so. A runtime that cannot guarantee a successor must SAY it rather than
-    #: retire blind, and this is the surviving half of that notice: a marker is
-    #: readable by ``sessions(op='info')`` and by the next operator when no
-    #: viewer was attached to paint it (agent review round 1, B2).
+    #: Why the consuming runtime could not act on this request on its last look —
+    #: a NOTICE, never a gate: it names the condition the runtime hit, and the
+    #: consumer re-checks that condition from scratch on every tick. It stays on
+    #: the marker so ``sessions(op='info')`` and the next caller can see why
+    #: nothing has happened yet. Only transients land here (a destination that
+    #: went away, an unreadable idle boundary); "no viewer can follow this" is
+    #: no longer a reason to wait, so it is no longer a reason recorded here.
     blocked_reason: str = ""
     blocked_at: float = 0.0
 
@@ -146,7 +156,7 @@ class MoveIntent:
 
     def to_payload(self) -> dict[str, Any]:
         return {
-            "version": 1,
+            "version": PAYLOAD_VERSION,
             "request_id": self.request_id,
             "session_id": self.session_id,
             "source_cwd": self.source_cwd,
@@ -260,30 +270,38 @@ def enqueue_self_move(
 
     IDEMPOTENT PER REQUEST. A second message asking for the directory already
     queued returns that same request rather than a new one — a retried tool call
-    must not look like a new move to the reconciliation. A third destination
-    supersedes the queued request (the later intent wins; the earlier one never
-    reaches ``committed``), and one naming the directory the caller is ALREADY IN
-    is the CANCEL: it supersedes the queued intent and returns it at stage
-    ``superseded``, which is how a move is withdrawn without inventing a third
-    destination (UX round 1, U4). With nothing queued it stays the refusal it was.
+    must not look like a new move to the reconciliation. A different destination
+    supersedes a request nothing has OBSERVED yet (``queued`` or ``handoff``):
+    the later request wins, and the earlier one must never reach ``committed``
+    behind it. Naming the directory the caller is ALREADY IN is the CANCEL: it
+    supersedes such a request and returns it at stage ``superseded``, which is
+    how a move is withdrawn without inventing a third destination (UX round 1,
+    U4) — including a ``handoff`` a runtime recorded moments before exiting.
+    With nothing supersedable it raises :class:`CwdMoveRefused`, as before.
     """
     destination = resolve_destination(requested_cwd, effective_cwd=effective_cwd)
     previous = read_move_intent(root, session_id)
+    # ONLY AN UNRECORDED OUTCOME CAN BE DISPLACED. A committed/superseded/expired
+    # document is history: editing it would rewrite what the session is recorded
+    # to have done, which is the one thing this file exists to keep straight.
+    displaceable = (
+        previous if previous is not None and previous.stage in DISPLACEABLE_STAGES else None
+    )
     # THE INTENT IS CONSULTED BEFORE THE CURRENT-DIRECTORY REFUSAL, and that
     # ordering is the cancel path: "move back to where I am" is how a queued
     # request is withdrawn, so a call that would have been refused for pointing
     # at the current directory must first get the chance to mean "cancel"
     # (UX round 1, U4).
-    if _same_directory(destination, effective_cwd):
-        if previous is not None and previous.stage == STAGE_QUEUED:
-            cancelled = _with_stage(previous, STAGE_SUPERSEDED)
+    if same_directory(destination, effective_cwd):
+        if displaceable is not None:
+            cancelled = _with_stage(displaceable, STAGE_SUPERSEDED)
             _write(root, cancelled)
             return cancelled
         raise CwdMoveRefused("sessions_move_destination_is_current", requested_cwd=destination)
-    if previous is not None and previous.stage == STAGE_QUEUED:
-        if previous.destination_cwd == destination:
-            return previous
-        _write(root, _with_stage(previous, STAGE_SUPERSEDED))
+    if displaceable is not None:
+        if displaceable.stage == STAGE_QUEUED and displaceable.destination_cwd == destination:
+            return displaceable
+        _write(root, _with_stage(displaceable, STAGE_SUPERSEDED))
     intent = MoveIntent(
         request_id=uuid.uuid4().hex,
         session_id=session_id,
@@ -297,7 +315,7 @@ def enqueue_self_move(
     return intent
 
 
-def _same_directory(left: str, right: str) -> bool:
+def same_directory(left: str, right: str) -> bool:
     """Whether two paths name one directory, however they are spelled.
 
     REALPATH ON BOTH SIDES, which is the whole reason this exists as a helper:
@@ -337,63 +355,24 @@ def _with_stage(intent: MoveIntent, stage: str, **overrides: Any) -> MoveIntent:
     return MoveIntent(**fields)
 
 
-def hold_lapsed(intent: MoveIntent, *, now: float | None = None) -> bool:
-    """Whether a ``queued`` intent has been HELD for longer than the TTL.
-
-    Only a recorded hold ages (``blocked_at``, set by :func:`mark_blocked` when
-    the hold BEGINS and kept while it continues): a request that nobody has
-    looked at yet, or one waiting on an ordinary busy turn, has not been refused
-    anything and must not run out of time (UX round 2, U10). A marker with no
-    ``blocked_at`` — every pre-hold document, and a hand-written one — therefore
-    never lapses on a guess.
-    """
-    if intent.stage != STAGE_QUEUED or not intent.blocked_reason or intent.blocked_at <= 0:
-        return False
-    instant = time.time() if now is None else now
-    return instant - intent.blocked_at >= QUEUED_MOVE_TTL_S
-
-
-def expire_stale_intent(
-    root: Path, session_id: str, *, now: float | None = None
-) -> MoveIntent | None:
-    """Flip a ``queued`` intent whose hold outlived its TTL to ``expired``.
-
-    APPLIED BY EVERY READER THAT REPORTS THE STAGE — the runtime's consumer and
-    ``sessions(op='info')`` (agent review round 2, m-e: ``info`` used to read the
-    raw marker, so a lapsed request still showed as queued until a runtime
-    ticked). A bounded life only bounds anything if every reader applies it. An
-    intent whose hold has not lapsed, or one already past ``queued``, is returned
-    untouched; ``None`` is still "no intent" rather than an error, for the same
-    reason :func:`read_move_intent` documents.
-    """
-    intent = read_move_intent(root, session_id)
-    if intent is None or not hold_lapsed(intent, now=now):
-        return intent
-    expired = _with_stage(intent, STAGE_EXPIRED)
-    _write(root, expired)
-    return expired
-
-
 def mark_blocked(
     root: Path, session_id: str, reason: str, *, now: float | None = None
 ) -> MoveIntent | None:
-    """Record why the consumer is holding the intent, so the hold is visible.
+    """Record why the consumer could not act on the intent, so it is visible.
 
     WRITTEN ONLY WHEN THE REASON CHANGES: the consumer ticks twice a second, and
     a staged write per tick would rewrite the same bytes for as long as the
-    session stays busy. ``""`` clears the record (the hold ended) for the same
-    reason the file name says nothing about it: the stage is the state, this is
-    the explanation attached to it.
+    condition persists. ``""`` clears the record (the condition ended) for the
+    same reason the file name says nothing about it: the stage is the state,
+    this is the explanation attached to it.
 
-    ``blocked_at`` IS THE TTL's CLOCK (:func:`hold_lapsed`), so it is stamped when
-    a hold BEGINS and kept when one hold reason gives way to another — a request
-    that went from "nobody can follow it" to "its directory is gone" has been
-    held the whole time, and resetting the clock on every change of wording
-    would let a request that can never happen live forever. Clearing the hold
-    resets it.
+    ``blocked_at`` is when the CONDITION was first seen, kept while one reason
+    gives way to another — it is a log of "how long has this not worked" and is
+    deliberately not a clock that decides anything any more (the TTL it once
+    fed is gone; see the module docstring). Clearing the record resets it.
     """
     intent = read_move_intent(root, session_id)
-    if intent is None or intent.stage != STAGE_QUEUED:
+    if intent is None or intent.stage not in DISPLACEABLE_STAGES:
         return intent
     if intent.blocked_reason == reason and (reason == "" or intent.blocked_at > 0):
         return intent
@@ -403,19 +382,145 @@ def mark_blocked(
         started = intent.blocked_at
     else:
         started = time.time() if now is None else now
-    updated = _with_stage(intent, STAGE_QUEUED, blocked_reason=reason, blocked_at=started)
+    updated = _with_stage(intent, intent.stage, blocked_reason=reason, blocked_at=started)
     _write(root, updated)
     return updated
 
 
-def reconcile_move(root: Path, session_id: str, *, effective_cwd: str) -> MoveIntent | None:
-    """Settle a queued intent against where the session ACTUALLY is now.
+def accept_handoff(root: Path, session_id: str, intent: MoveIntent) -> MoveIntent | None:
+    """Publish ``intent``'s destination as the session's RECORDED TRUTH, then stop.
 
-    THE ONLY WAY A ``queued`` INTENT BECOMES ``committed`` WITHOUT A LIVE
-    CONFIRMATION: if the session is observed at the destination, the successor
-    evidently booted there — the confirmation was lost, not the move. Observed
-    anywhere else, the intent stays ``queued`` for the successor to act on; this
-    function never infers a failure, because an inference is not evidence.
+    THE ACT THAT MAKES A VIEWER OPTIONAL. The asking runtime calls this in the
+    same breath as it retires: from here on the destination is what ANY later
+    engage reads, so the session can be re-engaged by a message, a wake or
+    ``lop exec`` with nobody attached to follow it. Nothing has been observed
+    running there yet — that is :func:`reconcile_move`'s half — and the request
+    keeps its identity (``request_id``, ``source_cwd``) so the successor can
+    still tell "booted where we asked" from "booted somewhere else".
+
+    Returns ``None`` when the document on disk is no longer THIS request (it was
+    cancelled or replaced in the moment between the consumer's read and this
+    write): publishing then would resurrect a withdrawn destination, so the
+    caller must treat ``None`` as "stop trying, do nothing".
+    """
+    current = read_move_intent(root, session_id)
+    if current is None or current.request_id != intent.request_id:
+        return None
+    if current.stage not in DISPLACEABLE_STAGES:
+        return None
+    handoff = _with_stage(current, STAGE_HANDOFF, blocked_reason="", blocked_at=0.0)
+    _write(root, handoff)
+    return handoff
+
+
+def rollback_handoff(root: Path, session_id: str, intent: MoveIntent) -> MoveIntent | None:
+    """Put a ``handoff`` back to ``queued`` when the retire it was written for is refused.
+
+    THE ONE ROLLBACK, and it is narrow on purpose: a handoff is written before
+    the retire latch is claimed (so a crash cannot lose the destination), so a
+    latch that refuses — work arrived in that instant — must undo the write or
+    the next engage would act on a move this runtime is still here to carry
+    out. Everything else stays put; once the session HAS moved nothing here
+    rolls it back (see the module docstring).
+
+    Returns the restored intent, or ``None`` when the document is no longer this
+    request (nothing to roll back).
+    """
+    current = read_move_intent(root, session_id)
+    if current is None or current.request_id != intent.request_id:
+        return None
+    if current.stage != STAGE_HANDOFF:
+        return None
+    queued = _with_stage(current, STAGE_QUEUED)
+    _write(root, queued)
+    return queued
+
+
+def withdraw_queued_move(root: Path, session_id: str) -> MoveIntent | None:
+    """Supersede a request that nothing has observed yet, so nothing acts on it.
+
+    Used by a caller that has to REFUSE a move it has just recorded (a
+    destination outside the session's confinement, a host that can never
+    restart it): leaving the request in force would either move the session
+    somewhere the caller refused, or sit `queued` for ever, which is exactly the
+    silent lapse the handoff design removes. The document keeps its identity at
+    stage ``superseded``, so every reader sees the request was withdrawn rather
+    than never made.
+    """
+    current = read_move_intent(root, session_id)
+    if current is None or current.stage not in DISPLACEABLE_STAGES:
+        return None
+    withdrawn = _with_stage(current, STAGE_SUPERSEDED)
+    _write(root, withdrawn)
+    return withdrawn
+
+
+class HandoffUnreadable(Exception):
+    """A move document exists but cannot be understood, so the destination is unknown.
+
+    Raised only by :func:`pending_handoff`, and only towards callers that are
+    about to choose a directory to boot a session in. The two candidate answers
+    there are not symmetric: refusing costs one engage a sentence, while
+    guessing spawns the session in a directory the document may have said not
+    to — a wrong spawn, which is worse than a sentence.
+    """
+
+    def __init__(self, path: str) -> None:
+        self.path = path
+        super().__init__(path)
+
+
+def pending_handoff(root: Path, session_id: str) -> MoveIntent | None:
+    """The handoff waiting for this session's next runtime, or ``None``.
+
+    THE ONE READER THE ENGAGE PATH USES, and it is deliberately stricter than
+    :func:`read_move_intent`:
+
+    * no document file at all -> ``None`` (one `stat`, which is the cost paid on
+      every ordinary engage),
+    * a document that is not a ``handoff`` -> ``None``: every other stage says
+      nothing about where the next process should start,
+    * a ``handoff`` document that cannot be parsed -> :class:`HandoffUnreadable`,
+      never ``None``. Falling through to the caller's own cwd there would spawn
+      the session in the directory the move was explicitly leaving.
+
+    The whole intent is returned, not just the destination: a caller that has to
+    decide between "substitute the destination" and "this caller named a third
+    directory, so the move is cancelled" needs ``source_cwd`` too.
+    """
+    path = marker_path(root, session_id)
+    if not path.is_file():
+        return None
+    intent = read_move_intent(root, session_id)
+    if intent is None:
+        raise HandoffUnreadable(str(path))
+    if intent.stage != STAGE_HANDOFF:
+        return None
+    return intent
+
+
+def reconcile_move(root: Path, session_id: str, *, effective_cwd: str) -> MoveIntent | None:
+    """Settle an unobserved intent against where the session ACTUALLY booted.
+
+    THE ONLY WAY A REQUEST BECOMES ``committed`` WITHOUT A LIVE CONFIRMATION: if
+    the session is observed at the destination, the successor evidently booted
+    there — the confirmation was lost, not the move. This is the promotion rule
+    the whole design leans on, so it is one function and it runs at every boot.
+
+    THE TWO UNOBSERVED STAGES SETTLE DIFFERENTLY, and the difference is the loop
+    bound:
+
+    * ``queued`` — the runtime that is still running has not acted yet, so a boot
+      anywhere means nothing either way: at the destination it commits (the
+      request was carried out), anywhere else it stays ``queued`` for that
+      runtime's own idle point. Never inferred as a failure.
+    * ``handoff`` — the destination was already written as the session's truth
+      and the writer has (or had) gone. A boot at the destination commits; a boot
+      ANYWHERE ELSE supersedes, once, naming the reason. That single shot is what
+      stops the B2 failure (a boot that retires and exits on every open, for
+      ever): the request cannot survive a boot that ignored it.
+
+    ``committed`` still means OBSERVED, never inferred from a write.
 
     ``effective_cwd`` is the directory THE SESSION holds, which is not
     necessarily the one this process runs in: the value arrives from a record (or
@@ -426,12 +531,17 @@ def reconcile_move(root: Path, session_id: str, *, effective_cwd: str) -> MoveIn
     directory.
     """
     intent = read_move_intent(root, session_id)
-    if intent is None or intent.stage != STAGE_QUEUED:
+    if intent is None or intent.stage not in DISPLACEABLE_STAGES:
         return intent
     if not effective_cwd.strip():
         return intent
-    if not _same_directory(effective_cwd, intent.destination_cwd):
-        return intent
-    committed = _with_stage(intent, STAGE_COMMITTED)
+    at_destination = same_directory(effective_cwd, intent.destination_cwd)
+    if not at_destination:
+        if intent.stage != STAGE_HANDOFF:
+            return intent
+        superseded = _with_stage(intent, STAGE_SUPERSEDED)
+        _write(root, superseded)
+        return superseded
+    committed = _with_stage(intent, STAGE_COMMITTED, blocked_reason="", blocked_at=0.0)
     _write(root, committed)
     return committed

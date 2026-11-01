@@ -297,37 +297,28 @@ def test_a_crash_between_the_request_and_the_boot_is_settled_by_where_it_really_
     assert crashed is not None, "the request survived the process that made it"
     assert crashed.stage == cwd_move.STAGE_QUEUED
 
-    # 2. A SUCCESSOR IN THE WRONG DIRECTORY claims nothing, and — by design — it does
-    #    NOT retire toward the move either (agent review round 1, B2; UX round 1, U4).
-    #    Retiring there was the defect: with nobody attached who could adopt the
-    #    destination, the runtime stopped, the next boot read the same intent and
-    #    stopped again, and the session could never be opened. The contract pinned here
-    #    instead is the HOLD — a serving runtime, the intent still ``queued``, and the
-    #    reason recorded where `sessions(info)` and the next operator can read it.
+    # 2. A SUCCESSOR IN THE WRONG DIRECTORY claims nothing. It boots elsewhere, which
+    #    a QUEUED request reads as "not there yet" rather than "failed" — so the stage
+    #    is not ``committed`` because of it. What the runtime DOES do is hand the move
+    #    on: with nobody attached to follow, it writes the destination as the session's
+    #    recorded truth and stops, so the request is carried by the record instead of
+    #    being re-consumed by every later boot (the B2 loop a hold used to cause).
     wrong = _spawn_successor(config_dir, str(elsewhere), inherit_cwd=host_cwd)
     try:
         _wait_until(
-            lambda: True if _hold(config_dir) == "no_capable_viewer" else None,
+            lambda: _stage(config_dir) == cwd_move.STAGE_HANDOFF or None,
             timeout=BOOT_COMMIT_TIMEOUT_S,
-            what="the wrong-directory successor to record why it is holding the move",
+            what="the successor in a third directory to hand the move on",
         )
-        assert wrong.poll() is None, "a runtime that cannot guarantee a successor keeps serving"
-        # AND IT SAYS SO (UX round 2, U10): the hold is journalled into the
-        # conversation by the real runtime, so the agent reads it at its next turn
-        # and a later open replays it — reason and next step, not a bare code.
-        transcript = config_dir / "sessions" / SESSION_ID / "transcript.jsonl"
+        handed = cwd_move.read_move_intent(config_dir, SESSION_ID)
+        assert handed is not None
+        assert handed.destination_cwd == crashed.destination_cwd, "the request is unchanged"
+        assert handed.blocked_reason == "", "a handoff is not a hold"
         _wait_until(
-            lambda: (
-                True
-                if "nothing attached can follow it" in transcript.read_text(encoding="utf-8")
-                else None
-            ),
-            timeout=30,
-            what="the hold to be journalled for the agent",
+            lambda: True if wrong.poll() is not None else None,
+            timeout=BOOT_COMMIT_TIMEOUT_S,
+            what="the handing-off runtime to stop",
         )
-        assert (
-            _stage(config_dir) == cwd_move.STAGE_QUEUED
-        ), "a boot elsewhere is not a confirmation, and not a failure either"
     finally:
         _reap(wrong)
 
@@ -474,7 +465,6 @@ async def test_an_embedded_hosts_hold_notice_is_written_on_the_apps_loop(
         build_session,
         seed_transcript,
         text_turn,
-        tool_call_turn,
         user_message,
         wait_for_adoption,
     )
@@ -487,19 +477,15 @@ async def test_an_embedded_hosts_hold_notice_is_written_on_the_apps_loop(
     destination.mkdir()
     directory = config / "sessions" / SESSION_ID
     await seed_transcript(directory, [user_message("seed")])
+    # The tool is still installed: this cell must exercise the REAL session, and
+    # a session without the move op would not be the shape being protected.
     sessions_tool = build_sessions_tool(
         ToolContext(cwd=str(source), subagent_launcher=lambda label, prompt, **kwargs: "")
     )
     assert sessions_tool is not None
     stream = ScriptedStream(
         [
-            tool_call_turn(
-                text="Moving",
-                tool_name="sessions",
-                tool_call_id="move-1",
-                arguments={"op": "move", "cwd": "../destination"},
-            ),
-            text_turn("Queued the move"),
+            text_turn("first turn persisted"),
             text_turn("second turn persisted"),
         ]
     )
@@ -529,6 +515,21 @@ async def test_an_embedded_hosts_hold_notice_is_written_on_the_apps_loop(
             registrant = app._mobile_registrant
             assert registrant is not None, "the owned session must start its registrant"
             assert type(app._mobile_handle).__name__ == "TuiSessionHandle"
+            # THE REQUEST IS WRITTEN DIRECTLY, because the TOOL now refuses an
+            # incapable host at the CALL (a move a `TuiSessionHandle` can never
+            # perform is no longer recorded and held). The regression this cell
+            # guards is the thread the ANNOUNCEMENT runs on, and a marker written
+            # by any writer reaches that path through the real consumer.
+            cwd_move.enqueue_self_move(
+                config,
+                SESSION_ID,
+                requested_cwd=str(destination),
+                effective_cwd=str(source),
+                owner_pid=os.getpid(),
+            )
+            from local_operator.session.runtime.server import notify_move_queued
+
+            assert notify_move_queued(SESSION_ID, config) == "host_cannot_restart"
             await session.prompt("move this session to ../destination")
             for _ in range(200):
                 if any(name == "journal_incident" for name, _, _ in where):
@@ -546,3 +547,144 @@ async def test_an_embedded_hosts_hold_notice_is_written_on_the_apps_loop(
             assert "second turn persisted" in text
             assert "the program hosting this session cannot restart it" in text
             await pilot.pause()
+
+
+def test_a_viewerless_move_hands_off_and_the_next_engage_boots_in_the_destination(
+    headless_tui_env: Path, tmp_path: Path
+) -> None:
+    """THE DEFECT THIS CHANGE FIXES, driven end to end with real processes.
+
+    Before: a session with nobody attached could never move itself. The consumer
+    refused to retire without a viewer that would adopt the destination
+    (``no_capable_viewer``), the request sat on disk, and after thirty minutes it
+    lapsed with the cwd unchanged.
+
+    Now the request is carried by the RECORD: the runtime writes the destination,
+    stops, and the next engage of any kind starts the session there. This cell
+    pins the whole round trip — a real boot consumes the request and hands it on,
+    the production engage guard resolves the caller's OLD directory to the new
+    one, and a second real boot in that directory commits the move.
+
+    The one seam not exercised here is ``engage_runtime``'s own spawn loop: this
+    cell calls the guard it calls (``_engage_cwd_for_recorded_move``) and then
+    boots the same child the loop boots. ``tests/unit/session/runtime/
+    test_launch_cwd_handoff.py`` drives the loop far enough to assert the
+    directory the fork is handed.
+    """
+    from local_operator.session.runtime.launch import _engage_cwd_for_recorded_move
+
+    config_dir = headless_tui_env
+    _seed(config_dir, SESSION_ID)
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    host_cwd = tmp_path / "host"
+    for directory in (source, destination, host_cwd):
+        directory.mkdir()
+
+    # THE REQUEST IS WRITTEN BEFORE ANY RUNTIME BOOTS, which is when the boot
+    # watcher would see it: a child in another process cannot be woken by the
+    # in-process tool path.
+    cwd_move.enqueue_self_move(
+        config_dir,
+        SESSION_ID,
+        requested_cwd=str(destination),
+        effective_cwd=str(source),
+        owner_pid=os.getpid(),
+    )
+    first = _spawn_successor(config_dir, str(source), inherit_cwd=host_cwd)
+    try:
+        _wait_until(
+            lambda: _stage(config_dir) == cwd_move.STAGE_HANDOFF or None,
+            timeout=BOOT_COMMIT_TIMEOUT_S,
+            what="the viewer-less runtime to record the handoff",
+        )
+        _wait_until(
+            lambda: True if first.poll() is not None else None,
+            timeout=BOOT_COMMIT_TIMEOUT_S,
+            what="the handing-off runtime to stop",
+        )
+        assert _stage(config_dir) == cwd_move.STAGE_HANDOFF, "recorded, and NOT yet observed"
+    finally:
+        _reap(first)
+
+    # THE NEXT ENGAGE NAMES THE OLD DIRECTORY — a wake, a message, a shell still
+    # standing there — and the guard resolves it to the destination.
+    resolved = _engage_cwd_for_recorded_move(config_dir, SESSION_ID, str(source))
+    assert resolved == str(destination.resolve()), resolved
+
+    successor = _spawn_successor(config_dir, resolved, inherit_cwd=host_cwd)
+    try:
+        _wait_until(
+            lambda: _stage(config_dir) == cwd_move.STAGE_COMMITTED or None,
+            timeout=BOOT_COMMIT_TIMEOUT_S,
+            what="the successor in the destination to commit the handoff",
+        )
+        _wait_until(
+            lambda: _record_cwd(config_dir, successor.pid) == str(destination.resolve()) or None,
+            timeout=BOOT_COMMIT_TIMEOUT_S,
+            what="the successor to publish its record in the destination",
+        )
+        # AND A LATER BOOT DOES NOT RE-CONSUME ANYTHING: the move is settled, so
+        # nothing retires and nothing loops.
+        assert successor.poll() is None, "a committed move leaves a serving runtime"
+    finally:
+        _reap(successor)
+
+
+def test_a_third_directory_supersedes_a_recorded_handoff_exactly_once(
+    headless_tui_env: Path, tmp_path: Path
+) -> None:
+    """AN EXPLICIT CHOICE WINS, and the boot that lands there settles it.
+
+    After a handoff is recorded, a caller naming a directory that is neither the
+    record's source nor its destination is not silently redirected: the engage
+    guard keeps the caller's directory, and the runtime that boots there
+    reconciles the record to ``superseded``. Once is the point — the superseded
+    request must not be re-consumed by the next boot (that re-arm is the B2 loop).
+    """
+    from local_operator.session.runtime.launch import _engage_cwd_for_recorded_move
+
+    config_dir = headless_tui_env
+    _seed(config_dir, SESSION_ID)
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    third = tmp_path / "third"
+    host_cwd = tmp_path / "host"
+    for directory in (source, destination, third, host_cwd):
+        directory.mkdir()
+
+    cwd_move.enqueue_self_move(
+        config_dir,
+        SESSION_ID,
+        requested_cwd=str(destination),
+        effective_cwd=str(source),
+        owner_pid=os.getpid(),
+    )
+    first = _spawn_successor(config_dir, str(source), inherit_cwd=host_cwd)
+    try:
+        _wait_until(
+            lambda: _stage(config_dir) == cwd_move.STAGE_HANDOFF or None,
+            timeout=BOOT_COMMIT_TIMEOUT_S,
+            what="the viewer-less runtime to record the handoff",
+        )
+    finally:
+        _reap(first)
+
+    assert _engage_cwd_for_recorded_move(config_dir, SESSION_ID, str(third)) == str(third)
+
+    other = _spawn_successor(config_dir, str(third), inherit_cwd=host_cwd)
+    try:
+        _wait_until(
+            lambda: _stage(config_dir) == cwd_move.STAGE_SUPERSEDED or None,
+            timeout=BOOT_COMMIT_TIMEOUT_S,
+            what="the boot in the third directory to supersede the handoff",
+        )
+        settled = cwd_move.read_move_intent(config_dir, SESSION_ID)
+        assert settled is not None and settled.destination_cwd == str(destination.resolve())
+        assert other.poll() is None, "a superseded request leaves a serving runtime"
+        # NO SECOND RETIRE: the stage stays settled while the runtime keeps serving.
+        time.sleep(2.0)
+        assert _stage(config_dir) == cwd_move.STAGE_SUPERSEDED
+        assert other.poll() is None
+    finally:
+        _reap(other)

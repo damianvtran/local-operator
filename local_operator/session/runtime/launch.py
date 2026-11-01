@@ -1307,6 +1307,74 @@ def _live_relay_instance(config_dir: Path) -> str:
     return str(getattr(record, "instance_id", "") or "")
 
 
+def _engage_cwd_for_recorded_move(config_dir: Path, session_id: str, cwd: str) -> str:
+    """The directory this engage should start the session in, honouring a handoff.
+
+    WHY THIS EXISTS. A session's cwd is a SPAWN INPUT, baked into the child at
+    fork (``_spawn_runtime`` writes ``LOP_MOBILE_CHILD_CWD``; see ``attached.py``,
+    "THE CWD IS BAKED IN AT SPAWN"), so nothing can retarget a running runtime.
+    The only way a session changes directory is to STOP and be started again
+    somewhere else — and a headless session has no viewer to re-engage it, so
+    before the durable handoff such a session could never move itself at all: the
+    request sat queued, lapsed after thirty minutes, and the cwd never changed.
+
+    The fix inverts that: the runtime that cannot be followed writes the
+    destination to the move marker and stops (``cwd_move.accept_handoff``). This
+    is the read half, and it lives where ``engage_runtime`` can call it because
+    that function is the ONE entry point every engage path shares — a local
+    viewer's first message, the phone daemon, a scheduled wake, ``lop exec``, the
+    relay — so honouring the record once, at the choke point, covers all of them.
+    A guard at any one caller would be a guard the others do not have.
+
+    WHOSE DIRECTORY WINS:
+
+    * a caller naming the record's SOURCE, or naming nothing, is asking for the
+      session and gets the destination. That is the ordinary case: a wake, a peer
+      message, or a terminal still standing in the old directory all name what
+      they remember — which is exactly what the move superseded;
+    * a caller naming a THIRD directory is making an explicit choice, and an
+      explicit choice wins. No substitution and no silent redirect: the runtime
+      it starts boot-reconciles the record as ``superseded``, which is how the
+      cancelled move is reported (``cwd_move.reconcile_move``).
+
+    FAIL CLOSED ON A BAD READ. The two answers are not symmetric: refusing costs
+    one engage a sentence, while guessing from a torn document spawns the session
+    in the directory it was leaving.
+
+    Cost on the ordinary path is one `stat` — a session with no move marker
+    returns immediately — which is why this is a plain call, not a thread hop.
+    """
+    from local_operator.session import cwd_move
+
+    try:
+        pending_move = cwd_move.pending_handoff(config_dir, session_id)
+    except cwd_move.HandoffUnreadable as unreadable:
+        raise RuntimeStartupError(
+            "this session has a working-directory move recorded that cannot be read, so "
+            f"there is no telling which directory to start it in ({unreadable.path}). "
+            "Delete that file to start the session where the caller asked, or repair it "
+            "and retry."
+        ) from unreadable
+    if pending_move is None:
+        return cwd
+    if not str(cwd or "").strip() or cwd_move.same_directory(cwd, pending_move.source_cwd):
+        logger.info(
+            "engage: %s has a recorded move to %s; starting it there instead of %s",
+            session_id,
+            pending_move.destination_cwd,
+            cwd or "(no directory given)",
+        )
+        return pending_move.destination_cwd
+    logger.info(
+        "engage: %s has a recorded move to %s, but the caller named %s; honouring the caller "
+        "(the boot settles the record as superseded)",
+        session_id,
+        pending_move.destination_cwd,
+        cwd,
+    )
+    return cwd
+
+
 async def engage_runtime(
     session_id: str,
     cwd: str,
@@ -1394,6 +1462,12 @@ async def engage_runtime(
     if handed_off:
         raise RuntimeStartupError(handed_off)
 
+    # -----------------------------------------------------------------
+    # INV-2: A SESSION THAT MOVED ITSELF IS ENGAGED WHERE IT MOVED TO.
+    # -----------------------------------------------------------------
+    # The decision and its whole rationale live in one helper so the test rig
+    # can drive it without standing a runtime up; this is the only call site.
+    cwd = _engage_cwd_for_recorded_move(config_dir, session_id, cwd)
     if not getattr(work, "command_id", ""):
         # Identity is what makes a retry safe. A caller that did not supply one
         # gets one here rather than being silently non-idempotent.
