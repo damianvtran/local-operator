@@ -402,6 +402,21 @@ async def test_a_harness_injected_row_does_not_become_the_provisional_title() ->
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("human", [None, "Please investigate the tool warning"])
+async def test_recovery_never_becomes_a_provisional_title(human: str | None) -> None:
+    from local_operator.harness.chrome_prompts import MISSING_ARGUMENTS_RECOVERY_PROMPT
+
+    app, session = await _boot()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _ready(pilot, app)
+        session._history = [Message.user(MISSING_ARGUMENTS_RECOVERY_PROMPT)]
+        if human:
+            session._history.append(Message.user(human))
+        app._restore_resumed_name(session)
+        assert app._provisional_name == (naming.provisional_title(human) if human else "")
+
+
+@pytest.mark.asyncio
 async def test_frontend_updates_preserve_the_provisional_name() -> None:
     """Canonical control snapshots must not repaint an unnamed tab as its cwd.
 
