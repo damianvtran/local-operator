@@ -39,8 +39,11 @@ The same practice for any agent: reviewing a diff, a patch, or another agent's w
 - A fix that unexpectedly touches more is in scope again: check its blast radius.
 - A genuine late BLOCKER/MAJOR with a reproduced code path stays admissible;
   delta scope is not a waiver for correctness, security or regression risk.
-- Collect all initial review streams before ONE remediation commit; see
-  `guide://delivery` for compatibility proof and metadata-only addenda.
+- Collect all initial review streams before ONE batched remediation round,
+  defaulting to ONE commit. Only justified, independently revertible safety or
+  stream boundaries allow separate commits within that SAME round; never use
+  per-finding commit/review cycles. See `guide://delivery` for convergence,
+  compatibility proof and metadata-only addenda.
 
 ## Verdict
 

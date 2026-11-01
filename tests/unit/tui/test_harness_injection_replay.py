@@ -21,6 +21,7 @@ from local_operator.compaction.cutpoint import (
     PRESERVED_USER_TURN_KEY,
     RENDERED_INJECTION_KEY,
 )
+from local_operator.harness.chrome_prompts import MISSING_ARGUMENTS_RECOVERY_PROMPT
 from local_operator.harness.types import Message, TextContent
 from local_operator.incidents import format_model_switch_message
 from local_operator.tui.app import OperatorApp
@@ -106,6 +107,23 @@ async def test_a_pasted_notice_is_hidden_on_display_but_kept_in_the_transcript()
     assert "[model switch] You are now running as zai/glm-5.3" not in shown
     # Not lost: the row itself is untouched, which is the half that matters.
     assert pasted.text.startswith("[model switch] You are now running as zai/glm-5.3")
+
+
+@pytest.mark.asyncio
+async def test_missing_argument_recovery_does_not_paint_on_replay() -> None:
+    session = FakeSession()
+    session._history = [
+        Message.user("Please investigate the tool warning"),
+        Message.user(MISSING_ARGUMENTS_RECOVERY_PROMPT),
+    ]
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await await_session_boot(app)
+        app._project_settled_rows(list(session._history))
+        await pilot.pause()
+        shown = _transcript_text(app)
+    assert "Please investigate the tool warning" in shown
+    assert "required tool arguments were omitted" not in shown
 
 
 @pytest.mark.asyncio

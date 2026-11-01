@@ -26,6 +26,7 @@ from pydantic import (
 
 from local_operator.harness.rows import (
     ask_gate_diverted_call_ids,
+    is_harness_chrome,
     is_harness_notice_row,
     is_hidden_tool_message,
     without_ask_gate_divert,
@@ -1019,7 +1020,10 @@ def _capture_display_window(
             (
                 m.text[:256]
                 for m in history
-                if isinstance(m, Message) and m.role == "user" and not is_harness_notice_row(m)
+                if isinstance(m, Message)
+                and m.role == "user"
+                and not is_harness_notice_row(m)
+                and not is_harness_chrome(m.text)
             ),
             "",
         ),
