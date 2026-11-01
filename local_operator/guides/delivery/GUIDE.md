@@ -91,8 +91,9 @@ severity-and-evidence ledger, triages conflicts and batches all necessary
 clarifications before edits. The implementer verifies each claim, then fixes
 accepted findings in ONE coordinated remediation pass, answering every ID with
 fixed commit SHA, rejection evidence, or deferral reason and recorded location.
-Logically separate commits are allowed for explicit safety or revert boundaries;
-one batched round does not mean one mandatory commit.
+Default to ONE batched remediation commit. Separate commits require justified,
+independently revertible safety or stream boundaries within the SAME round;
+never use per-finding commit/review cycles.
 
 Use targeted tests for the delta and direct regressions during remediation;
 full coverage belongs at the terminal head OR existing CI. Preserve independent
