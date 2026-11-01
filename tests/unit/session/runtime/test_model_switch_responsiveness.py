@@ -197,7 +197,7 @@ async def test_cold_loopback_listing_cannot_commit_after_resolution_cancellation
     release = threading.Event()
 
     class Handler(BaseHTTPRequestHandler):
-        def log_message(self, *_: Any) -> None:
+        def log_message(self, format: str, *args: Any) -> None:
             pass
 
         def do_GET(self) -> None:

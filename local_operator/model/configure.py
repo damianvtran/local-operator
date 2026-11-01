@@ -1973,7 +1973,9 @@ def _borrowed_listing_token(provider: str, *, base: Path | None = None) -> str:
 
         worker = threading.Thread(target=_run, daemon=True)
         worker.start()
-        worker.join(timeout=_LISTING_BORROW_JOIN_S)
+        from local_operator.model.deadline import remaining
+
+        worker.join(timeout=remaining(_LISTING_BORROW_JOIN_S))
         return outcome[0] if outcome else ""
     except Exception as exc:  # noqa: BLE001 - metadata is never worth a failed start
         logger.debug("could not borrow a %s token for the listing: %s", provider, exc)
