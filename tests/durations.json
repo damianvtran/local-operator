@@ -34,7 +34,9 @@
       "job_id": 124816195230,
       "shard": 4
      }
-    ]
+    ],
+    "workflow_blob": "5212079c36d92854bba386bfdb1b18975e14a6f7",
+    "workflow_sha": "88239c28f29018a7ea73b1e1dd569d429498865f"
    },
    {
     "attempt": 1,
@@ -67,7 +69,9 @@
       "job_id": 124812704185,
       "shard": 4
      }
-    ]
+    ],
+    "workflow_blob": "5212079c36d92854bba386bfdb1b18975e14a6f7",
+    "workflow_sha": "1ea0054d488d8acfb8bf54aa26859234fbd23cb4"
    },
    {
     "attempt": 1,
@@ -100,7 +104,9 @@
       "job_id": 124812356245,
       "shard": 4
      }
-    ]
+    ],
+    "workflow_blob": "5212079c36d92854bba386bfdb1b18975e14a6f7",
+    "workflow_sha": "e88665a2ee82ee964dedba8b64a26b4a161f606b"
    }
   ],
   "samples_per_file": {

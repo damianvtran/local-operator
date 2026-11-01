@@ -8,8 +8,8 @@ margin has been demonstrated.
 
 ## Reproduce the committed manifest
 
-Run from the repository root with Python and authenticated `gh` (no pytest run,
-dependency install or build):
+Run from the repository root with Python, the repository's existing PyYAML
+dependency and authenticated `gh` (no pytest run, dependency install or build):
 
 ```sh
 python scripts/gen_test_durations.py --cache-dir "$LOCAL_OPERATOR_SCRATCHPAD/timing-cache" \
@@ -17,13 +17,39 @@ python scripts/gen_test_durations.py --cache-dir "$LOCAL_OPERATOR_SCRATCHPAD/tim
 ```
 
 The generator fetches attempt-specific jobs and downloads artifacts by immutable
-ID. It requires a completed successful CI run and a complete successful Python
-3.12 five- or six-shard matrix in **that attempt**, then binds artifact creation
-time to each job's execution interval. Missing or ambiguous artifacts are fatal.
+ID. It requires a completed successful CI run and the **exact** complete Python
+3.12 shard matrix declared by its immutable execution-source workflow, then binds
+artifact creation time to each job's execution interval. A six-shard source with
+only jobs 0–4 is incomplete, not a historical five-shard run. Missing or ambiguous
+artifacts are fatal.
 New artifacts include `-attempt-${{ github.run_attempt }}` in their names; old
 names remain readable only with the interval check. Raw XML is stored under the
 cache; run/head/attempt/job/artifact IDs and per-file observation counts are
 committed in `tests/durations.json` under `_provenance`.
+
+For PR events, the Actions API's `head_sha` is the branch head, not the execution
+merge. The generator reads the full identity SHA immediately following the
+attempt job's actions/checkout group (`git log -1 --format=%H`), verifies that
+merge has the run head as a parent, and fetches the workflow at that immutable
+SHA. It never resolves today's mutable PR merge ref or main. For push events,
+checkout must equal the recorded head. Source YAML is safely composed without
+expression evaluation: duplicate keys, aliases, dynamic shard expressions and
+matrix include/exclude fail closed. Only literal contiguous five/six matrices
+are supported; broader workflow forms need an explicitly validated schema.
+
+This depends on retained job logs and source content. Expired/unreadable logs,
+missing/multiple checkout identities, wrong ancestry, or failed source fetches
+abort; falling back to branch HEAD could certify the wrong matrix.
+
+| Run | Executed merge workflow SHA | Workflow blob |
+|---|---|---|
+| 41295059480 | `88239c28f29018a7ea73b1e1dd569d429498865f` | `5212079c36d92854bba386bfdb1b18975e14a6f7` |
+| 41294499173 | `1ea0054d488d8acfb8bf54aa26859234fbd23cb4` | `5212079c36d92854bba386bfdb1b18975e14a6f7` |
+| 41294469202 | `e88665a2ee82ee964dedba8b64a26b4a161f606b` | `5212079c36d92854bba386bfdb1b18975e14a6f7` |
+
+These source identities were verified separately for every admitted run. Their
+identical workflow blob declares five shards; no observed-job count is used to
+infer the expected matrix.
 
 Only exact known ordinary and shard-zero serial-control XML members are read.
 Classnames resolve against real source files, trimming nested test classes;

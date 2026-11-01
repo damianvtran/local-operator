@@ -36,9 +36,11 @@ modules never become free work. Unmeasured files still run at the fallback:
 from __future__ import annotations
 
 import argparse
+import base64
 import glob
 import json
 import math
+import re
 import statistics
 import subprocess
 import sys
@@ -48,6 +50,9 @@ from collections import defaultdict
 from io import BytesIO
 from pathlib import Path
 from typing import Any
+
+import yaml
+from yaml.nodes import MappingNode, Node, ScalarNode, SequenceNode
 
 # The shardable-tree registry lives with the partitioner that consumes it, so
 # the two scripts cannot disagree about which manifest belongs to which tree.
@@ -164,6 +169,109 @@ def _gh_json(endpoint: str) -> dict[str, Any]:
     return json.loads(subprocess.check_output(["gh", "api", endpoint]))
 
 
+def _workflow_shards(workflow: str) -> list[int]:
+    """Read a literal source matrix, never execute Actions expressions or YAML.
+
+    Safe composition retains duplicate keys (safe_load would silently overwrite
+    them). Reject aliases, merge keys, include/exclude and dynamic shard values:
+    those need a new validated schema, not an inferred count of observed jobs.
+    Other matrix axes may contain expressions; they are not evaluated here.
+    """
+
+    def mapping(node: Node | None) -> dict[str, Node]:
+        if not isinstance(node, MappingNode):
+            raise ValueError("source workflow: expected an unambiguous mapping")
+        result = {}
+        for key, value in node.value:
+            if not isinstance(key, ScalarNode) or key.value in result or key.value == "<<":
+                raise ValueError("source workflow: duplicate/ambiguous mapping key")
+            result[key.value] = value
+        return result
+
+    try:
+        if any(
+            isinstance(token, (yaml.tokens.AliasToken, yaml.tokens.AnchorToken))
+            for token in yaml.scan(workflow)
+        ):
+            raise ValueError("source workflow: aliases/anchors are not a literal matrix schema")
+        root = mapping(yaml.compose(workflow, Loader=yaml.SafeLoader))
+        job = mapping(mapping(root.get("jobs")).get("test"))
+        matrix = mapping(mapping(job.get("strategy")).get("matrix"))
+        if "include" in matrix or "exclude" in matrix:
+            raise ValueError("source workflow: matrix include/exclude is unsupported")
+        shards = matrix.get("shard")
+        if not isinstance(shards, SequenceNode) or any(
+            not isinstance(value, ScalarNode)
+            or value.tag != "tag:yaml.org,2002:int"
+            or not re.fullmatch(r"[0-9]+", value.value)
+            for value in shards.value
+        ):
+            raise ValueError("source workflow: shard must be a literal integer sequence")
+        values = [int(value.value) for value in shards.value]
+        if values not in [list(range(n)) for n in (5, 6)]:
+            raise ValueError("source workflow: expected contiguous literal five/six shard matrix")
+        return values
+    except yaml.YAMLError as exc:
+        raise ValueError(f"source workflow: unreadable YAML: {exc}") from exc
+
+
+def _source_matrix(run: dict[str, Any], job: dict[str, Any]) -> tuple[list[int], dict[str, str]]:
+    """Pin PR workflow content to the executed merge, not the moving PR ref.
+
+    Actions' run.head_sha names the PR branch HEAD, NOT its tested merge. The
+    attempt job's checkout log records the full git-log SHA. Require that merge
+    to contain the recorded run head, then fetch the workflow by immutable SHA.
+    No current main, PR head, or refs/pull/.../merge lookup is a valid fallback.
+    Missing/ambiguous checkout evidence fails closed (including expired logs).
+    """
+    logs = subprocess.check_output(
+        [
+            "gh",
+            "api",
+            "--allow-escape-sequences",
+            f"repos/damianvtran/local-operator/actions/jobs/{job['id']}/logs",
+        ],
+        text=True,
+    )
+    lines = [re.sub(r"^\d{4}-\d{2}-\d{2}T\S+ ", "", line) for line in logs.splitlines()]
+    # actions/checkout emits the identity command immediately after its checkout
+    # group. Later test output can contain arbitrary SHA/command-looking text;
+    # it is not checkout evidence and must never select a workflow revision.
+    groups = [i for i, line in enumerate(lines) if line == "##[group]Checking out the ref"]
+    revisions = []
+    for start in groups:
+        end = next(
+            (i for i in range(start + 1, len(lines)) if lines[i] == "##[endgroup]"), len(lines)
+        )
+        if (
+            end + 2 < len(lines)
+            and re.fullmatch(r"\[command\].*/git log -1 --format=%H", lines[end + 1])
+            and re.fullmatch(r"[0-9a-f]{40}", lines[end + 2])
+        ):
+            revisions.append(lines[end + 2])
+    if len(groups) != 1 or len(revisions) != 1:
+        raise ValueError("source workflow: missing/ambiguous immutable checkout SHA in job log")
+    revision = revisions[0]
+    if run.get("event") == "pull_request":
+        commit = _gh_json(f"repos/damianvtran/local-operator/git/commits/{revision}")
+        if len(commit["parents"]) != 2 or run["head_sha"] not in [
+            parent["sha"] for parent in commit["parents"]
+        ]:
+            raise ValueError("source workflow: PR execution merge does not contain run head")
+    elif run.get("event") != "push" or revision != run["head_sha"]:
+        raise ValueError("source workflow: unsupported event or checkout/head mismatch")
+    source = _gh_json(
+        f"repos/damianvtran/local-operator/contents/.github/workflows/ci.yml?ref={revision}"
+    )
+    if source.get("encoding") != "base64":
+        raise ValueError("source workflow: missing base64 source content")
+    try:
+        workflow = base64.b64decode(source["content"]).decode("utf-8")
+    except (ValueError, UnicodeError) as exc:
+        raise ValueError("source workflow: unreadable source content") from exc
+    return _workflow_shards(workflow), {"workflow_sha": revision, "workflow_blob": source["sha"]}
+
+
 def ci_run(run_id: int, attempt: int, cache: Path) -> tuple[dict[str, float], dict[str, Any]]:
     """Admit only an entire successful Python 3.12 shard matrix from ONE attempt.
 
@@ -189,11 +297,16 @@ def ci_run(run_id: int, attempt: int, cache: Path) -> tuple[dict[str, float], di
         (j for j in jobs if j["name"].startswith("test (3.12, ")),
         key=lambda j: j["name"],
     )
-    # Both the old and new matrices are legitimate future timing sources.
-    if [j["name"] for j in shards] not in [
-        [f"test (3.12, {s})" for s in range(n)] for n in (5, 6)
-    ] or any(j["conclusion"] != "success" for j in shards):
-        raise ValueError(f"run {run_id}: incomplete or unsuccessful shard matrix")
+    if not shards:
+        raise ValueError(f"run {run_id}: no unit shard jobs for source validation")
+    expected, workflow_source = _source_matrix(run, shards[0])
+    if [j["name"] for j in shards] != [f"test (3.12, {s})" for s in expected] or any(
+        j["conclusion"] != "success" for j in shards
+    ):
+        raise ValueError(
+            f"run {run_id}: incomplete or unsuccessful shard matrix; "
+            f"source {workflow_source.get('workflow_sha', run['head_sha'])} expects {expected}"
+        )
     paths: list[Path] = []
     sources = []
     for shard, job in enumerate(shards):
@@ -234,6 +347,7 @@ def ci_run(run_id: int, attempt: int, cache: Path) -> tuple[dict[str, float], di
         "attempt": attempt,
         "head": run["head_sha"],
         "python": "3.12",
+        **workflow_source,
         "shards": sources,
     }
 
