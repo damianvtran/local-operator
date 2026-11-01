@@ -345,6 +345,51 @@ def test_only_the_delegating_roles_may_delegate() -> None:
         assert seed(name).may_delegate is False, name
 
 
+@pytest.mark.parametrize(
+    ("role", "cue"),
+    [
+        ("manager", "severity-and-evidence ledger"),
+        ("coder", "verify every claim"),
+        ("reviewer", "full in-scope code"),
+        ("qa-tester", "full in-scope QA matrix"),
+        ("designer", "full in-scope visual"),
+        ("ux-reviewer", "full in-scope interaction"),
+    ],
+)
+def test_convergence_cues_reach_delegated_prompt(tmp_path, role, cue) -> None:
+    """Check the actual launch assembler, not just the seed Markdown.
+
+    Registry overrides deliberately win: changing packaged guidance must not
+    silently rewrite an operator's role. The negative control proves that this
+    receipt distinguishes starter rollout from an already-installed override.
+    """
+    from types import SimpleNamespace
+
+    from local_operator.harness.subagent import _effective_prompt
+
+    registry = AgentRegistry(tmp_path)
+    parent = SimpleNamespace(agent_registry=registry, active_team=None)
+    brief = "Synthetic bounded review task"
+    packaged = seed(role)
+    initial, profile = _effective_prompt(brief, role, parent)
+    assert profile is not None
+    assert initial == packaged.preamble + brief
+    assert "guide://delivery" in initial and cue in initial
+
+    installed = install_seed(role, registry=registry, scope="global")
+    assert installed is not None
+    loaded, _ = _effective_prompt(brief, role, parent)
+    assert loaded == initial, "fresh installation must preserve every starter byte"
+
+    installed_profile, _ = installed
+    assert installed_profile.agent_id is not None
+    registry.set_agent_system_prompt(installed_profile.agent_id, "Override control")
+    control, _ = _effective_prompt(brief, role, parent)
+    assert "Override control" in control
+    assert cue not in control and "guide://delivery" not in control
+    assert control != loaded, "a seed-only probe must not masquerade as rollout"
+
+
 def test_the_preamble_is_empty_when_a_role_says_nothing() -> None:
     """It rides in front of every prompt, so a role with no guidance must
     cost nothing rather than emitting a header with nothing under it."""

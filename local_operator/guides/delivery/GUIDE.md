@@ -80,12 +80,37 @@ investigate failures, including ones outside the slice.
 
 ## Converge, do not restart
 
-Collect all initial code, QA, design and UX reports before ONE remediation
-commit. On round 2+ review the remediation delta and direct regression
-neighbors, with the previous head as a negative comparison when needed. Keep
-unchanged evidence when byte/source compatibility is proved. A model-header or
-provenance-only metadata correction is an addendum, not a reason to rerun the
-suite; a new executable or user-visible change is not metadata.
+Complete each applicable initial stream (code, independent real-path QA, design,
+UX and security) coherently across its full in-scope surface; do not stop at the
+first finding and start remediation. An early BLOCKER alert may bound risk, but
+must say the review is incomplete. Reviews run asynchronously with CI, not after
+its full pass; merge still requires all applicable gates.
+
+The manager collects all applicable initial reports into ONE deduplicated
+severity-and-evidence ledger, triages conflicts and batches all necessary
+clarifications before edits. The implementer verifies each claim, then fixes
+accepted findings in ONE coordinated remediation pass, answering every ID with
+fixed commit SHA, rejection evidence, or deferral reason and recorded location.
+Logically separate commits are allowed for explicit safety or revert boundaries;
+one batched round does not mean one mandatory commit.
+
+Use targeted tests for the delta and direct regressions during remediation;
+full coverage belongs at the terminal head OR existing CI. Preserve independent
+real-path QA, design, UX and security gates. Follow-up scope is
+`<previous_reviewed_head>..<new_head>` plus direct regression neighbors, not an
+unchanged re-audit or a MINOR/NIT loop. A late BLOCKER/MAJOR needs a concrete code
+path/reproducer and its changed or direct-neighbor scope. Keep unchanged evidence
+only when byte/source compatibility is proved; backend response-shape changes
+may require new rendered evidence. Model-header or provenance-only
+metadata corrections are addenda, not product/suite resets; executable or
+user-visible changes are not metadata.
+
+After two unsuccessful remediation cycles, freeze the severity/evidence ledger,
+root-transition/authority matrix (failing state, intended transition, authoritative
+owner/source) and explicit exit criteria BEFORE more patches. If the same unknown
+persists twice, escalate it to the owner rather than guessing again. This is a
+checkpoint, not an arbitrary maximum-round waiver: unresolved BLOCKER/MAJOR
+findings and required evidence still gate completion.
 
 A moved base is NOT a blind re-pin: post `scripts/rebase_proof.py`'s
 `### Rebase proof` (range-diff `=`, byte-identical patch, no file overlap).
