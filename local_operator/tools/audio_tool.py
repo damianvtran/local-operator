@@ -248,7 +248,7 @@ def _describe_sound_effect_approval(args: dict[str, Any], cwd: str) -> str:
         # each server receipt remains authoritative for billing and the ledger.
         estimates = [
             pricing.sound_effect_estimate(
-                "elevenlabs" if route == AudioRoute.RADIENT else str(route),
+                str(route),
                 None if route == AudioRoute.RADIENT else params.model,
                 item.duration_s,
             )

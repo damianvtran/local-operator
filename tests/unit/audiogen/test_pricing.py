@@ -53,7 +53,7 @@ def test_sound_effects_price_whole_started_seconds():
         (4.01, 5, 0.0100),
     ]
     for duration, units, amount in cases:
-        estimate = pricing.sound_effect_estimate("elevenlabs", None, duration)
+        estimate = pricing.sound_effect_estimate("elevenlabs", "eleven_text_to_sound_v2", duration)
         assert estimate is not None, duration
         assert estimate.units == units, duration
         assert estimate.unit == "seconds"
@@ -103,15 +103,9 @@ def test_an_unpinned_model_prices_on_what_the_rung_would_run():
     assert unpinned.units == 1000.0 and unpinned.unit == "chars"
 
 
-def test_every_byok_model_the_rungs_send_is_priceable():
-    """A model the rung sends MUST have a rate row, or every estimate is None.
-
-    The table keys are literals (it is data), so this is the drift pin: the
-    ids the rungs default to — voiceover and Flash voiceover per provider, and
-    the sound-effect model — are exactly the ids the table prices.
-    """
+def test_known_voiceover_defaults_have_published_rate_rows():
+    """Published voiceover prices remain pinned independently of the SFX migration."""
     from local_operator.audiogen.models import (
-        ELEVENLABS_SOUND_EFFECT_MODEL,
         ELEVENLABS_VOICEOVER_FLASH_MODEL,
         ELEVENLABS_VOICEOVER_MODEL,
         OPENAI_VOICEOVER_MODEL,
@@ -121,8 +115,22 @@ def test_every_byok_model_the_rungs_send_is_priceable():
     assert ("elevenlabs", ELEVENLABS_VOICEOVER_MODEL) in voiceover_keys
     assert ("elevenlabs", ELEVENLABS_VOICEOVER_FLASH_MODEL) in voiceover_keys
     assert ("openai", OPENAI_VOICEOVER_MODEL) in voiceover_keys
-    assert ("elevenlabs", ELEVENLABS_SOUND_EFFECT_MODEL) in set(
-        pricing.SOUND_EFFECT_RATES_PER_SECOND
-    )
     # And no row prices a model the lane cannot send (a typo would be dead data).
     assert all(provider in {"elevenlabs", "openai"} for provider, _model in voiceover_keys)
+
+
+def test_v3_default_has_no_unverified_v2_price():
+    from local_operator.audiogen.models import ELEVENLABS_SOUND_EFFECT_MODEL
+
+    assert ELEVENLABS_SOUND_EFFECT_MODEL == "eleven_text_to_sound_v3"
+    assert pricing.sound_effect_estimate("elevenlabs", None, 5) is None
+    assert pricing.sound_effect_estimate("elevenlabs", ELEVENLABS_SOUND_EFFECT_MODEL, 5) is None
+    # Explicit legacy requests retain their historical estimate.
+    legacy = pricing.sound_effect_estimate("elevenlabs", "eleven_text_to_sound_v2", 5)
+    assert legacy is not None and legacy.amount_usd == 0.01
+
+
+def test_radient_published_policy_is_independent_of_byok_unknown_price():
+    estimate = pricing.sound_effect_estimate("radient", None, 0.5)
+    assert estimate is not None and estimate.amount_usd == 0.002
+    assert "radient/sound-effects" in estimate.provenance

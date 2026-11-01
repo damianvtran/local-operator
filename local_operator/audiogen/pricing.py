@@ -68,6 +68,9 @@ VOICEOVER_RATES_PER_1K_CHARS: dict[tuple[str, str], float] = {
 #: row exists — deliberately absent rather than zeroed.
 SOUND_EFFECT_RATES_PER_SECOND: dict[tuple[str, str], float] = {
     ("elevenlabs", "eleven_text_to_sound_v2"): 0.002,
+    # The platform publishes its own quoted USD policy. This is not evidence
+    # of a model-specific v3 vendor price for a user's BYOK account.
+    ("radient", "radient/sound-effects"): 0.002,
 }
 
 
@@ -156,7 +159,13 @@ def sound_effect_estimate(
     """
     if not math.isfinite(duration_s) or duration_s <= 0:
         return None
-    resolved = (model or "").strip() or "eleven_text_to_sound_v2"
+    # Resolve from the request model's source of truth. Do not inherit v2's rate
+    # for v3 without a published model-specific USD price: unknown is not zero.
+    from local_operator.audiogen.models import ELEVENLABS_SOUND_EFFECT_MODEL
+
+    resolved = (model or "").strip() or (
+        "radient/sound-effects" if provider == "radient" else ELEVENLABS_SOUND_EFFECT_MODEL
+    )
     rate = SOUND_EFFECT_RATES_PER_SECOND.get((provider, resolved))
     if rate is None:
         return None

@@ -237,11 +237,12 @@ async def test_the_radient_card_says_the_server_quotes(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_the_sound_effect_card_prices_the_duration(monkeypatch):
+async def test_the_v3_sound_effect_card_does_not_borrow_a_v2_price(monkeypatch):
     monkeypatch.setattr(audio_tool, "_preferred_route", lambda direction: AudioRoute.ELEVENLABS)
     text = audio_tool._describe_sound_effect_approval({"prompt": "a clap", "duration_s": 10}, ".")
     assert "10s sound effect" in text
-    assert "$0.0200" in text, "10 s at $0.002/s"
+    assert "$" not in text, "v3 has no verified BYOK USD estimate"
+    assert "paid provider call" in text
 
 
 @pytest.mark.asyncio
@@ -372,7 +373,7 @@ async def test_a_sub_second_byok_effect_row_counts_one_started_second(monkeypatc
     estimate prices with, and the label must not drift towards a charge.
     """
     spent: list[Any] = []
-    estimate = pricing.sound_effect_estimate("elevenlabs", None, 0.5)
+    estimate = pricing.sound_effect_estimate("elevenlabs", "eleven_text_to_sound_v2", 0.5)
     assert estimate is not None and estimate.amount_usd == pytest.approx(0.002)
     outcome = _outcome(
         route=AudioRoute.ELEVENLABS,
@@ -386,7 +387,7 @@ async def test_a_sub_second_byok_effect_row_counts_one_started_second(monkeypatc
     _fake_cascade(monkeypatch, outcome)
     result = await audio_tool.execute_generate_sound_effect(
         "call-sfx-half",
-        {"prompt": "a single clap", "duration_s": 0.5},
+        {"prompt": "a single clap", "duration_s": 0.5, "model": "eleven_text_to_sound_v2"},
         None,
         None,
         _context(tmp_path, spent),

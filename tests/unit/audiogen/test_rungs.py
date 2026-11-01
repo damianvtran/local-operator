@@ -757,12 +757,11 @@ async def test_elevenlabs_sound_effect_body_carries_the_required_duration():
     assert body["duration_seconds"] == 3.5
     assert body["prompt_influence"] == 0.7
     assert body["loop"] is True
-    assert body["model_id"] == "eleven_text_to_sound_v2"
-    # 3.5 s is FOUR started seconds: the estimate prices whole units, the same
-    # count the ledger row carries (a fractional 3.5 × rate under-quoted it).
-    assert outcome.cost_usd == pytest.approx(0.002 * 4)
-    assert outcome.cost_source == "rate_table"
-    assert outcome.billing_basis == "estimated"
+    assert body["model_id"] == "eleven_text_to_sound_v3"
+    # A v2 rate must not masquerade as verified v3 BYOK spending.
+    assert outcome.cost_usd is None
+    assert outcome.cost_source is None
+    assert outcome.billing_basis is None
 
 
 @pytest.mark.asyncio
