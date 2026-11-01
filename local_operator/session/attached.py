@@ -10257,6 +10257,12 @@ class AttachedSession:
                 [_image_to_wire(image) for image in (images or [])],
             )
         except ConnectionError as error:
+            # An ACK expiry is not a disconnect: the authenticated socket is
+            # still live and the mutation may already have landed. Preserve
+            # that typed disposition for the desktop/control caller instead
+            # of falsely prescribing owner recovery (or replaying the switch).
+            if getattr(error, "owner_alive", False):
+                raise
             raise ConnectionError(_RECONNECTING_SLASH_NOTICE.format(command=command)) from error
 
     def _require_routed_model_admission(self, args: str) -> None:
