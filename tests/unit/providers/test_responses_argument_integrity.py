@@ -37,6 +37,10 @@ from tests.unit.harness.test_loop import make_config
         ("late_delta", False),
         ("delta", False),
         ("empty_object", False),
+        ("added_then_deltas", False),
+        ("added_prefix_then_deltas", False),
+        ("added_only", False),
+        ("metadata_tail", False),
     ],
 )
 async def test_final_arguments_reach_real_dispatch_once(source, prefix):
@@ -63,6 +67,11 @@ async def exercise_lifecycle(source, *, prefix=False, conflict=False):
         "name": "read",
         "arguments": arguments,
     }
+    added_arguments = ""
+    if source in ("added", "added_then_deltas", "added_only"):
+        added_arguments = arguments
+    elif source == "added_prefix_then_deltas":
+        added_arguments = arguments[:9]
     payloads = [
         # A reasoning item makes output_index differ from normalized call index.
         {
@@ -73,12 +82,12 @@ async def exercise_lifecycle(source, *, prefix=False, conflict=False):
         {
             "type": "response.output_item.added",
             "output_index": 1,
-            "item": {**item, "arguments": arguments if source == "added" else ""},
+            "item": {**item, "arguments": added_arguments},
         },
     ]
     if source in ("done_only", "completed_only"):
         payloads = []
-    if source == "delta":
+    if source in ("delta", "added_then_deltas", "added_prefix_then_deltas"):
         payloads.append(
             {
                 "type": "response.function_call_arguments.delta",
@@ -113,7 +122,7 @@ async def exercise_lifecycle(source, *, prefix=False, conflict=False):
                 "arguments": arguments,
             }
         )
-    if source not in ("completed", "completed_only"):
+    if source not in ("completed", "completed_only", "added_only"):
         # Duplicate done snapshots are normal and must never double arguments.
         payloads.extend(
             [
@@ -130,7 +139,18 @@ async def exercise_lifecycle(source, *, prefix=False, conflict=False):
             },
         }
     )
-    if source == "late_delta":
+    if source == "added_only":
+        # No final argument/item source: legacy endpoints can omit the output
+        # field entirely. A populated added snapshot still must reach dispatch.
+        payloads[-1] = {"type": "response.completed", "response": {"id": "synthetic-response"}}
+    if source == "metadata_tail":
+        payloads.append(
+            {
+                "type": "response.subscription_usage",
+                "subscription": {"window": {"used_percent": 7}},
+            }
+        )
+    if source in ("late_delta", "metadata_tail"):
         payloads.append(
             {
                 "type": "response.function_call_arguments.delta",
@@ -141,6 +161,15 @@ async def exercise_lifecycle(source, *, prefix=False, conflict=False):
         )
     executed = []
     captured = []
+    observed_metadata = []
+
+    class ObservingClient(OpenAICompatClient):
+        def _observe_responses_event(self, payload):
+            # Billing metadata is observational, not generated output. The real
+            # Muse client uses this same hook for its required trailing receipt.
+            if payload.get("type") == "response.subscription_usage":
+                observed_metadata.append(payload)
+            super()._observe_responses_event(payload)
 
     async def execute(call_id, args, signal, on_update, context):
         executed.append(args)
@@ -173,7 +202,7 @@ async def exercise_lifecycle(source, *, prefix=False, conflict=False):
         )
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
-        client = OpenAICompatClient(
+        client = ObservingClient(
             "https://synthetic.invalid/v1", http_client=http, openai_api="responses"
         )
 
@@ -192,6 +221,8 @@ async def exercise_lifecycle(source, *, prefix=False, conflict=False):
             )
         ]
     assert captured[0]["tools"][0]["parameters"] == tool.parameters
+    if source == "metadata_tail":
+        assert len(observed_metadata) == 1
     end = next(event for event in reversed(events) if isinstance(event, AgentEndEvent))
     if conflict:
         assert executed == []

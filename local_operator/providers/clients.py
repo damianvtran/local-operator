@@ -3976,6 +3976,8 @@ class OpenAICompatClient:
         call_indexes: dict[str, int] = {}
         output_items: dict[int, dict[str, Any]] = {}
         argument_parts: dict[int, list[str]] = {}
+        added_argument_snapshots: dict[int, str] = {}
+        added_argument_bytes = 0
         output_call_indexes: dict[int, int] = {}
         call_identities: dict[int, tuple[str, str, str]] = {}
         finalized_arguments: set[int] = set()
@@ -4011,7 +4013,7 @@ class OpenAICompatClient:
         def reconcile_item(
             item: Mapping[str, Any], output_index: int, *, final: bool = False
         ) -> list[StreamToolCallDelta]:
-            nonlocal tool_call_count
+            nonlocal tool_call_count, added_argument_bytes
             if item.get("type") != "function_call":
                 # A completed message/reasoning item cannot erase a call that
                 # already owns this output slot. Partial deltas are pending,
@@ -4046,7 +4048,24 @@ class OpenAICompatClient:
                 call_indexes[call_id] = index
             if item_id:
                 call_indexes[item_id] = index
-            events.extend(reconcile_arguments(index, item.get("arguments")))
+            arguments = item.get("arguments")
+            if final:
+                snapshot = added_argument_snapshots.get(index, "")
+                if not isinstance(arguments, str) or not arguments.startswith(snapshot):
+                    raise conflicting_call()
+                events.extend(reconcile_arguments(index, arguments))
+            elif isinstance(arguments, str) and arguments:
+                # The added item is a snapshot, not the first argument delta:
+                # providers may repeat its populated arguments in the stream.
+                # Keep the sources separate until a final snapshot reconciles
+                # them, so native replay and dispatch cannot disagree.
+                previous = added_argument_snapshots.get(index)
+                if previous is not None and previous != arguments:
+                    raise conflicting_call()
+                if previous is None:
+                    added_argument_bytes += len(arguments.encode("utf-8"))
+                    envelope.check(added_argument_bytes)
+                    added_argument_snapshots[index] = arguments
             return events
 
         async with self._http.stream(
@@ -4070,6 +4089,14 @@ class OpenAICompatClient:
                     continue
                 self._observe_responses_event(payload)
                 event_type = payload.get("type", "")
+                if terminal_stop is not None:
+                    # Completion closes generated output, not the transport's
+                    # metadata tail. Muse's subscription receipt arrives AFTER
+                    # response.completed and must reach the observer above;
+                    # late output deltas must not mutate pending calls.
+                    if event_type in ("response.failed", "error"):
+                        raise _openai_response_error(payload)
+                    continue
                 if event_type == "response.created":
                     # The Responses API names the turn as soon as it opens it.
                     # Capture the boundary HERE, not at ``response.completed``:
@@ -4179,6 +4206,18 @@ class OpenAICompatClient:
                                     raise conflicting_call()
                                 final_call_indices.add(index)
                                 final_call_positions.add(output_index)
+                    if not explicit_output:
+                        # Legacy endpoints can omit final items as well as the
+                        # terminal field. Reconcile a populated added snapshot
+                        # with a separately streamed prefix without duplicating
+                        # either source; a shorter added snapshot stays partial.
+                        for index, snapshot in added_argument_snapshots.items():
+                            streamed = "".join(argument_parts.get(index, []))
+                            if snapshot.startswith(streamed):
+                                for event in reconcile_arguments(index, snapshot):
+                                    yield event
+                            elif not streamed.startswith(snapshot):
+                                raise conflicting_call()
                     # Never dispatch survivors of an explicitly contradictory
                     # batch. An absent field is not a membership assertion:
                     # legacy delta-only streams and length truncation retain
@@ -4322,9 +4361,6 @@ class OpenAICompatClient:
                                 f"OpenAI Responses incomplete: {reason or 'unknown reason'}",
                                 retryable=False,
                             )
-                    # A terminal snapshot is authoritative. Do not append late
-                    # duplicate deltas from a compatible endpoint after it.
-                    break
                 elif event_type in ("response.failed", "error"):
                     raise _openai_response_error(payload)
 
