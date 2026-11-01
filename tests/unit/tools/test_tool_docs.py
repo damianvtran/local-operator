@@ -398,7 +398,9 @@ MEASURED_TOKENS: dict[str, int] = {
     # `console_cleanup` in the console doc — the ONLY entry that moved. The two
     # new methods and the capacity/cleanup detail are the whole delta.
     "console": 1228,
-    "edit": 347,
+    # The ordered-hunks and anchor-line descriptions were shortened without
+    # changing their contract; this is the measured tool://edit cost (347 -> 326).
+    "edit": 326,
     "eval": 372,
     #: Media wave-2 edit lane (2026-10-10): the source paragraph now names
     #: the by-reference input (``source_attachment``) and the edit rungs;

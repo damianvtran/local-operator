@@ -311,6 +311,12 @@ def _served_provider_name(value: Any) -> str | None:
     return trimmed
 
 
+def _reported_token_count(raw: Mapping[str, Any], key: str) -> bool:
+    """A missing or malformed counter is not an explicitly reported zero."""
+    value = raw.get(key)
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
 def _compat_cache_usage(raw_usage: Mapping[str, Any]) -> tuple[int | None, int]:
     """Normalize counters without mistaking an absent or malformed hit for zero."""
     details = raw_usage.get("prompt_tokens_details") or {}
@@ -3708,6 +3714,9 @@ class OpenAICompatClient:
                             at_ms=tariff.now_ms(),
                         )
                         usage._cache_read_reported = cache_read is not None
+                        usage._token_counts_reported = _reported_token_count(
+                            raw, "prompt_tokens"
+                        ) and _reported_token_count(raw, "completion_tokens")
                         yield StreamUsageEvent(usage=usage)
                     choices = chunk.get("choices") or []
                     if not choices:
@@ -4302,6 +4311,9 @@ class OpenAICompatClient:
                             # call's own (see ``model/tariff.moment_for``).
                             at_ms=tariff.now_ms(),
                         )
+                        usage._token_counts_reported = _reported_token_count(
+                            raw, "input_tokens"
+                        ) and _reported_token_count(raw, "output_tokens")
                         yield StreamUsageEvent(usage=usage)
                     if event_type == "response.completed":
                         if refusal_parts:
@@ -5309,6 +5321,8 @@ class AnthropicClient:
         # property of the call (seconds of skew across a stream boundary cannot
         # change a window that is hours wide).
         usage = Usage(at_ms=tariff.now_ms())
+        input_reported = False
+        output_reported = False
         streamed_text = False
         block_index_to_call: dict[int, tuple[str, str]] = {}
         oauth = self._is_oauth(oauth_access)
@@ -5378,6 +5392,7 @@ class AnthropicClient:
                         cache_missed_tokens=missed_tokens,
                     )
                     raw_usage = (event.get("message") or {}).get("usage") or {}
+                    input_reported = _reported_token_count(raw_usage, "input_tokens")
                     usage.input_tokens = int(raw_usage.get("input_tokens", usage.input_tokens))
                     usage.cache_read_tokens = int(raw_usage.get("cache_read_input_tokens", 0))
                     usage.cache_write_tokens = int(raw_usage.get("cache_creation_input_tokens", 0))
@@ -5429,6 +5444,7 @@ class AnthropicClient:
                         stop_reason = str(delta["stop_reason"])
                     raw_usage = event.get("usage") or {}
                     if "output_tokens" in raw_usage:
+                        output_reported = _reported_token_count(raw_usage, "output_tokens")
                         usage.output_tokens = int(raw_usage["output_tokens"])
                 elif event_type == "error":
                     raise _anthropic_stream_error(event.get("error") or {})
@@ -5451,6 +5467,7 @@ class AnthropicClient:
             # line only needs to name the mechanism — and whether it cut a
             # partially-streamed answer or produced nothing at all (D1).
             error = _refusal_error("stop_reason=refusal", "", streamed_text=streamed_text)
+        usage._token_counts_reported = input_reported and output_reported
         yield StreamUsageEvent(usage=usage)
         yield StreamEndEvent(stop_reason=mapped, usage=usage, error=error)
 
@@ -5830,6 +5847,9 @@ class GoogleClient:
                         # a time-of-use row is priced in (``model/tariff``).
                         at_ms=tariff.now_ms(),
                     )
+                    usage._token_counts_reported = _reported_token_count(
+                        raw_usage, "promptTokenCount"
+                    ) and _reported_token_count(raw_usage, "candidatesTokenCount")
 
         if usage is not None:
             yield StreamUsageEvent(usage=usage)

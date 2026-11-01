@@ -518,6 +518,100 @@ def test_compaction_event_inside_a_request_triple_is_invalid(tmp_path: Path) -> 
     assert "receipt_binding_invalid" in codes(root)
 
 
+def test_auxiliary_summary_cannot_appear_inside_an_open_request(tmp_path: Path) -> None:
+    from local_operator.evaluation.evidence.models import AuxiliaryUsageCostPayload
+
+    root = tmp_path / "auxiliary-inside-request"
+    with EvidenceWriter.create(root, manifest(), RedactionSet.from_resolved_values(())) as writer:
+        _append_authority(writer)
+        writer.append(
+            "model_request",
+            ModelRequestPayload(
+                request_id="request-0",
+                requested_route=ROUTE,
+                tool_schema_digest=DIGEST,
+                input_tokens=1,
+                message_count=1,
+                tool_count=0,
+            ),
+            monotonic_ns=1,
+            wall_time_ms=1,
+        )
+        writer.append(
+            "auxiliary_usage_cost",
+            AuxiliaryUsageCostPayload(
+                auxiliary_id="aux-0",
+                route=ROUTE,
+                provider_request_id="provider-0",
+                input_tokens=100,
+                output_tokens=5,
+                cost_microusd=10,
+                cost_known=True,
+            ),
+            monotonic_ns=2,
+            wall_time_ms=2,
+        )
+    assert "receipt_binding_invalid" in codes(root)
+
+    duplicate = tmp_path / "auxiliary-duplicate"
+    with EvidenceWriter.create(
+        duplicate, manifest(), RedactionSet.from_resolved_values(())
+    ) as writer:
+        _append_authority(writer)
+        charge = AuxiliaryUsageCostPayload(
+            auxiliary_id="aux-0",
+            route=ROUTE,
+            provider_request_id="provider-0",
+            input_tokens=100,
+            output_tokens=5,
+            cost_microusd=10,
+            cost_known=True,
+        )
+        writer.append("auxiliary_usage_cost", charge, monotonic_ns=1, wall_time_ms=1)
+        writer.append("auxiliary_usage_cost", charge, monotonic_ns=2, wall_time_ms=2)
+    assert "receipt_binding_invalid" in codes(duplicate)
+
+    unknown = tmp_path / "auxiliary-unknown-previous"
+    with EvidenceWriter.create(
+        unknown, manifest(), RedactionSet.from_resolved_values(())
+    ) as writer:
+        _append_authority(writer)
+        charge = AuxiliaryUsageCostPayload(
+            auxiliary_id="aux-1",
+            previous_request_id="missing",
+            route=ROUTE,
+            provider_request_id="provider-1",
+            input_tokens=100,
+            output_tokens=5,
+            cost_microusd=10,
+            cost_known=True,
+        )
+        writer.append("auxiliary_usage_cost", charge, monotonic_ns=1, wall_time_ms=1)
+    assert "receipt_binding_invalid" in codes(unknown)
+
+
+def test_auxiliary_summary_must_reference_latest_request(tmp_path: Path) -> None:
+    from local_operator.evaluation.evidence.models import AuxiliaryUsageCostPayload
+
+    stale = tmp_path / "auxiliary-stale-previous"
+    with EvidenceWriter.create(stale, manifest(), RedactionSet.from_resolved_values(())) as writer:
+        _append_authority(writer)
+        _request_triple(writer, "request-0", at=1)
+        _request_triple(writer, "request-1", at=4)
+        charge = AuxiliaryUsageCostPayload(
+            auxiliary_id="aux-2",
+            previous_request_id="request-0",
+            route=ROUTE,
+            provider_request_id="provider-2",
+            input_tokens=100,
+            output_tokens=5,
+            cost_microusd=10,
+            cost_known=True,
+        )
+        writer.append("auxiliary_usage_cost", charge, monotonic_ns=7, wall_time_ms=7)
+    assert "receipt_binding_invalid" in codes(stale)
+
+
 def test_semantic_graph_rejects_broken_observation_action_step_links(
     tmp_path: Path,
 ) -> None:
