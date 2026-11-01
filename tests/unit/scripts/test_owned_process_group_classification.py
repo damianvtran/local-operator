@@ -31,12 +31,18 @@ from tests.unit.scripts.test_run_bounded import memory_wrapper  # noqa: F401
 class World:
     """Synthetic kernel facts. Nothing here is a host capability."""
 
-    def __init__(self, pgid=10, parent=1, birth="leader", scheme="fixture"):
+    def __init__(self, pgid=10, parent=None, birth="leader", scheme="fixture"):
+        # C1: the leader must still be OUR child, so the synthetic kernel records
+        # this process as its parent unless a test deliberately models a foreign
+        # one. Modelling that by default made every arm "not_exclusive_reaper".
+        parent = os.getpid() if parent is None else parent
         self.pgid, self.parent, self.birth, self.scheme = pgid, parent, birth, scheme
         self.rows = {parent: (0, parent, parent, "creator"), pgid: (parent, pgid, pgid, birth)}
         self.now = 0.0
         self.calls = []
         self.sample_calls = 0
+        #: Set by a test that wants the leader to become an unreaped corpse.
+        self.corpse = False
 
     def clock(self):
         self.now += 0.001
@@ -46,12 +52,13 @@ class World:
         return sorted(pid for pid, row in self.rows.items() if row[1] == pgid)
 
     def samples(self, pids):
-        # Two samples during capture, then the child is a corpse: the loop sees it
-        # through `leader_terminal` and never reaps it to find out.
+        # WHEN the leader becomes a corpse is the test's decision, never a count of
+        # how many times this was asked: a count silently tracks the implementation's
+        # call sequence, so adding one honest witness read turned a live leader into
+        # a corpse mid-capture and made every arm report absence.
         self.sample_calls += 1
-        corpse = self.sample_calls > 2
         return {
-            pid: owned.procstate.ProcessSample(corpse and pid == self.pgid, self.rows[pid][3])
+            pid: owned.procstate.ProcessSample(self.corpse and pid == self.pgid, self.rows[pid][3])
             for pid in pids
             if pid in self.rows
         }
@@ -74,8 +81,20 @@ class World:
             signal_group=send,
         )
 
-    def forget(self, pgid=None):
-        self.rows.pop(pgid or self.pgid, None)
+    def forget(self, pgid=None, *, keep_leader=False):
+        """The group empties. The leader's own row is a CORPSE, not a departure.
+
+        Popping it models a REAPED leader, which the contract refuses as pin_lost;
+        the healthy case this file is about is "every member went away while the
+        reservation still held", so the corpse row stays unless a test says
+        otherwise.
+        """
+        gone = pgid or self.pgid
+        if keep_leader:
+            self.corpse = True
+            self.rows = {pid: row for pid, row in self.rows.items() if pid == self.pgid}
+            return
+        self.rows.pop(gone, None)
 
 
 #: Real kernel primitives: skip where the platform has no POSIX process groups.
@@ -94,6 +113,17 @@ def _free_process_group() -> int:
     pytest.skip("no free process-group id available for the ESRCH control")
 
 
+@pytest.fixture(autouse=True)
+def _fixture_birth_scheme(monkeypatch):
+    """The synthetic kernel speaks the ``fixture`` birth scheme.
+
+    Without this the receipt and the sampled token are compared under the *host*
+    scheme, so every capture refuses for a reason that has nothing to do with the
+    classification under test. Same stub the other provider-injected suites use.
+    """
+    monkeypatch.setattr(owned.procstate, "birth_scheme", lambda: "fixture")
+
+
 @pytest.fixture
 def wrapper(request, monkeypatch, tmp_path):
     """The real wrapper module, isolated scratch, real capability object.
@@ -107,8 +137,22 @@ def wrapper(request, monkeypatch, tmp_path):
     return module
 
 
-def _fake_process(poll_status):
-    return NS(pid=10, poll=lambda: poll_status, wait=lambda **_: poll_status)
+def _fake_process(poll_status, world=None):
+    """A child that has already exited.
+
+    An exited, unreaped child IS a corpse, so reporting the exit status makes the
+    synthetic kernel report a zombie leader -- otherwise the wrapper waits out its
+    whole bound for a terminal state the world can never reach.
+    """
+
+    def poll():
+        return poll_status
+
+    if poll_status is not None and world is not None:
+        # The child has ALREADY exited: the wrapper no longer asks `poll()` to find
+        # that out (it samples the leader), so the synthetic world must state it.
+        world.corpse = True
+    return NS(pid=10, poll=poll, wait=lambda **_: poll_status)
 
 
 def _install(wrapper, monkeypatch, world, send, process):
@@ -169,10 +213,10 @@ def test_a_passing_gate_keeps_rc_zero_when_the_group_is_already_gone(wrapper, mo
     world = World()
 
     def gone(pgid, _signum):
-        world.forget(pgid)
+        world.forget(pgid, keep_leader=True)
         raise ProcessLookupError(3, "No such process")
 
-    _install(wrapper, monkeypatch, world, gone, _fake_process(0))
+    _install(wrapper, monkeypatch, world, gone, _fake_process(0, world))
     output = io.StringIO()
     rc = wrapper.run(["synthetic"], timeout=None, grace=0.05, stream=output)
     assert rc == 0, output.getvalue()
@@ -248,7 +292,7 @@ def test_the_final_recensus_is_what_reports_an_unproven_cleanup(wrapper, monkeyp
     and this run reports 0 — which is the mutant this test exists to catch.
     """
     world = World()
-    _install(wrapper, monkeypatch, world, lambda *a: world.calls.append(a), _fake_process(0))
+    _install(wrapper, monkeypatch, world, lambda *a: world.calls.append(a), _fake_process(0, world))
     output = io.StringIO()
     rc = wrapper.run(["synthetic"], timeout=None, grace=0.05, stream=output)
     assert world.calls, "the cleanup attempted at least one checked signal"
@@ -265,7 +309,7 @@ def test_a_member_forked_after_capture_is_adopted_under_the_pin(wrapper, monkeyp
     syscall.
     """
     world = World()
-    cap = world.capture(send=world.calls.append)
+    cap = world.capture(send=lambda pgid, signum: world.calls.append((pgid, signum)))
     assert cap.last.status == "VERIFIED"
     world.rows[11] = (world.pgid, world.pgid, world.pgid, "late")
     verdict = cap.signal(signal.SIGTERM, deadline=time_budget())
@@ -275,7 +319,7 @@ def test_a_member_forked_after_capture_is_adopted_under_the_pin(wrapper, monkeyp
 
     # The pin-lost control: same members, no reservation above them.
     lost = World()
-    cap_lost = lost.capture(send=lost.calls.append)
+    cap_lost = lost.capture(send=lambda pgid, signum: lost.calls.append((pgid, signum)))
     lost.rows[11] = (lost.pgid, lost.pgid, lost.pgid, "late")
     del lost.rows[lost.pgid]
     refused = cap_lost.signal(signal.SIGTERM, deadline=time_budget())
@@ -379,3 +423,31 @@ def test_no_posix_only_os_attribute_is_evaluated_in_a_default_expression():
                     ):
                         offenders.append((node.name, sub.attr))
     assert offenders == [], offenders
+
+
+def test_a_no_timeout_run_decides_ownership_within_a_phase_bound(wrapper, monkeypatch):
+    """A wedged sampler must not inherit the run's infinite deadline.
+
+    `--timeout`-less means "wait forever for the CHILD", never "wait forever to
+    decide ownership". On the reviewed head `leader_terminal` passed the run's
+    deadline straight into the sampler, so this run spins for as long as the
+    (never-terminal) leader is believed alive: the assertion is the WALL CLOCK.
+    """
+    import time
+
+    world = World()
+    cap = _install(
+        wrapper, monkeypatch, world, lambda *a: world.calls.append(a), _fake_process(0, world)
+    )
+
+    # After capture, the provider answers nothing: no sample, no terminal fact.
+    wedged = lambda pids: {}  # noqa: E731 - one-line provider
+    cap.samples = wedged
+
+    output = io.StringIO()
+    started = time.monotonic()
+    rc = wrapper.run(["synthetic"], timeout=None, grace=0.05, stream=output)
+    elapsed = time.monotonic() - started
+    assert elapsed < 15.0, (elapsed, output.getvalue())
+    # A run whose ownership could never be decided is UNPROVEN, never green.
+    assert rc == 126, (rc, output.getvalue())

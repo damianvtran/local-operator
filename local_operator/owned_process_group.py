@@ -98,6 +98,16 @@ SECOND_RESOLUTION_REUSE = "UNSUPPORTED"
 _ALL_PIDS = 1
 
 
+#: Facts from the last Darwin enumeration, filled in by ``_darwin_all_pids`` and
+#: reported only by a census that misses. Diagnostic, never an input to a verdict.
+_LAST_ENUMERATION: dict[str, object] = {}
+
+
+#: The bound on one internal ownership phase (one leader sample), deliberately
+#: independent of any user-supplied timeout.
+_TERMINAL_PHASE_SECONDS = 0.5
+
+
 def _darwin_all_pids(deadline, clock):
     """Every live pid on Darwin, through libproc, or ``Unknown``.
 
@@ -133,6 +143,21 @@ def _darwin_all_pids(deadline, clock):
         pids = [pid for pid in buffer[: written // size] if pid > 0]
         if len(set(pids)) != len(pids):
             raise Unknown("malformed libproc PID rows")
+        # ONE LINE, ONLY WHEN A CENSUS COMES BACK WITHOUT THE GROUP IT WAS ASKED
+        # ABOUT. A healthy run pays nothing; a miss carries the discriminator for
+        # the candidates that look identical from outside (restricted table vs a
+        # short read vs a capacity retry vs the group simply not being there).
+        _LAST_ENUMERATION.update(
+            {
+                "required": required,
+                "capacity": capacity,
+                "buffer_bytes": ctypes.sizeof(buffer),
+                "written": written,
+                "parsed": len(pids),
+                "retries": _,
+            }
+        )
+        _LAST_ENUMERATION["_first"] = pids[:5]
         return pids
     raise Unknown("saturated libproc census")
 
@@ -162,6 +187,8 @@ def strict_darwin(pgid, deadline, *, listpids=None, clock=time.monotonic):
                 raise Unknown("unreadable process group") from exc
             if group == pgid:
                 members.append(pid)
+        if pgid not in members:
+            _report_census_miss(pgid, deadline)
         return sorted(members)
     lib = resources._darwin_libproc() if listpids is None else None
     call = listpids if listpids is not None else getattr(lib, "proc_listpids", None)
@@ -192,6 +219,49 @@ def strict_darwin(pgid, deadline, *, listpids=None, clock=time.monotonic):
             raise Unknown("malformed libproc PID rows")
         return sorted(pids)
     raise Unknown("saturated libproc census")
+
+
+def _report_census_miss(pgid, deadline):
+    """One stderr line explaining WHY a Darwin census missed its group.
+
+    Nothing here is asserted on: it exists so the next CI run answers "was the
+    leader alive, was the enumeration short, or was the pid unfilterable?" from
+    the record instead of from a hypothesis. ``os.getpgid`` outcomes for the first
+    few raw pids are the discriminator between "not listed" (kernel restriction)
+    and "listed but unresolvable" (our own silent drop).
+    """
+    import json
+
+    sample = None
+    try:
+        sample = bounded_samples([pgid], deadline).get(pgid)
+    except Exception:  # noqa: BLE001 - the diagnostic must never change a verdict
+        sample = None
+    state = "unknown"
+    if sample is not None:
+        state = "zombie" if sample.zombie else "live"
+    recorded = _LAST_ENUMERATION.get("_first")
+    raw = (
+        [int(pid) for pid in recorded] if isinstance(recorded, list) else []
+    )
+    facts = dict(_LAST_ENUMERATION)
+    facts.pop("_first", None)
+    facts.update(
+        asked_pgid=pgid,
+        leader_state=state,
+        leader_birth_readable=bool(sample is not None and sample.birth is not None),
+        matched=0,
+        probed=[{"pid": pid, "getpgid": (lambda q: _pgid_outcome(q))(pid)} for pid in raw[:5]],
+    )
+    sys.stderr.write("DARWIN_CENSUS_MISS " + json.dumps(facts, default=str) + "\n")
+    sys.stderr.flush()
+
+
+def _pgid_outcome(pid):
+    try:
+        return os.getpgid(pid)
+    except Exception as exc:  # noqa: BLE001 - the exception TYPE is the evidence
+        return type(exc).__name__
 
 
 def strict_linux(
@@ -562,7 +632,15 @@ class OwnedGroup:
         census plus the RECORDED birth token (`_leader_witness`), never from
         a function that asks the kernel about a live session.
         """
-        sample = self._samples([self.leader], deadline).get(self.leader)
+        # EVERY INTERNAL PHASE CARRIES ITS OWN FINITE BUDGET. The caller's
+        # deadline is the USER's contract -- a `--timeout`-less run may wait
+        # forever for the child -- but deciding OWNERSHIP must never inherit that
+        # infinity: a wedged sampler would otherwise spin here for as long as the
+        # child lives, which is how a proof phase became a local hang.
+        phase = self.clock() + _TERMINAL_PHASE_SECONDS
+        if deadline is not None:
+            phase = min(deadline, phase)
+        sample = self._samples([self.leader], phase).get(self.leader)
         return sample is None or sample.zombie
 
     def _leader_witness(self, deadline):
