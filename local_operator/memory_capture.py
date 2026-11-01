@@ -32,6 +32,7 @@ from local_operator.memory import (
     _dump,
     guard,
     is_expiry_tombstone,
+    safe_segment,
     validate_fact,
     validate_op,
 )
@@ -1467,7 +1468,10 @@ def persist(
     Returns the terminal ``(status, reason)`` actually recorded, so ``finish`` reports
     the same outcome the store holds.
     """
-    guard(marker_id)
+    # This is a minted lookup id, not user content. The same structural rule
+    # applies when it rides source.entry (guard_fact); mod-97 coincidences must
+    # not refuse either the capture or _record_failure's terminal-marker retry.
+    safe_segment(marker_id, structural=True)
     if skipped is None:
         skipped = getattr(rows, "skipped", 0)
     if status not in ("ok", "failed", "declined") or len(rows) > 52:
