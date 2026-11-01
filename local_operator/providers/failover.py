@@ -4752,6 +4752,15 @@ async def _stream_with_failover_events(
             successful_terminal = False
             failed_terminal = False
             try:
+                turn_state = current_request._codex_turn_state
+                if turn_state is not None:
+                    # After actual credential selection, before every adapter.
+                    # None MUST clear: A→gateway→A cannot resurrect A's token.
+                    scope_for = getattr(client, "codex_turn_state_scope", None)
+                    scope = (
+                        scope_for(current_request, key, access) if callable(scope_for) else None
+                    )
+                    turn_state.observe_attempt(*(scope or ("", "")))
                 async for event in capture_wire_stream(
                     client.stream(current_request, key, oauth_access=access), attempt_hint
                 ):
