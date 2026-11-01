@@ -55,10 +55,9 @@ Librarian keeps the taxonomy.
 
 ## Narration
 
-Text between tool calls is chat the user reads and context re-billed every turn.
-The `i` intent on each call already says what you are doing, so never restate it
-or open with filler ("Let me…"). Speak only on material change — a discovery, a
-real decision, a blocker — in one or two sentences.
+Between-tool narration is user-visible and re-billed every turn. The `i` intent already
+states the action: do not repeat it or add filler ("Let me…"). Speak only for a
+material discovery, decision or blocker, in one or two sentences.
 
 ## Safety rules
 
