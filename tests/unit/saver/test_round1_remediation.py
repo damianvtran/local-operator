@@ -287,11 +287,7 @@ def test_s1_provenance_is_not_one_span_scan_per_token(invented: bool) -> None:
 
     big = "\n".join(f"line {j} of src/module_{j}.py value_{j:06d}" for j in range(30_000))
     rows = saver_projection([Message(role="user", content=[TextContent(text="paste:\n" + big)])])
-    tokens = (
-        [f"invented_{i:07d}" for i in range(60_000)]
-        if invented
-        else ["value_029999"] * 60_000
-    )
+    tokens = [f"invented_{i:07d}" for i in range(60_000)] if invented else ["value_029999"] * 60_000
     text = HEADER + "\nuser: " + " ".join(tokens)
 
     # Warm with a SMALL record: a first tokenizer load is not per-token source
