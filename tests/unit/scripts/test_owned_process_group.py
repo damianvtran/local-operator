@@ -127,44 +127,36 @@ def test_unknown_facts_cannot_be_authority(monkeypatch, failure):
     assert fake.calls == []
 
 
-def test_a_reaped_leader_is_refused_never_reported_as_absence(monkeypatch):
-    """F3: "could not prove it" must never become "nothing was there".
+def test_an_empty_complete_census_is_absence_not_a_refusal(monkeypatch):
+    """A: the enumeration answered and found nothing — the run finished.
 
-    Deleting the leader's row is a REAPED leader: the group number was given up,
-    so the ownership proof failed. Reporting OBSERVED_EMPTY here let a run
-    publish clean cleanup for a group it never owned -- false assurance, which is
-    never investigated. Fails at 53ac9c08, which returned OBSERVED_EMPTY.
+    Refusing here refused every healthy run whose child had already exited, which
+    is what cb5f53c8 did. A reaped-reservation refusal belongs where a census still
+    holds members but the pin is gone; that case is
+    `test_refuses_when_the_reservation_is_not_provably_ours[reaped]`.
     """
     fake = Fake()
     monkeypatch.setattr(owned.procstate, "birth_scheme", lambda: "fixture")
     cap = fake.cap()
     del fake.rows[10]
     verdict = cap.signal(signal.SIGKILL, deadline=5)
-    assert verdict.status == "REFUSED", verdict.reason
-    assert verdict.refusal_class == "pin_lost"
+    assert verdict.status == "OBSERVED_EMPTY", verdict.reason
+    assert verdict.refusal_class is None
     assert fake.calls == []
 
 
-def test_a_proven_empty_syscall_still_reports_observed_empty(monkeypatch):
-    """Negative control for the pair above: the pin HELD when ESRCH came back.
-
-    Same scenario one step apart, and the two must never be conflated: here the
-    reservation still holds at syscall time and the kernel answers ESRCH, which is
-    proof the group is gone. A future edit that made this REFUSED would be as
-    wrong as the one that made a reap look empty.
-    """
+def test_an_unreadable_census_still_refuses(monkeypatch):
+    """The other half of the pair: unreadable is not empty."""
     fake = Fake()
     monkeypatch.setattr(owned.procstate, "birth_scheme", lambda: "fixture")
     cap = fake.cap()
-    fake.rows[20] = (10, 10, 10, "survivor", False)
 
-    def gone(pgid, signum):
-        raise ProcessLookupError(3, "No such process")
+    def unreadable(*args):
+        raise owned.Unknown("unreadable /proc row")
 
-    cap._send = gone
+    cap.census = unreadable
     verdict = cap.signal(signal.SIGKILL, deadline=5)
-    assert verdict.status == "OBSERVED_EMPTY", verdict.reason
-
+    assert verdict.status == "REFUSED", verdict.reason
     assert fake.calls == []
 
 

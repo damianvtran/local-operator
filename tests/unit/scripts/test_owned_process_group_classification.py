@@ -17,7 +17,9 @@ import io
 import os
 import signal
 import subprocess
+import sys
 from pathlib import Path
+from types import ModuleType
 from types import SimpleNamespace as NS
 
 import pytest
@@ -300,12 +302,16 @@ def _load_without_killpg():
     def fake_import(name, *args, **kwargs):
         return NoKillpg() if name == "os" else real_import(name, *args, **kwargs)
 
-    namespace = {
-        "__name__": "owned_process_group_no_killpg",
-        "__file__": owned.__file__,
-        "__builtins__": dict(builtins.__dict__, __import__=fake_import),
-    }
-    exec(compile(source, "owned_process_group_no_killpg", "exec"), namespace)
+    # REGISTERED IN sys.modules BEFORE the exec, because `@dataclass` resolves its
+    # module through `sys.modules[cls.__module__].__dict__` on 3.12: an unregistered
+    # name is `None` there and the exec dies with "'NoneType' object has no
+    # attribute '__dict__'" -- an AttributeError from the harness, not the module.
+    module = ModuleType("owned_process_group_no_killpg")
+    module.__file__ = owned.__file__
+    sys.modules[module.__name__] = module
+    namespace = module.__dict__
+    namespace["__builtins__"] = dict(builtins.__dict__, __import__=fake_import)
+    exec(compile(source, module.__name__, "exec"), namespace)
     return namespace
 
 

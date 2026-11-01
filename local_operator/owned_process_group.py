@@ -571,14 +571,12 @@ class OwnedGroup:
             members = sorted(set(first) | set(second))
             self.probe["members"] = list(members)
             if not members:
-                # AN EMPTY CENSUS IS NOT ABSENCE UNTIL THE RESERVATION SAYS SO.
-                # A reaped leader means the group number was given up: that is a
-                # failed ownership proof, and reporting it as observably empty let a
-                # run publish clean cleanup for a group it never proved. Only an
-                # ESRCH obtained WHILE the pin held at syscall time may answer
-                # OBSERVED_EMPTY, and that answer is produced in `signal`.
-                if self._leader_reservation(deadline) is None:
-                    raise PinLost("empty census with no live reservation: reaped or reused leader")
+                # A COMPLETED census that lists nothing means the group is gone,
+                # and that is the state a finishing run wants. Refusing here refused
+                # every healthy run whose child had already exited (rc 126 where 0
+                # is correct). The reaped-reservation refusal lives BELOW, where a
+                # census that STILL HOLDS members meets a leader whose reservation is
+                # gone -- failed ownership proof, which is not absence.
                 self.last = Verdict("OBSERVED_EMPTY", "two strict censuses: no members")
                 return self.last
             lead = self._leader_reservation(deadline)
