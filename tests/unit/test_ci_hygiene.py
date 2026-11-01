@@ -2076,9 +2076,9 @@ def test_packaging_is_a_separate_question_from_unit() -> None:
     )
     plan = scope.job_plan(tests_only)
     assert plan["packaging-smoke-build"] == "skip", f"packaging still runs: {plan}"
-    assert scope.classify(["docs/a.md", "tests/unit/test_x.py"])["packaging"] is False, (
-        "docs next to tests must not arm a wheel rebuild either"
-    )
+    assert (
+        scope.classify(["docs/a.md", "tests/unit/test_x.py"])["packaging"] is False
+    ), "docs next to tests must not arm a wheel rebuild either"
 
     # The packaging jobs' own inputs always arm it, so a change to the slimmer or
     # the size budget still exercises what it changed.
@@ -2091,9 +2091,9 @@ def test_packaging_is_a_separate_question_from_unit() -> None:
     # class this flag keys on.
     docs_code = "docs/store/assets/build_assets.py"
     assert scope.category_of(docs_code) != scope.CAT_DOCS
-    assert scope.classify([docs_code])["packaging"] is True, (
-        "a Python file under docs/ skipped the wheel rebuild"
-    )
+    assert (
+        scope.classify([docs_code])["packaging"] is True
+    ), "a Python file under docs/ skipped the wheel rebuild"
 
     # Adversarial 2: a mobile-web change that also edits a shared i18n catalogue.
     # The catalogue is a live category, so the subset test fails and packaging

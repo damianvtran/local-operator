@@ -465,6 +465,32 @@ def test_the_sweep_logs_every_post_merge_cancellation(monkeypatch, capsys):
     assert "run 501 aaaaaaaaa" in out and "run 502 ccccccccc" in out, out
 
 
+def test_a_sweep_with_nothing_on_main_never_reads_the_tag_list(monkeypatch, capsys):
+    """The tag listing is paginated and only a `main` decision consults it.
+
+    The first draft read it unconditionally at the top of `main()`, which spent
+    pages of API calls on every sweep AND broke the ghost/refusal tests: their
+    `gh_api` stub answers a single-run body, so the listing came back as a dict
+    and iterating it raised `'str' object has no attribute 'get'`. This pins the
+    read to the branch that needs it.
+    """
+    runs = [_run(id=7, head_branch="feat/x", created_at=_old(48), updated_at=_old(48))]
+    reads = []
+
+    def fake_tags(repo: str):
+        reads.append(repo)
+        return frozenset()
+
+    monkeypatch.setattr(reaper, "queued_runs", lambda repo: runs)
+    monkeypatch.setattr(reaper, "tag_targets", fake_tags)
+    monkeypatch.setattr(reaper, "decide", lambda *a, **k: (False, "kept by the test"))
+    monkeypatch.setattr(reaper.sys, "argv", ["x", "--repo", "o/r"])
+
+    rc = reaper.main()
+    capsys.readouterr()
+    assert rc == 0
+    assert reads == [], "a sweep with nothing on main read the tag listing anyway"
+
 
 def _cancel_stub(status: int):
     """A gh_api that answers the pre-read then fails the cancel with `status`."""

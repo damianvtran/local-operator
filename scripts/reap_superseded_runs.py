@@ -280,6 +280,10 @@ def tag_targets(repo: str) -> frozenset[str]:
         data = gh_api(f"repos/{repo}/tags?per_page={SEARCH_LIMIT}&page={page}")
         if data is None:
             raise ApiError("the tag listing returned no body")
+        if not isinstance(data, list):
+            # Not a shape this endpoint produces; treat it as unreadable rather
+            # than iterating it and cancelling what the caller cannot vouch for.
+            raise ApiError(f"the tag listing returned {type(data).__name__}, not a list")
         batch = list(data)
         for entry in batch:
             sha = (entry.get("commit") or {}).get("sha")
@@ -490,20 +494,27 @@ def main() -> int:
     if not runs:
         return 0
 
-    # One read for the whole sweep (rule 2b). A failure is NOT an empty list:
-    # passing None keeps every `main` run, because "we cannot see the tags" and
-    # "no commit carries a tag" are the two readings that decide whether a
-    # published release's CI record can be cancelled.
-    try:
-        tags: frozenset[str] | None = tag_targets(args.repo)
-    except ApiError as exc:
-        tags = None
-        print(
-            f"WARNING: tag targets unreadable ({exc}); every {PROTECTED_MAIN} run "
-            "will be kept this sweep",
-            file=sys.stderr,
-            flush=True,
-        )
+    # One read for the whole sweep (rule 2b), and only when a post-merge run is
+    # actually queued: a sweep with nothing on `main` has no use for a paginated
+    # listing. A failure is NOT an empty list: passing None keeps every `main`
+    # run, because "we cannot see the tags" and "no commit carries a tag" are
+    # the two readings that decide whether a published release's CI record can be
+    # cancelled.
+    needs_tags = any(
+        run.get("head_branch") == PROTECTED_MAIN and run.get("event") == "push" for run in runs
+    )
+    tags: frozenset[str] | None = frozenset()
+    if needs_tags:
+        try:
+            tags = tag_targets(args.repo)
+        except ApiError as exc:
+            tags = None
+            print(
+                f"WARNING: tag targets unreadable ({exc}); every {PROTECTED_MAIN} run "
+                "will be kept this sweep",
+                file=sys.stderr,
+                flush=True,
+            )
 
     cancelled = kept = refused = ghosts = 0
     #: (run id, sha) for every post-merge run this sweep acted on, so the
@@ -511,9 +522,7 @@ def main() -> int:
     post_merge: list[tuple[Any, str]] = []
     for run in runs:
         run_id = run.get("id")
-        should, reason = decide(
-            args.repo, run, args.min_age_minutes, args.max_queue_hours, tags
-        )
+        should, reason = decide(args.repo, run, args.min_age_minutes, args.max_queue_hours, tags)
         label = f"run {run_id} ({run.get('name', '?')[:40]}, {run.get('head_branch')})"
         if not should:
             kept += 1
