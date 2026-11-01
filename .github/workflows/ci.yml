@@ -1669,6 +1669,21 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
+      - name: Darwin zombie-census probe
+        # WHY THIS LIVES IN THE TUI JOB: the sharded `test` job is
+        # `runs-on: ubuntu-latest` only, so the one platform this probe exists to
+        # measure -- macOS, where nobody had checked whether a group census still
+        # lists an unreaped zombie leader -- would otherwise never run it in CI.
+        # This job is the only one with a macOS leg, so the Darwin answer is
+        # measured here or nowhere. One file only, serial (`-n0`): it forks and
+        # leaves a corpse on purpose, and it must not overlap other tests.
+        #
+        # It FAILS rather than skipping when the platform cannot produce the
+        # shape (no fork, no zombie, corpse absent from the census): a skip that
+        # reads as green would defeat the point of measuring at all.
+        if: matrix.os == 'macos-latest'
+        timeout-minutes: 5
+        run: python -m pytest tests/unit/scripts/test_owned_process_group_zombie_probe.py -n0 -q
       - name: Partition the e2e suite
         # Same partitioner as the unit matrix, pointed at the other tree: the
         # LPT split by measured per-file duration (tests/durations-e2e.json),

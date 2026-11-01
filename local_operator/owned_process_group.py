@@ -39,11 +39,15 @@ class Unknown(RuntimeError):
     no platform frees a group number while a member or a corpse still holds it —
     Linux by the struct-pid's group reference, Darwin by pid-number reservation.
 
-    Scope, stated rather than implied: the pin needs the corpse to be VISIBLE in
-    the group census. Where a platform's census does not report a zombie leader
-    (Darwin is the measured case), this module refuses rather than assuming the
-    reservation and stays live-leader-only. Where SIGCHLD is SIG_IGN there is no
-    corpse at all, so the premise is void and capture refuses with a named reason.
+    Scope, MEASURED rather than assumed: the pin needs the corpse to be VISIBLE in
+    the group census, and it is on both platforms this ships for — Darwin and
+    Linux both report an unreaped zombie leader in the group census (measured:
+    `strict_census -> [pid]`, `ps` row `Z <defunct>`). The reservation is
+    therefore claimed on both. A REAPED leader is `pin_lost` on both platforms
+    all the same: once the corpse is given up the number is releasable, which is
+    exactly why nothing reaps before the terminal census. Where SIGCHLD is
+    SIG_IGN there is no corpse at all, so the premise is void and capture refuses
+    with a named reason.
 
     Exclusions enforced at the one place a signal leaves this module: never pid 1,
     never this process or its own process group, never a group whose members are
@@ -433,6 +437,14 @@ class OwnedGroup:
         One sample, no census: this runs every poll tick and must not cost two
         strict scans. The census belongs to the signal path, where authority is
         actually spent.
+
+        THE CORPSE IS NEVER READ THROUGH A LIVE SESSION QUERY, and that is a
+        correctness requirement, not an optimisation: on Darwin `getsid` fails on
+        a zombie, so `kernel_identity` raises `Unknown: actual parent/PG/SID
+        unavailable` for exactly the process this design exists to keep as its
+        witness. The terminal path therefore reads the corpse from the group
+        census plus the RECORDED birth token (`_leader_reservation`), never from
+        a function that asks the kernel about a live session.
         """
         sample = self._samples([self.leader], deadline).get(self.leader)
         return sample is None or sample.zombie
