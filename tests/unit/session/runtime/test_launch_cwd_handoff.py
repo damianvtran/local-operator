@@ -115,7 +115,8 @@ def test_a_caller_naming_a_third_directory_keeps_it(tree: tuple[Path, Path, Path
     third.mkdir()
     _handoff(config, source=source, destination=destination)
     assert _engage_cwd_for_recorded_move(config, OWN, str(third)) == str(third)
-    assert cwd_move.read_move_intent(config, OWN).stage == cwd_move.STAGE_HANDOFF
+    pending = cwd_move.read_move_intent(config, OWN)
+    assert pending is not None and pending.stage == cwd_move.STAGE_HANDOFF
     # The boot that lands there settles it, once.
     settled = cwd_move.reconcile_move(config, OWN, effective_cwd=str(third))
     assert settled is not None and settled.stage == cwd_move.STAGE_SUPERSEDED
