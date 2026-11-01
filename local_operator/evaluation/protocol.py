@@ -32,6 +32,7 @@ from pydantic import (
     TypeAdapter,
     field_serializer,
     field_validator,
+    model_serializer,
     model_validator,
 )
 from typing_extensions import TypeAliasType
@@ -389,17 +390,86 @@ class _FrameAction(_Action):
     frame_id: Identifier
 
 
+#: Keys held DOWN for the duration of one pointer action (shift-click,
+#: ctrl-click, shift-drag, ctrl-scroll). WHY a field and not a sequence of
+#: ``key`` actions: a ``key`` action presses and releases its chord before the
+#: next action runs, so ``[click][key SHIFT][click]`` is two plain clicks --
+#: sealed osworld-21 episode t25k3c-t004 (steps 5-6) sent exactly that for a
+#: range selection, selected one slide, and the model concluded "shift via
+#: standalone key doesn't hold for click"; t25k3c-t022 said "Tool click no
+#: modifiers". Bounded to the four modifiers, so the tuple cannot exceed them.
+HeldModifiers: TypeAlias = Annotated[tuple[str, ...], Field(max_length=4)]
+
+
+class _HoldsModifiers(ProtocolModel):
+    """Validation and wire shape for a concrete action's ``modifiers`` field.
+
+    Fieldless on purpose: each concrete action declares ``modifiers`` LAST, so
+    the existing fields keep their declaration order (and with it the prompt's
+    field lines and every JSON-schema ``required`` list).
+    """
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_explicit_empty_modifiers(cls, value: Any) -> Any:
+        # Defaults remain empty for historic byte identity; explicitly supplying
+        # [] must not silently turn a requested hold into an ordinary click.
+        if isinstance(value, dict) and "modifiers" in value and value["modifiers"] in ([], ()):
+            raise ValueError("modifiers must not be empty; omit the field for an unmodified action")
+        return value
+
+    @field_validator("modifiers", mode="before", check_fields=False)
+    @classmethod
+    def _freeze_json_modifiers(cls, modifiers: Any) -> Any:
+        return tuple(modifiers) if isinstance(modifiers, list) else modifiers
+
+    @field_validator("modifiers", check_fields=False)
+    @classmethod
+    def _known_unique_modifiers(cls, modifiers: tuple[str, ...]) -> tuple[str, ...]:
+        # The SAME vocabulary and alias table ``keys`` uses (``canonical_key``),
+        # narrowed to the keys that mean something when held: a second
+        # vocabulary would let "control" parse here and fail in ``keys``.
+        normalized: list[str] = []
+        for key in modifiers:
+            candidate = canonical_key(key)
+            if candidate is None:
+                raise ValueError(f"unknown modifier: {key!r}")
+            if candidate not in _MODIFIER_KEYS:
+                raise ValueError(
+                    f"not a modifier: {key!r}; modifiers held during a pointer action "
+                    "are shift, ctrl, alt and meta"
+                )
+            normalized.append(candidate)
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("modifiers cannot contain duplicate keys")
+        # Order is kept, not sorted: it is the press order (released reversed).
+        return tuple(normalized)
+
+    @model_serializer(mode="wrap")
+    def _omit_unheld_modifiers(self, handler: Any, info: Any) -> Any:
+        # Omitted while empty, never ``"modifiers": []``: sealed records compare
+        # canonical action bytes, so an action holding nothing must serialize
+        # exactly as it did before the field existed. A field-level
+        # ``exclude_if`` would read better but needs pydantic 2.12+, while
+        # pyproject declares >=2.7 (same reasoning as harness/types.py).
+        data = handler(self)
+        if isinstance(data, dict) and not data.get("modifiers"):
+            data.pop("modifiers", None)
+        return data
+
+
 class _PointerAction(_FrameAction):
     x: Coordinate
     y: Coordinate
     button: MouseButton = "left"
 
 
-class ClickAction(_PointerAction):
+class ClickAction(_PointerAction, _HoldsModifiers):
     kind: Literal["click"] = "click"
+    modifiers: HeldModifiers = ()
 
 
-class DoubleClickAction(_FrameAction):
+class DoubleClickAction(_FrameAction, _HoldsModifiers):
     """A distinct action retained because existing compilers emit double-click."""
 
     kind: Literal["double_click"] = "double_click"
@@ -408,9 +478,10 @@ class DoubleClickAction(_FrameAction):
     # Historical compilers only emit left-button double clicks; closing this
     # now avoids inventing adapter semantics that no implementation has proved.
     button: Literal["left"] = "left"
+    modifiers: HeldModifiers = ()
 
 
-class DragAction(_FrameAction):
+class DragAction(_FrameAction, _HoldsModifiers):
     """One atomic press-drag-release between two points of the shown frame.
 
     Deliberately atomic: a cross-request held-button lifecycle would let a
@@ -430,6 +501,7 @@ class DragAction(_FrameAction):
     # of the adapter's guest execution deadline (the same relationship the
     # adapter's typing bound derives from that deadline).
     duration_ms: int = Field(default=500, ge=100, le=MAX_DRAG_MS)
+    modifiers: HeldModifiers = ()
 
 
 class TypeAction(_Action):
@@ -709,12 +781,13 @@ class PasteTextAction(_KeyChordAction):
         return text
 
 
-class ScrollAction(_FrameAction):
+class ScrollAction(_FrameAction, _HoldsModifiers):
     kind: Literal["scroll"] = "scroll"
     x: Coordinate
     y: Coordinate
     delta_x: int = Field(default=0, ge=-MAX_SCROLL_DELTA, le=MAX_SCROLL_DELTA)
     delta_y: int = Field(default=0, ge=-MAX_SCROLL_DELTA, le=MAX_SCROLL_DELTA)
+    modifiers: HeldModifiers = ()
 
     @model_validator(mode="after")
     def _requires_motion(self) -> Self:

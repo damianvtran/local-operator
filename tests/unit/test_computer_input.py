@@ -422,3 +422,177 @@ def test_drag_cancellation_unwinds_and_releases(drag_guest: dict[str, str], tmp_
     assert ups[0]["failsafe"] is False
     assert calls[-1]["failsafe"] is True
     assert calls[-1]["held"] is None
+
+
+@pytest.mark.parametrize("failure", ["interrupt_then_error", "error", "none"])
+def test_modifier_release_diagnostics_in_guest(failure: str, tmp_path: Path) -> None:
+    # Execute the shipped statement in a fresh guest: stderr, rather than only
+    # the caught exception object, is what survives in the sealed action record.
+    (tmp_path / "pyautogui.py").write_text(
+        "import os\n"
+        "FAILSAFE = True\n"
+        "def keyDown(key): pass\n"
+        "def keyUp(key):\n"
+        "    if os.environ['RELEASE_FAILURE'] == 'none': return\n"
+        "    if key == 'shift': raise KeyboardInterrupt('cancelled')\n"
+        "    raise RuntimeError('release refused')\n"
+    )
+    keys = ("ctrl", "shift") if failure == "interrupt_then_error" else ("ctrl",)
+    result = subprocess.run(
+        python_source_argv(computer_input.held_keys_source(keys, "pass")),
+        env={**os.environ, "PYTHONPATH": str(tmp_path), "RELEASE_FAILURE": failure},
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if failure == "none":
+        assert result.returncode == 0
+        assert result.stderr == ""
+    else:
+        assert result.returncode != 0
+        assert "could not be released" in result.stderr
+        assert "ctrl" in result.stderr
+        if failure == "interrupt_then_error":
+            assert "shift" in result.stderr
+            assert "KeyboardInterrupt: cancelled" in result.stderr
+            assert "RuntimeError: release refused" in result.stderr
+        else:
+            assert "RuntimeError" in result.stderr
+
+
+@pytest.mark.parametrize("body_kind", ["clean", "error", "interrupt"])
+@pytest.mark.parametrize(
+    ("release_key", "preceding_failure"), [("shift", False), ("ctrl", False), ("ctrl", True)]
+)
+@pytest.mark.parametrize("release_kind", ["error", "interrupt"])
+@pytest.mark.parametrize("closed_stderr", [False, True])
+def test_modifier_cleanup_preserves_exception_identity(
+    monkeypatch, capsys, body_kind, release_key, preceding_failure, release_kind, closed_stderr
+) -> None:
+    import io
+    import types
+
+    body_error = {
+        "clean": None,
+        "error": ValueError("original pointer failure"),
+        "interrupt": KeyboardInterrupt("original cancellation"),
+    }[body_kind]
+    release_error = (
+        OSError("release refused")
+        if release_kind == "error"
+        else KeyboardInterrupt("release cancelled")
+    )
+    # A preceding ordinary failure must not hide a later cancellation. Keeping
+    # both objects also proves we propagate originals, not equivalent wrappers.
+    first_error = OSError("first release refused") if preceding_failure else None
+    attempts = []
+    fake = types.SimpleNamespace(FAILSAFE=True, keyDown=lambda key: None)
+
+    def pointer():
+        if body_error is not None:
+            raise body_error
+
+    def release(key):
+        attempts.append((key, fake.FAILSAFE))
+        if key == release_key:
+            raise release_error
+        if key == "shift" and first_error is not None:
+            raise first_error
+
+    fake.pointer = pointer
+    fake.keyUp = release
+    monkeypatch.setitem(sys.modules, "pyautogui", fake)
+    if closed_stderr:
+        stream = io.StringIO()
+        stream.close()
+        monkeypatch.setattr(sys, "stderr", stream)
+    expected = (
+        body_error
+        if body_error is not None
+        else (release_error if release_kind == "interrupt" else first_error or release_error)
+    )
+    with pytest.raises(BaseException) as caught:
+        # Execute the exact source shipped to the guest, not a copied helper.
+        exec(computer_input.held_keys_source(("ctrl", "shift"), "pyautogui.pointer()"))
+    assert caught.value is expected
+    assert attempts == [("shift", False), ("ctrl", False)]
+    assert fake.FAILSAFE is True
+    notes = "\n".join(caught.value.__notes__)
+    assert "could not be released" in notes
+    assert repr(release_key) in notes
+    assert str(release_error) in notes
+    if first_error is not None:
+        assert "'shift'" in notes
+        assert str(first_error) in notes
+    if not closed_stderr:
+        assert capsys.readouterr().err.strip() in notes
+
+
+@pytest.mark.parametrize("body_raises", [False, True])
+@pytest.mark.parametrize("closed_stderr", [False, True])
+def test_modifier_diagnostic_formatting_cannot_mask_failure(
+    monkeypatch, body_raises, closed_stderr
+) -> None:
+    import io
+    import types
+
+    class BrokenMessage(OSError):
+        def __str__(self):
+            raise RuntimeError("diagnostic formatting failed")
+
+    release_error = BrokenMessage()
+    body_error = KeyboardInterrupt("original cancellation")
+    fake = types.SimpleNamespace(FAILSAFE=True, keyDown=lambda key: None)
+
+    def release(key):
+        raise release_error
+
+    def pointer():
+        if body_raises:
+            raise body_error
+
+    fake.keyUp = release
+    fake.pointer = pointer
+    monkeypatch.setitem(sys.modules, "pyautogui", fake)
+    if closed_stderr:
+        stream = io.StringIO()
+        stream.close()
+        monkeypatch.setattr(sys, "stderr", stream)
+    with pytest.raises(BaseException) as caught:
+        exec(computer_input.held_keys_source(("shift",), "pyautogui.pointer()"))
+    assert caught.value is (body_error if body_raises else release_error)
+    assert fake.FAILSAFE is True
+    assert "'shift': BrokenMessage" in "\n".join(caught.value.__notes__)
+
+
+@pytest.mark.parametrize("later_failure", [False, True])
+def test_modifier_cleanup_defers_keyboard_interrupt_until_every_release(
+    monkeypatch, capsys, later_failure: bool
+) -> None:
+    import types
+
+    from local_operator.computer_input import _hold_x11
+
+    attempts = []
+    fake = types.SimpleNamespace(FAILSAFE=True, keyDown=lambda key: None)
+    interrupt = KeyboardInterrupt("release interrupted")
+
+    def release(key):
+        attempts.append((key, fake.FAILSAFE))
+        if key == "shift":
+            raise interrupt
+        if later_failure:
+            raise RuntimeError("release refused")
+
+    fake.keyUp = release
+    monkeypatch.setitem(sys.modules, "pyautogui", fake)
+    with pytest.raises(KeyboardInterrupt) as caught:
+        _hold_x11(("ctrl", "shift"), "pass")
+    assert attempts == [("shift", False), ("ctrl", False)]
+    assert fake.FAILSAFE is True
+    assert caught.value is interrupt
+    diagnostic = capsys.readouterr().err
+    assert "could not be released" in diagnostic
+    assert "shift" in diagnostic
+    assert ("ctrl" in diagnostic) is later_failure
+    assert diagnostic.strip() in interrupt.__notes__
