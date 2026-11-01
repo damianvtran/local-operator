@@ -62,6 +62,20 @@ def test_the_wait_separates_a_commit_here_from_a_confirmation_there(
     server_a = request.getfixturevalue("pair")[0]
     _owned_session(server_a)
     progress = mobility.progress_for(server_a)
+    # Mirror the precondition the real entry point applies: ``_offload`` calls
+    # ``progress.forget(session_id)`` immediately after ``progress_for(server)``
+    # (mobility.py:6157-6158), because a progress record is scoped to ONE move.
+    #
+    # Without it this cell inherits whatever an earlier cell in the same worker left
+    # behind. ``done`` is a level-triggered ``threading.Event`` that nothing clears,
+    # and this family shares one module-level ``SESSION``, so a previous test's
+    # successful move answers THIS wait's first poll with ``"done"`` before anything
+    # has moved — which is how main went red (run 41239213762, job 124682212843:
+    # ``assert ('done', None) == ('none', None)``). The donor is the last test of
+    # ``test_mobility_store_marker.py``, the file immediately before this one in the
+    # shard, which ends with a successful ``SESSION`` move and never forgets.
+    progress.forget(SESSION)
+
     try:
         outcome, refusal = mobility._await_own_progress(server_a, SESSION, budget=0.2)
         assert (outcome, refusal) == ("none", None), (outcome, refusal)
