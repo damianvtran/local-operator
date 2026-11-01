@@ -727,8 +727,7 @@ def run(
                     require(
                         owned_process_group.Verdict(
                             "REFUSED",
-                            "owned-group probe unanswered for %d consecutive attempts"
-                            % unanswered,
+                            "owned-group probe unanswered for %d consecutive attempts" % unanswered,
                         ),
                         "probe-streak",
                     )
