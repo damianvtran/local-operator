@@ -1087,8 +1087,9 @@ class RemoteOwner:
         """Ask the peer to warm the session. Carries no prompt (§2.2).
 
         ``cwd`` is forwarded only when the CALLER supplied one: a remote viewer
-        must not invent a path on another machine, and the peer defaults to its
-        own home when the frame omits it (§5.3 step 2). ``warm`` is ignored by
+        must not invent a path on another machine. Omission stays empty until
+        the peer's spawn resolver chooses its recorded destination, or HOME if
+        there is no recorded move (§5.3 step 2). ``warm`` is ignored by
         design — its fields are the local spawn's model choice, and the peer
         decides its own.
 

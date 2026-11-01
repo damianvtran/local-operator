@@ -442,24 +442,46 @@ async def test_a_later_message_reships_with_the_new_as_of(
     a LATER minute ships it again with the new "as of" — and a message in the
     same minute does not, because the bytes are identical and re-sending them
     would be the duplicate the delta machinery exists to avoid."""
+    # Awaited prompts can cross a real minute even when adjacent in this test.
+    # ShiftedClock alone still follows wall time; hold BOTH durable/live stamp
+    # sources explicitly, while its proxy leaves monotonic/deadline clocks real.
+    base = 1_793_556_780.0  # 2026-11-01 18:13:00 UTC, a fixed minute boundary.
+    clock = ShiftedClock(10)
+    monkeypatch.setattr(clock, "time", lambda: base + clock.shift)
+    monkeypatch.setattr("local_operator.session.session.time", clock)
+    monkeypatch.setattr("local_operator.session.transcript.time", clock)
     goal_state = GoalState()
     stream = ScriptedStream()
     session = _make_session(tmp_path / "sess", stream, goal_state)
     queue = _install_queue(session, monkeypatch)
+
+    def assert_stamp() -> None:
+        entry = session._transcript.latest_user_entry()
+        assert entry is not None
+        assert (
+            session.latest_user_message_at()
+            == int(entry.ts * 1000)
+            == int((base + clock.shift) * 1000)
+        )
+
     try:
         await session.prompt("freeze the prefix")
         _ask(queue)
         await session.prompt("first message")
+        assert_stamp()
         first = _open_asks_sections(session)
         assert len(first) == 1
 
-        # Same minute: the render is byte-identical, so nothing is journalled.
+        # Different seconds in the SAME minute must still render identical bytes.
+        clock.shift = 40
         await session.prompt("second message, same minute")
+        assert_stamp()
         assert _open_asks_sections(session) == first
 
         # A minute later the stamp moves, so the section ships again.
-        _shift_clock(monkeypatch, 61)
+        clock.shift = 71
         await session.prompt("a third message, a minute on")
+        assert_stamp()
         sections = _open_asks_sections(session)
         assert len(sections) == 2
         assert sections[-1] != sections[0]

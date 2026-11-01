@@ -1,0 +1,22 @@
+{
+  "cli.exec_help.agent_id": "ID của tác nhân dùng cho lần thực thi này (thay cho --agent theo tên)",
+  "cli.exec_help.background": "Tách tác vụ: khởi tạo một worker nền có tệp nhật ký rồi thoát ngay",
+  "cli.exec_help.clear_goal": "Xóa mục tiêu thường trực đang được tiếp tục",
+  "cli.exec_help.command": "Prompt nguyên văn; ''-'' hoặc bỏ trống khi có stdin qua pipe sẽ đọc stdin; tùy chọn cho một vòng lặp",
+  "cli.exec_help.control": "Chuyển các phê duyệt và câu hỏi tới một người giám sát đang gắn kèm (có thể phải chờ). Không có cờ này, phê duyệt không-TTY sẽ bị từ chối; khám phá và gắn kèm trực tiếp có sẵn trong cả hai trường hợp. --yolo vẫn là một ghi đè phê duyệt tường minh.",
+  "cli.exec_help.effort": "Đặt mức suy luận; được xác thực theo mô hình đã chọn",
+  "cli.exec_help.goal": "Đặt một mục tiêu thường trực nguyên văn. Khác với /goal của TUI, lệnh này KHÔNG gửi văn bản đó như một tin nhắn: hãy kết hợp với một prompt hoặc --loop",
+  "cli.exec_help.json": "Phát một dòng JSON cho mỗi sự kiện của tác nhân thay vì văn bản cuối",
+  "cli.exec_help.loop": "Chạy N vòng tiếp tục sau prompt tùy chọn; cần có mục tiêu thường trực",
+  "cli.exec_help.loop_goal": "Tiếp tục và đánh giá mục tiêu này cho đến khi đạt được (không cố định số vòng)",
+  "cli.exec_help.name": "Đặt tên cuộc trò chuyện được lưu",
+  "cli.exec_help.output_format": "Bắt buộc định dạng của phản hồi CUỐI của trợ lý. Lần chạy thất bại (thoát 1) nếu không tạo được payload hợp lệ trong --output-retries. Mặc định: không bắt buộc — hành vi không đổi.",
+  "cli.exec_help.output_retries": "Số lần thử lại tối đa sau phản hồi cuối thất bại (0-5; mặc định 2). Cần --output-format.",
+  "cli.exec_help.output_schema": "Tệp JSON Schema mà payload JSON/YAML/TOML đã giải mã phải thỏa mãn. Với --output-format markdown: một đối tượng JSON '{'''required_sections'': [...]'}'. Cần --output-format.",
+  "cli.exec_help.profile": "Gắn một vai trò/chuyên gia dùng lại được (tương ứng /agent; không phải --agent cũ)",
+  "cli.exec_help.status": "Đọc trạng thái tác vụ nền bền vững dưới dạng JSON; không khởi động phiên",
+  "cli.exec_help.supervisor_fd": "Ghi khả năng điều hành của lần chạy này vào descriptor được kế thừa này để người giám sát giữ đầu kia có thể PHÊ DUYỆT các thẻ mà lần chạy này tạm giữ (giai đoạn E). Cần --control; bị từ chối với --background. Chỉ dùng số descriptor — giá trị không bao giờ chạm tới argv, môi trường hay tệp.",
+  "cli.exec_help.team": "Gắn một nhóm đã lưu cùng quản lý, danh sách thành viên và bản tóm lược của nó",
+  "cli.exec_help.tools": "Danh sách công cụ cách nhau bằng dấu phẩy mà lần chạy này có thể dùng, và là DUY NHẤT. Công cụ bị loại không thể tiếp cận, chứ không chỉ chưa được phê duyệt. Khai báo này chỉ đóng vai trò PHÊ DUYỆT cho chính các thành viên của nó ở nơi không ai có thể được hỏi — lần chạy không-tty không có --control; trên terminal, và dưới --control, mọi lệnh ghi/exec vẫn do cổng phê duyệt quyết định. Tên mà bản dựng này không có sẽ không thể tiếp cận và được báo cáo",
+  "cli.exec_help.workstream": "Xuất bản lần chạy này thành một WORKSTREAM song song dài hạn mà người vận hành yêu cầu: nó được liệt kê ở thanh bên, /resume và danh sách trên điện thoại, mang phiên đã mở nó, và có thể được theo dõi và điều hướng. Không có cờ này, lần chạy do tác nhân mở sẽ ở dạng tạm thời: ẩn ở mọi nơi và im lặng. Chỉ đổi khả năng hiển thị của dòng, không bao giờ đổi cách xử lý phê duyệt (kết hợp với --control cho việc đó). Không đánh dấu gì bên ngoài shell của tác nhân"
+}

@@ -1,0 +1,27 @@
+{
+  "locale": "vi",
+  "namespace": "wire.errors.agents",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 1,
+    "minor": 0,
+    "nit": 0
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 1,
+      "id": "VI-026",
+      "severity": "MAJOR",
+      "namespace": "wire.errors.agents",
+      "key": "wire.errors.agents.team_pull_local_failure",
+      "english": "This team could not be pulled from this machine.",
+      "current": "Không thể kéo nhóm này về từ máy này.",
+      "problem": "Glossary wave-2 kept-English set: hub `pull` stays English; 'kéo … về' translates the operation (same defect class as tui.hub_links).",
+      "suggested": "Không thể pull nhóm này từ máy này.",
+      "disposition": "fixed (remediation core-fix, session 5e0b68c135be)"
+    }
+  ]
+}

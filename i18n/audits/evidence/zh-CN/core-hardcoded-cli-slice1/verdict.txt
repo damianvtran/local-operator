@@ -1,0 +1,18 @@
+CHANGES_REQUESTED
+BLOCKER 0, MAJOR 0, MINOR 0, NIT 0
+Agent: i18n-auditor; session d07912e282a8
+Actual audit model: openai/gpt-6.1-sol. Provider quota fallbacks: assigned anthropic/claude-sonnet-5-5 -> anthropic/claude-opus-5-5 -> openai/gpt-6.1-sol. All semantic audit reasoning and executed checks occurred on openai/gpt-6.1-sol.
+
+INCOMPLETE COVERAGE, NOT A CONFIRMED TRANSLATION DEFECT: 15/16 keys independently read and semantically audited clean. cli.group_help.secret remains semantically UNAUDITED: ordinary output redacts its value; read_public_copy refuses because the translated file is not committed at HEAD. Asked manager to commit the public copy so the allowlisted tool can read it. No attempt made to bypass the refusal. A PASS for all 16 is withheld until that key can be read. findings.jsonl is empty because no actual translation defect was confirmed.
+
+Read zh-CN style guide and glossary, English catalogues and context, then translated values. All other 15 keys preserve meaning and read naturally in terse Chinese CLI/TUI register. Rechecked the safety-sensitive skills_description, disk, operator and pair wording: no unsafe guarantee or polarity inversion found. 'any execute bit is refused' remains 任何执行权限位都会导致拒绝; disk limits reclamation to 已证实可安全删除; pair preserves one-time signature authorization.
+
+Mechanics: all 16 keys passed JSON parsing, exact key parity and runtime.message_arguments name/kind/order comparisons. Scoped repository validator check.check_catalogues(), restricting namespace/locales enumeration to these three namespaces and en/zh-CN, returned zero problems (exit 0). The full scripts/i18n/check.py was attempted but timed out after 180 seconds with no output; no whole-tree validator PASS is claimed. See scoped-validator.log and mechanical.log for actual execution output. validator.log is empty from the timed-out command, not a successful execution log.
+
+Width: rich.cells.cell_len('先连接AI账户：输入/login radient') = 32 cells, declared maxCells = 74, headroom = 42. CJK probe 中 = 2 cells; combining acute U+0301 = 0 cells. The cue has no combining marks, so that combining-mark assumption does not affect this measurement. Two-cell Han/full-width punctuation and one-cell ASCII match a conventional modern CJK-capable terminal; no physical terminal-render proof is claimed.
+
+Wrapper: lop teams show: 错误: 测试消息. Only 'error' changes; {prog}: <error word>: {message} and ASCII separators survive. No untranslated English error scaffold. Rendering invalid_choice with quoted values keeps 'bad' and 'safe', 'fast' unchanged; rendering invalid_command with command='None' leaves None literal. /login radient is interpolated verbatim.
+
+No plural/select expression occurs; zh-CN has only CLDR other, and these sentences require no numeric agreement. No extra plural arm is needed. Chinese/Latin adjacency and full-width prose punctuation follow the guide; the error wrapper's ASCII separators are expressly required by its context. No glossary divergence was confirmed among the 15 readable keys.
+
+No repository/catalogue/ledger files modified. These requested scratch outputs are provisional audit artifacts, not tracked canonical evidence or ledger approval. Manager must retain final evidence in the canonical tracked root and record ledger rows after completing the unread key.

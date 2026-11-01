@@ -1875,15 +1875,19 @@ class MemoryStore:
         """Pure host stamping/validation, usable before an index-repair write."""
         if not isinstance(fact, dict):
             raise MemoryError("Memory content must be a JSON object.")
+        # Caller-supplied source metadata is content, even when its keys look
+        # like identifiers. Guard BEFORE stamping so an overridden value cannot
+        # smuggle a secret into storage or silently evade validation.
         guard(fact)
         source = fact.get("source", {})
         if not isinstance(source, dict):
             raise MemoryError("Memory source must be an object.")
         source = {
-            "session": self.identity.session_id,
             "kind": "reported",
             "author": self.identity.agent_id or "anonymous",
             **source,
+            # Session provenance belongs to the host, never the JSON caller.
+            "session": self.identity.session_id,
         }
         return validate_fact(
             dict(

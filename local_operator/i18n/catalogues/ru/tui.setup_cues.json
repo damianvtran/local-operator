@@ -1,0 +1,4 @@
+{
+  "tui.setup_cues.setup_placeholder": "Введите {command}, чтобы начать",
+  "tui.setup_cues.no_provider_cue": "Сначала подключите аккаунт ИИ: введите {command}"
+}

@@ -1,0 +1,13 @@
+{
+  "cli.exec_worker_help.agent": "Bộ chọn tên tác nhân",
+  "cli.exec_worker_help.agent_id": "Id tác nhân",
+  "cli.exec_worker_help.control": "Công bố bản ghi phiên và phục vụ socket điều khiển cho lần chạy này",
+  "cli.exec_worker_help.hosting": "Ghi đè nhà cung cấp",
+  "cli.exec_worker_help.job_id": "Id tác vụ trong sổ cái; khi được đặt, worker thêm một bản ghi kết thúc (finished_at + exit_code) vào sổ cái JSONL khi thoát",
+  "cli.exec_worker_help.json": "Phát một dòng JSON cho mỗi sự kiện của tác nhân",
+  "cli.exec_worker_help.model": "Ghi đè mô hình",
+  "cli.exec_worker_help.prompt": "Prompt cần thực thi",
+  "cli.exec_worker_help.resume": "Tiếp tục một phiên trước đó theo id (hoặc ''@latest'')",
+  "cli.exec_worker_help.train": "Chế độ huấn luyện: nối bản ghi vào thư mục tác nhân (--train kiểu cũ)",
+  "cli.exec_worker_help.yolo": "Tự động phê duyệt mọi bậc công cụ"
+}

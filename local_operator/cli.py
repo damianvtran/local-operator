@@ -61,6 +61,8 @@ from local_operator.agent_shell import exec_session_refusal, interactive_session
 from local_operator.config import ConfigManager
 from local_operator.env import get_env_config
 from local_operator.i18n.boot import activate_resolved_locale
+from local_operator.i18n.cli_failures import LocalizedArgumentParser
+from local_operator.i18n.cli_help import help_text as _tr
 from local_operator.i18n.keys import cli_agents_help as _ag
 from local_operator.i18n.keys import cli_aida_help as _ad
 from local_operator.i18n.keys import cli_browser as _b
@@ -69,6 +71,7 @@ from local_operator.i18n.keys import cli_config_help as _cf
 from local_operator.i18n.keys import cli_credential_help as _cr
 from local_operator.i18n.keys import cli_exec_help as _eh
 from local_operator.i18n.keys import cli_global_help as _gh
+from local_operator.i18n.keys import cli_group_help as _gg
 from local_operator.i18n.keys import cli_hub_help as _hu
 from local_operator.i18n.keys import cli_hub_shared_help as _hs
 from local_operator.i18n.keys import cli_install_help as _in
@@ -158,7 +161,7 @@ _t = tr("wire.exec")
 _bt = tr("cli.browser")
 
 
-def build_cli_parser() -> argparse.ArgumentParser:
+def build_cli_parser() -> LocalizedArgumentParser:
     """
     Build and return the CLI argument parser.
 
@@ -167,7 +170,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
     subcommands are additive only (docs/REWRITE.md section E).
 
     Returns:
-        argparse.ArgumentParser: The CLI argument parser
+        LocalizedArgumentParser: The CLI argument parser with keyed usage failures
     """
     from local_operator.i18n.cli_help import help_locale as resolve_help_locale
     from local_operator.update import installed_version
@@ -178,7 +181,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
     help_locale = resolve_help_locale()
 
     # Create parent parser with common arguments
-    parent_parser = argparse.ArgumentParser(add_help=False)
+    parent_parser = LocalizedArgumentParser(add_help=False)
     parent_parser.add_argument(
         "--debug",
         action="store_true",
@@ -198,7 +201,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
     )
 
     # Main parser
-    parser = argparse.ArgumentParser(
+    parser = LocalizedArgumentParser(
         description=_gh.description().envelope(locale=help_locale)["text"], parents=[parent_parser]
     )
 
@@ -772,13 +775,9 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # the publisher confirmation on public pulls). It drives the SAME service
     # functions the desktop routes use -- there is no second sync engine.
     skills_parser = subparsers.add_parser(
-        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
         "skills",
-        help="Publish, pull and synchronize hub skills (documents and bundles)",
-        description=(
-            "Bundle skills may not contain executables (any execute bit is refused), "
-            "and installing one never runs code."
-        ),
+        help=_gg.skills().envelope(locale=help_locale)["text"],
+        description=_gg.skills_description().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
     skills_subparsers = skills_parser.add_subparsers(dest="skills_command", required=True)
@@ -1096,14 +1095,14 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # so an ordinary terminal session pays no tunnel startup cost.
     from local_operator.tunnels.arguments import add_parser as add_tunnel_parser
 
-    add_tunnel_parser(subparsers)
+    add_tunnel_parser(subparsers, help_locale=help_locale)
 
     # Encrypted secret store. Same discipline: argument registration is
     # stdlib-only, so `--version` and `--help` never load the crypto stack that
     # the handlers import at the point of use.
     from local_operator.secrets.cli import add_parser as add_secret_parser
 
-    add_secret_parser(subparsers)
+    add_secret_parser(subparsers, help_locale=help_locale)
 
     # Mesh networks (design: docs/design/mesh-network.md). Same stdlib-only
     # registration rule as tunnels/secrets: the peer listener, the crypto and the
@@ -1112,7 +1111,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # position-independent globals (--debug, --agent) working on these subcommands.
     from local_operator.network.cli import add_parser as add_network_parser
 
-    add_network_parser(subparsers, parent_parser)
+    add_network_parser(subparsers, parent_parser, help_locale=help_locale)
 
     # Agent messages' background receiver (Team Bridge connector): status,
     # install, remove, logs for a backend-only machine (guide://team-bridge).
@@ -1129,7 +1128,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # imported by the handler, never while the parser is built.
     from local_operator.disk_cli import add_parser as add_disk_parser
 
-    add_disk_parser(subparsers, parent_parser)
+    add_disk_parser(subparsers, parent_parser, help_locale=help_locale)
 
     # Operator authority (issue #1310, revision 2). Registration is stdlib-only
     # for the same reason `secret`'s is: `lop --version` must not load
@@ -1137,7 +1136,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # live in `operator/handlers.py`, imported only when a verb is dispatched.
     from local_operator.operator.cli import add_parser as add_operator_parser
 
-    add_operator_parser(subparsers)
+    add_operator_parser(subparsers, help_locale=help_locale)
 
     # Device pairing (stage D of the same design). Registered beside
     # `operator` because it is the same trust root seen from the other end — the
@@ -1145,7 +1144,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # for the identical reason: `lop --version` must not load the keychain.
     from local_operator.operator.pair import add_parser as add_pair_parser
 
-    add_pair_parser(subparsers)
+    add_pair_parser(subparsers, help_locale=help_locale)
 
     # QwenCloud console session cookie: the credential the personal Token Plan
     # usage window needs and no login flow can mint (a browser session cookie
@@ -2278,12 +2277,14 @@ def build_cli_parser() -> argparse.ArgumentParser:
         parents=[parent_parser],
     )
 
+    # wire.exec is deferred from client bundles: render these plain-string
+    # argparse consumers in-process, using the parser build's locale snapshot.
     exec_parser = subparsers.add_parser(
         "exec",
-        help=_t(_wd.exec_help()),
+        help=_tr(_wd.exec_help(), help_locale),
         parents=[parent_parser],
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=_t(_wd.exec_epilog()),
+        epilog=_tr(_wd.exec_epilog(), help_locale),
     )
     exec_parser.add_argument(
         "command",
@@ -2480,8 +2481,8 @@ def build_cli_parser() -> argparse.ArgumentParser:
     from local_operator.web_fetch.cli import add_fetch_subparser
     from local_operator.web_search.cli import add_search_subparser
 
-    add_search_subparser(subparsers, parent_parser)
-    add_fetch_subparser(subparsers, parent_parser)
+    add_search_subparser(subparsers, parent_parser, help_locale=help_locale)
+    add_fetch_subparser(subparsers, parent_parser, help_locale=help_locale)
 
     # CL-04: ``--yolo`` is accepted on every subcommand too (additive). The
     # root flag keeps its default; subparsers get a SUPPRESS copy so parsing
@@ -17369,7 +17370,7 @@ def main() -> int:
             elif args.credential_command == "git-helper":
                 return _credential_git_helper_command(args)
             else:
-                parser.error(f"Invalid credential command: {args.credential_command}")
+                parser.fail_invalid_command("credential", args.credential_command)
         elif args.subcommand == "config":
             if args.config_command == "create":
                 return config_create_command()
@@ -17382,12 +17383,12 @@ def main() -> int:
             elif args.config_command == "instructions":
                 return config_instructions_command(args)
             else:
-                parser.error(f"Invalid config command: {args.config_command}")
+                parser.fail_invalid_command("config", args.config_command)
         elif args.subcommand == "aida":
             if args.aida_command == "note":
                 return aida_note_command(args)
             else:
-                parser.error(f"Invalid aida command: {args.aida_command}")
+                parser.fail_invalid_command("aida", args.aida_command)
         elif args.subcommand == "search":
             from local_operator.web_search.cli import search_command
 
@@ -17568,7 +17569,7 @@ def main() -> int:
                 # shared sync functions, not in this branch.
                 return agents_sync_command(args, agent_registry, base_dir)
             else:
-                parser.error(f"Invalid agents command: {args.agents_command}")
+                parser.fail_invalid_command("agents", args.agents_command)
         elif args.subcommand == "teams":
             # U5-1: every teams subcommand can hit the registry lock, and lock
             # contention is a recoverable state — print one concise line here
@@ -17606,7 +17607,7 @@ def main() -> int:
                 elif args.teams_command == "link":
                     return teams_link_command(args, team_registry, base_dir)
                 else:
-                    parser.error(f"Invalid teams command: {args.teams_command}")
+                    parser.fail_invalid_command("teams", args.teams_command)
             except (TeamRegistryLockTimeout, TeamRegistryRecoveryError) as e:
                 print(f"\n\033[1;31mError: {str(e)}\033[0m", file=sys.stderr)
                 return 1
@@ -17642,8 +17643,8 @@ def main() -> int:
             if args.hub_command == "link":
                 if args.hub_link_command == "set":
                     return hub_link_set_command(args, base_dir)
-                parser.error(f"Invalid hub link command: {args.hub_link_command}")
-            parser.error(f"Invalid hub command: {args.hub_command}")
+                parser.fail_invalid_command("hub link", args.hub_link_command)
+            parser.fail_invalid_command("hub", args.hub_command)
         elif args.subcommand == "skills":
             return skills_command(args, base_dir)
         elif args.subcommand == "mobile":
@@ -17653,6 +17654,10 @@ def main() -> int:
 
             return tunnel_main(args)
         elif args.subcommand == "team-bridge":
+            if getattr(args, "team_bridge_command", None) == "avatar":
+                from local_operator.team_bridge.cli import main as team_bridge_avatar
+
+                return team_bridge_avatar(args)
             if getattr(args, "team_bridge_command", None) == "setup":
                 from local_operator.team_bridge.setup_cli import (
                     main as team_bridge_setup,
@@ -18428,6 +18433,9 @@ def main() -> int:
                     # The owner's directory, not this terminal's: the band paints
                     # it before the bind lands, and a live conversation's cwd is
                     # the one it is working in.
+                    # CLI invocation is a deliberate local directory choice:
+                    # unlike a remote engage, its shell cwd is not a placeholder.
+                    # Keep intentional HOME resumes winning over a recorded move.
                     paint_first_cwd = str(record.cwd or os.getcwd())
                     record = None
                 if record is not None:
@@ -18476,6 +18484,8 @@ def main() -> int:
                 viewer = await AttachedSession.cold(
                     session_id,
                     config_dir=config_directory,
+                    # No remote omission here: this is the user's CLI shell
+                    # directory, including an intentional HOME (see above).
                     cwd=paint_first_cwd or os.getcwd(),
                     takeover_factory=take_over,
                     initial_model=initial_model,

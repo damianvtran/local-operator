@@ -1110,8 +1110,10 @@ def _resolved_cwd(session_dir: Path, previous: Mapping[str, Any]) -> str:
 
     The index entry's own value first — it is what the supervisor reads today
     and must not be rewritten to something else by an unrelated arm — then the
-    desktop marker a created session carries, then the session directory as a
-    last resort (what the CLI did before this module existed)."""
+    desktop marker a created session carries. With neither, preserve omission
+    as an empty string until spawn: the storage directory is not a caller's
+    working-directory choice, just as HOME is not an omission sentinel. An
+    invented path here would cancel a recorded move on the next wake/monitor."""
     from local_operator.session.retention import DESKTOP_MARKER_NAME
 
     existing = previous.get("cwd")
@@ -1124,7 +1126,7 @@ def _resolved_cwd(session_dir: Path, previous: Mapping[str, Any]) -> str:
             return cwd
     except (OSError, ValueError):
         pass
-    return str(session_dir)
+    return ""
 
 
 def _ensure_supervisor(config_dir: Path) -> str:

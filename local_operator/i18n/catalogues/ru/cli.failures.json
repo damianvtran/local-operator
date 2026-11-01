@@ -1,0 +1,6 @@
+{
+  "cli.failures.error_line": "{prog}: ошибка: {message}",
+  "cli.failures.required": "необходимо указать следующие аргументы: {names}",
+  "cli.failures.invalid_choice": "аргумент {argument}: недопустимое значение: {value} (выберите из {choices})",
+  "cli.failures.invalid_command": "Недопустимая команда {group}: {command}"
+}

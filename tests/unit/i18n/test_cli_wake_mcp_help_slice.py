@@ -84,7 +84,7 @@ def test_the_wake_block_renders_through_the_help_bootstrap() -> None:
 def test_the_mcp_block_renders_through_the_help_bootstrap() -> None:
     source = (REPO / CLI).read_text(encoding="utf-8")
     start = source.index("mcp_parser = subparsers.add_parser(")
-    nxt = source.index("add_search_subparser(subparsers, parent_parser)")
+    nxt = source.index("add_search_subparser(subparsers, parent_parser")
     block = source[start:nxt]
     assert block.count("_mh.") == 19, block.count("_mh.")
     assert block.count('.envelope(locale=help_locale)["text"]') == 19

@@ -1,0 +1,4 @@
+{
+  "tui.setup_cues.setup_placeholder": "शुरू करने के लिए {command} लिखें",
+  "tui.setup_cues.no_provider_cue": "पहले AI खाता जोड़ें: {command} लिखें"
+}

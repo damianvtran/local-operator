@@ -1,0 +1,23 @@
+{
+  "cli.agents_help.agents": "Quản lý tác nhân",
+  "cli.agents_help.list": "Liệt kê mọi tác nhân",
+  "cli.agents_help.list_page": "Số trang cần hiển thị (mặc định: 1)",
+  "cli.agents_help.list_perpage": "Số tác nhân mỗi trang (mặc định: 10)",
+  "cli.agents_help.create": "Tạo tác nhân mới",
+  "cli.agents_help.create_name": "Tên tác nhân cần tạo",
+  "cli.agents_help.delete": "Xóa một tác nhân (cục bộ theo tên hoặc Radient theo ID)",
+  "cli.agents_help.delete_name": "Tên tác nhân cần xóa cục bộ",
+  "cli.agents_help.delete_id": "ID tác nhân cần xóa khỏi Radient",
+  "cli.agents_help.delete_org": "Xóa tác nhân khỏi không gian làm việc của tổ chức này thay vì hub công khai (chia sẻ theo tổ chức của Agent Hub; cần `lop login radient`)",
+  "cli.agents_help.push": "Push (tải lên) một tác nhân lên Radient; `--org` và `--hub-id` push qua luồng xem trước/xác nhận (mã thoát: 0 đã xuất bản, 1 lỗi, 2 chỉ xem trước còn thay đổi đang chờ, 3 bị từ chối, 130 đã hủy)",
+  "cli.agents_help.push_name": "Tên tác nhân cần push lên Radient",
+  "cli.agents_help.push_id": "ID tác nhân cần push lên Radient (ghi đè tường minh)",
+  "cli.agents_help.push_org": "Xuất bản vào không gian làm việc của tổ chức này thay vì hub công khai (chia sẻ theo tổ chức của Agent Hub; cần `lop login radient`)",
+  "cli.agents_help.push_hub_id": "Xuất bản lại (ghi đè) bản đăng này trên hub từ tác nhân cục bộ (kiểm tra thông tin cá nhân trước); cần --name (--id là id cục bộ)",
+  "cli.agents_help.pull": "Pull (tải xuống) một tác nhân từ Radient",
+  "cli.agents_help.pull_id": "ID tác nhân cần pull từ Radient",
+  "cli.agents_help.pull_org": "Pull từ không gian làm việc của tổ chức này thay vì hub công khai (chia sẻ theo tổ chức của Agent Hub; cần `lop login radient`)",
+  "cli.agents_help.sync": "Cập nhật các bản khởi đầu đã cài và tác nhân đã pull từ hub lên văn bản mới nhất",
+  "cli.agents_help.sync_name": "Chỉ đồng bộ hồ sơ đã cài có tên này",
+  "cli.agents_help.sync_all": "Đồng bộ mọi bản khởi đầu đã cài và tác nhân đã pull từ hub (mặc định khi không có --name)"
+}

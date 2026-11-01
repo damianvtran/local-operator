@@ -1,0 +1,7 @@
+PASS
+BLOCKER: 0
+MAJOR: 0
+MINOR: 0
+NIT: 0
+Agent: i18n-auditor (session c0654a5679e8)
+Actual model: openai/gpt-6.1-sol; temporary fallback from anthropic/claude-sonnet-5-5 after quota failure (intermediate model switch: anthropic/claude-opus-5-5).

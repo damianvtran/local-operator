@@ -1,0 +1,59 @@
+{
+  "schema": 1,
+  "audit_id": "core-hardcoded-cli-slice1",
+  "locale": "fr",
+  "namespaces": [
+    "cli.failures",
+    "cli.group_help",
+    "tui.setup_cues"
+  ],
+  "audit_date": "2026-10-31",
+  "key_count": 16,
+  "tree_head_above_the_rewrite": "c65fbaa580ad9359031cc7367d8fb93db7b94a43",
+  "translator": {
+    "agent": "i18n-translator (session 446e242f9009; instance 57d2d4fc767a)",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-10-31",
+    "session": "446e242f9009",
+    "instance": "57d2d4fc767a"
+  },
+  "auditor": {
+    "agent": "i18n-auditor (session 94f0fe9d61c8; instance 86ba27845890); independent of translator",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-10-31",
+    "result": "passed",
+    "findings": 0,
+    "unresolved_blocker_major": 0,
+    "session": "94f0fe9d61c8",
+    "instance": "86ba27845890",
+    "counts": {
+      "BLOCKER": 0,
+      "MAJOR": 0,
+      "MINOR": 0,
+      "NIT": 0
+    }
+  },
+  "sha256": {
+    "cli.failures": {
+      "en": "b2fdec07146b26ad5bb43f3acf3fa8f1ab527c4bf94d9065ca715c16be2eec44",
+      "target": "785a5045e823b37fb196e2d8bb4105b4711868480c68a6da7ab83100521cc711",
+      "context": "b8f5e700bcdaf46fbeefc6c40269c7fe7cd4c91d7069f7f6dfcc8f813823b97d"
+    },
+    "cli.group_help": {
+      "en": "b819cbdf879a9f0b6567f8a555eceec4d1c7210b8ddab9beb665e2c21e3b7e88",
+      "target": "47dc0b3f476b54470f63268cb2f02151f126b0724d73c767e03cd5fbb38f09c5",
+      "context": "10ebe588116f331251985812a8a959aec5bf13cb2f9a57406aaadd01679b598c"
+    },
+    "tui.setup_cues": {
+      "en": "9028bb3883b7f60d6fe7cdeac21495e307279ad3eb959b53bc62add500cedce0",
+      "target": "c3dffa1f4b3c53bbe31b1919443ca8b9c727aaf7727e70bea583fc9c5032d2a4",
+      "context": "96a124500c8c523e3d0e1fb5de9f8f486c4050441c81ea458b3d9f782cf4d6bc"
+    }
+  },
+  "verdict": "passed",
+  "note": "All keys passed the independent first audit. All translators and auditors actually ran openai/gpt-6.1-sol after provider-quota fallbacks. Job instances supplied by manager registry; session identities from verbatim receipts.",
+  "evidence": {
+    "translator": "translator.md",
+    "verdict": "verdict.txt"
+  }
+}

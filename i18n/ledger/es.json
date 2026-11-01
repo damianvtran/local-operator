@@ -1880,25 +1880,6 @@
     },
     {
       "locale": "es",
-      "namespace": "wire.slash",
-      "source_sha256": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
-      "translator": {
-        "agent": "i18n-translator (session e537e741e8d1)",
-        "model": "radient/auto",
-        "date": "2026-10-29"
-      },
-      "auditor": {
-        "agent": "i18n-auditor (session 56bf28217956; instance 56bf28217956-slash2-es)",
-        "model": "radient/auto",
-        "date": "2026-10-29",
-        "result": "passed",
-        "findings": 0
-      },
-      "status": "passed",
-      "note": "PR #3088 width rewrite, re-audited at the committed bytes. 9 of 52 values rewritten by i18n-translator (session e537e741e8d1) (actual model radient/auto; provider-quota fallback); round-1 audit e7a6d684b88a-slash-es rejected the shortened bytes (0B/1M/5m/5n) and round-2 independent audit 56bf28217956-slash2-es on the new bytes passed 0B/0M/2m/4n. target sha256 b577fc64e6ab7369a58f02d4b4653367f9169cf1a015b16168e02dae6bfc5c3b; en source unchanged (b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202). Evidence: i18n/audits/evidence/es/wire.slash/es29s2/record.json (receipt.json + verdicts copied verbatim). Previous rows for this pair described audits of the pre-rewrite values and are superseded."
-    },
-    {
-      "locale": "es",
       "namespace": "relay.account_policy",
       "source_sha256": "0019b08106e6f7762194b164b9b9b37054a8cfade759aa2f6490787a73dea890",
       "translator": {
@@ -2466,6 +2447,88 @@
       },
       "status": "passed",
       "note": "Dual blind passes: i18n/audits/evidence/es/wire.errors.session_host/es31a/record.json; i18n/audits/evidence/es/wire.errors.session_host/es3222b/record.json. Both pass, 0 findings; actual quota fallback model recorded."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.failures",
+      "source_sha256": "b2fdec07146b26ad5bb43f3acf3fa8f1ab527c4bf94d9065ca715c16be2eec44",
+      "target_sha256": "dca45de2d87b581ea365803751794fc645e2d40749b15847861a682f49067bc3",
+      "translator": {
+        "agent": "i18n-translator (session 15ef8fd56f9d; instance 8712ff5050bb)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session d3db31d3a75d; instance 9326aa6e2338); independent of translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Clean independent audit of cli.failures, cli.group_help and tui.setup_cues (16 keys total); this row binds cli.failures at committed source/target bytes. Final severity counts: BLOCKER 0, MAJOR 0, MINOR 0, NIT 0. All keys passed the independent first audit. Actual translator/auditor model openai/gpt-6.1-sol after provider-quota fallbacks, not the requested model. Auditor instance 9326aa6e2338. Evidence: i18n/audits/evidence/es/core-hardcoded-cli-slice1/record.json; passing receipt verdict.txt."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.group_help",
+      "source_sha256": "b819cbdf879a9f0b6567f8a555eceec4d1c7210b8ddab9beb665e2c21e3b7e88",
+      "target_sha256": "79f99f664032b253f8463bbc9d1b225d6076f4c9f8a6b618b4c52961933eeaba",
+      "translator": {
+        "agent": "i18n-translator (session 15ef8fd56f9d; instance 8712ff5050bb)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session d3db31d3a75d; instance 9326aa6e2338); independent of translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Clean independent audit of cli.failures, cli.group_help and tui.setup_cues (16 keys total); this row binds cli.group_help at committed source/target bytes. Final severity counts: BLOCKER 0, MAJOR 0, MINOR 0, NIT 0. All keys passed the independent first audit. Actual translator/auditor model openai/gpt-6.1-sol after provider-quota fallbacks, not the requested model. Auditor instance 9326aa6e2338. Evidence: i18n/audits/evidence/es/core-hardcoded-cli-slice1/record.json; passing receipt verdict.txt."
+    },
+    {
+      "locale": "es",
+      "namespace": "tui.setup_cues",
+      "source_sha256": "9028bb3883b7f60d6fe7cdeac21495e307279ad3eb959b53bc62add500cedce0",
+      "target_sha256": "07324e324270110190120a852967f4e0fdbeb451f08eefddbb397afa3b3cd362",
+      "translator": {
+        "agent": "i18n-translator (session 15ef8fd56f9d; instance 8712ff5050bb)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session d3db31d3a75d; instance 9326aa6e2338); independent of translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Clean independent audit of cli.failures, cli.group_help and tui.setup_cues (16 keys total); this row binds tui.setup_cues at committed source/target bytes. Final severity counts: BLOCKER 0, MAJOR 0, MINOR 0, NIT 0. All keys passed the independent first audit. Actual translator/auditor model openai/gpt-6.1-sol after provider-quota fallbacks, not the requested model. Auditor instance 9326aa6e2338. Evidence: i18n/audits/evidence/es/core-hardcoded-cli-slice1/record.json; passing receipt verdict.txt."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.slash",
+      "source_sha256": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
+      "translator": {
+        "agent": "i18n-translator (session e537e741e8d1)",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session 56bf28217956; instance 56bf28217956-slash2-es)",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PR #3088 width rewrite, re-audited at the committed bytes. 9 of 52 values rewritten by i18n-translator (session e537e741e8d1) (actual model radient/auto; provider-quota fallback); round-1 audit e7a6d684b88a-slash-es rejected the shortened bytes (0B/1M/5m/5n) and round-2 independent audit 56bf28217956-slash2-es on the new bytes passed 0B/0M/2m/4n. target sha256 b577fc64e6ab7369a58f02d4b4653367f9169cf1a015b16168e02dae6bfc5c3b; en source unchanged (b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202). Evidence: i18n/audits/evidence/es/wire.slash/es29s2/record.json (receipt.json + verdicts copied verbatim). Previous rows for this pair described audits of the pre-rewrite values and are superseded."
     },
     {
       "locale": "es",

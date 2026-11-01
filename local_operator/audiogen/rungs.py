@@ -56,6 +56,7 @@ import asyncio
 import contextlib
 import hashlib
 import logging
+import math
 import random
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -629,7 +630,7 @@ def _cost_from_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
         basis = "billed"
     else:
         basis = "estimated"
-    return {
+    normalized = {
         "amount_usd": amount,
         "basis": basis,
         "raw_basis": basis_label,
@@ -639,6 +640,13 @@ def _cost_from_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
         "units": _as_float(cost.get("units")),
         "tool_type": _as_str(cost.get("tool_type")),
     }
+    # Fractional SFX billing has a precise requested quantity separate from
+    # legacy integer units. Preserve valid server metadata, including failed
+    # settlement zero, without inventing it for historical/unknown receipts.
+    duration = _as_float(cost.get("billable_duration_seconds"))
+    if duration is not None and math.isfinite(duration) and duration >= 0:
+        normalized["billable_duration_seconds"] = duration
+    return normalized
 
 
 def _cost_provenance(path: str, cost: dict[str, Any]) -> str:

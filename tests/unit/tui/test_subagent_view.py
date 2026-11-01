@@ -269,6 +269,29 @@ def test_fold_produces_prose_and_tool_rows_in_call_order() -> None:
     assert entries[2].result_text == "2 failed"
 
 
+def test_child_history_hides_unstamped_recovery_but_keeps_human_text() -> None:
+    from local_operator.harness.chrome_prompts import MISSING_ARGUMENTS_RECOVERY_PROMPT
+
+    def row(entry_id: str, text: str) -> TranscriptEntry:
+        return TranscriptEntry(
+            id=entry_id,
+            ts=1.0,
+            type=ENTRY_MESSAGE,
+            payload={
+                "kind": "message",
+                "role": "user",
+                "content": [{"type": "text", "text": text}],
+            },
+        )
+
+    human = "Please investigate the tool warning"
+    result = fold_transcript_entries(
+        [row("recovery", MISSING_ARGUMENTS_RECOVERY_PROMPT), row("human", human)]
+    )
+    assert len(result) == 1
+    assert result[0].text == human
+
+
 def test_both_folds_read_the_childs_fault_class_before_is_error() -> None:
     """A child's MARKED abort/skip is `interrupted`, not `failed`, on both folds.
 

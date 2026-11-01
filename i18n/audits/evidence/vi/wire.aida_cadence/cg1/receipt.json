@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "audit_id": "cg1",
+  "locale": "vi",
+  "namespace": "wire.aida_cadence",
+  "source_sha256": "3bb421a58f2ffa4fec089421d9cb91257fa626d66b2e215b3e120c068bb8e5dd",
+  "target_sha256": "a622dec1a962c8b9205b8383cd33e2cd05c046dbab2f78b1da301e8c445e9684",
+  "hashes": {
+    "audit.log": "c2b8f81ff79c1f442baf8b0fe30b0871b2ab06005f13c5ae791bdb8e6ee36c76",
+    "findings.json": "bf1b14f15d985373d7b21b767cfa39e1a6943a2646576a5f67e664d5f2bd0fae",
+    "record.json": "65e96b60b06d56da0872e916ce79e8a959d57a50c52ee28a675ba116d76ce8a3",
+    "report.md": "66174c397cd98023dbc8d6c25dae59ab7d493054cca3df1e844a615888c37435"
+  }
+}

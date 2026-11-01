@@ -1,0 +1,4 @@
+{
+  "tui.setup_cues.setup_placeholder": "شروع کرنے کے لیے {command} لکھیں",
+  "tui.setup_cues.no_provider_cue": "پہلے AI اکاؤنٹ منسلک کریں: {command} لکھیں"
+}

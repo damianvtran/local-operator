@@ -386,12 +386,32 @@ async def test_rows_group_opened_then_mentioned_and_enter_opens_the_forge_url(re
 
 
 @pytest.mark.asyncio
-async def test_r_refreshes_the_forge_and_re_reads_the_index(refreshes) -> None:
+async def test_r_refreshes_the_forge_and_re_reads_the_index(refreshes, monkeypatch) -> None:
+    # Cached-ready is deliberately earlier than the forge pass. Hold the scan
+    # between them so this cell cannot accidentally use that first paint as a
+    # receipt for a refresh that has not run (CI run 41305820860, shard 0).
+    scan_entered = asyncio.Event()
+    release_scan = asyncio.Event()
+    real_scan = ReviewView._scan
+
+    async def gated_scan(self, *, force: bool) -> None:
+        scan_entered.set()
+        await release_scan.wait()
+        await real_scan(self, force=force)
+
+    monkeypatch.setattr(ReviewView, "_scan", gated_scan)
     _populated(1)
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
         await _boot(pilot, app)
         view = await _open_review(pilot, app)
+        await _settle(pilot, scan_entered.is_set)
+        assert view._state == "ready"
+        assert refreshes == [], "cached-ready must not imply that the forge was refreshed"
+        release_scan.set()
+        # Wait for the effect this assertion measures AND the worker's completion:
+        # otherwise the following r can cancel the initial pass's final re-read.
+        await _settle(pilot, lambda: len(refreshes) == 1 and not view._refreshing)
         assert len(refreshes) == 1
 
         _write_index(
@@ -401,7 +421,14 @@ async def test_r_refreshes_the_forge_and_re_reads_the_index(refreshes) -> None:
             ]
         )
         await pilot.press("r")
-        await _settle(pilot, lambda: "#3" in _plain(view._body_text))
+        # The pre-forge cached frame can already contain #3 here too; it is not
+        # proof that the explicit refresh reached the forge or finished adopting.
+        await _settle(
+            pilot,
+            lambda: len(refreshes) == 2
+            and not view._refreshing
+            and "#3" in _plain(view._body_text),
+        )
         assert len(refreshes) == 2
         assert refreshes[-1][0] == SESSION_ID
         assert _ref(1).key in [row["key"] for row in refreshes[-1][1]]

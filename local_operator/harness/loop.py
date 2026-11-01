@@ -3684,20 +3684,19 @@ class AgentLoop:
                         )
                         return
                     if missing_required or repeated_error_batches == REPEATED_TOOL_ERROR_WARNING:
+                        # The stamp survives journaling and identifies future rows without
+                        # relying on their prose; old unstamped rows need exact matching.
+                        from local_operator.compaction.cutpoint import (
+                            RENDERED_INJECTION_KEY,
+                        )
+
                         recovery = Message.user(
                             (
-                                "Harness recovery notice: required tool arguments were omitted. "
-                                "No rejected call ran. Supply the named required fields "
-                                "inside each call's argument object, including each "
-                                "parallel child's parameters; "
-                                "do not resend empty objects or invent values. If the values are "
-                                "unavailable, explain the blocker. An unchanged retry will stop."
-                            )
-                            if missing_required
-                            else "Harness recovery notice: the last three tool batches repeated "
-                            "the same arguments and errors. Inspect the error and change approach; "
-                            "do not repeat the unchanged failing calls. If an external condition "
-                            "must change, use a supported wait operation or explain the blocker."
+                                _chrome_prompts.MISSING_ARGUMENTS_RECOVERY_PROMPT
+                                if missing_required
+                                else _chrome_prompts.REPEATED_TOOL_ERRORS_RECOVERY_PROMPT
+                            ),
+                            provider_payload={RENDERED_INJECTION_KEY: True},
                         )
                         context.messages.append(recovery)
                         new_messages.append(recovery)

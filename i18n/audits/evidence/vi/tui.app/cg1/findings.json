@@ -1,0 +1,39 @@
+{
+  "locale": "vi",
+  "namespace": "tui.app",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 1,
+    "nit": 1
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 1,
+      "id": "VI-009",
+      "severity": "MINOR",
+      "namespace": "tui.app",
+      "key": "tui.app.help.notify_note_more",
+      "english": "or set `LOCAL_OPERATOR_NO_NOTIFICATIONS=1`; in-band ones wait for the terminal to be unfocused, detached ones click to reopen",
+      "current": "hoặc đặt `LOCAL_OPERATOR_NO_NOTIFICATIONS=1`; thông báo trong băng tần chờ terminal mất tiêu điểm, thông báo tách rời nhấp để mở lại",
+      "problem": "'trong băng tần' is a literal calque of 'in-band' and 'thông báo tách rời nhấp để mở lại' says the notification itself clicks; reads machine-translated.",
+      "suggested": "hoặc đặt `LOCAL_OPERATOR_NO_NOTIFICATIONS=1`; thông báo tại chỗ chờ terminal mất tiêu điểm, thông báo của phiên tách rời có thể nhấp để mở lại",
+      "disposition": "fixed (remediation core-fix, session 5e0b68c135be)"
+    },
+    {
+      "round": 2,
+      "id": "R2-VI-008",
+      "severity": "NIT",
+      "namespace": "tui.app",
+      "key": "tui.app.help.notify_note_more",
+      "english": "or set `LOCAL_OPERATOR_NO_NOTIFICATIONS=1`; in-band ones wait for the terminal to be unfocused, detached ones click to reopen",
+      "current": "hoặc đặt `LOCAL_OPERATOR_NO_NOTIFICATIONS=1`; thông báo tại chỗ chờ terminal mất tiêu điểm, thông báo của phiên tách rời có thể nhấp để mở lại",
+      "problem": "«thông báo tại chỗ» loses the meaning of «in-band», which is notifications sent through the terminal escape (tui/notify.py); the fix is acceptable but vague.",
+      "suggested": "… thông báo qua terminal chờ terminal mất tiêu điểm, thông báo của phiên tách rời có thể nhấp để mở lại",
+      "disposition": "fixed (remediation core-fix2, session 053117b4ad36)"
+    }
+  ]
+}

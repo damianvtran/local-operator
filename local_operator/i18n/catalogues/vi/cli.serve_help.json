@@ -1,0 +1,7 @@
+{
+  "cli.serve_help.serve": "Khởi động máy chủ FastAPI",
+  "cli.serve_help.host": "Địa chỉ host (mặc định: 127.0.0.1). Theo chính sách chỉ loopback: mọi bind không phải loopback đều bị từ chối. Phục vụ tệp không bị giới hạn trên các kết nối loopback; hãy truy cập API này từ xa qua tunnel tường minh hoặc chuyển tiếp cổng SSH.",
+  "cli.serve_help.port": "Cổng cho máy chủ (mặc định: 1111)",
+  "cli.serve_help.reload": "Bật hot reload cho máy chủ",
+  "cli.serve_help.listener_fd": "Nhận một socket lắng nghe đã bind sẵn thay vì tự bind. Được đặt bởi một daemon thay thế ảnh tiến trình của chính nó bằng bản dựng mới (`server/reload`), để cổng không bao giờ có lúc không có gì phía sau. Không phải cờ dành cho người dùng."
+}

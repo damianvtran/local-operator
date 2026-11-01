@@ -1,0 +1,27 @@
+{
+  "locale": "vi",
+  "namespace": "cli.services_help",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 1,
+    "nit": 0
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 3,
+      "id": "R3-VI-003",
+      "severity": "MINOR",
+      "namespace": "cli.services_help",
+      "key": "cli.services_help.services_description",
+      "english": "Everything local_operator runs for this machine that is not a conversation. A 'service' is a `lop serve` daemon or a supervised LaunchAgent — the mobile relay, the browser bridge, the tunnel and the wakes agent. Runtimes — the processes holding your conversations — are never stopped: 'restart' reloads a serve daemon in place, keeping its pid and socket.",
+      "current": "Mọi thứ local_operator chạy cho máy này mà không phải một cuộc trò chuyện. Một 'dịch vụ' là một daemon `lop serve` hoặc một LaunchAgent được giám sát — relay di động, cầu nối trình duyệt, tunnel và tác nhân wake. Runtime — các tiến trình giữ cuộc trò chuyện của bạn — không bao giờ bị dừng: 'restart' nạp lại một daemon serve tại chỗ, giữ nguyên pid và socket của nó.",
+      "problem": "Sweep (glossary-term class, inverse direction): «relay di động» and «tác nhân wake» keep relay/wake Latin in prose, although glossary §2 says both translate (vi «chuyển tiếp», «thức dậy»; only the tool name `wake` stays). It also contradicts the translator's own R2-VI-004 decline, which keeps «chuyển tiếp:» in the network panel because of that glossary row: the same mobile relay now has two names. Meaning is clear, so MINOR.",
+      "suggested": "… — chuyển tiếp di động, cầu nối trình duyệt, tunnel và tác nhân thức dậy. … (or, if relay is meant as a service name, keep it Latin in the network panel too and record the call in the style guide)",
+      "disposition": "open at PASS: minor/nit accepted, value unchanged"
+    }
+  ]
+}

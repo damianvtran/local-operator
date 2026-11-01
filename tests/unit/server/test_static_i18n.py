@@ -145,14 +145,13 @@ async def test_html_invalid_utf8_and_read_failure(monkeypatch, tmp_path):
     }
 
 
-def test_new_namespace_english_fallback():
+def test_new_namespace_english_fallback(tmp_path, monkeypatch):
     # This slice must not invalidate translated locales or need translated keys.
     expected = {
         "code": "wire.errors.files.sign_ttl",
         "params": {"maximum": "3600"},
         "text": "ttl_s must be between 1 and 3600.",
     }
-    fallback: list[str] = []
     translated: list[str] = []
     for locale in shipped_locales():
         envelope = wire_errors_files.sign_ttl(maximum="3600").envelope(locale=locale)
@@ -161,7 +160,6 @@ def test_new_namespace_english_fallback():
         except catalogues.CatalogueNotFound:
             # A locale that does not carry the namespace renders the English
             # source; a new English child never needs translated keys.
-            fallback.append(locale)
             assert envelope == expected, locale
             continue
         translated.append(locale)
@@ -174,7 +172,18 @@ def test_new_namespace_english_fallback():
             catalogue[expected["code"]], expected["params"], locale
         ), locale
         assert envelope["text"] != expected["text"], locale
-    # Both arms stay covered: some shipped locales still do not carry this
-    # namespace, and the released Chinese candidate does.
-    assert fallback
     assert "zh-CN" in translated
+
+    # Coverage can reach 100%, so exercise the missing-namespace arm with an
+    # English-only fixture tree, not a requirement that a shipped locale lag.
+    # Keep the real loader and generated envelope: a lookup exception alone
+    # would not prove that fallback preserves the English wording and params.
+    english = tmp_path / "en"
+    english.mkdir()
+    (english / "wire.errors.files.json").write_bytes(
+        catalogues.catalogue_bytes("en", "wire.errors.files")
+    )
+    monkeypatch.setattr(catalogues, "_CATALOGUES", tmp_path)
+    with pytest.raises(catalogues.CatalogueNotFound):
+        catalogues.load_catalogue("zh-CN", "wire.errors.files")
+    assert wire_errors_files.sign_ttl(maximum="3600").envelope(locale="zh-CN") == expected
