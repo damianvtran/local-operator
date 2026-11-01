@@ -16,6 +16,7 @@ from typing import Any
 from local_operator.i18n.keys import cli_exec_help as _eh
 from local_operator.i18n.keys import wire_exec as _wd
 from local_operator.i18n.keys import wire_radient_saver as _rs
+from local_operator.i18n.messages import render
 from local_operator.i18n.text import tr
 
 logger = logging.getLogger(__name__)
@@ -203,7 +204,9 @@ def add_startup_arguments(parser: argparse.ArgumentParser, *, help_locale: str =
         # `--help` prose. This sentence already says what the flag does and is
         # audited in all seven locales; argparse prints the three accepted words
         # beside it, so the choice vocabulary is not lost.
-        help=_rs.command_description().envelope(locale=help_locale)["text"],
+        # This is argparse prose, not an identity envelope. Render directly so
+        # the deferred-wire policy can verify that only text leaves this seam.
+        help=render(_rs.command_description().code, {}, locale=help_locale),
     )
     parser.add_argument(
         "--workstream",

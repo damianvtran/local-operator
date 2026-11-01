@@ -369,6 +369,8 @@ async def saver_slash(session: Any, arg: str, SlashResult: Any) -> Any:
         notify()
     return SlashResult(
         kind="notice",
-        text=_tr(_rs.command_enabled() if target else _rs.command_disabled()),
+        # Keep each key call directly inside its render seam: the deferred-wire
+        # guard verifies that the result is text, never an outgoing Msg identity.
+        text=_tr(_rs.command_enabled()) if target else _tr(_rs.command_disabled()),
         style="info",
     )
