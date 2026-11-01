@@ -3415,9 +3415,7 @@ def _owner_audit_no_store(
         # (or scheduling failure), losing a record is safer than leaking a refusal.
         status_class = f"{exc.status_code // 100}xx"
         try:
-            asyncio.get_running_loop().call_soon(
-                _log_owner_audit_refusal, operation, status_class
-            )
+            asyncio.get_running_loop().call_soon(_log_owner_audit_refusal, operation, status_class)
         except Exception:  # noqa: BLE001 — preserve the original refusal on failure
             pass
         raise

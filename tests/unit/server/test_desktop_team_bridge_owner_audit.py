@@ -362,11 +362,14 @@ def test_owner_audit_failing_log_sink_preserves_refusal_without_sensitive_stderr
         suffix = "&unexpected=" + fragment
     path = BASE + _q(suffix)
     original = client.get(path)
-    assert original.status_code == {
-        "query": 422,
-        "upstream": 404,
-        "malformed_page": 502,
-    }[surface]
+    assert (
+        original.status_code
+        == {
+            "query": 422,
+            "upstream": 404,
+            "malformed_page": 502,
+        }[surface]
+    )
     capfd.readouterr()
     active_exceptions = []
     emitted = threading.Event()
@@ -431,9 +434,7 @@ def test_owner_audit_skips_logging_when_it_cannot_detach(monkeypatch, caplog, fa
         monkeypatch.setattr(
             routes.asyncio, "get_running_loop", lambda: SimpleNamespace(call_soon=fail)
         )
-    refusal = HTTPException(
-        422, {"code": "private-code"}, headers={"X-Synthetic": "preserved"}
-    )
+    refusal = HTTPException(422, {"code": "private-code"}, headers={"X-Synthetic": "preserved"})
     with caplog.at_level(logging.WARNING, logger=routes.__name__):
         with pytest.raises(HTTPException) as caught:
             with routes._owner_audit_no_store("owner_audit_conversations"):
