@@ -23,6 +23,7 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import contextmanager
 
 import pytest
 
@@ -1096,19 +1097,133 @@ def _kill_pids():
             pass
 
 
-def test_survivor_stays_in_ledger_and_session_reap_kills_it(tmp_path, monkeypatch, _kill_pids):
-    pid = _bash_bg("sleep 4242 >/dev/null 2>&1 & echo pid=$!", "sess-a", tmp_path, monkeypatch)
-    _kill_pids.append(pid)
-    assert _pid_alive(pid)
-    (entry,) = _ledger_entries(tmp_path)
-    assert entry["session_id"] == "sess-a"
-    assert pid in [s["pid"] for s in entry["survivors"]]
-    assert "detached" not in entry
+@contextmanager
+def _survivor_diagnostics(config_dir):
+    """Cache existing call results; emit only when this synthetic case fails.
 
-    assert group_reaper.reap_session_groups("sess-a", config_dir=tmp_path) == 1
-    assert _wait_dead(pid)
-    assert _ledger_entries(tmp_path) == []  # idempotent: nothing left to do
-    assert group_reaper.reap_session_groups("sess-a", config_dir=tmp_path) == 0
+    No extra ps, ledger read, registration or lifecycle call is made. Profiling
+    observes this thread only and adds timing overhead; register's return alone
+    cannot prove an append persisted. Unknown/unobserved facts stay unknown.
+    An existing profiler is left untouched rather than chained or replaced.
+    """
+    functions = {
+        group_reaper.register_group: "register",
+        group_reaper.settle_group: "settle",
+        group_reaper.unregister_group: "unregister",
+        group_reaper._resolve_config_dir: "root",
+        group_reaper._self_start_token: ".".join(("owner", "birth")),
+        group_reaper._group_has_members: "group_present",
+        group_reaper._group_survivors: "survivors",
+        group_reaper._annotate_entry: "annotate",
+        procstate.pid_liveness: "pid_liveness",
+        procstate.is_zombie: "zombie",
+        _ledger_entries: "ledger_read",
+    }
+    codes = {function.__code__: name for function, name in functions.items()}
+    events = []
+    previous = sys.getprofile()
+
+    def observe(frame, event, result):
+        if len(events) >= 64:
+            return
+        if frame.f_code is group_reaper.register_group.__code__ and event in {
+            "c_return",
+            "c_exception",
+        }:
+            operation = getattr(result, "__name__", "")
+            if operation in {"write", "__exit__"} and getattr(
+                result, "__self__", None
+            ) is frame.f_locals.get("handle"):
+                events.append({"stage": "register." + operation, "succeeded": event == "c_return"})
+            return
+        if event != "return" or frame.f_code not in codes:
+            return
+        name = codes[frame.f_code]
+        facts = {"stage": name}
+        if name == "root":
+            facts["matches_test_root"] = result == config_dir
+        elif name == "owner.birth":
+            facts["token_present"] = bool(result)
+        elif name in {"group_present", "pid_liveness", "zombie"}:
+            facts["result"] = result
+        elif name in {"survivors", "ledger_read"}:
+            facts["count"] = len(result) if isinstance(result, list) else None
+        elif name == "register":
+            facts["root_matches"] = frame.f_locals.get("resolved") == config_dir
+            facts["entry_built"] = isinstance(frame.f_locals.get("entry"), dict)
+            facts["token_present"] = bool(frame.f_locals.get("owner_start"))
+            facts["session_matches"] = frame.f_locals.get("session_id") == "sess-a"
+        elif name == "annotate":
+            facts["matching_row"] = frame.f_locals.get("newest", -1) >= 0
+        events.append(facts)
+
+    if previous is None:
+        sys.setprofile(observe)
+    try:
+        yield events
+    except (AssertionError, ValueError):
+        print(
+            "survivor observation: "
+            + json.dumps(
+                {
+                    "existing_profiler": previous is not None,
+                    "event_limit_reached": len(events) == 64,
+                    "events": events,
+                }
+            ),
+            file=sys.stderr,
+        )
+        raise
+    finally:
+        if sys.getprofile() is observe:
+            sys.setprofile(previous)
+
+
+def test_survivor_diagnostics_are_silent_on_pass_and_preserve_failure(tmp_path, capsys):
+    previous = sys.getprofile()
+    with _survivor_diagnostics(tmp_path):
+        assert _ledger_entries(tmp_path) == []
+    assert capsys.readouterr().err == ""
+    with pytest.raises(ValueError, match="original sentinel"):
+        with _survivor_diagnostics(tmp_path):
+            assert _ledger_entries(tmp_path) == []
+            raise ValueError("original sentinel")
+    output = capsys.readouterr()
+    assert sys.getprofile() is previous
+    assert str(tmp_path) not in output.err
+    assert output.out == ""
+    if previous is None:
+        assert '"stage": "ledger_read", "count": 0' in output.err
+
+    def other_profiler(frame, event, result):
+        pass
+
+    try:
+        sys.setprofile(other_profiler)
+        with pytest.raises(ValueError, match="external profiler sentinel"):
+            with _survivor_diagnostics(tmp_path):
+                assert sys.getprofile() is other_profiler
+                raise ValueError("external profiler sentinel")
+        assert sys.getprofile() is other_profiler
+    finally:
+        sys.setprofile(previous)
+    assert '"existing_profiler": true' in capsys.readouterr().err
+
+
+def test_survivor_stays_in_ledger_and_session_reap_kills_it(tmp_path, monkeypatch, _kill_pids):
+    with _survivor_diagnostics(tmp_path):
+        pid = _bash_bg("sleep 4242 >/dev/null 2>&1 & echo pid=$!", "sess-a", tmp_path, monkeypatch)
+        _kill_pids.append(pid)
+        assert _pid_alive(pid)
+        (entry,) = _ledger_entries(tmp_path)
+        assert entry["session_id"] == "sess-a"
+        assert pid in [s["pid"] for s in entry["survivors"]]
+        assert "detached" not in entry
+
+        assert group_reaper.reap_session_groups("sess-a", config_dir=tmp_path) == 1
+        assert _wait_dead(pid)
+        assert _ledger_entries(tmp_path) == []  # idempotent: nothing left to do
+        assert group_reaper.reap_session_groups("sess-a", config_dir=tmp_path) == 0
 
 
 def test_session_reap_leaves_a_sibling_sessions_survivor(tmp_path, monkeypatch, _kill_pids):

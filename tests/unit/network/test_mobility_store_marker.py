@@ -22,9 +22,11 @@ adopted.
 
 from __future__ import annotations
 
+import json
 import warnings
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, get_args
 
 import pytest
 
@@ -208,6 +210,140 @@ def test_a_promoted_session_marks_the_store_that_adopted_it(
     assert not adopted.exists()
 
 
+def _observe_archived_move(monkeypatch, servers):
+    """Cache allowlisted calls, delegating once without new actions or waits.
+
+    The two synthetic servers only. Callback/return order is not a global wire
+    timeline, and an audit call is not proof its record persisted. Python
+    observation adds timing overhead; payloads and identifiers are never copied.
+    """
+    from local_operator.network import mobility
+    from local_operator.network.relay import PeerLink
+
+    events = []
+    allowed = {"link_opened", "link_closed", "link_replaced", "link_idle"} | {
+        mobility.AUDIT_PREPARE,
+        mobility.AUDIT_READY,
+        mobility.AUDIT_HANDING_OFF,
+        mobility.AUDIT_COMMITTED,
+        mobility.AUDIT_ROLLED_BACK,
+        mobility.AUDIT_DONE,
+    }
+    for side, server in enumerate(servers):
+        original_record = server.audit.record
+
+        def record(event, _original=original_record, _side=side):
+            result = _original(event)
+            if event.event in allowed and len(events) < 64:
+                events.append({"stage": "audit.call", "side": _side, "event": event.event})
+            return result
+
+        monkeypatch.setattr(server.audit, "record", record)
+    original_request = PeerLink.request
+
+    def request(link, frame, *, timeout=None):
+        side = next((i for i, server in enumerate(servers) if link.server is server), None)
+        watching = side is not None and frame.get("phase") == "invite"
+        if watching and len(events) < 64:
+            events.append({"stage": "invite.request", "side": side})
+        try:
+            result = original_request(link, frame, timeout=timeout)
+        except BaseException:
+            if watching and len(events) < 64:
+                events.append({"stage": "invite.raised", "side": side})
+            raise
+        if watching and len(events) < 64:
+            events.append(
+                {"stage": "invite.return", "side": side, "answer_present": result is not None}
+            )
+        return result
+
+    monkeypatch.setattr(PeerLink, "request", request)
+    return events
+
+
+def _archived_move_diagnostics(servers, events):
+    """Failure-only rendering of cached calls and current in-memory state.
+
+    No Audit.tail (it flushes), file read, lock wait, dial or progress creation.
+    Snapshots are not atomic across threads; missing evidence stays unknown.
+    """
+    from local_operator.network import mobility
+
+    phases = set(get_args(mobility.SessionMovePhase))
+    observations = []
+    for index, server in enumerate(servers):
+        progress = mobility._progress.get(id(server))
+        history = [] if progress is None else progress._phases.get(SESSION, []).copy()
+        target = servers[1 - index].identity.device_id
+        observations.append(
+            {
+                "side": index,
+                "phases": [row["phase"] for row in history if row.get("phase") in phases],
+                "links": [
+                    {"alive": link.alive, "closing": link.closing}
+                    for link in server.links.copy().values()
+                    if link.device_id == target
+                ],
+            }
+        )
+    return {
+        "observations": observations,
+        "calls": list(events),
+        "event_limit_reached": len(events) == 64,
+    }
+
+
+def test_archived_move_observer_does_not_flush_or_expose_payload(monkeypatch):
+    from local_operator.network import mobility
+    from local_operator.network.relay import PeerLink
+
+    private = "synthetic-sensitive-value"
+    calls = []
+
+    def record(event):
+        calls.append(event)
+
+    # No tail/flush/dial methods exist: observation must not invent an action.
+    servers = tuple(
+        SimpleNamespace(
+            audit=SimpleNamespace(record=record),
+            links={},
+            identity=SimpleNamespace(device_id=private),
+        )
+        for _ in range(2)
+    )
+    answer = {"body": private}
+    failure = RuntimeError("synthetic request sentinel")
+
+    def original(link, frame, *, timeout=None):
+        calls.append((link, frame, timeout))
+        if frame.get("fail"):
+            raise failure
+        return answer
+
+    monkeypatch.setattr(PeerLink, "request", original)
+    monkeypatch.setattr(mobility, "_progress", {})
+    events = _observe_archived_move(monkeypatch, servers)
+    event = SimpleNamespace(event="link_closed", detail=private)
+    assert servers[0].audit.record(event) is None
+    link = SimpleNamespace(server=servers[0])
+    frame = {"phase": "invite", "body": private}
+    assert PeerLink.request(link, frame, timeout=3) is answer
+    assert calls == [event, (link, frame, 3)]
+    result = _archived_move_diagnostics(servers, events)
+    assert result["calls"][0] == {"stage": "audit.call", "side": 0, "event": "link_closed"}
+    assert result["calls"][-1]["answer_present"] is True
+    assert private not in json.dumps(result)
+    with pytest.raises(RuntimeError) as raised:
+        PeerLink.request(link, {"phase": "invite", "fail": True}, timeout=3)
+    assert raised.value is failure
+    assert len(calls) == 3  # one audit call and exactly the two requested calls
+    assert events[-1]["stage"] == "invite.raised"
+    assert private not in json.dumps(events)
+    assert mobility._progress == {}
+
+
 def test_an_archived_session_arrives_archived(
     request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -226,6 +362,7 @@ def test_an_archived_session_arrives_archived(
     from local_operator.session.archived import archived_ids, set_archived
 
     server_a, server_b, _host, _port = request.getfixturevalue("pair")
+    move_events = _observe_archived_move(monkeypatch, (server_a, server_b))
     # ``settings=server_b.settings`` or the joiner publishes a record nobody can
     # dial and the move answers ``unreachable`` — see every other cell in this file.
     _pair_settled(
@@ -240,7 +377,7 @@ def test_an_archived_session_arrives_archived(
 
     result = _move(server_a, SESSION, to=server_b.identity.device_id, monkeypatch=monkeypatch)
 
-    assert result["ok"] is True, result
+    assert result["ok"] is True, _archived_move_diagnostics((server_a, server_b), move_events)
     assert (server_b.root / "sessions" / SESSION).is_dir()
     assert SESSION in archived_ids(server_b.root), (
         "the device that adopted the conversation does not know it was archived, so it "
