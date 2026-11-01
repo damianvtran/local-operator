@@ -2861,19 +2861,28 @@ def test_projection_selection_failure_retains_original_fallback(
     control = _owner_frame(server_b)
     ti._reset_for_tests()
     calls = []
-    admissions: list[tuple[tuple[str, str], asyncio.Task[Any], bool]] = []
+    admissions: list[tuple[tuple[str, str], asyncio.Task[Any], bool, bool]] = []
     server_b._frame_memo.clear()
     original = server_b._stored_frame_index
     original_start = ti.start_refresh
 
     def capture_start(root: str | Path, session_id: str) -> tuple[asyncio.Task[Any], bool]:
-        task, started = original_start(root, session_id)
         key = ti._key(root, session_id)
+        previous = ti._IN_FLIGHT.get(key)
+        joining = (
+            previous is not None
+            and previous[0] is asyncio.get_running_loop()
+            and not previous[1].done()
+        )
+        task, started = original_start(root, session_id)
         entry = ti._IN_FLIGHT.get(key)
         # Capture admission on the owning loop before it yields. A completed
         # refresh legitimately removes this transient entry before the reader
         # can assert on it; absence later is not evidence of suppressed work.
-        admissions.append((key, task, entry is not None and entry[1] is task))
+        joined_correctly = (
+            previous is not None and task is previous[1] and not started if joining else started
+        )
+        admissions.append((key, task, entry is not None and entry[1] is task, joined_correctly))
         return task, started
 
     monkeypatch.setattr(ti, "start_refresh", capture_start)
@@ -2911,19 +2920,22 @@ def test_projection_selection_failure_retains_original_fallback(
         assert admissions, "a failed projection suppressed the single-flight"
     if admissions:
         expected_key = ti._key(server_b.root, SESSION)
-        assert all(key == expected_key and registered for key, _task, registered in admissions)
-        task = admissions[0][1]
-        assert all(admitted is task for _key, admitted, _registered in admissions)
+        assert all(
+            key == expected_key and registered and joined_correctly
+            for key, _task, registered, joined_correctly in admissions
+        )
 
-        async def settle_refresh() -> Any:
+        async def settle_refresh(task: asyncio.Task[Any]) -> Any:
             return await asyncio.shield(task)
 
-        # Wait for this exact admitted task, not a new refresh or a delay. This
-        # keeps final-frame correctness independent of worker completion speed.
-        refreshed = asyncio.run_coroutine_threadsafe(settle_refresh(), task.get_loop()).result(
-            timeout=5
-        )
-        assert refreshed is not None
+        # A completed flight can be replaced after a caller's cold cache check
+        # but before its schedule runs. Only overlapping admissions must join;
+        # settle EVERY distinct admitted task, not an invented global flight.
+        for task in dict.fromkeys(task for _key, task, _registered, _joined in admissions):
+            refreshed = asyncio.run_coroutine_threadsafe(
+                settle_refresh(task), task.get_loop()
+            ).result(timeout=5)
+            assert refreshed is not None
     server_b._frame_memo.clear()
     monkeypatch.undo()
     settled = _owner_frame(server_b)
