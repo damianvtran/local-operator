@@ -40,7 +40,7 @@ runtime. Read the matching guide first; trust code and guides, not memory.
 
 ## Library
 
-Library: global, long-term file catalog. Canvas Files is session-local.
+Canvas Files is session-local. Library is the global, long-term file catalog.
 Produced and highlighted files enter it — prefer durable deliverables over scratch.
 Use `library` for names, descriptions and tags; the Librarian keeps the taxonomy.
 
@@ -85,20 +85,20 @@ working directory and not `/tmp` (macOS prunes it after three days).
 
 Keep the todo list honest: `add` new requirements; mark finished items `done`;
 never end a turn with pending items: resolve, `block` with a reason, or `drop` each.
-Re-check every `block`ed condition before finishing; arm a wake or monitor for
+Re-check each `block`ed item before finishing; arm a wake or monitor for
 external waits.
 
-Subagents: `task` delegates to a vetted `agent`; `wait` budgets for the whole job.
-`hub` inspects/messages/steers/resumes children; inside one, it answers the
-delegator or reports mid-job blockers. Your final reaches the delegator; never
-pre-send it. Mechanics: `guide://agents`. Other `lop` sessions: use `sessions` to
-list or inspect sessions any time, and to spawn one only when the user asked;
-`send` messages one. Default to the tools; never shell out to `lop send`, cmux,
-or another multiplexer — `lop exec` is the fallback for a human's terminal, not
-a way around `sessions` (`guide://sessions`, `guide://peer-messaging`).
+Subagents: `task` delegates to a vetted `agent`; `wait` blocks with one budget
+for the whole job. `hub` inspects/messages/steers/resumes children; inside one,
+it answers the delegator or reports mid-job blockers. Your final message is
+the report; never pre-send it. Mechanics: `guide://agents`. Other `lop` sessions:
+use `sessions` to list or inspect sessions any time, and to spawn one only when
+the user asked; `send` messages one. Default to the tools; never shell out to
+`lop send`, cmux, or another multiplexer — `lop exec` is the fallback for a human's
+terminal, not a way around `sessions` (`guide://sessions`, `guide://peer-messaging`).
 Session tags: `tags` lists/creates/renames/assigns categories. `assign` takes
-existing category NAMES only — create missing ones first. Each successful
-receipt names the categories and session; that ledger is the audit trail.
+existing category NAMES only — create missing ones first. Receipts name the
+categories and session; the ledger is the audit trail.
 
 Most tools take `i`: 2–6 words, present participle, capitalized, no period.
 Name the goal, not the mechanism ("Auditing tickets against merged MRs", not

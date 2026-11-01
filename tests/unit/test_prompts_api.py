@@ -805,9 +805,10 @@ def test_system_md_cues_on_demand_tool_references() -> None:
 def test_system_md_scopes_the_peer_gate_to_spawning_and_names_restart_cutoffs() -> None:
     """C1: listing or inspecting peer sessions needs no permission — only
     spawning does; the old sentence gated all three under "when the user
-    asked". C4: a restart or update that cut a turn off belongs in the
-    incident cause list (kept cause-agnostic: a held-delivery card does not
-    end a turn)."""
+    asked". C4: restart/update must stay in the enumerated incident cause
+    list — the earlier "a restart or update that cut a turn off" wording was
+    compressed away, but the list stays cause-agnostic: a held-delivery card
+    does not end a turn."""
     flat = " ".join(render_template("system.md", {}).split())
     assert "list or inspect sessions any time, and to spawn one only when the user asked" in flat
     assert "cause (limits/auth/provider/network/context/restart/update) and recovery" in flat
