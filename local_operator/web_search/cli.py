@@ -7,8 +7,11 @@ import asyncio
 import getpass
 import json
 from pathlib import Path
+from typing import TypeVar
 
 from local_operator.config import ConfigManager
+from local_operator.i18n.cli_help import help_text
+from local_operator.i18n.keys import cli_group_help as _gg
 from local_operator.paths import config_dir
 from local_operator.web_search.models import (
     PROVIDER_IDS,
@@ -28,14 +31,21 @@ _API_KEY_NAMES: dict[SearchProviderId, str] = {
 TAVILY_MCP_URL = "https://mcp.tavily.com/mcp/"
 
 
+# argparse subparser actions are invariant: preserve the caller's parser subtype
+# while accepting both stock parsers in standalone callers and the keyed CLI.
+_ParserT = TypeVar("_ParserT", bound=argparse.ArgumentParser)
+
+
 def add_search_subparser(
-    subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
-    parent_parser: argparse.ArgumentParser,
+    subparsers: argparse._SubParsersAction[_ParserT],
+    parent_parser: _ParserT,
+    *,
+    help_locale: str | None = None,
 ) -> None:
     """Install ``search`` and its focused configuration subcommands."""
     search_parser = subparsers.add_parser(
         "search",
-        help="Configure and test load-balanced web search",
+        help=help_text(_gg.search(), help_locale),
         parents=[parent_parser],
     )
     commands = search_parser.add_subparsers(dest="search_command")

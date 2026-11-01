@@ -1,0 +1,61 @@
+PASS
+BLOCKER 0, MAJOR 0, MINOR 0, NIT 0
+
+Locale: ru
+Namespaces: cli.failures (4), cli.group_help (10), tui.setup_cues (2); all 16 keys audited.
+Audit date: 2026-10-31
+Agent: i18n-auditor (Russian core literals)
+Session: 3db14c5d43c4
+Actual audit model: openai/gpt-6.1-sol.
+Provider fallback: requested anthropic/claude-sonnet-5-5; host reported quota failure, then anthropic/claude-opus-5-5, then openai/gpt-6.1-sol. All substantive input reading, execution and semantic judgment occurred after the final switch; only the general code-review skill was read before it.
+Independent from translator: this session did not translate or edit any catalogue. Translator session identity was not supplied, so no translator-session identifier is invented.
+
+Sources read: i18n/style-guides/ru.md, i18n/glossary.md, all three English catalogues, all three English .context.json sidecars, and all three Russian catalogues, in the supplied lit-translate worktree. No translation or MT service used.
+
+MECHANICAL EXECUTION
+Working directory: /Users/damian/local-operator/.worktrees/lit-translate
+Command: PYTHONDONTWRITEBYTECODE=1 /Users/damian/local-operator/.venv/bin/python scripts/i18n/check.py --catalogues-only
+Actual output: check.py: catalogue checks: 0 problem(s)
+Exit status: 0.
+The worktree has no .venv/bin/python; used the existing primary checkout interpreter, not a copied dependency tree or a symlinked venv. The checker resolves the worktree from its script location.
+An additional Python probe parsed all six JSON catalogues, asserted exact key parity and placeholder-name parity per key, and confirmed that none uses ICU plural/select. All assertions passed. No added/dropped keys, markup, code spans or literal flags occur in these 16 values. Wrapper ordering, colon delimiters, placeholder boundaries and supplied quote marks were inspected and exercised.
+
+WIDTH EXECUTION
+rich.cells.cell_len('Сначала подключите аккаунт ИИ: введите /login radient') = 53.
+Declared maxCells = 74; margin = 21 cells. No overflow.
+The Russian string is ordinary Cyrillic plus ASCII punctuation and the Latin slash command; it has no combining marks or CJK wide characters. Rich's single-cell treatment is appropriate for an ordinary monospaced Unicode terminal. This is a measured string width, not a captured terminal frame or proof across every terminal implementation. No Devanagari/CJK assumption is needed for ru.
+
+PER-KEY SEMANTIC/REGISTER CHECK
+cli.failures.error_line: '{prog}: ошибка: {message}' preserves the exact wrapper; only 'error' is translated. Exercised with prog='lop config', message='тест'.
+cli.failures.required: 'необходимо указать следующие аргументы: {names}' is a conventional impersonal list-introducing diagnostic. Exercised with '--name' and '--name, --scope'. The plural introductory category does not require declension of the technical names or a count-dependent verb; a one-item list remains idiomatic. No missing Russian ICU branch is needed.
+cli.failures.invalid_choice: 'аргумент {argument}: недопустимое значение: {value} (выберите из {choices})' accurately identifies an invalid value and introduces alternatives. Exercised with argument='mode', value="'bad'", choices="'one', 'two'". The colon isolates {value}; 'значение' describes one input regardless of whether its literal contains a list. {choices} is an enumerated list of quoted technical tokens, not a Russian noun phrase requiring runtime declension. Quotes remain supplied verbatim. No count-dependent morphology is needed.
+cli.failures.invalid_command: 'Недопустимая команда {group}: {command}' preserves invalid-command meaning and technical tokens. Exercised with group='config', command='None'; None stays literal Latin.
+cli.group_help.skills: natural nominal group summary; publishing, pulling/downloading and synchronization, Agent Hub, documents and bundles all retained. A group summary is not an action-button label; the noun construction is acceptable under the style guide.
+cli.group_help.skills_description: both safety constraints retained: any execute permission bit is forbidden, and installation never runs code. No weakening of the negative statements.
+cli.group_help.tunnel: correct remote-access direction through Radient to local runtimes; 'рантаймам' follows the recorded Russian runtime terminology.
+cli.group_help.secret: encrypted, long-term, agent-retrievable and no user prompt retained. Generic read output masked the initial public-copy word; read_public_copy could not expose the fresh uncommitted catalogue (first timeout, then not-committed refusal). A local equality assertion against the complete expected public summary, without printing that value, returned True. Thus the masked adjective was checked, not silently skipped.
+cli.group_help.network: pairing devices and controlling sessions on them retained; Mesh-сети reads as established technical terminology, with correct 'сессиями'.
+cli.group_help.disk: measurement first and only provably safe deletion retained; 'заведомо безопасно удалять' is a natural, unambiguous safety restriction.
+cli.group_help.operator: key/authority that can loosen an active approval control retained; 'одобрений' matches the glossary and is not confused with confirmations. The terse technical formulation is understandable rather than a claim that the key bypasses every control.
+cli.group_help.pair: phone as operator device and one-time signature authorization retained. The authorisation is not presented as repeatable without the signature or as a different access direction.
+cli.group_help.search: configuration/testing plus load-balanced web search retained, natural infinitive summary.
+cli.group_help.fetch: configuration/testing plus no-visible-browser-window fetching retained, matching the context definition of headless.
+tui.setup_cues.setup_placeholder: natural formal imperative, exact command placeholder, correct start meaning.
+tui.setup_cues.no_provider_cue: connect an AI account first, then type the command; natural formal imperative, lower-casing after a prefixed refusal remains grammatical; measured 53/74 cells.
+
+PLURALS / TYPOGRAPHY / TERMINOLOGY
+No numeric plural/select messages occur, so Russian one/few/many/other arms are not applicable. 'Following arguments' is a generic list heading rather than a numeric counter; its fixed plural is acceptable for single and multiple entries. Interpolated identifiers remain undeclined and isolated by punctuation. No translated command tokens, changed quotes around choices, mixed address register, glossary violation or RTL hazard found. There are no declared width budgets for the CLI help summaries in these sidecars, so no invented budget or overflow finding is asserted for them.
+
+INPUT SHA-256
+local_operator/i18n/catalogues/en/cli.failures.json b2fdec07146b26ad5bb43f3acf3fa8f1ab527c4bf94d9065ca715c16be2eec44
+local_operator/i18n/catalogues/en/cli.failures.context.json b8f5e700bcdaf46fbeefc6c40269c7fe7cd4c91d7069f7f6dfcc8f813823b97d
+local_operator/i18n/catalogues/ru/cli.failures.json c5c3c46de1774a395303624d61703c24caae26ba4661cd86bf3ceea04647a3aa
+local_operator/i18n/catalogues/en/cli.group_help.json b819cbdf879a9f0b6567f8a555eceec4d1c7210b8ddab9beb665e2c21e3b7e88
+local_operator/i18n/catalogues/en/cli.group_help.context.json 10ebe588116f331251985812a8a959aec5bf13cb2f9a57406aaadd01679b598c
+local_operator/i18n/catalogues/ru/cli.group_help.json ed8855a3becc153924a4aa3d1819b1a7b8589311198bdfc5fcf6e5ab73a814d8
+local_operator/i18n/catalogues/en/tui.setup_cues.json 9028bb3883b7f60d6fe7cdeac21495e307279ad3eb959b53bc62add500cedce0
+local_operator/i18n/catalogues/en/tui.setup_cues.context.json 96a124500c8c523e3d0e1fb5de9f8f486c4050441c81ea458b3d9f782cf4d6bc
+local_operator/i18n/catalogues/ru/tui.setup_cues.json c518ff70dcdf52a2dda9f93605d37dce11bce862480aaabb72a67adca6db47e6
+
+SCOPE / RETENTION
+This file contains audit notes and a quoted execution summary, not a raw execution log. Actual command receipts are in this audit session transcript. No repository file, catalogue, ledger or tracked evidence bundle was modified, following the explicit read-only task constraint. The requesting manager must preserve these outputs under the canonical tracked audit evidence root and record ledger provenance if needed; no ledger execution or tracked retention is claimed here. This report is one independent semantic pass, not proof of the separately required second independent high-visibility pass. No rendered UI or full interactive CLI flow was captured.

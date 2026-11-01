@@ -1,0 +1,22 @@
+{
+  "cli.failures.error_line": {
+    "role": "lop CLI failure message",
+    "tone": "terse, plain, states what the user typed wrong",
+    "note": "Wraps every argparse usage failure, printed on stderr after the usage block. {prog} is the command path such as `lop teams show` and {message} is the already-localised failure sentence; both are inserted verbatim, so do not translate or reorder their content. Keep the shape '<command>: <error word>: <message>'."
+  },
+  "cli.failures.required": {
+    "role": "lop CLI failure message",
+    "tone": "terse, plain, states what the user typed wrong",
+    "note": "Missing required argument(s). {names} is a comma-separated list of argument names, flag spellings or dest names (technical tokens, inserted verbatim)."
+  },
+  "cli.failures.invalid_choice": {
+    "role": "lop CLI failure message",
+    "tone": "terse, plain, states what the user typed wrong",
+    "note": "A value that is not one of the allowed choices, for a flag or for the subcommand position (an unknown subcommand takes this same shape). {argument} is the flag or dest token, {value} is the user's input already quoted with its quote marks, {choices} is a comma-separated list of command or option tokens; all three stay verbatim."
+  },
+  "cli.failures.invalid_command": {
+    "role": "lop CLI failure message",
+    "tone": "terse, plain, states what the user typed wrong",
+    "note": "Raised when a command group is invoked without a valid verb. {group} is a command name such as config or agents and {command} is the verb typed or the literal word None when none was given; both stay verbatim, translate only 'Invalid' and 'command'."
+  }
+}

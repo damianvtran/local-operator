@@ -1,0 +1,12 @@
+{
+  "cli.group_help.skills": "Publier, effectuer un pull et synchroniser les compétences de l’Agent Hub (documents et paquets)",
+  "cli.group_help.skills_description": "Les paquets de compétences ne peuvent contenir aucun exécutable (tout bit d’exécution est refusé), et leur installation n’exécute jamais de code.",
+  "cli.group_help.tunnel": "Accès à distance Radient à vos runtimes locaux",
+  "cli.group_help.secret": "Secrets chiffrés conservés à long terme, récupérables par un agent sans vous solliciter",
+  "cli.group_help.network": "Réseaux maillés : associer des appareils et piloter leurs sessions",
+  "cli.group_help.disk": "Gestion de l’espace disque : mesurer d’abord, ne supprimer qu’après vérification de l’absence de risque",
+  "cli.group_help.operator": "Autorité de l’opérateur : la clé autorisant l’assouplissement d’un contrôle d’approbation en cours",
+  "cli.group_help.pair": "Associer un téléphone comme appareil opérateur : votre signature l’autorise une seule fois",
+  "cli.group_help.search": "Configurer et tester la recherche web avec répartition de charge",
+  "cli.group_help.fetch": "Configurer et tester la récupération de pages web sans fenêtre de navigateur"
+}

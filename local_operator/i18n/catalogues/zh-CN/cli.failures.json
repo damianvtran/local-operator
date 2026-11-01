@@ -1,0 +1,6 @@
+{
+  "cli.failures.error_line": "{prog}: 错误: {message}",
+  "cli.failures.required": "缺少以下必需参数：{names}",
+  "cli.failures.invalid_choice": "参数{argument}：无效选项：{value}（可选值：{choices}）",
+  "cli.failures.invalid_command": "无效的{group}命令：{command}"
+}

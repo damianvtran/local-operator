@@ -1,0 +1,59 @@
+{
+  "schema": 1,
+  "audit_id": "core-hardcoded-cli-slice1",
+  "locale": "ur",
+  "namespaces": [
+    "cli.failures",
+    "cli.group_help",
+    "tui.setup_cues"
+  ],
+  "audit_date": "2026-10-31",
+  "key_count": 16,
+  "tree_head_above_the_rewrite": "c65fbaa580ad9359031cc7367d8fb93db7b94a43",
+  "translator": {
+    "agent": "i18n-translator (session 6d443470fd42; instance fc9fad296b2f); disk replacement i18n-translator (session 61efc26064e2; instance 2af28e041da7)",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-10-31",
+    "session": "6d443470fd42",
+    "instance": "fc9fad296b2f"
+  },
+  "auditor": {
+    "agent": "i18n-auditor (session cb928306d086; instance 940b970d0a81); independent of translator",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-10-31",
+    "result": "passed",
+    "findings": 0,
+    "unresolved_blocker_major": 0,
+    "session": "cb928306d086",
+    "instance": "940b970d0a81",
+    "counts": {
+      "BLOCKER": 0,
+      "MAJOR": 0,
+      "MINOR": 0,
+      "NIT": 0
+    }
+  },
+  "sha256": {
+    "cli.failures": {
+      "en": "b2fdec07146b26ad5bb43f3acf3fa8f1ab527c4bf94d9065ca715c16be2eec44",
+      "target": "a48c6e12dcb2c9fea6d76233ec681b8805d89752903e1c89906197d9ec7dac4b",
+      "context": "b8f5e700bcdaf46fbeefc6c40269c7fe7cd4c91d7069f7f6dfcc8f813823b97d"
+    },
+    "cli.group_help": {
+      "en": "b819cbdf879a9f0b6567f8a555eceec4d1c7210b8ddab9beb665e2c21e3b7e88",
+      "target": "36961f47e877ba8d2914c25ca7f959c7947040b59aa17ec2bcb000f0d024cbbb",
+      "context": "10ebe588116f331251985812a8a959aec5bf13cb2f9a57406aaadd01679b598c"
+    },
+    "tui.setup_cues": {
+      "en": "9028bb3883b7f60d6fe7cdeac21495e307279ad3eb959b53bc62add500cedce0",
+      "target": "4c64e8d7fa1fdca6e45065678f2a3e01b3392eebc8ebe467da1ed6764646eef2",
+      "context": "96a124500c8c523e3d0e1fb5de9f8f486c4050441c81ea458b3d9f782cf4d6bc"
+    }
+  },
+  "verdict": "passed",
+  "note": "First pass (session 6c1c9ef5c2c3; instance 96788a2d0bbc) reviewed all 16 keys: one MAJOR UR-001 in cli.group_help.disk, other 15 clean. UR-001 fixed in c65fbaa580a, re-audited PASS by the bound second-pass auditor for disk only; unchanged first-pass coverage retained. All translators and auditors actually ran openai/gpt-6.1-sol after provider-quota fallbacks. Job instances supplied by manager registry; session identities from verbatim receipts.",
+  "evidence": {
+    "translator": "translator.md",
+    "verdict": "verdict-r2.txt"
+  }
+}

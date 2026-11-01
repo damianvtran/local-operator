@@ -1,0 +1,12 @@
+{
+  "cli.group_help.skills": "Publicar, hacer pull y sincronizar habilidades del hub (documentos y paquetes)",
+  "cli.group_help.skills_description": "Los paquetes de habilidades no pueden contener ejecutables (se rechaza cualquier bit de ejecución), y su instalación nunca ejecuta código.",
+  "cli.group_help.tunnel": "Acceso remoto de Radient a tus harnesses locales",
+  "cli.group_help.secret": "Secretos cifrados de larga duración que un agente puede recuperar sin preguntarte",
+  "cli.group_help.network": "Redes malladas: vincular dispositivos y controlar sesiones entre ellos",
+  "cli.group_help.disk": "Herramientas de espacio en disco: medir primero y borrar solo con seguridad comprobada",
+  "cli.group_help.operator": "Autoridad del operador: la clave que permite flexibilizar un control de aprobación en curso",
+  "cli.group_help.pair": "Vincular un teléfono como dispositivo del operador: tu firma lo autoriza una sola vez",
+  "cli.group_help.search": "Configurar y probar la búsqueda web con balanceo de carga",
+  "cli.group_help.fetch": "Configurar y probar la obtención de contenido web con un navegador sin ventana"
+}

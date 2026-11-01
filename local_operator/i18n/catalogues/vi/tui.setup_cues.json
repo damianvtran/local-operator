@@ -1,0 +1,4 @@
+{
+  "tui.setup_cues.setup_placeholder": "Nhập {command} để bắt đầu",
+  "tui.setup_cues.no_provider_cue": "Kết nối tài khoản AI trước: nhập {command}"
+}

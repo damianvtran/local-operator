@@ -1,0 +1,4 @@
+{
+  "tui.setup_cues.setup_placeholder": "Type {command} to begin",
+  "tui.setup_cues.no_provider_cue": "Connect an AI account first: type {command}"
+}
