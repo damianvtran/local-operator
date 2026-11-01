@@ -978,6 +978,42 @@ test_eval_tool.py` as **24 failures** that three agents in a row wrote off as
 somewhere real. Treat a standing block of "known environmental" failures as an
 unverified claim, not as weather.
 
+### One stash list is shared by every worktree of a clone
+
+Worktrees share one `.git`, so `refs/stash` — and the `stash@{n}` index that
+addresses it — is shared with them. Every worktree of a clone answers
+`git stash list` with the same entries in the same order, which makes an
+unqualified two-command sequence unsafe wherever another agent (or person) is
+working: your `git stash push` lands at `stash@{0}`, a peer's push between it
+and your `git stash pop` renumbers yours to `stash@{1}`, and the bare `pop`
+then applies THEIR work to YOUR tree. Nothing in the output says it is not
+yours, and a `pop` drops the entry it applied, so the peer's own restore later
+finds their entry gone.
+
+**Rule: for anything you intend to restore, do not use a bare `git stash` in a
+shared checkout — and do not treat reading `stash@{0}` after a `push` as a
+capture.** That read is racy in exactly the way the push is: a peer's push can
+land between the two commands, and the id you then record is theirs. Take an id
+that cannot move instead. `git stash create` prints the commit id, adds nothing
+to the list and leaves the working tree untouched; store that commit under a
+message you recognise — `git stash store -m "<why>" <id>` — and it becomes the
+newest entry. Restore by value — `git stash apply <id>` — and the number stops
+mattering: it may change under you, the content will not. Four limits, all
+real. `create` SNAPSHOTS the tree rather than clearing it, so it does not
+replace `push` when the point is a clean tree — and clearing a tree you share is
+the whole-tree operation banned above. It holds the index and the TRACKED
+working tree only: it takes no `-u` (a bare `-u` is read as the message), so
+untracked files are not in that id at all — copy those aside instead, for
+example from `git ls-files --others --exclude-standard`. Being alone in YOUR
+worktree does not make push-then-capture safe either, because the list is
+clone-wide: only being alone in the CLONE would, which in a parallel fleet is
+not something to assume. And an id that is never stored is a dangling commit
+that `git gc` may prune; `store` is what makes it durable. This is a property of
+Git, not of this repository's layout: it applies to any clone running parallel
+agents. The conflict shape a foreign apply leaves, and how to recover path by
+path, are in "The stash list is repo-global, and `apply` lands whatever it
+resolves" under "Always capture before AND after".
+
 ### Isolating a run: `LOCAL_OPERATOR_CONFIG_DIR` alone is not enough
 
 `LOCAL_OPERATOR_CONFIG_DIR` redirects the **config** dir. It does *not* redirect
