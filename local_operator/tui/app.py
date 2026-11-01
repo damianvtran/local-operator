@@ -3156,9 +3156,7 @@ CREDENTIAL_PLACEHOLDER = "Type or paste the secret… — masked; Enter chips it
 
 #: The composer's placeholder in the first-run setup state (see
 #: ``_composer_placeholder_for``).
-SETUP_PLACEHOLDER = _t_setup(
-    _setup_keys.setup_placeholder(command=RECOMMENDED_LOGIN_COMMAND)
-)
+SETUP_PLACEHOLDER = _t_setup(_setup_keys.setup_placeholder(command=RECOMMENDED_LOGIN_COMMAND))
 
 #: How often the ask surfaces re-derive their countdown while a row is present.
 #:
@@ -4620,9 +4618,7 @@ def _reload_setup_cues() -> None:
     """
     global SETUP_PLACEHOLDER, AIDA_NO_PROVIDER_CUE
     SETUP_PLACEHOLDER = _t_setup(_setup_keys.setup_placeholder(command=RECOMMENDED_LOGIN_COMMAND))
-    AIDA_NO_PROVIDER_CUE = _t_setup(
-        _setup_keys.no_provider_cue(command=RECOMMENDED_LOGIN_COMMAND)
-    )
+    AIDA_NO_PROVIDER_CUE = _t_setup(_setup_keys.no_provider_cue(command=RECOMMENDED_LOGIN_COMMAND))
 
 
 register_refresh(_reload_setup_cues)
