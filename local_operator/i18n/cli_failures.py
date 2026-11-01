@@ -9,19 +9,16 @@ who mistyped a subcommand got an English error under a localised ``--help``.
 Patching ``argparse`` internals is not an option; the one public seam is
 ``ArgumentParser.error(message)``, which every failure funnels through (argparse
 catches its own ``ArgumentError`` and calls it with ``str(err)``). This subclass
-overrides only that method.
+overrides only that method; parser control flow and exit statuses stay argparse's.
 
-WHAT IT RECOGNISES. Exactly the shapes the user can cause by typing and that carry
-no other copy of their own:
+WHAT IT RECOGNISES. The stdlib's invalid choices, required arguments/groups,
+unrecognized/ambiguous options, nargs failures, int/float conversion failures,
+mutually exclusive conflicts, explicit values on zero-argument options, and
+argument/error wrappers. Unknown third-party validator bodies pass through
+unchanged: guessing at their prose could rewrite user data. Our own seconds
+validator and exec positional refusal use keys at their source.
 
-* an unknown subcommand or a bad flag value (``invalid choice``),
-* a missing required argument (``the following arguments are required``),
-* the final ``<prog>: error: …`` line itself.
-
-Anything else — ``unrecognized arguments``, ``expected one argument``,
-``ambiguous option``, a ``type=`` validator's own message — passes through as
-argparse (or the validator's author) wrote it, unchanged. Recognition is a match on
-argparse's template, and a message that does not match is never rewritten, so a
+Recognition matches argparse's templates, leaving unknown bodies untouched, so a
 future CPython wording change degrades to English, not to a wrong sentence. The
 templates are stable across the supported 3.12+ range; 3.14 changed how the
 CHOICES are rendered (``'a', 'b'`` instead of ``a, b``), which is why the choices
@@ -42,6 +39,7 @@ import sys
 from typing import Any
 
 from local_operator.i18n.cli_help import help_text
+from local_operator.i18n.keys import cli_failure_details as _d
 from local_operator.i18n.keys import cli_failures as _f
 
 # ``argument --hosting: invalid choice: 'zzz' (choose from a, b)``. The argument
@@ -65,7 +63,51 @@ def localise_failure(message: str, locale: str | None = None) -> str:
         )
     if message.startswith(_REQUIRED_PREFIX):
         return help_text(_f.required(names=message[len(_REQUIRED_PREFIX) :]), locale)
+    # Match whole stdlib templates, not substrings: quoted user values may
+    # themselves contain error-like text. Never rebuild option/choice tokens.
+    if message.startswith("unrecognized arguments: "):
+        return help_text(
+            _d.unrecognized(arguments=message[len("unrecognized arguments: ") :]), locale
+        )
+    match = re.fullmatch(r"ambiguous option: (.+?) could match (.+)", message, re.DOTALL)
+    if match:
+        return help_text(_d.ambiguous(option=match[1], matches=match[2]), locale)
+    match = re.fullmatch(r"one of the arguments (.+) is required", message, re.DOTALL)
+    if match:
+        return help_text(_d.required_group(names=match[1]), locale)
+    # The wrapper belongs to argparse even when the body belongs to a plugin
+    # or was already localized by our validator. Unknown bodies stay verbatim.
+    match = re.fullmatch(r"argument (.+?): (.+)", message, re.DOTALL)
+    if match:
+        body = _localise_argument_body(match[2], locale)
+        return help_text(
+            _d.argument(argument=match[1], message=body if body is not None else match[2]), locale
+        )
     return message
+
+
+def _localise_argument_body(message: str, locale: str | None) -> str | None:
+    """Recognize only argparse-owned bodies; arbitrary validators are opaque."""
+    exact = {
+        "expected one argument": _d.expected_one,
+        "expected at most one argument": _d.expected_optional,
+        "expected at least one argument": _d.expected_some,
+    }
+    if message in exact:
+        return help_text(exact[message](), locale)
+    match = re.fullmatch(r"expected ([0-9]+) arguments?", message)
+    if match:
+        return help_text(_d.expected_count(count=int(match[1])), locale)
+    match = re.fullmatch(r"invalid (int|float) value: (.+)", message, re.DOTALL)
+    if match:
+        return help_text(_d.invalid_number(type=match[1], value=match[2]), locale)
+    prefix = "not allowed with argument "
+    if message.startswith(prefix):
+        return help_text(_d.conflict(argument=message[len(prefix) :]), locale)
+    prefix = "ignored explicit argument "
+    if message.startswith(prefix):
+        return help_text(_d.ignored_value(value=message[len(prefix) :]), locale)
+    return None
 
 
 class LocalizedArgumentParser(argparse.ArgumentParser):

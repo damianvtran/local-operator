@@ -70,6 +70,7 @@ from local_operator.i18n.keys import cli_browser_help as _bh
 from local_operator.i18n.keys import cli_config_help as _cf
 from local_operator.i18n.keys import cli_credential_help as _cr
 from local_operator.i18n.keys import cli_exec_help as _eh
+from local_operator.i18n.keys import cli_failure_details as _failure_details
 from local_operator.i18n.keys import cli_global_help as _gh
 from local_operator.i18n.keys import cli_group_help as _gg
 from local_operator.i18n.keys import cli_hub_help as _hu
@@ -142,16 +143,18 @@ def _positive_seconds(text: str) -> float:
     try:
         value = float(text)
     except ValueError:
-        raise argparse.ArgumentTypeError(f"{text!r} is not a number of seconds") from None
+        raise argparse.ArgumentTypeError(
+            _tr(_failure_details.not_seconds(value=repr(text)))
+        ) from None
     if not math.isfinite(value):
         # ``nan``/``inf``/``1e400`` passed the ``<= 0`` test below, because every
         # comparison against ``nan`` is False. Measured by review round 10: the
         # relocation poll never expired against ``nan`` (51 polls, 10.4 s, deadline
         # never fired), and the echo printed "within nans" — so the validator admitted
         # exactly the budget it exists to refuse.
-        raise argparse.ArgumentTypeError("must be a finite number of seconds")
+        raise argparse.ArgumentTypeError(_tr(_failure_details.finite_seconds()))
     if value <= 0:
-        raise argparse.ArgumentTypeError("must be greater than zero")
+        raise argparse.ArgumentTypeError(_tr(_failure_details.positive_seconds()))
     return value
 
 
@@ -17065,34 +17068,20 @@ def _reject_extra_positionals(parser: Any, args: Any) -> None:
     if not extras:
         return
     quoted = [repr(part) for part in (args.command, *extras)]
-    received = (
-        ", ".join(quoted[:-1]) + f" and {quoted[-1]}" if len(quoted) > 2 else " and ".join(quoted)
-    )
+    received = _tr(_failure_details.positional_pair(first=", ".join(quoted[:-1]), last=quoted[-1]))
     # Exactly two positionals is the common shape — a title mistaken for the
     # prompt — and can be repaired with a concrete command. Three or more cannot:
     # a `--name <title> <prompt>` example would silently DROP the tail, handing
     # the caller a valid command that runs a different brief than the one they
     # composed. Those get the rule instead of a misleading example.
     if len(quoted) == 2:
-        hint = (
-            "The first positional is the prompt, not a title. To name the run, "
-            "pass the title via --name:\n"
-            # shlex.quote, not repr: the suggestion is composed to be pasted into
-            # a shell, and repr's escaping is Python's, not the shell's (a title
-            # like `O'Brien's audit` renders differently under each).
-            f"  lop exec --name {shlex.quote(args.command)} {shlex.quote(extras[0])}\n"
-        )
+        # Keep shell syntax out of the catalogue: translators must never alter
+        # quoting, since this example is intended to be pasted into a shell.
+        command = f"lop exec --name {shlex.quote(args.command)} {shlex.quote(extras[0])}"
+        message = _failure_details.exec_two(count=len(quoted), received=received, command=command)
     else:
-        hint = (
-            "The first positional is the prompt, not a title: pass the title via "
-            "--name, and quote the prompt as the ONE positional — the extra "
-            "positionals are not consumed.\n"
-        )
-    parser.error(
-        f"exec takes ONE positional prompt, got {len(quoted)} positionals: "
-        f"{received}.\n{hint}"
-        "(--workstream is a flag — it publishes the run and takes no value.)"
-    )
+        message = _failure_details.exec_many(count=len(quoted), received=received)
+    parser.error(_tr(message))
 
 
 def main() -> int:
