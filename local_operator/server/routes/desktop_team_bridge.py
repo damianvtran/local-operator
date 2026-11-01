@@ -3368,8 +3368,30 @@ _OWNER_AUDIT_SERVABLE = {"image/png", "image/jpeg", "application/octet-stream"}
 _OWNER_AUDIT_FILE_MIME = "application/octet-stream"
 
 
+def _log_owner_audit_refusal(operation: str, status_class: str) -> None:
+    """Best-effort callback receiving only two immutable, non-sensitive fields."""
+
+    # The record path carries only operation + status class. A broken standard
+    # handler may print its own sink-only traceback via logging.handleError; we
+    # deliberately do not reconfigure global logging to suppress that diagnostic.
+    # Detaching from the refusal keeps its code, exact status and body out of it.
+    try:
+        logging.getLogger(__name__).warning(
+            "owner-audit refusal operation=%s status_class=%s", operation, status_class
+        )
+    except Exception:  # noqa: BLE001 — diagnostic sink failure must not affect a refusal
+        pass
+
+
 @contextmanager
-def _owner_audit_no_store() -> Iterator[None]:
+def _owner_audit_no_store(
+    operation: Literal[
+        "owner_audit_conversations",
+        "owner_audit_messages",
+        "owner_audit_replies",
+        "owner_audit_attachment",
+    ],
+) -> Iterator[None]:
     """Stamp ``private, no-store`` on any refusal raised inside the block.
 
     A success gets the header from the route's ``Response``; an
@@ -3383,6 +3405,19 @@ def _owner_audit_no_store() -> Iterator[None]:
         yield
     except HTTPException as exc:
         exc.headers = {**(exc.headers or {}), "Cache-Control": OWNER_AUDIT_CACHE_CONTROL}
+        # ONLY owner-audit, never the shared _raise_read. Warning makes expected
+        # security-relevant refusals visible without persisting authority-specific
+        # codes, exact statuses, bodies or identifiers. Pass only immutable values:
+        # contextlib.__exit__ keeps the sensitive exception active even after our
+        # except ends, and a broken StreamHandler can print that exception chain.
+        # A loop callback runs detached from that chain; it may log after the
+        # response is sent. Do not "fix" ordering by emitting inline. With no loop
+        # (or scheduling failure), losing a record is safer than leaking a refusal.
+        status_class = f"{exc.status_code // 100}xx"
+        try:
+            asyncio.get_running_loop().call_soon(_log_owner_audit_refusal, operation, status_class)
+        except Exception:  # noqa: BLE001 — preserve the original refusal on failure
+            pass
         raise
 
 
@@ -3462,7 +3497,7 @@ async def owner_audit_conversations(
     no unread counts — auditing never raises a badge.
     """
 
-    with _owner_audit_no_store():
+    with _owner_audit_no_store("owner_audit_conversations"):
         response.headers["Cache-Control"] = OWNER_AUDIT_CACHE_CONTROL
         query = _owner_audit_query(
             request, frozenset({"expected_account_id", "tenant_id", "limit", "cursor"})
@@ -3500,7 +3535,7 @@ async def owner_audit_messages(
     history route.
     """
 
-    with _owner_audit_no_store():
+    with _owner_audit_no_store("owner_audit_messages"):
         response.headers["Cache-Control"] = OWNER_AUDIT_CACHE_CONTROL
         _require_conversation_id(conversation_id)
         query = _owner_audit_query(
@@ -3543,7 +3578,7 @@ async def owner_audit_replies(
 ) -> CRUDResponse[Any]:
     """One audited thread: root plus chronological replies in the requested window."""
 
-    with _owner_audit_no_store():
+    with _owner_audit_no_store("owner_audit_replies"):
         response.headers["Cache-Control"] = OWNER_AUDIT_CACHE_CONTROL
         _require_conversation_id(conversation_id)
         _require_message_id(message_id)
@@ -3595,7 +3630,7 @@ async def owner_audit_attachment(
     never be rendered by the renderer under a type it chose.
     """
 
-    with _owner_audit_no_store():
+    with _owner_audit_no_store("owner_audit_attachment"):
         _require_conversation_id(conversation_id)
         _require_message_id(message_id)
         _require_attachment_id(attachment_id)
