@@ -26,7 +26,7 @@ import json
 import warnings
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, get_args
+from typing import Any, cast, get_args
 
 import pytest
 
@@ -327,7 +327,10 @@ def test_archived_move_observer_does_not_flush_or_expose_payload(monkeypatch):
     events = _observe_archived_move(monkeypatch, servers)
     event = SimpleNamespace(event="link_closed", detail=private)
     assert servers[0].audit.record(event) is None
-    link = SimpleNamespace(server=servers[0])
+    # This nominal boundary is intentionally a stand-in, as in relay ownership
+    # tests: request is monkeypatched above and the wrapper reads only server.
+    # Constructing PeerLink would add sockets/crypto to this no-action control.
+    link = cast(PeerLink, SimpleNamespace(server=servers[0]))
     frame = {"phase": "invite", "body": private}
     assert PeerLink.request(link, frame, timeout=3) is answer
     assert calls == [event, (link, frame, 3)]

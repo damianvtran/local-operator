@@ -1139,7 +1139,8 @@ def _survivor_diagnostics(config_dir):
         if event != "return" or frame.f_code not in codes:
             return
         name = codes[frame.f_code]
-        facts = {"stage": name}
+        # Rows deliberately mix a stage label with boolean/count/unknown facts.
+        facts: dict[str, object] = {"stage": name}
         if name == "root":
             facts["matches_test_root"] = result == config_dir
         elif name == "owner.birth":
