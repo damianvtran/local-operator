@@ -367,6 +367,34 @@ def test_capability_command_is_omitted_while_false_and_rides_when_true() -> None
     assert "drag" not in both_off and "command" not in both_off
 
 
+@pytest.mark.parametrize("drag", [False, True])
+@pytest.mark.parametrize("modifiers", [False, True])
+@pytest.mark.parametrize("command", [False, True])
+def test_pointer_and_command_capabilities_negotiate_independently(
+    drag: bool, modifiers: bool, command: bool
+) -> None:
+    # These capabilities landed independently but share one serializer: omitting
+    # an unsupported command must not leak or erase the modifier negotiation.
+    capabilities = AdapterCapabilities(
+        routes=("computer",),
+        ask_user=True,
+        scoring=True,
+        drag=drag,
+        modifiers=modifiers,
+        command=command,
+    )
+    wire = json.loads(capabilities.to_canonical_json())
+    for key, enabled in (("drag", drag), ("modifiers", modifiers), ("command", command)):
+        if enabled:
+            assert wire[key] is True
+        else:
+            assert key not in wire
+    restored = AdapterCapabilities.model_validate(wire)
+    assert restored == capabilities
+    assert restored.action_surface().drag is drag
+    assert restored.action_surface().modifiers is modifiers
+
+
 def test_run_command_is_a_keyed_running_method_outside_the_structural_check() -> None:
     from local_operator.evaluation.adapters.api import (
         KEYED_METHODS,
