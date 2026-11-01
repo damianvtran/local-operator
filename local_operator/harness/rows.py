@@ -149,7 +149,7 @@ def harness_chrome_prompts() -> tuple[str, ...]:
     not type any of them, and painting one attributes the harness's words to
     them. The live path never shows them, so replay must not either.
 
-    The NINE, and why each is persisted:
+    The prompts, and why each is persisted:
 
     - ``LOOP_PROMPT`` — the goal loop's self-continuation.
     - ``CONTINUATION_AFTER_COMPACTION`` — the session's auto-continuation after a
@@ -159,6 +159,10 @@ def harness_chrome_prompts() -> tuple[str, ...]:
       notice instead.
     - ``NAMELESS_CALL_RECOVERY_PROMPT`` — the re-ask after a tool call arrived
       with no name and was dropped; the live run showed a notice instead.
+    - ``MISSING_ARGUMENTS_RECOVERY_PROMPT`` and
+      ``REPEATED_TOOL_ERRORS_RECOVERY_PROMPT`` — model-only correction requests.
+      Old unstamped rows are indistinguishable from an exact user paste; both
+      are hidden on display but remain in the transcript and model context.
     - ``NO_PROGRESS_RECOVERY_PROMPT`` — the steer after unchanged tool calls
       repeat; persisted so replay records the harness intervention.
     - ``WORDLESS_STOP_RECOVERY_PROMPT`` — the re-ask after a turn arrived with
@@ -205,8 +209,10 @@ def harness_chrome_prompts() -> tuple[str, ...]:
         CONTINUE_TRUNCATED_ANSWER_PROMPT,
         DEGENERATE_STREAM_RECOVERY_PROMPT,
         LENGTH_STOP_RECOVERY_PROMPT,
+        MISSING_ARGUMENTS_RECOVERY_PROMPT,
         NAMELESS_CALL_RECOVERY_PROMPT,
         NO_PROGRESS_RECOVERY_PROMPT,
+        REPEATED_TOOL_ERRORS_RECOVERY_PROMPT,
         WORDLESS_STOP_RECOVERY_PROMPT,
     )
     from local_operator.session.goal_loop import LOOP_PROMPT
@@ -224,6 +230,8 @@ def harness_chrome_prompts() -> tuple[str, ...]:
         LENGTH_STOP_RECOVERY_PROMPT,
         CONTINUE_TRUNCATED_ANSWER_PROMPT,
         DEGENERATE_STREAM_RECOVERY_PROMPT,
+        MISSING_ARGUMENTS_RECOVERY_PROMPT,
+        REPEATED_TOOL_ERRORS_RECOVERY_PROMPT,
     )
 
 
@@ -238,7 +246,7 @@ def is_harness_chrome(text: str) -> bool:
     words the moment a persisted prompt gained a trailing newline.
 
     Two legs, one decision. Exact membership covers the prompts that are
-    single fixed strings (the nine listed above); a producer-side recogniser covers each family the
+    single fixed strings listed above; a producer-side recogniser covers each family the
     producer composes and therefore cannot enumerate — the loop's
     :func:`~local_operator.harness.loop.is_connectivity_continuation_instruction`
     for the "prose then an aborted tool call" instruction, the goal judge's

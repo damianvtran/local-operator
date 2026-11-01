@@ -32,6 +32,7 @@ from typing import Any, Awaitable, Callable, Literal, cast
 from local_operator.harness.approval import ApprovalGate
 from local_operator.harness.approval import ask_approval as call_approval_gate
 from local_operator.harness.message_types import PEER_MESSAGE_MESSAGE_TYPE
+from local_operator.harness.rows import is_harness_chrome, is_harness_notice_row
 from local_operator.harness.types import (
     EFFORT_CHOICE_UNSET,
     AgentEndEvent,
@@ -9970,7 +9971,19 @@ class AttachedSession:
         self._require_not_deferred()
         if self._display_history is not None:
             return self._display_history.opener_text
-        return next((m.text for m in self._history if getattr(m, "role", "") == "user"), "")
+        # Non-window attaches must use the same display provenance rule as
+        # paged history; otherwise an old recovery prompt becomes the title.
+        return next(
+            (
+                m.text
+                for m in self._history
+                if isinstance(m, Message)
+                and m.role == "user"
+                and not is_harness_notice_row(m)
+                and not is_harness_chrome(m.text)
+            ),
+            "",
+        )
 
     def history_last_message(self) -> Any:
         self._require_not_deferred()
@@ -10300,6 +10313,12 @@ class AttachedSession:
                 [_image_to_wire(image) for image in (images or [])],
             )
         except ConnectionError as error:
+            # An ACK expiry is not a disconnect: the authenticated socket is
+            # still live and the mutation may already have landed. Preserve
+            # that typed disposition for the desktop/control caller instead
+            # of falsely prescribing owner recovery (or replaying the switch).
+            if getattr(error, "owner_alive", False):
+                raise
             raise ConnectionError(_RECONNECTING_SLASH_NOTICE.format(command=command)) from error
 
     def _require_routed_model_admission(self, args: str) -> None:

@@ -2343,3 +2343,29 @@ def test_a_role_word_is_refused_on_the_model_switch_path(fake_scan) -> None:
     assert record is None
     assert candidates == []
     assert "is a team role (roles on: lopdev)" in error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("requested", ["", "/deliberate/home", "/deliberate/third"])
+async def test_cold_peer_send_preserves_cwd_intent_until_the_spawn_boundary(
+    monkeypatch: pytest.MonkeyPatch, requested: str
+) -> None:
+    """A home fallback here used to supersede an otherwise valid handoff (R3-1)."""
+    seen: list[str] = []
+
+    async def engage(session_id: str, cwd: str, work: Any, **kwargs: Any) -> Any:
+        seen.append(cwd)
+        raise RuntimeError("captured before spawn")
+
+    monkeypatch.setattr("local_operator.session.runtime.launch.engage_runtime", engage)
+    await peer_send._engaged_outcome(
+        "cold00000001",
+        target="synthetic cold session",
+        message_id="peer-cwd-intent",
+        text="synthetic message",
+        mode="mailbox",
+        wake=True,
+        sender={"session_id": "sender000001"},
+        cwd=requested,
+    )
+    assert seen == [requested]

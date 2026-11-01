@@ -9059,8 +9059,36 @@ def build_app(daemon: MobileDaemon):
         # The transcript dir does not reliably record a cwd, so resume in the
         # owner's home: always a valid directory under the spawn gate. The
         # user can steer the reopened session to a directory from there.
+        #
+        # …EXCEPT WHEN THE SESSION HAS A RECORDED MOVE. This spawn is the second
+        # runtime spawn in the product (it does not go through
+        # ``launch._spawn_runtime``), so it has to honour the same record: a
+        # handoff written by a viewer-less move with nobody attached means the
+        # session's next start belongs in the destination, and opening the
+        # conversation from the phone is exactly that start. Booting in $HOME
+        # instead made the child's boot reconcile settle a legitimate move as
+        # ``superseded`` — a terminal state meaning "the caller asked to go
+        # somewhere else", which nobody did (agent review round 1, MAJOR-2).
+        #
+        # An explicit third directory is still honoured by the resolver, and a
+        # record that cannot be read or a destination that is gone becomes a
+        # refusal here rather than a wrong spawn (QA: fail closed, never guess).
+        from local_operator.paths import config_dir as _config_dir
+        from local_operator.session import cwd_move
+
+        # AN EMPTY REQUEST, NOT $HOME: the daemon has NO OPINION about where the
+        # conversation lives — it defaulted to home only because the transcript
+        # directory does not record one. Passing home as the requested cwd would
+        # make it an "explicit third directory", which by design outranks the
+        # record, and the recorded move would lose to a placeholder.
         try:
-            pid = await daemon.spawn_session(str(Path.home()), resume=session_id)
+            replay_cwd = cwd_move.spawn_cwd_for_session(_config_dir(), session_id, "")
+        except cwd_move.HandoffRefused as refused:
+            logger.warning("mobile resume refused by a recorded move: %s", refused.message)
+            return JSONResponse({"error": refused.message[:300]}, status_code=409)
+        replay_cwd = replay_cwd or str(Path.home())
+        try:
+            pid = await daemon.spawn_session(replay_cwd, resume=session_id)
         except Exception as exc:  # noqa: BLE001
             logger.warning("mobile resume spawn failed", exc_info=True)
             return JSONResponse({"error": str(exc)[:300]}, status_code=500)

@@ -21,7 +21,9 @@ root, and a stub connect-state — no socket, no credential, no provider call.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
+import json
 from pathlib import Path
 from typing import Any
 
@@ -31,7 +33,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from local_operator.config import ConfigManager
-from local_operator.mobile.attach_client import AttachClient
+from local_operator.mobile.attach_client import AttachClient, OwnerAckTimeout
 from local_operator.model import configure
 from local_operator.server.routes import desktop_sessions
 
@@ -226,3 +228,98 @@ async def test_non_switch_forms_are_the_owners_to_answer(desktop) -> None:
     response = await _model(client, "saved")
     assert response.status_code == 200, response.text
     assert facade._client.calls == [("model", "saved")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure", "code"),
+    [
+        (OwnerAckTimeout("synthetic live owner missed acknowledgement"), "runtime_busy"),
+        (ConnectionError("synthetic wrong owner"), "runtime_unreachable"),
+    ],
+)
+async def test_model_slash_preserves_owner_failure_disposition(
+    desktop, monkeypatch: pytest.MonkeyPatch, failure: Exception, code: str
+) -> None:
+    """The facade must not turn a live socket's lost ACK into owner loss.
+
+    Neither outcome proves the mutation did not land. The route must preserve
+    its typed disposition without dispatching a second mutation itself.
+    """
+    client, facade = desktop
+    calls = []
+
+    async def refuse(*args, **kwargs):
+        calls.append(args)
+        raise failure
+
+    monkeypatch.setattr(facade._client, "slash_result", refuse)
+    response = await _model(client, "openai/fixture-new")
+    assert response.status_code == 503, response.text
+    assert response.json()["detail"]["code"] == code, response.text
+    assert len(calls) == 1
+    if code == "runtime_busy":
+        assert response.json()["detail"]["retryable"] is True
+        assert response.headers["Retry-After"]
+    else:
+        assert "retryable" not in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_model_slash_lost_socket_ack_keeps_busy_disposition(desktop, tmp_path: Path) -> None:
+    """A written mutation with a missing ACK is indeterminate, not disconnected.
+
+    This deliberately uses an already-established transport rather than the
+    runtime handshake: the boundary under test is the actual payload writer's
+    timeout crossing the facade and HTTP error adapter. The synthetic peer
+    journals the selection but withholds its reply, proving that replay is not
+    justified by an ACK timeout. No live owner or provider is involved.
+    """
+    client, facade = desktop
+    release = asyncio.Event()
+    settled = asyncio.Event()
+    selected = tmp_path / "synthetic-selection.json"
+    frames = []
+
+    async def owner(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        try:
+            frame = json.loads(await reader.readline())
+            frames.append(frame)
+            selected.write_text(json.dumps({"selected": frame["args"], "effective": frame["args"]}))
+            await release.wait()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+            settled.set()
+
+    class _ShortAckClient(AttachClient):
+        async def slash_result(self, command, args, images=None):
+            return await self._request_payload(
+                "slash_result", command=command, args=args, images=images or [], deadline_s=0.05
+            )
+
+    server = await asyncio.start_server(owner, "127.0.0.1", 0)
+    transport = _ShortAckClient(lambda _: None, lambda _: None)
+    try:
+        _, writer = await asyncio.open_connection(*server.sockets[0].getsockname()[:2])
+        transport._writer = writer
+        transport._connected = True
+        facade._client = transport
+        response = await _model(client, "openai/fixture-new")
+        assert response.status_code == 503, response.text
+        assert response.json()["detail"]["code"] == "runtime_busy", response.text
+        assert transport.connected, "the ACK deadline must not be treated as socket death"
+        assert json.loads(selected.read_text()) == {
+            "selected": "openai/fixture-new",
+            "effective": "openai/fixture-new",
+        }
+        assert len(frames) == 1, "the facade must not replay an indeterminate mutation"
+        assert not transport._pending
+    finally:
+        release.set()
+        if transport._writer is not None:
+            transport._writer.close()
+            await transport._writer.wait_closed()
+        server.close()
+        await server.wait_closed()
+        await asyncio.wait_for(settled.wait(), 2)

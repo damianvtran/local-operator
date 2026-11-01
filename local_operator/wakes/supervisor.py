@@ -610,10 +610,10 @@ def _due_sessions(
                         record.get("last_error") or "unknown",
                     )
                 continue
+        # A missing index cwd is no opinion, not an explicit HOME override.
+        # Only the common spawn boundary may default it after reading a move.
         cwd = entry.get("cwd")
-        due.append(
-            (session_id, cwd if isinstance(cwd, str) and cwd else os.path.expanduser("~"), fireable)
-        )
+        due.append((session_id, cwd if isinstance(cwd, str) else "", fireable))
     # Older first: if several are due at once, the one that has waited
     # longest gets its runtime first.
     # SPOOLED TURNS, AFTER the index's own rows so a session that is due both ways
@@ -632,7 +632,7 @@ def _due_sessions(
         due.append(
             (
                 session_id,
-                cwd if isinstance(cwd, str) and cwd else os.path.expanduser("~"),
+                cwd if isinstance(cwd, str) else "",
                 int(noted) if isinstance(noted, int) and not isinstance(noted, bool) else now_ms,
             )
         )
@@ -640,7 +640,8 @@ def _due_sessions(
     # first row wins and the later kind does not duplicate it). The cwd prefers
     # the target's own index entry when one exists; a target with no entry at
     # all — her session with no armed rows — still engages, from the home
-    # directory, which is what the spooled path does too. A target in a
+    # directory only if no recorded move exists. Omission stays empty until
+    # the spawn boundary resolves it, just as for spooled turns. A target in a
     # DECLINE state is skipped here (see the docstring): the record stays on
     # disk but is not owed, so nothing is engaged and nothing keeps the
     # supervisor resident for it.
@@ -661,7 +662,7 @@ def _due_sessions(
         due.append(
             (
                 session_id,
-                cwd if isinstance(cwd, str) and cwd else os.path.expanduser("~"),
+                cwd if isinstance(cwd, str) else "",
                 int(noted) if isinstance(noted, int) and not isinstance(noted, bool) else now_ms,
             )
         )

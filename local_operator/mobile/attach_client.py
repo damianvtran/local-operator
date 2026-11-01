@@ -2774,9 +2774,10 @@ async def engage_session_client(
     """
     from local_operator.session.runtime.launch import engage_runtime
 
+    # No cwd opinion: only the spawn boundary may supply a home fallback.
     outcome = await engage_runtime(
         session_id,
-        str(Path.home()),
+        "",
         work,
         config_dir=config_dir,
         deadline_s=deadline_s,

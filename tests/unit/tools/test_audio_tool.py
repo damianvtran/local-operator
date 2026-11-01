@@ -237,11 +237,12 @@ async def test_the_radient_card_says_the_server_quotes(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_the_sound_effect_card_prices_the_duration(monkeypatch):
+async def test_the_v3_sound_effect_card_does_not_borrow_a_v2_price(monkeypatch):
     monkeypatch.setattr(audio_tool, "_preferred_route", lambda direction: AudioRoute.ELEVENLABS)
     text = audio_tool._describe_sound_effect_approval({"prompt": "a clap", "duration_s": 10}, ".")
     assert "10s sound effect" in text
-    assert "$0.0200" in text, "10 s at $0.002/s"
+    assert "$" not in text, "v3 has no verified BYOK USD estimate"
+    assert "paid provider call" in text
 
 
 @pytest.mark.asyncio
@@ -372,7 +373,7 @@ async def test_a_sub_second_byok_effect_row_counts_one_started_second(monkeypatc
     estimate prices with, and the label must not drift towards a charge.
     """
     spent: list[Any] = []
-    estimate = pricing.sound_effect_estimate("elevenlabs", None, 0.5)
+    estimate = pricing.sound_effect_estimate("elevenlabs", "eleven_text_to_sound_v2", 0.5)
     assert estimate is not None and estimate.amount_usd == pytest.approx(0.002)
     outcome = _outcome(
         route=AudioRoute.ELEVENLABS,
@@ -386,7 +387,7 @@ async def test_a_sub_second_byok_effect_row_counts_one_started_second(monkeypatc
     _fake_cascade(monkeypatch, outcome)
     result = await audio_tool.execute_generate_sound_effect(
         "call-sfx-half",
-        {"prompt": "a single clap", "duration_s": 0.5},
+        {"prompt": "a single clap", "duration_s": 0.5, "model": "eleven_text_to_sound_v2"},
         None,
         None,
         _context(tmp_path, spent),
@@ -1137,7 +1138,7 @@ def test_batch_approval_is_one_summed_estimate(monkeypatch):
     args = {"sounds": [{"prompt": "click", "duration_s": 0.5}] * 10}
     text = audio_tool._describe_sound_effect_approval(args, ".")
     assert "10 sound effects" in text
-    assert "estimated total $0.0200" in text
+    assert "estimated total $0.0100" in text
     assert "billed figures are authoritative" in text
 
 
@@ -1918,7 +1919,7 @@ def test_batch_approval_keeps_known_subtotal_for_unpriceable_duration(monkeypatc
         ".",
     )
     assert "Generate 2 sound effects" in text
-    assert "estimated known subtotal $0.0020" in text
+    assert "estimated known subtotal $0.0010" in text
     assert "1 item(s) unpriced" in text
     single = audio_tool._describe_sound_effect_approval(
         {
@@ -2012,3 +2013,12 @@ async def test_batch_identical_bytes_keep_names_ids_and_actual_format(
         f"first.{expected_ext}",
         f"second.{expected_ext}",
     ]
+
+
+def test_batch_approval_fractional_duration_policy(monkeypatch):
+    monkeypatch.setattr(audio_tool, "_preferred_route", lambda direction: AudioRoute.RADIENT)
+    text = audio_tool._describe_sound_effect_approval(
+        {"sounds": [{"prompt": "click", "duration_s": d} for d in [0.5, 0.75, 1.25, 2.1, 30]]}, "."
+    )
+    assert "estimated total $0.0692" in text
+    assert pricing.SOUND_EFFECT_PRICE_VERSION in text

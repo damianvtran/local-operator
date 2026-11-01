@@ -5622,6 +5622,10 @@ async def amain(operator_cap: bytes | None = None) -> int:
     )
     from local_operator.session_lease import SessionLeaseHeldError
 
+    # Final cwd consumer, not a producer forwarding an unspecified request:
+    # supported launch paths resolve recorded moves before supplying this env.
+    # A bare module bootstrap defaults to HOME rather than the daemon's process
+    # cwd; deliberate HOME supplied in the env remains an explicit choice.
     cwd = os.environ.get("LOP_MOBILE_CHILD_CWD") or os.path.expanduser("~")
     provider = os.environ.get("LOP_MOBILE_CHILD_PROVIDER") or None
     model_id = os.environ.get("LOP_MOBILE_CHILD_MODEL") or None
