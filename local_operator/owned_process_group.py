@@ -676,6 +676,10 @@ class OwnedGroup:
                 raise PinLost("reservation lost during proof")
             if final_state == "unreadable":
                 raise Unknown("witness unreadable during proof")
+            # An unreadable witness at the end of the proof is a REFUSAL, never a
+            # defaulted anchor: defaulting would publish a pin this run never held.
+            if final_witness is None:
+                raise Unknown("witness unreadable at the end of the proof")
             pin = "leader-reservation" if final_witness.zombie else "leader-live"
             self.probe["proof"] = _identities(self.receipts, samples, members)
             self.probe["residuals"] = []

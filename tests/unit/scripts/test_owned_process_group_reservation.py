@@ -745,6 +745,9 @@ def test_c2_same_second_reuse_is_encoded_unsupported_not_waived():
     and second collide in the birth token. The honest outcome is a named
     UNSUPPORTED, not a silent claim of safety and not a fabricated discriminator.
     """
+    # UNTESTED, precisely: whether two same-pid processes whose lstart agrees to the
+    # second can be told apart. They cannot with a second-resolution token, so there
+    # is no discriminating assertion to write -- the encoding is the honest output.
     assert owned.SECOND_RESOLUTION_REUSE == "UNSUPPORTED"
     doc = owned.__doc__ or ""
     assert "SECOND-RESOLUTION" in doc.upper(), "the scope must be documented"

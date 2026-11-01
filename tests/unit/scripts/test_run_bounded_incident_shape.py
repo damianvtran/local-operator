@@ -73,7 +73,16 @@ def test_the_incident_shape_is_reclaimed_and_the_record_shows_the_pin(wrapper, t
         stream=output,
         run_id="incident-shape",
     )
-    assert rc == 0, output.getvalue()
+    if rc != 0:
+        # Quote the RECORD rather than guess: the owner reads the refusal class and
+        # the phase before anything else, and a bare "rc != 0" would hide both.
+        record = _exit_record(tmp_path)
+        ownership = record.get("ownership") or {}
+        raise AssertionError(
+            f"rc={rc} refusal_class={ownership.get('refusal_class')!r} "
+            f"anchor={ownership.get('anchor')!r} phase={record.get('phase')!r}\n"
+            + output.getvalue()
+        )
 
     record = _exit_record(tmp_path)
     ownership = record["ownership"]

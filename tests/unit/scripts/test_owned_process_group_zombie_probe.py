@@ -70,27 +70,26 @@ def test_a_zombie_leader_is_visible_to_the_group_census_on_this_platform():
         # refresh answers OBSERVED_EMPTY — that is not a lost reservation. What
         # would be a lost reservation is `pin_lost`, which is what this asserts
         # against; the live-member half is exercised by the incident-shape test.
-        claimable = verdict.refusal_class != "pin_lost"
         answer = {
             "platform": sys.platform,
             "zombie_sample": sample.zombie,
             "zombie_in_group_census": visible,
             "census": census,
-            "reservation_claimable": claimable,
+            "reservation_claimable": verdict.refusal_class != "pin_lost",
             "anchor": verdict.anchor,
             "reason": verdict.reason,
         }
         print("DARWIN_PROBE " + json.dumps(answer), flush=True)
 
-        # (a) the platform's answer to the unknown, asserted rather than assumed
-        assert visible, (
-            "the group census does NOT list the unreaped zombie leader on this "
-            "platform; the pin must stay live-leader-only here and the docs must "
-            "say so: " + json.dumps(answer)
+        # CONTRACT: corpse visibility is a DIAGNOSTIC and never the predicate. The
+        # continuity witness is the leader's creation receipt -- a readable sample
+        # whose birth matches, retained unreaped -- so the verdict must be the
+        # contract's answer whatever this platform's census chose to list. Whether
+        # Darwin lists corpses stays UNKNOWN here: the JSON is the measurement.
+        assert verdict.status == "OBSERVED_EMPTY", (
+            verdict.status + ": " + verdict.reason + ": " + json.dumps(answer)
         )
-        # (c) therefore the reservation is claimable from the corpse: the pin did
-        # not report itself lost on a group whose only member is the leader.
-        assert claimable, (answer, verdict.reason)
+        assert verdict.refusal_class is None, (verdict.reason, answer)
     finally:
         if write_fd != -1:
             os.close(write_fd)
@@ -127,10 +126,14 @@ def test_a_new_session_child_is_visible_to_the_census():
     with os.fdopen(read_fd, "rb") as handle:
         child = int(handle.read())
     try:
+        # The census is measured while the child is ALIVE (it sleeps for 30 s), so
+        # a lookup miss is a census answer rather than a race with an exit.
         assert os.getsid(child) != os.getsid(0), "the child must be in a NEW session"
         members = owned.strict_census(child, time.monotonic() + 5.0)
         assert child in members, (child, members)
     finally:
+        # Deterministic reap of EXACTLY our own child: ignore an already-gone pid,
+        # then wait for the one we forked so no zombie outlives the test.
         try:
             os.kill(child, signal.SIGKILL)
         except ProcessLookupError:
