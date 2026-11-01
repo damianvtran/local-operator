@@ -292,7 +292,7 @@ def _mutant():
     return module
 
 
-def _witness_fails_at_the_presend_check(kernel, state):
+def _witness_fails_at_the_presend_check(kernel, state, on_fire=None):
     """ONE trigger for both arms: the witness is unreadable only at the last check.
 
     Both the intact run and the mutant run use this exact schedule, so the ONLY
@@ -303,6 +303,8 @@ def _witness_fails_at_the_presend_check(kernel, state):
 
     def samples(pids):
         if kernel.sent == [] and pids == [kernel.leader] and state["calls"] >= 3:
+            if on_fire is not None:
+                on_fire()
             return {}
         state["calls"] += 1
         return original(pids)
@@ -314,6 +316,7 @@ def test_c3_removing_the_residency_re_check_lets_a_stranger_die():
     """The mutation must fail in the RIGHT direction — a stranger dies."""
     kernel = Kernel()
     cap = kernel.cap()
+
     cap.samples = _witness_fails_at_the_presend_check(kernel, {"calls": 0})
     verdict = cap.signal(signal.SIGKILL, deadline=kernel.clock() + 5.0)
     assert verdict.status == "REFUSED", verdict.reason
@@ -324,6 +327,14 @@ def test_c3_removing_the_residency_re_check_lets_a_stranger_die():
 
     mutant = _mutant()
     kernel2 = Kernel()
+
+    def send_reaching_a_stranger(pgid, signum):
+        # The stranger occupies the number AT SEND TIME: this is the window the
+        # pre-send witness check exists to close, and the only thing that can
+        # notice it. Recorded here so the assertion is about a real target.
+        kernel2.rows[77] = (kernel2.parent, kernel2.leader, kernel2.leader, "stranger")
+        kernel2.sent.append((pgid, signum))
+
     cap2 = mutant.OwnedGroup.capture(
         kernel2.leader,
         parent_pid=kernel2.parent,
@@ -332,14 +343,20 @@ def test_c3_removing_the_residency_re_check_lets_a_stranger_die():
         identity=kernel2.identity,
         scheme=lambda: SCHEME,
         clock=kernel2.clock,
-        signal_group=lambda *a: kernel2.sent.append(a),
+        signal_group=send_reaching_a_stranger,
         deadline=kernel2.clock() + 5.0,
     )
-    # THE SAME TRIGGER as the intact arm, deliberately.
+    # THE SAME TRIGGER as the intact arm, plus a STRANGER: the moment the witness
+    # becomes unreadable, pid 77 appears in the SAME group number. It is not our
+    # child, never was, and only the guard stands between it and a group-wide kill.
     cap2.samples = _witness_fails_at_the_presend_check(kernel2, {"calls": 0})
     mutated = cap2.signal(signal.SIGKILL, deadline=kernel2.clock() + 5.0)
     assert mutated.status == "SIGNALED", mutated.reason
-    assert kernel2.sent == [(10, signal.SIGKILL)]
+    # THE MUTANT KILLS THE STRANGER: with the pre-send witness check deleted, the
+    # group-wide signal goes out while a process that is not ours occupies the
+    # number. The intact arm above refuses and sends nothing.
+    assert 77 in kernel2.rows and kernel2.rows[77][1] == kernel2.leader
+    assert kernel2.sent == [(kernel2.leader, signal.SIGKILL)]
 
 
 def test_the_grace_loop_costs_no_census_and_signals_cost_at_most_two(
@@ -774,4 +791,26 @@ def test_a_retained_zombie_with_an_unreadable_member_refuses_not_absent():
     verdict = cap.signal(signal.SIGKILL, deadline=kernel.clock() + 5.0)
     assert verdict.status == "REFUSED", verdict.reason
     assert verdict.refusal_class == "unproven", verdict.reason
+    assert kernel.sent == []
+
+
+def test_a_foreign_birth_beats_an_unreadable_census():
+    """MAJOR A: `pin_lost` has precedence over any census failure.
+
+    A readable foreign birth is positive proof the number was reused. If a census
+    also fails in the same pass, the honest answer is still loss -- reporting the
+    generic "could not read" would hide the one fact we actually established.
+    """
+    kernel = Kernel()
+    cap = kernel.cap()
+    kernel.rows[20] = (kernel.leader, kernel.leader, kernel.leader, "grandchild")
+    kernel.rows[kernel.leader] = (kernel.parent, kernel.leader, kernel.leader, "foreign")
+
+    def unreadable(pgid, deadline):
+        raise owned.Unknown("strict /proc census deadline")
+
+    cap.census = unreadable
+    verdict = cap.signal(signal.SIGKILL, deadline=kernel.clock() + 5.0)
+    assert verdict.status == "REFUSED", verdict.reason
+    assert verdict.refusal_class == "pin_lost", verdict.reason
     assert kernel.sent == []

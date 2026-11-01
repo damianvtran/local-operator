@@ -628,21 +628,31 @@ class OwnedGroup:
             anchor = self.receipts.get(self.leader)
             if anchor is None:
                 raise Unknown("no leader receipt")
-            first = self._members(deadline)
-            second = self._members(deadline)
-            members = sorted(set(first) | set(second))
-            self.probe["members"] = list(members)
-            # WITNESS FIRST, AND BRACKETED. The creation receipt is the predicate;
-            # census data is target evidence. Inspecting it first is also what keeps
-            # `pin_lost` precedence: a readable foreign birth is positive proof of
-            # loss and must not be degraded to a generic unreadable because a census
-            # happened to fail in the same pass.
+            # THE WITNESS IS READ BEFORE THE FIRST CENSUS. The creation receipt is
+            # the predicate and the census is only target evidence, so a census that
+            # fails -- or that runs at all -- cannot pre-empt it. That ordering is
+            # also what gives `pin_lost` precedence: a readable foreign birth is
+            # positive proof of loss, and a coincident census failure must not
+            # degrade it to a generic "could not read".
             state, witness = self._leader_witness(deadline)
             self.probe["witness"] = state
             if state == "reaped":
                 raise PinLost("leader reaped or birth mismatch: reservation released")
             if state == "unreadable":
                 raise Unknown("leader witness unreadable")
+            try:
+                first = self._members(deadline)
+                second = self._members(deadline)
+            except Exception:
+                # Re-read the witness exactly once: if it has become a readable
+                # foreign birth in the meantime, the loss still wins over the
+                # unreadable census.
+                late, _ = self._leader_witness(deadline)
+                if late == "reaped":
+                    raise PinLost("reservation lost during a failed census") from None
+                raise
+            members = sorted(set(first) | set(second))
+            self.probe["members"] = list(members)
             if not members:
                 # EMPTY-COMPLETE, bracketed on both sides: a retained matching
                 # witness before AND after, or no absence may be claimed.
@@ -670,8 +680,12 @@ class OwnedGroup:
                 raise Unknown("census member sample unreadable")
             live = [pid for pid in members if not samples[pid].zombie]
             if not live:
-                # Corpse-only: allowed ONLY under a retained matching witness.
+                # Corpse-only: allowed ONLY under a retained matching witness, and a
+                # witness that has become a READABLE FOREIGN BIRTH is loss, not an
+                # unreadable detail.
                 still, _ = self._leader_witness(deadline)
+                if still == "reaped":
+                    raise PinLost("reservation lost before the corpse-only proof")
                 if still != "held":
                     raise Unknown("no live member and no readable witness")
                 self.probe["anchor"] = "leader-reservation"
