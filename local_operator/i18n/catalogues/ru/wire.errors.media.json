@@ -1,0 +1,22 @@
+{
+  "wire.errors.media.media_refusal": "{error}",
+  "wire.errors.media.provider_model_pair": "провайдер и модель нужно указывать вместе либо не указывать вовсе.",
+  "wire.errors.media.radient_key_missing": "Ключ Radient API не настроен на сервере.",
+  "wire.errors.media.save_audio_failed": "Не удалось сохранить загруженный аудиофайл: {error}",
+  "wire.errors.media.speech_generate_failed": "Не удалось сгенерировать речь: {error}",
+  "wire.errors.media.speech_no_credential": "Войдите в Radient в настройках, чтобы включить озвучивание.",
+  "wire.errors.media.speech_radient_credit_low": "Баланс кредитов Radient слишком мал для озвучивания. Пополните его в консоли Radient, чтобы продолжить.",
+  "wire.errors.media.speech_radient_sign_in_failed": "Вход в Radient перестал работать. Войдите снова в настройках.",
+  "wire.errors.media.speech_temporarily_unavailable": "Озвучивание временно недоступно. Повторите через некоторое время.",
+  "wire.errors.media.speech_unavailable": "Озвучивание сейчас недоступно. Повторите через некоторое время.",
+  "wire.errors.media.speech_unknown_agent": "Агент этого разговора больше недоступен.",
+  "wire.errors.media.speech_upstream_no_response": "Ошибка генерации речи у вышестоящего сервиса: нет ответа от сервиса: {error}",
+  "wire.errors.media.speech_upstream_reported_error": "Ошибка генерации речи у вышестоящего сервиса: Radient сообщил об ошибке (HTTP {status}): {error}",
+  "wire.errors.media.speech_upstream_responded": "Ошибка генерации речи у вышестоящего сервиса: сервис ответил {status}: {error}",
+  "wire.errors.media.speech_vendor_credit_low": "Баланс кредитов {vendor} слишком мал для озвучивания. Пополните его у {vendor}, чтобы продолжить.",
+  "wire.errors.media.speech_vendor_key_refused": "{vendor} отклонил ваш ключ API. Замените его.",
+  "wire.errors.media.temp_audio_missing": "Временный аудиофайл не найден после сохранения.",
+  "wire.errors.media.transcription_unexpected": "Непредвиденная ошибка при транскрибировании: {error}",
+  "wire.errors.media.unknown_model": "Неизвестная модель {provider}/{model}: {error}",
+  "wire.errors.media.unknown_provider": "Неизвестный провайдер {provider}."
+}

@@ -1,0 +1,13 @@
+{
+  "wire.errors.files.audio_type": "Файл не является допустимым аудиотипом: {mime_type}",
+  "wire.errors.files.heic_conversion": "Не удалось преобразовать файл HEIC/HEIF: {error}",
+  "wire.errors.files.html_type": "Файл не является допустимым HTML-типом: {mime_type}",
+  "wire.errors.files.html_utf8": "HTML-файл не является корректным текстом UTF-8.",
+  "wire.errors.files.image_type": "Файл не является допустимым типом изображения: {mime_type}",
+  "wire.errors.files.internal_error": "Внутренняя ошибка сервера: {error}",
+  "wire.errors.files.sign_auth": "Требуется локальный токен доступа или bearer рабочего стола.",
+  "wire.errors.files.sign_path": "path не должен быть пустым.",
+  "wire.errors.files.sign_route": "route должен быть одним из: {routes}",
+  "wire.errors.files.sign_ttl": "ttl_s должен быть от 1 до {maximum}.",
+  "wire.errors.files.video_type": "Файл не является допустимым видеотипом: {mime_type}"
+}
