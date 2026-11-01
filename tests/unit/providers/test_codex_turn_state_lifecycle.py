@@ -25,8 +25,10 @@ def test_first_value_wins_and_stale_response_cannot_repopulate() -> None:
 def test_owner_endpoint_model_and_turn_resets() -> None:
     state = CodexTurnState()
     for owner, endpoint in [
-        ("a:model-1", "endpoint-1"), ("b:model-1", "endpoint-1"),
-        ("a:model-1", "endpoint-1"), ("a:model-1", "endpoint-2"),
+        ("a:model-1", "endpoint-1"),
+        ("b:model-1", "endpoint-1"),
+        ("a:model-1", "endpoint-1"),
+        ("a:model-1", "endpoint-2"),
         ("a:model-2", "endpoint-2"),
     ]:
         state.observe_attempt("openai", owner)
