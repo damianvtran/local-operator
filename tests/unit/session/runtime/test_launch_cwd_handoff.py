@@ -166,7 +166,8 @@ def test_a_committed_move_still_says_where_the_session_lives(
     config, source, destination = tree
     _handoff(config, source=source, destination=destination)
     cwd_move.reconcile_move(config, OWN, effective_cwd=str(destination))
-    assert cwd_move.read_move_intent(config, OWN).stage == cwd_move.STAGE_COMMITTED
+    settled = cwd_move.read_move_intent(config, OWN)
+    assert settled is not None and settled.stage == cwd_move.STAGE_COMMITTED
     assert _engage_cwd_for_recorded_move(config, OWN, str(source)) == str(destination)
     assert _engage_cwd_for_recorded_move(config, OWN, "") == str(destination)
 
