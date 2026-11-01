@@ -1,5 +1,6 @@
 {
   "schema": 1,
+  "locale": "zh-CN",
   "entries": [
     {
       "locale": "zh-CN",
@@ -2270,6 +2271,46 @@
       },
       "status": "passed",
       "note": "Clean independent audit of cli.failures, cli.group_help and tui.setup_cues (16 keys total); this row binds tui.setup_cues at committed source/target bytes. Final severity counts: BLOCKER 0, MAJOR 0, MINOR 0, NIT 0. First pass (instance 0b44aad360bb) reviewed 15/16 keys clean but was incomplete due to cli.group_help.secret being redacted and uncommitted. Bound second pass PASS covers that key only; unchanged first-pass coverage retained. No full second-pass audit is claimed. Actual translator/auditor model openai/gpt-6.1-sol after provider-quota fallbacks, not the requested model. Auditor instance 97c4ab5bc324. Evidence: i18n/audits/evidence/zh-CN/core-hardcoded-cli-slice1/record.json; passing receipt verdict-r2.txt."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.slash",
+      "source_sha256": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
+      "translator": {
+        "agent": "i18n-translator (session 1fe5533c9a8f)",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session 7b1ecf2ef33b; instance 7b1ecf2ef33b-slash-zh-cn)",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PR #3088 width rewrite, re-audited at the committed bytes. 5 of 52 values rewritten by i18n-translator (session 1fe5533c9a8f) (actual model radient/auto; provider-quota fallback); round-1 audit a303f65af544-slash-zh-CN rejected the shortened bytes (0B/1M/3m/2n) and round-2 independent audit 7b1ecf2ef33b-slash-zh-cn on the new bytes passed 0B/0M/0m/1n. target sha256 ebc0ae0101022d4ff31ca7e54f0e0d34d000c7e3b46e62b54ac3ed132a88cd55; en source unchanged (b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202). Evidence: i18n/audits/evidence/zh-CN/wire.slash/zh-CN29s2/record.json (receipt.json + verdicts copied verbatim). Previous rows for this pair described audits of the pre-rewrite values and are superseded."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.errors.session_host",
+      "source_sha256": "b7d6561be15577c118ec333586f7c809e65471c5dfd0dd839abee700b2ed1ba0",
+      "translator": {
+        "agent": "i18n-translator (lopdev; host-copy-zh)",
+        "session": "d90daece65d4",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev; host-zh-CN-audit-b)",
+        "session": "3d31f5998c79",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Dual blind passes: i18n/audits/evidence/zh-CN/wire.errors.session_host/zh31a1/record.json; i18n/audits/evidence/zh-CN/wire.errors.session_host/host26b/record.json. Both pass, 0 findings; actual quota fallback model recorded."
     }
   ]
 }

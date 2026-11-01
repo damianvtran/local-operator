@@ -1,5 +1,6 @@
 {
   "schema": 1,
+  "locale": "hi",
   "entries": [
     {
       "locale": "hi",
@@ -2584,6 +2585,46 @@
       },
       "status": "passed",
       "note": "Clean independent audit of cli.failures, cli.group_help and tui.setup_cues (16 keys total); this row binds tui.setup_cues at committed source/target bytes. Final severity counts: BLOCKER 0, MAJOR 0, MINOR 0, NIT 0. All keys passed the independent first audit. Actual translator/auditor model openai/gpt-6.1-sol after provider-quota fallbacks, not the requested model. Auditor instance 5cd41aac8d83. Evidence: i18n/audits/evidence/hi/core-hardcoded-cli-slice1/record.json; passing receipt verdict.txt."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.slash",
+      "source_sha256": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
+      "translator": {
+        "agent": "i18n-translator (session d5ec953fe384)",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session 80b132698268; instance 80b132698268-slash2-hi)",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PR #3088 width rewrite, re-audited at the committed bytes. 8 of 52 values rewritten by i18n-translator (session d5ec953fe384) (actual model radient/auto; provider-quota fallback); round-1 audit 610f8d957d36-slash-hi rejected the shortened bytes (0B/1M/3m/3n) and round-2 independent audit 80b132698268-slash2-hi on the new bytes passed 0B/0M/1m/1n. target sha256 da022ae8f9e0777ae0d7d7cb53e593a769400ace0a090f282cf79fe646a98b48; en source unchanged (b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202). Evidence: i18n/audits/evidence/hi/wire.slash/hi29s2/record.json (receipt.json + verdicts copied verbatim). Previous rows for this pair described audits of the pre-rewrite values and are superseded."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.errors.session_host",
+      "source_sha256": "b7d6561be15577c118ec333586f7c809e65471c5dfd0dd839abee700b2ed1ba0",
+      "translator": {
+        "agent": "i18n-translator",
+        "session": "d2959affe186",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "39a4a8de4f1c",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Dual blind passes: i18n/audits/evidence/hi/wire.errors.session_host/h31a/record.json; i18n/audits/evidence/hi/wire.errors.session_host/h31-39a4b/record.json. Both pass, 0 findings; actual quota fallback model recorded."
     }
   ]
 }
