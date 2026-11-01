@@ -573,7 +573,7 @@ def _returncode_text(returncode: object) -> str:
     return f"rc={returncode}"
 
 
-def _await_exit_status(process: object) -> str:
+def _await_exit_status(process: subprocess.Popen[bytes]) -> str:
     """Best-effort exit status for a worker's process, bounded in time.
 
     ``poll()`` reaps the child once it has exited, which is the controller's own
@@ -586,13 +586,21 @@ def _await_exit_status(process: object) -> str:
     worker whose channel closed while its process still runs (a hang, a wedged
     child) is a real state, and naming it is what stops the line from implying an
     exit code was ever seen.
+
+    Typed as a real ``subprocess.Popen`` on purpose, and the caller enforces it:
+    the deadline only bounds the LOOP, because it is checked between iterations.
+    It cannot bound a single ``poll()`` call, so an object whose ``poll`` blocks
+    would hold the controller for as long as it liked -- a review round measured
+    0.753 s from a process-shaped stub under a 0.5 s deadline. ``Popen.poll``
+    itself is documented and implemented as a non-blocking ``waitpid`` with
+    ``WNOHANG``, which is the property this wait relies on; no other object shape
+    gets to be polled, however plausible it looks.
     """
     deadline = time.monotonic() + _EXIT_STATUS_DEADLINE_S
     while True:
-        returncode = getattr(process, "returncode", None)
+        returncode = process.returncode
         if returncode is None:
-            poll = getattr(process, "poll", None)
-            returncode = poll() if callable(poll) else None
+            returncode = process.poll()
         if returncode is not None:
             return f"exited {_returncode_text(returncode)}"
         if time.monotonic() >= deadline:
@@ -615,10 +623,18 @@ def _dead_worker_exit_line(node: object) -> str:
         process = _worker_process(node)
         if process is None:
             return f"DEAD WORKER EXIT: {worker} unknown (no local process object)"
-        pid = getattr(process, "pid", None)
-        if not isinstance(pid, int):
-            return f"DEAD WORKER EXIT: {worker} unknown (process object has no pid)"
-        return f"DEAD WORKER EXIT: {worker} pid {pid} {_await_exit_status(process)}"
+        if not isinstance(process, subprocess.Popen):
+            # The deadline bounds the wait LOOP, not one call: a process-shaped
+            # object whose poll() blocks cannot be interrupted by it (review round
+            # 1 measured 0.753 s from a stub under a 0.5 s deadline). Only a real
+            # Popen has the non-blocking poll this probe is allowed to rely on, so
+            # anything else is reported without ever calling it.
+            kind = type(process).__name__
+            return (
+                f"DEAD WORKER EXIT: {worker} unknown "
+                f"(process object is {kind}, not a subprocess.Popen; not polled)"
+            )
+        return f"DEAD WORKER EXIT: {worker} pid {process.pid} {_await_exit_status(process)}"
     except Exception as exc:  # see the docstring: unknown, never raise
         reason = " ".join(str(exc).split()) or type(exc).__name__
         return (
