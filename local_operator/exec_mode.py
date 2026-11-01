@@ -920,7 +920,34 @@ def _make_default_session_factory(exec_args: ExecArgs, team: Any | None = None) 
             # an ordinary attribute, so it can never masquerade as a user flag.
             team_model_suggestion=team.model_suggestion if team is not None else None,
         )
-        return create_session(session_args, config_manager, agent_registry)
+        # Exec constructs an in-process Session, so it never calls _spawn_runtime.
+        # Keep the shared resolver here at that separate lifetime boundary.
+        # A RESUME HONOURS THE SESSION'S RECORDED MOVE, like every other path that
+        # starts a session without being told where. `lop exec --resume` spawned at
+        # the PROCESS's cwd, which is a caller naming a directory for a session
+        # whose own record may already say it lives somewhere else: the child's boot
+        # then reconcile-settled a real move as ``superseded``, so the documented
+        # remedy for a viewer-less session ("it starts in the destination the next
+        # time it is engaged -- a message, a wake, or `lop exec`") destroyed the
+        # move instead (QA round 1, Q1).
+        #
+        # The resolver keeps an explicit choice: a cwd that is neither the record's
+        # source nor its destination is honoured untouched. A record that cannot be
+        # read, or a destination that is gone, becomes a refusal -- reported as
+        # "exec failed: <why>" -- rather than a spawn in the wrong tree.
+        session_cwd = os.getcwd()
+        if exec_args.resume:
+            from local_operator.resume import resolve_resume_id
+            from local_operator.session import cwd_move
+
+            try:
+                resumed_id = resolve_resume_id(base_dir, str(exec_args.resume))
+                session_cwd = cwd_move.spawn_cwd_for_session(base_dir, resumed_id, session_cwd)
+            except cwd_move.HandoffRefused as refused:
+                raise RuntimeError(refused.message) from refused
+            except Exception:  # noqa: BLE001 -- an unresolvable selector is the factory's refusal
+                session_cwd = os.getcwd()
+        return create_session(session_args, config_manager, agent_registry, cwd=session_cwd)
 
     return factory
 

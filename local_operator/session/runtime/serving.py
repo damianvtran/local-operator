@@ -36,7 +36,7 @@ import uuid
 import weakref
 from asyncio import InvalidStateError
 from collections import deque
-from collections.abc import Mapping, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import (
@@ -407,8 +407,33 @@ _ASK_REFRESH_MIN_S = 1.0
 #: idle threads. Lazy because most runtimes never switch, and the test suite
 #: builds hundreds of handles that never do.
 _SWITCH_EXECUTOR_WORKERS = 2
+
+#: One queue-plus-resolution budget, shorter than the attach ACK deadline.
+#: HTTP read timeouts bound idle reads, not a trickling complete listing, and
+#: dedicated workers can themselves be occupied. Only metadata is built in a
+#: worker: expiry cancels this await before the loop-owned mutation below, so
+#: a late result can populate caches but cannot change the session later.
+_MODEL_SWITCH_RESOLVE_S = 8.0
 _switch_executor_pool: concurrent.futures.ThreadPoolExecutor | None = None
 _switch_executor_lock = threading.Lock()
+
+
+@contextlib.asynccontextmanager
+async def _model_resolution_window(deadline: float) -> AsyncIterator[None]:
+    from local_operator.model.deadline import scope
+
+    # Task-local as well as worker-local: MetaMuse's asynchronous resolver and
+    # its to_thread metadata leg must inherit the SAME foreground deadline.
+    with scope(deadline):
+        try:
+            async with asyncio.timeout(_MODEL_SWITCH_RESOLVE_S):
+                yield
+        except TimeoutError as error:
+            # Reuse the existing noun-neutral localized label; an empty built-in
+            # TimeoutError otherwise becomes the unhelpful "cannot switch model: ".
+            from local_operator.i18n.keys.relay_asks import card_timed_out_badge
+
+            raise TimeoutError(card_timed_out_badge().envelope()["text"]) from error
 
 
 def _switch_executor() -> concurrent.futures.ThreadPoolExecutor:
@@ -5842,27 +5867,38 @@ class ServingSessionHandle(SessionHandle):
         # that resolves through another is how a "warm" switch used to run the
         # cold body on the loop anyway (review round 2, R2-1).
         from local_operator.model.configure import warm_model_info
+        from local_operator.model.deadline import run_before
 
-        warm_info = warm_model_info(provider, model_id)
-        if warm_info is not None:
-            spec = build_model_spec(provider, model_id, info=warm_info)
-        else:
-            spec = await self._loop.run_in_executor(
-                _switch_executor(), build_model_spec, provider, model_id
-            )
-        if provider == "meta-muse":
-            from local_operator.harness.types import ModelSpec
+        # Captured before submission: queueing cannot earn another network
+        # budget when a worker finally becomes available. run_in_executor does
+        # not propagate contextvars, so install the shared budget explicitly.
+        resolution_deadline = time.monotonic() + _MODEL_SWITCH_RESOLVE_S
+        async with _model_resolution_window(resolution_deadline):
+            warm_info = warm_model_info(provider, model_id)
+            if warm_info is not None:
+                spec = build_model_spec(provider, model_id, info=warm_info)
+            else:
+                spec = await self._loop.run_in_executor(
+                    _switch_executor(),
+                    run_before,
+                    resolution_deadline,
+                    build_model_spec,
+                    provider,
+                    model_id,
+                )
+            if provider == "meta-muse":
+                from local_operator.harness.types import ModelSpec
 
-            # Resolve the same selected account BEFORE publishing primary/spec.
-            # This is the existing metadata seam, not an inference or Codex call.
-            resolver = getattr(
-                getattr(self._session, "_stream_fn", None), "resolve_context_model", None
-            )
-            if callable(resolver):
-                result = resolver(spec)
-                resolved = await result if inspect.isawaitable(result) else result
-                if isinstance(resolved, ModelSpec):
-                    spec = resolved
+                # Resolve the same selected account BEFORE publishing primary/spec.
+                # This is the existing metadata seam, not an inference or Codex call.
+                resolver = getattr(
+                    getattr(self._session, "_stream_fn", None), "resolve_context_model", None
+                )
+                if callable(resolver):
+                    result = resolver(spec)
+                    resolved = await result if inspect.isawaitable(result) else result
+                    if isinstance(resolved, ModelSpec):
+                        spec = resolved
         if effort:
             spec = spec.model_copy(
                 update={

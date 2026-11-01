@@ -345,6 +345,52 @@ def test_only_the_delegating_roles_may_delegate() -> None:
         assert seed(name).may_delegate is False, name
 
 
+@pytest.mark.parametrize(
+    ("role", "cue"),
+    [
+        ("manager", "severity-and-evidence ledger"),
+        ("coder", "verify every claim"),
+        ("reviewer", "full in-scope code"),
+        ("qa-tester", "full in-scope QA matrix"),
+        ("designer", "full in-scope visual"),
+        ("ux-reviewer", "full in-scope interaction"),
+    ],
+)
+def test_convergence_cues_reach_delegated_prompt(tmp_path, role, cue) -> None:
+    """Check the actual launch assembler, not just the seed Markdown.
+
+    Registry overrides deliberately win: changing packaged guidance must not
+    silently rewrite an operator's role. The negative control proves that this
+    receipt distinguishes starter rollout from an already-installed override.
+    """
+    from local_operator.harness.subagent import _effective_prompt
+    from tests.unit.session.test_session import ScriptedStream, make_session
+
+    registry = AgentRegistry(tmp_path)
+    # Exercise the typed launch boundary with a real, offline Session rather
+    # than a look-alike that only happens to expose today's two consumed fields.
+    parent = make_session(tmp_path, ScriptedStream([]), agent_registry=registry)
+    brief = "Synthetic bounded review task"
+    packaged = seed(role)
+    initial, profile = _effective_prompt(brief, role, parent)
+    assert profile is not None
+    assert initial == packaged.preamble + brief
+    assert "guide://delivery" in initial and cue in initial
+
+    installed = install_seed(role, registry=registry, scope="global")
+    assert installed is not None
+    loaded, _ = _effective_prompt(brief, role, parent)
+    assert loaded == initial, "fresh installation must preserve every starter byte"
+
+    installed_profile, _ = installed
+    assert installed_profile.agent_id is not None
+    registry.set_agent_system_prompt(installed_profile.agent_id, "Override control")
+    control, _ = _effective_prompt(brief, role, parent)
+    assert "Override control" in control
+    assert cue not in control and "guide://delivery" not in control
+    assert control != loaded, "a seed-only probe must not masquerade as rollout"
+
+
 def test_the_preamble_is_empty_when_a_role_says_nothing() -> None:
     """It rides in front of every prompt, so a role with no guidance must
     cost nothing rather than emitting a header with nothing under it."""
@@ -650,7 +696,7 @@ def test_an_untouched_copy_updates_in_place_when_the_starter_moves(scratch_seeds
     assert verdict.verdict == "outdated-clean"
     assert verdict.applied is True
     # Stamped from the packaged reviewer at install, before the simulated move.
-    assert verdict.installed_version == "1.3.7"
+    assert verdict.installed_version == "1.3.9"
     assert verdict.packaged_version == "2.0.0"
     assert verdict.diverged_fields == ("instructions",)
     # The echo: recoverable by copy-paste, the same guarantee reset gives.
@@ -788,7 +834,7 @@ def test_an_unbumped_body_change_is_still_an_update(scratch_seeds, tmp_path) -> 
     assert verdict.verdict == "outdated-clean"
     assert verdict.applied is True
     # Both sides read the seed's version, untouched by the body-only move.
-    assert verdict.installed_version == verdict.packaged_version == "1.3.7"
+    assert verdict.installed_version == verdict.packaged_version == "1.3.9"
     assert verdict.replaced_instructions == before_prompt
     assert registry.get_agent_system_prompt(row.id).strip() == "REVIEWER, SAME VERSION, NEW TEXT"
 

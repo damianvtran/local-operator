@@ -64,6 +64,19 @@ async def _finish_browser_scope(session: Any, outcome: str) -> None:
         logger.debug("exec browser scope finish failed", exc_info=True)
 
 
+def session_cwd(session: Any) -> str:
+    """The directory this session works in, for the runtime record it publishes.
+
+    The session carries it (``create_session(cwd=...)``), and every other spawn
+    path already derives the record from the SESSION rather than the process — see
+    ``launch._spawn_runtime``'s ``LOP_MOBILE_CHILD_CWD``. Reading the private
+    attribute with a fallback matches how ``exec_control`` and the record writer
+    read the same session elsewhere; the fallback keeps a double that predates the
+    field building today's record instead of failing.
+    """
+    return str(getattr(session, "_cwd", "") or os.getcwd())
+
+
 async def run_session(session: Any, prompt: str, args: Any, team: Any) -> int:
     from local_operator.headless_print import run_print_mode
     from local_operator.session.runtime.exec_control import start_exec_control
@@ -73,7 +86,17 @@ async def run_session(session: Any, prompt: str, args: Any, team: Any) -> int:
         apply_startup(session, args, team)
         control = await start_exec_control(
             session,
-            cwd=os.getcwd(),
+            # THE SESSION'S OWN DIRECTORY, NOT THE PROCESS'S. This value becomes
+            # the published record's cwd (``exec_control`` -> handle projection ->
+            # record), and the record is what a successor's BOOT RECONCILE
+            # compares against a recorded move (``RuntimeServer._serve`` ->
+            # ``cwd_move.reconcile_move``). Handing it ``os.getcwd()`` made a
+            # `lop exec --resume` that correctly STARTED in a session's recorded
+            # destination publish a record naming the directory the person
+            # happened to run the command in — so the move was settled
+            # ``superseded`` and the next start went back to the source (agent
+            # review round 2, MAJOR; QA round 2, same finding).
+            cwd=session_cwd(session),
             yolo=bool(args.yolo),
             supervised=bool(getattr(args, "control", False)),
             # A resumed run inherits its conversation's outstanding asks (#2803):

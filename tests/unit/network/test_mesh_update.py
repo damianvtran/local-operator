@@ -1125,6 +1125,9 @@ def test_the_successor_engage_uses_the_warm_errand_and_reports_failures(
     assert session_id == "s9" and cwd == "/tmp/x"
     assert isinstance(errand, launch.WarmErrand), errand
     assert config_dir == root and deadline == meshupdate.REENGAGE_DEADLINE_S
+    record.cwd = ""
+    assert meshupdate._engage_successor(record, root=root, deadline_s=5.0) == ""
+    assert seen[-1][1] == "", "an absent record cwd is not an explicit HOME override"
 
     # An id with no directory on THIS device is a raced registry read, not a
     # session to spawn for — the relay's own pre-check (n3).

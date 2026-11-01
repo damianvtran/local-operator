@@ -521,6 +521,12 @@ def static_feature_flags() -> dict[str, Any]:
         # for a Team Bridge OS notification's image slot. Own key so a desktop
         # facing an older core keeps today's app icon instead of 404-probing.
         "team_bridge_notification_avatar": 1,
+        # `GET /v1/desktop/team-bridge/endpoints/{id}/avatar` (an agent's OWN
+        # published picture, closed and hash-pinned like the account relay) and
+        # `avatar_endpoint_id` on the notification-avatar route. Its own key: a
+        # desktop facing an older core keeps drawing the agent glyph instead of
+        # 404-probing a route that does not exist.
+        "team_bridge_endpoint_avatar": 1,
         # Session code memory: GET/POST/PATCH/DELETE on
         # `/v1/desktop/sessions/{id}/variables`, reading and writing a
         # session's LIVE eval-kernel namespace by session id. Its OWN key

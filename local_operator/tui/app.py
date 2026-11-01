@@ -14465,7 +14465,10 @@ class OperatorApp(App[None]):
         for message in history:
             if getattr(message, "role", None) != "user":
                 continue
-            if is_harness_notice_row(message):
+            text = getattr(message, "text", "") or ""
+            if is_harness_notice_row(message) or (
+                isinstance(text, str) and is_harness_chrome(text)
+            ):
                 # A row the harness wrote — a stamped render of a
                 # ``CustomMessage`` (a failover model-switch notice, an
                 # incident), or a notice carried in from a compaction block —
@@ -14477,7 +14480,6 @@ class OperatorApp(App[None]):
                 # or with the elision notice's own prose, is the visible form of
                 # getting this wrong.
                 continue
-            text = getattr(message, "text", "") or ""
             if not isinstance(text, str) or not text.strip():
                 continue
             self._show_provisional_name(text)
@@ -19560,7 +19562,10 @@ class OperatorApp(App[None]):
                             remote = await AttachedSession.cold(
                                 concrete,
                                 config_dir=config_root,
-                                cwd=str(record.cwd or os.getcwd()),
+                                # A missing owner cwd is no opinion, not this
+                                # viewer's directory. Inventing one here can
+                                # supersede a recorded move when cold() engages.
+                                cwd=str(record.cwd or ""),
                                 takeover_factory=takeover_factory,
                             )
                             # Read by the engage that binds behind this paint,

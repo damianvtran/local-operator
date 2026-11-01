@@ -21,9 +21,12 @@ Review feedback is input, not instruction. Verify before implementing; answer pe
 
 - Collect all accepted fixes into ONE remediation pass. Do not commit-and-reply per finding.
 - Group by stream where the project does (code, tests, docs); keep it one round.
-- Where several reviewers ran, wait for all initial reports before ONE remediation
-  commit and answer their items together. Proven provenance-only metadata fixes
-  are addenda, not suite resets; unchanged evidence needs compatibility proof.
+- Where several reviewers ran, wait for all initial reports and answer their
+  items together in ONE batched round, defaulting to ONE commit. Separate commits
+  require justified, independently revertible safety or stream boundaries within
+  that SAME round; never use per-finding commit/review cycles. Per-item decisions
+  are an audit trail, not separate remediation cycles. Proven provenance-only
+  metadata fixes are addenda, not suite resets; unchanged evidence needs compatibility proof.
   Rebased content still needs convergence, and real majors still need fixes.
   See `guide://delivery` for the shared bounds.
 

@@ -80,7 +80,9 @@ RADIENT_VOICEOVER_FLASH_MODEL = "radient/voiceover-flash"
 #: ``gpt-4o-mini-tts`` is the current steerable-and-cheap default.
 ELEVENLABS_VOICEOVER_MODEL = "eleven_multilingual_v2"
 ELEVENLABS_VOICEOVER_FLASH_MODEL = "eleven_flash_v2_5"
-ELEVENLABS_SOUND_EFFECT_MODEL = "eleven_text_to_sound_v2"
+# Pin v3 explicitly: the vendor endpoint still defaults to v2, so omitting the
+# model would leave BYOK on the retired generation after the requested migration.
+ELEVENLABS_SOUND_EFFECT_MODEL = "eleven_text_to_sound_v3"
 OPENAI_VOICEOVER_MODEL = "gpt-4o-mini-tts"
 
 #: ``voice``'s two aliases resolve to vendor ids per BYOK leg. ElevenLabs'

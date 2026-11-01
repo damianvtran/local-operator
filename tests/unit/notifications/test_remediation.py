@@ -17,6 +17,10 @@ from local_operator.notifications.items import apply_patch, list_page
 from local_operator.notifications.store import NotificationStore, ask_ref
 from local_operator.tools.registry import create_tools
 from local_operator.variables import VariableStore
+
+# Bind the fixture here: late plugin registration can leave it scoped to
+# test_inbox when that module was already collected in the same CI shard.
+# The explicit re-export preserves its pytest name without global plugin state.
 from tests.unit.notifications.test_inbox import (
     AUTH,
     OTHER,
@@ -24,8 +28,10 @@ from tests.unit.notifications.test_inbox import (
     _open_ask,
     _run_awaitable,
 )
+from tests.unit.notifications.test_inbox import client as client
 
-pytest_plugins = ["tests.unit.notifications.test_inbox"]
+# Pytest consumes this module's fixture export by name, not a Python call here.
+__all__ = ["client"]
 
 
 @pytest.mark.parametrize("op", ["read", "dismiss"])
