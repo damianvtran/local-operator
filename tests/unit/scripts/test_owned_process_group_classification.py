@@ -341,11 +341,13 @@ def test_a_member_forked_after_capture_is_adopted_under_the_pin(wrapper, monkeyp
     assert verdict.anchor == "leader-live"
     assert world.calls == [(world.pgid, signal.SIGTERM)]
 
-    # The pin-lost control: same members, no reservation above them.
+    # The pin-lost control: a READABLE FOREIGN birth at the leader's number --
+    # the only observation that positively proves the reservation was given up.
+    # (A missing row is unreadable, never pin_lost: macOS censuses omit processes.)
     lost = World()
     cap_lost = lost.capture(send=lambda pgid, signum: lost.calls.append((pgid, signum)))
     lost.rows[11] = (lost.pgid, lost.pgid, lost.pgid, "late")
-    del lost.rows[lost.pgid]
+    lost.rows[lost.pgid] = (lost.parent, lost.pgid, lost.pgid, "someone-else")
     refused = cap_lost.signal(signal.SIGTERM, deadline=time_budget())
     assert refused.status == "REFUSED", refused.reason
     assert refused.refusal_class == "pin_lost"

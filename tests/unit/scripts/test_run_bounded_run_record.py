@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import subprocess
 from types import SimpleNamespace as NS
 
@@ -24,7 +25,14 @@ from tests.unit.scripts.test_run_bounded import memory_wrapper  # noqa: F401
 
 class World:
     def __init__(self, birth="leader"):
-        self.rows = {1: (0, 1, 1, "creator"), 10: (1, 10, 10, birth)}
+        # The creator row IS this process: the leader's kernel parent must be us
+        # or C1 refuses the capture and no receipt exists.
+        self.rows = {
+            os.getpid(): (0, os.getpid(), os.getpid(), "creator"),
+            10: (os.getpid(), 10, 10, birth),
+        }
+        #: Set when the faked child has exited; a corpse until it is reaped.
+        self.exited = False
         self.now = 0.0
         self.calls = []
         self.sample_calls = 0
@@ -37,11 +45,12 @@ class World:
         return sorted(pid for pid, row in self.rows.items() if row[1] == pgid)
 
     def samples(self, pids):
-        # Capture samples the leader twice; after that the child has exited and is
-        # left a CORPSE. That is the reservation: `leader_terminal` can see it
-        # without reaping, and cleanup reads the status only after the census.
+        # THE CORPSE IS AN EVENT, NOT A CALL COUNT. Counting samples couples the
+        # fixture to the implementation's call sequence: one added witness read
+        # turned a live leader into a corpse during capture and the receipt was
+        # never recorded. `self.exited` says the child has exited; nothing else.
         self.sample_calls += 1
-        corpse = self.sample_calls > 2
+        corpse = bool(getattr(self, "exited", False))
         return {
             pid: owned.procstate.ProcessSample(corpse and pid == 10, self.rows[pid][3])
             for pid in pids
@@ -57,10 +66,13 @@ class World:
         self.rows.pop(pgid, None)
 
     def capture(self, send=None, identity=None):
+        # The leader is OUR pid's child: C1 refuses anything else, and a refused
+        # capture leaves no receipt, which every later refresh reports as
+        # "no leader receipt" and the wrapper as an unproven cleanup.
         return owned.OwnedGroup.capture(
             10,
             deadline=self.clock() + 5.0,
-            parent_pid=1,
+            parent_pid=os.getpid(),
             census=self.census,
             samples=self.samples,
             identity=identity or self.identity,
@@ -78,6 +90,16 @@ def wrapper(request, monkeypatch, tmp_path):
     return module
 
 
+#: The world the current test built; the fake Popen marks its child as exited.
+_CURRENT_WORLD = None
+
+
+def _record_exit():
+    """The faked child has exited: from here it is a corpse until reaped."""
+    if _CURRENT_WORLD is not None:
+        _CURRENT_WORLD.exited = True
+
+
 def _install(wrapper, monkeypatch, cap, status=0):
     monkeypatch.setattr(
         wrapper,
@@ -88,7 +110,11 @@ def _install(wrapper, monkeypatch, cap, status=0):
         wrapper,
         "subprocess",
         NS(
-            Popen=lambda *a, **k: NS(pid=10, poll=lambda: status, wait=lambda **_: status),
+            Popen=lambda *a, **k: NS(
+                pid=10,
+                poll=lambda: (_record_exit(), status)[1],
+                wait=lambda **_: (_record_exit(), status)[1],
+            ),
             TimeoutExpired=subprocess.TimeoutExpired,
         ),
     )
@@ -161,7 +187,9 @@ def test_acquisition_failure_still_leaves_a_record_with_the_run_id(wrapper, monk
     assert spawn["run_id"] == "qa-fail"
     assert spawn["actors"] == []
     assert spawn["believed"]["leader"] == 10
-    assert spawn["believed"]["parent"] == 1
+    # The recorded parent is THIS process: the fixture now models a leader that
+    # really is our child, which is what C1 requires before a receipt exists.
+    assert spawn["believed"]["parent"] == os.getpid()
     assert "error" in spawn["believed"]
     # A record exists, so this is distinguishable from "the wrapper never ran".
     assert _records(tmp_path, "exit"), "a recorded run must also record its exit"

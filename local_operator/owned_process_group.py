@@ -672,21 +672,12 @@ class OwnedGroup:
         except Exception:  # noqa: BLE001 - a failed sample is unreadable, never absent
             return "unreadable", None
         sample = samples.get(self.leader)
-        if sample is None:
-            # NO SAMPLE IS TWO DIFFERENT FACTS. The contract separates "positively
-            # reaped" (the number was given up -> pin_lost) from "the reader could
-            # not read it" (unreadable); a missing sample alone cannot tell them
-            # apart, so ask the census. A COMPLETED enumeration that does not list
-            # the leader means the process is gone, which is loss. A census that
-            # lists it, or that cannot complete, is a reader failure.
-            try:
-                listed = self._members(deadline)
-            except Exception:  # noqa: BLE001 - an unreadable census proves nothing
-                return "unreadable", sample
-            if self.leader not in listed:
-                return "reaped", sample
-            return "unreadable", sample
-        if sample.birth is None:
+        if sample is None or sample.birth is None:
+            # A MISSING ROW IS NOT PROOF OF REAPING. It is the ambiguous
+            # observation: the census demonstrably omits processes on macOS, so
+            # "not listed" and "the reader failed" are indistinguishable here.
+            # Only a READABLE FOREIGN birth below may be `pin_lost`; everything
+            # this branch can see is `unreadable`.
             return "unreadable", sample
         held = sample.is_birth(anchor.scheme, anchor.birth)
         if held is True:
