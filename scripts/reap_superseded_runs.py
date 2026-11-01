@@ -18,9 +18,42 @@ one prevents:
    artifacts or logs someone may still need, and cancelling it wastes the work
    already done. The bug this addresses is a QUEUE problem, so the queue is
    the only place it acts.
-2. Never a protected branch. `main` and `release-next-*` are release-bearing:
-   a gate that can be cancelled is not a gate. (The release gate workflow
-   already uses a per-SHA group precisely so a later run cannot evict it.)
+2. Never `release-next-*`. A release branch's gate is the verdict the release is
+   cut on, and a gate that can be cancelled is not a gate. (The release gate
+   workflow already uses a per-SHA group precisely so a later run cannot evict
+   it.) This is unchanged.
+
+2a. `main` is NOT covered by rule 2 any more, and the reversal is narrow: only a
+   QUEUED `push` run whose commit is an ANCESTOR of the current `main` tip, and
+   which NO tag points at, may be cancelled. The reason rule 2 protected `main`
+   at all was that a `main` run is the post-merge CI record for a merge commit;
+   the reason it no longer can be absolute is measured: `ci.yml`'s concurrency
+   group is per-SHA for `main`, so a queued run for an ancestor is never evicted
+   by the newer one -- it just waits, holding a runner slot, in a pool that was
+   observed at 20 concurrent jobs with 38 runs queued. On 2026-10-29 sixteen
+   such runs were cancelled by hand and every one was proven an ancestor of the
+   newest with `git merge-base --is-ancestor`. The record for the TIP is the one
+   anybody reads; the record for an ancestor is superseded by definition.
+
+2b. NEVER a tag target. Two of those sixteen hand-cancelled runs were the
+   commits `v0.91.0` and `v0.91.1` were tagged on (`20d8c7c3fc`, `85f3b9097b`).
+   "Older than the newest queued run" alone would have destroyed the CI evidence
+   for a PUBLISHED release, and it is not recoverable: a cancelled run's jobs
+   cannot be un-cancelled, and re-running one on a tag target re-runs code that
+   may no longer be the branch tip. The tag list is read once per sweep from the
+   API; if it cannot be read, EVERY `main` run is kept (rule 6's fail-closed
+   shape, applied to a read this rule depends on).
+
+2c. Ancestry is PROVEN, not inferred. `head_sha != tip` is not enough: a
+   force-push or a rebase onto `main` can leave a queued run's commit outside
+   the tip's history, and such a commit is not "superseded post-merge CI", it is
+   a commit the branch no longer contains. The comparison is the API's
+   `compare/{run_sha}...{tip}`, whose `ahead`/`identical` status is the same
+   reading `git merge-base --is-ancestor` gives. A transient failure on that read
+   keeps the run.
+
+2d. Only `push`. A `workflow_dispatch` run on `main` was asked for by a person,
+   not produced by the merge, and is kept whatever its age.
 3. For a pull_request run the PULL REQUEST's head is authoritative.
    `head_sha == pull_request.head.sha` means KEEP, at any age, whether or not
    the branch resolves -- that is the fork-PR case, where the fork's branch
@@ -95,8 +128,10 @@ import subprocess
 import sys
 from typing import Any
 
-PROTECTED_BRANCHES = ("main",)
 PROTECTED_PREFIXES = ("release-next",)
+#: The post-merge branch. Its QUEUED push runs are eligible under rule 2a-2d;
+#: everything else about it is still protected.
+PROTECTED_MAIN = "main"
 SEARCH_LIMIT = 100
 
 
@@ -226,8 +261,53 @@ def age_minutes(run: dict[str, Any]) -> float:
     )
 
 
+def tag_targets(repo: str) -> frozenset[str]:
+    """Every commit a tag points at, across pages (rule 2b).
+
+    `repos/{repo}/tags` reports the COMMIT an annotated tag resolves to (not the
+    tag object), which is exactly the question rule 2b asks: is this SHA the
+    published record of a release? A paginated listing is used rather than
+    `git ls-remote --tags` because this script is stdlib + `gh` only and must
+    work without a checkout.
+
+    RAISES on failure. The caller keeps every `main` run rather than treating an
+    unreadable tag list as an empty one -- the difference between the two is
+    whether a release's CI record can be cancelled.
+    """
+    out: set[str] = set()
+    page = 1
+    while True:
+        data = gh_api(f"repos/{repo}/tags?per_page={SEARCH_LIMIT}&page={page}")
+        if data is None:
+            raise ApiError("the tag listing returned no body")
+        batch = list(data)
+        for entry in batch:
+            sha = (entry.get("commit") or {}).get("sha")
+            if sha:
+                out.add(sha)
+        page += 1
+        if len(batch) < SEARCH_LIMIT:
+            return frozenset(out)
+        if page > 20:  # more than 2000 tags is not this script's problem
+            return frozenset(out)
+
+
+def is_ancestor(repo: str, older: str, newer: str) -> bool:
+    """Whether `older` is an ancestor of `newer` (rule 2c).
+
+    `compare/{base}...{head}` answers this without walking the graph locally:
+    `ahead` means head contains base, `identical` means they are the same
+    commit. `behind` and `diverged` both mean the queued run's commit is not in
+    the tip's history, which keeps the run.
+
+    RAISES on failure; the caller keeps the run.
+    """
+    data = gh_api(f"repos/{repo}/compare/{older}...{newer}")
+    return ((data or {}).get("status")) in ("ahead", "identical")
+
+
 def is_protected(branch: str) -> bool:
-    return branch in PROTECTED_BRANCHES or branch.startswith(PROTECTED_PREFIXES)
+    return branch.startswith(PROTECTED_PREFIXES)
 
 
 def _abandoned_or(age: float, max_queue_hours: float, unresolved: str) -> tuple[bool, str]:
@@ -249,8 +329,61 @@ def _abandoned_or(age: float, max_queue_hours: float, unresolved: str) -> tuple[
     return False, f"unresolvable ({unresolved}) -- kept, inside the abandonment bound"
 
 
+def _post_merge_decision(
+    repo: str,
+    run: dict[str, Any],
+    head: str | None,
+    tag_targets: frozenset[str] | None,
+) -> tuple[bool, str]:
+    """The narrow reversal of "never touch `main`" (rules 2a-2d).
+
+    Every guard here is a separate reason the old blanket rule existed, and each
+    one returns KEEP on its own. The only path to CANCEL is: a queued push run,
+    a readable tag list that does not name this commit, a readable `main` tip
+    that is not this commit, and a proof that this commit is in that tip's
+    history.
+    """
+    if run.get("event") != "push":
+        return False, f"{PROTECTED_MAIN} run from {run.get('event')!r} -- kept (rule 2d)"
+    if tag_targets is None:
+        return False, (
+            "tag targets unreadable -- every "
+            f"{PROTECTED_MAIN} commit could be a release (rule 2b)"
+        )
+    if head and head in tag_targets:
+        return False, (
+            f"{str(head)[:9]} is a release tag target -- its CI record is the "
+            "published evidence (rule 2b)"
+        )
+    try:
+        tip = branch_tip(repo, PROTECTED_MAIN)
+    except ApiError as exc:
+        return False, f"transient read failure ({exc.status or 'unknown'}) -- kept, not guessed"
+    if not tip:
+        return False, f"{PROTECTED_MAIN} has no readable tip -- kept"
+    if tip == head:
+        return False, f"{PROTECTED_MAIN} tip is this commit"
+    try:
+        ancestor = is_ancestor(repo, str(head), tip)
+    except ApiError as exc:
+        return False, f"ancestry unreadable ({exc.status or 'unknown'}) -- kept (rule 2c)"
+    if not ancestor:
+        return False, (
+            f"not in the history of {PROTECTED_MAIN}'s tip ({tip[:9]}) -- a "
+            "force-push or rebase, kept (rule 2c)"
+        )
+    return True, (
+        f"superseded post-merge CI: {PROTECTED_MAIN} moved {str(head)[:9]} -> "
+        f"{tip[:9]} and no tag points at {str(head)[:9]}"
+    )
+
+
 def decide(
-    repo: str, run: dict[str, Any], min_age: float, max_queue_hours: float = 24.0
+    repo: str,
+    run: dict[str, Any],
+    min_age: float,
+    max_queue_hours: float = 24.0,
+    tag_targets: frozenset[str] | None = None,
 ) -> tuple[bool, str]:
     """(should_cancel, reason) for one queued run. Pure: makes no writes.
 
@@ -269,6 +402,10 @@ def decide(
 
     The abandonment bound applies ONLY to a run no reading can resolve. Age
     never overrules a resolved run.
+
+    `main` is the one branch whose verdict is not an event rule: its queued push
+    runs are decided by `_post_merge_decision` (rules 2a-2d), which is where the
+    tag-target exclusion lives.
     """
     branch = run.get("head_branch") or ""
     event = run.get("event") or ""
@@ -286,6 +423,9 @@ def decide(
 
     if age < min_age:
         return False, f"inside the {min_age:g}-minute grace period"
+
+    if branch == PROTECTED_MAIN:
+        return _post_merge_decision(repo, run, head, tag_targets)
 
     if event == "pull_request":
         prs = run.get("pull_requests") or []
@@ -350,10 +490,30 @@ def main() -> int:
     if not runs:
         return 0
 
+    # One read for the whole sweep (rule 2b). A failure is NOT an empty list:
+    # passing None keeps every `main` run, because "we cannot see the tags" and
+    # "no commit carries a tag" are the two readings that decide whether a
+    # published release's CI record can be cancelled.
+    try:
+        tags: frozenset[str] | None = tag_targets(args.repo)
+    except ApiError as exc:
+        tags = None
+        print(
+            f"WARNING: tag targets unreadable ({exc}); every {PROTECTED_MAIN} run "
+            "will be kept this sweep",
+            file=sys.stderr,
+            flush=True,
+        )
+
     cancelled = kept = refused = ghosts = 0
+    #: (run id, sha) for every post-merge run this sweep acted on, so the
+    #: decision is auditable from the log rather than from the queue's absence.
+    post_merge: list[tuple[Any, str]] = []
     for run in runs:
         run_id = run.get("id")
-        should, reason = decide(args.repo, run, args.min_age_minutes, args.max_queue_hours)
+        should, reason = decide(
+            args.repo, run, args.min_age_minutes, args.max_queue_hours, tags
+        )
         label = f"run {run_id} ({run.get('name', '?')[:40]}, {run.get('head_branch')})"
         if not should:
             kept += 1
@@ -361,6 +521,8 @@ def main() -> int:
             continue
         if args.dry_run:
             cancelled += 1
+            if run.get("head_branch") == PROTECTED_MAIN:
+                post_merge.append((run_id, str(run.get("head_sha"))[:9]))
             print(f"  WOULD  {label}: {reason}", flush=True)
             continue
         # C-6: re-read the status immediately before writing. A run can start
@@ -401,11 +563,21 @@ def main() -> int:
             print(f"  REFUSE {label}: {reason} -> {exc}", flush=True)
             continue
         cancelled += 1
+        if run.get("head_branch") == PROTECTED_MAIN:
+            post_merge.append((run_id, str(run.get("head_sha"))[:9]))
         print(f"  CANCEL {label}: {reason} -> ok", flush=True)
 
     verb = "would cancel" if args.dry_run else "cancelled"
     print(
         f"{verb} {cancelled}, kept {kept}, refused {refused}, ghosts {ghosts}",
+        flush=True,
+    )
+    # The audit list for the ONE reversal this script makes (rules 2a-2d). It is
+    # printed even when empty, so a reader of a quiet sweep can tell "nothing
+    # was eligible" from "this rule did not run".
+    print(
+        f"post-merge {PROTECTED_MAIN} runs {verb}: {len(post_merge)} -- "
+        + (", ".join(f"run {rid} {sha}" for rid, sha in post_merge) or "none"),
         flush=True,
     )
     return 0
