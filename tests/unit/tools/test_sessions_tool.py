@@ -884,7 +884,13 @@ def test_describe_approval_sentences_are_pinned() -> None:
     # Round 3: the path starts within the first nine cells (U15, the 80x24 clamp),
     # no ``: `` precedes it so the receipt keeps it (U16), and the wording says the
     # move is pending (U16/U17).
-    moved = "move to ~/work/dest after this turn (now in ~/work/src) — the session restarts there"
+    # Round 4 (design D9): the card promises the RESTART, not when it happens —
+    # "after this turn" implied a schedule the idle predicate can defer, and with
+    # nothing attached the session stops first.
+    moved = (
+        "move to ~/work/dest (now in ~/work/src) — the session restarts there, "
+        "stopping first if nothing is attached to follow it"
+    )
     assert _describe_sessions_approval({"op": "move", "cwd": "~/work/dest"}, "~/work/src") == moved
     assert _describe_sessions_approval({"op": "move", "cwd": "../dest"}, "~/work/src") == moved
     assert ": " not in moved, "the receipt keeps what follows the first ': '"
