@@ -26,6 +26,7 @@ import time
 
 import pytest
 
+from local_operator import procstate
 from local_operator.tools import group_reaper
 from local_operator.tools.group_reaper import (
     PROC_GROUPS_DIRNAME,
@@ -1040,11 +1041,10 @@ def _bash_bg(command, session_id, config_dir, monkeypatch):
 
 
 def _pid_alive(pid):
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    return True
+    # A killed orphan can remain a zombie until init reaps it. Signal zero
+    # proves only PID existence, not that the workload survived the reaper;
+    # use the shared state probe without mistaking an unknown state for death.
+    return procstate.pid_alive(pid) and not procstate.is_zombie(pid)
 
 
 def _wait_dead(pid, timeout=5.0):
@@ -1054,6 +1054,34 @@ def _wait_dead(pid, timeout=5.0):
             return True
         time.sleep(0.05)
     return False
+
+
+@pytest.mark.skipif(os.name != "posix", reason="unreaped zombies are a POSIX process state")
+def test_wait_dead_accepts_a_confirmed_unreaped_child():
+    # Keep the parent alive and deliberately do not poll/wait the child until
+    # finally: an orphan's init may reap too quickly to discriminate the bug.
+    # Signal zero must still succeed, proving that PID existence is not life.
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    try:
+        assert _pid_alive(child.pid)
+        assert not _wait_dead(child.pid, timeout=0.1)  # a running sibling stays live
+        child.kill()
+        deadline = time.monotonic() + 3
+        while not procstate.is_zombie(child.pid):
+            assert time.monotonic() < deadline, "owned child never reached zombie state"
+            time.sleep(0.01)
+        os.kill(child.pid, 0)
+        assert _wait_dead(child.pid, timeout=0.2), "a confirmed corpse cannot keep executing"
+    finally:
+        # This is only our retained Popen child, never a PID/name discovered by
+        # a scan. wait() also removes the intentional zombie on assertion failure.
+        child.kill()
+        child.wait(timeout=3)
 
 
 @pytest.fixture
