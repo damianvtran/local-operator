@@ -32,7 +32,7 @@ from typing import Any, cast
 
 import pytest
 
-from local_operator.network import mobility, sync, wire
+from local_operator.network import mobility, relay, sync, wire
 from local_operator.session.placement import (
     HANDOFF_PHASE_HANDING_OFF,
     HANDOFF_PHASE_PREPARED,
@@ -244,42 +244,163 @@ def test_link_close_keeps_the_descriptor_until_its_reader_exits(
     keyed by that thread, so the close happens after the read exists — and a reader
     that stops short of it fails here naming its own state instead of being
     reported as a shutdown that did not wake anything.
+
+    THE WAKE IS OBSERVED ON THE READER ITSELF, NOT ON ONE WAY OUT OF IT (CI flake
+    2026-11-01, run 41294370324, job 124812063723 — ``test (3.12, 3)``, one
+    failure in 12,426 passes: "shutdown did not wake retained reader
+    mesh-read-30d7a0a7; alive=False fd=-1"). That message is formatted only after
+    the 60 s bound expires, and by then the reader had exited with its descriptor
+    released: the shutdown HAD woken it and its own finally HAD released the fd,
+    so the rule this cell exists to prove held and only the observation was wrong.
+    The old seam recorded a wake only when the read raised
+    ``ConnectionError``/``OSError`` *and* the reader's socket was still the link's,
+    so every other way out of that read — a keepalive record already sitting in
+    the receive buffer, the peer's own bye, a crypto refusal — left the event
+    unset while the reader was already gone. Both hooks below are keyed on the
+    reader THREAD object: the read hook records every exit from
+    ``read_until_shutdown`` (any path, any exception, ``BaseException`` included)
+    and the loop hook records the reader leaving altogether. Neither keys on the
+    thread NAME, which a leaked reader in the same worker can share — this worker
+    logged two (``mesh-read-7ed74df6`` and ``mesh-read-2765b417``).
     """
     p: Devices = request.getfixturevalue("pair")
     server_a, server_b, _host, _port = p
     _pair_settled(p, monkeypatch, role="admin")
-    observed = threading.Event()
+    observed = threading.Event()  # the reader left the read that owns the descriptor
+    exited = threading.Event()  # ...or its thread left the read loop entirely
+    woken = threading.Event()  # either of the two, so the gate has one thing to wait on
+    close_requested = threading.Event()  # the cell's own close is under way
     release = threading.Event()
     seams: list[str] = []
+    read_exits: list[str] = []
+    # THREAD OBJECTS CURRENTLY INSIDE ``_fill``, by identity. A one-shot event would
+    # miss the ordinary case: the reader is already blocked in recv before this body
+    # binds ``owner["reader"]``, so anything keyed on that binding at ENTRY is false
+    # for the very call the close has to wake. Membership is level-triggered, so it
+    # answers "is it in the read now" after the fact.
+    in_read: set[threading.Thread] = set()
     owner: dict[str, Any] = {}
-    real = wire.FrameReader.read_record_payload
+    # The origin for the elapsed stamps in the exit record, set before any seam
+    # can fire so a message never dies on an unbound name.
+    bound_at = time.monotonic()
+    real_read = wire.FrameReader.read_record_payload
     real_fill = wire.FrameReader._fill
+    real_loop = relay.PeerLink._read_loop
 
-    def reading_from_socket(reader: Any, deadline: float | None) -> None:
+    def is_target_reader() -> bool:
+        """True only for the reader THREAD this cell bound — by object, never by name.
+
+        Evaluated at the moment it is asked, never cached: the reader is reading
+        before this body binds it, so an ENTRY-time answer about the call that
+        blocks in recv is false, and caching it would hide that call's exit.
+        """
+        return threading.current_thread() is owner.get("reader")
+
+    def state() -> str:
+        """Everything a failure message needs to say what actually happened.
+
+        Read from ``owner`` rather than from locals of the test body, because the
+        seam callbacks run on the reader thread and may format this before the
+        body has finished binding them.
+        """
+        link = owner.get("link")
+        reader = owner.get("reader")
+        fd = link.sock.fileno() if link is not None else None
+        return (
+            f"alive={reader.is_alive() if reader is not None else None} fd={fd} "
+            f"close_requested={close_requested.is_set()} "
+            f"closing={getattr(link, 'closing', None)} "
+            f"closed={link._closed.is_set() if link is not None else None} "
+            f"read_exits={read_exits or ['none']} seams={seams}"
+        )
+
+    def note_exit(path: str, frame_reader: Any, exc: BaseException | None) -> None:
+        """Record ONE exit from the reader's socket read, then act on it.
+
+        THE RECORD IS WRITTEN BEFORE ANY EVENT IS SET: the gate reads it the
+        instant its wait returns, so a record written afterwards would be read
+        half-made and would misname the path that just failed.
+
+        A wake is recorded only once this cell's own close is under way. An exit
+        that happened earlier is real evidence and is kept — but crediting it to
+        the close would let a read that had already ended satisfy the gate, which
+        is exactly the no-op wake assertion this cell must not become. Such a
+        reader is instead reported by the loop hook below, naming its path.
+        """
+        if not is_target_reader():
+            # Another link's reader (this package keeps several, and an xdist worker
+            # can still be draining a leaked one) is not evidence about this cell.
+            return
+        link = owner.get("link")
+        after_close = close_requested.is_set() or bool(getattr(link, "closing", False))
+        read_exits.append(
+            f"+{time.monotonic() - bound_at:.3f}s {path}"
+            + ("" if exc is None else f" {type(exc).__name__}: {exc!r}")
+            + f" socket_is_link_socket={frame_reader._sock is owner.get('socket')}"
+            + f" after_close={after_close}"
+        )
+        if not after_close:
+            return
+        observed.set()
+        woken.set()
+        # HOLD THE READER INSIDE ITS OWN READ, so the descriptor it owns is still
+        # open when the gate looks and its finally is demonstrably still ahead.
+        if not release.wait(timeout=RELEASE_S):
+            raise AssertionError(
+                f"the retained reader of {owner.get('socket')} was never released; "
+                f"it was pinned after {path}, so its finally block has not run"
+            )
+
+    def reading_from_socket(frame_reader: Any, deadline: float | None) -> None:
         # Publish the recv seam BY THREAD, not once globally: the closing thread
         # must not be able to close before THIS link's reader has entered the read
         # it owns, and a global flag any other reader could set would let the
-        # precondition pass without the target reader ever getting there.
-        name = threading.current_thread().name
-        if name not in seams:
-            seams.append(name)
-        real_fill(reader, deadline)
-
-    def read_until_shutdown(reader: Any, deadline: float | None) -> bytes:
+        # precondition pass without the target reader ever getting there. Record the
+        # THREAD OBJECT and leave it there for as long as it is in the fill, so the
+        # gate can ask about the target by identity even for a read that started
+        # before this body bound it.
+        thread = threading.current_thread()
+        in_read.add(thread)
+        if thread.name not in seams:
+            seams.append(thread.name)
         try:
-            return real(reader, deadline)
-        except (ConnectionError, OSError):
-            if reader._sock is owner.get("socket"):
-                observed.set()
-                if not release.wait(timeout=RELEASE_S):
-                    raise AssertionError(
-                        f"the retained reader of {reader._sock} was never released; "
-                        f"its finally block did not run"
-                    )
+            real_fill(frame_reader, deadline)
+        finally:
+            in_read.discard(thread)
+
+    def read_until_shutdown(frame_reader: Any, deadline: float | None) -> bytes:
+        # NOT GATED AT ENTRY: ``note_exit`` decides at EXIT whether this is the target
+        # reader, because the read that the close wakes is already blocked in recv
+        # before the body binds ``owner["reader"]`` — an entry-time check would pass
+        # that call through and lose the very exit the gate waits for.
+        try:
+            payload = real_read(frame_reader, deadline)
+        except BaseException as exc:  # noqa: BLE001 — an exit is evidence, whatever its type
+            note_exit("raised", frame_reader, exc)
             raise
+        note_exit(f"returned {len(payload)} bytes", frame_reader, None)
+        return payload
+
+    def reading_until_the_loop_ends(link_self: Any) -> None:
+        """Report a reader that left its LOOP — the exit the read hook cannot see.
+
+        The loop's own ``finally`` closes the descriptor, so by the time this runs
+        there is nothing left to hold and no ownership left to demonstrate. Its job
+        is diagnostics: it turns "the close did not wake it", a false description
+        of a reader that has already gone, into the path it actually left by, and
+        it does so at once instead of after a ``WAKE_S`` backstop about a thread
+        that is no longer there.
+        """
+        try:
+            real_loop(link_self)
+        finally:
+            if is_target_reader():
+                exited.set()
+                woken.set()
 
     monkeypatch.setattr(wire.FrameReader, "_fill", reading_from_socket)
     monkeypatch.setattr(wire.FrameReader, "read_record_payload", read_until_shutdown)
+    monkeypatch.setattr(relay.PeerLink, "_read_loop", reading_until_the_loop_ends)
     server_b._ensure_link(server_a.identity.device_id)
     assert wait_for(lambda: server_a._link_for(server_b.identity.device_id) is not None)
     link = server_a._link_for(server_b.identity.device_id)
@@ -290,24 +411,38 @@ def test_link_close_keeps_the_descriptor_until_its_reader_exits(
     # demonstrably set (the assert above runs before the link is closed, and the
     # reader cannot be replaced). The local is the same thread object.
     reader = link._reader
+    owner["link"] = link
+    owner["reader"] = reader
     owner["socket"] = link.sock
     try:
         # The event, not the clock, decides when to close: the wait exists so a
         # reader that never reaches its read fails here with its own state
         # instead of being read as "shutdown did not wake it" (AGENTS.md, "Wait on
         # the event, never on the clock").
-        assert wait_for(lambda: reader.name in seams), (
-            f"reader {reader.name} never entered its socket read; "
-            f"alive={reader.is_alive()} closing={link.closing} "
-            f"closed={link._closed.is_set()} fd={link.sock.fileno()} "
-            f"seams={seams}"
-        )
+        assert wait_for(
+            lambda: reader in in_read
+        ), f"reader {reader.name} never entered its socket read; {state()}"
+        close_requested.set()
         link.close("we-closed", flush_s=0.0)
-        assert observed.wait(timeout=WAKE_S), (
-            f"shutdown did not wake retained reader {reader.name}; "
-            f"alive={reader.is_alive()} fd={link.sock.fileno()}"
+        # ONE wait, so neither observation can be mistaken for the other: an exit from
+        # the read pins the reader mid-flight and satisfies the ownership gate below,
+        # while an exit from the loop wakes this wait without any observation the
+        # close can be credited with — the next assertion names which one happened.
+        assert woken.wait(timeout=WAKE_S), (
+            f"the close did not wake retained reader {reader.name} within "
+            f"{WAKE_S:.0f}s: it is still inside the socket read it entered, so no "
+            f"exit has been recorded since the close began; {state()}"
         )
-        assert reader.is_alive(), "the gate must hold the reader before its finally"
+        assert observed.is_set(), (
+            f"{reader.name} left its read loop instead of leaving the read this "
+            f"cell's close was meant to wake; last read exit "
+            f"{read_exits[-1] if read_exits else 'never recorded'}; {state()}"
+        )
+        assert reader.is_alive(), (
+            f"the gate must hold the reader before its finally, but {reader.name} "
+            f"had already exited; last read exit "
+            f"{read_exits[-1] if read_exits else 'never recorded'}; {state()}"
+        )
         assert link.sock.fileno() >= 0, "the closing thread released the reader's descriptor"
     finally:
         release.set()
