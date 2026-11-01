@@ -346,3 +346,90 @@ async def test_draining_skip_offers_the_tool_no_force_flag(tmp_path, monkeypatch
     assert outcome.method == "draining"
     assert "--force" not in outcome.line
     assert "nothing to do" in outcome.line
+
+
+@pytest.mark.asyncio
+async def test_stop_refuses_the_published_update_window_without_preempting_handover(
+    tmp_path, monkeypatch
+):
+    """R7-1/Q4-1: a stop during the announcement cannot steal its successor.
+
+    Open and close the real update window, including its lock/marker and server
+    publication, rather than merely setting a private flag. The stop travels over
+    the control socket; final update retirement must still work in that window.
+    """
+    from local_operator import buildwatch
+    from local_operator.tools.builtin import _sessions_receipt
+
+    class UpdatingHandle(_IdleStopHandle):
+        begin_update = ServingSessionHandle.begin_update
+        end_update = ServingSessionHandle.end_update
+        _updating = ""
+        _update_failed = ""
+        _update_retried = ""
+
+        def _session_directory(self):
+            return tmp_path
+
+    handle = UpdatingHandle(busy=False)
+    monkeypatch.setattr(handle, "_update_lock", buildwatch.UpdateLock(), raising=False)
+    server, record = await _serve(handle)
+    monkeypatch.setattr(handle, "_server", server, raising=False)
+    marker = Mock(side_effect=AssertionError("a refused stop stages no marker"))
+    park = AsyncMock(side_effect=AssertionError("a refused stop parks no schedules"))
+    signal = AsyncMock(side_effect=AssertionError("an idle-only stop never signals"))
+    monkeypatch.setattr(control, "_write_stop_marker", marker)
+    monkeypatch.setattr(control, "_park_wakes", park)
+    monkeypatch.setattr(control, "_park_monitors", park)
+    monkeypatch.setattr(control, "_signal_and_confirm", signal)
+    pair = "synthetic-old..synthetic-successor"
+    try:
+        assert handle.begin_update(pair)
+        assert handle._updating == server._record.updating == pair
+        assert handle.may_refresh() == "", "this is not a busy/wake refusal"
+        outcome = await control.stop_session(
+            _record_for(record), timeout_s=1, _root=config_dir(), graceful_only=True
+        )
+        assert (outcome.method, outcome.reason) == ("refused", "updating")
+        assert handle.stops == []
+        assert handle._exit_committed is False
+        assert handle._updating == server._record.updating == pair
+        receipt = _sessions_receipt(outcome, 1)
+        assert receipt == outcome.line, "use the existing conservative fallback, not busy copy"
+        assert receipt == (
+            f'refused "{outcome.name}" — an idle-only stop was not confirmed; the owner '
+            "may be busy, unavailable, too old, or still exiting. No signal was sent; "
+            "reconcile its state before retrying."
+        )
+        assert "is working right now" not in receipt
+        assert "runs an older build" not in receipt
+        # The update's own final retirement MUST still latch while updating.
+        assert handle.begin_retire("runtime-retired", pair)
+        assert handle._exit_committed is True
+        marker.assert_not_called()
+        park.assert_not_awaited()
+        signal.assert_not_awaited()
+    finally:
+        handle.end_update()
+        assert handle._updating == server._record.updating == ""
+        server.close()
+
+
+@pytest.mark.asyncio
+async def test_stop_without_an_update_window_still_reaches_the_exit_hook(tmp_path, monkeypatch):
+    """An ordinary idle owner still accepts stop and reaches its exit hook."""
+    handle = _IdleStopHandle(busy=False)
+    monkeypatch.setattr(handle, "_updating", "", raising=False)
+    server, record = await _serve(handle)
+    monkeypatch.setattr(control, "_await_stopped", AsyncMock(return_value=True))
+    monkeypatch.setattr(control, "_write_stop_marker", Mock())
+    monkeypatch.setattr(control, "_park_wakes", AsyncMock(return_value=0))
+    monkeypatch.setattr(control, "_park_monitors", AsyncMock(return_value=0))
+    try:
+        outcome = await control.stop_session(
+            _record_for(record), timeout_s=1, _root=config_dir(), graceful_only=True
+        )
+        assert outcome.method == "socket"
+        assert handle.stops == [True]
+    finally:
+        server.close()
