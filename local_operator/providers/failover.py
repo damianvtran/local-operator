@@ -71,6 +71,12 @@ if TYPE_CHECKING:  # import cycle: both modules import this one at runtime
     from local_operator.providers.auth_store import OAuthAccess, StoredCredential
     from local_operator.providers.clients import WireClient
 
+    # Keep the optional hook contract readable without concatenated forward
+    # references: Pyright rejects those as cast types even though Python joins them.
+    _CodexTurnStateScope = Callable[
+        [ChatRequest, str | None, OAuthAccess | None], tuple[str, str] | None
+    ]
+
 # ---------------------------------------------------------------------------
 # Errors
 # ---------------------------------------------------------------------------
@@ -4757,8 +4763,7 @@ async def _stream_with_failover_events(
                     # After actual credential selection, before every adapter.
                     # None MUST clear: A→gateway→A cannot resurrect A's token.
                     scope_for = cast(
-                        "Callable[[ChatRequest, str | None, OAuthAccess | None], "
-                        "tuple[str, str] | None] | None",
+                        "_CodexTurnStateScope | None",
                         getattr(client, "codex_turn_state_scope", None),
                     )
                     scope = scope_for(current_request, key, access) if callable(scope_for) else None
