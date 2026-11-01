@@ -9672,8 +9672,7 @@ class EditParams(BaseModel):
     edits: list[EditHunk] = Field(
         default_factory=list,
         description=(
-            "Hunks applied in order — the multi-edit form. Prefer this for "
-            "several changes to one file: it costs one call instead of N."
+            "Ordered hunks; prefer for several changes to one file (one call)."
         ),
     )
     old_text: str | None = Field(
@@ -9688,8 +9687,7 @@ class EditParams(BaseModel):
     anchor_line: int | None = Field(
         default=None,
         description=(
-            "Optional 1-based line that disambiguates a match that occurs in "
-            "several places: the window containing this line wins."
+            "Optional 1-based line to disambiguate repeated matches; its window wins."
         ),
     )
 
