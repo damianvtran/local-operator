@@ -1,4 +1,6 @@
 """MockTransport seam tests; no renderer/main trust or live hub is established."""
+
+import json
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -9,7 +11,10 @@ import pytest
 from local_operator.team_bridge import client as client_module
 from local_operator.team_bridge import file_history_action as history
 from local_operator.team_bridge.client import BridgeRefusal, TeamBridgeClient
-from local_operator.team_bridge.file_action_registry import ActionUnavailable, InertFileActionRegistry
+from local_operator.team_bridge.file_action_registry import (
+    ActionUnavailable,
+    InertFileActionRegistry,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -21,7 +26,13 @@ class Row:
     credential_type: str = "oauth"
     disabled_cause: str | None = None
     updated_at: int = 42
-    data: dict[str, Any] = field(default_factory=lambda: {"access": "synthetic-token", "account_id": "acc_1", "expires": 4102444800000})
+    data: dict[str, Any] = field(
+        default_factory=lambda: {
+            "access": "synthetic-token",
+            "account_id": "acc_1",
+            "expires": 4102444800000,
+        }
+    )
 
 
 class Store:
@@ -44,31 +55,74 @@ class Store:
 
 
 def scope(registry):
-    return history.HistoryScope(1, "acc_1", "a" * 32, "tnt_alpha", "window_1", 4,
-                                "bcv_aaaaaaaa", "bcmsg_aaaaaaaa", registry.current_epoch())
+    return history.HistoryScope(
+        1,
+        "acc_1",
+        "a" * 32,
+        "tnt_alpha",
+        "window_1",
+        4,
+        "bcv_aaaaaaaa",
+        "bcmsg_aaaaaaaa",
+        registry.current_epoch(),
+    )
 
 
 def file(file_id="batt_aaaaaaaa", **changes):
-    return {"id": file_id, "mime": "application/octet-stream", "download_only": True,
-            "state": "bound", "class": "other", "size": 0, "expires_at": "2099-01-01T00:00:00Z", **changes}
+    return {
+        "id": file_id,
+        "mime": "application/octet-stream",
+        "download_only": True,
+        "state": "bound",
+        "class": "other",
+        "size": 0,
+        "expires_at": "2099-01-01T00:00:00Z",
+        **changes,
+    }
 
 
 def page(files=None):
-    return {"msg": "ok", "result": {"messages": [{"id": "bcmsg_aaaaaaaa", "conversation_id": "bcv_aaaaaaaa", "files": files if files is not None else [file()]}]}}
+    return {
+        "msg": "ok",
+        "result": {
+            "messages": [
+                {
+                    "id": "bcmsg_aaaaaaaa",
+                    "conversation_id": "bcv_aaaaaaaa",
+                    "files": files if files is not None else [file()],
+                }
+            ]
+        },
+    }
+
+
+def streamed_json(value):
+    # MockTransport's json= eagerly consumes the body; real HTTP streams do not.
+    return httpx.Response(
+        200,
+        headers={"content-type": "application/json"},
+        stream=httpx.ByteStream(json.dumps(value).encode()),
+    )
 
 
 def client(monkeypatch, store, handler):
     monkeypatch.setattr(client_module, "org_oauth_destination_allowed", lambda _: True)
-    return TeamBridgeClient(base_url="https://synthetic.example/v1", store=store, transport=httpx.MockTransport(handler))
+    return TeamBridgeClient(
+        base_url="https://synthetic.example/v1", store=store, transport=httpx.MockTransport(handler)
+    )
 
 
 async def test_exact_human_history_commissions_only_response_files(monkeypatch):
     store, registry, requests = Store(), InertFileActionRegistry(), []
+
     def handler(request):
         requests.append(request)
-        return httpx.Response(200, json=page())
+        return streamed_json(page())
+
     s = scope(registry)
-    handle = await history.commission_human_history(client(monkeypatch, store, handler), registry, s, lambda: s)
+    handle = await history.commission_human_history(
+        client(monkeypatch, store, handler), registry, s, lambda: s
+    )
     assert len(requests) == 1
     assert requests[0].url.path == "/v1/messaging/conversations/bcv_aaaaaaaa/messages"
     assert dict(requests[0].url.params) == {"tenant_id": "tnt_alpha", "limit": "50"}
@@ -82,34 +136,66 @@ async def test_exact_human_history_commissions_only_response_files(monkeypatch):
 async def test_stale_before_request_and_401_never_refresh(monkeypatch):
     store, registry, requests = Store(), InertFileActionRegistry(), []
     s = scope(registry)
-    c = client(monkeypatch, store, lambda request: (requests.append(request) or httpx.Response(401)))
+    c = client(
+        monkeypatch, store, lambda request: (requests.append(request) or httpx.Response(401))
+    )
     with pytest.raises(BridgeRefusal):
-        await history.commission_human_history(c, registry, s, lambda: replace(s, view_generation=5))
+        await history.commission_human_history(
+            c, registry, s, lambda: replace(s, view_generation=5)
+        )
     assert requests == [] and store.refreshes == 0
     with pytest.raises(BridgeRefusal):
         await history.commission_human_history(c, registry, s, lambda: s)
     assert len(requests) == 1 and store.refreshes == 0
 
 
-@pytest.mark.parametrize("alter", ["wrong_conversation", "other_message", "other_message_file", "duplicate_message", "duplicate_file", "bad_mime", "agent_file", "unknown_state", "expired"])
+@pytest.mark.parametrize(
+    "alter",
+    [
+        "wrong_conversation",
+        "other_message",
+        "other_message_file",
+        "duplicate_message",
+        "duplicate_file",
+        "bad_mime",
+        "agent_file",
+        "unknown_state",
+        "expired",
+    ],
+)
 async def test_malformed_or_cross_message_history_never_commissions(monkeypatch, alter):
     store, registry = Store(), InertFileActionRegistry()
     obj = page()
     message = obj["result"]["messages"][0]
-    if alter == "wrong_conversation": message["conversation_id"] = "bcv_bbbbbbbb"
-    if alter == "other_message": message["id"] = "bcmsg_bbbbbbbb"
+    if alter == "wrong_conversation":
+        message["conversation_id"] = "bcv_bbbbbbbb"
+    if alter == "other_message":
+        message["id"] = "bcmsg_bbbbbbbb"
     if alter == "other_message_file":
-        obj["result"]["messages"].append({"id": "bcmsg_bbbbbbbb", "conversation_id": "bcv_aaaaaaaa", "files": [file()]})
+        obj["result"]["messages"].append(
+            {"id": "bcmsg_bbbbbbbb", "conversation_id": "bcv_aaaaaaaa", "files": [file()]}
+        )
         message["files"] = []
-    if alter == "duplicate_message": obj["result"]["messages"].append(dict(message))
-    if alter == "duplicate_file": message["files"].append(file())
-    if alter == "bad_mime": message["files"][0]["mime"] = "image/png"
-    if alter == "agent_file": message["files"][0]["download_only"] = False
-    if alter == "unknown_state": message["files"][0]["state"] = "staged"
-    if alter == "expired": message["files"][0]["state"] = "expired"
+    if alter == "duplicate_message":
+        obj["result"]["messages"].append(dict(message))
+    if alter == "duplicate_file":
+        message["files"].append(file())
+    if alter == "bad_mime":
+        message["files"][0]["mime"] = "image/png"
+    if alter == "agent_file":
+        message["files"][0]["download_only"] = False
+    if alter == "unknown_state":
+        message["files"][0]["state"] = "staged"
+    if alter == "expired":
+        message["files"][0]["state"] = "expired"
     s = scope(registry)
     with pytest.raises(BridgeRefusal):
-        await history.commission_human_history(client(monkeypatch, store, lambda _: httpx.Response(200, json=obj)), registry, s, lambda: s)
+        await history.commission_human_history(
+            client(monkeypatch, store, lambda _: streamed_json(obj)),
+            registry,
+            s,
+            lambda: s,
+        )
     assert registry._contexts == {}
 
 
@@ -118,22 +204,39 @@ async def test_lifecycle_and_view_revocation_after_response_refuses_commit(monke
         store, registry = Store(), InertFileActionRegistry()
         s = scope(registry)
         current = [s]
+
         def handler(_):
-            if revoke == "login": store.incarnation = "b" * 32
-            if revoke == "tenant": current[0] = replace(s, tenant_id="tnt_other")
-            if revoke == "generation": current[0] = replace(s, view_generation=5)
-            if revoke == "account": current[0] = replace(s, account_id="acc_2")
-            if revoke == "window": current[0] = replace(s, window_id="window_2")
-            return httpx.Response(200, json=page())
+            if revoke == "login":
+                store.incarnation = "b" * 32
+            if revoke == "tenant":
+                current[0] = replace(s, tenant_id="tnt_other")
+            if revoke == "generation":
+                current[0] = replace(s, view_generation=5)
+            if revoke == "account":
+                current[0] = replace(s, account_id="acc_2")
+            if revoke == "window":
+                current[0] = replace(s, window_id="window_2")
+            return streamed_json(page())
+
         with pytest.raises(BridgeRefusal):
-            await history.commission_human_history(client(monkeypatch, store, handler), registry, s, lambda: current[0])
+            await history.commission_human_history(
+                client(monkeypatch, store, handler), registry, s, lambda: current[0]
+            )
         assert registry._contexts == {} and store.refreshes == 0
 
 
 async def test_no_agent_addressing_api_or_invalid_json(monkeypatch):
     store, registry = Store(), InertFileActionRegistry()
     s = scope(registry)
-    c = client(monkeypatch, store, lambda _: httpx.Response(200, content=b'{"result":{"messages":[],"messages":[]}}', headers={"content-type": "application/json"}))
+    c = client(
+        monkeypatch,
+        store,
+        lambda _: httpx.Response(
+            200,
+            stream=httpx.ByteStream(b'{"result":{"messages":[],"messages":[]}}'),
+            headers={"content-type": "application/json"},
+        ),
+    )
     for key in ("endpoint_id", "actor_endpoint_id", "purpose"):
         with pytest.raises(TypeError):
             await history.commission_human_history(c, registry, s, lambda: s, **{key: "agent"})
@@ -142,16 +245,27 @@ async def test_no_agent_addressing_api_or_invalid_json(monkeypatch):
     assert registry._contexts == {}
 
 
-@pytest.mark.parametrize("change", ["expired", "missing_expiry", "missing_access", "dead", "wrong_account"])
+@pytest.mark.parametrize(
+    "change", ["expired", "missing_expiry", "missing_access", "dead", "wrong_account"]
+)
 async def test_stale_or_wrong_credential_never_dispatches_or_refreshes(monkeypatch, change):
     store, registry, requests = Store(), InertFileActionRegistry(), []
-    if change == "expired": store.row.data["expires"] = 1
-    if change == "missing_expiry": store.row.data.pop("expires")
-    if change == "missing_access": store.row.data.pop("access")
-    if change == "dead": store.row.data["grant_dead_at"] = 1
-    if change == "wrong_account": store.row.data["account_id"] = "acc_2"
+    if change == "expired":
+        store.row.data["expires"] = 1
+    if change == "missing_expiry":
+        store.row.data.pop("expires")
+    if change == "missing_access":
+        store.row.data.pop("access")
+    if change == "dead":
+        store.row.data["grant_dead_at"] = 1
+    if change == "wrong_account":
+        store.row.data["account_id"] = "acc_2"
     s = scope(registry)
-    c = client(monkeypatch, store, lambda request: (requests.append(request) or httpx.Response(200, json=page())))
+    c = client(
+        monkeypatch,
+        store,
+        lambda request: (requests.append(request) or streamed_json(page())),
+    )
     with pytest.raises((BridgeRefusal, ValueError)):
         await history.commission_human_history(c, registry, s, lambda: s)
     assert requests == [] and store.refreshes == 0 and registry._contexts == {}
@@ -186,7 +300,7 @@ async def test_invalidation_between_final_guard_and_insert_blocks_resurrection(m
         invalidated.set()
 
     monkeypatch.setattr(registry, "commission", paused_insert)
-    c = client(monkeypatch, store, lambda _: httpx.Response(200, json=page()))
+    c = client(monkeypatch, store, lambda _: streamed_json(page()))
     with ThreadPoolExecutor(max_workers=1) as pool:
         worker = pool.submit(invalidate)
         with pytest.raises(ActionUnavailable):
@@ -206,6 +320,7 @@ async def test_invalidation_between_final_guard_and_insert_blocks_resurrection(m
 async def test_rotation_after_history_guard_refuses_old_epoch_and_accepts_fresh_scope(monkeypatch):
     from concurrent.futures import ThreadPoolExecutor
     from threading import Event
+
     from local_operator.team_bridge import file_action_registry as registry_module
 
     monkeypatch.setattr(registry_module, "_MAX_WINDOW_TOMBSTONES", 1)
@@ -226,7 +341,7 @@ async def test_rotation_after_history_guard_refuses_old_epoch_and_accepts_fresh_
         rotated.set()
 
     monkeypatch.setattr(registry, "commission", paused_insert)
-    c = client(monkeypatch, store, lambda _: httpx.Response(200, json=page()))
+    c = client(monkeypatch, store, lambda _: streamed_json(page()))
     with ThreadPoolExecutor(max_workers=1) as pool:
         worker = pool.submit(rotate)
         with pytest.raises(ActionUnavailable):

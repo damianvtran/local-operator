@@ -9,16 +9,26 @@ from local_operator.team_bridge import file_action_registry as actions
 
 
 def binding(**changes):
-    return replace(actions.InertActionBinding(
-        credential_id=1, account_id="acc_synthetic", login_incarnation="a" * 32,
-        tenant_id="tenant_synthetic", window_id="window_synthetic", view_generation=4,
-        conversation_id="conversation_synthetic", message_id="message_synthetic",
-        file_ids=frozenset({"file_one", "file_two"}),
-    ), **changes)
+    return replace(
+        actions.InertActionBinding(
+            credential_id=1,
+            account_id="acc_synthetic",
+            login_incarnation="a" * 32,
+            tenant_id="tenant_synthetic",
+            window_id="window_synthetic",
+            view_generation=4,
+            conversation_id="conversation_synthetic",
+            message_id="message_synthetic",
+            file_ids=frozenset({"file_one", "file_two"}),
+        ),
+        **changes,
+    )
 
 
 def issue(registry, candidate, *, ttl_seconds):
-    return registry.commission(candidate, ttl_seconds=ttl_seconds, expected_epoch=registry.current_epoch())
+    return registry.commission(
+        candidate, ttl_seconds=ttl_seconds, expected_epoch=registry.current_epoch()
+    )
 
 
 def test_claim_once_and_registry_reader_tracks_cancel():
@@ -75,12 +85,19 @@ def test_one_use_claim_is_serialized():
         assert sum(pool.map(lambda _: claim(), range(32))) == 1
 
 
-@pytest.mark.parametrize("change", [
-    {"credential_id": 0}, {"credential_id": True}, {"account_id": ""},
-    {"login_incarnation": "not-a-login"}, {"view_generation": -1},
-    {"file_ids": frozenset()}, {"file_ids": frozenset(str(i) for i in range(17))},
-    {"file_ids": frozenset({"bad\nfile"})},
-])
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"credential_id": 0},
+        {"credential_id": True},
+        {"account_id": ""},
+        {"login_incarnation": "not-a-login"},
+        {"view_generation": -1},
+        {"file_ids": frozenset()},
+        {"file_ids": frozenset(str(i) for i in range(17))},
+        {"file_ids": frozenset({"bad\nfile"})},
+    ],
+)
 def test_invalid_candidate_fails_closed(change):
     with pytest.raises(actions.ActionUnavailable):
         issue(actions.InertFileActionRegistry(), binding(**change), ttl_seconds=30)
@@ -115,7 +132,9 @@ def test_process_local_namespace_and_unknown_clock_fail_closed():
     with pytest.raises(actions.ActionUnavailable):
         second.start(context, "file_one")
     with pytest.raises(actions.ActionUnavailable):
-        issue(actions.InertFileActionRegistry(clock=lambda: float("nan")), binding(), ttl_seconds=10)
+        issue(
+            actions.InertFileActionRegistry(clock=lambda: float("nan")), binding(), ttl_seconds=10
+        )
 
 
 def test_retired_generation_cannot_resurrect_and_new_generation_can():
@@ -163,6 +182,7 @@ def test_watermark_capacity_rotates_and_recovers_without_reviving_old_handles(mo
 
 def test_concurrent_revoke_prevents_subsequent_reads():
     from threading import Barrier
+
     registry = actions.InertFileActionRegistry()
     context = issue(registry, binding(), ttl_seconds=30)
     operation = registry.start(context, "file_one")

@@ -32,6 +32,7 @@ Cross-process invalidation is asynchronous: main's revoke has delivery latency
 and can never recall a request already dispatched. Registry epoch and TTL bound
 that race; they do not eliminate it.
 """
+
 from __future__ import annotations
 
 import json
@@ -44,14 +45,22 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from local_operator.server.desktop import require_desktop
 from local_operator.team_bridge.client import (
-    ACCOUNT_MISMATCH_CODE, BridgeRefusal, BridgeSignInRequired, BridgeUnreachable,
+    ACCOUNT_MISMATCH_CODE,
+    BridgeRefusal,
+    BridgeSignInRequired,
+    BridgeUnreachable,
 )
-from local_operator.team_bridge.file_action_orchestrator import HumanFileActionOrchestrator
+from local_operator.team_bridge.file_action_orchestrator import (
+    HumanFileActionOrchestrator,
+)
 from local_operator.team_bridge.file_action_registry import ActionUnavailable
 from local_operator.team_bridge.types import ATTACHMENT_ID_PATTERN
 
-router = APIRouter(prefix="/v1/desktop/member-file-actions", tags=["Desktop member files"],
-                   dependencies=[Depends(require_desktop)])
+router = APIRouter(
+    prefix="/v1/desktop/member-file-actions",
+    tags=["Desktop member files"],
+    dependencies=[Depends(require_desktop)],
+)
 
 # Request bodies are intentionally tiny and streamed into a bounded buffer; an
 # invalid body must not be echoed by a validation error (it may contain secrets).
@@ -93,13 +102,16 @@ async def _body(request: Request, model: type[_Body]) -> _Body:
     if content_type != "application/json":
         raise HTTPException(status_code=422, detail="Invalid member file request.")
     length = request.headers.get("content-length")
-    if length is not None and (not re.fullmatch(r"[0-9]{1,10}", length) or int(length) > _BODY_LIMIT):
+    if length is not None and (
+        not re.fullmatch(r"[0-9]{1,10}", length) or int(length) > _BODY_LIMIT
+    ):
         raise HTTPException(status_code=422, detail="Invalid member file request.")
     data = bytearray()
     async for chunk in request.stream():
         if len(chunk) > _BODY_LIMIT - len(data):
             raise HTTPException(status_code=422, detail="Invalid member file request.")
         data.extend(chunk)
+
     def unique(pairs: list[tuple[str, object]]) -> dict[str, object]:
         result: dict[str, object] = {}
         for key, value in pairs:
@@ -107,6 +119,7 @@ async def _body(request: Request, model: type[_Body]) -> _Body:
                 raise ValueError("duplicate")
             result[key] = value
         return result
+
     try:
         return model.model_validate(json.loads(data, object_pairs_hook=unique))
     except (UnicodeDecodeError, ValueError, ValidationError):
@@ -123,7 +136,10 @@ def _error(exc: Exception) -> JSONResponse:
         status, code = 401, "reauthentication_required"
     elif isinstance(exc, BridgeUnreachable):
         status, code = 503, "retry"
-    elif isinstance(exc, BridgeRefusal) and exc.code in {"file_auth_refresh_required", "file_reauthentication_required"}:
+    elif isinstance(exc, BridgeRefusal) and exc.code in {
+        "file_auth_refresh_required",
+        "file_reauthentication_required",
+    }:
         status, code = 401, "reauthentication_required"
     elif isinstance(exc, BridgeRefusal) and exc.code == ACCOUNT_MISMATCH_CODE:
         # The action was prepared for another login/account/tenant state: the
@@ -133,7 +149,11 @@ def _error(exc: Exception) -> JSONResponse:
         status, code = 404, "unavailable"
     else:
         status, code = 503, "retry"
-    return JSONResponse({"error": code}, status_code=status, headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
+    return JSONResponse(
+        {"error": code},
+        status_code=status,
+        headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+    )
 
 
 Actions = Annotated[HumanFileActionOrchestrator, Depends(member_file_orchestrator)]
@@ -144,7 +164,10 @@ async def commission(request: Request, actions: Actions) -> Response:
     body = await _body(request, _Commission)
     try:
         context = await actions.commission(body.window_id)
-        return JSONResponse({"context": context}, headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
+        return JSONResponse(
+            {"context": context},
+            headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+        )
     except Exception as exc:
         return _error(exc)
 
@@ -155,7 +178,10 @@ async def begin(request: Request, actions: Actions) -> Response:
     assert isinstance(body, _Begin)
     try:
         operation = actions.begin(body.window_id, body.context, body.file_id)
-        return JSONResponse({"operation": operation}, headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
+        return JSONResponse(
+            {"operation": operation},
+            headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+        )
     except Exception as exc:
         return _error(exc)
 
@@ -166,10 +192,15 @@ async def file_bytes(request: Request, actions: Actions) -> Response:
     assert isinstance(body, _Operation)
     try:
         data = await actions.bytes(body.window_id, body.operation)
-        return Response(content=data, media_type="application/octet-stream", headers={
-            "Content-Disposition": 'attachment; filename="attachment.bin"',
-            "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
-        })
+        return Response(
+            content=data,
+            media_type="application/octet-stream",
+            headers={
+                "Content-Disposition": 'attachment; filename="attachment.bin"',
+                "Cache-Control": "no-store",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
     except Exception as exc:
         return _error(exc)
 
@@ -180,7 +211,10 @@ async def verify(request: Request, actions: Actions) -> Response:
     assert isinstance(body, _Operation)
     try:
         actions.verify(body.window_id, body.operation)
-        return Response(status_code=204, headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
+        return Response(
+            status_code=204,
+            headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+        )
     except Exception as exc:
         return _error(exc)
 
@@ -191,7 +225,10 @@ async def cancel(request: Request, actions: Actions) -> Response:
     assert isinstance(body, _Operation)
     try:
         actions.cancel(body.window_id, body.operation)
-        return Response(status_code=204, headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
+        return Response(
+            status_code=204,
+            headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+        )
     except Exception as exc:
         return _error(exc)
 
@@ -202,6 +239,9 @@ async def revoke(request: Request, actions: Actions) -> Response:
     assert isinstance(body, _Context)
     try:
         actions.revoke(body.window_id, body.context)
-        return Response(status_code=204, headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
+        return Response(
+            status_code=204,
+            headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+        )
     except Exception as exc:
         return _error(exc)

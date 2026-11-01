@@ -19,7 +19,7 @@ import re
 import secrets
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Callable
 
 _MAX_CONTEXTS = 256
@@ -79,12 +79,20 @@ def _valid_binding(binding: object) -> bool:
     if not isinstance(binding, InertActionBinding):
         return False
     return (
-        type(binding.credential_id) is int and 0 < binding.credential_id <= 2**63 - 1
-        and type(binding.view_generation) is int and 0 <= binding.view_generation <= 2**63 - 1
-        and all(_bounded_text(value) for value in (
-            binding.account_id, binding.tenant_id, binding.window_id,
-            binding.conversation_id, binding.message_id,
-        ))
+        type(binding.credential_id) is int
+        and 0 < binding.credential_id <= 2**63 - 1
+        and type(binding.view_generation) is int
+        and 0 <= binding.view_generation <= 2**63 - 1
+        and all(
+            _bounded_text(value)
+            for value in (
+                binding.account_id,
+                binding.tenant_id,
+                binding.window_id,
+                binding.conversation_id,
+                binding.message_id,
+            )
+        )
         and isinstance(binding.login_incarnation, str)
         and len(binding.login_incarnation) == 32
         and all(char in "0123456789abcdef" for char in binding.login_incarnation)
@@ -128,7 +136,11 @@ class InertFileActionRegistry:
     def require_epoch(self, expected_epoch: str) -> None:
         with self._lock:
             self._require_open()
-            if not isinstance(expected_epoch, str) or re.fullmatch(r"[A-Za-z0-9_-]{43}", expected_epoch) is None or not secrets.compare_digest(self._boot, expected_epoch):
+            if (
+                not isinstance(expected_epoch, str)
+                or re.fullmatch(r"[A-Za-z0-9_-]{43}", expected_epoch) is None
+                or not secrets.compare_digest(self._boot, expected_epoch)
+            ):
                 raise ActionUnavailable()
 
     def _rotate_epoch(self) -> None:
@@ -146,14 +158,20 @@ class InertFileActionRegistry:
 
     def _now(self) -> float:
         value = self._clock()
-        if (isinstance(value, bool) or not isinstance(value, (int, float))
-            or not -1e15 <= value <= 1e15 or not math.isfinite(value)):
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not -1e15 <= value <= 1e15
+            or not math.isfinite(value)
+        ):
             raise ActionUnavailable()
         return float(value)
 
     def _drop_context(self, handle: str) -> None:
         self._contexts.pop(handle, None)
-        for operation in [key for key, value in self._operations.items() if value.context == handle]:
+        for operation in [
+            key for key, value in self._operations.items() if value.context == handle
+        ]:
             del self._operations[operation]
 
     def _prune(self, now: float) -> None:
@@ -168,15 +186,25 @@ class InertFileActionRegistry:
                 return handle
         raise ActionUnavailable()
 
-    def commission(self, binding: InertActionBinding, *, ttl_seconds: float, expected_epoch: str) -> str:
+    def commission(
+        self, binding: InertActionBinding, *, ttl_seconds: float, expected_epoch: str
+    ) -> str:
         """Store a candidate only; callers cannot infer member-response provenance."""
-        if (not _valid_binding(binding) or isinstance(ttl_seconds, bool)
-            or not isinstance(ttl_seconds, (int, float)) or not 0 < ttl_seconds <= _MAX_TTL_SECONDS
-            or not math.isfinite(ttl_seconds)):
+        if (
+            not _valid_binding(binding)
+            or isinstance(ttl_seconds, bool)
+            or not isinstance(ttl_seconds, (int, float))
+            or not 0 < ttl_seconds <= _MAX_TTL_SECONDS
+            or not math.isfinite(ttl_seconds)
+        ):
             raise ActionUnavailable()
         with self._lock:
             self._require_open()
-            if not isinstance(expected_epoch, str) or re.fullmatch(r"[A-Za-z0-9_-]{43}", expected_epoch) is None or not secrets.compare_digest(self._boot, expected_epoch):
+            if (
+                not isinstance(expected_epoch, str)
+                or re.fullmatch(r"[A-Za-z0-9_-]{43}", expected_epoch) is None
+                or not secrets.compare_digest(self._boot, expected_epoch)
+            ):
                 raise ActionUnavailable()
             # The trusted view owner must use monotonic generations and call
             # invalidate_view before it reports invalidation complete. This
@@ -283,14 +311,25 @@ class InertFileActionRegistry:
         never evicts a live-epoch tombstone. Fresh work requires a newly
         authenticated core-owned scope bound to the new epoch.
         """
-        if not _bounded_text(window_id) or type(view_generation) is not int or not 0 <= view_generation <= 2**63 - 1:
+        if (
+            not _bounded_text(window_id)
+            or type(view_generation) is not int
+            or not 0 <= view_generation <= 2**63 - 1
+        ):
             raise ActionUnavailable()
         with self._lock:
             self._require_open()
-            if window_id not in self._invalidated_through and len(self._invalidated_through) >= _MAX_WINDOW_TOMBSTONES:
+            if (
+                window_id not in self._invalidated_through
+                and len(self._invalidated_through) >= _MAX_WINDOW_TOMBSTONES
+            ):
                 self._rotate_epoch()
             previous = self._invalidated_through.get(window_id, -1)
             self._invalidated_through[window_id] = max(previous, view_generation)
-            for handle in [key for key, row in self._contexts.items()
-                           if row.binding.window_id == window_id and row.binding.view_generation <= view_generation]:
+            for handle in [
+                key
+                for key, row in self._contexts.items()
+                if row.binding.window_id == window_id
+                and row.binding.view_generation <= view_generation
+            ]:
                 self._drop_context(handle)

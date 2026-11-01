@@ -15,6 +15,7 @@ cannot recall an HTTP request already sent. The hub must authorize membership at
 history and download; the eventual integration must recheck before publication.
 This draft is deliberately unregistered pending security review.
 """
+
 from __future__ import annotations
 
 import json
@@ -29,14 +30,25 @@ import httpx
 
 from local_operator.providers.auth_store import GRANT_DEAD_AT_KEY, OAUTH_REFRESH_SKEW_MS
 from local_operator.team_bridge.client import (
-    ACCOUNT_MISMATCH_CODE, ACCOUNT_MISMATCH_SENTENCE, REQUEST_TIMEOUT_S,
-    SIGN_IN_SENTENCE, BridgeRefusal, BridgeSignInRequired, BridgeUnreachable,
+    ACCOUNT_MISMATCH_CODE,
+    ACCOUNT_MISMATCH_SENTENCE,
+    REQUEST_TIMEOUT_S,
+    SIGN_IN_SENTENCE,
+    BridgeRefusal,
+    BridgeSignInRequired,
+    BridgeUnreachable,
     TeamBridgeClient,
 )
-from local_operator.team_bridge.file_action_registry import InertActionBinding, InertFileActionRegistry
+from local_operator.team_bridge.file_action_registry import (
+    InertActionBinding,
+    InertFileActionRegistry,
+)
 from local_operator.team_bridge.read_context import TENANT_ID_PATTERN
 from local_operator.team_bridge.types import (
-    ATTACHMENT_ID_PATTERN, CONVERSATION_ID_PATTERN, is_account_id, is_conversation_message_id,
+    ATTACHMENT_ID_PATTERN,
+    CONVERSATION_ID_PATTERN,
+    is_account_id,
+    is_conversation_message_id,
 )
 
 _HISTORY_MAX_BYTES = 2 * 1024 * 1024
@@ -72,18 +84,27 @@ def _pairs_unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 def _file_ids(body: bytes, scope: HistoryScope) -> frozenset[str]:
     """Parse only bounded server output, refusing ambiguous or inconsistent pages."""
     try:
-        envelope = json.loads(body.decode("utf-8"), object_pairs_hook=_pairs_unique,
-                              parse_constant=lambda _: (_ for _ in ()).throw(ValueError("constant")))
+        envelope = json.loads(
+            body.decode("utf-8"),
+            object_pairs_hook=_pairs_unique,
+            parse_constant=lambda _: (_ for _ in ()).throw(ValueError("constant")),
+        )
         result = envelope["result"]
         messages = result["messages"]
-        if not isinstance(result, dict) or not isinstance(messages, list) or len(messages) > _HISTORY_LIMIT:
+        if (
+            not isinstance(result, dict)
+            or not isinstance(messages, list)
+            or len(messages) > _HISTORY_LIMIT
+        ):
             raise ValueError("page")
         found: dict[str, Any] | None = None
         seen: set[str] = set()
         for message in messages:
-            if not isinstance(message, dict) or not is_conversation_message_id(message.get("id")):
+            if not isinstance(message, dict):
                 raise ValueError("message")
-            mid = message["id"]
+            mid = message.get("id")
+            if not isinstance(mid, str) or not is_conversation_message_id(mid):
+                raise ValueError("message")
             if mid in seen or message.get("conversation_id") != scope.conversation_id:
                 raise ValueError("ambiguous message")
             seen.add(mid)
@@ -100,14 +121,26 @@ def _file_ids(body: bytes, scope: HistoryScope) -> frozenset[str]:
             if not isinstance(item, dict):
                 raise ValueError("file")
             file_id = item.get("id")
-            if not isinstance(file_id, str) or re.fullmatch(ATTACHMENT_ID_PATTERN, file_id) is None or file_id in observed:
+            if (
+                not isinstance(file_id, str)
+                or re.fullmatch(ATTACHMENT_ID_PATTERN, file_id) is None
+                or file_id in observed
+            ):
                 raise ValueError("file id")
             observed.add(file_id)
-            if item.get("mime") != "application/octet-stream" or item.get("download_only") is not True:
+            if (
+                item.get("mime") != "application/octet-stream"
+                or item.get("download_only") is not True
+            ):
                 raise ValueError("file type")
             if item.get("state") == "expired":
                 continue
-            if item.get("state") != "bound" or item.get("class") not in {"pdf", "text", "container", "other"}:
+            if item.get("state") != "bound" or item.get("class") not in {
+                "pdf",
+                "text",
+                "container",
+                "other",
+            }:
                 raise ValueError("file state")
             if type(item.get("size")) is not int or not 0 <= item["size"] <= 25 * 1024 * 1024:
                 raise ValueError("file size")
@@ -126,7 +159,9 @@ def _file_ids(body: bytes, scope: HistoryScope) -> frozenset[str]:
         raise _invalid() from None
 
 
-def _native_snapshot(client: TeamBridgeClient, scope: HistoryScope, current: Callable[[], HistoryScope]) -> tuple:
+def _native_snapshot(
+    client: TeamBridgeClient, scope: HistoryScope, current: Callable[[], HistoryScope]
+) -> tuple[Any, ...]:
     try:
         same = current() == scope
     except Exception:
@@ -135,20 +170,29 @@ def _native_snapshot(client: TeamBridgeClient, scope: HistoryScope, current: Cal
         raise BridgeRefusal(ACCOUNT_MISMATCH_CODE, ACCOUNT_MISMATCH_SENTENCE, http_status=409)
     store = client._auth_store()
     rows = store.native_lifecycle_snapshot(store.db_path, "radient")
-    if not isinstance(rows, list) or any(not isinstance(row, tuple) or len(row) != 9 for row in rows):
+    if not isinstance(rows, list) or any(
+        not isinstance(row, tuple) or len(row) != 9 for row in rows
+    ):
         raise BridgeSignInRequired(SIGN_IN_SENTENCE)
     matches = [row for row in rows if row[0] == scope.credential_id]
     if len(matches) != 1:
         raise BridgeSignInRequired(SIGN_IN_SENTENCE)
     row = matches[0]
-    if (row[2] != scope.login_incarnation or row[3] is not None or row[4] != "oauth"
-            or row[5] != scope.account_id or row[8] is not None):
+    if (
+        row[2] != scope.login_incarnation
+        or row[3] is not None
+        or row[4] != "oauth"
+        or row[5] != scope.account_id
+        or row[8] is not None
+    ):
         raise BridgeRefusal(ACCOUNT_MISMATCH_CODE, ACCOUNT_MISMATCH_SENTENCE, http_status=409)
     return row
 
 
 async def commission_human_history(
-    client: TeamBridgeClient, registry: InertFileActionRegistry, scope: HistoryScope,
+    client: TeamBridgeClient,
+    registry: InertFileActionRegistry,
+    scope: HistoryScope,
     current_scope: Callable[[], HistoryScope],
 ) -> str:
     """Return only an opaque context; `current_scope` is a TRUSTED integration seam.
@@ -156,15 +200,25 @@ async def commission_human_history(
     Caller-selected message ID chooses a message *within* the returned page; no
     file IDs are accepted from the caller. A page that does not contain it fails.
     """
-    if (not isinstance(scope, HistoryScope) or not callable(current_scope)
-        or type(scope.credential_id) is not int or scope.credential_id <= 0
+    if (
+        not isinstance(scope, HistoryScope)
+        or not callable(current_scope)
+        or type(scope.credential_id) is not int
+        or scope.credential_id <= 0
         or not is_account_id(scope.account_id)
-        or not isinstance(scope.login_incarnation, str) or re.fullmatch(r"[0-9a-f]{32}", scope.login_incarnation) is None
-        or not isinstance(scope.tenant_id, str) or re.fullmatch(TENANT_ID_PATTERN, scope.tenant_id) is None
-        or not isinstance(scope.conversation_id, str) or re.fullmatch(CONVERSATION_ID_PATTERN, scope.conversation_id) is None
+        or not isinstance(scope.login_incarnation, str)
+        or re.fullmatch(r"[0-9a-f]{32}", scope.login_incarnation) is None
+        or not isinstance(scope.tenant_id, str)
+        or re.fullmatch(TENANT_ID_PATTERN, scope.tenant_id) is None
+        or not isinstance(scope.conversation_id, str)
+        or re.fullmatch(CONVERSATION_ID_PATTERN, scope.conversation_id) is None
         or not is_conversation_message_id(scope.message_id)
-        or not isinstance(scope.window_id, str) or not scope.window_id or len(scope.window_id) > 256
-        or type(scope.view_generation) is not int or scope.view_generation < 0):
+        or not isinstance(scope.window_id, str)
+        or not scope.window_id
+        or len(scope.window_id) > 256
+        or type(scope.view_generation) is not int
+        or scope.view_generation < 0
+    ):
         raise BridgeRefusal("invalid_request", "Invalid file history request.", http_status=422)
     # A stale scope cannot borrow the registry's post-rotation epoch. The
     # trusted scope owner must mint a fresh scope after reauthorization.
@@ -173,19 +227,40 @@ async def commission_human_history(
     try:
         client._require_destination()
     except BridgeRefusal:
-        raise BridgeRefusal("bridge_destination_refused", "File service unavailable.", http_status=503) from None
-    if client._pinned_credential_id is not None and client._pinned_credential_id != scope.credential_id:
+        raise BridgeRefusal(
+            "bridge_destination_refused", "File service unavailable.", http_status=503
+        ) from None
+    if (
+        client._pinned_credential_id is not None
+        and client._pinned_credential_id != scope.credential_id
+    ):
         raise BridgeRefusal(ACCOUNT_MISMATCH_CODE, ACCOUNT_MISMATCH_SENTENCE, http_status=409)
     row = client._auth_store().get_credential(scope.credential_id)
-    if row is None or _native_snapshot(client, scope, current_scope) != before or row.updated_at != before[1]:
+    if (
+        row is None
+        or _native_snapshot(client, scope, current_scope) != before
+        or row.updated_at != before[1]
+    ):
         raise BridgeRefusal(ACCOUNT_MISMATCH_CODE, ACCOUNT_MISMATCH_SENTENCE, http_status=409)
-    if (row.provider != "radient" or row.credential_type != "oauth" or row.disabled_cause is not None
-        or not isinstance(row.data, Mapping) or row.data.get("account_id") != scope.account_id):
+    if (
+        row.provider != "radient"
+        or row.credential_type != "oauth"
+        or row.disabled_cause is not None
+        or not isinstance(row.data, Mapping)
+        or row.data.get("account_id") != scope.account_id
+    ):
         raise BridgeSignInRequired(SIGN_IN_SENTENCE)
     token, expires = row.data.get("access"), row.data.get("expires")
-    if (row.data.get(GRANT_DEAD_AT_KEY) is not None or not isinstance(token, str) or not token
-        or type(expires) is not int or expires <= int(time.time() * 1000) + OAUTH_REFRESH_SKEW_MS):
-        raise BridgeRefusal("file_auth_refresh_required", "Sign in or refresh before downloading.", http_status=401)
+    if (
+        row.data.get(GRANT_DEAD_AT_KEY) is not None
+        or not isinstance(token, str)
+        or not token
+        or type(expires) is not int
+        or expires <= int(time.time() * 1000) + OAUTH_REFRESH_SKEW_MS
+    ):
+        raise BridgeRefusal(
+            "file_auth_refresh_required", "Sign in or refresh before downloading.", http_status=401
+        )
 
     def guard() -> None:
         registry.require_epoch(scope.registry_epoch)
@@ -193,21 +268,42 @@ async def commission_human_history(
             raise BridgeRefusal(ACCOUNT_MISMATCH_CODE, ACCOUNT_MISMATCH_SENTENCE, http_status=409)
 
     try:
-        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT_S, transport=client._transport, follow_redirects=False) as http:
+        async with httpx.AsyncClient(
+            timeout=REQUEST_TIMEOUT_S, transport=client._transport, follow_redirects=False
+        ) as http:
             guard()
-            async with http.stream("GET", client.base_url + f"/messaging/conversations/{scope.conversation_id}/messages",
+            async with http.stream(
+                "GET",
+                client.base_url + f"/messaging/conversations/{scope.conversation_id}/messages",
                 params={"tenant_id": scope.tenant_id, "limit": _HISTORY_LIMIT},
-                headers={"Authorization": f"Bearer {token}", "Accept": "application/json", "Accept-Encoding": "identity"}) as response:
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Accept": "application/json",
+                    "Accept-Encoding": "identity",
+                },
+            ) as response:
                 guard()
                 if response.status_code == 401:
-                    raise BridgeRefusal("file_reauthentication_required", "Sign in again before downloading.", http_status=401)
+                    raise BridgeRefusal(
+                        "file_reauthentication_required",
+                        "Sign in again before downloading.",
+                        http_status=401,
+                    )
                 if response.status_code != 200:
                     raise _invalid()
-                if (response.headers.get("content-encoding", "identity").strip().lower() != "identity"
-                    or response.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/json"):
+                if (
+                    response.headers.get("content-encoding", "identity").strip().lower()
+                    != "identity"
+                    or response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+                    != "application/json"
+                ):
                     raise _invalid()
                 length = response.headers.get("content-length")
-                if length is not None and (len(length) > 10 or re.fullmatch(r"[0-9]+", length) is None or int(length) > _HISTORY_MAX_BYTES):
+                if length is not None and (
+                    len(length) > 10
+                    or re.fullmatch(r"[0-9]+", length) is None
+                    or int(length) > _HISTORY_MAX_BYTES
+                ):
                     raise _invalid()
                 data = bytearray()
                 async for chunk in response.aiter_raw():
@@ -221,9 +317,18 @@ async def commission_human_history(
     # This check is not atomic with an independent auth write. View retirement
     # is separately serialized with insertion by the registry's watermark.
     guard()
-    return registry.commission(InertActionBinding(
-        credential_id=scope.credential_id, account_id=scope.account_id,
-        login_incarnation=scope.login_incarnation, tenant_id=scope.tenant_id,
-        window_id=scope.window_id, view_generation=scope.view_generation,
-        conversation_id=scope.conversation_id, message_id=scope.message_id, file_ids=files,
-    ), ttl_seconds=30, expected_epoch=scope.registry_epoch)
+    return registry.commission(
+        InertActionBinding(
+            credential_id=scope.credential_id,
+            account_id=scope.account_id,
+            login_incarnation=scope.login_incarnation,
+            tenant_id=scope.tenant_id,
+            window_id=scope.window_id,
+            view_generation=scope.view_generation,
+            conversation_id=scope.conversation_id,
+            message_id=scope.message_id,
+            file_ids=files,
+        ),
+        ttl_seconds=30,
+        expected_epoch=scope.registry_epoch,
+    )
