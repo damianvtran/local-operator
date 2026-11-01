@@ -13,6 +13,7 @@ refusal mapping, contract projection, response headers and the app's
 from __future__ import annotations
 
 import json
+import logging
 import socket
 import threading
 import time
@@ -272,6 +273,93 @@ _SERVED_CACHE_CONTROL = "no-store"
 
 def _q(extra: str = "") -> str:
     return f"?expected_account_id={OWNER}&tenant_id=org-a{extra}"
+
+
+@pytest.mark.parametrize(
+    "path,operation",
+    [
+        (BASE, "owner_audit_conversations"),
+        (f"{BASE}/{CID}/messages", "owner_audit_messages"),
+        (f"{BASE}/{CID}/messages/{ROOT}/replies", "owner_audit_replies"),
+        (
+            f"{BASE}/{CID}/messages/{MID}/attachments/{AID}",
+            "owner_audit_attachment",
+        ),
+    ],
+)
+@pytest.mark.parametrize("source", ["query", "upstream"])
+def test_owner_audit_refusal_logs_only_operation_and_status_class(
+    proxy, caplog, path, operation, source
+):
+    client, calls, state, _ = proxy
+    body_fragment = "private-message-fragment"
+    # Include sensitive values in the actual HTTP request; a future accidental
+    # request/exception dump must fail on the rendered record, not just its args.
+    if source == "upstream":
+        state["error"] = (404, "conversation_not_found")
+        suffix = ""
+        expected_status = 404
+    else:
+        suffix = "&unexpected=" + body_fragment
+        expected_status = 422
+    with caplog.at_level(logging.WARNING, logger=routes.__name__):
+        response = client.request(
+            "GET", path + _q(suffix), content=body_fragment.encode()
+        )
+    assert response.status_code == expected_status, response.text
+    assert response.headers["cache-control"] == _SERVED_CACHE_CONTROL
+    assert bool(calls) == (source == "upstream")
+    records = [record for record in caplog.records if record.name == routes.__name__]
+    assert len(records) == 1
+    record = records[0]
+    assert record.levelno == logging.WARNING
+    rendered = logging.Formatter("%(levelname)s %(message)s").format(record)
+    assert rendered == (
+        f"WARNING owner-audit refusal operation={operation} status_class=4xx"
+    )
+    for forbidden in (
+        OWNER,
+        "org-a",
+        CID,
+        ROOT,
+        MID,
+        AID,
+        body_fragment,
+        response.json()["detail"]["code"],
+        str(expected_status),
+    ):
+        assert forbidden not in rendered
+    assert record.exc_info is None and record.stack_info is None
+
+
+def test_owner_audit_malformed_page_logs_status_class_without_body(proxy, caplog):
+    client, _calls, state, _ = proxy
+    fragment = "private-malformed-page-body"
+    state["override"] = {"conversations": [{"id": CID, "body": fragment}]}
+    with caplog.at_level(logging.WARNING, logger=routes.__name__):
+        response = client.get(BASE + _q())
+    assert response.status_code == 502, response.text
+    assert response.json()["detail"]["code"] == "malformed_page"
+    records = [record for record in caplog.records if record.name == routes.__name__]
+    assert len(records) == 1
+    rendered = logging.Formatter("%(message)s").format(records[0])
+    assert rendered == (
+        "owner-audit refusal operation=owner_audit_conversations status_class=5xx"
+    )
+    for forbidden in (OWNER, "org-a", CID, fragment, "malformed_page", "502"):
+        assert forbidden not in rendered
+
+
+def test_owner_audit_logging_does_not_cover_success_or_other_routes(proxy, caplog):
+    client, _calls, _state, _ = proxy
+    with caplog.at_level(logging.WARNING, logger=routes.__name__):
+        assert client.get(BASE + _q()).status_code == 200
+        # The shared read-refusal helper must remain quiet for member routes.
+        response = client.get(
+            "/v1/desktop/team-bridge/unread?scope=account&tenant_id=org-a"
+        )
+    assert response.status_code == 422, response.text
+    assert not [record for record in caplog.records if record.name == routes.__name__]
 
 
 def test_list_forwards_to_the_owned_route_and_passes_the_221_row_through(proxy):

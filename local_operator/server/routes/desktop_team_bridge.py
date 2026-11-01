@@ -3369,7 +3369,14 @@ _OWNER_AUDIT_FILE_MIME = "application/octet-stream"
 
 
 @contextmanager
-def _owner_audit_no_store() -> Iterator[None]:
+def _owner_audit_no_store(
+    operation: Literal[
+        "owner_audit_conversations",
+        "owner_audit_messages",
+        "owner_audit_replies",
+        "owner_audit_attachment",
+    ],
+) -> Iterator[None]:
     """Stamp ``private, no-store`` on any refusal raised inside the block.
 
     A success gets the header from the route's ``Response``; an
@@ -3383,6 +3390,17 @@ def _owner_audit_no_store() -> Iterator[None]:
         yield
     except HTTPException as exc:
         exc.headers = {**(exc.headers or {}), "Cache-Control": OWNER_AUDIT_CACHE_CONTROL}
+        # This boundary belongs ONLY to owner-audit, not the shared _raise_read:
+        # refusals must be visible at default level without widening route logging.
+        # Warning marks an expected security-relevant refusal, not a trace. Keep
+        # only the fixed operation and status CLASS: even a refusal code can
+        # disclose account/tenant authority after the session has ended. Never
+        # pass the exception, request, identifiers or body to the logger.
+        logging.getLogger(__name__).warning(
+            "owner-audit refusal operation=%s status_class=%sxx",
+            operation,
+            exc.status_code // 100,
+        )
         raise
 
 
@@ -3462,7 +3480,7 @@ async def owner_audit_conversations(
     no unread counts — auditing never raises a badge.
     """
 
-    with _owner_audit_no_store():
+    with _owner_audit_no_store("owner_audit_conversations"):
         response.headers["Cache-Control"] = OWNER_AUDIT_CACHE_CONTROL
         query = _owner_audit_query(
             request, frozenset({"expected_account_id", "tenant_id", "limit", "cursor"})
@@ -3500,7 +3518,7 @@ async def owner_audit_messages(
     history route.
     """
 
-    with _owner_audit_no_store():
+    with _owner_audit_no_store("owner_audit_messages"):
         response.headers["Cache-Control"] = OWNER_AUDIT_CACHE_CONTROL
         _require_conversation_id(conversation_id)
         query = _owner_audit_query(
@@ -3543,7 +3561,7 @@ async def owner_audit_replies(
 ) -> CRUDResponse[Any]:
     """One audited thread: root plus chronological replies in the requested window."""
 
-    with _owner_audit_no_store():
+    with _owner_audit_no_store("owner_audit_replies"):
         response.headers["Cache-Control"] = OWNER_AUDIT_CACHE_CONTROL
         _require_conversation_id(conversation_id)
         _require_message_id(message_id)
@@ -3595,7 +3613,7 @@ async def owner_audit_attachment(
     never be rendered by the renderer under a type it chose.
     """
 
-    with _owner_audit_no_store():
+    with _owner_audit_no_store("owner_audit_attachment"):
         _require_conversation_id(conversation_id)
         _require_message_id(message_id)
         _require_attachment_id(attachment_id)
