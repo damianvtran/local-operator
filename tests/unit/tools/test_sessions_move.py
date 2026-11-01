@@ -538,7 +538,10 @@ def test_the_help_reference_describes_what_move_really_does(tmp_path: Path) -> N
     omitted the two refusals the op now has. A model that plans around a held move
     that lapses plans around a request that never lapses and never holds.
     """
-    from local_operator.tools.builtin import _SESSIONS_OP_DOCS, render_sessions_reference
+    from local_operator.tools.builtin import (
+        _SESSIONS_OP_DOCS,
+        render_sessions_reference,
+    )
 
     rendered = render_sessions_reference()
     move_doc = _SESSIONS_OP_DOCS["move"]
