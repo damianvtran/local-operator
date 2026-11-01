@@ -361,8 +361,8 @@ def test_system_md_frames_the_web_as_a_verification_surface() -> None:
     # Both halves carried the closed-local framing, and this one is read FIRST
     # — a later bullet asking for web research argues uphill against a persona
     # that already scoped tool use to "the machine's state".
-    assert "searching the workspace and the web" in text
-    assert "or on something you would otherwise recall" in text
+    assert "workspace/web search" in text
+    assert "or something you would otherwise recall" in text
     # The working principle's own enumeration of what verifying means.
     assert "search the workspace, look it up on the web" in text
 
@@ -386,14 +386,14 @@ def test_system_md_teaches_when_to_research_without_making_it_reflexive() -> Non
     # 3. Not reflexive: a trigger the agent evaluates against itself, plus an
     #    explicit brake. Stated trigger-then-brake so the agent learns what
     #    fires the search before it learns what suppresses it.
-    assert "you notice you are guessing" in text
+    assert "when guessing" in text
     assert "not on every task" in text
     # 4. Results inform, never dictate, are never copied wholesale, and — the
     #    clause that is easy to miss — never bound the options considered. An
     #    agent can honour "never the answer" and still weigh only the three
     #    approaches a search surfaced.
-    assert "input, never the answer" in text
-    assert "never the edge of your options" in text
+    assert "inputs, not answers" in text
+    assert "not answers or limits on your options" in text
 
 
 def test_system_md_makes_deciding_the_default_and_asking_the_exception() -> None:
@@ -805,12 +805,13 @@ def test_system_md_cues_on_demand_tool_references() -> None:
 def test_system_md_scopes_the_peer_gate_to_spawning_and_names_restart_cutoffs() -> None:
     """C1: listing or inspecting peer sessions needs no permission — only
     spawning does; the old sentence gated all three under "when the user
-    asked". C4: a restart or update that cut a turn off belongs in the
-    incident cause list (kept cause-agnostic: a held-delivery card does not
-    end a turn)."""
+    asked". C4: restart/update must stay in the enumerated incident cause
+    list — the earlier "a restart or update that cut a turn off" wording was
+    compressed away, but the list stays cause-agnostic: a held-delivery card
+    does not end a turn."""
     flat = " ".join(render_template("system.md", {}).split())
     assert "list or inspect sessions any time, and to spawn one only when the user asked" in flat
-    assert "or a restart or update that cut a turn off" in flat
+    assert "cause (limits/auth/provider/network/context/restart/update) and recovery" in flat
     # The tool-first steer: `sessions` owns list/inspect/resume/stop/peek and
     # is the default route; the messaging negative stays, and `lop exec` is the
     # CLI fallback for a human's terminal — NOT a blanket ban, which would
