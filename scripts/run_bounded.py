@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run a gate command in its OWN process group and reap the whole group.
+"""Run a gate command in its OWN process group with checked signal authority.
 
 WHY THIS EXISTS
 ---------------
@@ -36,7 +36,7 @@ wrapper on their own:
   shipped `--grace` default of 10 would take ~13 s for it).
 
 So the wrapper puts the command in its own session (`start_new_session=True`, so
-it leads a fresh process group its children inherit) and signals the GROUP on
+it leads a fresh process group its children inherit) and requests a checked group signal on
 every exit path: the timeout, a forwarded signal, and the ordinary exit where the
 leader is gone but its descendants are not.
 
@@ -54,7 +54,7 @@ so passing it to every wrapped command is harmless.
 USAGE
 -----
     python scripts/run_bounded.py --timeout 1800 -- <command> [args…]
-    python scripts/run_bounded.py -- <command> [args…]      # no bound, still reaped
+    python scripts/run_bounded.py -- <command> [args…]      # no bound, checked cleanup
 
 Run it through the interpreter (`.venv/bin/python scripts/run_bounded.py …`),
 never as a console script — the #423 shebang rule applies to this file too.
@@ -68,7 +68,21 @@ else (a `kill -9`, the OOM killer, a job runner), which a shell would report the
 same way; `137` for a measured owned-group memory breach, identified by the
 `MEMORY LIMIT EXCEEDED` diagnostic (status 137 alone also covers an external
 SIGKILL); `125` when the command could not start or its memory budget was refused
-before spawn — never 0 for a gate that did not run.
+before spawn, or a previously successful gate whose cleanup was REFUSED.
+Timeout/RAM/signal/nonzero child statuses are retained with secondary residual
+receipts on refusal; a requested signal is never reported as proven reaping.
+
+SAFETY BOUNDARY
+---------------
+Fresh COMPLETE membership, canonical birth/parent-birth and actual PG/SID are
+required before EVERY signal. New members enrol only through a live verified
+creation chain before polling can reap the leader. After leader exit a previously
+authenticated live survivor must anchor continuity. Unknown/reused/mixed/terminal-
+only groups refuse with a nonzero outcome and a durable residual receipt.
+User-space census-to-killpg remains NON-ATOMIC; this is checked owner-alive, not a
+kernel-held capability or a hard-owner-SIGKILL immediate-cleanup guarantee.
+Escaped/new-session descendants are outside this group's signal authority.
+No keeper, tokenless fallback, or existing monitor-policy changes are introduced.
 
 DIAGNOSTICS go to stderr, never stdout: the lint/format gates' stdout is
 parseable output and the suite's `-q` output is parsed too (the same rule the
@@ -92,7 +106,7 @@ from typing import IO, Sequence
 # canonical stdlib-only guard from THIS script's tree, not a stale tool install
 # or another worktree's editable finder. No dependency installation is needed.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from local_operator import memory_guard  # noqa: E402
+from local_operator import memory_guard, owned_process_group  # noqa: E402
 
 #: Exit status for a fired bound. `timeout(1)` uses the same number.
 EXIT_TIMEOUT = 124
@@ -128,43 +142,60 @@ FORWARDED_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUI
 _POLL_SECONDS = 0.05
 
 
-def _signal_group(pgid: int, signum: int) -> bool:
-    """Signal every process in `pgid`. False when the group is already gone."""
-    if pgid <= 0:
-        return False
+def _signal_group(owner, signum: int, *, deadline: float):
+    """One capability boundary; numeric groups cannot be supplied as authority."""
+    return owner.signal(signum, deadline=deadline)
+
+
+def _report(stream, text):
+    # A closed pipe is not permission to skip cleanup or mask the original error.
     try:
-        os.killpg(pgid, signum)
-    except (ProcessLookupError, PermissionError):
-        return False
-    return True
+        stream.write(text + "\n")
+        stream.flush()
+    except (OSError, ValueError):
+        pass
 
 
-def _reap(
-    pgid: int,
-    grace: float,
-    poll,
-    stream: IO[str],
-    *,
-    reason: str,
-) -> bool:
-    """SIGTERM the group, escalate to SIGKILL, and report what happened.
+def _refusal_receipt(owner, phase, verdict, stream):
+    """Durable residual facts only: no argv, environment, capability or nonce."""
+    import json
+    import uuid
+    from dataclasses import asdict
 
-    Returns True when the escalation was needed, which is the fact worth
-    printing: a group that ignores SIGTERM is exactly the case an unbounded
-    orphan comes from.
-    """
-    stream.write(f"[run_bounded] {reason} — SIGTERM to process group {pgid}\n")
-    stream.flush()
-    _signal_group(pgid, signal.SIGTERM)
-    deadline = time.monotonic() + grace
-    while poll() is None and time.monotonic() < deadline:
-        time.sleep(_POLL_SECONDS)
-    if poll() is not None:
-        return False
-    stream.write(f"[run_bounded] group {pgid} outlived SIGTERM by {grace:g}s — SIGKILL\n")
-    stream.flush()
-    _signal_group(pgid, signal.SIGKILL)
-    return True
+    base = Path(os.environ.get("LOCAL_OPERATOR_SCRATCHPAD") or
+                os.environ.get("LOCAL_OPERATOR_CONFIG_DIR") or
+                str(Path.home() / ".local-operator")) / "run-bounded-refusals"
+    try:
+        base.mkdir(mode=0o700, parents=True, exist_ok=True)
+        path = base / (uuid.uuid4().hex + ".json")
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as handle:
+            json.dump({"phase": phase, "pgid": owner.pgid,
+                       "verdict": asdict(verdict),
+                       "receipts": [asdict(r) for r in owner.receipts.values()],
+                       "monotonic": time.monotonic(),
+                       "cleanup": "REFUSED; residuals not claimed absent"}, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        _report(stream, f"[run_bounded] safety refusal ({phase}); residual receipt: {path}")
+    except (OSError, ValueError) as exc:
+        # This is already a nonzero safety failure, not a recovered cleanup. Do
+        # not replace an original monitor exception with a second capture error.
+        _report(stream, f"[run_bounded] residual capture failed: {type(exc).__name__} errno={getattr(exc, 'errno', None)}")
+
+
+def _reap(owner, grace, poll, stream, *, reason, send, deadline):
+    """TERM and KILL EACH obtain fresh authority; refusal never enters a wait."""
+    _report(stream, f"[run_bounded] {reason} — requesting checked SIGTERM")
+    verdict = send(signal.SIGTERM, reason + ":term", deadline)
+    if verdict.status == "REFUSED":
+        return
+    while time.monotonic() < deadline:
+        owner.refresh(deadline=deadline)  # retain ancestry BEFORE reaping leader
+        if poll() is not None:
+            return
+        time.sleep(min(_POLL_SECONDS, max(0, deadline - time.monotonic())))
+    send(signal.SIGKILL, reason + ":kill", deadline + 0.25)
 
 
 def _memory_budget(override_mb: int | None) -> tuple[memory_guard.Budget, str]:
@@ -253,14 +284,11 @@ def run(
     # and nothing forwards it or reaps the group; that window was measured on the
     # Linux CI leg as `rc=-15` with an empty stderr, i.e. a wrapper that died
     # before it could report anything.
-    state: dict[str, int] = {}
     stop: dict[str, int] = {"signum": 0}
 
     def _forward(signum: int, _frame: object) -> None:
         stop["signum"] = signum
-        pgid = state.get("pgid")
-        if pgid:
-            _signal_group(pgid, signum)
+        # Handlers latch intent only; probes and syscalls run in the main loop.
 
     child_env = os.environ.copy()
     # Nested cooperative wrappers inherit the effective (possibly tightened)
@@ -296,131 +324,118 @@ def run(
             signal.signal(sig, handler)
         stream.write(f"[run_bounded] could not start {argv[0]!r}: {exc}\n")
         return EXIT_NOT_STARTED
-    # The group id IS the child's pid: `start_new_session=True` makes the child a
-    # session leader, so its process group is its own. Asking the kernel
-    # (`os.getpgid`) instead RACES a command that exits quickly — measured: the
-    # simplest gate, `python -c "print(...)"`, raised `ProcessLookupError` from
-    # `getpgid` on most runs, because the pid was already gone and a session
-    # leader's group dissolves with it. That turned a passing gate into `rc=1`,
-    # which is the worst thing a wrapper like this can do.
-    pgid = state["pgid"] = proc.pid
+    pgid = proc.pid
+    deadline = None if timeout is None else started + timeout
+    # Provisional numeric identity grants NO signal authority. Capture before ANY
+    # poll/wait can reap this leader; failed capture remains a bounded refusal.
+    owner = owned_process_group.OwnedGroup.capture(
+        proc.pid, deadline=min(deadline if deadline is not None else float("inf"),
+                               time.monotonic() + 3.0))
+    refused = False
+    cleanup_deadline = None
 
-    rc: int
+    def begin_cleanup(allowance):
+        nonlocal cleanup_deadline
+        if cleanup_deadline is None:
+            cleanup_deadline = time.monotonic() + allowance
+        return cleanup_deadline
+
+    def send(signum, phase, until):
+        nonlocal refused
+        result = _signal_group(owner, signum, deadline=until)
+        if result.status == "REFUSED":
+            refused = True
+            _refusal_receipt(owner, phase, result, stream)
+        return result
+
+    def bounded_wait(until):
+        try:
+            proc.wait(timeout=0 if refused else max(0.0, until - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            # Waiting is not cleanup proof. No PID-only or numeric-PG fallback.
+            return False
+        return True
+
+    rc = EXIT_NOT_STARTED
     try:
         guard = memory_guard.Guard(pgid, budget) if budget.ceiling_mb > 0 else None
         next_sample = started
         unmeasured_reported = False
-        deadline = None if timeout is None else started + timeout
         while True:
-            status = proc.poll()
+            # Enrolment needs a still-live creation chain; do this before poll
+            # can reap the only authenticated ancestor. Unknown stays unknown.
+            owner.refresh(deadline=min(deadline if deadline is not None else float("inf"),
+                                       time.monotonic() + 3.0))
             signum = stop["signum"]
-            if status is not None:
-                # A forwarded signal ends the child as well, and the child's
-                # status then arrives as `-signum` (Python renders that as 241).
-                # The wrapper reports the SIGNAL instead, the way a shell does, so
-                # a caller reading `128 + signum` sees the same code either way,
-                # and it says so — a gate that was signalled must not look like a
-                # gate that failed on its own.
-                if signum:
-                    rc = 128 + signum
-                    note = f"signal {signum} received — process group {pgid} signalled"
-                elif status < 0:
-                    # Nobody here sent this signal (a `kill -9` by hand, the OOM
-                    # killer, a job runner). `sys.exit(-9)` is 247 and the
-                    # diagnostic line would read `rc=-9`: neither is in the EXIT
-                    # STATUS contract, and both are unreadable in a log. A shell
-                    # reports 128 + the signal for a child killed this way, so
-                    # this does too.
-                    rc = 128 - status
-                    note = f"child killed by signal {-status}"
-                else:
-                    rc = status
-                    note = None
-                if note:
-                    stream.write(f"[run_bounded] {note} (rc={rc})\n")
-                    stream.flush()
-                break
             if signum:
-                _reap(pgid, grace, proc.poll, stream, reason=f"signal {signum} received")
-                proc.wait()
+                until = begin_cleanup(grace + 0.25)
+                send(signum, "forward", until)
+                _reap(owner, grace, proc.poll, stream, reason=f"signal {signum} received",
+                      send=send, deadline=until - 0.25)
                 rc = 128 + signum
                 break
+            status = proc.poll()
+            if status is not None:
+                rc = 128 - status if status < 0 else status
+                break
             if deadline is not None and time.monotonic() >= deadline:
-                _reap(pgid, grace, proc.poll, stream, reason=f"timeout after {timeout:g}s")
-                # Say what this is and what to do about it, on THIS path too: the
-                # bound is a per-host judgement, a loaded host is the one that
-                # legitimately reaches it, and `make type-check` prints nothing
-                # else — a developer there would otherwise learn what happened but
-                # not what to do (review round 2, M3 / QA Q4).
-                stream.write(
-                    f"[run_bounded] that is the BOUND ({timeout:g}s) firing, not the gate "
-                    "failing — re-run it, or raise it (--timeout, or "
-                    "`make type-check BOUND_TIMEOUT=<seconds>`)\n"
-                )
-                stream.flush()
-                proc.wait()
+                until = begin_cleanup(grace + 0.25)
+                _reap(owner, grace, proc.poll, stream, reason=f"timeout after {timeout:g}s",
+                      send=send, deadline=until - 0.25)
                 rc = EXIT_TIMEOUT
+                _report(stream, f"[run_bounded] BOUND ({timeout:g}s) fired, not the gate failing; --timeout sets the bound")
                 break
             now = time.monotonic()
             if guard is not None and now >= next_sample:
                 sample = guard.sample_sync()
                 next_sample = now + guard.tick_s
                 if guard.should_kill(sample):
-                    stream.write(f"[run_bounded] {guard.over_budget_message(sample)}\n")
-                    stream.flush()
-                    _signal_group(pgid, signal.SIGKILL)
-                    proc.wait()
+                    _report(stream, f"[run_bounded] {guard.over_budget_message(sample)}")
+                    send(signal.SIGKILL, "memory", begin_cleanup(0.25))
                     rc = EXIT_MEMORY
                     break
                 notice = guard.soft_notice(sample)
                 if notice:
-                    stream.write(f"[run_bounded] {notice} (advisory only)\n")
-                    stream.flush()
+                    _report(stream, f"[run_bounded] {notice} (advisory only)")
                 if sample.bytes_used is None and not unmeasured_reported:
-                    stream.write("[run_bounded] memory charge unavailable; no measured cap proof\n")
-                    stream.flush()
+                    _report(stream, "[run_bounded] memory charge unavailable; no measured cap proof")
                     unmeasured_reported = True
             time.sleep(_POLL_SECONDS)
     except Exception as exc:
-        stream.write(f"[run_bounded] owned-child monitor failed: {type(exc).__name__}: {exc}\n")
-        stream.flush()
+        _report(stream, f"[run_bounded] owned-child monitor failed: {type(exc).__name__}")
         raise
     finally:
         try:
-            # The ordinary-exit half of the defect: the leader is gone, and anything
-            # it spawned is still holding its heap. SIGKILL, because there is nothing
-            # left to negotiate with — the gate has already finished.
-            #
-            # Several passes, because a child forked in the instant the leader exited
-            # can land after the kernel resolved the previous one. Bounded and cheap:
-            # the whole sweep is a quarter of a second, against a gate that has
-            # already finished.
-            reaped = False
-            for _ in range(5):
-                reaped = _signal_group(pgid, signal.SIGKILL) or reaped
-                time.sleep(_POLL_SECONDS)
-            if reaped:
-                stream.write(
-                    f"[run_bounded] reaped processes left behind in group {pgid} "
-                    "after the gate exited\n"
-                )
-                stream.flush()
-
+            # Retain the existing quarter-second final allowance, not a new
+            # grace period per pass. Never claim a requested signal means reaped.
+            until = begin_cleanup(0.25)
+            for attempt in range(5):
+                owner.refresh(deadline=until)
+                proc.poll()  # refresh before reaping; then strictly observe again
+                result = send(signal.SIGKILL, "finally", until)
+                if result.status in {"REFUSED", "OBSERVED_EMPTY"}:
+                    break
+                if time.monotonic() >= until:
+                    break
+                if attempt < 4:
+                    time.sleep(min(_POLL_SECONDS, max(0, until - time.monotonic())))
+            terminal = owner.refresh(deadline=until, enrol=False)
+            if terminal.status != "OBSERVED_EMPTY":
+                refused = True
+                terminal = owned_process_group.Verdict(
+                    "REFUSED", "group not observed empty: " + terminal.reason, terminal.members)
+                _refusal_receipt(owner, "residual-census", terminal, stream)
+            if not bounded_wait(until):
+                refused = True
+                result = owned_process_group.Verdict("REFUSED", "leader wait exceeded remaining cleanup allowance")
+                _refusal_receipt(owner, "bounded-wait", result, stream)
         finally:
-            try:
-                # Also reap the leader when an unexpected monitor error, not
-                # normal poll/timeout, brought us here. Keep forwarding signals
-                # until cleanup finishes rather than reopening an orphan window.
-                proc.wait()
-            finally:
-                for sig, handler in previous.items():
-                    signal.signal(sig, handler)
+            for sig, handler in previous.items():
+                signal.signal(sig, handler)
 
-    stream.write(
-        f"[run_bounded] {os.path.basename(argv[0])} rc={rc} "
-        f"wall={time.monotonic() - started:.1f}s\n"
-    )
-    stream.flush()
+    if refused and rc == 0:
+        rc = EXIT_NOT_STARTED
+    _report(stream, f"[run_bounded] {os.path.basename(argv[0])} rc={rc} wall={time.monotonic() - started:.1f}s")
     return rc
 
 
