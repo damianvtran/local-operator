@@ -2377,6 +2377,16 @@ class ServingSessionHandle(SessionHandle):
         if getattr(self, "_disposing", False):
             self._retire_refusal = "already disposing"
             return False
+        # A stop cannot take over the successor promised by an update window.
+        # begin_update sets the handle flag before publishing it; end_update
+        # clears it only when that window closes. Checking the authoritative
+        # flag HERE keeps exclusion and retirement in the same owner-loop step,
+        # including the await while the update announces its handover (R7-1 /
+        # Q4-1). Do not put this in may_refresh or reject every retirement: the
+        # update itself must still latch runtime-retired inside its own window.
+        if cause == "user-stop" and getattr(self, "_updating", ""):
+            self._retire_refusal = "updating"
+            return False
         try:
             reason = str(self.may_refresh() or "")
         except Exception:  # noqa: BLE001 — uncertainty keeps the runtime

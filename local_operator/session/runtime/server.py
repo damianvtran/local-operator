@@ -1134,6 +1134,11 @@ def _idle_refusal_reason(handle: Any) -> str:
     refusal = str(getattr(handle, "_retire_refusal", "") or "")
     if "already disposing" in refusal:
         return "leaving"
+    # Updating is neither conversational work nor an accepted stop. Preserve
+    # its own cause so the caller uses its conservative unconfirmed receipt,
+    # not the busy sentence or a claim that this stop was already accepted.
+    if refusal == "updating":
+        return "updating"
     if "wake" in refusal:
         return "wake"
     return "busy"

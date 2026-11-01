@@ -3452,6 +3452,9 @@ def test_the_viewer_declares_that_it_adopts_a_move_destination() -> None:
         ("refused", "old_owner", "runs an older build", True),
         ("refused", "unanswered", "did not answer", True),
         ("pending", "", "stop accepted by", False),
+        # An update window must remain an error/refusal at the tool boundary,
+        # using the ladder's conservative fallback rather than invented busy copy.
+        ("refused", "updating", "the ladder's own English line", True),
     ],
 )
 async def test_stop_receipt_sentence_is_chosen_by_outcome(
