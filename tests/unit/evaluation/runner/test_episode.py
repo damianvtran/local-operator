@@ -2158,6 +2158,140 @@ async def test_a_direct_providers_table_price_reaches_the_budget_cap(
     assert steps[-1].truncation_reason == "budget-cap"
 
 
+@pytest.mark.parametrize("reports_usage", [False, True])
+@pytest.mark.asyncio
+async def test_cancelled_decision_preserves_partial_paid_usage(
+    tmp_path: Path, episode_id: str, reports_usage: bool
+) -> None:
+    import asyncio
+    import json
+
+    class CancelledDecision(DirectProviderStream):
+        async def _events(self, request: Any) -> Any:
+            if reports_usage:
+                yield StreamUsageEvent(
+                    usage=Usage(input_tokens=100, output_tokens=10, usd_cost=0.1)
+                )
+            raise asyncio.CancelledError()
+            yield  # pragma: no cover
+
+    adapter = FakeAdapter(tmp_path, episode_id)
+    client = ProviderModelClient(
+        CancelledDecision(),
+        route=ROUTE,
+        model_spec=ModelSpec(provider="provider", model_id="model"),
+        artifact_root=tmp_path / "artifacts",
+        prompt_cache_key="probe",
+    )
+    runner = EpisodeRunner(
+        build_spec(episode_id),
+        build_config(tmp_path),
+        selector=selector(tmp_path),
+        model=client,
+        launch=lambda _: adapter,
+        rescue=_rescue_ok,
+    )
+    with pytest.raises(asyncio.CancelledError):
+        await runner.run()
+    root = tmp_path / "evidence" / episode_id
+    assert verify_bundle(root).valid
+    events = [json.loads(line) for line in (root / "events.jsonl").read_text().splitlines()]
+    auxiliary = [e["payload"] for e in events if e["kind"] == "auxiliary_usage_cost"]
+    assert len(auxiliary) == 1 and auxiliary[0]["purpose"] == "decision"
+    assert auxiliary[0]["input_tokens"] == (100 if reports_usage else 0)
+    assert auxiliary[0]["cost_microusd"] == (100_000 if reports_usage else 0)
+    assert auxiliary[0]["cost_known"] is False
+    assert runner._provider_cost_known is False
+    assert not payloads(root, ModelRequestPayload) and not payloads(root, ModelResponsePayload)
+    assert payloads(root, ReconciliationPayload)[0].provider_cost_microusd == (
+        100_000 if reports_usage else 0
+    )
+
+
+@pytest.mark.parametrize(
+    ("raw_usage", "expected_calls", "known"),
+    [
+        ({}, 1, False),
+        ({"prompt_tokens": 100}, 1, False),
+        ({"completion_tokens": 10}, 1, False),
+        ({"prompt_tokens": 0, "completion_tokens": 0}, 2, True),
+        ({"cost": 0.0}, 2, True),
+    ],
+)
+@pytest.mark.asyncio
+async def test_compat_adapter_missing_counts_stops_capped_episode(
+    tmp_path: Path,
+    episode_id: str,
+    monkeypatch: pytest.MonkeyPatch,
+    raw_usage: dict[str, Any],
+    expected_calls: int,
+    known: bool,
+) -> None:
+    import json
+
+    import httpx
+
+    from local_operator.model import configure
+    from local_operator.providers.clients import OpenAICompatClient
+
+    monkeypatch.setattr(configure, "refresh_model_info_background", lambda *_: None)
+    calls = 0
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        wire = json.loads(request.content)
+        content = wire["messages"][-1]["content"]
+        if isinstance(content, list):
+            content = " ".join(item.get("text", "") for item in content if isinstance(item, dict))
+        import re
+
+        match = re.search(r"Observation ID: (\S+)", str(content))
+        assert match is not None
+        reply = json.dumps(
+            {"actions": [{"kind": "wait", "observation_id": match.group(1), "duration_ms": 1}]}
+        )
+        chunk = {
+            "choices": [{"delta": {"content": reply}, "finish_reason": "stop"}],
+            "usage": raw_usage,
+        }
+        body = "data: " + json.dumps(chunk) + "\n\ndata: [DONE]\n\n"
+        return httpx.Response(200, text=body, headers={"content-type": "text/event-stream"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+        adapter = OpenAICompatClient("https://api.openai.com/v1", http_client=http)
+
+        async def stream(request: Any, signal: Any) -> Any:
+            async for event in adapter.stream(request, "synthetic"):
+                yield event
+
+        client = ProviderModelClient(
+            stream,
+            route=ROUTE,
+            model_spec=ModelSpec(provider="openai", model_id="gpt-6-astra"),
+            artifact_root=tmp_path / "artifacts",
+            prompt_cache_key="probe",
+        )
+        runner = EpisodeRunner(
+            build_spec(episode_id),
+            build_config(tmp_path, max_steps=2),
+            selector=selector(tmp_path),
+            model=client,
+            launch=lambda _: FakeAdapter(tmp_path, episode_id),
+            rescue=_rescue_ok,
+        )
+        outcome = await runner.run()
+    assert outcome.bundle_root is not None and verify_bundle(outcome.bundle_root).valid
+    assert calls == expected_calls
+    events = [
+        json.loads(line) for line in (outcome.bundle_root / "events.jsonl").read_text().splitlines()
+    ]
+    coverage = [
+        event["payload"]["cost_known"] for event in events if event["kind"] == "cost_coverage"
+    ]
+    assert coverage == [known] * expected_calls
+
+
 @pytest.mark.asyncio
 async def test_unknown_provider_cost_stops_a_capped_episode(
     tmp_path: Path, episode_id: str
@@ -2219,6 +2353,7 @@ async def test_unknown_provider_cost_stops_a_capped_episode(
         "summary-cancel-append-failure",
         "summary-cancel-seal-failure",
         "summary-cancel-abandon-failure",
+        "summary-decision-cancel",
     ],
 )
 @pytest.mark.asyncio
@@ -2279,6 +2414,7 @@ async def test_unknown_summary_blocks_next_dispatch_and_preserves_usage(
                     "summary-cancel-append-failure": 0.1,
                     "summary-cancel-seal-failure": 0.1,
                     "summary-cancel-abandon-failure": 0.1,
+                    "summary-decision-cancel": 0.1,
                 }[summary_case]
                 usage = Usage(
                     input_tokens=100,
@@ -2293,9 +2429,15 @@ async def test_unknown_summary_blocks_next_dispatch_and_preserves_usage(
                 usage = Usage(
                     input_tokens=10,
                     output_tokens=5,
-                    usd_cost=0.2 if summary_case == "normal-priced" else 0.0,
+                    usd_cost=(
+                        0.2 if summary_case in ("normal-priced", "summary-decision-cancel") else 0.0
+                    ),
                 )
             yield StreamUsageEvent(usage=usage)
+            if not is_summary and summary_case == "summary-decision-cancel":
+                import asyncio
+
+                raise asyncio.CancelledError()
             if is_summary and summary_case == "summary-error":
                 raise ConnectionError("synthetic summary interruption")
             if is_summary and summary_case in (
@@ -2398,6 +2540,7 @@ async def test_unknown_summary_blocks_next_dispatch_and_preserves_usage(
         "summary-cancel-append-failure",
         "summary-cancel-seal-failure",
         "summary-cancel-abandon-failure",
+        "summary-decision-cancel",
     ):
         import asyncio
 
@@ -2434,6 +2577,17 @@ async def test_unknown_summary_blocks_next_dispatch_and_preserves_usage(
         assert verify_bundle(root).terminal_state != "sealed"
         return
     assert verify_bundle(root).valid
+    if summary_case == "summary-decision-cancel":
+        import json
+
+        events = [json.loads(line) for line in (root / "events.jsonl").read_text().splitlines()]
+        charges = [e["payload"] for e in events if e["kind"] == "auxiliary_usage_cost"]
+        assert [c["purpose"] for c in charges] == ["compaction", "decision"]
+        assert [c["cost_microusd"] for c in charges] == [100_000, 200_000]
+        assert [c["cost_known"] for c in charges] == [True, False]
+        assert payloads(root, ReconciliationPayload)[0].provider_cost_microusd == 300_000
+        assert not payloads(root, UsageCostPayload)
+        return
     if summary_case in ("pass-error", "summary-error", "summary-cancel", "summary-cancel-empty"):
         import json
 

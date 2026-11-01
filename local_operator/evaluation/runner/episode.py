@@ -1478,6 +1478,7 @@ class EpisodeRunner:
                 "auxiliary_usage_cost",
                 AuxiliaryUsageCostPayload(
                     auxiliary_id=f"aux-{uuid.uuid4().hex[:12]}",
+                    purpose=charge.purpose,
                     previous_request_id=self._last_request_id,
                     route=self._spec.requested_route,
                     provider_request_id=charge.provider_request_id,

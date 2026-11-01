@@ -393,11 +393,15 @@ class UsageCostPayload(ProtocolModel):
 
 
 class AuxiliaryUsageCostPayload(ProtocolModel):
-    """A paid summary whose following decision was blocked before dispatch."""
+    """A paid dispatch without a completed decision receipt.
+
+    A partial decision must not be invented as a request/response triple, while
+    a failed or canceled summary must remain separately accountable.
+    """
 
     schema_version: Literal["1.0"] = "1.0"
     auxiliary_id: StrictIdentifier
-    purpose: Literal["compaction"] = "compaction"
+    purpose: Literal["compaction", "decision"] = "compaction"
     previous_request_id: StrictIdentifier | None = None
     route: RouteIdentity
     provider_request_id: StrictIdentifier

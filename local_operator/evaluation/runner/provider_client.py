@@ -36,7 +36,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Mapping, Sequence, get_args, get_origin
+from typing import TYPE_CHECKING, Any, Literal, Mapping, Sequence, get_args, get_origin
 
 from pydantic import ValidationError
 
@@ -3715,7 +3715,9 @@ class ProviderModelClient:
         finally:
             self._dispatch_account.reset(token)
 
-    async def _stream(self, request: Any, *, purpose: str = "decision") -> _StreamOutcome:
+    async def _stream(
+        self, request: Any, *, purpose: Literal["decision", "compaction"] = "decision"
+    ) -> _StreamOutcome:
         account = self._dispatch_account.get()
         dispatch_id = uuid.uuid4().hex
         if account is not None:
@@ -3821,7 +3823,10 @@ class ProviderModelClient:
             final_known = stream_completed and terminal_seen and cost_known
             if account is not None:
                 account.record(dispatch_id, cost_micros=cost_micros, cost_known=final_known)
-                if purpose == "compaction":
+                # Normal/aborted decision outcomes already carry a request
+                # triple. Cancellation escapes before one can be written, so
+                # only that unreturned decision needs an auxiliary receipt.
+                if purpose == "compaction" or (not stream_completed and not interrupted):
                     from local_operator.evaluation.runner.dispatch_account import (
                         SummaryCharge,
                     )
@@ -3833,6 +3838,7 @@ class ProviderModelClient:
                             cost_micros=cost_micros,
                             cost_known=final_known,
                             provider_request_id=provider_request_id,
+                            purpose=purpose,
                         )
                     )
         cost_known = stream_completed and terminal_seen and cost_known
@@ -4343,6 +4349,17 @@ def _usage_from(
     reported = _usage_cost(usage)
     if reported is not None:
         return model_usage, max(0, round(reported * 1_000_000)), True
+    # An estimate needs both billed token components. Wire adapters stamp
+    # completeness before replacing missing counters with display-safe zeros;
+    # manual clients must have explicitly provided both fields themselves.
+    receipt_complete = getattr(usage, "_token_counts_reported", None)
+    if receipt_complete is False or (
+        receipt_complete is None
+        and not {"input_tokens", "output_tokens"}.issubset(
+            getattr(usage, "model_fields_set", set())
+        )
+    ):
+        return model_usage, 0, False
     # The stamp is the spec that ACTUALLY served (``stream_with_failover``
     # rewrites the request to a fallback and stamps the on-the-wire spec onto
     # the usage for exactly this reason); the request is the honest fallback

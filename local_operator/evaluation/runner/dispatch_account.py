@@ -8,6 +8,7 @@ previous observation instead of billing it twice.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 from local_operator.evaluation.runner.model import CompactionRecord, ModelUsage
 
@@ -19,6 +20,7 @@ class SummaryCharge:
     cost_micros: int
     cost_known: bool
     provider_request_id: str
+    purpose: Literal["compaction", "decision"] = "compaction"
 
 
 class DispatchBlocked(Exception):

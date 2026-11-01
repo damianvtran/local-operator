@@ -362,6 +362,45 @@ async def test_openai_compat_preserves_cache_counter_presence(
     assert type(usage).model_validate(usage.model_dump())._cache_read_reported is None
 
 
+@pytest.mark.parametrize(
+    ("raw", "known"),
+    [
+        ({}, False),
+        ({"prompt_tokens": 12}, False),
+        ({"completion_tokens": 7}, False),
+        ({"prompt_tokens": 0, "completion_tokens": 0}, True),
+        ({"prompt_tokens": 12, "completion_tokens": 7}, True),
+        ({"cost": 0.0}, True),
+    ],
+)
+async def test_evaluation_prices_only_complete_compat_usage(
+    raw: dict[str, Any], known: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.evaluation.runner.provider_client import _usage_from
+    from local_operator.model import configure
+
+    # This checks the adapter and the static table, never discovery or a live API.
+    monkeypatch.setattr(configure, "refresh_model_info_background", lambda *_: None)
+    body = _sse([{"choices": [], "usage": raw}])
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(
+            200, content=body, headers={"content-type": "text/event-stream"}
+        )
+    )
+    async with httpx.AsyncClient(transport=transport) as http:
+        client = OpenAICompatClient("https://api.openai.com/v1", http_client=http)
+        events = await _collect(
+            client.stream(ChatRequest(model=_spec(), messages=[Message.user("hi")]), "sk-test")
+        )
+    usage = [event.usage for event in events if isinstance(event, StreamUsageEvent)][-1]
+    _, _, cost_known = _usage_from(
+        usage, requested_provider="openai", requested_model_id="gpt-6-astra"
+    )
+    assert cost_known is known
+    assert usage.model_copy(deep=True)._token_counts_reported is usage._token_counts_reported
+    assert "_token_counts_reported" not in usage.model_dump()
+
+
 async def test_openai_compat_prefers_standard_cache_detail_over_alias() -> None:
     """A compatibility alias must not double-count a standard cache detail."""
     body = _sse(
@@ -2689,6 +2728,69 @@ async def test_google_usage_includes_thinking_and_tool_use_tokens() -> None:
     assert usage.output_tokens == 50
     assert usage.reasoning_tokens == 30
     assert usage.total_tokens == 160
+
+
+@pytest.mark.parametrize(
+    ("raw", "complete"),
+    [
+        ({"promptTokenCount": 3}, False),
+        ({"candidatesTokenCount": 2}, False),
+        ({"promptTokenCount": 0, "candidatesTokenCount": 0}, True),
+    ],
+)
+async def test_google_usage_records_counter_completeness(
+    raw: dict[str, Any], complete: bool
+) -> None:
+    body = _sse([{"candidates": [{"finishReason": "STOP"}], "usageMetadata": raw}])
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(
+            200, content=body, headers={"content-type": "text/event-stream"}
+        )
+    )
+    async with httpx.AsyncClient(transport=transport) as http:
+        client = GoogleClient(http_client=http)
+        events = await _collect(
+            client.stream(
+                ChatRequest(model=_spec("google", "gemini-2.5-pro"), messages=[Message.user("hi")]),
+                "synthetic",
+            )
+        )
+    usage = next(event.usage for event in events if isinstance(event, StreamUsageEvent))
+    assert usage._token_counts_reported is complete
+
+
+@pytest.mark.parametrize(
+    ("input_usage", "output_usage", "complete"),
+    [
+        ({}, {"output_tokens": 1}, False),
+        ({"input_tokens": 1}, {}, False),
+        ({"input_tokens": 0}, {"output_tokens": 0}, True),
+    ],
+)
+async def test_anthropic_usage_records_counter_completeness(
+    input_usage: dict[str, Any], output_usage: dict[str, Any], complete: bool
+) -> None:
+    body = _sse(
+        [
+            {"type": "message_start", "message": {"usage": input_usage}},
+            {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": output_usage},
+        ]
+    )
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(
+            200, content=body, headers={"content-type": "text/event-stream"}
+        )
+    )
+    async with httpx.AsyncClient(transport=transport) as http:
+        client = AnthropicClient(http_client=http)
+        events = await _collect(
+            client.stream(
+                ChatRequest(model=_spec(provider="anthropic"), messages=[Message.user("hi")]),
+                "synthetic",
+            )
+        )
+    usage = next(event.usage for event in events if isinstance(event, StreamUsageEvent))
+    assert usage._token_counts_reported is complete
 
 
 async def test_anthropic_context_tokens_sums_uncached_and_cached() -> None:
@@ -6222,6 +6324,42 @@ async def test_compat_stream_stamps_only_qualified_real_endpoint(
     usage = next(event.usage for event in events if isinstance(event, StreamUsageEvent))
     assert usage.openai_long_context is expected
     assert ("openai_long_context" in usage.model_dump()) is expected
+
+
+@pytest.mark.parametrize(
+    ("raw", "known"),
+    [
+        ({"input_tokens": 12}, False),
+        ({"output_tokens": 7}, False),
+        ({"input_tokens": 0, "output_tokens": 0}, True),
+    ],
+)
+async def test_evaluation_prices_only_complete_responses_usage(
+    raw: dict[str, Any], known: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.evaluation.runner.provider_client import _usage_from
+    from local_operator.model import configure
+
+    monkeypatch.setattr(configure, "refresh_model_info_background", lambda *_: None)
+    body = _sse([{"type": "response.completed", "response": {"output": [], "usage": raw}}])
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(
+            200, content=body, headers={"content-type": "text/event-stream"}
+        )
+    )
+    async with httpx.AsyncClient(transport=transport) as http:
+        client = OpenAICompatClient("https://api.openai.com/v1", http_client=http)
+        spec = _spec(provider="openai").model_copy(
+            update={"model_id": "gpt-6-astra", "supports_responses_api": True}
+        )
+        events = await _collect(
+            client.stream(ChatRequest(model=spec, messages=[Message.user("hi")]), "synthetic")
+        )
+    usage = next(event.usage for event in events if isinstance(event, StreamUsageEvent))
+    _, _, cost_known = _usage_from(
+        usage, requested_provider="openai", requested_model_id="gpt-6-astra"
+    )
+    assert cost_known is known
 
 
 async def test_public_responses_stream_stamps_long_context_receipt() -> None:
