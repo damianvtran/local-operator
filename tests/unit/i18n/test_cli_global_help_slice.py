@@ -100,13 +100,18 @@ def test_all_pinned_copy_sites_render_from_the_existing_snapshot():
     )
     actual = []
     for node in ast.walk(build):
-        if (
-            not isinstance(node, ast.Call)
-            or not isinstance(node.func, (ast.Attribute, ast.Name))
-            or (isinstance(node.func, ast.Attribute) and not isinstance(node.func.value, ast.Name))
-        ):
+        if not isinstance(node, ast.Call):
             continue
-        owner = node.func.value.id if isinstance(node.func, ast.Attribute) else None
+        # Narrow in steps rather than one compound condition: pyright cannot
+        # follow the negated conjunction, and treating `node.func.value` as a
+        # bare expr is what made `value.id` a type error at this line.
+        owner: str | None = None
+        if isinstance(node.func, ast.Attribute):
+            if not isinstance(node.func.value, ast.Name):
+                continue
+            owner = node.func.value.id
+        elif not isinstance(node.func, ast.Name):
+            continue
         for kw in node.keywords:
             if (
                 owner in {"parser", "parent_parser"}
