@@ -99,7 +99,7 @@ class RefusalBoundary:
                         self.errors.append(evidence)
                         raise AssertionError(evidence)
                     self.permit = None
-                entry = dict(
+                entry: dict[str, Any] = dict(
                     server=server, thread=threading.current_thread(), key=key, done=False, link=None
                 )
                 self.dials.append(entry)
