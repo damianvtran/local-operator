@@ -24,9 +24,11 @@ from local_operator.evaluation.evidence.models import (
     ActionBatchPayload,
     AgentStopPayload,
     ArtifactRef,
+    AuxiliaryUsageCostPayload,
     BudgetCommitmentPayload,
     CleanupPayload,
     ContextCompactionPayload,
+    CostCoveragePayload,
     EnvironmentStepPayload,
     EventRecord,
     EvidenceArtifactRef,
@@ -374,7 +376,7 @@ def _counters(events: tuple[EventRecord, ...]) -> EvidenceCounters:
     kinds = Counter(event.kind for event in events)
     totals = Counter[str]()
     for event in events:
-        if isinstance(event.payload, UsageCostPayload):
+        if isinstance(event.payload, (UsageCostPayload, AuxiliaryUsageCostPayload)):
             totals.update(
                 {
                     "input_tokens": event.payload.input_tokens,
@@ -412,6 +414,8 @@ def _verify_semantics(
     requests: dict[str, ModelRequestPayload] = {}
     responses: set[str] = set()
     usage: set[str] = set()
+    coverage: set[str] = set()
+    auxiliary_ids: set[str] = set()
     observations: dict[str, ObservationPayload] = {}
     batches: dict[str, ActionBatchPayload] = {}
     observation_batches: dict[str, str] = {}
@@ -455,6 +459,8 @@ def _verify_semantics(
         # acquire after finalization.
         ReplyTolerancePayload,
         UsageCostPayload,
+        CostCoveragePayload,
+        AuxiliaryUsageCostPayload,
         ContextCompactionPayload,
         ObservationPayload,
         ActionBatchPayload,
@@ -584,6 +590,22 @@ def _verify_semantics(
             ):
                 issues.error("receipt_binding_invalid", location)
             usage.add(payload.request_id)
+        elif isinstance(payload, CostCoveragePayload):
+            # Historical receipts have no coverage event; where present it must
+            # attach to exactly one already-recorded receipt, never another call.
+            if payload.request_id not in usage or payload.request_id in coverage:
+                issues.error("receipt_binding_invalid", location)
+            coverage.add(payload.request_id)
+        elif isinstance(payload, AuxiliaryUsageCostPayload):
+            # A summary sits between complete model calls; accepting it inside
+            # an open request would make the journal's attribution ambiguous.
+            if (
+                payload.auxiliary_id in auxiliary_ids
+                or set(requests) != usage
+                or payload.previous_request_id != next(reversed(requests), None)
+            ):
+                issues.error("receipt_binding_invalid", location)
+            auxiliary_ids.add(payload.auxiliary_id)
         elif isinstance(payload, ContextCompactionPayload):
             # A compaction rebuilds the context BETWEEN requests: it must sit
             # after the previous request's usage receipt and before the next

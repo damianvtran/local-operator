@@ -311,6 +311,12 @@ def _served_provider_name(value: Any) -> str | None:
     return trimmed
 
 
+def _reported_token_count(raw: Mapping[str, Any], key: str) -> bool:
+    """A missing or malformed counter is not an explicitly reported zero."""
+    value = raw.get(key)
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
 def _compat_cache_usage(raw_usage: Mapping[str, Any]) -> tuple[int | None, int]:
     """Normalize counters without mistaking an absent or malformed hit for zero."""
     details = raw_usage.get("prompt_tokens_details") or {}
@@ -3708,6 +3714,9 @@ class OpenAICompatClient:
                             at_ms=tariff.now_ms(),
                         )
                         usage._cache_read_reported = cache_read is not None
+                        usage._token_counts_reported = _reported_token_count(
+                            raw, "prompt_tokens"
+                        ) and _reported_token_count(raw, "completion_tokens")
                         yield StreamUsageEvent(usage=usage)
                     choices = chunk.get("choices") or []
                     if not choices:
@@ -3975,6 +3984,98 @@ class OpenAICompatClient:
         # Output item/call ids -> normalized tool-call index.
         call_indexes: dict[str, int] = {}
         output_items: dict[int, dict[str, Any]] = {}
+        argument_parts: dict[int, list[str]] = {}
+        added_argument_snapshots: dict[int, str] = {}
+        added_argument_bytes = 0
+        output_call_indexes: dict[int, int] = {}
+        call_identities: dict[int, tuple[str, str, str]] = {}
+        finalized_arguments: set[int] = set()
+
+        def conflicting_call() -> ProviderError:
+            return ProviderError(
+                None,
+                "responses_tool_arguments_conflict",
+                retryable=False,
+                fail_closed=True,
+            )
+
+        def reconcile_arguments(index: int, arguments: Any) -> list[StreamToolCallDelta]:
+            """Final snapshots repeat deltas, but may be the ONLY argument source.
+
+            Append only a missing suffix. A contradictory snapshot cannot be
+            repaired with append-only deltas: fail closed before any pending
+            tool (especially a write) can execute with the wrong arguments.
+            """
+            if not isinstance(arguments, str):
+                return []
+            parts = argument_parts.setdefault(index, [])
+            streamed = "".join(parts)
+            if not arguments.startswith(streamed):
+                raise conflicting_call()
+            suffix = arguments[len(streamed) :]
+            if not suffix:
+                return []
+            envelope.charge(suffix)
+            parts.append(suffix)
+            return [StreamToolCallDelta(index=index, argument_delta=suffix)]
+
+        def reconcile_item(
+            item: Mapping[str, Any], output_index: int, *, final: bool = False
+        ) -> list[StreamToolCallDelta]:
+            nonlocal tool_call_count, added_argument_bytes
+            if item.get("type") != "function_call":
+                # A completed message/reasoning item cannot erase a call that
+                # already owns this output slot. Partial deltas are pending,
+                # not permission to execute a call contradicted by its final.
+                if output_index in output_call_indexes:
+                    raise conflicting_call()
+                return []
+            call_id = item.get("call_id") or item.get("id") or ""
+            item_id = item.get("id") or ""
+            index = call_indexes.get(call_id, call_indexes.get(item_id))
+            position_index = output_call_indexes.get(output_index)
+            if position_index is not None:
+                if index is not None and index != position_index:
+                    raise conflicting_call()
+                index = position_index
+            identity = (call_id, item_id, item.get("name") or "")
+            if index is not None and call_identities[index] != identity:
+                raise conflicting_call()
+            if final and not isinstance(item.get("arguments"), str):
+                raise conflicting_call()
+            events: list[StreamToolCallDelta] = []
+            if index is None:
+                index = tool_call_count
+                tool_call_count += 1
+                envelope.charge(item.get("name") or "")
+                events.append(StreamToolCallDelta(index=index, id=call_id, name=item.get("name")))
+                call_identities[index] = identity
+            output_call_indexes[output_index] = index
+            if final:
+                finalized_arguments.add(index)
+            if call_id:
+                call_indexes[call_id] = index
+            if item_id:
+                call_indexes[item_id] = index
+            arguments = item.get("arguments")
+            if final:
+                snapshot = added_argument_snapshots.get(index, "")
+                if not isinstance(arguments, str) or not arguments.startswith(snapshot):
+                    raise conflicting_call()
+                events.extend(reconcile_arguments(index, arguments))
+            elif isinstance(arguments, str) and arguments:
+                # The added item is a snapshot, not the first argument delta:
+                # providers may repeat its populated arguments in the stream.
+                # Keep the sources separate until a final snapshot reconciles
+                # them, so native replay and dispatch cannot disagree.
+                previous = added_argument_snapshots.get(index)
+                if previous is not None and previous != arguments:
+                    raise conflicting_call()
+                if previous is None:
+                    added_argument_bytes += len(arguments.encode("utf-8"))
+                    envelope.check(added_argument_bytes)
+                    added_argument_snapshots[index] = arguments
+            return events
 
         async with self._http.stream(
             "POST",
@@ -3997,6 +4098,14 @@ class OpenAICompatClient:
                     continue
                 self._observe_responses_event(payload)
                 event_type = payload.get("type", "")
+                if terminal_stop is not None:
+                    # Completion closes generated output, not the transport's
+                    # metadata tail. Muse's subscription receipt arrives AFTER
+                    # response.completed and must reach the observer above;
+                    # late output deltas must not mutate pending calls.
+                    if event_type in ("response.failed", "error"):
+                        raise _openai_response_error(payload)
+                    continue
                 if event_type == "response.created":
                     # The Responses API names the turn as soon as it opens it.
                     # Capture the boundary HERE, not at ``response.completed``:
@@ -4022,17 +4131,10 @@ class OpenAICompatClient:
                     item = payload.get("item") or {}
                     if item.get("type") == "reasoning":
                         continue
-                    if item.get("type") == "function_call":
-                        index = tool_call_count
-                        tool_call_count += 1
-                        call_id = item.get("call_id") or item.get("id") or ""
-                        item_id = item.get("id") or ""
-                        if call_id:
-                            call_indexes[call_id] = index
-                        if item_id:
-                            call_indexes[item_id] = index
-                        envelope.charge(item.get("name") or "")
-                        yield StreamToolCallDelta(index=index, id=call_id, name=item.get("name"))
+                    for event in reconcile_item(
+                        item, int(payload.get("output_index", tool_call_count))
+                    ):
+                        yield event
                 elif event_type == "response.output_item.done":
                     item = payload.get("item")
                     if isinstance(item, dict):
@@ -4044,16 +4146,30 @@ class OpenAICompatClient:
                             )
                         )
                         output_items[index] = item
+                        for event in reconcile_item(item, index, final=True):
+                            yield event
+                elif event_type == "response.function_call_arguments.done":
+                    call_id = payload.get("call_id") or payload.get("item_id") or ""
+                    index = call_indexes.get(call_id)
+                    if index is not None:
+                        if not isinstance(payload.get("arguments"), str):
+                            raise conflicting_call()
+                        finalized_arguments.add(index)
+                        for event in reconcile_arguments(index, payload.get("arguments")):
+                            yield event
                 elif event_type == "response.function_call_arguments.delta":
                     call_id = payload.get("call_id") or payload.get("item_id") or ""
                     delta = payload.get("delta")
                     if delta:
                         envelope.charge(delta)
                         fallback_index = int(payload.get("output_index", 0) or 0)
-                        yield StreamToolCallDelta(
-                            index=call_indexes.get(call_id, fallback_index),
-                            argument_delta=delta,
+                        index = call_indexes.get(
+                            call_id, output_call_indexes.get(fallback_index, fallback_index)
                         )
+                        if index in finalized_arguments:
+                            raise conflicting_call()
+                        argument_parts.setdefault(index, []).append(delta)
+                        yield StreamToolCallDelta(index=index, argument_delta=delta)
                 elif event_type == "response.output_text.delta":
                     delta = payload.get("delta")
                     if delta:
@@ -4069,14 +4185,56 @@ class OpenAICompatClient:
                     response_obj = payload.get("response") or {}
                     if response_obj.get("id"):
                         provider_payload = {"id": response_obj["id"]}
-                    native = response_obj.get("output")
-                    if not isinstance(native, list) or not native:
-                        native = [output_items[index] for index in sorted(output_items)]
+                    expected_call_positions = set(output_call_indexes)
+                    explicit_output = "output" in response_obj
+                    if not explicit_output:
+                        # Compatible endpoints may omit the FIELD and rely on
+                        # item.done snapshots. An explicit [] is authoritative,
+                        # not an invitation to resurrect earlier pending calls.
+                        native_indexes = sorted(output_items)
+                        native = [output_items[index] for index in native_indexes]
+                    else:
+                        native = response_obj["output"]
+                        if not isinstance(native, list):
+                            raise conflicting_call()
+                        native_indexes = list(range(len(native)))
                     envelope.check(
                         _responses_output_bytes(
                             [item for item in native if isinstance(item, Mapping)]
                         )
                     )
+                    final_call_positions: set[int] = set()
+                    final_call_indices: set[int] = set()
+                    for output_index, item in zip(native_indexes, native):
+                        if isinstance(item, Mapping):
+                            for event in reconcile_item(item, output_index, final=True):
+                                yield event
+                            if item.get("type") == "function_call":
+                                index = output_call_indexes[output_index]
+                                if index in final_call_indices:
+                                    raise conflicting_call()
+                                final_call_indices.add(index)
+                                final_call_positions.add(output_index)
+                    if not explicit_output:
+                        # Legacy endpoints can omit final items as well as the
+                        # terminal field. Reconcile a populated added snapshot
+                        # with a separately streamed prefix without duplicating
+                        # either source; a shorter added snapshot stays partial.
+                        for index, snapshot in added_argument_snapshots.items():
+                            streamed = "".join(argument_parts.get(index, []))
+                            if snapshot.startswith(streamed):
+                                for event in reconcile_arguments(index, snapshot):
+                                    yield event
+                            elif not streamed.startswith(snapshot):
+                                raise conflicting_call()
+                    # Never dispatch survivors of an explicitly contradictory
+                    # batch. An absent field is not a membership assertion:
+                    # legacy delta-only streams and length truncation retain
+                    # their existing completion/partial-call handling.
+                    if explicit_output and not expected_call_positions.issubset(
+                        final_call_positions
+                    ):
+                        raise conflicting_call()
                     # Terminal output is authoritative; .done events cover
                     # compatible endpoints whose terminal omits output.
                     replay_text: list[str] = []
@@ -4153,6 +4311,9 @@ class OpenAICompatClient:
                             # call's own (see ``model/tariff.moment_for``).
                             at_ms=tariff.now_ms(),
                         )
+                        usage._token_counts_reported = _reported_token_count(
+                            raw, "input_tokens"
+                        ) and _reported_token_count(raw, "output_tokens")
                         yield StreamUsageEvent(usage=usage)
                     if event_type == "response.completed":
                         if refusal_parts:
@@ -5160,6 +5321,8 @@ class AnthropicClient:
         # property of the call (seconds of skew across a stream boundary cannot
         # change a window that is hours wide).
         usage = Usage(at_ms=tariff.now_ms())
+        input_reported = False
+        output_reported = False
         streamed_text = False
         block_index_to_call: dict[int, tuple[str, str]] = {}
         oauth = self._is_oauth(oauth_access)
@@ -5229,6 +5392,7 @@ class AnthropicClient:
                         cache_missed_tokens=missed_tokens,
                     )
                     raw_usage = (event.get("message") or {}).get("usage") or {}
+                    input_reported = _reported_token_count(raw_usage, "input_tokens")
                     usage.input_tokens = int(raw_usage.get("input_tokens", usage.input_tokens))
                     usage.cache_read_tokens = int(raw_usage.get("cache_read_input_tokens", 0))
                     usage.cache_write_tokens = int(raw_usage.get("cache_creation_input_tokens", 0))
@@ -5280,6 +5444,7 @@ class AnthropicClient:
                         stop_reason = str(delta["stop_reason"])
                     raw_usage = event.get("usage") or {}
                     if "output_tokens" in raw_usage:
+                        output_reported = _reported_token_count(raw_usage, "output_tokens")
                         usage.output_tokens = int(raw_usage["output_tokens"])
                 elif event_type == "error":
                     raise _anthropic_stream_error(event.get("error") or {})
@@ -5302,6 +5467,7 @@ class AnthropicClient:
             # line only needs to name the mechanism — and whether it cut a
             # partially-streamed answer or produced nothing at all (D1).
             error = _refusal_error("stop_reason=refusal", "", streamed_text=streamed_text)
+        usage._token_counts_reported = input_reported and output_reported
         yield StreamUsageEvent(usage=usage)
         yield StreamEndEvent(stop_reason=mapped, usage=usage, error=error)
 
@@ -5681,6 +5847,9 @@ class GoogleClient:
                         # a time-of-use row is priced in (``model/tariff``).
                         at_ms=tariff.now_ms(),
                     )
+                    usage._token_counts_reported = _reported_token_count(
+                        raw_usage, "promptTokenCount"
+                    ) and _reported_token_count(raw_usage, "candidatesTokenCount")
 
         if usage is not None:
             yield StreamUsageEvent(usage=usage)

@@ -1324,6 +1324,9 @@ class Usage(BaseModel):
     # tiny field across hundreds of receipts breaks the bounded attach frame.
     # model_copy retains it; a serialized/replayed receipt safely becomes unknown.
     _cache_read_reported: bool | None = PrivateAttr(default=None)
+    # Live wire completeness is not a zero token count; keep it off bounded
+    # serialized frames, like cache evidence. Legacy/manual usage remains None.
+    _token_counts_reported: bool | None = PrivateAttr(default=None)
 
     @model_serializer(mode="wrap")
     def _serialize_usage_without_unset_stamp(

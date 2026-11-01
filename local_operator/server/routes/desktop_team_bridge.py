@@ -111,6 +111,7 @@ from local_operator.team_bridge.types import (
     ATTACHMENT_ID_PATTERN,
     CONVERSATION_ID_PATTERN,
     is_account_id,
+    reply_window_params,
 )
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, never imported at runtime
@@ -1820,7 +1821,7 @@ class ConversationReactIn(_Strict):
 #: ``tenant_id`` are REQUIRED (see ``_required_owner_query``); the rest are the
 #: history route's paging/endpoint hints.
 _REPLIES_QUERY = frozenset(
-    {"expected_account_id", "tenant_id", "limit", "after_seq", "endpoint_id"}
+    {"expected_account_id", "tenant_id", "limit", "after_seq", "before_seq", "order", "endpoint_id"}
 )
 #: The reaction DELETE's query: the receipt only. ``actor_endpoint_id`` is
 #: deliberately absent, so the desktop can never remove an agent's reaction.
@@ -3074,6 +3075,8 @@ async def conversation_replies(
     request: Request,
     limit: str | None = Query(default=None),
     after_seq: str | None = Query(default=None),
+    before_seq: str | None = Query(default=None),
+    order: str | None = Query(default=None),
     endpoint_id: str | None = Query(default=None),
     config_manager: ConfigManager = Depends(get_config_manager),
 ) -> CRUDResponse[Any]:
@@ -3098,11 +3101,10 @@ async def conversation_replies(
     _require_message_id(message_id)
     owner = _required_owner_query(request, _REPLIES_QUERY)
     try:
-        parsed_limit = int(limit) if limit is not None else None
-        parsed_after = int(after_seq) if after_seq else None
+        paging = reply_window_params(
+            limit=limit, after_seq=after_seq, before_seq=before_seq, order=order
+        )
     except ValueError:
-        _raise_read("invalid_request")
-    if parsed_after is not None and parsed_after < 0:
         _raise_read("invalid_request")
     client = _conversation_client(config_manager)
     return reply(
@@ -3112,8 +3114,7 @@ async def conversation_replies(
                 message_id,
                 tenant_id=owner.tenant_id,
                 expected_account_id=owner.expected_account_id,
-                limit=parsed_limit,
-                after_seq=parsed_after,
+                **paging,
                 endpoint_id=endpoint_id,
             )
         )
@@ -3367,8 +3368,30 @@ _OWNER_AUDIT_SERVABLE = {"image/png", "image/jpeg", "application/octet-stream"}
 _OWNER_AUDIT_FILE_MIME = "application/octet-stream"
 
 
+def _log_owner_audit_refusal(operation: str, status_class: str) -> None:
+    """Best-effort callback receiving only two immutable, non-sensitive fields."""
+
+    # The record path carries only operation + status class. A broken standard
+    # handler may print its own sink-only traceback via logging.handleError; we
+    # deliberately do not reconfigure global logging to suppress that diagnostic.
+    # Detaching from the refusal keeps its code, exact status and body out of it.
+    try:
+        logging.getLogger(__name__).warning(
+            "owner-audit refusal operation=%s status_class=%s", operation, status_class
+        )
+    except Exception:  # noqa: BLE001 — diagnostic sink failure must not affect a refusal
+        pass
+
+
 @contextmanager
-def _owner_audit_no_store() -> Iterator[None]:
+def _owner_audit_no_store(
+    operation: Literal[
+        "owner_audit_conversations",
+        "owner_audit_messages",
+        "owner_audit_replies",
+        "owner_audit_attachment",
+    ],
+) -> Iterator[None]:
     """Stamp ``private, no-store`` on any refusal raised inside the block.
 
     A success gets the header from the route's ``Response``; an
@@ -3382,6 +3405,19 @@ def _owner_audit_no_store() -> Iterator[None]:
         yield
     except HTTPException as exc:
         exc.headers = {**(exc.headers or {}), "Cache-Control": OWNER_AUDIT_CACHE_CONTROL}
+        # ONLY owner-audit, never the shared _raise_read. Warning makes expected
+        # security-relevant refusals visible without persisting authority-specific
+        # codes, exact statuses, bodies or identifiers. Pass only immutable values:
+        # contextlib.__exit__ keeps the sensitive exception active even after our
+        # except ends, and a broken StreamHandler can print that exception chain.
+        # A loop callback runs detached from that chain; it may log after the
+        # response is sent. Do not "fix" ordering by emitting inline. With no loop
+        # (or scheduling failure), losing a record is safer than leaking a refusal.
+        status_class = f"{exc.status_code // 100}xx"
+        try:
+            asyncio.get_running_loop().call_soon(_log_owner_audit_refusal, operation, status_class)
+        except Exception:  # noqa: BLE001 — preserve the original refusal on failure
+            pass
         raise
 
 
@@ -3461,7 +3497,7 @@ async def owner_audit_conversations(
     no unread counts — auditing never raises a badge.
     """
 
-    with _owner_audit_no_store():
+    with _owner_audit_no_store("owner_audit_conversations"):
         response.headers["Cache-Control"] = OWNER_AUDIT_CACHE_CONTROL
         query = _owner_audit_query(
             request, frozenset({"expected_account_id", "tenant_id", "limit", "cursor"})
@@ -3499,7 +3535,7 @@ async def owner_audit_messages(
     history route.
     """
 
-    with _owner_audit_no_store():
+    with _owner_audit_no_store("owner_audit_messages"):
         response.headers["Cache-Control"] = OWNER_AUDIT_CACHE_CONTROL
         _require_conversation_id(conversation_id)
         query = _owner_audit_query(
@@ -3540,17 +3576,27 @@ async def owner_audit_replies(
     response: Response,
     config_manager: ConfigManager = Depends(get_config_manager),
 ) -> CRUDResponse[Any]:
-    """One audited thread (``OwnerAuditThread``): root + replies, oldest-first."""
+    """One audited thread: root plus chronological replies in the requested window."""
 
-    with _owner_audit_no_store():
+    with _owner_audit_no_store("owner_audit_replies"):
         response.headers["Cache-Control"] = OWNER_AUDIT_CACHE_CONTROL
         _require_conversation_id(conversation_id)
         _require_message_id(message_id)
         query = _owner_audit_query(
-            request, frozenset({"expected_account_id", "tenant_id", "limit", "after_seq"})
+            request,
+            frozenset(
+                {"expected_account_id", "tenant_id", "limit", "after_seq", "before_seq", "order"}
+            ),
         )
-        limit = _owner_audit_int(query, "limit")
-        after_seq = _owner_audit_int(query, "after_seq")
+        try:
+            paging = reply_window_params(
+                limit=query.get("limit"),
+                after_seq=query.get("after_seq"),
+                before_seq=query.get("before_seq"),
+                order=query.get("order"),
+            )
+        except ValueError:
+            _raise_read("invalid_request")
         client = _conversation_client(config_manager)
         return await _owner_audit_reply(
             client.owner_audit_replies(
@@ -3558,8 +3604,7 @@ async def owner_audit_replies(
                 message_id,
                 expected_account_id=query["expected_account_id"],
                 tenant_id=query.get("tenant_id"),
-                limit=limit,
-                after_seq=after_seq,
+                **paging,
             ),
             OwnerAuditThread,
         )
@@ -3585,7 +3630,7 @@ async def owner_audit_attachment(
     never be rendered by the renderer under a type it chose.
     """
 
-    with _owner_audit_no_store():
+    with _owner_audit_no_store("owner_audit_attachment"):
         _require_conversation_id(conversation_id)
         _require_message_id(message_id)
         _require_attachment_id(attachment_id)

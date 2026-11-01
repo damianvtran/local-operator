@@ -167,6 +167,23 @@ def test_budget_cap_fires_at_the_cap_and_not_below() -> None:
     assert guard.evaluate(_snapshot(budget=_budget(model_cycles=3))).kind == "truncate"
 
 
+def test_unknown_cost_stops_only_a_monetary_cap() -> None:
+    guard = BudgetCapGuard()
+    unknown = _snapshot(provider_cost_known=False, budget=_budget(provider_usd_micros=100))
+    verdict = guard.evaluate(unknown)
+    assert verdict.kind == "truncate" and verdict.code == "cost-unreported"
+    assert (
+        guard.evaluate(_snapshot(provider_cost_known=False, budget=_uncapped_budget())).kind
+        == "continue"
+    )
+    assert (
+        guard.evaluate(
+            _snapshot(provider_cost_known=True, budget=_budget(provider_usd_micros=100))
+        ).kind
+        == "continue"
+    )
+
+
 def test_cost_rate_needs_two_full_windows_then_fires_on_a_spike() -> None:
     guard = CostRateGuard(window=3, ratio=2.0)
     assert guard.evaluate(_snapshot(recent_costs_micros=(1, 1, 1, 9, 9))).kind == "continue"

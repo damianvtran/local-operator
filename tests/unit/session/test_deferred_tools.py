@@ -359,7 +359,12 @@ async def test_an_invalid_call_to_a_published_tool_gets_no_tool_doc_hint(tmp_pat
     )
     await session.prompt("go")
     text = _results(session)["c1"]
-    assert text == "Invalid arguments: missing required argument 'path'"
+    # A published schema needs correction guidance, not a deferred schema-doc
+    # hint: the model already has this contract and must populate its own args.
+    assert text.startswith("Invalid arguments: missing required argument 'path'")
+    assert "Supply these fields in this call's arguments object" in text
+    assert "tool://" not in text
+    assert executed == []
     assert "console" in session._deferred_now()
     await session.dispose()
 
