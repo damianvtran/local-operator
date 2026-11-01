@@ -313,7 +313,7 @@ def test_a_rerun_of_an_old_run_is_protected_by_the_grace_period(api):
     assert "grace period" in reason
 
 
-def _old(hours: int) -> str:
+def _old(hours: float) -> str:
     return (
         datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=hours)
     ).strftime("%Y-%m-%dT%H:%M:%SZ")
