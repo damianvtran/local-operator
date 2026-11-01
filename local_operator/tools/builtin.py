@@ -31859,18 +31859,16 @@ def build_jobs_tool(context: ToolContext) -> AgentTool | None:
     return AgentTool(
         name="jobs",
         label="List jobs",
+        # Age aliases and cursor semantics stay explicit; condense repeated
+        # explanations/examples because this metadata rides every root and child
+        # request. Keep the rationale outside the published description.
         description=(
-            "Inspect background jobs (task/bash/video). op='list' shows every "
-            "running and recently-settled job with its id, status and age — "
-            "'up' is how long a running job has been going, 'wait' is how long "
-            "a parked one has been waiting for a slot, 'ago' is how long since "
-            "a settled one finished, and 'old' is a settled job whose finish "
-            "time was not recorded. op='peek' (job_id, and since=<seq from the "
-            "last peek>) returns ONLY the output produced since that cursor, so "
-            "polling a long job stays cheap — use it to watch a build, a "
-            "training run, a terraform apply, or a pipeline poll without "
-            "blocking. op='cancel' (job_id) stops a running job and kills its "
-            "process tree."
+            "Inspect background jobs (task/bash/video). op='list': all running and recently "
+            "settled jobs with id, status and age: 'up'=runtime, 'wait'=time waiting for a "
+            "slot, 'ago'=time since finishing, 'old'=settled with no recorded finish time. "
+            "op='peek' requires job_id; since=<last seq> returns only newer output. Use it "
+            "for nonblocking build/training/pipeline progress. op='cancel' requires "
+            "job_id; stops a running job and kills its process tree."
         ),
         parameters=JobsParams.model_json_schema(),
         approval_tier="read",
