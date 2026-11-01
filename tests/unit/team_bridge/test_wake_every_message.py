@@ -602,6 +602,9 @@ class ToolClient:
 
     async def conversation_send(self, conversation_id: str, *, text: str, **kwargs: Any):
         assert conversation_id == CONV
+        guard = kwargs.get("pre_http_guard")
+        if guard is not None:
+            guard()
         msg = self.hub.post(self.endpoint, text)
         return {"id": msg.id, "seq": msg.seq}
 

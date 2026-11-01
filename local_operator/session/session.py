@@ -19095,6 +19095,9 @@ class Session:
         continuation runs ``_drain_continuation`` opens call this method
         directly and inherit the default — a continuation is not an opening.
         """
+        runtime = getattr(self, "bridge_runtime", None)
+        if runtime is not None:
+            runtime.bridge_input_presented = False
         if self._abort_requested and may_drop:
             # BORN PRE-ABORTED: do not open a turn at all. Running one spends a
             # real provider request — the loop builds and issues the call
@@ -19371,6 +19374,19 @@ class Session:
                     if frame is not None and not frame.binding_intact():
                         raise RuntimeError("bridge body authority changed before dispatch")
                     self._attention_run_request_dispatched = True
+                    from local_operator.team_bridge.card_projection import (
+                        presented_bridge_ref,
+                    )
+
+                    runtime = getattr(self, "bridge_runtime", None)
+                    # Inspect final provider payloads only. Historical text and
+                    # model-origin lookalikes cannot carry this ephemeral proof.
+                    # Check each message so independently admitted A/B frames
+                    # cannot cancel each other's run-level presentation evidence.
+                    if runtime is not None and any(
+                        presented_bridge_ref([message]) is not None for message in request.messages
+                    ):
+                        runtime.bridge_input_presented = True
                     if carried:
                         # Past the refusal checks, the request is going out:
                         # any owed card it carries has now been read.
@@ -19743,6 +19759,11 @@ class Session:
             await self._refresh_context_metadata()
             await self._maybe_compact()
         finally:
+            runtime = getattr(self, "bridge_runtime", None)
+            if runtime is not None:
+                # Clear before awaited cleanup, including error/cancellation:
+                # no later run may inherit a previous dispatch's requirement.
+                runtime.bridge_input_presented = False
             # LAST-RESORT durability. The persistence above runs only on the
             # normal path: an exception out of the loop (the
             # "model turn produced no assistant message" RuntimeError, a

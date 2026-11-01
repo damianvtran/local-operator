@@ -2858,6 +2858,68 @@ class Store:
                 ).fetchone()
             )
 
+    def admitted_inbound_reservation_readonly(
+        self,
+        owner: OwnerSnapshot,
+        *,
+        in_reply_to_message_id: str,
+        designated_session: str,
+    ) -> dict[str, str] | None:
+        """Exact reply destination under one read snapshot; never create/migrate.
+
+        The older LIMIT-1 conversation hint is guidance only. Authorization
+        requires uniqueness BEFORE checking redundant reservation bindings, so
+        a second damaged/stale candidate cannot silently select a destination.
+        Completed admissions remain answerable; retirement revokes this proof.
+        No body, labels, or mutable delivery state escapes this lookup.
+        """
+        if not designated_session or owner.enrollment_generation <= 0:
+            return None
+        with self._connect_readonly() as conn:
+            if conn is None:
+                return None
+            conn.execute("BEGIN")
+            if self._live_generation(conn, owner) != owner.enrollment_generation:
+                return None
+            enrollments = conn.execute(
+                "SELECT designated_session, consent_version, consent_ref "
+                "FROM enrollments WHERE state = 'committed'"
+            ).fetchall()
+            if len(enrollments) != 1:
+                return None
+            enrollment = enrollments[0]
+            if (
+                enrollment["designated_session"] != designated_session
+                or not enrollment["consent_version"]
+                or not enrollment["consent_ref"]
+            ):
+                return None
+            rows = conn.execute(
+                "SELECT conversation_id, message_id, account_id, tenant_id, endpoint_id, "
+                "credential_id, canonical_base_url, enrollment_generation, "
+                "designated_session, consent_version, state FROM body_reservations "
+                "WHERE owner_key = ? AND message_id = ? LIMIT 2",
+                (_owner_key(owner), in_reply_to_message_id),
+            ).fetchall()
+            if len(rows) != 1:
+                return None
+            row = rows[0]
+            expected = {
+                "account_id": owner.account_id,
+                "tenant_id": owner.tenant_id,
+                "endpoint_id": owner.endpoint_id,
+                "credential_id": owner.credential_id,
+                "canonical_base_url": owner.canonical_base_url,
+                "enrollment_generation": owner.enrollment_generation,
+                "designated_session": designated_session,
+                "consent_version": enrollment["consent_version"],
+            }
+            if any(row[key] != value for key, value in expected.items()):
+                return None
+            if row["state"] not in ("pending", "claimed", "completed"):
+                return None
+            return {"conversation_id": row["conversation_id"], "message_id": row["message_id"]}
+
     def conversation_of_reserved_message(self, owner: OwnerSnapshot, message_id: str) -> str | None:
         """The ``bcv_`` id an ADMITTED conversation message belongs to, or None.
 
