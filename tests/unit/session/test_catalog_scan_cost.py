@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import threading
 import time
 from pathlib import Path
@@ -106,7 +107,35 @@ def _session(
     return directory
 
 
-def _counting(names: tuple[str, ...] = ("stat", "lstat", "scandir")) -> Any:
+#: The one module whose store resolutions are the catalogue's own work. A
+#: ``realpath`` is attributed to whichever ``local_operator`` module asked for
+#: it, so a writer-lock finaliser resolving a session directory from a collector
+#: that happens to run inside the same call is not credited to the page.
+CATALOG_MODULE = "local_operator/session/catalog.py"
+
+
+def _origin_module() -> str:
+    """The NEAREST ``local_operator`` frame on the stack: who asked for this call.
+
+    Provenance, not a path prefix. A path says a syscall touched the store; only
+    the caller says whether the PAGE made it, which is the difference between a
+    walk that moved and a collector or an importer that ran at the wrong moment.
+    """
+    frame = sys._getframe(1)
+    while frame is not None:
+        name = frame.f_code.co_filename.replace(os.sep, "/")
+        if "/local_operator/" in name:
+            return name
+        frame = frame.f_back
+    return ""
+
+
+def _counting(
+    names: tuple[str, ...] = ("stat", "lstat", "scandir"),
+    *,
+    within: Path | None = None,
+    product: str | None = None,
+) -> Any:
     """Count ``os`` filesystem calls made inside the context, on THIS thread.
 
     Thread-scoped rather than process-scoped, and that is a MEASUREMENT fix
@@ -126,13 +155,52 @@ def _counting(names: tuple[str, ...] = ("stat", "lstat", "scandir")) -> Any:
     cells assert a ``scandir`` canary so a counter that attributed nothing --
     how this instrument would fail silently, turning an equality of counts
     into an equality of zeros -- cannot pass vacuously.
+
+    ``within`` AND ``product`` ADD TWO NARROWER TALLIES, and they exist because
+    a window total is not a property of the walk. ``lstat`` is a realpath's
+    syscall, and realpath inside a measured window is not only the catalogue's:
+    measured on this file's own call, the first ``catalogue_page`` in a process
+    imports ``pydantic``, ``rich`` and ``sysconfig`` on the way through, and 42
+    ``lstat`` calls from import machinery landed inside one measured window;
+    ``compression.release_writer_from_finaliser`` resolves a session directory on
+    whatever thread the collector runs it on, which can be this one, mid-call.
+    Those are one-time or collector-timed, so comparing window TOTALS between two
+    calls compares process state as well as the walk -- how a shard reports
+    ``lstat 12`` against ``6`` for byte-identical code.
+
+    ``counter.within`` is the calls naming a path under ``within`` (the store);
+    ``counter.product`` is the subset of those whose nearest ``local_operator``
+    frame is ``product``. The second is the one a cell should assert on, because
+    it keeps the discrimination that matters -- a second resolution OF THE STORE
+    BY THE PAGE doubles it -- while dropping work the page did not ask for.
+    Counts stay whole for the failure messages that need the entire picture.
     """
 
     class Counter:
         def __init__(self) -> None:
             self.counts: dict[str, int] = {name: 0 for name in names}
+            self.within: dict[str, int] = {name: 0 for name in names}
+            self.product: dict[str, int] = {name: 0 for name in names}
             self._originals: dict[str, Callable[..., Any]] = {}
             self._thread: int = -1
+
+        @staticmethod
+        def _path_of(args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+            if args:
+                return args[0]
+            return kwargs.get("path")
+
+        def _in_scope(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> bool:
+            """Does this call name a path under ``within``?"""
+            if within is None:
+                return False
+            target = self._path_of(args, kwargs)
+            if isinstance(target, int) or target is None:  # a descriptor names no path
+                return False
+            try:
+                return Path(os.fspath(target)).is_relative_to(within)
+            except (TypeError, ValueError):
+                return False
 
         def __enter__(self) -> "Counter":
             self._thread = threading.get_ident()
@@ -144,6 +212,10 @@ def _counting(names: tuple[str, ...] = ("stat", "lstat", "scandir")) -> Any:
                     def counting(*args: Any, **kwargs: Any) -> Any:
                         if threading.get_ident() == self._thread:
                             self.counts[name] += 1
+                            if self._in_scope(args, kwargs):
+                                self.within[name] += 1
+                                if product is not None and _origin_module().endswith(product):
+                                    self.product[name] += 1
                         return real(*args, **kwargs)
 
                     return counting
@@ -307,6 +379,58 @@ class TestActivityBetweenPollsIsSeenImmediately:
 # ---------------------------------------------------------------------------
 
 
+def _store_realpaths(run: Callable[[], Any], root: Path) -> list[str]:
+    """Every ``realpath`` this call makes INTO ``root``, as the path it walked.
+
+    ONE instrument for both spellings: ``Path.resolve()`` reaches
+    ``os.path.realpath`` through pathlib's flavour at call time, and a direct
+    ``os.path.realpath(...)`` reaches it too, so patching ``os.path.realpath``
+    counts a resolution however the caller wrote it -- a patch on ``Path.resolve``
+    alone would miss the direct spelling and vice versa.
+
+    SCOPED TO THE STORE AND TO THE CALLER, and both halves are load-bearing.
+    Unscoped, the count includes realpath work that is not the page's: the first
+    page in a process imports ``pydantic`` and ``sysconfig`` through it, and a
+    writer-lock finaliser resolves a session directory on whatever thread
+    collects it -- measured here as 42 ``lstat`` calls from import machinery
+    inside one window. Path alone is not enough for the same reason: a finaliser
+    resolving a session directory names a path inside the store while the page
+    is running, and it is still not the page's work. So a call counts only when
+    its nearest ``local_operator`` frame is :data:`CATALOG_MODULE` -- the page's
+    own resolve -- which is what makes the number a fact about the page, and is
+    what still doubles if the page ever resolves the store twice.
+
+    Counts CALLS, not syscalls, and that is what makes it portable:
+    ``resolve()`` is a realpath whose ``lstat`` count is the DEPTH of the path it
+    walks, so one extra resolution of one store reads as ``+6`` on a CI temp path
+    and ``+10`` under macOS's ``/private`` detour, and two shapes sitting on paths
+    of different depth cannot be compared by that number at all.
+
+    Thread-scoped for the reason :func:`_counting` is: the suite runs threads
+    beside this measurement, and a resolve one of them made would otherwise be
+    read as the page's own work.
+    """
+    calls: list[str] = []
+    real = os.path.realpath
+    thread = threading.get_ident()
+
+    def counting(path: Any, *args: Any, **kwargs: Any) -> Any:
+        if threading.get_ident() == thread and _origin_module().endswith(CATALOG_MODULE):
+            try:
+                if Path(os.fspath(path)).is_relative_to(root):
+                    calls.append(os.fspath(path))
+            except (TypeError, ValueError):
+                pass
+        return real(path, *args, **kwargs)
+
+    os.path.realpath = counting  # type: ignore[assignment]
+    try:
+        run()
+    finally:
+        os.path.realpath = real  # type: ignore[assignment]
+    return calls
+
+
 def _band(store: Path, *, visible: int, hidden: int) -> None:
     """A store with two populations, every visible session carrying a binding.
 
@@ -348,6 +472,17 @@ class TestAScopedPageIsTheSameScan:
     thing a page size is supposed to buy. The scan is the term that must not move,
     and the existing cost model above pins the same property for the unstructured
     call.
+
+    AND WHAT A WINDOW TOTAL CANNOT MEASURE. ``lstat`` is a realpath's syscall, and
+    realpath happens in a window without the page asking for it: import machinery
+    resolving a module the first time a code path reaches it, and a writer-lock
+    finaliser releasing a session directory from a collector that can run on this
+    thread mid-call. A shard therefore reported ``lstat 12`` against ``6`` for
+    byte-identical code -- and a stack-attributed probe of the SAME call on the
+    SAME worker found six, all at ``catalog.py:1702``. So the cells below assert
+    the page's own share of those counts (see :func:`_counting`), which is the
+    term a page size or a scope must not move, and
+    ``test_the_store_root_is_resolved_once_per_page`` pins the absolute number.
     """
 
     @staticmethod
@@ -356,16 +491,36 @@ class TestAScopedPageIsTheSameScan:
             run()
         return dict(counter.counts)
 
+    @staticmethod
+    def _profile_scoped(
+        run: Callable[[], Any], root: Path
+    ) -> tuple[dict[str, int], dict[str, int], dict[str, int]]:
+        """One call's profile: the whole window, the store's share, and the page's.
+
+        Three numbers from one pass, deliberately: re-running a shape to measure
+        it twice would measure a different memo state, and the point of the set
+        is that the TOTAL may carry work that is not the walk's while the last,
+        narrowest one may not -- it is the page's own store resolutions.
+        """
+        with _counting(within=root, product=CATALOG_MODULE) as counter:
+            run()
+        return dict(counter.counts), dict(counter.within), dict(counter.product)
+
     def test_the_walk_is_identical_at_every_page_size_and_scope(self, tmp_path: Path) -> None:
         _band(tmp_path, visible=40, hidden=200)
         # Warm the birth memo first: this is about the WALK, not about which memo
         # a first call happens to fill.
         catalogue_page(tmp_path, limit=5)
 
-        small = self._profile(lambda: catalogue_page(tmp_path, limit=5))
-        large = self._profile(lambda: catalogue_page(tmp_path, limit=200))
-        scoped = self._profile(
-            lambda: catalogue_page(tmp_path, scope=CatalogueScope("team", "lopdev"), limit=25)
+        small, small_store, small_page = self._profile_scoped(
+            lambda: catalogue_page(tmp_path, limit=5), tmp_path
+        )
+        large, large_store, large_page = self._profile_scoped(
+            lambda: catalogue_page(tmp_path, limit=200), tmp_path
+        )
+        scoped, scoped_store, scoped_page = self._profile_scoped(
+            lambda: catalogue_page(tmp_path, scope=CatalogueScope("team", "lopdev"), limit=25),
+            tmp_path,
         )
 
         assert small["scandir"] == large["scandir"] == scoped["scandir"], (
@@ -377,16 +532,28 @@ class TestAScopedPageIsTheSameScan:
         # inode the scandir batch already carried, and 200 hidden directories add
         # no per-directory stat to any shape.
         #
-        # THE MESSAGE CARRIES THE WHOLE PICTURE BECAUSE THIS CELL WENT RED IN CI
-        # AND NOWHERE ELSE: `scoped` counted 18 lstats against `small`'s 6 on a
-        # Linux shard while the same bytes passed here, in the shard's own replay
-        # order, and on a neighbouring head. A bare `18 == 6` cannot say whether
-        # the WALK moved, the CENSUS moved, or the store's lapsed window did, so
-        # on failure the three profiles, the configured window and the wall clock
-        # the visibility rule read all travel with the assertion.
+        # THE LSTAT CLAIM IS SCOPED TO THE PAGE'S OWN STORE RESOLUTIONS, and that
+        # is the fix for a cell that went red in CI and nowhere else: `small`
+        # counted 12 lstats against 6 on a Linux shard (and `scoped` 18 against 6
+        # a month earlier) for byte-identical code that passes here, in the
+        # failing shard's own replay order. `lstat` is a realpath's syscall, and
+        # realpath inside a measured window is not only the catalogue's -- the
+        # first page in a process imports pydantic, rich and sysconfig through
+        # it, and a writer lock finaliser resolves a SESSION DIRECTORY, inside the
+        # store, on whatever thread collects it. So neither a raw total nor a
+        # path prefix identifies the walk; the page's own resolution does, and
+        # THAT must not move with the page size or the scope. What still fails
+        # here is a second resolution of the store BY the page, which is the
+        # defect worth catching -- see `test_..._resolved_once_per_page` below.
         lapsed_ms = lapsed_visible_ms()
-        assert scoped["lstat"] == small["lstat"] == large["lstat"], (
+        assert small_page["lstat"] > 0, (
+            "canary: the store-scoped tally attributed nothing to the page, so the "
+            f"equality below would pass vacuously: small={small_page} root={tmp_path}"
+        )
+        assert scoped_page["lstat"] == small_page["lstat"] == large_page["lstat"], (
             f"walk moved: small={small} large={large} scoped={scoped} "
+            f"page_lstat small={small_page} large={large_page} scoped={scoped_page} "
+            f"store_lstat small={small_store} large={large_store} scoped={scoped_store} "
             f"lapsed_ms={lapsed_ms} now={time.time():.3f} root={tmp_path}"
         )
 
@@ -410,6 +577,67 @@ class TestAScopedPageIsTheSameScan:
         # And a scoped page costs what the HEAD answer the client actually sends
         # costs, because the census is the same read -- there is no third term.
         assert counted["stat"] == scoped["stat"], (scoped, counted)
+
+    def test_the_store_root_is_resolved_once_per_page(self, tmp_path: Path) -> None:
+        """One realpath of the store per page -- whatever the page size, or the scope.
+
+        WHAT THIS PINS: resolving the store is the page's own bookkeeping, so the
+        number of resolutions may not depend on how many rows the caller asked
+        for. A page that resolves the same root twice pays a duplicate realpath --
+        one ``lstat`` per path component -- on every scan, which is the poll the
+        sidebar re-runs every two seconds.
+
+        WHY A CALL COUNT RATHER THAN THE ``_counting`` PROFILE ABOVE: that cell
+        compares ``lstat`` counts, which are path DEPTH on the machine that runs
+        them, so the same doubling reads +6 in CI and +10 on macOS and the test
+        cannot be reproduced where it is written. How many times the page resolves
+        the root it was handed is the same number everywhere.
+
+        WHAT IT IS NOT: a claim about every realpath in the window. Realpath is
+        not only the catalogue's (see :func:`_store_realpaths`), so the count is
+        scoped to the store and an unrelated resolution cannot fail it.
+        """
+        _band(tmp_path, visible=40, hidden=200)
+        # Warm the birth memo first, exactly as the walk cell above does: this is
+        # about the RESOLUTION the page performs, not about which memo a first
+        # call happens to fill.
+        catalogue_page(tmp_path, limit=5)
+
+        store_root = str(tmp_path / "sessions")
+        small = _store_realpaths(lambda: catalogue_page(tmp_path, limit=5), tmp_path)
+        large = _store_realpaths(lambda: catalogue_page(tmp_path, limit=200), tmp_path)
+        scoped = _store_realpaths(
+            lambda: catalogue_page(tmp_path, scope=CatalogueScope("team", "lopdev"), limit=25),
+            tmp_path,
+        )
+
+        assert small == large == scoped == [store_root], (
+            f"the page resolved the store {len(small)}/{len(large)}/{len(scoped)} "
+            f"times (limit=5 / limit=200 / scoped), expected exactly "
+            f"{[store_root]}: small={small} large={large} scoped={scoped}"
+        )
+
+    def test_the_instrument_ignores_the_same_path_resolved_elsewhere(self, tmp_path: Path) -> None:
+        """Two-way control for the instrument the cell above is built on.
+
+        THE NEGATIVE HALF is what keeps that cell honest. A resolution of the
+        store root issued from THIS module names a path inside the store, so a
+        path prefix alone would credit it to the page -- and that is precisely
+        the case that must not count: ``compression.release_writer_from_finaliser``
+        resolves a session directory, inside the store, from a collector that can
+        run on this thread mid-call. Same path, different caller, not the page's
+        work. THE POSITIVE HALF runs the page through the SAME instrument and
+        requires the resolution to be counted, so a helper that attributed
+        nothing cannot pass this cell by returning empty both times.
+        """
+        _band(tmp_path, visible=40, hidden=200)
+        catalogue_page(tmp_path, limit=5)
+        store_root = tmp_path / "sessions"
+
+        assert _store_realpaths(store_root.resolve, tmp_path) == []
+        assert _store_realpaths(lambda: catalogue_page(tmp_path, limit=5), tmp_path) == [
+            str(store_root)
+        ]
 
     def test_a_warm_census_re_reads_no_binding(self, tmp_path: Path) -> None:
         """T5's stat half: an unchanged store is answered from the memo.
