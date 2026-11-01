@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import socket
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -303,9 +304,7 @@ def test_owner_audit_refusal_logs_only_operation_and_status_class(
         suffix = "&unexpected=" + body_fragment
         expected_status = 422
     with caplog.at_level(logging.WARNING, logger=routes.__name__):
-        response = client.request(
-            "GET", path + _q(suffix), content=body_fragment.encode()
-        )
+        response = client.request("GET", path + _q(suffix), content=body_fragment.encode())
     assert response.status_code == expected_status, response.text
     assert response.headers["cache-control"] == _SERVED_CACHE_CONTROL
     assert bool(calls) == (source == "upstream")
@@ -314,9 +313,7 @@ def test_owner_audit_refusal_logs_only_operation_and_status_class(
     record = records[0]
     assert record.levelno == logging.WARNING
     rendered = logging.Formatter("%(levelname)s %(message)s").format(record)
-    assert rendered == (
-        f"WARNING owner-audit refusal operation={operation} status_class=4xx"
-    )
+    assert rendered == (f"WARNING owner-audit refusal operation={operation} status_class=4xx")
     for forbidden in (
         OWNER,
         "org-a",
@@ -343,11 +340,111 @@ def test_owner_audit_malformed_page_logs_status_class_without_body(proxy, caplog
     records = [record for record in caplog.records if record.name == routes.__name__]
     assert len(records) == 1
     rendered = logging.Formatter("%(message)s").format(records[0])
-    assert rendered == (
-        "owner-audit refusal operation=owner_audit_conversations status_class=5xx"
-    )
+    assert rendered == ("owner-audit refusal operation=owner_audit_conversations status_class=5xx")
     for forbidden in (OWNER, "org-a", CID, fragment, "malformed_page", "502"):
         assert forbidden not in rendered
+
+
+@pytest.mark.parametrize("sink", ["broken_stream", "raising_handler"])
+@pytest.mark.parametrize("surface", ["query", "upstream", "malformed_page"])
+def test_owner_audit_failing_log_sink_preserves_refusal_without_sensitive_stderr(
+    proxy, monkeypatch, capfd, sink, surface
+):
+    client, _calls, state, _ = proxy
+    fragment = "private-refusal-body-marker"
+    if surface == "upstream":
+        state["error"] = (404, "conversation_not_found")
+        suffix = ""
+    elif surface == "malformed_page":
+        state["override"] = {"conversations": [{"id": CID, "body": fragment}]}
+        suffix = ""
+    else:
+        suffix = "&unexpected=" + fragment
+    path = BASE + _q(suffix)
+    original = client.get(path)
+    assert original.status_code == {
+        "query": 422,
+        "upstream": 404,
+        "malformed_page": 502,
+    }[surface]
+    capfd.readouterr()
+    active_exceptions = []
+    emitted = threading.Event()
+
+    class BrokenStream:
+        def write(self, _text):
+            raise OSError("synthetic log sink failure")
+
+        def flush(self):
+            pass
+
+    class FailingHandler(logging.StreamHandler):
+        def emit(self, record):
+            active_exceptions.append(sys.exception())
+            try:
+                if sink == "raising_handler":
+                    raise OSError("synthetic log sink failure")
+                super().emit(record)
+            finally:
+                emitted.set()
+
+    # Keep logging's normal diagnostic enabled: catching warning() errors alone
+    # cannot stop StreamHandler.handleError from printing a chained exception.
+    monkeypatch.setattr(logging, "raiseExceptions", True)
+    logger = logging.getLogger(routes.__name__)
+    handler = FailingHandler(BrokenStream())
+    logger.addHandler(handler)
+    try:
+        refused = client.get(path)
+        assert emitted.wait(5), "detached refusal diagnostic never reached the sink"
+    finally:
+        logger.removeHandler(handler)
+        handler.close()
+    assert refused.status_code == original.status_code, refused.text
+    assert refused.content == original.content
+    assert refused.headers["cache-control"] == original.headers["cache-control"]
+    assert active_exceptions == [None]
+    captured = capfd.readouterr()
+    for forbidden in (
+        original.json()["detail"]["code"],
+        str(original.status_code),
+        OWNER,
+        "org-a",
+        CID,
+        fragment,
+    ):
+        assert forbidden not in captured.err
+    if sink == "raising_handler":
+        assert captured.err == ""
+    else:
+        assert "--- Logging error ---" in captured.err
+
+
+@pytest.mark.parametrize("failure", ["no_loop", "scheduling_failure"])
+def test_owner_audit_skips_logging_when_it_cannot_detach(monkeypatch, caplog, failure):
+    from fastapi import HTTPException
+
+    def fail(*_args):
+        raise RuntimeError("synthetic scheduling failure")
+
+    if failure == "scheduling_failure":
+        monkeypatch.setattr(
+            routes.asyncio, "get_running_loop", lambda: SimpleNamespace(call_soon=fail)
+        )
+    refusal = HTTPException(
+        422, {"code": "private-code"}, headers={"X-Synthetic": "preserved"}
+    )
+    with caplog.at_level(logging.WARNING, logger=routes.__name__):
+        with pytest.raises(HTTPException) as caught:
+            with routes._owner_audit_no_store("owner_audit_conversations"):
+                raise refusal
+    assert caught.value is refusal
+    assert refusal.status_code == 422 and refusal.detail == {"code": "private-code"}
+    assert refusal.headers == {
+        "X-Synthetic": "preserved",
+        "Cache-Control": routes.OWNER_AUDIT_CACHE_CONTROL,
+    }
+    assert not [record for record in caplog.records if record.name == routes.__name__]
 
 
 def test_owner_audit_logging_does_not_cover_success_or_other_routes(proxy, caplog):
@@ -355,9 +452,7 @@ def test_owner_audit_logging_does_not_cover_success_or_other_routes(proxy, caplo
     with caplog.at_level(logging.WARNING, logger=routes.__name__):
         assert client.get(BASE + _q()).status_code == 200
         # The shared read-refusal helper must remain quiet for member routes.
-        response = client.get(
-            "/v1/desktop/team-bridge/unread?scope=account&tenant_id=org-a"
-        )
+        response = client.get("/v1/desktop/team-bridge/unread?scope=account&tenant_id=org-a")
     assert response.status_code == 422, response.text
     assert not [record for record in caplog.records if record.name == routes.__name__]
 

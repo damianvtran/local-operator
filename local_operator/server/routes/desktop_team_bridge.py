@@ -3368,6 +3368,21 @@ _OWNER_AUDIT_SERVABLE = {"image/png", "image/jpeg", "application/octet-stream"}
 _OWNER_AUDIT_FILE_MIME = "application/octet-stream"
 
 
+def _log_owner_audit_refusal(operation: str, status_class: str) -> None:
+    """Best-effort callback receiving only two immutable, non-sensitive fields."""
+
+    # The record path carries only operation + status class. A broken standard
+    # handler may print its own sink-only traceback via logging.handleError; we
+    # deliberately do not reconfigure global logging to suppress that diagnostic.
+    # Detaching from the refusal keeps its code, exact status and body out of it.
+    try:
+        logging.getLogger(__name__).warning(
+            "owner-audit refusal operation=%s status_class=%s", operation, status_class
+        )
+    except Exception:  # noqa: BLE001 — diagnostic sink failure must not affect a refusal
+        pass
+
+
 @contextmanager
 def _owner_audit_no_store(
     operation: Literal[
@@ -3390,17 +3405,21 @@ def _owner_audit_no_store(
         yield
     except HTTPException as exc:
         exc.headers = {**(exc.headers or {}), "Cache-Control": OWNER_AUDIT_CACHE_CONTROL}
-        # This boundary belongs ONLY to owner-audit, not the shared _raise_read:
-        # refusals must be visible at default level without widening route logging.
-        # Warning marks an expected security-relevant refusal, not a trace. Keep
-        # only the fixed operation and status CLASS: even a refusal code can
-        # disclose account/tenant authority after the session has ended. Never
-        # pass the exception, request, identifiers or body to the logger.
-        logging.getLogger(__name__).warning(
-            "owner-audit refusal operation=%s status_class=%sxx",
-            operation,
-            exc.status_code // 100,
-        )
+        # ONLY owner-audit, never the shared _raise_read. Warning makes expected
+        # security-relevant refusals visible without persisting authority-specific
+        # codes, exact statuses, bodies or identifiers. Pass only immutable values:
+        # contextlib.__exit__ keeps the sensitive exception active even after our
+        # except ends, and a broken StreamHandler can print that exception chain.
+        # A loop callback runs detached from that chain; it may log after the
+        # response is sent. Do not "fix" ordering by emitting inline. With no loop
+        # (or scheduling failure), losing a record is safer than leaking a refusal.
+        status_class = f"{exc.status_code // 100}xx"
+        try:
+            asyncio.get_running_loop().call_soon(
+                _log_owner_audit_refusal, operation, status_class
+            )
+        except Exception:  # noqa: BLE001 — preserve the original refusal on failure
+            pass
         raise
 
 
