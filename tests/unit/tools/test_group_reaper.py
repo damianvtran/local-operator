@@ -23,9 +23,11 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import contextmanager
 
 import pytest
 
+from local_operator import procstate
 from local_operator.tools import group_reaper
 from local_operator.tools.group_reaper import (
     PROC_GROUPS_DIRNAME,
@@ -1040,11 +1042,10 @@ def _bash_bg(command, session_id, config_dir, monkeypatch):
 
 
 def _pid_alive(pid):
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    return True
+    # A killed orphan can remain a zombie until init reaps it. Signal zero
+    # proves only PID existence, not that the workload survived the reaper;
+    # use the shared state probe without mistaking an unknown state for death.
+    return procstate.pid_alive(pid) and not procstate.is_zombie(pid)
 
 
 def _wait_dead(pid, timeout=5.0):
@@ -1054,6 +1055,34 @@ def _wait_dead(pid, timeout=5.0):
             return True
         time.sleep(0.05)
     return False
+
+
+@pytest.mark.skipif(os.name != "posix", reason="unreaped zombies are a POSIX process state")
+def test_wait_dead_accepts_a_confirmed_unreaped_child():
+    # Keep the parent alive and deliberately do not poll/wait the child until
+    # finally: an orphan's init may reap too quickly to discriminate the bug.
+    # Signal zero must still succeed, proving that PID existence is not life.
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    try:
+        assert _pid_alive(child.pid)
+        assert not _wait_dead(child.pid, timeout=0.1)  # a running sibling stays live
+        child.kill()
+        deadline = time.monotonic() + 3
+        while not procstate.is_zombie(child.pid):
+            assert time.monotonic() < deadline, "owned child never reached zombie state"
+            time.sleep(0.01)
+        os.kill(child.pid, 0)
+        assert _wait_dead(child.pid, timeout=0.2), "a confirmed corpse cannot keep executing"
+    finally:
+        # This is only our retained Popen child, never a PID/name discovered by
+        # a scan. wait() also removes the intentional zombie on assertion failure.
+        child.kill()
+        child.wait(timeout=3)
 
 
 @pytest.fixture
@@ -1068,19 +1097,134 @@ def _kill_pids():
             pass
 
 
-def test_survivor_stays_in_ledger_and_session_reap_kills_it(tmp_path, monkeypatch, _kill_pids):
-    pid = _bash_bg("sleep 4242 >/dev/null 2>&1 & echo pid=$!", "sess-a", tmp_path, monkeypatch)
-    _kill_pids.append(pid)
-    assert _pid_alive(pid)
-    (entry,) = _ledger_entries(tmp_path)
-    assert entry["session_id"] == "sess-a"
-    assert pid in [s["pid"] for s in entry["survivors"]]
-    assert "detached" not in entry
+@contextmanager
+def _survivor_diagnostics(config_dir):
+    """Cache existing call results; emit only when this synthetic case fails.
 
-    assert group_reaper.reap_session_groups("sess-a", config_dir=tmp_path) == 1
-    assert _wait_dead(pid)
-    assert _ledger_entries(tmp_path) == []  # idempotent: nothing left to do
-    assert group_reaper.reap_session_groups("sess-a", config_dir=tmp_path) == 0
+    No extra ps, ledger read, registration or lifecycle call is made. Profiling
+    observes this thread only and adds timing overhead; register's return alone
+    cannot prove an append persisted. Unknown/unobserved facts stay unknown.
+    An existing profiler is left untouched rather than chained or replaced.
+    """
+    functions = {
+        group_reaper.register_group: "register",
+        group_reaper.settle_group: "settle",
+        group_reaper.unregister_group: "unregister",
+        group_reaper._resolve_config_dir: "root",
+        group_reaper._self_start_token: ".".join(("owner", "birth")),
+        group_reaper._group_has_members: "group_present",
+        group_reaper._group_survivors: "survivors",
+        group_reaper._annotate_entry: "annotate",
+        procstate.pid_liveness: "pid_liveness",
+        procstate.is_zombie: "zombie",
+        _ledger_entries: "ledger_read",
+    }
+    codes = {function.__code__: name for function, name in functions.items()}
+    events = []
+    previous = sys.getprofile()
+
+    def observe(frame, event, result):
+        if len(events) >= 64:
+            return
+        if frame.f_code is group_reaper.register_group.__code__ and event in {
+            "c_return",
+            "c_exception",
+        }:
+            operation = getattr(result, "__name__", "")
+            if operation in {"write", "__exit__"} and getattr(
+                result, "__self__", None
+            ) is frame.f_locals.get("handle"):
+                events.append({"stage": "register." + operation, "succeeded": event == "c_return"})
+            return
+        if event != "return" or frame.f_code not in codes:
+            return
+        name = codes[frame.f_code]
+        # Rows deliberately mix a stage label with boolean/count/unknown facts.
+        facts: dict[str, object] = {"stage": name}
+        if name == "root":
+            facts["matches_test_root"] = result == config_dir
+        elif name == "owner.birth":
+            facts["token_present"] = bool(result)
+        elif name in {"group_present", "pid_liveness", "zombie"}:
+            facts["result"] = result
+        elif name in {"survivors", "ledger_read"}:
+            facts["count"] = len(result) if isinstance(result, list) else None
+        elif name == "register":
+            facts["root_matches"] = frame.f_locals.get("resolved") == config_dir
+            facts["entry_built"] = isinstance(frame.f_locals.get("entry"), dict)
+            facts["token_present"] = bool(frame.f_locals.get("owner_start"))
+            facts["session_matches"] = frame.f_locals.get("session_id") == "sess-a"
+        elif name == "annotate":
+            facts["matching_row"] = frame.f_locals.get("newest", -1) >= 0
+        events.append(facts)
+
+    if previous is None:
+        sys.setprofile(observe)
+    try:
+        yield events
+    except (AssertionError, ValueError):
+        print(
+            "survivor observation: "
+            + json.dumps(
+                {
+                    "existing_profiler": previous is not None,
+                    "event_limit_reached": len(events) == 64,
+                    "events": events,
+                }
+            ),
+            file=sys.stderr,
+        )
+        raise
+    finally:
+        if sys.getprofile() is observe:
+            sys.setprofile(previous)
+
+
+def test_survivor_diagnostics_are_silent_on_pass_and_preserve_failure(tmp_path, capsys):
+    previous = sys.getprofile()
+    with _survivor_diagnostics(tmp_path):
+        assert _ledger_entries(tmp_path) == []
+    assert capsys.readouterr().err == ""
+    with pytest.raises(ValueError, match="original sentinel"):
+        with _survivor_diagnostics(tmp_path):
+            assert _ledger_entries(tmp_path) == []
+            raise ValueError("original sentinel")
+    output = capsys.readouterr()
+    assert sys.getprofile() is previous
+    assert str(tmp_path) not in output.err
+    assert output.out == ""
+    if previous is None:
+        assert '"stage": "ledger_read", "count": 0' in output.err
+
+    def other_profiler(frame, event, result):
+        pass
+
+    try:
+        sys.setprofile(other_profiler)
+        with pytest.raises(ValueError, match="external profiler sentinel"):
+            with _survivor_diagnostics(tmp_path):
+                assert sys.getprofile() is other_profiler
+                raise ValueError("external profiler sentinel")
+        assert sys.getprofile() is other_profiler
+    finally:
+        sys.setprofile(previous)
+    assert '"existing_profiler": true' in capsys.readouterr().err
+
+
+def test_survivor_stays_in_ledger_and_session_reap_kills_it(tmp_path, monkeypatch, _kill_pids):
+    with _survivor_diagnostics(tmp_path):
+        pid = _bash_bg("sleep 4242 >/dev/null 2>&1 & echo pid=$!", "sess-a", tmp_path, monkeypatch)
+        _kill_pids.append(pid)
+        assert _pid_alive(pid)
+        (entry,) = _ledger_entries(tmp_path)
+        assert entry["session_id"] == "sess-a"
+        assert pid in [s["pid"] for s in entry["survivors"]]
+        assert "detached" not in entry
+
+        assert group_reaper.reap_session_groups("sess-a", config_dir=tmp_path) == 1
+        assert _wait_dead(pid)
+        assert _ledger_entries(tmp_path) == []  # idempotent: nothing left to do
+        assert group_reaper.reap_session_groups("sess-a", config_dir=tmp_path) == 0
 
 
 def test_session_reap_leaves_a_sibling_sessions_survivor(tmp_path, monkeypatch, _kill_pids):

@@ -10209,6 +10209,15 @@ class Session:
         second row. Empty means the receiver mints its own, which is what every
         pre-field sender gets.
         """
+        # Reserved display carriage must never leak through the advisory sender
+        # fallback, including an invalid receipt or a non-Bridge custom kind.
+        # Copy first: spool/live callers may still own the supplied dictionary.
+        sender = dict(sender)
+        display_carriage = {
+            key: sender.pop(key)
+            for key in ("bridge_receipt", "bridge_receipt_source")
+            if key in sender
+        }
         pid = sender.get("pid")
         conversation = sender.get("conversation_name", "")
         model_label = sender.get("model_label", "")
@@ -10301,6 +10310,17 @@ class Session:
             # byte-identical to what this function built before the carriage.
             peer_fields["id"] = entry_id
         details: dict[str, Any] = {"text": wrapped, "body": text, "sender": sender}
+        if chosen == TEAM_BRIDGE_MESSAGE_TYPE and display_carriage:
+            from local_operator.team_bridge.authority import authority_fence
+            from local_operator.team_bridge.display_receipt import (
+                validated_display_receipt,
+            )
+            from local_operator.team_bridge.store import Store as DisplayStore
+
+            runtime = getattr(self, "bridge_runtime", None)
+            if runtime is not None and authority_fence(runtime) is None:
+                owner = DisplayStore(runtime.config_dir).active_owner()
+                details.update(validated_display_receipt(display_carriage, owner=owner))
         if bridge_meta is not None:
             # The internal bridge LOCATOR (H5a/F3) rides the row so the
             # issuance hook beside the durable append can find THIS machine's
@@ -10842,7 +10862,11 @@ class Session:
         await self._emit(
             PeerMessageDeliveredEvent(
                 body=str(message.details.get("body", "")),
-                sender=sender,
+                sender={
+                    key: value
+                    for key, value in sender.items()
+                    if key not in ("bridge_receipt", "bridge_receipt_source")
+                },
                 message_id=message.id,
                 # The row's OWN provenance kind, so the live surface paints the
                 # same card the history replay will (§13.4); empty stays peer.

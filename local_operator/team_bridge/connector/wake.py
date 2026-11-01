@@ -771,7 +771,7 @@ async def deliver_wake(
     session_id: str,
     config_dir: Path,
     bridge_meta: dict[str, Any] | None = None,
-    sender_display: dict[str, str] | None = None,
+    sender_display: dict[str, Any] | None = None,
 ) -> str:
     """SEAM: hand the wake to the designated CoS session (lazy heavy import).
 
@@ -800,6 +800,11 @@ async def deliver_wake(
             value = " ".join(str(sender_display.get(field) or "").split())
             if value:
                 sender[key] = value
+        # This optional display carriage is not admission or model context.
+        # The receiving session independently revalidates its live owner fence.
+        from local_operator.team_bridge.display_receipt import validated_display_receipt
+
+        sender.update(validated_display_receipt(sender_display, owner=owner))
     if session_has_durable_history(session_id):
         # Live, or cold WITH durable history: the primitive owns delivery and
         # answers with the TYPED outcome — no exception-type or message-string
