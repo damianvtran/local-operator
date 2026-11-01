@@ -339,6 +339,52 @@ async def push_item(
     bundle_upload: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
     org_skill: bool = False,
 ) -> PushOutcome:
+    """Serialize an org skill's dispatch so a pending intent has one live owner."""
+    kwargs = dict(
+        kind=kind,
+        local_id=local_id,
+        captured_local=captured_local,
+        accepted=accepted,
+        current_local=current_local,
+        remote_latest=remote_latest,
+        expected_revision=expected_revision,
+        transport=transport,
+        outbox=outbox,
+        operation_id=operation_id,
+        budget=budget,
+        opts=opts,
+        document_builder=document_builder,
+        bundle_attested=bundle_attested,
+        bundle_upload=bundle_upload,
+        org_skill=org_skill,
+    )
+    if kind != "skill" or not org_skill:
+        return await _push_item_inner(**kwargs)
+    with outbox.org_skill_operation(operation_id) as acquired:
+        if not acquired:
+            return PushOutcome("skipped", operation_id=operation_id, reason="operation-in-progress")
+        return await _push_item_inner(**kwargs)
+
+
+async def _push_item_inner(
+    *,
+    kind: Kind,
+    local_id: str,
+    captured_local: Mapping[str, Any] | None,
+    accepted: Mapping[str, Any] | None,
+    current_local: Mapping[str, Any],
+    remote_latest: Mapping[str, Any],
+    expected_revision: str | None,
+    transport: PushTransport,
+    outbox: Outbox,
+    operation_id: str,
+    budget: OperationBudget,
+    opts: MergeOptions = MergeOptions(),
+    document_builder: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
+    bundle_attested: bool = False,
+    bundle_upload: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
+    org_skill: bool = False,
+) -> PushOutcome:
     """Project and conditionally publish one authored item; settle the outbox.
 
     ``expected_revision`` is the opaque remote ETag the local merge input was
@@ -360,7 +406,11 @@ async def push_item(
         kind, captured_local, accepted, current_local, remote_latest, expected_revision
     )
     attempt: Attempt | None = outbox.begin_attempt(
-        operation_id, kind=kind, local_id=local_id, input_fp=input_fp
+        operation_id,
+        kind=kind,
+        local_id=local_id,
+        input_fp=input_fp,
+        recover_org_skill_intent=kind == "skill" and org_skill,
     )
     if attempt is None:
         # Dead-lettered (over the attempt cap), inside its backoff window, or an

@@ -213,6 +213,34 @@ class Outbox:
                     fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
 
+    @contextlib.contextmanager
+    def org_skill_operation(self, operation_id: str) -> Iterator[bool]:
+        """Fence one org-skill dispatch across processes; kernel releases on death.
+
+        This lock is separate from the short outbox metadata lock: it serializes
+        only this operation while a network call is in flight, allowing recovery
+        to distinguish a dead owner from another active dispatcher.
+        """
+        import fcntl
+
+        path = self._path(operation_id)
+        self.dir.mkdir(parents=True, exist_ok=True)
+        fd = os.open(path.with_suffix(".operation.lock"), os.O_CREAT | os.O_RDWR, 0o600)
+        acquired = False
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+            except OSError as exc:
+                if exc.errno not in (errno.EAGAIN, errno.EACCES, errno.EWOULDBLOCK):
+                    raise
+            yield acquired
+        finally:
+            if acquired:
+                with contextlib.suppress(OSError):
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
     def _atomic_write(self, record: OutboxRecord) -> None:
         path = self._path(record.operation_id)
         fd, tmp = tempfile.mkstemp(dir=self.dir, prefix=f".{record.operation_id}.", suffix=".tmp")
@@ -401,6 +429,7 @@ class Outbox:
         max_attempts: int = PUSH_MAX_ATTEMPTS,
         now: str | None = None,
         input_fp: str | None = None,
+        recover_org_skill_intent: bool = False,
     ) -> "Attempt | None":
         """Start (or resume) an attempt; ``None`` = skip this tick.
 
@@ -454,6 +483,21 @@ class Outbox:
                     replay=record.intent,
                 )
             if record.state == "pending":
+                # Only the holder of the per-operation OS lock may recover an
+                # org intent: another live dispatcher could still own a pending
+                # row. Preserve the exact request and generation after a crash.
+                if (
+                    recover_org_skill_intent
+                    and record.kind == "skill"
+                    and isinstance(record.intent, Mapping)
+                    and record.intent.get("unpinned_org_skill") is True
+                ):
+                    self._atomic_write(dataclasses.replace(record, state="pending-reconciliation"))
+                    return Attempt(
+                        generation=record.generation,
+                        attempts=record.attempts,
+                        replay=record.intent,
+                    )
                 # An abandoned attempt (crash between begin and settle): fence it.
                 attempts = record.attempts + 1
                 if attempts > max_attempts and not changed:
