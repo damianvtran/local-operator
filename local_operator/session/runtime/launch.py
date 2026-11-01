@@ -511,6 +511,7 @@ def _spawn_runtime(
     cwd: str,
     *,
     defer_materialise: bool,
+    config_dir: Path | None = None,
     warm: bool = False,
     initial_model: Any = None,
     model_selection_override: bool = False,
@@ -535,11 +536,19 @@ def _spawn_runtime(
     in the ``else`` arm — ``tests/unit/session/runtime/test_session_host.py``
     pins that shape by AST as well as by behaviour.
 
-    The signature is the one every caller and test double already uses; it is
-    deliberately unchanged.
+    ``config_dir`` is the engage store; direct callers default to the runtime
+    environment, just as the child environment builder does.
     """
+    from local_operator.paths import config_dir as runtime_config_dir
     from local_operator.session.runtime import session_host
 
+    # Resolve at the fork boundary, not in a producer: peer sends, panel binds,
+    # and API errands must all retain "no opinion" until this point. In
+    # particular HOME is a valid explicit override, never an omission sentinel.
+    # Exec constructs an in-process Session and the legacy daemon resume forks
+    # separately; those two bypass this boundary and retain their own resolver.
+    cwd = _engage_cwd_for_recorded_move(config_dir or runtime_config_dir(), session_id, cwd)
+    cwd = cwd or str(Path.home())
     if session_host.spawn_authority() == session_host.AUTHORITY_HOST:
         return _spawn_runtime_hosted(
             session_id,
@@ -1308,20 +1317,12 @@ def _live_relay_instance(config_dir: Path) -> str:
 
 
 def _engage_cwd_for_recorded_move(config_dir: Path, session_id: str, cwd: str) -> str:
-    """The directory this engage should start the session in, honouring a handoff.
+    """Adapt the canonical cwd resolver to the spawn boundary's error vocabulary.
 
-    THIN ADAPTER, NO DECISION. Which directory wins — the caller's, the record's
-    source, a third directory — is decided once, in
-    :func:`local_operator.session.cwd_move.spawn_cwd_for_session`, because this is
-    not the only place a session is started (the mobile daemon's resume and
-    ``lop exec`` are the others, and they call the same function). All this adds
-    is the runtime's error vocabulary, so a refusal surfaces as the startup error
-    the engage path already understands.
-
-    ``actionable`` carries the sentence through: ``AttachedSession`` re-raises a
-    ``RuntimeStartupError`` as a plain ``ConnectionError`` unless it has one, and
-    the guidance ("delete that file", "recreate that directory") is exactly what
-    a person needs (agent review round 1, MINOR-1).
+    Exec's in-process lifetime and the legacy daemon's separate fork cannot use
+    ``_spawn_runtime``; they call the same resolver at their own start boundary.
+    ``actionable`` preserves recovery guidance through AttachedSession instead
+    of replacing the refusal with its generic connection-error sentence.
     """
     from local_operator.session import cwd_move
 
@@ -1419,12 +1420,7 @@ async def engage_runtime(
     if handed_off:
         raise RuntimeStartupError(handed_off)
 
-    # -----------------------------------------------------------------
-    # INV-2: A SESSION THAT MOVED ITSELF IS ENGAGED WHERE IT MOVED TO.
-    # -----------------------------------------------------------------
-    # The decision and its whole rationale live in one helper so the test rig
-    # can drive it without standing a runtime up; this is the only call site.
-    cwd = _engage_cwd_for_recorded_move(config_dir, session_id, cwd)
+    # Spawn cwd is resolved only if a candidate actually has to be started.
     if not getattr(work, "command_id", ""):
         # Identity is what makes a retry safe. A caller that did not supply one
         # gets one here rather than being silently non-idempotent.
@@ -1584,6 +1580,7 @@ async def engage_runtime(
                     session_id,
                     cwd,
                     defer_materialise=defer,
+                    config_dir=config_dir,
                     warm=isinstance(work, WarmErrand),
                     initial_model=work.initial_model if isinstance(work, WarmErrand) else None,
                     model_selection_override=(
@@ -1643,6 +1640,7 @@ async def engage_runtime(
                     session_id,
                     cwd,
                     defer_materialise=defer,
+                    config_dir=config_dir,
                     warm=isinstance(work, WarmErrand),
                     initial_model=work.initial_model if isinstance(work, WarmErrand) else None,
                     model_selection_override=(

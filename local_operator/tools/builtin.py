@@ -17281,8 +17281,8 @@ def _describe_sessions_approval(args: dict[str, Any], cwd: str) -> str:
         # "after this turn" no longer reads as the moment it happens, because a busy
         # boundary defers the stop.
         return (
-            f"move to {destination} (now in {source}) — the session restarts there, "
-            "stopping first if nothing is attached to follow it"
+            f"move to {destination} (now in {source}) — the session restarts there; "
+            "with nothing attached, it stops and resumes there on the next engage"
         )
     if op == "stop":
         if peer:
@@ -20701,7 +20701,9 @@ async def _sessions_move(
             # Swapping it for a static remedy withheld exactly that (design review
             # round 1, D2) — the same boundary the shell, the path tools and
             # public_copy consult.
-            return refuse("sessions_move_outside_confinement", sentence=denial)
+            return refuse(
+                "sessions_move_outside_confinement", sentence=denial.removeprefix("refused: ")
+            )
         # THE ANSWER IS READ BEFORE THE PROMISE IS WORDED, and what it says decides
         # both. A process hosting no runtime answers "" — the durable marker is still
         # exactly what the next open consumes. A host that cannot restart this runtime

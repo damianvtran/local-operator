@@ -37,7 +37,6 @@ import asyncio
 import base64
 import json
 import logging
-import os
 import uuid
 from contextvars import ContextVar
 from pathlib import Path
@@ -2746,29 +2745,6 @@ class AttachClient:
                 pass
 
 
-def _engage_cwd(config_dir: Path, session_id: str, placeholder: str) -> str:
-    """The directory to engage ``session_id`` in, honouring a recorded move.
-
-    ``placeholder`` is what the caller would have spawned at with no opinion — the
-    home directory, for every caller that has none. It is treated as NO opinion
-    when it IS that placeholder, because a caller cannot name "home" as a choice
-    it never made; anything else passes through untouched so an explicit third
-    directory still outranks the record (the rule ``engage_runtime`` applies).
-
-    A refusal from the resolver — an unreadable record, or a destination that can
-    no longer be entered — propagates: a wrong spawn is worse than a sentence.
-    """
-    from local_operator.session import cwd_move
-
-    requested = (
-        ""
-        if not placeholder.strip()
-        or os.path.realpath(placeholder) == os.path.realpath(str(Path.home()))
-        else placeholder
-    )
-    return cwd_move.spawn_cwd_for_session(config_dir, session_id, requested) or placeholder
-
-
 async def engage_session_client(
     config_dir: Path,
     session_id: str,
@@ -2798,19 +2774,10 @@ async def engage_session_client(
     """
     from local_operator.session.runtime.launch import engage_runtime
 
-    # A RECORDED MOVE WINS OVER THE HOME PLACEHOLDER (agent review round 2,
-    # MAJOR). This helper passed ``Path.home()`` for every caller — the phone's
-    # message route, a peer send, the ask path — because a transcript does not
-    # record a cwd, and home is always a valid spawn gate. But home is not a
-    # CHOICE: a session whose last runtime recorded a move must be started in the
-    # destination, or the successor's boot reconcile settles the move
-    # ``superseded`` and the next start goes back to the source. Resolving HERE,
-    # in the one engage-and-dial seam, is what covers every caller at once; a
-    # caller that names a real third directory still wins, because the resolver
-    # treats it as an explicit choice.
+    # No cwd opinion: only the spawn boundary may supply a home fallback.
     outcome = await engage_runtime(
         session_id,
-        _engage_cwd(config_dir, session_id, str(Path.home())),
+        "",
         work,
         config_dir=config_dir,
         deadline_s=deadline_s,

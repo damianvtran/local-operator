@@ -13,7 +13,6 @@ import json
 import re
 import sys
 import uuid
-from pathlib import Path
 
 import httpx
 import pytest
@@ -653,17 +652,10 @@ async def test_the_resume_route_starts_the_session_in_its_recorded_move(tmp_path
 async def test_a_message_to_a_stopped_session_engages_in_its_recorded_destination(
     tmp_path, monkeypatch
 ):
-    """THE SHARED ENGAGE SEAM, NOT EACH CALLER (agent review round 2, MAJOR).
+    """Omission must reach the spawn boundary, not become an explicit HOME.
 
-    Every surface that turns "no runtime" into "a runtime" comes through
-    ``engage_session_client``, and it passed ``Path.home()`` for all of them. A
-    phone MESSAGE to a session with a recorded move therefore started it in home
-    and its boot reconcile settled the move ``superseded`` — while the resume route
-    beside it was already fixed. Home is a PLACEHOLDER, not a choice: it is what a
-    caller passes when it has no opinion, so the record decides.
-
-    Driven here through the real helper with the real resolver, and the engage it
-    reaches is captured to show the destination is what travels.
+    The helper has no caller cwd argument. Resolving here duplicated the spawn
+    policy and left peer-send's separate producer uncovered (R3-1).
     """
     from local_operator.mobile import attach_client as attach_module
     from local_operator.paths import config_dir
@@ -683,19 +675,7 @@ async def test_a_message_to_a_stopped_session_engages_in_its_recorded_destinatio
     )
     cwd_move.accept_handoff(config_dir(), session_id, intent)
 
-    # The resolver half: the placeholder is no opinion, the record decides, and a
-    # real third directory is still an explicit choice.
-    assert attach_module._engage_cwd(config_dir(), session_id, str(Path.home())) == str(
-        destination.resolve()
-    )
-    third = tmp_path / "third"
-    third.mkdir()
-    assert attach_module._engage_cwd(config_dir(), session_id, str(third)) == str(third)
-    assert attach_module._engage_cwd(config_dir(), "no-such-session", str(Path.home())) == str(
-        Path.home()
-    )
-
-    # The seam half: what the helper resolved is what the engage is given.
+    # Only the spawn boundary resolves this pending move.
     seen: list[str] = []
 
     async def fake_engage(session_id: str, cwd: str, work, **kwargs):
@@ -711,4 +691,4 @@ async def test_a_message_to_a_stopped_session_engages_in_its_recorded_destinatio
         await attach_module.engage_session_client(
             config_dir(), session_id, object()  # type: ignore[arg-type]
         )
-    assert seen == [str(destination.resolve())], seen
+    assert seen == [""], seen

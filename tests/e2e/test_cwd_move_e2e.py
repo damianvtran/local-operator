@@ -688,3 +688,57 @@ def test_a_third_directory_supersedes_a_recorded_handoff_exactly_once(
         assert other.poll() is None
     finally:
         _reap(other)
+
+
+@pytest.mark.asyncio
+async def test_cold_peer_send_commits_a_recorded_handoff_in_the_real_runtime(
+    headless_tui_env: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R3-1: a delivered/acked wake must not secretly cancel the session's move.
+
+    Do not replace engage, publication, or reconcile with a double: those seams
+    all passed while the peer producer supplied its implicit HOME as an override.
+    The spawn observer only retains the actual child handles for exact-group
+    cleanup; arguments and results travel through unchanged.
+    """
+    from local_operator.mobile.peer_send import deliver_peer_message_outcome
+    from local_operator.session.runtime import launch
+
+    config = headless_tui_env
+    _seed(config, SESSION_ID)
+    source, destination = tmp_path / "source", tmp_path / "destination"
+    source.mkdir()
+    destination.mkdir()
+    intent = cwd_move.enqueue_self_move(
+        config, SESSION_ID, requested_cwd=str(destination), effective_cwd=str(source), owner_pid=1
+    )
+    assert cwd_move.accept_handoff(config, SESSION_ID, intent) is not None
+    for key, value in NO_NOTIFY_ENV.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("PYTHONPATH", _REPO_ROOT)
+    children: list[subprocess.Popen[bytes]] = []
+    real_spawn = launch._spawn_runtime
+
+    def observe(*args: Any, **kwargs: Any) -> subprocess.Popen[bytes]:
+        child = real_spawn(*args, **kwargs)
+        children.append(child)
+        return child
+
+    monkeypatch.setattr(launch, "_spawn_runtime", observe)
+    try:
+        outcome = await deliver_peer_message_outcome(
+            None,
+            session_id=SESSION_ID,
+            text="Reply briefly: cold peer handoff regression",
+            mode="mailbox",
+            wake=True,
+            sender={"session_id": "synthetic0001", "name": "handoff regression"},
+        )
+        assert outcome.state == "delivered" and outcome.wake == "acked", outcome
+        assert children, "the target was genuinely cold"
+        assert _record_cwd(config, children[0].pid) == str(destination.resolve())
+        settled = cwd_move.read_move_intent(config, SESSION_ID)
+        assert settled is not None and settled.stage == cwd_move.STAGE_COMMITTED
+    finally:
+        for child in children:
+            _reap(child)

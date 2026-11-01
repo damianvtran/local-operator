@@ -888,8 +888,8 @@ def test_describe_approval_sentences_are_pinned() -> None:
     # "after this turn" implied a schedule the idle predicate can defer, and with
     # nothing attached the session stops first.
     moved = (
-        "move to ~/work/dest (now in ~/work/src) — the session restarts there, "
-        "stopping first if nothing is attached to follow it"
+        "move to ~/work/dest (now in ~/work/src) — the session restarts there; "
+        "with nothing attached, it stops and resumes there on the next engage"
     )
     assert _describe_sessions_approval({"op": "move", "cwd": "~/work/dest"}, "~/work/src") == moved
     assert _describe_sessions_approval({"op": "move", "cwd": "../dest"}, "~/work/src") == moved

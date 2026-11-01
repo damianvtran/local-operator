@@ -537,9 +537,9 @@ def spawn_cwd_for_session(root: Path, session_id: str, requested_cwd: str | None
 
     THE ONE RESOLVER EVERY SPAWN PATH CALLS. A session's cwd is a spawn input, so
     "the session moved" can only be honoured where the next process is started —
-    and that is not one place: ``engage_runtime``, the mobile daemon's resume and
-    ``lop exec`` each start a runtime, and a measured review round found that two
-    of the three ignored the record entirely (agent review round 1, MAJOR-2; QA
+    and that is not one place: ``launch._spawn_runtime``, the mobile daemon's
+    separate fork and the in-process ``lop exec`` each start a runtime. A review
+    found that two of the three ignored the record entirely (round 1, MAJOR-2; QA
     round 1, Q1). Putting the decision here, rather than in each caller, is what
     makes "every path that starts a session without an explicit destination
     honours the move" a property instead of a claim.
@@ -581,8 +581,9 @@ def spawn_cwd_for_session(root: Path, session_id: str, requested_cwd: str | None
         raise HandoffDestinationUnavailable(
             pending.destination_cwd,
             f"this session's recorded move is to {pending.destination_cwd}, which can no "
-            "longer be entered — recreate that directory, or ask the session to move "
-            "somewhere else (sessions op='move') and try again",
+            "longer be entered — recreate that directory, or start it from an existing directory "
+            "other than the recorded source with "
+            f"`cd /existing/directory && lop exec --resume {session_id} 'continue'`",
         ) from refused
     return pending.destination_cwd
 

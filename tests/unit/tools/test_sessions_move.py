@@ -473,6 +473,7 @@ async def test_a_destination_outside_the_confinement_is_refused_and_withdrawn(
     result = await _move(context, cwd=str(outside))
     assert _code(result) == "sessions_move_outside_confinement", result.text
     assert "confined" in result.text, result.text
+    assert result.text.count("refused") == 1, result.text
     # The root and the offending path, both named: that is what makes the refusal
     # actionable without provoking a second tool's error.
     assert str(inside.resolve()) in result.text, result.text
@@ -569,7 +570,7 @@ def test_the_approval_card_names_the_stop_when_nothing_can_follow(tmp_path: Path
     source.mkdir()
     destination.mkdir()
     card = _describe_sessions_approval({"op": "move", "cwd": "../dest"}, str(source))
-    assert "restarts there" in card and "stopping first if nothing is attached" in card, card
+    assert "with nothing attached, it stops and resumes there on the next engage" in card, card
 
 
 def test_a_repeat_request_does_not_demote_a_recorded_handoff(tmp_path: Path) -> None:

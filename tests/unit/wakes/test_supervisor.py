@@ -2011,7 +2011,7 @@ def test_due_sessions_includes_a_pending_trigger_target(tmp_path: Path) -> None:
     record = _pending_record(root, session_id)
 
     due = _due_sessions({}, NOW_MS, triggers={session_id: record})
-    assert due == [(session_id, os.path.expanduser("~"), NOW_MS)]
+    assert due == [(session_id, "", NOW_MS)], "missing cwd stays omitted until spawn"
 
     # The cwd prefers her own index entry when one exists.
     write_entry(root, session_id, cwd=str(root), schedules=[_schedule(NOW_MS + 60_000)])
@@ -2227,3 +2227,17 @@ async def test_an_ordinary_retirement_leaves_its_runtimes_to_their_own_residency
 
     assert await serve(tmp_path) == 0
     assert swept == []
+
+
+@pytest.mark.parametrize("producer", ["schedule", "spool", "trigger"])
+def test_due_sessions_does_not_turn_an_omitted_cwd_into_an_explicit_home(producer: str) -> None:
+    """Every wake producer leaves cwd policy to the actual spawn boundary."""
+    sid = "cwdwake00001"
+    index = {sid: {"schedules": [_schedule(NOW_MS - 1000)]}} if producer == "schedule" else {}
+    kwargs: dict[str, Any] = (
+        {"spooled": {sid: {"noted_at_ms": NOW_MS}}}
+        if producer == "spool"
+        else {"triggers": {sid: {"noted_at_ms": NOW_MS}}} if producer == "trigger" else {}
+    )
+    due = _due_sessions(index, NOW_MS, **kwargs)
+    assert due and due[0][0:2] == (sid, "")

@@ -2,7 +2,7 @@
 
 A session that moved itself with nobody attached writes its destination to the
 move marker and stops (``cwd_move.accept_handoff``). Every later engage passes
-through ``engage_runtime``, which reads that record and starts the session in
+through ``_spawn_runtime``, which reads that record and starts the session in
 the destination — unless the caller names a third directory, which is an
 explicit choice and wins.
 
@@ -176,7 +176,7 @@ def test_a_committed_move_still_says_where_the_session_lives(
 async def test_the_spawn_receives_the_destination_not_the_callers_directory(
     tree: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """END TO END AT THE SEAM THAT MATTERS: what ``_spawn_runtime`` is handed.
+    """END TO END AT THE SEAM THAT MATTERS: what the actual fork route is handed.
 
     Everything between the guard and the fork is the engine's own arbitration, so
     the fake spawn stops the engage the moment it is asked to fork. The assertion
@@ -192,8 +192,10 @@ async def test_the_spawn_receives_the_destination_not_the_callers_directory(
         raise RuntimeStartupError("spawn refused by the test")
 
     from local_operator import memory_guard
+    from local_operator.session.runtime import session_host
 
-    monkeypatch.setattr(launch, "_spawn_runtime", _refuse_spawn)
+    monkeypatch.setattr(session_host, "spawn_authority", lambda: session_host.AUTHORITY_LOCAL)
+    monkeypatch.setattr(launch, "_spawn_runtime_local", _refuse_spawn)
     monkeypatch.setattr(
         memory_guard,
         "admission_check",
@@ -226,7 +228,10 @@ def test_a_destination_that_vanished_refuses_instead_of_adopting_it(
     destination.rmdir()
     with pytest.raises(RuntimeStartupError) as refused:
         _engage_cwd_for_recorded_move(config, OWN, str(source))
-    assert "can no longer be entered" in str(refused.value), str(refused.value)
+    assert "can no longer be entered" in str(refused.value)
+    assert f"cd /existing/directory && lop exec --resume {OWN} 'continue'" in str(
+        refused.value
+    ), str(refused.value)
     assert refused.value.actionable, "the guidance must survive AttachedSession's re-wrap"
     # STILL PENDING, not superseded and not committed: the move is not lost.
     fresh = cwd_move.read_move_intent(config, OWN)
@@ -277,3 +282,33 @@ def test_every_spawn_path_shares_one_resolver(tree: tuple[Path, Path, Path]) -> 
     assert spawn_cwd_for_session(config, OWN, str(third)) == str(third)
     pending = cwd_move.read_move_intent(config, OWN)
     assert pending is not None and pending.stage == cwd_move.STAGE_HANDOFF
+
+
+@pytest.mark.parametrize("route", ["local", "host"])
+@pytest.mark.parametrize("choice", ["omitted", "home", "third"])
+def test_spawn_boundary_resolves_every_producer_but_keeps_explicit_choices(
+    tree: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch, route: str, choice: str
+) -> None:
+    """No producer owns policy; both actual fork routes see the same decision."""
+    from local_operator.session.runtime import session_host
+
+    config, source, destination = tree
+    _handoff(config, source=source, destination=destination)
+    third = source.parent / "third"
+    third.mkdir()
+    requested = {"omitted": "", "home": str(Path.home()), "third": str(third)}[choice]
+    expected = str(destination) if choice == "omitted" else requested
+    seen: list[str] = []
+
+    def fork(session_id: str, cwd: str, **kwargs: Any) -> Any:
+        seen.append(cwd)
+        return object()
+
+    monkeypatch.setattr(session_host, "spawn_authority", lambda: route)
+    monkeypatch.setattr(launch, "_spawn_runtime_local", fork)
+    monkeypatch.setattr(launch, "_spawn_runtime_hosted", fork)
+    launch._spawn_runtime(OWN, requested, defer_materialise=False, config_dir=config)
+    assert seen == [expected]
+    settled = cwd_move.reconcile_move(config, OWN, effective_cwd=expected)
+    assert settled is not None
+    assert settled.stage == ("committed" if choice == "omitted" else "superseded")

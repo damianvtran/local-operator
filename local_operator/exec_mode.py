@@ -920,6 +920,8 @@ def _make_default_session_factory(exec_args: ExecArgs, team: Any | None = None) 
             # an ordinary attribute, so it can never masquerade as a user flag.
             team_model_suggestion=team.model_suggestion if team is not None else None,
         )
+        # Exec constructs an in-process Session, so it never calls _spawn_runtime.
+        # Keep the shared resolver here at that separate lifetime boundary.
         # A RESUME HONOURS THE SESSION'S RECORDED MOVE, like every other path that
         # starts a session without being told where. `lop exec --resume` spawned at
         # the PROCESS's cwd, which is a caller naming a directory for a session
