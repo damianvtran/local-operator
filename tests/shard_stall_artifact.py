@@ -21,6 +21,7 @@ from typing import Any
 
 ENV_INVOCATION = "LOCAL_OPERATOR_SHARD_STALL_INVOCATION"
 ENV_REGISTRY = "LOCAL_OPERATOR_SHARD_STALL_REGISTRY"
+REGISTRATION_FAILURE = ".retention-registration-failed"
 _ID = re.compile(r"ci-([0-9]+)-([0-9]+)-([0-9]+\.[0-9]+)-([0-9]+)", re.ASCII)
 _WORKER = re.compile(r"worker-[0-9]+\.log", re.ASCII)
 FILE_CAP = 1024 * 1024
@@ -43,6 +44,32 @@ def _directory(path, *, dir_fd=None):
     # Descriptor-relative descent pins the directory even if its name is swapped;
     # O_NOFOLLOW rejects a substituted root/run symlink instead of following it.
     return os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dir_fd)
+
+
+def note_registration_failure(directory: Path) -> None:
+    """Deny retention on lifecycle failure without disabling the independent timer.
+
+    This exact, empty marker is denial-only: no contents are captured or trusted
+    as worker provenance. It also overrides any receipt left by a failed final
+    registration write. Never replace unknown files. If even the original run
+    directory is unwritable, persistence is best-effort; absence of a receipt
+    still cannot authorize a log export. No console/timer behavior changes.
+    """
+    directory_fd = marker_fd = None
+    try:
+        directory_fd = _directory(directory)
+        marker_fd = os.open(
+            REGISTRATION_FAILURE,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=directory_fd,
+        )
+    except OSError:
+        pass
+    finally:
+        for fd in (marker_fd, directory_fd):
+            if fd is not None:
+                os.close(fd)
 
 
 def registered_handle(path: Path, registry: Path):
@@ -216,6 +243,10 @@ def _copy_worker(run_fd, name, output, budget, receipt):
     return entry
 
 
+class _RegistrationFailed(Exception):
+    """A denial-only lifecycle marker forbids all retention for this invocation."""
+
+
 def stage(
     root: Path,
     invocation: str,
@@ -236,7 +267,10 @@ def stage(
     limited (explicit policy truncation/omission, never a completeness claim).
     Exit 2: rejected (boundary/protocol), error (I/O), or partial (some retained
     bytes plus a failure). A missing explicitly handed registry is a protocol
-    error; no handoff at all (e.g. setup skipped) is healthy absence.
+    error; no handoff at all (e.g. setup skipped) is healthy absence. A persisted
+    registration-failure marker yields error/no logs even if a receipt remains.
+    Optional retention failure never disables the independent report/hard timer;
+    its fallback writer is not registered for export.
     Failed/partial artifacts are manifested locally but
     NOT published: the workflow emits an upload path only after a zero exit.
     A failed stage does not authorize an upload of any pre-existing directory.
@@ -271,6 +305,14 @@ def stage(
         root_fd = _directory(root)
         run_fd = _directory(invocation, dir_fd=root_fd)
         manifest["status"] = "collected"
+        try:
+            os.stat(REGISTRATION_FAILURE, dir_fd=run_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            # Mere presence is denial-only, including symlink/nonregular markers.
+            # Never follow/read it or scan/export fallback worker files.
+            raise _RegistrationFailed
         if registry is None:
             eligible = []
         else:
@@ -296,6 +338,8 @@ def stage(
                 manifest.update(status="omitted-cap", reason="directory-scan-limit")
             else:
                 manifest.update(status="missing", reason="no-current-invocation-worker-files")
+    except _RegistrationFailed:
+        manifest.update(status="error", reason="worker-registration-failed")
     except FileNotFoundError:
         manifest.update(status="missing", reason="current-invocation-directory-or-registry-missing")
     except OSError as exc:

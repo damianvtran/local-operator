@@ -529,9 +529,13 @@ class _WorkerTimer:
         # failed open once per test for the rest of the run.
         self._disabled = False
         # Only CI retention asks for a pre-test writer/ownership handoff. Keep
-        # timer arming and all local-run behavior unchanged; registration failure
-        # disables this optional diagnostic rather than failing pytest.
-        from tests.shard_stall_artifact import ENV_REGISTRY, registered_handle
+        # timer arming and all local-run behavior unchanged. Retention failure
+        # must never disable the independent report timer or explicit hard bound.
+        from tests.shard_stall_artifact import (
+            ENV_REGISTRY,
+            note_registration_failure,
+            registered_handle,
+        )
 
         registry = os.environ.pop(ENV_REGISTRY, "")
         self._registered = bool(registry)
@@ -539,7 +543,11 @@ class _WorkerTimer:
             try:
                 self._handle = registered_handle(self._path, Path(registry))
             except (OSError, ValueError):
-                self._disabled = True
+                # Fail retention closed, not the existing watchdog: arm() keeps
+                # its original log-open/timer error handling and destination.
+                # Never represent a fallback writer as registered provenance.
+                self._registered = False
+                note_registration_failure(self._path.parent)
 
     def bound_for(self, nodeid: str) -> tuple[float, bool]:
         """The ``(seconds, exit)`` to arm for ``nodeid``.
@@ -600,8 +608,10 @@ class _WorkerTimer:
                 # A CI registered handle must never silently reopen a replaced
                 # pathname as though it were the original writer inode.
                 if self._registered:
-                    self._disabled = True
-                    return
+                    from tests.shard_stall_artifact import note_registration_failure
+
+                    self._registered = False
+                    note_registration_failure(self._path.parent)
                 self._handle = self._path.open("w", encoding="utf-8")
             self._handle.write(f"{ARM_MARKER}{nodeid} exceeded {bound:g}s; every thread follows.\n")
             self._handle.flush()

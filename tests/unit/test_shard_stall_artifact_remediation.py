@@ -328,6 +328,89 @@ def test_missing_registry_handoff_is_error_but_no_handoff_is_healthy(tmp_path):
     assert json.loads((tmp_path / "absent/manifest.json").read_text())["status"] == "missing"
 
 
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "none",
+        "normal",
+        "missing",
+        "invalid",
+        "permission",
+        "descriptor",
+        "after-receipt",
+        "closed-handle",
+    ],
+)
+def test_r4_optional_registration_failure_preserves_existing_hard_timer(
+    tmp_path, monkeypatch, failure
+):
+    import errno
+
+    from tests import shard_stall_watchdog as watchdog
+
+    run = tmp_path / "root" / RUN
+    run.mkdir(parents=True)
+    registry = tmp_path / "owners"
+    registry.mkdir()
+    monkeypatch.setattr(watchdog, "_RUN_DIR", run)
+    monkeypatch.delenv(artifact.ENV_REGISTRY, raising=False)
+    if failure != "none":
+        handoff = registry
+        if failure == "missing":
+            handoff = tmp_path / "missing-registry"
+        elif failure == "invalid":
+            handoff = tmp_path / "not-a-directory"
+            handoff.write_text("invalid registry")
+        monkeypatch.setenv(artifact.ENV_REGISTRY, str(handoff))
+    if failure in ("permission", "descriptor", "after-receipt"):
+        code = errno.EACCES if failure == "permission" else errno.EMFILE
+        original_registration = artifact.registered_handle
+
+        def unavailable(*args, **kwargs):
+            if failure == "after-receipt":
+                # A receipt may have reached disk before the final write/close
+                # failed. Denial must override it, never certify fallback bytes.
+                with original_registration(*args, **kwargs):
+                    pass
+            raise OSError(code, "synthetic registration failure")
+
+        monkeypatch.setattr(artifact, "registered_handle", unavailable)
+    calls = []
+
+    class FakeTimer:
+        def dump_traceback_later(self, seconds, **kwargs):
+            calls.append((seconds, kwargs))
+
+        def cancel_dump_traceback_later(self):
+            pass
+
+    monkeypatch.setattr(watchdog, "faulthandler", FakeTimer())
+    timer = watchdog._WorkerTimer(240, hard=(300, True))
+    try:
+        if failure == "closed-handle":
+            assert timer._handle is not None
+            timer._handle.close()
+        timer.arm("tests/synthetic.py::test_case")
+        assert not timer._disabled
+        assert timer._armed
+        assert len(calls) == 1
+        assert calls[0][0] == 300
+        assert calls[0][1] == {"file": timer._handle, "repeat": False, "exit": True}
+        assert timer._path.read_text().startswith(watchdog.ARM_MARKER)
+        assert artifact.ENV_REGISTRY not in os.environ
+        if failure not in ("none", "normal"):
+            manifest = artifact.stage(run.parent, RUN, tmp_path / "out", registry=registry)
+            assert manifest["exit_code"] == 2
+            assert manifest["status"] == "error"
+            assert manifest["reason"] == "worker-registration-failed"
+            assert manifest["output_bytes"] == 0
+            assert manifest["files"] == []
+            assert not list((tmp_path / "out").glob("worker-*.log"))
+    finally:
+        if timer._handle is not None:
+            timer._handle.close()
+
+
 def test_r3_wrong_source_type_is_nonzero_and_manifest_truthful(tmp_path):
     root = tmp_path / "regular-root"
     root.write_text("not a directory")
