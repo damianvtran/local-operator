@@ -59,8 +59,19 @@ class Kernel:
         return self.rows[pid][:3]
 
     def send(self, pgid, signum):
+        """Delivery marks the group terminal; it does NOT reap (the wrapper's wait does).
+
+        The earlier fake popped the row on delivery, which made every post-signal
+        census describe a number nobody held and turned healthy runs into
+        pin_lost -- a fake that could not express the state the design is built on.
+        """
         self.sent.append((pgid, signum))
-        self.rows.pop(pgid, None)
+        self.corpses.update(pid for pid, row in self.rows.items() if row[1] == pgid)
+
+    def reap(self, pid):
+        """What subprocess.wait() does to the real world: give up the corpse."""
+        self.rows.pop(pid, None)
+        self.corpses.discard(pid)
 
     def cap(self, *, send=None, leader=None):
         return owned.OwnedGroup.capture(
@@ -262,6 +273,7 @@ def test_the_grace_loop_costs_no_census_and_signals_cost_at_most_two(
     """Condition: census_passes <= 2 per signal, zero per grace tick."""
     kernel = Kernel()
     cap = kernel.cap()
+    kernel.corpses.add(kernel.leader)
     kernel.rows[20] = (kernel.leader, kernel.leader, kernel.leader, "child")
     monkeypatch.setattr(
         wrapper,
@@ -291,6 +303,11 @@ def test_the_grace_loop_costs_no_census_and_signals_cost_at_most_two(
     monkeypatch.setenv("LOCAL_OPERATOR_SCRATCHPAD", str(tmp_path))
     before = kernel.censuses
     out = io.StringIO()
+    # TERMINAL, not a timeout: the corpse leader makes `leader_terminal` true on the
+    # first tick, so the run reaches the grace loop deterministically instead of
+    # spinning for ever -- `poll` is no longer the exit driver, and a live-leader
+    # `timeout=None` shape would never leave this loop. It also exercises the
+    # `inf` horizon B2 fixed.
     assert wrapper.run(["synthetic"], timeout=None, grace=0.05, stream=out) == 0, out.getvalue()
     # One refresh proves, then each signal re-proves: two complete strict scans
     # per proof. Nothing here runs a census once per poll or per grace tick.
@@ -320,25 +337,30 @@ def test_the_leader_is_not_reaped_before_the_terminal_census(wrapper, monkeypatc
     """Design test 3: poll()/wait() must not run while the pin is still needed."""
     kernel = Kernel()
     cap = kernel.cap()
-    kernel.corpses.add(kernel.leader)
+    kernel.corpses.update({kernel.leader, 20})
     kernel.rows[20] = (kernel.leader, kernel.leader, kernel.leader, "child")
 
     class Process:
         pid = 10
 
         def poll(self):
-            assert kernel.sent, "poll() would reap the leader before the census"
+            # The census under the pin must have run BEFORE the corpse is given
+            # up; `poll` is the reap. Ordering is the property, not "a signal
+            # happened": a run whose members are already corpses sends nothing.
+            assert kernel.censuses >= 2, "poll() reaped the leader before the terminal census"
+            kernel.reap(10)
             return 0
 
         def wait(self, **_):
-            assert kernel.sent, "wait() would reap the leader before the census"
+            assert kernel.censuses >= 2, "wait() reaped the leader before the terminal census"
+            kernel.reap(10)
             return 0
 
     _wrapper_owner(wrapper, monkeypatch, cap, Process())
     monkeypatch.setenv("LOCAL_OPERATOR_SCRATCHPAD", str(tmp_path))
     out = io.StringIO()
     assert wrapper.run(["synthetic"], timeout=None, grace=0.05, stream=out) == 0, out.getvalue()
-    assert kernel.sent, "the run must have signalled before any reap"
+    assert kernel.censuses >= 2, "the terminal census must have run"
 
 
 def test_sigchld_ignored_at_entry_is_refused_with_a_named_reason(monkeypatch):
@@ -379,3 +401,167 @@ def test_a_zombie_grandchild_does_not_hold_the_cleanup_unproven(wrapper, monkeyp
     assert wrapper.run(["synthetic"], timeout=None, grace=0.05, stream=out) == 0, out.getvalue()
     # Nothing live: the run reports clean, and it did so without a signal.
     assert kernel.sent == []
+
+
+def test_a_darwin_shaped_identity_provider_does_not_refuse_the_incident_shape():
+    """B1: the corpse is the RESERVATION, never an identity proof.
+
+    Darwin's `kernel_identity` raises for a zombie (`getsid` fails on a corpse),
+    so proving PG/SID over the CENSUS UNION refused a corpse leader plus a live
+    grandchild on the operator's platform -- rc 126 with the child still running,
+    the exact bug this PR exists to kill. The live set is what carries an identity
+    proof; the corpse carries the reservation.
+    """
+    kernel = Kernel()
+    cap = kernel.cap()
+    kernel.corpses.add(kernel.leader)
+    kernel.rows[20] = (kernel.leader, kernel.leader, kernel.leader, "grandchild")
+
+    def darwin_identity(pid):
+        if pid in kernel.corpses:
+            raise owned.Unknown("actual parent/PG/SID unavailable (zombie)")
+        return kernel.rows[pid][:3]
+
+    cap.identity = darwin_identity
+    verdict = cap.signal(signal.SIGKILL, deadline=kernel.clock() + 5.0)
+    assert verdict.status == "SIGNALED", verdict.reason
+    assert verdict.anchor == "leader-reservation"
+    assert kernel.sent == [(10, signal.SIGKILL)]
+
+
+def test_a_member_that_exits_between_census_and_sample_is_recorded_not_refused():
+    """The union keeps amnesty: a vanished member is gone, not unproven.
+
+    Refusing here would report a healthy gate as a cleanup failure, which is the
+    opposite of what the union's "recorded, not set-equal" contract promises.
+    """
+    kernel = Kernel()
+    cap = kernel.cap()
+    kernel.rows[20] = (kernel.leader, kernel.leader, kernel.leader, "grandchild")
+    original = kernel.samples
+
+    def vanishing(pids):
+        # 20 is seen by the census, then exits before the sample is taken.
+        return {pid: sample for pid, sample in original(pids).items() if pid != 20}
+
+    cap.samples = vanishing
+    verdict = cap.signal(signal.SIGKILL, deadline=kernel.clock() + 5.0)
+    assert verdict.status == "SIGNALED", verdict.reason
+    assert cap.probe.get("vanished") == [20]
+
+
+def test_a_run_without_a_timeout_no_longer_compares_against_none(wrapper, monkeypatch, tmp_path):
+    """B2 control: `--timeout`-less is `inf`, so `now >= deadline` compares floats.
+
+    On the `None` form this run raises `TypeError: '>=' not supported between
+    'float' and 'NoneType'` in `leader_terminal`, and every such invocation dies.
+    """
+    kernel = Kernel()
+    cap = kernel.cap()
+    for pid in (kernel.leader,):
+        kernel.corpses.add(pid)
+    kernel.rows[20] = (kernel.leader, kernel.leader, kernel.leader, "child")
+    kernel.corpses.add(20)
+
+    class Process:
+        pid = 10
+
+        def poll(self):
+            kernel.reap(10)
+            return 0
+
+        def wait(self, **_):
+            kernel.reap(10)
+            return 0
+
+    _wrapper_owner(wrapper, monkeypatch, cap, Process())
+    monkeypatch.setenv("LOCAL_OPERATOR_SCRATCHPAD", str(tmp_path))
+    out = io.StringIO()
+    assert wrapper.run(["synthetic"], timeout=None, grace=0.05, stream=out) == 0, out.getvalue()
+
+
+LOSS_OF_AUTHORITY_SIGNAL_GUARD = (
+    "                if proof_failed:\n"
+    "                    break  # no automatic signal retry after loss of authority\n"
+)
+
+
+def test_the_discarded_authority_guard_has_an_executed_deletion_control(
+    wrapper, monkeypatch, tmp_path
+):
+    """The :754 guard, discriminated: a latched loss must never be followed by a send.
+
+    Intact, a run whose authority is refused mid-run sends NOTHING afterwards even
+    though every later refresh would verify again -- `proof_failed` is the memory
+    that the refusal happened. The mutant deletes that memory and signals anyway.
+    """
+    ASK = {"armed": True}
+
+    def once_then_verified(kernel):
+        def refresh(*, deadline):
+            if ASK["armed"]:
+                ASK["armed"] = False
+                return owned.Verdict(
+                    "REFUSED", "authority refused mid-run", (10,), refusal_class="unproven"
+                )
+            return owned.Verdict("VERIFIED", "verifies again", (10,), anchor="leader-live")
+
+        return refresh
+
+    def run_one(module, kernel, cap):
+        monkeypatch.setattr(
+            module,
+            "owned_process_group",
+            NS(OwnedGroup=NS(capture=lambda *a, **k: cap), Verdict=owned.Verdict),
+        )
+        monkeypatch.setattr(
+            module, "_memory_budget", lambda _: (NS(ceiling_mb=0, reason="fixture"), "fixture")
+        )
+
+        class Process:
+            pid = 10
+
+            def poll(self):
+                return 0
+
+            def wait(self, **_):
+                return 0
+
+        monkeypatch.setattr(
+            module,
+            "subprocess",
+            NS(Popen=lambda *a, **k: Process(), TimeoutExpired=subprocess.TimeoutExpired),
+        )
+        monkeypatch.setenv("LOCAL_OPERATOR_SCRATCHPAD", str(tmp_path))
+        return module.run(["synthetic"], timeout=None, grace=0.05, stream=io.StringIO())
+
+    kernel = Kernel()
+    cap = kernel.cap()
+    kernel.rows[20] = (kernel.leader, kernel.leader, kernel.leader, "child")
+    cap.refresh = once_then_verified(kernel)
+    assert run_one(wrapper, kernel, cap) != 0, "the refusal must be reported, not swallowed"
+    assert kernel.sent == [], "a latched loss of authority was followed by a signal"
+
+    source = Path(wrapper.__file__).read_text()
+    assert LOSS_OF_AUTHORITY_SIGNAL_GUARD in source, "the guard moved; update this control"
+    module = ModuleType("run_bounded_no_authority_guard")
+    module.__file__ = wrapper.__file__
+    sys.modules[module.__name__] = module
+    exec(
+        compile(
+            source.replace(
+                LOSS_OF_AUTHORITY_SIGNAL_GUARD,
+                "                if False:  # MUTANT\n                    break\n",
+            ),
+            module.__name__,
+            "exec",
+        ),
+        module.__dict__,
+    )
+    kernel2 = Kernel()
+    cap2 = kernel2.cap()
+    kernel2.rows[20] = (kernel2.leader, kernel2.leader, kernel2.leader, "child")
+    cap2.refresh = once_then_verified(kernel2)
+    ASK["armed"] = True
+    run_one(module, kernel2, cap2)
+    assert kernel2.sent, "the mutant must signal after the latched loss, or it proves nothing"

@@ -3,15 +3,23 @@
 Stdlib plus this checkout's own leaves (``procstate``, ``mobile.resources``); no
 third-party import and no installation, so ``python -S`` bootstrap holds.
 
-A remembered PGID is NOT ownership. Enrolment needs a living authenticated
-creation chain; signalling needs a fresh complete census and matching births,
-actual kernel PG/SID and a previously enrolled live anchor. Terminal samples are
-not absence or anchors. Refusal deliberately trades cleanup for operator safety.
+OWNERSHIP IS A RESERVATION, NOT A MEMBER SET: the leader is held UNREAPED, which
+keeps its process-group number reserved in the kernel, so every process carrying
+that number is ours. Two strict censuses describe what the reservation holds
+rather than proving ancestry member by member; the birth of the leader is
+checked against the recorded one because a reused pid is the one thing the
+reservation cannot survive. Members are re-verified against the group and session
+before any signal, and the reservation is re-checked between that check and the
+send. A reaped leader is not a reservation, and is refused by name.
+
+The residual risk this rests on, in one sentence: no platform frees a group
+number while a member or a corpse still holds it -- Linux by the struct-pid's
+group reference, Darwin by pid-number reservation.
 
 This is a checked owner-alive USER-SPACE boundary, NOT an atomic kernel handle:
-a member/anchor may exit between the final observation and killpg, and canonical
-birth tokens have finite resolution. No zero-recipient-race or hard-SIGKILL
-owner cleanup guarantee is claimed. No keeper process is introduced.
+a member may exit between the final observation and the send, and birth tokens
+have finite resolution. No zero-recipient-race or hard-SIGKILL guarantee is
+claimed, and no keeper process is introduced.
 """
 
 from __future__ import annotations
@@ -35,9 +43,8 @@ class Unknown(RuntimeError):
     leader is held UNREAPED, which keeps its process-group number reserved in the
     kernel, and every process carrying that number is therefore ours by
     construction. A census then describes what the reservation covers instead of
-    trying to prove who belongs. The residual risk this rests on, in one sentence:
-    no platform frees a group number while a member or a corpse still holds it —
-    Linux by the struct-pid's group reference, Darwin by pid-number reservation.
+    trying to prove who belongs. The residual risk, and the boundary this is not,
+    are stated once in the module docstring.
 
     Scope, MEASURED rather than assumed: the pin needs the corpse to be VISIBLE in
     the group census, and it is on both platforms this ships for — Darwin and
@@ -473,6 +480,11 @@ class OwnedGroup:
         dropping one would be a silent amnesty. A member that is not in both scans
         is recorded, not treated as a reason to keep a live group alive.
         """
+        # THE PROBE IS PER-VERDICT: a later VERIFIED verdict must not inherit an
+        # earlier refusal's residuals, nor a refusal an earlier anchor, or the run
+        # record would describe a proof that never happened.
+        for stale in ("proof", "residuals", "anchor", "error", "vanished"):
+            self.probe.pop(stale, None)
         members = []
         try:
             anchor = self.receipts.get(self.leader)
@@ -490,13 +502,13 @@ class OwnedGroup:
                 raise PinLost("leader reaped or birth mismatch: reservation released")
             if lead.zombie:
                 if self.leader not in first and self.leader not in second:
-                    # Platform scope, stated plainly: the pin needs the corpse to
-                    # be VISIBLE in the group census. Where it is not (Darwin is the
-                    # measured case), this build claims no reservation and stays
-                    # live-leader-only rather than pretending to a pin it cannot see.
+                    # The pin needs the corpse to be VISIBLE in the group census.
+                    # Both platforms this ships for report it (measured: Darwin
+                    # `strict_census -> [pid]`, `ps` row `Z <defunct>`), so this arm
+                    # guards an unreachable platform rather than describing ours.
                     raise PinLost(
                         "zombie leader not reported by the group census: "
-                        "live-leader-only on this platform"
+                        "no visible reservation on this platform"
                     )
                 pin = "leader-reservation"
             else:
@@ -512,7 +524,23 @@ class OwnedGroup:
                     "OBSERVED_EMPTY", "reserved group holds no live member", tuple(members)
                 )
                 return self.last
-            for pid in members:
+            # PG/SID IS PROVEN OVER THE LIVE SET ONLY. The unreaped corpse is the
+            # RESERVATION, never an identity proof: on Darwin `getsid` fails on a
+            # zombie, so `kernel_identity` raises `Unknown: actual parent/PG/SID
+            # unavailable` for exactly the process this design exists to keep
+            # (`_leader_reservation` already reads the corpse from the census plus
+            # the recorded birth for the same reason). Asking the session API about
+            # the corpse would refuse the incident shape on the one platform whose
+            # answer was measured — corpse leader, live grandchild, rc 126, child
+            # still running.
+            #
+            # A member that exited between the census and the sample is GONE, not
+            # unproven: refusing on it would revoke the union's amnesty and report
+            # a healthy gate as a cleanup failure.
+            vanished = [pid for pid in members if pid not in samples]
+            if vanished:
+                self.probe["vanished"] = vanished
+            for pid in live:
                 parent, group, sid = self.identity(pid)
                 if (group, sid) != (self.pgid, self.sid):
                     raise Unknown("member outside the recorded group/session")
@@ -541,7 +569,10 @@ class OwnedGroup:
                 refusal_class="pin_lost" if isinstance(exc, PinLost) else "unproven",
             )
             self.probe["error"] = type(exc).__name__ + ":" + str(exc)
-            self.probe["residuals"] = list(members)
+            # The DECLINED set carries the same fields as the proven set — pid,
+            # birth, scheme, group, session — because "who did we refuse to touch"
+            # needs the same evidence as "who did we signal".
+            self.probe["residuals"] = _identities(self.receipts, {}, members)
         return self.last
 
     def signal(self, signum, *, deadline):
@@ -570,11 +601,15 @@ class OwnedGroup:
         if checked >= deadline:
             self.last = Verdict("REFUSED", "expired before syscall", result.members)
             return self.last
-        # RESIDENCY RE-CHECK IMMEDIATELY BEFORE THE SYSCALL. The census above
-        # proved the reservation held a moment ago; between it and killpg the only
-        # thing that could free the number is a reap of this corpse. One sample
-        # answers that, and it is the difference between "proven" and "proven a
-        # while ago" — the non-atomicity this module discloses rather than hides.
+        # RESIDENCY RE-CHECK IMMEDIATELY BEFORE THE SYSCALL -- THE C3 MUTATION
+        # ANCHOR: this exact check is what a deletion control removes. `refresh`
+        # carries its own end-of-proof check for a different reason (a reap during
+        # the proof), so a mutation names this one and cannot take both by
+        # accident. The census above proved the reservation held a moment ago;
+        # between it and killpg the only thing that could free the number is a
+        # reap of this corpse. One sample answers that, and it is the difference
+        # between "proven" and "proven a while ago" — the non-atomicity this module
+        # discloses rather than hides.
         if self._leader_reservation(deadline) is None:
             self.last = Verdict(
                 "REFUSED",
@@ -583,7 +618,7 @@ class OwnedGroup:
                 anchor=result.anchor,
                 refusal_class="pin_lost",
             )
-            self.probe["residuals"] = list(result.members)
+            self.probe["residuals"] = _identities(self.receipts, {}, result.members)
             return self.last
         try:
             self._send(self.pgid, signum)

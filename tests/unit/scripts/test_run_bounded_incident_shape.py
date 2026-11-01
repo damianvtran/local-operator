@@ -7,9 +7,13 @@ that shape, run for real: the leader exits on purpose the moment it has forked a
 long-lived grandchild, and the wrapper must reclaim the grandchild anyway — with
 the run record naming how ownership was established.
 
-Linux-only: the pin needs the corpse visible in the group census, which
-`test_owned_process_group_zombie_probe.py` measures per platform. Darwin is
-skipped here rather than passing for the wrong reason.
+POSIX, not Linux-only, and deliberately so: the pin needs the corpse visible in
+the group census, and that was MEASURED on both platforms this ships for (Darwin
+`strict_census -> [pid]`, `ps` row `Z <defunct>`). This file therefore runs on
+the macOS leg of `tui-e2e` as well as the Linux unit shard, so the shape this PR
+exists to fix is exercised on the operator's own platform rather than argued
+about. A platform without `fork` skips; a POSIX platform that cannot produce the
+shape FAILS with its reason named.
 
 Bounded three ways so it cannot hang CI: the wrapper's own `timeout`, the
 explicit wrapper deadline inside the test, and a bounded wait for the grandchild
@@ -31,8 +35,8 @@ import pytest
 from tests.unit.scripts.test_run_bounded import memory_wrapper  # noqa: F401
 
 pytestmark = pytest.mark.skipif(
-    not sys.platform.startswith("linux"),
-    reason="the pin needs the corpse in the group census; measured on Linux",
+    not hasattr(os, "fork") or os.name != "posix",
+    reason="no fork: this shape cannot be produced and there is nothing to measure",
 )
 
 #: Fork a long-lived grandchild, announce its pid, then exit immediately. The

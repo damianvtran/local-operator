@@ -1684,6 +1684,16 @@ jobs:
         if: matrix.os == 'macos-latest'
         timeout-minutes: 5
         run: python -m pytest tests/unit/scripts/test_owned_process_group_zombie_probe.py -n0 -q
+      - name: Darwin incident shape (corpse leader, live grandchild)
+        # The macOS half of the acceptance condition. The probe above proves the
+        # platform REPORTS the corpse; this runs the whole consequence of it -- a
+        # real child that outlives its parent and a live grandchild that must be
+        # reclaimed through the census, not through `ps` on a corpse. It lives in
+        # the same block as the probe for the same reason: `tui-e2e` is the only
+        # job with a macos runner, and the Darwin answer is worthless unmeasured.
+        if: matrix.os == 'macos-latest'
+        timeout-minutes: 5
+        run: python -m pytest tests/unit/scripts/test_run_bounded_incident_shape.py -n0 -q
       - name: Partition the e2e suite
         # Same partitioner as the unit matrix, pointed at the other tree: the
         # LPT split by measured per-file duration (tests/durations-e2e.json),

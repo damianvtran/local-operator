@@ -75,15 +75,22 @@ Timeout/RAM/signal/nonzero child statuses are retained with secondary residual
 receipts on refusal; a requested signal is never reported as proven reaping.
 
 SAFETY BOUNDARY
----------------
-Fresh COMPLETE membership, canonical birth/parent-birth and actual PG/SID are
-required before EVERY signal. New members enrol only through a live verified
-creation chain before polling can reap the leader. After leader exit a previously
-authenticated live survivor must anchor continuity. Unknown/reused/mixed/terminal-
-only groups refuse with a nonzero outcome and a durable residual receipt.
-User-space census-to-killpg remains NON-ATOMIC; this is checked owner-alive, not a
+----------------
+OWNERSHIP IS A RESERVATION, NOT A MEMBER SET. The leader is held UNREAPED, which
+keeps its process-group number reserved in the kernel, so every process carrying
+that number is ours and a census only describes what the reservation holds. Two
+complete strict censuses are unioned per check; each LIVE member is re-verified
+against the recorded group and session, and the reservation is re-sampled between
+that check and the send (the corpse is read from the census plus the recorded
+birth, never through a live session query -- `getsid` fails on a zombie on Darwin,
+which is exactly the process the pin keeps). The leader is reaped only AFTER the
+terminal census, and a REAPED leader is refused by name: giving up the corpse
+releases the number.
+User-space census-to-send remains NON-ATOMIC; this is checked owner-alive, not a
 kernel-held capability or a hard-owner-SIGKILL immediate-cleanup guarantee.
-Escaped/new-session descendants are outside this group's signal authority.
+Unknown/reused/mixed/terminal-only groups refuse with a nonzero outcome and a
+durable residual receipt naming births. Escaped/new-session descendants are
+outside this group's signal authority.
 No keeper, tokenless fallback, or existing monitor-policy changes are introduced.
 
 DIAGNOSTICS go to stderr, never stdout: the lint/format gates' stdout is
@@ -272,7 +279,10 @@ def _ownership_record(owner, verdict):
     schema instead of widening a published one.
 
     ``proof`` is the exact set a signal was proven against; ``residuals`` is the
-    set that was SEEN and declined. Both carry pids, births, group and session.
+    set that was SEEN and declined, and ``refusal_class`` names why (``pin_lost``,
+    ``unproven``, ``excluded``, or null when nothing was refused). All of them are
+    carried on every run, including a refusal, because "what did we decline to
+    touch, and on what evidence" is the question a later reader actually asks.
     """
     probe = getattr(owner, "probe", {}) or {}
     anchor = getattr(verdict, "anchor", None) or probe.get("anchor")
@@ -284,6 +294,7 @@ def _ownership_record(owner, verdict):
             "leader held unreaped: the group number stays reserved, so its "
             "members are ours by construction"
         ),
+        "refusal_class": getattr(verdict, "refusal_class", None),
         "proof": probe.get("proof", []),
         "residuals": probe.get("residuals", []),
         "cleanup": (
@@ -561,7 +572,11 @@ def run(
         stream.write(f"[run_bounded] could not start {argv[0]!r}: {exc}\n")
         return EXIT_NOT_STARTED
     pgid = proc.pid
-    deadline = None if timeout is None else started + timeout
+    # ONE REPRESENTATION for the horizon, normalised here where it enters: the
+    # unbounded case is `inf`, never `None`. Every downstream reader -- the loop's
+    # `now >= deadline`, the probe windows, and `leader_terminal(deadline)` -- then
+    # compares floats, and a `--timeout`-less run cannot reach `float >= None`.
+    deadline = float("inf") if timeout is None else started + timeout
     run_id = _resolve_run_id(run_id)
     run_started_utc = _utc_now()
     # The caller-readable binding, emitted the moment the group exists: an
@@ -575,7 +590,7 @@ def run(
     # poll/wait can reap this leader; failed capture remains a bounded refusal.
     owner = owned_process_group.OwnedGroup.capture(
         proc.pid,
-        deadline=min(deadline if deadline is not None else float("inf"), time.monotonic() + 3.0),
+        deadline=min(deadline, time.monotonic() + 3.0),
     )
     # Written even when capture failed: the acquisition-failure run is the one
     # whose evidence matters most, and a record carrying only the believed
@@ -639,7 +654,7 @@ def run(
         while True:
             now = time.monotonic()
             signum = stop["signum"]
-            timed_out = deadline is not None and now >= deadline
+            timed_out = now >= deadline
             if signum:
                 rc = 128 + signum
             elif timed_out:
@@ -649,9 +664,7 @@ def run(
             # cadence rather than once per poll: see _AUTHORITY_REFRESH_SECONDS.
             if signum or timed_out or now >= next_probe:
                 probe_until = (
-                    begin_cleanup(grace + 0.25)
-                    if signum or timed_out
-                    else min(deadline if deadline is not None else float("inf"), now + 3.0)
+                    begin_cleanup(grace + 0.25) if signum or timed_out else min(deadline, now + 3.0)
                 )
                 require(owner.refresh(deadline=probe_until), "required-refresh")
                 next_probe = now + _AUTHORITY_REFRESH_SECONDS
