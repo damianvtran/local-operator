@@ -322,7 +322,9 @@ def _refusal_of(exc: BaseException) -> str:
 
 def org_skill_operation_id(operation_id: str) -> str:
     """Keep new org intents out of paths older runtimes can rewrite."""
-    return f"{operation_id}-org-v2"
+    # Every legacy push id starts with `push-`; a prefix outside that grammar
+    # cannot collide even when a skill's own valid ID contains `org-v2`.
+    return f"org-v2--{operation_id}"
 
 
 async def push_item(
@@ -381,11 +383,32 @@ async def push_item(
     with outbox.org_skill_operation(scoped_id) as acquired:
         if not acquired:
             return PushOutcome("skipped", operation_id=scoped_id, reason="operation-in-progress")
+        # Earlier unreleased candidates used a suffix in the legacy namespace.
+        # Do not strand an intent from that candidate, nor confuse another
+        # skill whose legitimate ID happens to end in the same suffix.
+        prior_candidate = outbox.read(f"{operation_id}-org-v2")
+        if (
+            prior_candidate is not None
+            and prior_candidate.local_id == local_id
+            and prior_candidate.state in ("pending", "pending-reconciliation")
+            and isinstance(prior_candidate.intent, Mapping)
+            and prior_candidate.intent.get("unpinned_org_skill") is True
+        ):
+            return PushOutcome(
+                "skipped", operation_id=operation_id, reason="prior-version-reconciliation-required"
+            )
         legacy = outbox.read(operation_id)
-        if legacy is not None and legacy.state in ("pending", "pending-reconciliation"):
+        if legacy is not None and (
+            legacy.state == "pending-reconciliation"
+            or (legacy.state == "pending" and legacy.intent is not None)
+        ):
             return PushOutcome(
                 "skipped", operation_id=operation_id, reason="legacy-reconciliation-required"
             )
+        # A pending legacy row with no intent has not yet dispatched a commit.
+        # Never mutate it: its owner may still be alive and could later dispatch.
+        # The two requests retain If-Match on the same remote revision, so only
+        # one can succeed if that older owner races this isolated operation.
         kwargs["operation_id"] = scoped_id
         return await _push_item_inner(**kwargs)
 
