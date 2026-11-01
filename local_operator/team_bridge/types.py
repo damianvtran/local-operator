@@ -1259,8 +1259,11 @@ class ReplyWindowParams(TypedDict, total=False):
 
 
 def reply_window_params(
-    *, limit: int | str | None = None, after_seq: int | str | None = None,
-    before_seq: int | str | None = None, order: str | None = None,
+    *,
+    limit: int | str | None = None,
+    after_seq: int | str | None = None,
+    before_seq: int | str | None = None,
+    order: str | None = None,
 ) -> ReplyWindowParams:
     """The shared member/owner thread query contract, without synthetic defaults.
 
@@ -1270,7 +1273,8 @@ def reply_window_params(
     """
     result: ReplyWindowParams = {}
     for name, raw, minimum, maximum in (
-        ("limit", limit, 1, 100), ("after_seq", after_seq, 0, (1 << 63) - 1),
+        ("limit", limit, 1, 100),
+        ("after_seq", after_seq, 0, (1 << 63) - 1),
         ("before_seq", before_seq, 1, (1 << 63) - 1),
     ):
         if raw is None:

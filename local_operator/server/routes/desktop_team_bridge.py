@@ -3555,8 +3555,10 @@ async def owner_audit_replies(
         )
         try:
             paging = reply_window_params(
-                limit=query.get("limit"), after_seq=query.get("after_seq"),
-                before_seq=query.get("before_seq"), order=query.get("order"),
+                limit=query.get("limit"),
+                after_seq=query.get("after_seq"),
+                before_seq=query.get("before_seq"),
+                order=query.get("order"),
             )
         except ValueError:
             _raise_read("invalid_request")

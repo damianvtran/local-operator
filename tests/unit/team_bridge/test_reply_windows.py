@@ -6,13 +6,23 @@ from local_operator.team_bridge.client import TeamBridgeClient
 from local_operator.team_bridge.types import reply_window_params
 
 
-@pytest.mark.parametrize("query", [
-    {"before_seq": 0}, {"after_seq": -1}, {"before_seq": True},
-    {"order": "DESC"}, {"order": ""}, {"before_seq": "2.0"},
-    {"before_seq": 3, "after_seq": 0}, {"before_seq": 3, "order": "asc"},
-    {"after_seq": 0, "order": "desc"}, {"limit": 101}, {"limit": 0},
-    {"before_seq": "9" * 501},
-])
+@pytest.mark.parametrize(
+    "query",
+    [
+        {"before_seq": 0},
+        {"after_seq": -1},
+        {"before_seq": True},
+        {"order": "DESC"},
+        {"order": ""},
+        {"before_seq": "2.0"},
+        {"before_seq": 3, "after_seq": 0},
+        {"before_seq": 3, "order": "asc"},
+        {"after_seq": 0, "order": "desc"},
+        {"limit": 101},
+        {"limit": 0},
+        {"before_seq": "9" * 501},
+    ],
+)
 def test_reply_window_rejects_invalid_or_conflicting_modes(query):
     with pytest.raises(ValueError):
         reply_window_params(**query)
@@ -23,7 +33,9 @@ def test_reply_window_preserves_legacy_and_explicit_empty_mode():
     assert reply_window_params(after_seq="0") == {"after_seq": 0}
     assert reply_window_params(order="desc") == {"order": "desc"}
     assert reply_window_params(before_seq="51", order="desc", limit="50") == {
-        "before_seq": 51, "order": "desc", "limit": 50,
+        "before_seq": 51,
+        "order": "desc",
+        "limit": 50,
     }
 
 
@@ -54,6 +66,41 @@ async def test_reply_client_serializes_only_explicit_cursors(method, monkeypatch
     assert len(captured) == count
 
 
+@pytest.mark.parametrize("method", ["conversation_replies", "owner_audit_replies"])
+@pytest.mark.parametrize(
+    ("hints", "query"),
+    [
+        ({}, b"tenant_id=tnt_1"),
+        ({"after_seq": 0}, b"tenant_id=tnt_1&after_seq=0"),
+        ({"after_seq": 5}, b"tenant_id=tnt_1&after_seq=5"),
+        ({"limit": 3, "after_seq": 5}, b"tenant_id=tnt_1&limit=3&after_seq=5"),
+        ({"order": "desc"}, b"tenant_id=tnt_1&order=desc"),
+        ({"before_seq": 51, "order": "desc"}, b"tenant_id=tnt_1&before_seq=51&order=desc"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_reply_client_preserves_legacy_raw_query_order(method, hints, query, monkeypatch):
+    # Dict equality hid an actual upstream URI regression. Use httpx's real
+    # serializer, but no credentials/socket; the existing route HTTP test keeps
+    # asserting the complete tenant-first URL on its synthetic upstream too.
+    import httpx
+
+    client = object.__new__(TeamBridgeClient)
+    captured = []
+
+    async def send(verb, path, **kwargs):
+        captured.append(
+            httpx.Request(verb, f"https://fixture.invalid{path}", params=kwargs["params"]).url.query
+        )
+        return {"root": {}, "replies": [], "has_more": False}
+
+    monkeypatch.setattr(client, "_send", send)
+    await getattr(client, method)(
+        "bcv_abc12345", "bcmsg_root0001", tenant_id="tnt_1", expected_account_id="acc_1", **hints
+    )
+    assert captured == [query]
+
+
 def test_reply_window_keyword_types_are_per_key_and_optional():
     # A homogeneous dictionary passed runtime tests but broke both typed HTTP
     # dispatches. Keep the public helper contract precise without casts/ignores.
@@ -62,7 +109,9 @@ def test_reply_window_keyword_types_are_per_key_and_optional():
     result_type = get_type_hints(reply_window_params)["return"]
     assert is_typeddict(result_type)
     assert get_type_hints(result_type) == {
-        "limit": int, "after_seq": int, "before_seq": int,
+        "limit": int,
+        "after_seq": int,
+        "before_seq": int,
         "order": Literal["asc", "desc"],
     }
     assert result_type.__required_keys__ == frozenset()

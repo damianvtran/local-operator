@@ -4428,7 +4428,10 @@ async def test_conversation_replies_backward_window_and_conflicts(api):
     base = "/v1/desktop/team-bridge/conversations/bcv_abc12345/messages/bcmsg_root0001/replies"
     owner = "tenant_id=tnt_1&expected_account_id=acc_1"
     FakeClient.behavior["conversation_replies"] = {
-        "root": {"id": "bcmsg_root0001"}, "replies": [], "has_more": False, "order": "desc"
+        "root": {"id": "bcmsg_root0001"},
+        "replies": [],
+        "has_more": False,
+        "order": "desc",
     }
     response = await client.get(f"{base}?{owner}&order=desc&before_seq=81&limit=50")
     assert response.status_code == 200, response.text
@@ -4436,8 +4439,12 @@ async def test_conversation_replies_backward_window_and_conflicts(api):
     assert FakeClient.behavior["last_replies_kwargs"]["before_seq"] == 81
     assert FakeClient.behavior["last_replies_kwargs"]["after_seq"] is None
     for suffix in (
-        "order=DESC", "before_seq=0", "before_seq=4&after_seq=0",
-        "before_seq=4&order=asc", "after_seq=0&order=desc", "limit=101",
+        "order=DESC",
+        "before_seq=0",
+        "before_seq=4&after_seq=0",
+        "before_seq=4&order=asc",
+        "after_seq=0&order=desc",
+        "limit=101",
     ):
         before = FakeClient.calls
         response = await client.get(f"{base}?{owner}&{suffix}")

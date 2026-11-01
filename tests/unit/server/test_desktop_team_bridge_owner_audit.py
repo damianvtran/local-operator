@@ -525,8 +525,11 @@ def test_reply_backward_contract_real_http(proxy, family):
         for seq in range(101, 151)
     ]
     state["override"] = {
-        "root": THREAD["root"], "replies": replies, "has_more": True,
-        "next_before_seq": 101, "order": "desc",
+        "root": THREAD["root"],
+        "replies": replies,
+        "has_more": True,
+        "next_before_seq": 101,
+        "order": "desc",
     }
     first = client.get(path + _q("&order=desc&limit=50"))
     assert first.status_code == 200, first.text
@@ -544,8 +547,12 @@ def test_reply_backward_contract_real_http(proxy, family):
     assert older.json()["result"]["replies"] == []
     assert "after_seq" not in parse_qs(urlsplit(calls[-1][1]).query)
     for suffix in (
-        "&before_seq=0", "&order=ASC", "&after_seq=0&order=desc",
-        "&before_seq=101&order=asc", "&before_seq=101&after_seq=0", "&limit=101",
+        "&before_seq=0",
+        "&order=ASC",
+        "&after_seq=0&order=desc",
+        "&before_seq=101&order=asc",
+        "&before_seq=101&after_seq=0",
+        "&limit=101",
     ):
         before = len(calls)
         response = client.get(path + _q(suffix))
@@ -558,9 +565,17 @@ def test_reply_backward_contract_real_http(proxy, family):
     )
     assert refused.status_code == 401
     assert len(calls) == before
-    print({
-        "family": family, "first_status": first.status_code, "rows": len(result["replies"]),
-        "order": result["order"], "next_before": result["next_before_seq"],
-        "terminal_status": older.status_code, "terminal_rows": 0,
-        "auth_status": refused.status_code, "malformed_cases": 6, "after_omitted": True,
-    })
+    print(
+        {
+            "family": family,
+            "first_status": first.status_code,
+            "rows": len(result["replies"]),
+            "order": result["order"],
+            "next_before": result["next_before_seq"],
+            "terminal_status": older.status_code,
+            "terminal_rows": 0,
+            "auth_status": refused.status_code,
+            "malformed_cases": 6,
+            "after_omitted": True,
+        }
+    )
