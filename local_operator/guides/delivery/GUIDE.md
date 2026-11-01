@@ -5,15 +5,11 @@ description: "Allocate bounded engineering delivery, brief so a child can land, 
 
 # Bounded delivery
 
-Read this when allocating engineering work, planning costly evidence, or closing
-review rounds. `AGENTS.md` remains the repository authority for isolation,
-commands, security, merge and release gates. This policy changes allocation and
-scope, not the depth of validation or the operator's approval requirements.
-For this repository's public release copy, follow
-`.github/RELEASE_NOTES_TEMPLATE.md` and the release steps in `AGENTS.md`.
-The claim/bump PR's public-notes section and publication file follow that same
-contract; internal gate evidence remains in separate PR comments, never in
-user-facing release notes.
+For allocation, costly evidence and review convergence. AGENTS.md remains the
+authority for isolation, commands, security, merge/release and approvals; this
+changes scope/allocation, not validation depth. Public notes follow
+`.github/RELEASE_NOTES_TEMPLATE.md` and AGENTS.md, including claim/bump PR and
+publication file. Keep internal gate evidence out of user-facing notes.
 
 ## Allocate once, inspect narrowly
 
@@ -27,36 +23,26 @@ user-facing release notes.
   owner directly; do not broadcast a status hunt. One confirmed durable ACK
   means no unchanged resend or repeated approval request. Update only material deltas;
   verify completion from primary evidence, not an agent's assertion.
-- Prefer metadata and narrow indexes before reading logs or artifacts. Follow
-  a surprising first read one step further; cite the source of relayed results.
-  Root recovery restores the minimal prerequisite; cross-repository hardening
-  is a separate scope, not an incidental repair.
+- Prefer metadata/narrow indexes before logs. Verify surprising first reads one
+  step further; cite relayed sources. Root recovery restores only prerequisites;
+  cross-repository hardening is separate scope.
 
 ## Delegate so the child can land
 
-Measured: the median first write/edit lands on call 29;
-rediscovering a diagnosis you hold costs a child twice — budget, then the
-resume brief.
-
-- Briefs carry the change site (file:line), the failing behaviour, the
-  acceptance check; "investigate and fix X" redoes your work.
-- Coder-class children land early: first edit within ~10 tool calls; after ~40
-  with nothing landed, return the precise blocker, not more exploration.
-- A repeat "explored, nothing landed" gets a smaller brief — after ruling out
-  a harness cut-off (cut children end named).
+Briefs name file:line, failure and acceptance check; do not delegate rediscovery.
+Coder children edit within ~10 calls; after ~40 without an edit, return the
+blocker. A repeat "explored, nothing landed" needs a smaller brief after checking
+for a harness cut-off (cut children end named).
 
 ## Preflight before expensive dispatch
 
-Inventory the loaded briefs and source winners first; measure raw and loaded
-prompt budgets so clipping cannot masquerade as compliance. Write one test plan
-before native, browser or hardware lanes: changed surfaces, commands,
-dependencies, source/binary identity, isolation, expected outputs and at least
-one negative control; confirm the compiled artifact contains the changed source
-and the harness can observe success AND failure. A source-only test is not
-native execution proof. A setup failure stops costly dispatch: report the failed
-prerequisite and its bounded repair. Use the harness browser, never install a
-second browser stack; obey the isolated HOME/config, CMUX stripping and
-exact-process-group teardown rules in `AGENTS.md`.
+Measure raw/loaded prompt budgets and source winners so clipping cannot fake
+compliance. Before native/browser/hardware dispatch, plan changed surfaces,
+commands, dependencies, source/binary identity, isolation, expected outputs and a
+negative control. Verify compiled source identity and success/failure detection;
+source-only checks are not native proof. Failed setup stops dispatch: report the
+prerequisite and bounded repair. Use the harness browser, no second stack; follow
+AGENTS.md's HOME/config, CMUX stripping and exact-process-group teardown rules.
 
 ## Never use a live peer as the revoke test
 
@@ -68,50 +54,39 @@ peer, and record it. Authorization to test is not authorization to delete.
 
 ## Spend coverage once
 
-Iterate with affected tests and lints, bounded and serial for heavy work. At the
-terminal frozen head require full coverage once: when CI runs the same suite,
-CI supplies that pass, not an additional local full suite. If CI omits a
-required surface, run that missing coverage with a bounded local or QA command
-and record it. A scoped pass is not a full pass; merge still waits for the
-required checks and independent review/QA. CI replaces duplicate automated
-coverage, never the independent real-path QA matrix. Resource holds forbid
-hold-class local gates, not the evidence requirement. Read CI asynchronously;
-investigate failures, including ones outside the slice.
+Iterate with targeted tests/lints; heavy runs bounded/serial. Full coverage once
+at the terminal head: when CI runs the same suite, use it, not a duplicate local
+run. Run omitted required surfaces bounded locally/in QA and record them. Scoped
+is not full coverage. Merge requires actual checks and independent review/QA;
+CI never replaces independent real-path QA. Resource holds forbid hold-class
+runs, not evidence. Review CI asynchronously; investigate even out-of-slice fails.
 
 ## Converge, do not restart
 
-Complete each applicable initial stream (code, independent real-path QA, design,
-UX and security) coherently across its full in-scope surface; do not stop at the
-first finding and start remediation. An early BLOCKER alert may bound risk, but
-must say the review is incomplete. Reviews run asynchronously with CI, not after
-its full pass; merge still requires all applicable gates.
+Complete every applicable initial stream (code, independent real-path QA,
+design, UX, security) across its full in-scope surface before remediation, not
+just the first finding. Early BLOCKER alerts must say incomplete. Review runs
+asynchronously with CI; merge still needs all gates.
 
-The manager collects all applicable initial reports into ONE deduplicated
-severity-and-evidence ledger, triages conflicts and batches all necessary
-clarifications before edits. The implementer verifies each claim, then fixes
-accepted findings in ONE coordinated remediation pass, answering every ID with
-fixed commit SHA, rejection evidence, or deferral reason and recorded location.
-Default to ONE batched remediation commit. Separate commits require justified,
-independently revertible safety or stream boundaries within the SAME round;
-never use per-finding commit/review cycles.
+Manager collects all reports into ONE deduplicated severity/evidence ledger,
+triages conflicts and batches necessary clarifications before edits. Implementer
+verifies claims, then fixes accepted IDs in ONE coordinated pass, answering each
+with fixed SHA, rejection evidence, or deferral reason/location. Default ONE
+batched commit; separate commits need justified independently revertible safety
+or stream boundaries in the SAME round. No per-finding commit/review cycles.
 
-Use targeted tests for the delta and direct regressions during remediation;
-full coverage belongs at the terminal head OR existing CI. Preserve independent
-real-path QA, design, UX and security gates. Follow-up scope is
-`<previous_reviewed_head>..<new_head>` plus direct regression neighbors, not an
-unchanged re-audit or a MINOR/NIT loop. A late BLOCKER/MAJOR needs a concrete code
-path/reproducer and its changed or direct-neighbor scope. Keep unchanged evidence
-only when byte/source compatibility is proved; backend response-shape changes
-may require new rendered evidence. Model-header or provenance-only
-metadata corrections are addenda, not product/suite resets; executable or
-user-visible changes are not metadata.
+Follow up on `<previous_reviewed_head>..<new_head>` plus direct regression
+neighbors, never unchanged re-audits or MINOR/NIT loops. Late BLOCKER/MAJOR needs
+a concrete code path/reproducer and changed/direct-neighbor scope. Target delta
+and direct-regression tests; preserve independent QA/design/UX/security gates.
+Retain evidence only with byte/source compatibility proof; backend response-shape
+changes may need rendered proof. Model-header/provenance-only addenda do not reset
+product/suites; executable/user-visible changes are not metadata.
 
-After two unsuccessful remediation cycles, freeze the severity/evidence ledger,
-root-transition/authority matrix (failing state, intended transition, authoritative
-owner/source) and explicit exit criteria BEFORE more patches. If the same unknown
-persists twice, escalate it to the owner rather than guessing again. This is a
-checkpoint, not an arbitrary maximum-round waiver: unresolved BLOCKER/MAJOR
-findings and required evidence still gate completion.
+After two unsuccessful cycles, freeze severity/evidence ledger, root-transition/
+authority matrix (failing state, intended transition, authoritative owner/source)
+and exit criteria BEFORE more patches. An unknown persisting twice escalates to
+its owner. This checkpoint never waives unresolved BLOCKER/MAJOR or evidence gates.
 
 A moved base is NOT a blind re-pin: post `scripts/rebase_proof.py`'s
 `### Rebase proof` (range-diff `=`, byte-identical patch, no file overlap).
@@ -120,23 +95,18 @@ cross-file breaks. Otherwise run one `old-head..new-head` round on the files
 it names: if that proof fails, review and test the affected content. A test-
 or docs-only commit after a clean round needs an independent
 `<prev-head>..<head>` delta review; no QA unless a QA'd surface moved. Follow
-`AGENTS.md`'s SHA-freshness rules and the standing PR comment format. A genuine
-late BLOCKER/MAJOR with a demonstrated code path stays admissible; delta scope
-never waives correctness, security or regression risk. Fix real BLOCKER/MAJOR
-findings before merge; MINOR/NIT findings do not force another round.
+`AGENTS.md`'s SHA-freshness rules and the standing PR comment format. Fix real BLOCKER/MAJOR before merge; delta scope never waives correctness,
+security or regression risk. MINOR/NIT do not force another round.
 
 ## Model provenance
 
-Use supported fallback when available and disclose the actual served model,
-including a mid-round change. A model preference is not a new approval gate;
-never rewrite role/default model pins or tool permissions to work around it.
-Inability to execute the required independent round remains a blocker, not a
-reason to fabricate a verdict.
+Use supported fallback and disclose the actual served model, including changes.
+Preference is not an approval gate; never rewrite role/default pins or tools to
+work around it. A missing required independent round blocks; never invent one.
 
 ## Evidence and pilots
 
-Before shipping policy changes, run fresh-agent pilots against the loaded
-role/team boundary, including a genuine destructive/access escalation. Keep
-prompts and actual responses in session scratch with model provenance. Retain
-custom security, release, roster and approval policy when patching live
-overrides; back them up, read them back, never force-sync away local additions.
+Before shipping policy, run fresh-agent pilots at the loaded role/team boundary,
+including a genuine destructive/access escalation. Keep prompts, actual responses
+and model provenance in scratch. Preserve custom security/release/roster/approval
+policy in live overrides: back up and read back; never force-sync away additions.
