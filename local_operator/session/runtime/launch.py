@@ -545,6 +545,9 @@ def _spawn_runtime(
     # Resolve at the fork boundary, not in a producer: peer sends, panel binds,
     # and API errands must all retain "no opinion" until this point. In
     # particular HOME is a valid explicit override, never an omission sentinel.
+    # Converting omission to HOME anywhere upstream destroys a recorded move:
+    # by the time we see that path it is indistinguishable from a deliberate
+    # HOME request, which must supersede the move. Empty string is the sentinel.
     # Exec constructs an in-process Session and the legacy daemon resume forks
     # separately; those two bypass this boundary and retain their own resolver.
     cwd = _engage_cwd_for_recorded_move(config_dir or runtime_config_dir(), session_id, cwd)

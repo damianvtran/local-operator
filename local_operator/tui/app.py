@@ -19560,7 +19560,10 @@ class OperatorApp(App[None]):
                             remote = await AttachedSession.cold(
                                 concrete,
                                 config_dir=config_root,
-                                cwd=str(record.cwd or os.getcwd()),
+                                # A missing owner cwd is no opinion, not this
+                                # viewer's directory. Inventing one here can
+                                # supersede a recorded move when cold() engages.
+                                cwd=str(record.cwd or ""),
                                 takeover_factory=takeover_factory,
                             )
                             # Read by the engage that binds behind this paint,
