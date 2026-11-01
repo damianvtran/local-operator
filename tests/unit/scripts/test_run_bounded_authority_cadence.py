@@ -24,6 +24,7 @@ class World:
         self.rows = {1: (0, 1, 1, "creator"), 10: (1, 10, 10, "leader")}
         self.now = 0.0
         self.censuses = 0
+        self.sample_calls = 0
 
     def clock(self):
         self.now += 0.001
@@ -34,8 +35,10 @@ class World:
         return sorted(pid for pid, row in self.rows.items() if row[1] == pgid)
 
     def samples(self, pids):
+        self.sample_calls += 1
+        corpse = self.sample_calls > 2
         return {
-            pid: owned.procstate.ProcessSample(False, self.rows[pid][3])
+            pid: owned.procstate.ProcessSample(corpse and pid == 10, self.rows[pid][3])
             for pid in pids
             if pid in self.rows
         }

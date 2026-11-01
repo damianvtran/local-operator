@@ -29,7 +29,26 @@ from local_operator.mobile import resources
 
 
 class Unknown(RuntimeError):
-    """Incomplete proof, never a spelling of observed absence."""
+    """Incomplete proof, never a spelling of observed absence.
+
+    THE MODEL, in one paragraph: ownership is not derived from the members. The
+    leader is held UNREAPED, which keeps its process-group number reserved in the
+    kernel, and every process carrying that number is therefore ours by
+    construction. A census then describes what the reservation covers instead of
+    trying to prove who belongs. The residual risk this rests on, in one sentence:
+    no platform frees a group number while a member or a corpse still holds it —
+    Linux by the struct-pid's group reference, Darwin by pid-number reservation.
+
+    Scope, stated rather than implied: the pin needs the corpse to be VISIBLE in
+    the group census. Where a platform's census does not report a zombie leader
+    (Darwin is the measured case), this module refuses rather than assuming the
+    reservation and stays live-leader-only. Where SIGCHLD is SIG_IGN there is no
+    corpse at all, so the premise is void and capture refuses with a named reason.
+
+    Exclusions enforced at the one place a signal leaves this module: never pid 1,
+    never this process or its own process group, never a group whose members are
+    not proven to sit in the recorded group AND session.
+    """
 
 
 class PinLost(Unknown):
@@ -474,7 +493,13 @@ class OwnedGroup:
             self.probe["observed"] = _observed(samples, None)
             live = [pid for pid in members if pid in samples and not samples[pid].zombie]
             if not live:
-                raise Unknown("no live member inside the reserved group")
+                # Corpses only: there is nothing left to signal, and holding the
+                # group "open" for them would report a live group that is not one.
+                # OBSERVED_EMPTY is the honest state — the same answer ESRCH gets.
+                self.last = Verdict(
+                    "OBSERVED_EMPTY", "reserved group holds no live member", tuple(members)
+                )
+                return self.last
             for pid in members:
                 parent, group, sid = self.identity(pid)
                 if (group, sid) != (self.pgid, self.sid):
