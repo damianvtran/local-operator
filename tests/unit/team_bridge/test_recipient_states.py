@@ -23,9 +23,12 @@ notify or endpoint-disabled decision — ``connector/conversation.py`` starts fr
 "one ``message_available`` feed row per active agent member whose endpoint
 consent allows it", i.e. the row is already the server's verdict. So:
 
-* state 1 (mentioned) is proven end to end: row → card → wake → turn;
+* state 1 (mentioned) proves row → durable human-visible mention card → wake
+  → turn with a neutral model placeholder. This Session fixture has no bridge
+  runtime, so native body hydration/source presentation is NOT claimed here;
 * state 2 (unmentioned) is proven in both LOCAL arms — a notify=all row wakes
-  with ``mention: no``, and a mention-only member's silence produces no work —
+  with a durable ``mention: no`` card and neutral model placeholder, and a
+  mention-only member's silence produces no work —
   while the rule that turns the setting into a row is modelled from §10.1 and
   named as the server's, not asserted as local behaviour;
 * states 3 (muted) and 4 (endpoint disabled) are proven in the only shape the
@@ -627,13 +630,18 @@ async def test_mentioned_member_is_woken_with_a_card_that_says_mentioned(
     assert "guidance: bridge-guidance-v2" in card
     assert BODY not in card  # metadata only; the body is read separately
 
-    # A REAL TURN started from the wake, and the model request carries the card
-    # inside the bridge envelope — not as the owner's own words.
+    # A REAL TURN starts from the wake, but this fixture binds no bridge
+    # runtime to Session, so it cannot hydrate the reserved body. Conversation
+    # envelopes never gain model authority from wake delivery alone: only the
+    # native admitted frame may carry screened source metadata + body together.
+    # Raw mention metadata remains visible in the human journal below; the
+    # model receives the same fixed placeholder as every unhydrated card.
     requests = _card_requests(recipient)
     assert len(requests) == 1, "the wake must start exactly one turn"
-    assert "mention: yes" in requests[0]
-    assert "from Ada (human, same tenant)" in requests[0]
-    assert "<team-bridge-message" in requests[0]
+    assert "[team_bridge: delivery_pending]" in requests[0]
+    assert "mention:" not in requests[0]
+    assert "from Ada" not in requests[0]
+    assert "<team-bridge-message" not in requests[0]
     assert BODY not in requests[0]
 
     # The row is durable in the recipient's own transcript.
@@ -725,7 +733,15 @@ async def test_unmentioned_member_is_woken_exactly_when_the_setting_emits_a_row(
     ]
     assert "guidance: bridge-guidance-v2" in card
     requests = _card_requests(all_member)
-    assert len(requests) == 1 and "mention: no" in requests[0]
+    assert len(requests) == 1
+    # As in the mentioned fixture, no Session bridge runtime hydrates the
+    # conversation reservation here. Wake/routing is proven, not body delivery:
+    # no raw conversation envelope is model-visible without its admitted frame.
+    assert "[team_bridge: delivery_pending]" in requests[0]
+    assert "mention:" not in requests[0]
+    assert "from Ada" not in requests[0]
+    assert "<team-bridge-message" not in requests[0]
+    assert BODY not in requests[0]
 
     # notify=mention, unmentioned: the hub's silence produces NO local work.
     assert silent_outcome["handled"] == []

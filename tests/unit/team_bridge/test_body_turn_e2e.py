@@ -1657,3 +1657,117 @@ async def test_a_body_turn_after_a_real_prior_turn_still_yields_mid_work(tmp_pat
     assert person and person[0] == 2, _layout(stream)
     assert 2 not in _carrying(stream), _layout(stream)
     assert _row(config_dir)["state"] == "completed", "the yielded body is re-served"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "sender_kind,thread", [("human", False), ("agent", False), ("human", True)]
+)
+async def test_atomic_card_wake_at_a_running_tool_boundary(
+    tmp_path, monkeypatch, sender_kind, thread
+) -> None:
+    """The incident: connector card -> busy mailbox -> post-tool request.
+
+    Reservation creation happens DURING the person's turn, so hydration cannot
+    occur until the next turn. The real journal flush must not present the raw
+    envelope in the intervening physical request (the production failure).
+    """
+    from local_operator.harness.render import _default_convert_to_llm
+    from local_operator.mobile import peer_send
+    from local_operator.team_bridge.card_projection import PENDING_CARD
+    from local_operator.team_bridge.connector.conversation import (
+        ConversationCardMetadata,
+        _deliver_card,
+    )
+
+    config_dir = tmp_path / "cfg"
+    store = _store(config_dir)
+    stream = CapturingStream(
+        [
+            _tool_call("hook-atomic", "hook"),
+            [StreamTextDelta(delta="work complete"), StreamEndEvent(stop_reason="stop")],
+            [StreamTextDelta(delta="body read"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    alternate_views = []
+
+    async def deliver(_unused, **kwargs):
+        # Only the socket is replaced: the connector's wake and real receiving
+        # Session run unchanged, including its busy journal and follow-up task.
+        receipt = await session.receive_peer_message(
+            kwargs["text"],
+            mode=kwargs["mode"],
+            wake=kwargs["wake"],
+            sender=kwargs["sender"],
+            custom_type=kwargs["custom_type"],
+        )
+        return SimpleNamespace(detail=str(receipt))
+
+    async def arrival():
+        _reserve(store, config_dir=config_dir)
+        await _deliver_card(
+            _owner(),
+            ConversationCardMetadata(
+                conversation_id=CONVERSATION_ID,
+                tenant_id=TENANT,
+                conversation_label="private-room-canary",
+                sender_label="sender-name-canary",
+                sender_kind=sender_kind,
+                mention=False,
+                message_id=MESSAGE_ID,
+                conversation_seq=3,
+                thread_root_id="bcmsg_abcdef00" if thread else None,
+                conversation_kind="dm",
+            ),
+            session_id=SESSION_ID,
+            config_dir=config_dir,
+        )
+        raw = session._transcript.build_llm_history()
+        # Bare replay and the shared render used by compaction/other providers
+        # both see the persisted journal BEFORE the body-only turn can start.
+        alternate_views.append(_message_texts(_default_convert_to_llm(raw)))
+        alternate_views.append(_message_texts(session._render_history(raw, keep_images=True)))
+
+    monkeypatch.setattr(peer_send, "session_has_durable_history", lambda _sid: True)
+    monkeypatch.setattr(peer_send, "deliver_peer_message_outcome", deliver)
+    session = _session(
+        tmp_path, stream, _runtime(config_dir, FakeBridgeClient()), [_hook_tool(arrival)]
+    )
+    try:
+        await session.prompt("Do the ordinary work")
+        await _settle(session)
+        assert len(stream.requests) == 3, _layout(stream)
+        before_body = stream.texts(1)
+        for texts in [before_body, *alternate_views]:
+            joined = "\n".join(texts)
+            assert PENDING_CARD in joined, joined
+            for forbidden in (
+                "mention: no",
+                "expect:",
+                "sender-name-canary",
+                "private-room-canary",
+                CONVERSATION_ID,
+                MESSAGE_ID,
+                BODY,
+                "<team-bridge-message",
+            ):
+                assert forbidden not in joined, joined
+        admitted = "\n".join(stream.texts(2))
+        assert BODY in admitted and HEADER_MARKER in admitted, admitted
+        assert PENDING_CARD in admitted and "sender-name-canary" not in admitted, admitted
+        assert _row(config_dir)["state"] == "completed"
+        # Accepted cost: neither body nor envelope survives as model history.
+        # Status cannot disclose completion either. Re-reading uses the
+        # conversation read, never a cleared raw envelope.
+        later = "\n".join(
+            _message_texts(session._render_history(session._transcript.build_llm_history()))
+        )
+        assert PENDING_CARD in later, later
+        assert "mention: no" not in later and "sender-name-canary" not in later, later
+        assert BODY not in _transcript_text(tmp_path / "sess")
+        print(
+            f"atomic {sender_kind} thread={thread}: tool-boundary=pending; replay=pending; "
+            "body-turn=screened-source+body; settled-history=pending-marker; body-persisted=no"
+        )
+    finally:
+        await session.dispose()
