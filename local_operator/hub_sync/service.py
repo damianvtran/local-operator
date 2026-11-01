@@ -5881,6 +5881,7 @@ def confirm_link_push(ctx: HubSyncContext, *, link_id: str, preview_receipt: str
                 ),
                 bundle_attested=not is_bundle or _capability_bundle(ctx.store().load(), identity),
                 bundle_upload=(bundle_upload_hook(ctx, identity, record) if is_bundle else None),
+                org_skill=identity.visibility == "org",
             )
         )
         record_push_outcome(ctx, check, outcome)

@@ -337,6 +337,7 @@ async def push_item(
     document_builder: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
     bundle_attested: bool = False,
     bundle_upload: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
+    org_skill: bool = False,
 ) -> PushOutcome:
     """Project and conditionally publish one authored item; settle the outbox.
 
@@ -486,7 +487,23 @@ async def push_item(
         preview_document = preview.get("document")
         pin = preview.get("pin")
         token = str(pin.get("token") or "") if isinstance(pin, Mapping) else ""
-        if not isinstance(preview_document, Mapping) or not token:
+        # Org skill documents deliberately have no generalization pin on the hub.
+        # Only a verified org-scope caller may accept that contract; the preview
+        # must also prove it returned our exact untransformed document. CAS still
+        # binds both preview and commit to the same remote revision above.
+        transform = preview.get("transform")
+        unpinned_org_skill = (
+            kind == "skill"
+            and org_skill
+            and not token
+            and status == "unchanged"
+            and not unresolved
+            and preview.get("changes") == []
+            and isinstance(transform, Mapping)
+            and transform.get("model") == "not_applied"
+            and preview_document == document
+        )
+        if not isinstance(preview_document, Mapping) or (not token and not unpinned_org_skill):
             return _settle_deterministic(
                 outbox, operation_id, generation, "unsupported-precondition"
             )

@@ -1112,3 +1112,75 @@ def _document_fields(*, seed: str = "a") -> dict[str, Any]:
     if seed != "a":
         data["files"][0]["content"] += f"\n{seed}\n"
     return SkillDocument.from_json(data).to_json()
+
+
+def test_org_document_preview_without_pin_commits_with_revision(tmp_path: Path) -> None:
+    class OrgTransport(FakeTransport):
+        async def preview(self, *, document, expected_revision, budget):
+            self.preview_calls.append(
+                {"document": dict(document), "expected_revision": expected_revision}
+            )
+            return {
+                "revision": "rev-a",
+                "status": "unchanged",
+                "document": dict(document),
+                "unresolved": [],
+                "changes": [],
+                "transform": {"model": "not_applied"},
+            }
+
+    outcome, _, server = asyncio.run(
+        _run(
+            tmp_path,
+            transport=OrgTransport(),
+            kind="skill",
+            captured_local=_document_fields(),
+            accepted=_document_fields(),
+            current_local=_document_fields(seed="b"),
+            remote_latest=_document_fields(),
+            org_skill=True,
+        )
+    )
+    assert outcome.state == "pushed"
+    assert server.commit_calls[0]["preview_token"] == ""
+    assert server.commit_calls[0]["expected_revision"] == "rev-a"
+
+
+@pytest.mark.parametrize(
+    "case", ["public", "wrong_revision", "modified_document", "transform", "changes"]
+)
+def test_unpinned_preview_fails_closed_outside_org_contract(tmp_path: Path, case: str) -> None:
+    class OrgTransport(FakeTransport):
+        async def preview(self, *, document, expected_revision, budget):
+            result = {
+                "revision": "rev-a",
+                "status": "unchanged",
+                "document": dict(document),
+                "unresolved": [],
+                "changes": [],
+                "transform": {"model": "not_applied"},
+            }
+            if case == "wrong_revision":
+                result["revision"] = "rev-other"
+            elif case == "modified_document":
+                result["document"] = {**document, "description": "unexpected"}
+            elif case == "transform":
+                result["transform"] = {"model": "applied"}
+            elif case == "changes":
+                result["changes"] = [{"field": "description"}]
+            return result
+
+    outcome, _, server = asyncio.run(
+        _run(
+            tmp_path,
+            transport=OrgTransport(),
+            kind="skill",
+            captured_local=_document_fields(),
+            accepted=_document_fields(),
+            current_local=_document_fields(seed="b"),
+            remote_latest=_document_fields(),
+            org_skill=case != "public",
+        )
+    )
+    assert outcome.state != "pushed"
+    assert server.commit_calls == []

@@ -12857,6 +12857,7 @@ def _skills_push(args: argparse.Namespace, base_dir: Path) -> int:
             ),
             bundle_attested=not is_bundle or svc._capability_bundle(ctx.store().load(), identity),
             bundle_upload=(svc.bundle_upload_hook(ctx, identity, record) if is_bundle else None),
+            org_skill=identity.visibility == "org",
         )
     )
     svc.record_push_outcome(ctx, check, outcome)
