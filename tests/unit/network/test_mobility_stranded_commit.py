@@ -63,17 +63,22 @@ def test_the_wait_separates_a_commit_here_from_a_confirmation_there(
     _owned_session(server_a)
     progress = mobility.progress_for(server_a)
     # Mirror the precondition the real entry point applies: ``_offload`` calls
-    # ``progress.forget(session_id)`` immediately after ``progress_for(server)``
-    # (mobility.py:6157-6158), because a progress record is scoped to ONE move.
+    # ``progress.forget(session_id)`` immediately after ``progress_for(server)``,
+    # because a progress record is scoped to ONE move. (Named rather than cited by
+    # line: the coordinates drift and a stale number in a comment is worse than none.)
     #
     # Without it this cell inherits whatever an earlier cell in the same worker left
     # behind. ``done`` is a level-triggered ``threading.Event`` that nothing clears,
     # and this family shares one module-level ``SESSION``, so a previous test's
     # successful move answers THIS wait's first poll with ``"done"`` before anything
-    # has moved — which is how main went red (run 41239213762, job 124682212843:
-    # ``assert ('done', None) == ('none', None)``). The donor is the last test of
-    # ``test_mobility_store_marker.py``, the file immediately before this one in the
-    # shard, which ends with a successful ``SESSION`` move and never forgets.
+    # has moved — which is how main went red (run 41239213762, job 124682212843, and
+    # again on run 41252682294: ``assert ('done', None) == ('none', None)``).
+    #
+    # Measured, not assumed: seeding a ``done`` for ``SESSION`` on the pair's server
+    # makes this wait return ``('done', None)``; forgetting first makes it return
+    # ``('none', None)``. WHICH earlier cell seeds it is not proven — the leftover
+    # record is, the address-reuse step that carries it between servers is not, and
+    # shard adjacency under ``--dist worksteal`` is not a scheduling guarantee.
     progress.forget(SESSION)
 
     try:
