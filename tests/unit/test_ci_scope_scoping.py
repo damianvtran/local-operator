@@ -30,7 +30,7 @@ import os
 import shutil
 import subprocess
 import textwrap
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 import pytest
@@ -148,6 +148,56 @@ def _plan(
 # ---------------------------------------------------------------------------
 # The graph
 # ---------------------------------------------------------------------------
+
+
+#: The real checkout, RESOLVED: the identity below that a cached graph is keyed on.
+_REPO_ROOT = REPO.resolve()
+
+
+@pytest.fixture(scope="session")
+def real_graph() -> Callable[[Path], ci_scope.ImportGraph]:
+    """`ci_scope.build_import_graph` over the REAL checkout, built once per worker.
+
+    Three tests in this module answer a question about THIS repository (the slow
+    property guard and the two real-tree guards), and each asked the builder
+    directly, so each re-parsed every covered file — 3,756 of them when this was
+    written, and the dominant cost of the file. Session scope makes those three
+    calls one build per pytest worker; xdist hands every worker its own process,
+    so no cache below the filesystem can share further than that.
+
+    ONLY the real checkout is cacheable, and that is a correctness rule rather
+    than a scope trim. A `_fixture_repo(tmp_path)` tree is written BY the test
+    that reads it, and this cache is keyed on the path, not on the tree's
+    content: caching one of those would serve a graph built before a later
+    `_write` and turn "the selector sees what I just wrote" into a silent stale
+    read. Such a root therefore raises here instead of being served, because a
+    plausible wrong graph is the one failure mode this fixture could introduce.
+    The real checkout is safe to hold only because its three consumers are
+    read-only over it — they read `graph.files`, `graph.boot`,
+    `graph.unresolved_sites()` and the selector helpers, and never write to the
+    tree or to the graph. A future consumer that does must build its own.
+
+    The key is the RESOLVED path so the two spellings of the real root in this
+    module (`REPO`, and the `parents[2]` expression one test repeats) land on the
+    same entry rather than on two builds of the same tree.
+    """
+    cache: dict[Path, ci_scope.ImportGraph] = {}
+
+    def build(root: Path) -> ci_scope.ImportGraph:
+        key = root.resolve()
+        if key != _REPO_ROOT:
+            raise AssertionError(
+                f"{key} is not the real checkout ({_REPO_ROOT}): a synthetic or mutated "
+                "tree must be built with ci_scope.build_import_graph directly — this "
+                "cache is keyed on the path and would serve a graph from before the "
+                "test changed it"
+            )
+        graph = cache.get(key)
+        if graph is None:
+            graph = cache[key] = ci_scope.build_import_graph(root)
+        return graph
+
+    return build
 
 
 def test_the_graph_resolves_imports_by_parsing_and_never_imports(tmp_path):
@@ -728,7 +778,7 @@ def test_a_module_a_test_runs_with_dash_m_is_an_input(tmp_path):
 
 
 @pytest.mark.slow
-def test_a_repo_python_file_a_test_names_is_always_selected():
+def test_a_repo_python_file_a_test_names_is_always_selected(real_graph):
     """The same property over the REAL tree, so a rename cannot hide the case.
 
     `scripts/visual_gallery.py` → `tests/unit/tui/test_visual_gallery.py` is the
@@ -738,7 +788,7 @@ def test_a_repo_python_file_a_test_names_is_always_selected():
     the real graph once is the only affordable way to ask it ~100 times.
     """
     root = Path(__file__).resolve().parents[2]
-    graph = ci_scope.build_import_graph(root)
+    graph = real_graph(root)
     universe = ci_scope._test_universe(graph, "tests/unit")
     basenames = ci_scope._repo_basenames(sorted(graph.files))
     # Driven from the LITERALS each test carries, not from `graph.referrers`: the
@@ -1383,9 +1433,9 @@ def test_a_boot_closure_change_is_a_barrier_and_an_outside_module_is_not(tmp_pat
     assert "tests/unit/test_outside.py" in outside.targets
 
 
-def test_the_boot_closure_is_the_app_and_leaves_modules_outside_it():
+def test_the_boot_closure_is_the_app_and_leaves_modules_outside_it(real_graph):
     """Over the REAL tree: the closure exists, and it is not the whole package."""
-    graph = ci_scope.build_import_graph(REPO)
+    graph = real_graph(REPO)
 
     assert set(ci_scope.BOOT_ROOTS) <= graph.boot
     local = {rel for rel in graph.files if rel.startswith("local_operator/")}
@@ -1405,7 +1455,7 @@ def test_the_barrier_is_a_barrier_and_not_a_constant(tmp_path):
     assert ci_scope._test_barriers(graph, ["local_operator/alpha.py"], universe) == []
 
 
-def test_no_changed_file_can_be_narrowed_while_the_graph_has_unresolved_references():
+def test_no_changed_file_can_be_narrowed_while_the_graph_has_unresolved_references(real_graph):
     """The property, asserted over the REAL tree rather than over a fixture.
 
     This is the shape the previous guard got wrong: it walked the resolver's own
@@ -1414,7 +1464,7 @@ def test_no_changed_file_can_be_narrowed_while_the_graph_has_unresolved_referenc
     class through while an unresolvable reference is standing fails here, whatever
     the class looks like.
     """
-    graph = ci_scope.build_import_graph(REPO)
+    graph = real_graph(REPO)
     universe = ci_scope._test_universe(graph, "tests/unit")
 
     assert graph.unresolved_sites(), "this tree has no unresolved site — re-derive this guard"
