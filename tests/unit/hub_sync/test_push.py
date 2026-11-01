@@ -1114,6 +1114,85 @@ def _document_fields(*, seed: str = "a") -> dict[str, Any]:
     return SkillDocument.from_json(data).to_json()
 
 
+def test_unpinned_org_commit_timeout_replays_after_restart(tmp_path: Path) -> None:
+    class OrgTransport(FakeTransport):
+        async def preview(self, *, document, expected_revision, budget):
+            self.preview_calls.append(
+                {"document": dict(document), "expected_revision": expected_revision}
+            )
+            return {
+                "revision": "rev-a",
+                "status": "unchanged",
+                "document": dict(document),
+                "unresolved": [],
+                "changes": [],
+                "transform": {"model": "not_applied"},
+            }
+
+    args = dict(
+        kind="skill",
+        captured_local=_document_fields(),
+        accepted=_document_fields(),
+        current_local=_document_fields(seed="b"),
+        remote_latest=_document_fields(),
+        org_skill=True,
+    )
+    first, out, _ = asyncio.run(_run(tmp_path, transport=OrgTransport(hang_commit=True), **args))
+    assert first.state == "pending-reconciliation"
+    saved = dict(_stored(out, "op1").intent or {})
+    healthy = OrgTransport()
+    replay, _, _ = asyncio.run(_run(tmp_path, transport=healthy, **args))
+    assert replay.state == "pushed"
+    assert healthy.preview_calls == []
+    assert healthy.commit_calls[0]["document"] == saved["document"]
+    assert healthy.commit_calls[0]["expected_revision"] == saved["expected_revision"]
+    assert healthy.commit_calls[0]["preview_token"] == ""
+
+
+@pytest.mark.parametrize("case", ["wrong_scope", "missing_marker", "string_marker", "landed"])
+def test_unpinned_org_replay_requires_valid_intent_and_scope(tmp_path: Path, case: str) -> None:
+    from dataclasses import replace
+
+    class OrgTransport(FakeTransport):
+        async def preview(self, *, document, expected_revision, budget):
+            return {
+                "revision": "rev-a",
+                "status": "unchanged",
+                "document": dict(document),
+                "unresolved": [],
+                "changes": [],
+                "transform": {"model": "not_applied"},
+            }
+
+    args = dict(
+        kind="skill",
+        captured_local=_document_fields(),
+        accepted=_document_fields(),
+        current_local=_document_fields(seed="b"),
+        remote_latest=_document_fields(),
+        org_skill=True,
+    )
+    first, out, _ = asyncio.run(_run(tmp_path, transport=OrgTransport(hang_commit=True), **args))
+    assert first.state == "pending-reconciliation"
+    record = _stored(out, "op1")
+    intent = dict(record.intent or {})
+    assert intent["unpinned_org_skill"] is True
+    if case == "missing_marker":
+        intent.pop("unpinned_org_skill")
+    elif case == "string_marker":
+        intent["unpinned_org_skill"] = "true"
+    out._atomic_write(replace(record, intent=intent))
+    if case == "wrong_scope":
+        args["org_skill"] = False
+    transport = OrgTransport(fail_commit=RemoteRevisionChanged() if case == "landed" else None)
+    replay, _, _ = asyncio.run(_run(tmp_path, transport=transport, **args))
+    assert transport.preview_calls == []
+    if case == "landed":
+        assert replay.state == "conflict" and len(transport.commit_calls) == 1
+    else:
+        assert replay.reason == "reconciliation-intent-invalid" and not transport.commit_calls
+
+
 def test_org_document_preview_without_pin_commits_with_revision(tmp_path: Path) -> None:
     class OrgTransport(FakeTransport):
         async def preview(self, *, document, expected_revision, budget):
