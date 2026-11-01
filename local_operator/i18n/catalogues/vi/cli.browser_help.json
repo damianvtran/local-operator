@@ -1,0 +1,22 @@
+{
+  "cli.browser_help.browser": "Kết nối công cụ browser với một tiện ích Chromium",
+  "cli.browser_help.install": "Cài đặt daemon cầu nối",
+  "cli.browser_help.status": "Hiển thị trạng thái daemon, tiện ích và ghép nối",
+  "cli.browser_help.status_repair": "Đối soát trạng thái đã công bố với thực tế: bỏ các tab không còn tồn tại và công bố lại heartbeat mới. An toàn khi các phiên đang chạy.",
+  "cli.browser_help.json": "đầu ra máy đọc được",
+  "cli.browser_help.cleanup": "Đóng một chủ sở hữu trình duyệt đã được chứng minh là đã kết thúc, sau khi xác thực lại",
+  "cli.browser_help.cleanup_yes": "Phê duyệt đúng lần dọn dẹp này",
+  "cli.browser_help.daemon_action": "{action, select, start{Khởi động} stop{Dừng} restart{Khởi động lại} other{{action}}} daemon",
+  "cli.browser_help.pair": "Hiển thị mã ghép nối tiện ích",
+  "cli.browser_help.pair_reset": "Thu hồi trình duyệt đã ghép nối trước",
+  "cli.browser_help.pair_list": "Liệt kê các tiện ích trình duyệt được ủy quyền và tiện ích nào đang điều khiển",
+  "cli.browser_help.pair_revoke": "Thu hồi MỘT tiện ích được ủy quyền (id của nó, tiền tố id không mơ hồ, hoặc một phần nhãn), giữ nguyên ghép nối của mọi tiện ích khác",
+  "cli.browser_help.drive": "Chọn tiện ích được ủy quyền nào điều khiển trình duyệt",
+  "cli.browser_help.drive_target": "Id tiện ích (hoặc tiền tố không mơ hồ), hoặc một phần nhãn của nó",
+  "cli.browser_help.logs": "Theo dõi nhật ký daemon",
+  "cli.browser_help.uninstall": "Gỡ daemon cầu nối",
+  "cli.browser_help.uninstall_purge": "Xóa cả trạng thái ghép nối",
+  "cli.browser_help.serve": "Chạy daemon cầu nối (tiền cảnh)",
+  "cli.browser_help.tabs": "Liệt kê các bản ghi sở hữu bền vững và tab đang mở (chỉ đọc)",
+  "cli.browser_help.reconcile": "Bí danh của 'tabs': kiểm tra quyền sở hữu mà không đóng gì"
+}

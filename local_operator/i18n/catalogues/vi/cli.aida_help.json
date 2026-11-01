@@ -1,0 +1,6 @@
+{
+  "cli.aida_help.aida": "Ghi chú hồ sơ của Aida: ghi lại những điều cô ấy cần nhớ",
+  "cli.aida_help.note": "Nối một ghi chú vào mục 'About the operator' trong system_prompt.md",
+  "cli.aida_help.note_text": "Ghi chú cần ghi lại; bỏ qua để đọc từ STDIN",
+  "cli.aida_help.note_description": "Ghi một ghi chú vào <config root>/system_prompt.md, bên trong mục 'About the operator' có đánh dấu, để mọi phiên và tác nhân con sau này đều thấy. Tệp được xác định từ thư mục cấu hình gốc và không bao giờ là một đối số; ghi chú không được chứa các dấu đánh dấu mục. Bỏ qua TEXT để đọc ghi chú từ STDIN (ghi chú nhiều dòng không cần đặt trong dấu nháy)."
+}

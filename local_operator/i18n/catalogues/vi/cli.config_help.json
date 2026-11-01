@@ -1,0 +1,11 @@
+{
+  "cli.config_help.config": "Quản lý các cài đặt cấu hình",
+  "cli.config_help.open": "Mở tệp cấu hình bằng trình soạn thảo mặc định",
+  "cli.config_help.edit": "Sửa một giá trị cấu hình cụ thể trong tệp cấu hình",
+  "cli.config_help.edit_key": "Khóa cấu hình cần cập nhật (ví dụ: hosting, model_name, conversation_length, detail_length, max_learnings_history, auto_save_conversation)",
+  "cli.config_help.edit_value": "Giá trị mới cho khóa cấu hình (kiểu được tự động chuyển đổi theo khóa)",
+  "cli.config_help.list": "Liệt kê các tùy chọn cấu hình có sẵn và mô tả của chúng",
+  "cli.config_help.create": "Tạo tệp cấu hình mới",
+  "cli.config_help.instructions": "Hiển thị các tệp hướng dẫn tùy chỉnh mà một phiên ghép lại, theo thứ tự (chỉ đường dẫn và dung lượng, không bao giờ hiện nội dung)",
+  "cli.config_help.instructions_description": "Hiển thị các tệp hướng dẫn tùy chỉnh mà một phiên ghép lại, theo thứ tự, kèm dung lượng mỗi tệp đóng góp và việc nó bị gộp do trùng lặp, bị cắt bớt, hay chồng lấn với nguồn trước đó. Chỉ đường dẫn và dung lượng, không bao giờ hiện nội dung."
+}

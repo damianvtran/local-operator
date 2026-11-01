@@ -1,0 +1,27 @@
+{
+  "locale": "vi",
+  "namespace": "wire.exec",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 1,
+    "nit": 0
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 1,
+      "id": "VI-054",
+      "severity": "MINOR",
+      "namespace": "wire.exec",
+      "key": "wire.exec.approval_advisory",
+      "english": "Warning: this run cannot ask for approval (no terminal attached), so any tool call that needs approval will be denied.\n  Remedies: --control parks cards for a supervisor; --yolo auto-approves every tier; --tools NAME[,NAME] pre-approves the listed tools and bounds this run's reach to them; tool_approval_mode: auto in the config answers every call the same way for every run.",
+      "current": "Cảnh báo: lần chạy này không thể xin phê duyệt (không có terminal gắn kèm), nên mọi lệnh gọi công cụ cần phê duyệt sẽ bị từ chối.\n  Cách khắc phục: --control tạm giữ các thẻ cho người giám sát; --yolo tự động chấp thuận mọi bậc; --tools NAME[,NAME] chấp thuận trước các công cụ được liệt kê và giới hạn phạm vi của lần chạy này trong đó; tool_approval_mode: auto trong cấu hình trả lời mọi lệnh gọi theo cùng một cách cho mọi lần chạy.",
+      "problem": "Glossary: approvals → «phê duyệt» (used 9× in vi neighbours and in this wave's own cli.exec_help.control/tools); 'chấp thuận' is a second, unglossed term for the same safety act, so the user sees two words for one gate. Here 'phê duyệt' and 'chấp thuận' sit in the same message for the same act.",
+      "suggested": "… --yolo tự động phê duyệt mọi bậc; --tools NAME[,NAME] phê duyệt trước các công cụ được liệt kê …",
+      "disposition": "fixed (remediation core-fix, session 5e0b68c135be)"
+    }
+  ]
+}

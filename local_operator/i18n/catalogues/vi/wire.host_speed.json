@@ -1,0 +1,4 @@
+{
+  "wire.host_speed.retire_below_tps.label": "loại host chậm (tok/s)",
+  "wire.host_speed.retire_below_tps.help": "Thử nghiệm, mặc định tắt: bằng chứng chỉ từ một mô hình/lần chạy. Ngưỡng dương sẽ ngừng ghim một host sau ba phản hồi dài dưới tốc độ token đầu ra/giây này, không tính thời gian tiêu thụ cục bộ. 0 xóa các loại trừ theo tốc độ ở yêu cầu kế tiếp; các loại trừ do trượt cache vẫn giữ. Chuyển host có thể khiến prompt cache bắt đầu nguội."
+}

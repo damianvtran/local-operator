@@ -1,0 +1,21 @@
+{
+  "cli.mcp_help.mcp": "Quản lý máy chủ MCP",
+  "cli.mcp_help.list": "Liệt kê các máy chủ MCP đã cấu hình (gộp mọi nguồn)",
+  "cli.mcp_help.add": "Thêm một máy chủ MCP (lệnh stdio hoặc URL http/sse)",
+  "cli.mcp_help.add_name": "Tên máy chủ",
+  "cli.mcp_help.add_command": "Lệnh stdio để khởi chạy máy chủ",
+  "cli.mcp_help.add_arg": "Đối số của lệnh stdio (lặp lại được)",
+  "cli.mcp_help.add_env": "Biến môi trường KEY=VALUE cho máy chủ stdio (lặp lại được)",
+  "cli.mcp_help.add_url": "URL máy chủ HTTP/SSE (thay cho --command)",
+  "cli.mcp_help.add_scope": "Phạm vi cấu hình để ghi (mặc định: toàn cục ~/.local-operator/mcp.json)",
+  "cli.mcp_help.add_oauth": "Bật OAuth cho máy chủ HTTP từ xa",
+  "cli.mcp_help.remove_server": "Gỡ một máy chủ MCP khỏi một phạm vi cấu hình",
+  "cli.mcp_help.remove_name": "Tên máy chủ cần gỡ",
+  "cli.mcp_help.remove_scope": "Phạm vi cấu hình để gỡ khỏi (mặc định: toàn cục)",
+  "cli.mcp_help.login": "Xác thực một máy chủ MCP đã bật OAuth",
+  "cli.mcp_help.login_name": "Tên máy chủ cần xác thực",
+  "cli.mcp_help.logout": "Xóa thông tin xác thực OAuth đã lưu của một máy chủ MCP",
+  "cli.mcp_help.logout_name": "Tên máy chủ cần đăng xuất",
+  "cli.mcp_help.reauth": "Đăng xuất khỏi một máy chủ MCP OAuth rồi chạy lại ủy quyền mới",
+  "cli.mcp_help.reauth_name": "Tên máy chủ cần xác thực lại"
+}

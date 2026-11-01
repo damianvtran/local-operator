@@ -1,0 +1,14 @@
+{
+  "cli.hub_shared_help.publish_yes": "Bỏ qua các lời nhắc xác nhận; không chấp nhận giá trị chưa giải quyết (dùng --accept-unresolved cho chúng)",
+  "cli.hub_shared_help.publish_preview_only": "Chạy xem trước và in diff mà không xuất bản (thoát 2 khi nó sẽ khái quát hóa điều gì đó)",
+  "cli.hub_shared_help.publish_json": "Đầu ra xem trước máy đọc được; nó mang các giá trị tham chiếu và pin commit dùng một lần, nên hãy coi là nhạy cảm",
+  "cli.hub_shared_help.publish_accept_unresolved": "Xác nhận mọi giá trị mà bản xem trước không phân loại được, xuất bản chúng nguyên trạng",
+  "cli.hub_shared_help.publish_allow_internal_ops": "Đồng ý với phần cho phép vận hành nội bộ khi xuất bản cho một tổ chức (cần --org; hiện văn bản đồng ý một cách tương tác)",
+  "cli.hub_shared_help.sync_check": "Chỉ báo cáo những gì có sẵn; không thay đổi gì",
+  "cli.hub_shared_help.sync_prefer": "Quyết định một xung đột: giữ phía bạn hoặc lấy phía hub cho các phần cả hai cùng đổi",
+  "cli.hub_shared_help.sync_accept_unknown_baseline": "Áp dụng khi chưa rõ đường cơ sở: nhận phần hub thêm vào, không mất gì của bạn",
+  "cli.hub_shared_help.sync_replace": "BỎ bản của bạn để lấy bản của hub (in ra những gì đã bỏ; cần --yes)",
+  "cli.hub_shared_help.sync_yes": "Xác nhận --replace",
+  "cli.hub_shared_help.sync_dry_run": "Hiển thị những gì sẽ thay đổi; không ghi dòng tác nhân nào",
+  "cli.hub_shared_help.sync_json": "Phát báo cáo dưới dạng JSON"
+}
