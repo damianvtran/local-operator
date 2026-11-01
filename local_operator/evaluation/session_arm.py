@@ -308,6 +308,7 @@ def render_prompt_header(
     tool_names: Sequence[str],
     confined: bool,
     remote_platform: str | None = None,
+    command_tool: str | None = None,
 ) -> str:
     """The first prompt's protocol paragraph, plus the topology when it applies.
 
@@ -331,6 +332,14 @@ def render_prompt_header(
     """
 
     header = PROMPT_HEADER.format(tool_name=tool_name)
+    # Only negotiated targets get this sentence; legacy prompts remain exact.
+    if command_tool is not None:
+        header += (
+            f"Use `{command_tool}` for shell commands on the remote computer and "
+            "read their output as text. Commands run on the remote computer, "
+            "not in your local workspace; "
+            "do not type shell commands into its GUI terminal.\n"
+        )
     if remote_platform is not None:
         header += REMOTE_PLATFORM_NOTE.format(platform=remote_platform)
     guide = OBSERVATION_MARKER_GUIDE + "\n"
@@ -339,6 +348,8 @@ def render_prompt_header(
     if not local:
         return header + guide
     entry = "typing text, or `paste_text`" if surface.paste_text else "typing text"
+    if command_tool is not None:
+        entry += f", or running a command with `{command_tool}`"
     delegation = (
         " Agents you delegate to run in that same workspace and cannot reach the "
         "remote computer."
@@ -347,7 +358,17 @@ def render_prompt_header(
     )
     return (
         header
-        + REMOTE_TOPOLOGY_NOTE.format(
+        + (
+            REMOTE_TOPOLOGY_NOTE
+            if command_tool is None
+            else REMOTE_TOPOLOGY_NOTE.replace(
+                "The only way to put data into the remote computer is a "
+                "`{tool_name}` action ({entry}); the only way to read from it is the state "
+                "`{tool_name}` returns.",
+                "Use `{tool_name}` for screen actions ({entry}), or the remote command tool "
+                "for text input and output.",
+            )
+        ).format(
             local_tools=", ".join(f"`{name}`" for name in local),
             workspace="an isolated scratch workspace" if confined else "a local workspace",
             tool_name=tool_name,
@@ -659,6 +680,7 @@ class ActionServerDeclaration:
     endpoint: Path
     command: str
     args: tuple[str, ...]
+    command_tool_name: str | None = None
 
 
 def declare_action_server(
@@ -668,6 +690,7 @@ def declare_action_server(
     surface: ActionSurface,
     python_executable: str | None = None,
     cwd: Path | None = None,
+    command: bool = False,
 ) -> ActionServerDeclaration:
     """Write the episode's ``mcp.json`` declaration; return its resolved facts.
 
@@ -715,6 +738,9 @@ def declare_action_server(
         # and the harness refuses an execution carrying a child's job id.
         "ownTurnOnly": True,
     }
+    if command:
+        args.append("--command")
+        entry["enabledTools"].append("run_command")
     if cwd is not None:
         entry["cwd"] = str(cwd)
 
@@ -751,6 +777,7 @@ def declare_action_server(
         endpoint=Path(endpoint),
         command=executable,
         args=tuple(args),
+        command_tool_name=(create_mcp_tool_name(SERVER_NAME, "run_command") if command else None),
     )
 
 
@@ -1053,6 +1080,8 @@ class ActionBridge:
     execute: ExecuteBatch
     max_steps: int
     record: RecordBatch | None = None
+    # Separate from screen-bound batches: commands return text, not observations.
+    run_command: Callable[[str, float], Awaitable[Any]] | None = None
     #: The ask seam. The real driver returns the adapter's canonical
     #: ``AskUserExchangeResult`` (receipt + answer); scripted doubles may
     #: return a bare answer string, which the bridge renders without inventing
@@ -1680,11 +1709,144 @@ class ActionBridge:
         except OSError:
             pass
 
+    async def call_command(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
+        """Run a negotiated text operation without consuming a screen token.
+
+        Transport failures remain errors, not synthetic exit statuses. Recording
+        metadata excludes output: sealed artifacts still identify exactly what ran.
+        """
+        # Screen actions, terminal admission and commands share ONE mutation
+        # lane. Keep the ended-state check inside it so queued calls cannot run
+        # after a finish accepted while they were waiting.
+        async with self._lock:
+            return await self._call_command_locked(arguments)
+
+    async def _call_command_locked(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
+        from local_operator.evaluation.action_server import (
+            COMMAND_DEFAULT_TIMEOUT_S,
+            COMMAND_MAX_TIMEOUT_S,
+        )
+        from local_operator.evaluation.adapters.api import MAX_COMMAND_LENGTH
+
+        def refusal(text: str) -> dict[str, Any]:
+            return {"content": [TextContent(text=text)], "is_error": True}
+
+        if self.run_command is None:
+            return refusal("Remote commands are not available on this target.")
+        if self.end_requested is not None:
+            return refusal("The run has ended; no further commands may execute.")
+        command = arguments.get("command")
+        timeout = arguments.get("timeout_s", COMMAND_DEFAULT_TIMEOUT_S)
+        if (
+            set(arguments) - {"command", "timeout_s"}
+            or not isinstance(command, str)
+            or not command.strip()
+            or len(command) > MAX_COMMAND_LENGTH
+            or type(timeout) is not int
+            or not 1 <= timeout <= COMMAND_MAX_TIMEOUT_S
+        ):
+            return refusal(
+                "Invalid command arguments: supply a command and a bounded integer timeout_s."
+            )
+        row: dict[str, Any] = {
+            "call_id": f"command-{uuid.uuid4().hex[:12]}",
+            "command": command,
+            "timeout_s": float(timeout),
+        }
+        # Seal the attempt before yielding: cancellation or a dead worker must
+        # not erase the fact that a potentially mutating command was offered.
+        if self.record is not None:
+            self.record("command_started", dict(row))
+
+        def record_cancellation() -> None:
+            row.update(
+                cancelled=True,
+                outcome="cancelled_after_dispatch",
+                target_may_have_run=True,
+                exit_code=None,
+                timed_out=None,
+                stdout_truncated=None,
+                stderr_truncated=None,
+                error="CancelledError: command outcome unknown",
+            )
+            if self.record is not None:
+                self.record("command", row)
+
+        try:
+            result = await self.run_command(command, float(timeout))
+            # Some transports cannot stop an already dispatched HTTP request
+            # and may swallow cancellation while collecting its late reply.
+            # That reply must NEVER turn the caller's cancelled attempt green.
+            task = asyncio.current_task()
+            if task is not None and task.cancelling():
+                raise asyncio.CancelledError
+        except asyncio.CancelledError:
+            record_cancellation()
+            raise
+        except Exception as error:
+            task = asyncio.current_task()
+            if task is not None and task.cancelling():
+                record_cancellation()
+                raise asyncio.CancelledError from error
+            row.update(
+                exit_code=None,
+                timed_out=None,
+                stdout_truncated=None,
+                stderr_truncated=None,
+                error=f"{type(error).__name__}: {error}",
+            )
+            if self.record is not None:
+                self.record("command", row)
+            return refusal(
+                f"The target could not run the command ({type(error).__name__}: {error})."
+            )
+        details = result.model_dump(mode="json", exclude={"stdout", "stderr"})
+        row.update(details)
+        if self.record is not None:
+            self.record("command", row)
+        text = (
+            f"exit_code: {result.exit_code if result.exit_code is not None else 'none'}\n"
+            f"timed_out: {str(result.timed_out).lower()}\n"
+        )
+        for stream in ("stdout", "stderr"):
+            text += f"{stream}:\n{getattr(result, stream)}\n"
+            if getattr(result, f"{stream}_truncated"):
+                text += (
+                    f"[TRUNCATED {stream}: produced {getattr(result, f'{stream}_bytes')} bytes]\n"
+                )
+        return {"content": [TextContent(text=text)], "is_error": False, "details": details}
+
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
             line = await reader.readline()
             request = decode_call(line)
-            reply = await self.call(request.get("arguments") or {})
+            if request["tool"] == "run_command":
+                operation = asyncio.create_task(self.call_command(request.get("arguments") or {}))
+                disconnect = asyncio.create_task(reader.read(1))
+                try:
+                    done, _ = await asyncio.wait(
+                        (operation, disconnect), return_when=asyncio.FIRST_COMPLETED
+                    )
+                    if disconnect in done:
+                        # The command client half-closes on cancellation. ACK
+                        # only after forwarding cancellation, so a caller that
+                        # releases a delayed HTTP reply cannot race this signal.
+                        operation.cancel()
+                        writer.write(encode_response([], is_error=True))
+                        await writer.drain()
+                        try:
+                            await operation
+                        except asyncio.CancelledError:
+                            pass
+                        return
+                    reply = await operation
+                finally:
+                    disconnect.cancel()
+                    if not operation.done():
+                        operation.cancel()
+                    await asyncio.gather(operation, disconnect, return_exceptions=True)
+            else:
+                reply = await self.call(request.get("arguments") or {})
             writer.write(encode_response(**reply))
             await writer.drain()
         except Exception as error:  # noqa: BLE001 - every frame gets an answer
@@ -2567,6 +2729,7 @@ EPISODE_TOOL_SURFACE: tuple[str, ...] = (
 def validate_episode_session_spec(
     *,
     spec: SessionSpec,
+    command: bool = False,
 ) -> SessionSpec:
     """The session spec an episode runs under, from the run's own spec.
 
@@ -2605,6 +2768,12 @@ def validate_episode_session_spec(
             "the episode's approvals must be ApprovalPolicy.declared(EPISODE_TOOL_SURFACE): "
             "the declaration is the run's approval for exactly the tools it names"
         )
+    # Validate the caller's controller-safe baseline FIRST. Only the completed
+    # target handshake may widen it, and approval must name the same new tool;
+    # listing an MCP tool alone does not put it into a pinned session inventory.
+    if command:
+        tools = (*EPISODE_TOOL_SURFACE, create_mcp_tool_name(SERVER_NAME, "run_command"))
+        return replace(spec, tools=tools, approvals=ApprovalPolicy.declared(tools))
     return spec
 
 
@@ -3246,6 +3415,7 @@ async def run_session_episode(
             endpoint=endpoint,
             surface=surface,
             cwd=roots.cwd_path,
+            command=getattr(handshake.metadata.capabilities, "command", False),
         )
         resolved_sources = assert_declaration_resolved(
             cwd=roots.cwd_path,
@@ -3260,6 +3430,11 @@ async def run_session_episode(
                 "config": str(declaration.config_path),
                 "endpoint": str(declaration.endpoint),
                 "sources": {name: str(path) for name, path in resolved_sources.items()},
+                **(
+                    {"command_tool": declaration.command_tool_name}
+                    if declaration.command_tool_name
+                    else {}
+                ),
             },
         )
         # THE COMPARABILITY STAMP, in the record beside the declaration it
@@ -3277,6 +3452,11 @@ async def run_session_episode(
             render=renderer.render,
             render_read_only=renderer.render_read_only,
             execute=_make_execute(adapter_session, config, record),
+            run_command=(
+                _make_run_command(adapter_session, spec.episode_id)
+                if getattr(handshake.metadata.capabilities, "command", False)
+                else None
+            ),
             # The re-bind seam: one read-only ``observe`` after a re-bindable
             # failed execute (see ``_make_recover``).
             recover=_make_recover(adapter_session, config, spec.episode_id),
@@ -3309,7 +3489,9 @@ async def run_session_episode(
         await bridge.start()
 
         # --- the session turn (the engagement this module exists for) -------
-        episode_session = validate_episode_session_spec(spec=session_spec)
+        episode_session = validate_episode_session_spec(
+            spec=session_spec, command=declaration.command_tool_name is not None
+        )
         if episode_session.name is None and display_name:
             episode_session = replace(episode_session, name=display_name)
 
@@ -3436,7 +3618,8 @@ async def run_session_episode(
                         and event.message.role == "assistant"
                         and event.message.stop_reason != "error"
                         and not any(
-                            call.name == declaration.tool_name for call in event.message.tool_calls
+                            call.name in (declaration.tool_name, declaration.command_tool_name)
+                            for call in event.message.tool_calls
                         )
                         and bridge.end_requested is None
                         and bridge.attempted_groups >= bridge.max_steps
@@ -3499,6 +3682,7 @@ async def run_session_episode(
                     # not this function's optional argument.
                     confined=handle.confined,
                     remote_platform=remote_platform_of(observation),
+                    command_tool=declaration.command_tool_name,
                 )
                 + "\n"
                 + text
@@ -3986,7 +4170,9 @@ async def _await_action_tool(
     """
 
     session = handle.session
-    readiness = await session.wait_for_tools((declaration.tool_name,), timeout_s=timeout_s)
+    command_tool = getattr(declaration, "command_tool_name", None)
+    expected = (declaration.tool_name,) + ((command_tool,) if command_tool is not None else ())
+    readiness = await session.wait_for_tools(expected, timeout_s=timeout_s)
     present = readiness.status == "ready"
     startup = getattr(session, "mcp_startup", None)
     record.write(
@@ -4244,6 +4430,28 @@ def _on_event(record: RecordSink, bridge: ActionBridge, event: AgentEvent) -> No
 
     bridge.fold(event)
     record.write("agent_event", {"event": printable_event(event)})
+
+
+def _make_run_command(
+    adapter_session: Any, episode_id: str
+) -> Callable[[str, float], Awaitable[Any]]:
+    """Keep target execution inside the supervised, keyed RPC boundary."""
+    from local_operator.evaluation.adapters.api import RunCommandParams
+
+    async def run(command: str, timeout_s: float) -> Any:
+        return await adapter_session.run_command(
+            RunCommandParams(
+                operation_id=f"command-{uuid.uuid4().hex}",
+                episode_id=episode_id,
+                command=command,
+                timeout_s=timeout_s,
+                max_output_bytes=64 * 1024,
+            ),
+            # Leave the target time to stop the child and serialize its result.
+            timeout=timeout_s + 15,
+        )
+
+    return run
 
 
 def _make_execute(

@@ -85,6 +85,8 @@ from local_operator.evaluation.adapters.api import (
     RequirementsResult,
     ResetStartParams,
     ResolvedSecret,
+    RunCommandParams,
+    RunCommandResult,
     ScopedInfraValue,
     ScoreParams,
     ScoreResult,
@@ -363,6 +365,11 @@ class OSWorldV2Adapter:
                 max_type_chars=actions.ACTION_SURFACE.max_type_chars,
                 drag=actions.ACTION_SURFACE.drag,
                 modifiers=actions.ACTION_SURFACE.modifiers,
+                # Fake/injected providers must not promise access to a real shell.
+                command=(
+                    provider_factory is None
+                    and self._read_provider_config().get("provider") in (None, "aws")
+                ),
             ),
         )
         # Per-episode state. None until the corresponding method runs.
@@ -1040,6 +1047,19 @@ class OSWorldV2Adapter:
             raise AdapterStateError("probe before reset_start")
         reachable = await self._provider.probe_control_server(_PROBE_TIMEOUT_S)
         return ProbeResult(reachable=reachable)
+
+    async def run_command(self, params: RunCommandParams) -> RunCommandResult:
+        """Return text without advancing the screen-bound action sequence."""
+        if self._current_observation is None or self._provider is None:
+            raise AdapterStateError("run_command before reset_start")
+        if not self.metadata.capabilities.command:
+            raise AdapterStateError("target did not advertise commands")
+        if params.episode_id != self._current_observation.episode_id:
+            raise AdapterStateError("run_command belongs to another episode")
+        run = getattr(self._provider, "run_command", None)
+        if run is None:
+            raise AdapterStateError("provider does not support commands")
+        return await run(params)
 
     async def execute(self, params: ExecuteParams) -> ExecuteResult:
         if self._provider is None or self._observation_builder is None:

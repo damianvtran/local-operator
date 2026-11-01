@@ -48,6 +48,8 @@ from local_operator.evaluation.adapters.api import (
     RescueDescriptor,
     ResetStartParams,
     ResolvedSecret,
+    RunCommandParams,
+    RunCommandResult,
     ScoreParams,
     ScoreResult,
     validate_execution,
@@ -1147,6 +1149,40 @@ class VerifiedAdapterSession:
             await self._poison_after_ambiguous_mutation()
             raise
         return result
+
+    async def run_command(self, params: RunCommandParams, *, timeout: float) -> RunCommandResult:
+        """A command may mutate target state; ambiguous failures poison, never retry."""
+        if self.verifier.current_observation is None:
+            raise SupervisionError("run_command has no current observation")
+        if params.episode_id != self.verifier.current_observation.episode_id:
+            raise SupervisionError("run_command belongs to another episode")
+        result = await self._mutating_call(
+            "run_command",
+            params,
+            RunCommandResult,
+            timeout=timeout,
+            validate=lambda value: (
+                None
+                if isinstance(value, RunCommandResult)
+                else (_ for _ in ()).throw(
+                    SupervisionError("run_command returned the wrong result")
+                )
+            ),
+        )
+        assert isinstance(result, RunCommandResult)
+        # Capability negotiation trusts the adapter to execute, not to enforce
+        # our context budget. Cap each UTF-8 stream again at the host boundary.
+        from local_operator.evaluation.adapters.api import cap_command_output
+
+        updates: dict[str, Any] = {}
+        for stream in ("stdout", "stderr"):
+            text, byte_count, truncated = cap_command_output(
+                getattr(result, stream), params.max_output_bytes
+            )
+            updates[stream] = text
+            updates[f"{stream}_bytes"] = max(getattr(result, f"{stream}_bytes"), byte_count)
+            updates[f"{stream}_truncated"] = getattr(result, f"{stream}_truncated") or truncated
+        return result.model_copy(update=updates)
 
     async def execute(
         self,
