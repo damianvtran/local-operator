@@ -114,6 +114,13 @@ def test_every_stdlib_shape_uses_key_and_preserves_tokens(
         assert output == f"<cli.failure_details.{suffix}>"
 
 
+@pytest.mark.parametrize("count", [1, 2, 5, 21])
+def test_fixed_nargs_keeps_exact_count_and_english_plural(count: int) -> None:
+    noun = "argument" if count == 1 else "arguments"
+    text = f"argument --values: expected {count} {noun}"
+    assert localise_failure(text, "en") == text
+
+
 def test_unknown_validator_body_is_not_rewritten() -> None:
     text = "argument --custom: plugin says: invalid int value is forbidden"
     assert localise_failure(text, "en") == text
