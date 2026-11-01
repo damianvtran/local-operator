@@ -6,11 +6,14 @@ import json
 
 import pytest
 
+from local_operator.harness.chrome_prompts import MISSING_ARGUMENTS_RECOVERY_PROMPT
 from local_operator.harness.loop import AgentLoop, LoopContext
+from local_operator.harness.rows import is_harness_chrome
 from local_operator.harness.types import (
     AgentEndEvent,
     AgentTool,
     Message,
+    MessageStartEvent,
     StreamEndEvent,
     StreamEvent,
     StreamTextDelta,
@@ -85,10 +88,21 @@ async def test_missing_required_corrects_once_or_stops(name, field, value, corre
     assert f"missing required argument '{field}'" in rejected.text
     assert "each need their own populated parameters" in rejected.text
     recovery_request = stream.requests[1]
-    assert any(
-        "required tool arguments were omitted" in message.text
+    recovery = next(
+        message
         for message in recovery_request.messages
+        if message.text == MISSING_ARGUMENTS_RECOVERY_PROMPT
     )
+    # The exact persisted text is visible to the model, but suppressed by the
+    # shared replay predicate; ordinary user text mentioning it remains visible.
+    assert is_harness_chrome(recovery.text)
+    assert recovery.provider_payload == {"harness_injected": True}
+    assert not any(
+        isinstance(event, MessageStartEvent) and event.message.text == recovery.text
+        for event in events
+    )
+    assert is_harness_chrome(f" {recovery.text}\n")
+    assert not is_harness_chrome(f"Please investigate: {recovery.text}")
     if corrected:
         # A corrected call still crosses the ordinary approval boundary once;
         # the rejected predecessor must not have prompted the operator.
