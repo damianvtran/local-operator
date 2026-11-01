@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import signal
 import sys
 import time
 from dataclasses import dataclass
@@ -29,6 +30,15 @@ from local_operator.mobile import resources
 
 class Unknown(RuntimeError):
     """Incomplete proof, never a spelling of observed absence."""
+
+
+class PinLost(Unknown):
+    """The group number is not provably ours any more: refuse, never signal.
+
+    A distinct class, not a message: the wrapper records the refusal reason from
+    the TYPE, and a caller that cannot tell "this is not ours" from "we could not
+    read it" would retry the wrong one.
+    """
 
 
 def strict_darwin(pgid, deadline, *, listpids=None, clock=time.monotonic):
@@ -174,6 +184,30 @@ def kernel_identity(pid):
     return parent, group, os.getsid(pid)
 
 
+def _identities(receipts, samples, members):
+    """The exact set a signal was proven against: pid, birth, group and session.
+
+    Recorded for BOTH outcomes — what was signalled and what was declined — so a
+    later reader never has to reconstruct which pids a run was willing to touch.
+    """
+    rows = []
+    for pid in members:
+        receipt = receipts.get(pid)
+        sample = samples.get(pid)
+        rows.append(
+            {
+                "pid": pid,
+                "birth": (
+                    receipt.birth if receipt is not None else (sample.birth if sample else None)
+                ),
+                "scheme": receipt.scheme if receipt is not None else None,
+                "pgid": receipt.pgid if receipt is not None else None,
+                "sid": receipt.sid if receipt is not None else None,
+            }
+        )
+    return rows
+
+
 def _observed(before, after):
     """What the capability BELIEVED about each pid, for a receipt that must not be empty.
 
@@ -207,6 +241,12 @@ class Verdict:
     reason: str
     members: tuple[int, ...] = ()
     evidence_age_s: float | None = None
+    #: What held the group number at decision time: "leader-reservation" (an
+    #: unreaped corpse the census can see) or "leader-live" (no corpse needed).
+    anchor: str | None = None
+    #: Why authority was refused, as a class the record can carry: "pin_lost" or
+    #: "unproven". ``None`` on a VERIFIED/OBSERVED_EMPTY verdict.
+    refusal_class: str | None = None
 
 
 _SEAL = object()
@@ -226,6 +266,10 @@ class OwnedGroup:
             "members": [],
             "observed": {},
             "scheme": None,
+            #: The exact proven set and the exact declined set, carried into the
+            #: run record's `ownership` object on every run.
+            "proof": [],
+            "residuals": [],
         }
         self.census, self.samples, self.identity = census, samples, identity
         self.scheme, self.clock, self._send = scheme, clock, signal_group
@@ -266,6 +310,18 @@ class OwnedGroup:
         )
         parent = os.getpid() if parent_pid is None else parent_pid
         cap.probe["parent"] = parent
+        # SIGCHLD=SIG_IGN means the kernel reaps our children for us: there is no
+        # corpse, so the reservation this design rests on simply does not exist.
+        # Proceeding would be a pin that is never held. Refuse with a name.
+        sigchld = getattr(signal, "SIGCHLD", None)
+        if sigchld is not None and signal.getsignal(sigchld) == signal.SIG_IGN:
+            cap.last = Verdict(
+                "REFUSED",
+                "SIGCHLD is ignored: no corpse, so no reservation",
+                refusal_class="no_corpse_sigchld",
+            )
+            cap.probe["error"] = "SIGCHLD is ignored: no corpse, so no reservation"
+            return cap
         # Bound before the try: the refusal verdict reports it even when the census
         # itself raised, which is exactly the case a reader needs to see.
         members: list[int] = []
@@ -342,109 +398,114 @@ class OwnedGroup:
             raise Unknown("injected sample exceeded deadline")
         return result
 
-    def refresh(self, *, deadline, enrol=True):
+    def leader_terminal(self, deadline):
+        """Whether the leader is TERMINAL-or-gone, WITHOUT reaping it.
+
+        THE SEAM that replaces ``Popen.poll()``. ``poll()`` reaps, and reaping the
+        leader is the one operation that frees the group number this design is
+        built on: it literally performs the reservation the capability is supposed
+        to keep. Asking "is there still a corpse there?" leaves the reservation
+        intact until cleanup deliberately gives it up.
+
+        Terminal samples are not ABSENCE and they are not a LIVENESS claim — but
+        terminal-and-unreaped IS the reservation witness: the group number cannot
+        be handed to another process while this corpse holds it.
+
+        One sample, no census: this runs every poll tick and must not cost two
+        strict scans. The census belongs to the signal path, where authority is
+        actually spent.
+        """
+        sample = self._samples([self.leader], deadline).get(self.leader)
+        return sample is None or sample.zombie
+
+    def _leader_reservation(self, deadline):
+        """The leader's current sample if it still holds THIS receipt, else None."""
+        anchor = self.receipts.get(self.leader)
+        if anchor is None:
+            return None
+        sample = self._samples([self.leader], deadline).get(self.leader)
+        if sample is None or sample.is_birth(anchor.scheme, anchor.birth) is not True:
+            return None
+        return sample
+
+    def refresh(self, *, deadline):
+        """Prove the group is still ours by RESERVATION, not by membership.
+
+        Ownership is not derived from who is in the group. The leader is held
+        unreaped, so the group number stays reserved in the kernel (Linux by the
+        struct-pid's group reference, Darwin by pid-number reservation) and every
+        member of that number is therefore ours by construction. Membership is a
+        census of what the reservation covers, never a proof in its own right.
+
+        Two complete strict censuses are UNIONED rather than compared for
+        equality: a pid seen in either scan was seen inside our number, and
+        dropping one would be a silent amnesty. A member that is not in both scans
+        is recorded, not treated as a reason to keep a live group alive.
+        """
         members = []
         try:
-            members = self._members(deadline)
-            if not members:
-                self.last = Verdict("OBSERVED_EMPTY", "strict empty census")
-                return self.last
-            if not self.receipts:
-                raise Unknown(self.initial_error)
-            known = dict(self.receipts)
-            before = self._samples(set(members) | set(known), deadline)
-            # Keep the record honest: what the LAST attempt saw, not only what the
-            # first capture did. Every refresh replaces these fields.
+            anchor = self.receipts.get(self.leader)
+            if anchor is None:
+                raise Unknown("no leader receipt")
+            first = self._members(deadline)
+            second = self._members(deadline)
+            members = sorted(set(first) | set(second))
             self.probe["members"] = list(members)
-            self.probe["observed"] = _observed(before, None)
-            views = {p: self.identity(p) for p in members}
-            # Same rule as `capture`: a scheme this build cannot produce is not
-            # proof, and writing a scheme-less receipt would merely read as
-            # "unreadable" one step later instead of refusing at the point of proof.
-            stamp = self.scheme()
-            self.probe["scheme"] = stamp or None
-            if not stamp:
-                raise Unknown("birth scheme unavailable at enrolment")
-
-            def matching(pid, receipt, sample):
-                return sample is not None and sample.is_birth(receipt.scheme, receipt.birth) is True
-
-            # Observed reuse is not excused by another otherwise-valid survivor.
-            for pid, receipt in known.items():
-                if pid in before and not matching(pid, receipt, before[pid]):
-                    raise Unknown("recorded PID birth reused/unreadable")
-            anchors = {
-                p
-                for p in members
-                if p in known
-                and matching(p, known[p], before.get(p))
-                and not before[p].zombie
-                and views[p][1:] == (self.pgid, self.sid)
-            }
-            if not anchors:
-                raise Unknown("no previously authenticated LIVE anchor")
-            pending = set(members) - set(known)
-            if pending and not enrol:
-                raise Unknown("unenrolled member before signal")
-            while pending:
-                progressed = False
-                for pid in list(pending):
-                    parent, group, sid = views[pid]
-                    if parent not in known or parent not in members:
-                        continue
-                    ps, child = before.get(parent), before.get(pid)
-                    if (
-                        ps is None
-                        or child is None
-                        or ps.zombie
-                        or child.zombie
-                        or not matching(parent, known[parent], ps)
-                        or not child.birth
-                        or ps.birth is None
-                        or (group, sid) != (self.pgid, self.sid)
-                    ):
-                        raise Unknown("unprovable live ancestry enrolment")
-                    known[pid] = Receipt(
-                        pid, stamp, child.birth, parent, ps.birth, group, sid, self.clock()
+            if not members:
+                self.last = Verdict("OBSERVED_EMPTY", "two strict censuses: no members")
+                return self.last
+            lead = self._leader_reservation(deadline)
+            if lead is None:
+                raise PinLost("leader reaped or birth mismatch: reservation released")
+            if lead.zombie:
+                if self.leader not in first and self.leader not in second:
+                    # Platform scope, stated plainly: the pin needs the corpse to
+                    # be VISIBLE in the group census. Where it is not (Darwin is the
+                    # measured case), this build claims no reservation and stays
+                    # live-leader-only rather than pretending to a pin it cannot see.
+                    raise PinLost(
+                        "zombie leader not reported by the group census: "
+                        "live-leader-only on this platform"
                     )
-                    pending.remove(pid)
-                    progressed = True
-                if not progressed:
-                    raise Unknown("member has no authenticated live ancestry")
-            after = self._samples(set(members) | set(known), deadline)
-            self.probe["observed"] = _observed(before, after)
+                pin = "leader-reservation"
+            else:
+                pin = "leader-live"
+            samples = self._samples(set(members) | {self.leader}, deadline)
+            self.probe["observed"] = _observed(samples, None)
+            live = [pid for pid in members if pid in samples and not samples[pid].zombie]
+            if not live:
+                raise Unknown("no live member inside the reserved group")
             for pid in members:
-                if (
-                    not matching(pid, known[pid], after.get(pid))
-                    or self.identity(pid) != views[pid]
-                    or views[pid][1:] != (self.pgid, self.sid)
-                ):
-                    raise Unknown("member birth/actual PG/SID changed or unreadable")
-                if pid not in self.receipts:
-                    parent = known[pid].parent
-                    if (
-                        after[pid].zombie
-                        or parent not in after
-                        or after[parent].zombie
-                        or not matching(parent, known[parent], after[parent])
-                    ):
-                        raise Unknown("enrolment chain did not remain live")
-            if not any(
-                p in after and not after[p].zombie and matching(p, self.receipts[p], after[p])
-                for p in anchors
-            ):
-                raise Unknown("live continuity anchor lost during proof")
-            if self._members(deadline) != members:
-                raise Unknown("group membership changed during proof")
-            self.receipts = known
-            self.last = Verdict("VERIFIED", "fresh complete enrolled group", tuple(members), 0.0)
+                parent, group, sid = self.identity(pid)
+                if (group, sid) != (self.pgid, self.sid):
+                    raise Unknown("member outside the recorded group/session")
+            # The reservation must still hold at the END of the proof, not only at
+            # its start: a reap mid-proof would make the census describe a number
+            # that is no longer ours.
+            if self._leader_reservation(deadline) is None:
+                raise PinLost("reservation lost during proof")
+            self.probe["proof"] = _identities(self.receipts, samples, members)
+            self.probe["residuals"] = []
+            self.last = Verdict(
+                "VERIFIED",
+                "leader pin holds; members are the reservation's contents",
+                tuple(members),
+                0.0,
+                anchor=pin,
+            )
         except Exception as exc:
-            self.last = Verdict("REFUSED", type(exc).__name__ + ":" + str(exc), tuple(members))
+            self.last = Verdict(
+                "REFUSED",
+                type(exc).__name__ + ":" + str(exc),
+                tuple(members),
+                refusal_class="pin_lost" if isinstance(exc, PinLost) else "unproven",
+            )
             self.probe["error"] = type(exc).__name__ + ":" + str(exc)
+            self.probe["residuals"] = list(members)
         return self.last
 
     def signal(self, signum, *, deadline):
-        result = self.refresh(deadline=deadline, enrol=False)
+        result = self.refresh(deadline=deadline)
         if result.status != "VERIFIED":
             return result
         if self._send is None:
@@ -454,9 +515,35 @@ class OwnedGroup:
                 "REFUSED", "checked signal unsupported on this platform", result.members
             )
             return self.last
+        # ABSOLUTE EXCLUSIONS, checked at the one place a signal leaves this module:
+        # never pid 1, never our own process or process group, never a number whose
+        # members were not proven to sit in the recorded group AND session.
+        if self.pgid <= 1 or self.pgid == os.getpgrp() or self.pgid == os.getpid():
+            self.last = Verdict(
+                "REFUSED",
+                "refuses pid 1, this process and its own group",
+                result.members,
+                refusal_class="excluded",
+            )
+            return self.last
         checked = self.clock()
         if checked >= deadline:
             self.last = Verdict("REFUSED", "expired before syscall", result.members)
+            return self.last
+        # RESIDENCY RE-CHECK IMMEDIATELY BEFORE THE SYSCALL. The census above
+        # proved the reservation held a moment ago; between it and killpg the only
+        # thing that could free the number is a reap of this corpse. One sample
+        # answers that, and it is the difference between "proven" and "proven a
+        # while ago" — the non-atomicity this module discloses rather than hides.
+        if self._leader_reservation(deadline) is None:
+            self.last = Verdict(
+                "REFUSED",
+                "reservation lost between census and syscall",
+                result.members,
+                anchor=result.anchor,
+                refusal_class="pin_lost",
+            )
+            self.probe["residuals"] = list(result.members)
             return self.last
         try:
             self._send(self.pgid, signum)
@@ -484,5 +571,6 @@ class OwnedGroup:
             "checked owner-alive signal; non-atomic race remains",
             result.members,
             self.clock() - checked,
+            anchor=result.anchor,
         )
         return self.last
