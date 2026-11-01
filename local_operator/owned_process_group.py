@@ -71,8 +71,80 @@ class PinLost(Unknown):
     """
 
 
+#: ``proc_listpids``'s "every live pid" selector. Unlike ``PROC_PGRP_ONLY`` (2),
+#: this is not restricted to the caller's session, which is the whole reason the
+#: group census uses it: ``run_bounded`` spawns with ``start_new_session=True``, so
+#: the group we must see ALWAYS lives in another session, and ``PROC_PGRP_ONLY``
+#: answers an empty list for it rather than an error -- measured on macOS, where a
+#: live leader's capture came back OBSERVED_EMPTY.
+_ALL_PIDS = 1
+
+
+def _darwin_all_pids(deadline, clock):
+    """Every live pid on Darwin, through libproc, or ``Unknown``.
+
+    ``os.getpgid`` then filters by group: it answers for any pid this user may
+    ask about, across sessions, and is the same verified interface the module
+    already uses for identity. An unreadable answer raises rather than guessing,
+    because a silent omission is indistinguishable from an empty group.
+    """
+    lib = resources._darwin_libproc()
+    call = getattr(lib, "proc_listpids", None) if lib is not None else None
+    if call is None:
+        raise Unknown("strict Darwin census unsupported")
+    size = ctypes.sizeof(ctypes.c_int)
+    required = call(_ALL_PIDS, 0, None, 0)
+    if type(required) is not int or required <= 0 or required % size:
+        raise Unknown("malformed libproc size")
+    capacity = required // size + 64
+    for _ in range(4):
+        if clock() >= deadline or capacity > 262144:
+            raise Unknown("strict census deadline/capacity exhausted")
+        buffer = (ctypes.c_int * capacity)()
+        written = call(_ALL_PIDS, 0, buffer, ctypes.sizeof(buffer))
+        if (
+            type(written) is not int
+            or written < 0
+            or written > ctypes.sizeof(buffer)
+            or written % size
+        ):
+            raise Unknown("malformed libproc result length")
+        if written == ctypes.sizeof(buffer):
+            capacity *= 2
+            continue
+        pids = [pid for pid in buffer[: written // size] if pid > 0]
+        if len(set(pids)) != len(pids):
+            raise Unknown("malformed libproc PID rows")
+        return pids
+    raise Unknown("saturated libproc census")
+
+
 def strict_darwin(pgid, deadline, *, listpids=None, clock=time.monotonic):
-    """A filled libproc buffer is ambiguous, including the zero-size-query race."""
+    """Members of ``pgid``, enumerated WITHOUT the caller's-session restriction.
+
+    ``proc_listpids(PROC_PGRP_ONLY, ...)`` cannot see a group that lives in a
+    different session and returns an EMPTY list rather than an error, so it was
+    the wrong instrument for a process the runner spawns with
+    ``start_new_session=True``. Enumeration is now every pid, filtered by
+    ``os.getpgid``; an unreadable pid raises rather than being dropped.
+    ``listpids`` stays as the injection seam for tests.
+    """
+    if listpids is None:
+        members = []
+        for pid in _darwin_all_pids(deadline, clock):
+            if clock() >= deadline:
+                raise Unknown("strict census deadline")
+            try:
+                group = os.getpgid(pid)
+            except ProcessLookupError:
+                continue  # exited between the listing and the query: gone, not ours
+            except PermissionError:
+                raise Unknown("pid outside this user: census cannot be complete")
+            except OSError as exc:
+                raise Unknown("unreadable process group") from exc
+            if group == pgid:
+                members.append(pid)
+        return sorted(members)
     lib = resources._darwin_libproc() if listpids is None else None
     call = listpids if listpids is not None else getattr(lib, "proc_listpids", None)
     if call is None or pgid <= 1:
@@ -499,6 +571,14 @@ class OwnedGroup:
             members = sorted(set(first) | set(second))
             self.probe["members"] = list(members)
             if not members:
+                # AN EMPTY CENSUS IS NOT ABSENCE UNTIL THE RESERVATION SAYS SO.
+                # A reaped leader means the group number was given up: that is a
+                # failed ownership proof, and reporting it as observably empty let a
+                # run publish clean cleanup for a group it never proved. Only an
+                # ESRCH obtained WHILE the pin held at syscall time may answer
+                # OBSERVED_EMPTY, and that answer is produced in `signal`.
+                if self._leader_reservation(deadline) is None:
+                    raise PinLost("empty census with no live reservation: reaped or reused leader")
                 self.last = Verdict("OBSERVED_EMPTY", "two strict censuses: no members")
                 return self.last
             lead = self._leader_reservation(deadline)

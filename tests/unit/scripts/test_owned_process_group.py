@@ -127,12 +127,44 @@ def test_unknown_facts_cannot_be_authority(monkeypatch, failure):
     assert fake.calls == []
 
 
-def test_empty_is_observation_not_a_signal(monkeypatch):
+def test_a_reaped_leader_is_refused_never_reported_as_absence(monkeypatch):
+    """F3: "could not prove it" must never become "nothing was there".
+
+    Deleting the leader's row is a REAPED leader: the group number was given up,
+    so the ownership proof failed. Reporting OBSERVED_EMPTY here let a run
+    publish clean cleanup for a group it never owned -- false assurance, which is
+    never investigated. Fails at 53ac9c08, which returned OBSERVED_EMPTY.
+    """
     fake = Fake()
     monkeypatch.setattr(owned.procstate, "birth_scheme", lambda: "fixture")
     cap = fake.cap()
     del fake.rows[10]
-    assert cap.signal(signal.SIGKILL, deadline=5).status == "OBSERVED_EMPTY"
+    verdict = cap.signal(signal.SIGKILL, deadline=5)
+    assert verdict.status == "REFUSED", verdict.reason
+    assert verdict.refusal_class == "pin_lost"
+    assert fake.calls == []
+
+
+def test_a_proven_empty_syscall_still_reports_observed_empty(monkeypatch):
+    """Negative control for the pair above: the pin HELD when ESRCH came back.
+
+    Same scenario one step apart, and the two must never be conflated: here the
+    reservation still holds at syscall time and the kernel answers ESRCH, which is
+    proof the group is gone. A future edit that made this REFUSED would be as
+    wrong as the one that made a reap look empty.
+    """
+    fake = Fake()
+    monkeypatch.setattr(owned.procstate, "birth_scheme", lambda: "fixture")
+    cap = fake.cap()
+    fake.rows[20] = (10, 10, 10, "survivor", False)
+
+    def gone(pgid, signum):
+        raise ProcessLookupError(3, "No such process")
+
+    cap._send = gone
+    verdict = cap.signal(signal.SIGKILL, deadline=5)
+    assert verdict.status == "OBSERVED_EMPTY", verdict.reason
+
     assert fake.calls == []
 
 

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import sys
 import time
 
@@ -96,4 +97,45 @@ def test_a_zombie_leader_is_visible_to_the_group_census_on_this_platform():
         try:
             os.waitpid(pid, 0)  # reap EXACTLY our own child
         except ChildProcessError:  # already reaped by the failed-precondition path
+            pass
+
+
+@pytest.mark.skipif(not sys.platform.startswith("darwin"), reason="Darwin census shape")
+def test_a_new_session_child_is_visible_to_the_census():
+    """F1: the runner spawns with `start_new_session=True`, so this is production.
+
+    `proc_listpids(PROC_PGRP_ONLY, ...)` cannot list a group belonging to another
+    session and answers an EMPTY list rather than an error — which is how a live
+    leader's capture came back OBSERVED_EMPTY on macOS. An earlier measurement
+    missed it because the probe child used `setpgid(0, 0)` and stayed in the
+    caller's session; the convenient case was the wrong case. This child calls
+    `setsid()` and must still be found. Fails at 53ac9c08.
+    """
+    import os
+
+    read_fd, write_fd = os.pipe()
+    pid = os.fork()
+    if pid == 0:  # pragma: no cover - child
+        try:
+            os.close(read_fd)
+            os.setsid()
+            os.write(write_fd, str(os.getpid()).encode())
+            time.sleep(30)
+        finally:
+            os._exit(0)
+    os.close(write_fd)
+    with os.fdopen(read_fd, "rb") as handle:
+        child = int(handle.read())
+    try:
+        assert os.getsid(child) != os.getsid(0), "the child must be in a NEW session"
+        members = owned.strict_census(child, time.monotonic() + 5.0)
+        assert child in members, (child, members)
+    finally:
+        try:
+            os.kill(child, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            os.waitpid(child, 0)
+        except ChildProcessError:
             pass
