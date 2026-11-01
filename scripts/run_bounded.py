@@ -247,6 +247,59 @@ def _resolve_run_id(supplied: str | None) -> str:
     return "run-" + uuid.uuid4().hex[:12]
 
 
+def _verdict_record(verdict):
+    """The verdict exactly as it was: four fields, unchanged for existing readers.
+
+    ``Verdict`` gained ``anchor`` and ``refusal_class``; serialising it with
+    ``asdict`` would silently change a published object, so the record spells the
+    old shape out and the new facts live in ``ownership``.
+    """
+    if verdict is None:
+        return None
+    return {
+        "status": verdict.status,
+        "reason": verdict.reason,
+        "members": list(verdict.members),
+        "evidence_age_s": verdict.evidence_age_s,
+    }
+
+
+def _ownership_record(owner, verdict):
+    """How ownership was established, as a SIBLING object callers opt into.
+
+    The three downstream lanes bind QA evidence to a run's ownership, and a
+    schema change would break them: this rides beside ``verdict`` under its own
+    schema instead of widening a published one.
+
+    ``proof`` is the exact set a signal was proven against; ``residuals`` is the
+    set that was SEEN and declined. Both carry pids, births, group and session.
+    """
+    probe = getattr(owner, "probe", {}) or {}
+    anchor = getattr(verdict, "anchor", None) or probe.get("anchor")
+    refused = verdict is not None and verdict.status == "REFUSED"
+    return {
+        "schema": "run-bounded-ownership/v1",
+        "anchor": anchor,
+        "pin": (
+            "leader held unreaped: the group number stays reserved, so its "
+            "members are ours by construction"
+        ),
+        "proof": probe.get("proof", []),
+        "residuals": probe.get("residuals", []),
+        "cleanup": (
+            "residuals named here, never claimed absent"
+            if refused
+            else "record only; this object claims no cleanup outcome"
+        ),
+        "excluded": [
+            "pid 1",
+            "this process",
+            "this process group",
+            "any group outside the recorded session",
+        ],
+    }
+
+
 def _record_run(
     owner,
     stream,
@@ -305,7 +358,8 @@ def _record_run(
         "exit_code": exit_code,
         "actors": [asdict(receipt) for receipt in getattr(owner, "receipts", {}).values()],
         "believed": getattr(owner, "probe", {}) or {},
-        "verdict": asdict(verdict) if verdict is not None else None,
+        "verdict": _verdict_record(verdict),
+        "ownership": _ownership_record(owner, verdict),
         "cleanup": (
             "REFUSED; residuals named here, not claimed absent"
             if verdict is not None
@@ -353,8 +407,14 @@ def _record_run(
         return None
 
 
-def _reap(owner, grace, poll, stream, *, reason, send, require, deadline):
-    """TERM and KILL EACH obtain fresh authority; refusal never enters a wait."""
+def _reap(owner, grace, stream, *, reason, send, require, deadline):
+    """TERM then KILL; the grace wait asks ONE cheap question per tick.
+
+    A grace tick asks only "has the leader gone terminal?" through the pin seam —
+    it costs one sample, not the two complete strict censuses the old per-tick
+    ``refresh`` ran 40 times a second. Authority is re-proven where it is spent:
+    inside ``send`` at the SIGTERM and again at the SIGKILL decision.
+    """
     _report(stream, f"[run_bounded] {reason} — requesting checked SIGTERM")
     # ``send`` is ``require(...)``: a refusal raises AuthorityRefused at this call
     # site, so this function never enters its wait with a lost capability. The
@@ -362,8 +422,7 @@ def _reap(owner, grace, poll, stream, *, reason, send, require, deadline):
     # one and could never run.
     send(signal.SIGTERM, reason + ":term", deadline)
     while time.monotonic() < deadline:
-        require(owner.refresh(deadline=deadline), reason + ":grace-refresh")
-        if poll() is not None:
+        if owner.leader_terminal(deadline):
             return
         time.sleep(min(_POLL_SECONDS, max(0, deadline - time.monotonic())))
     send(signal.SIGKILL, reason + ":kill", deadline + 0.25)
@@ -570,6 +629,7 @@ def run(
     # The command is spawned: from here every failure names residuals, never
     # "did not run". A forwarded signal still carries its own status.
     rc = 128 + stop["signum"] if stop["signum"] else EXIT_CLEANUP_UNPROVEN
+    exited = False
     try:
         require(owner.last, "acquire")
         guard = memory_guard.Guard(pgid, budget) if budget.ceiling_mb > 0 else None
@@ -601,7 +661,6 @@ def run(
                 _reap(
                     owner,
                     grace,
-                    proc.poll,
                     stream,
                     reason=f"signal {signum} received",
                     send=send,
@@ -615,7 +674,6 @@ def run(
                 _reap(
                     owner,
                     grace,
-                    proc.poll,
                     stream,
                     reason=f"timeout after {timeout:g}s",
                     send=send,
@@ -628,9 +686,12 @@ def run(
                     "--timeout sets the bound",
                 )
                 break
-            status = proc.poll()
-            if status is not None:
-                rc = 128 - status if status < 0 else status
+            if owner.leader_terminal(deadline):
+                # TERMINAL, NOT REAPED. The leader is deliberately left a corpse:
+                # reaping it frees the group number and destroys the reservation
+                # the cleanup below depends on. The status is read after the
+                # terminal census, once cleanup has decided to give the pin up.
+                exited = True
                 break
             now = time.monotonic()
             if guard is not None and now >= next_sample:
@@ -680,7 +741,6 @@ def run(
                 if check.status == "REFUSED":
                     fail_proof(check, "finally-refresh")
                     break
-                proc.poll()  # refresh before reaping; then strictly observe again
                 try:
                     result = send(signal.SIGKILL, "finally", until)
                 except AuthorityRefused:
@@ -691,7 +751,7 @@ def run(
                     break
                 if attempt < 4:
                     time.sleep(min(_POLL_SECONDS, max(0, until - time.monotonic())))
-            terminal = owner.refresh(deadline=until, enrol=False)
+            terminal = owner.refresh(deadline=until)
             if terminal.status != "OBSERVED_EMPTY":
                 refused = True
                 terminal = owned_process_group.Verdict(
@@ -706,7 +766,15 @@ def run(
                     verdict=terminal,
                     start_utc=run_started_utc,
                 )
-            if not bounded_wait(until):
+            waited = bounded_wait(until)
+            if exited and waited:
+                # Only now is the corpse reaped, and only now is the child's own
+                # status meaningful: it could not be read earlier without giving
+                # the reservation away.
+                status = proc.poll()
+                if status is not None:
+                    rc = 128 - status if status < 0 else status
+            if not waited:
                 refused = True
                 result = owned_process_group.Verdict(
                     "REFUSED", "leader wait exceeded remaining cleanup allowance"
