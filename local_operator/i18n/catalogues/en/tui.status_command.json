@@ -1,0 +1,3 @@
+{
+  "tui.status_command.failed": "Status command failed ({error}). Check display.composer.command."
+}

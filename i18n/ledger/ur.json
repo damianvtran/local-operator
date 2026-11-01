@@ -2215,6 +2215,111 @@
       },
       "status": "passed",
       "note": "Core catalogue gap, 5 keys at source_sha256 3854be7dce54dd3aeb9564921ed6a50f0560b32c7ac40955d81be93acd7e2ac1; target catalogue_sha256 = 3bd2288ca8eb54b5f1c5e62a1ec8b7b96baf99e74144e0336928cb442719934b. Independent audit rounds: R1 0B/0M/0m/0n; R2 0B/0M/0m/0n; final verdict PASS (locale-wide). Dispositions: 0 finding(s), 0 fixed by remediation, 0 minor/nit accepted unchanged, 0 unresolved blocker/major. Translator lane and auditors share the Claude model family (disclosed). Not verified: native-speaker review, rendered terminal width/RTL. Evidence: i18n/audits/evidence/ur/wire.tunnel_setup/cg1/record.json"
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.settings",
+      "source_sha256": "94431b0e1cd4c2c8f842dfb1010386b0eda90d79b207cce748620d48414c6590",
+      "translator": {
+        "agent": "coder (i18n-translator brief; local-operator subagent d992666743e7)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-30"
+      },
+      "auditor": {
+        "agent": "copy-reviewer (independent i18n-auditor brief; local-operator subagent 239edf4e2872)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-30",
+        "result": "passed",
+        "findings": 2,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
+      },
+      "status": "passed",
+      "note": "Status band command delta: 5 new keys (display_composer_command label/help/placeholder, display_composer_command_interval label/help). Independent translation audit round 1 at these en bytes: 2 minor/nit finding(s) applied verbatim; 0 blocker/major. Same model family as translator (disclosed). Other keys carried unchanged. Findings record: PR description (evidence stays on the PR)."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.settings",
+      "source_sha256": "ed16289b2e22de6c9d3d25bb1218cb71a9240f284bbbc13d90e2dce52fc9c17f",
+      "translator": {
+        "agent": "coder (i18n-translator brief; local-operator subagent fccefb6b69f0)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-30"
+      },
+      "auditor": {
+        "agent": "copy-reviewer (independent i18n-auditor brief; local-operator subagent 86b86b0c8800/5fa28d6084bc)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-30",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
+      },
+      "status": "passed",
+      "note": "Status band command, review round 1 delta (display_composer_command.help reworded). Independent audit at these en bytes: 1 minor/nit finding(s); 0 applied verbatim, the rest optional follow-ups; 0 blocker/major. Read route: git show HEAD blob at 8da23bdaf (read_public_copy unreachable: session cwd was a different repo). Same model family as translator (disclosed)."
+    },
+    {
+      "locale": "ur",
+      "namespace": "tui.status_command",
+      "source_sha256": "67378299147606f27460b8a29e09780a601710af69324b974328a3c42b199ebc",
+      "translator": {
+        "agent": "coder (i18n-translator brief; local-operator subagent c463f78a151d)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-30"
+      },
+      "auditor": {
+        "agent": "copy-reviewer (independent i18n-auditor brief; local-operator subagent fee745c01d74)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-30",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
+      },
+      "status": "passed",
+      "note": "Status band command failure notice: new 1-key namespace tui.status_command. Independent audit at these en bytes: 0 nit finding(s) applied verbatim; 0 blocker/major. Read route: git show HEAD blob at 00a3fd491 (read_public_copy unreachable: session cwd was a different repo). Same model family as translator (disclosed)."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.settings",
+      "source_sha256": "4cb113ca6fc28e2cb2a6b24d3aa1a7ece1a6dca7292bcf19cb359998af44080d",
+      "translator": {
+        "agent": "coder (i18n-translator brief; local-operator subagent bfac07c3d927)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-30"
+      },
+      "auditor": {
+        "agent": "copy-reviewer (independent i18n-auditor brief; local-operator subagent b0b53842a648/a97e38b65a18)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-30",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
+      },
+      "status": "passed",
+      "note": "Status band command, review round 2 copy delta (help reworded to name the output line, 54-cell cap). Independent audit round 4: 1 finding(s) (major) applied verbatim; delta re-audit at these en bytes PASS, 0 unresolved blocker/major. Read route: git show HEAD blob at 6c1828881 and b5f6328d1 (read_public_copy unreachable: session cwd was a different repo). Same model family as translator (disclosed)."
+    },
+    {
+      "locale": "ur",
+      "namespace": "tui.status_command",
+      "source_sha256": "277b5bed030f87744ee8e3ce73542ca3e191c291c372f8dde7743db790f2d7ae",
+      "translator": {
+        "agent": "coder (i18n-translator brief; local-operator subagent bfac07c3d927)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-30"
+      },
+      "auditor": {
+        "agent": "copy-reviewer (independent i18n-auditor brief; local-operator subagent b0b53842a648/a97e38b65a18)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-30",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
+      },
+      "status": "passed",
+      "note": "Status band command, review round 2 copy delta (notice drops the held-reading clause). Independent audit round 4: 0 finding(s) (none) applied verbatim; delta re-audit at these en bytes PASS, 0 unresolved blocker/major. Read route: git show HEAD blob at 6c1828881 and b5f6328d1 (read_public_copy unreachable: session cwd was a different repo). Same model family as translator (disclosed)."
     }
   ]
 }

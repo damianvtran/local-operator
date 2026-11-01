@@ -77,7 +77,30 @@ def is_default(manager: "ConfigManager", setting: "Setting") -> bool:
 #: write-tier approval card does not name that data flow, and a host with
 #: standing approval has no human in the loop at all (security review S-5), so
 #: the row is refused here, before any approval could be asked for.
-OPERATOR_ONLY = frozenset({"radient.saver.mode"})
+#:
+#: ``display.composer.command`` is a shell command the TUI runs on a timer with
+#: no approval card. An agent able to write it could turn one approved
+#: ``setting`` call into recurring unattended execution, and content the model
+#: reads could ask it to. Refused for the same reason: a write-tier card does
+#: not say "this will run every 30 s, forever". Its interval is NOT listed —
+#: changing how often an operator-chosen command runs grants nothing new.
+#: Scope, stated so nobody over-reads it: this closes the ``setting`` tool
+#: only. An approved shell call (``lop config edit``, a write to config.yml)
+#: can still set the key, exactly as it can any other — the same class of
+#: residual ``tools/shell_env.py`` documents for the shell surface.
+OPERATOR_ONLY = frozenset({"radient.saver.mode", "display.composer.command"})
+
+#: Why each operator-only row is refused, in the words the agent receives.
+_OPERATOR_ONLY_REASONS = {
+    "radient.saver.mode": (
+        "it is consent to send this conversation's history to Radient, which only "
+        "the operator can give"
+    ),
+    "display.composer.command": (
+        "it is a shell command the terminal UI runs on a timer without asking, so "
+        "only the operator can set it"
+    ),
+}
 
 
 def apply(manager: "ConfigManager", setting: "Setting", value: Any) -> None:
@@ -91,8 +114,8 @@ def apply(manager: "ConfigManager", setting: "Setting", value: Any) -> None:
     """
     if setting.key in OPERATOR_ONLY:
         raise ValueError(
-            f"Setting '{setting.key}' is operator-only: it is consent to send this "
-            "conversation's history to Radient, which only the operator can give. "
+            f"Setting '{setting.key}' is operator-only: "
+            f"{_OPERATOR_ONLY_REASONS[setting.key]}. "
             "Change it on the /settings page or with `lop config edit`."
         )
     if setting.kind is settings_io.Kind.CASCADE:
