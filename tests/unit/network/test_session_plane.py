@@ -2861,8 +2861,22 @@ def test_projection_selection_failure_retains_original_fallback(
     control = _owner_frame(server_b)
     ti._reset_for_tests()
     calls = []
+    admissions: list[tuple[tuple[str, str], asyncio.Task[Any], bool]] = []
     server_b._frame_memo.clear()
     original = server_b._stored_frame_index
+    original_start = ti.start_refresh
+
+    def capture_start(root: str | Path, session_id: str) -> tuple[asyncio.Task[Any], bool]:
+        task, started = original_start(root, session_id)
+        key = ti._key(root, session_id)
+        entry = ti._IN_FLIGHT.get(key)
+        # Capture admission on the owning loop before it yields. A completed
+        # refresh legitimately removes this transient entry before the reader
+        # can assert on it; absence later is not evidence of suppressed work.
+        admissions.append((key, task, entry is not None and entry[1] is task))
+        return task, started
+
+    monkeypatch.setattr(ti, "start_refresh", capture_start)
 
     def fallback(session_id: str) -> Any:
         calls.append(session_id)
@@ -2894,9 +2908,22 @@ def test_projection_selection_failure_retains_original_fallback(
         ), "a failed projection produced a ready frame that is not the control's"
     else:
         assert frame["runs"] == [], "a building frame carried facts"
-        assert (
-            ti._key(server_b.root, SESSION) in ti._IN_FLIGHT
-        ), "a failed projection suppressed the single-flight"
+        assert admissions, "a failed projection suppressed the single-flight"
+    if admissions:
+        expected_key = ti._key(server_b.root, SESSION)
+        assert all(key == expected_key and registered for key, _task, registered in admissions)
+        task = admissions[0][1]
+        assert all(admitted is task for _key, admitted, _registered in admissions)
+
+        async def settle_refresh() -> Any:
+            return await asyncio.shield(task)
+
+        # Wait for this exact admitted task, not a new refresh or a delay. This
+        # keeps final-frame correctness independent of worker completion speed.
+        refreshed = asyncio.run_coroutine_threadsafe(settle_refresh(), task.get_loop()).result(
+            timeout=5
+        )
+        assert refreshed is not None
     server_b._frame_memo.clear()
     monkeypatch.undo()
     settled = _owner_frame(server_b)
