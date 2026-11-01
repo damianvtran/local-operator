@@ -1,0 +1,22 @@
+{
+  "wire.errors.media.media_refusal": "{error}",
+  "wire.errors.media.provider_model_pair": "provider और model एक साथ दिए जाने चाहिए, या कोई नहीं।",
+  "wire.errors.media.radient_key_missing": "सर्वर पर Radient API कुंजी कॉन्फ़िगर नहीं है।",
+  "wire.errors.media.save_audio_failed": "अपलोड की गई ऑडियो फ़ाइल सहेजने में विफल: {error}",
+  "wire.errors.media.speech_generate_failed": "बोली उत्पन्न करने में विफल: {error}",
+  "wire.errors.media.speech_no_credential": "ज़ोर से बोलना चालू करने के लिए सेटिंग्स में Radient में साइन इन करें।",
+  "wire.errors.media.speech_radient_credit_low": "बोली के लिए आपका Radient क्रेडिट शेष बहुत कम है। जारी रखने के लिए Radient कंसोल में क्रेडिट जोड़ें।",
+  "wire.errors.media.speech_radient_sign_in_failed": "आपका Radient साइन-इन काम करना बंद कर चुका है। सेटिंग्स में फिर से साइन इन करें।",
+  "wire.errors.media.speech_temporarily_unavailable": "बोली अस्थायी रूप से उपलब्ध नहीं है। थोड़ी देर में फिर कोशिश करें।",
+  "wire.errors.media.speech_unavailable": "बोली अभी उपलब्ध नहीं है। थोड़ी देर में फिर कोशिश करें।",
+  "wire.errors.media.speech_unknown_agent": "इस बातचीत का एजेंट अब उपलब्ध नहीं है।",
+  "wire.errors.media.speech_upstream_no_response": "बोली उत्पन्न करना अपस्ट्रीम पर विफल रहा: अपस्ट्रीम से कोई प्रतिक्रिया नहीं: {error}",
+  "wire.errors.media.speech_upstream_reported_error": "बोली उत्पन्न करना अपस्ट्रीम पर विफल रहा: Radient ने त्रुटि बताई (HTTP {status}): {error}",
+  "wire.errors.media.speech_upstream_responded": "बोली उत्पन्न करना अपस्ट्रीम पर विफल रहा: अपस्ट्रीम ने {status} लौटाया: {error}",
+  "wire.errors.media.speech_vendor_credit_low": "बोली के लिए आपका {vendor} क्रेडिट शेष बहुत कम है। जारी रखने के लिए {vendor} के साथ क्रेडिट जोड़ें।",
+  "wire.errors.media.speech_vendor_key_refused": "{vendor} ने आपकी API कुंजी अस्वीकार कर दी। उसे बदलें।",
+  "wire.errors.media.temp_audio_missing": "सहेजने के बाद अस्थायी ऑडियो फ़ाइल नहीं मिली।",
+  "wire.errors.media.transcription_unexpected": "ट्रांसक्रिप्शन के दौरान अप्रत्याशित त्रुटि हुई: {error}",
+  "wire.errors.media.unknown_model": "अज्ञात मॉडल {provider}/{model}: {error}",
+  "wire.errors.media.unknown_provider": "अज्ञात प्रोवाइडर {provider}।"
+}

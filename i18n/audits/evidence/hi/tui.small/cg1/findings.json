@@ -1,0 +1,112 @@
+{
+  "locale": "hi",
+  "namespace": "tui.small",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 5,
+    "nit": 3
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 1,
+      "id": "HI-001",
+      "severity": "MINOR",
+      "namespace": "tui.small",
+      "key": "tui.small.network_panel.installed_row",
+      "english": "  installed:  {value}\n",
+      "current": "  इंस्टॉल:    {value}\n",
+      "problem": "Value column misaligned: label+padding is 11 cells vs 14 in the sibling relay rows (and the English, where every row aligns at 14). Context note says the padding aligns the column.",
+      "suggested": "\"  इंस्टॉल:     {value}\\n\" padded so {value} starts at cell 14 (e.g. 5 spaces after the colon; verify with cell_len)",
+      "disposition": "fixed (remediation core-fix, session 76bcbfdf629d)"
+    },
+    {
+      "round": 1,
+      "id": "HI-002",
+      "severity": "MINOR",
+      "namespace": "tui.small",
+      "key": "tui.small.network_panel.identity_row",
+      "english": "  identity:   {identity}\n",
+      "current": "  पहचान:      {identity}\n",
+      "problem": "Value column at 13 cells, sibling rows at 14; one space short, so the identity value is visibly offset.",
+      "suggested": "\"  पहचान:       {identity}\\n\" (one more space; value at cell 14)",
+      "disposition": "fixed (remediation core-fix, session 76bcbfdf629d)"
+    },
+    {
+      "round": 1,
+      "id": "HI-003",
+      "severity": "MINOR",
+      "namespace": "tui.small",
+      "key": "tui.small.aside.title",
+      "english": "Aside",
+      "current": "अलग से",
+      "problem": "\"अलग से\" is an adverb (\"separately\"), not a name for the card; existing hi copy names the same aside surface \"नोट\" (tui.notices.unsaved_asides, wire.errors.desktop.aside_*), so one feature now has two names.",
+      "suggested": "Align with the shipped term: \"नोट\" — or, if \"नोट\" is to be replaced, a noun such as \"अलग बातचीत\" applied to all aside keys at once",
+      "disposition": "fixed (remediation core-fix, session 76bcbfdf629d)"
+    },
+    {
+      "round": 1,
+      "id": "HI-004",
+      "severity": "MINOR",
+      "namespace": "tui.small",
+      "key": "tui.small.session_picker.all_archived",
+      "english": "all {total} conversation(s) are archived",
+      "current": "सभी {total} वार्तालाप संग्रहीत हैं",
+      "problem": "\"वार्तालाप\" diverges from the settled hi term for conversation, \"बातचीत\" (102 uses in shipped hi catalogues).",
+      "suggested": "\"सभी {total} बातचीत संग्रहीत हैं\"",
+      "disposition": "fixed (remediation core-fix, session 76bcbfdf629d)"
+    },
+    {
+      "round": 1,
+      "id": "HI-005",
+      "severity": "MINOR",
+      "namespace": "tui.small",
+      "key": "tui.small.ask_queue.question_waiting",
+      "english": "{count, plural, one {{shown} question waiting} other {{shown} questions waiting}}",
+      "current": "{count, plural, one {{shown} प्रश्न प्रतीक्षा में} other {{shown} प्रश्न प्रतीक्षा में}}",
+      "problem": "\"प्रश्न\" for an ask/question diverges from shipped hi copy, which uses \"सवाल\" (22 uses, e.g. relay.ask.*, relay.asks.*); same for ask_queue.question_timed_out.",
+      "suggested": "\"{count, plural, one {{shown} सवाल प्रतीक्षा में} other {{shown} सवाल प्रतीक्षा में}}\" (and question_timed_out: \"सवाल का/सवालों का समय समाप्त\")",
+      "disposition": "fixed (remediation core-fix, session 76bcbfdf629d)"
+    },
+    {
+      "round": 1,
+      "id": "HI-006",
+      "severity": "NIT",
+      "namespace": "tui.small",
+      "key": "tui.small.todo_panel.header",
+      "english": "Todos",
+      "current": "टूडू",
+      "problem": "\"टूडू\" is a bare transliteration that does not read as Hindi; a short native heading fits.",
+      "suggested": "\"कार्य सूची\" (or \"करने के काम\")",
+      "disposition": "fixed (remediation core-fix, session 76bcbfdf629d)"
+    },
+    {
+      "round": 2,
+      "id": "HI2-002",
+      "severity": "NIT",
+      "namespace": "tui.small",
+      "key": "tui.small.network_panel.installed_row",
+      "english": "  installed:  {value}\n",
+      "current": "  इंस्टॉल:       {value}\n",
+      "problem": "Alignment fix verified under rich.cell_len, which the style guide mandates: {value} lands at cell 14 for installed_row and identity_row, the same as the relay rows. A wcwidth-style count that gives spacing matras (Mc: ा U+093E, ॉ U+0949) width 1 puts both rows at 15, one cell to the right. The rule is met; whether a given terminal renders them aligned depends on how it handles Mc. No change is requested.",
+      "suggested": "none (keep); verify on a rendered frame when the panel is visually validated",
+      "disposition": "open at PASS: minor/nit accepted, value unchanged"
+    },
+    {
+      "round": 2,
+      "id": "HI2-003",
+      "severity": "NIT",
+      "namespace": "tui.small",
+      "key": "tui.small.todo_panel.header",
+      "english": "Todos",
+      "current": "कार्य सूची",
+      "problem": "todo → कार्य/कार्य सूची is idiomatic. But bare कार्य also renders task/work elsewhere in this set (cli.exec_help.background 'कार्य को अलग करें', wire.console.*), so in todos_counts ' · कार्य {open}/{total}' and more_todos '… {count} और कार्य' a todo count can read as a task count.",
+      "suggested": "optional: ' · कार्य सूची {open}/{total}' / '… {count} और कार्य-सूची आइटम' if space allows",
+      "disposition": "open at PASS: minor/nit accepted, value unchanged"
+    }
+  ],
+  "counts_scope": "counts, result and gate_status describe locale-wide rounds 1-2 as recorded in the ledger; findings with round \"targeted-argorder\" come from session d8fb2395abc5 (read only the rephrased keys) and are not in those counts"
+}

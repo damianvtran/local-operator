@@ -1,0 +1,13 @@
+{
+  "cli.exec_runtime.thinking": "· सोच रहा है…",
+  "cli.exec_runtime.tool_interrupted": "⊘ {name} बाधित",
+  "cli.exec_runtime.tool_failed": "✗ {name} विफल",
+  "cli.exec_runtime.output_check_failed": "! आउटपुट जाँच विफल ({format}, प्रयास {attempt}/{max_attempts}): {reason}",
+  "cli.exec_runtime.retry": "[dim]पुनः प्रयास {attempt}: {error}[/dim]",
+  "cli.exec_runtime.model_fallback": "[dim]{selector} पर लौटा[/dim]",
+  "cli.exec_runtime.model_switched": "[dim]{selector} पर बदला[/dim]",
+  "cli.exec_runtime.model_returned": "[dim]{selector} पर वापस[/dim]",
+  "cli.exec_runtime.compacting": "[dim]संदर्भ संपीड़ित हो रहा है…[/dim]",
+  "cli.exec_runtime.error": "त्रुटि: {sentence}",
+  "cli.exec_runtime.aborted": "[red]निरस्त[/red]"
+}
