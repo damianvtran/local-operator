@@ -24,6 +24,14 @@ from tests import shard_stall_watchdog as watchdog
 
 @pytest.fixture(autouse=True)
 def _isolate_module_state(monkeypatch, tmp_path: Path):
+    # Share the actual lifecycle with the regression without reaching through
+    # pytest's fixture wrapper, whose public type has no __wrapped__ contract.
+    with _isolated_module_state(monkeypatch, tmp_path):
+        yield
+
+
+@contextmanager
+def _isolated_module_state(monkeypatch, tmp_path: Path):
     """Every test owns the module's process-wide state and its dump directory.
 
     The dump ROOT is a module-level constant computed from ``TMPDIR`` at import,
@@ -69,7 +77,7 @@ def _isolate_module_state(monkeypatch, tmp_path: Path):
 def test_module_isolation_joins_owned_reporters_even_after_failure(
     monkeypatch, tmp_path, body_fails
 ):
-    """Exercise fixture teardown, including a controller lost by global replacement.
+    """Exercise the fixture's shared lifecycle, including global replacement.
 
     The final safety net reaps the threads even when testing broken cleanup, so
     the negative control cannot itself contaminate later shard diagnostics.
@@ -82,7 +90,7 @@ def test_module_isolation_joins_owned_reporters_even_after_failure(
     )
     try:
         with monkeypatch.context() as scoped, expected:
-            with contextmanager(_isolate_module_state.__wrapped__)(scoped, tmp_path):
+            with _isolated_module_state(scoped, tmp_path):
                 for _ in range(2):
                     controller = watchdog._install_controller_for_test(900, _Sink())
                     controllers.append(controller)
