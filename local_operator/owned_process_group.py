@@ -480,12 +480,16 @@ class OwnedGroup:
         dropping one would be a silent amnesty. A member that is not in both scans
         is recorded, not treated as a reason to keep a live group alive.
         """
-        # THE PROBE IS PER-VERDICT: a later VERIFIED verdict must not inherit an
-        # earlier refusal's residuals, nor a refusal an earlier anchor, or the run
-        # record would describe a proof that never happened.
-        for stale in ("proof", "residuals", "anchor", "error", "vanished"):
+        # ONLY THE DECLINED SET IS PER-VERDICT. `residuals` and `error` describe
+        # THIS check, so a later VERIFIED verdict must not inherit a refusal's.
+        # `proof` and `anchor` are RUN-LEVEL evidence: the last successful proof is
+        # what a caller binds QA to, and the final refresh of a run normally returns
+        # OBSERVED_EMPTY -- popping them there published `anchor: null` and
+        # `proof: []` on every successful run.
+        for stale in ("residuals", "error", "vanished"):
             self.probe.pop(stale, None)
         members = []
+        samples = {}
         try:
             anchor = self.receipts.get(self.leader)
             if anchor is None:
@@ -571,8 +575,9 @@ class OwnedGroup:
             self.probe["error"] = type(exc).__name__ + ":" + str(exc)
             # The DECLINED set carries the same fields as the proven set — pid,
             # birth, scheme, group, session — because "who did we refuse to touch"
-            # needs the same evidence as "who did we signal".
-            self.probe["residuals"] = _identities(self.receipts, {}, members)
+            # needs the same evidence as "who did we signal". The samples this check
+            # already paid for supply the birth for a member that was never enrolled.
+            self.probe["residuals"] = _identities(self.receipts, samples, members)
         return self.last
 
     def signal(self, signum, *, deadline):
@@ -619,6 +624,7 @@ class OwnedGroup:
                 refusal_class="pin_lost",
             )
             self.probe["residuals"] = _identities(self.receipts, {}, result.members)
+            self.probe["anchor"] = result.anchor
             return self.last
         try:
             self._send(self.pgid, signum)

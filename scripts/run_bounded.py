@@ -297,6 +297,9 @@ def _ownership_record(owner, verdict):
         "refusal_class": getattr(verdict, "refusal_class", None),
         "proof": probe.get("proof", []),
         "residuals": probe.get("residuals", []),
+        # Members the census saw that had already exited by the sample: gone, not
+        # declined, and without this the record cannot tell the two apart.
+        "vanished": probe.get("vanished", []),
         "cleanup": (
             "residuals named here, never claimed absent"
             if refused

@@ -10,6 +10,7 @@ how the earlier harnesses silently tested nothing.
 from __future__ import annotations
 
 import io
+import json
 import signal
 import subprocess
 import sys
@@ -134,10 +135,17 @@ def test_a_live_leader_is_live_leader_only_and_still_signals():
 
 
 def test_c1_a_zombie_leader_the_census_cannot_see_is_refused_not_assumed():
-    """Darwin scope: no visible corpse means no claimed reservation."""
+    """No visible corpse means no claimed reservation — reached, not skipped.
+
+    The member has to EXIST: an empty census answers OBSERVED_EMPTY before the
+    visibility arm is ever consulted, which is how the earlier version of this
+    test passed without testing anything. Here the grandchild is listed and only
+    the leader is invisible, which is the platform state the arm exists for.
+    """
     kernel = Kernel()
     cap = kernel.cap()
     kernel.corpses.add(kernel.leader)
+    kernel.rows[20] = (kernel.leader, kernel.leader, kernel.leader, "grandchild")
     original = kernel.census
 
     def without_leader(pgid, deadline):
@@ -147,7 +155,7 @@ def test_c1_a_zombie_leader_the_census_cannot_see_is_refused_not_assumed():
     verdict = cap.signal(signal.SIGKILL, deadline=kernel.clock() + 5.0)
     assert verdict.status == "REFUSED", verdict.reason
     assert verdict.refusal_class == "pin_lost"
-    assert "live-leader-only" in verdict.reason
+    assert "no visible reservation on this platform" in verdict.reason
     assert kernel.sent == []
 
 
@@ -201,20 +209,38 @@ def test_c4_pid_one_and_our_own_group_are_never_signalled(monkeypatch):
         assert kernel.sent == []
 
 
+#: The C3 marker is what makes this mutation take ONE check: `refresh` holds a
+#: second, differently-motivated `_leader_reservation` test, and a bare
+#: `str.replace` of the call deleted BOTH -- so the control proved less than its
+#: comment claimed. The slice below runs from the marker to the end of the
+#: residency block, and nothing outside it.
 RESIDENCY_REMOVED = (
-    "if self._leader_reservation(deadline) is None:",
-    "if False:  # mutation: residency re-check removed",
+    "        # RESIDENCY RE-CHECK IMMEDIATELY BEFORE THE SYSCALL -- THE C3 MUTATION",
+    "        # MUTANT: the residency re-check is deleted here; refresh keeps its own.\n"
+    "        if False:\n"
+    "            pass",
 )
+
+
+def _mutant_source(source):
+    """Return `source` with ONLY the signal-path residency check deleted."""
+    before, after = RESIDENCY_REMOVED
+    marker = source.index(before)
+    check = source.index("if self._leader_reservation(deadline) is None:", marker)
+    tail = source.index("            return self.last\n", check) + len(
+        "            return self.last\n"
+    )
+    return source[:marker] + after + "\n" + source[tail:]
 
 
 def _mutant():
     source = Path(owned.__file__).read_text()
-    before, after = RESIDENCY_REMOVED
-    assert before in source, "the residency re-check moved; update this control"
+    mutated = _mutant_source(source)
+    assert mutated != source, "the residency re-check moved; update this control"
     module = ModuleType("owned_process_group_no_residency")
     module.__file__ = owned.__file__
     sys.modules[module.__name__] = module  # @dataclass resolves its module on 3.12
-    exec(compile(source.replace(before, after), module.__name__, "exec"), module.__dict__)
+    exec(compile(mutated, module.__name__, "exec"), module.__dict__)
     return module
 
 
@@ -311,10 +337,14 @@ def test_the_grace_loop_costs_no_census_and_signals_cost_at_most_two(
     assert wrapper.run(["synthetic"], timeout=None, grace=0.05, stream=out) == 0, out.getvalue()
     # One refresh proves, then each signal re-proves: two complete strict scans
     # per proof. Nothing here runs a census once per poll or per grace tick.
-    assert kernel.censuses - before <= 2 * (1 + len(kernel.sent) + 1), (
-        kernel.censuses - before,
-        kernel.sent,
-    )
+    # FIVE proofs, and 2 strict censuses each, is the whole cost:
+    #   acquire (capture), the required-refresh, the signal's own re-proof, the
+    #   finally refresh, and the finally signal's re-proof. Ten censuses were
+    #   observed against a bound of six because the earlier bound forgot the
+    #   signal and the finally pass -- the bound was wrong, not the run cheap.
+    # What the bound still proves is the property this test exists for: no census
+    # per poll tick and none per grace tick, only per proof.
+    assert kernel.censuses - before <= 2 * 5, (kernel.censuses - before, kernel.sent)
 
 
 def _wrapper_owner(wrapper, monkeypatch, cap, process):
@@ -565,3 +595,42 @@ def test_the_discarded_authority_guard_has_an_executed_deletion_control(
     ASK["armed"] = True
     run_one(module, kernel2, cap2)
     assert kernel2.sent, "the mutant must signal after the latched loss, or it proves nothing"
+
+
+def test_a_terminal_observed_empty_still_records_the_anchor_and_the_proof(
+    wrapper, monkeypatch, tmp_path
+):
+    """B1: `proof` and `anchor` are RUN-level evidence and outlive the last verdict.
+
+    The final refresh of a successful run is the terminal one, and it returns
+    OBSERVED_EMPTY. Resetting the probe per verdict therefore published
+    `anchor: null` and `proof: []` on every run that worked -- the object three
+    downstream lanes bind to, and the one the incident shape asserts.
+    """
+    kernel = Kernel()
+    cap = kernel.cap()
+    kernel.corpses.add(kernel.leader)
+    kernel.rows[20] = (kernel.leader, kernel.leader, kernel.leader, "grandchild")
+
+    class Process:
+        pid = 10
+
+        def poll(self):
+            kernel.reap(10)
+            return 0
+
+        def wait(self, **_):
+            kernel.reap(10)
+            return 0
+
+    _wrapper_owner(wrapper, monkeypatch, cap, Process())
+    monkeypatch.setenv("LOCAL_OPERATOR_SCRATCHPAD", str(tmp_path))
+    out = io.StringIO()
+    assert wrapper.run(["synthetic"], timeout=None, grace=0.05, stream=out) == 0, out.getvalue()
+    records = sorted(Path(tmp_path).rglob("*.exit.json"))
+    assert records, "a spawned run must leave an exit record"
+    ownership = json.loads(records[-1].read_text())["ownership"]
+    assert ownership["anchor"] == "leader-reservation", ownership
+    assert {row["pid"] for row in ownership["proof"]} == {10, 20}, ownership["proof"]
+    # The terminal verdict owns no declined set of its own, and must not inherit one.
+    assert ownership["residuals"] == [], ownership["residuals"]
