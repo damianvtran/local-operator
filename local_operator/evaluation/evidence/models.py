@@ -76,6 +76,8 @@ EventKind = Literal[
     "model_response",
     "reply_tolerance",
     "usage_cost",
+    "cost_coverage",
+    "auxiliary_usage_cost",
     "context_compaction",
     "budget_commitment",
     "reconciliation",
@@ -390,6 +392,32 @@ class UsageCostPayload(ProtocolModel):
     cost_microusd: SafeCount
 
 
+class AuxiliaryUsageCostPayload(ProtocolModel):
+    """A paid summary whose following decision was blocked before dispatch."""
+
+    schema_version: Literal["1.0"] = "1.0"
+    auxiliary_id: StrictIdentifier
+    purpose: Literal["compaction"] = "compaction"
+    previous_request_id: StrictIdentifier | None = None
+    route: RouteIdentity
+    provider_request_id: StrictIdentifier
+    input_tokens: SafeCount
+    output_tokens: SafeCount
+    reasoning_tokens: SafeCount = 0
+    cache_read_tokens: SafeCount = 0
+    cache_write_tokens: SafeCount = 0
+    cost_microusd: SafeCount
+    cost_known: bool
+
+
+class CostCoveragePayload(ProtocolModel):
+    """Pricing completeness for a receipt, separate to preserve historical hashes."""
+
+    schema_version: Literal["1.0"] = "1.0"
+    request_id: StrictIdentifier
+    cost_known: bool
+
+
 class BudgetCommitmentPayload(ProtocolModel):
     """Durable binding between the manifest budget and reserved execution authority."""
 
@@ -522,7 +550,7 @@ class AgentStopPayload(ProtocolModel):
     """
 
     stop_id: StrictIdentifier
-    reason: Literal["model_failure", "ask_unanswered"]
+    reason: Literal["model_failure", "ask_unanswered", "budget_exhausted"]
     observation_id: StrictIdentifier
     attempts: SafeCount
     detail_artifact: EvidenceArtifactRef | None = None
@@ -650,6 +678,8 @@ EventPayload: TypeAlias = (
     | ModelResponsePayload
     | ReplyTolerancePayload
     | UsageCostPayload
+    | CostCoveragePayload
+    | AuxiliaryUsageCostPayload
     | ContextCompactionPayload
     | BudgetCommitmentPayload
     | ReconciliationPayload
@@ -672,6 +702,8 @@ _EVENT_PAYLOAD_TYPES: dict[str, type[ProtocolModel]] = {
     "model_response": ModelResponsePayload,
     "reply_tolerance": ReplyTolerancePayload,
     "usage_cost": UsageCostPayload,
+    "cost_coverage": CostCoveragePayload,
+    "auxiliary_usage_cost": AuxiliaryUsageCostPayload,
     "context_compaction": ContextCompactionPayload,
     "budget_commitment": BudgetCommitmentPayload,
     "reconciliation": ReconciliationPayload,

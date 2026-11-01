@@ -31,6 +31,9 @@ import logging
 import re
 import textwrap
 import time
+import uuid
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping, Sequence, get_args, get_origin
@@ -1927,6 +1930,7 @@ def parse_decision(
     route: RouteIdentity,
     usage: ModelUsage | None = None,
     cost_micros: int = 0,
+    cost_known: bool = True,
     stop_reason: str = "stop",
     provider_request_id: str = "unknown",
     tool_call_count: int = 0,
@@ -2141,6 +2145,7 @@ def parse_decision(
         route=route,
         usage=usage or ModelUsage(),
         cost_micros=cost_micros,
+        cost_known=cost_known,
         stop_reason=stop_reason,
         provider_request_id=provider_request_id,
         tool_call_count=tool_call_count,
@@ -2256,6 +2261,10 @@ def _bounded_call_names(calls: Sequence[Any]) -> str:
     return rendered
 
 
+class AuxiliaryStreamAborted(RuntimeError):
+    """A paid summary stream ended before its result could be trusted."""
+
+
 class ProviderStreamAbortedError(RuntimeError):
     """The stream ended abnormally without producing any usable content.
 
@@ -2311,6 +2320,7 @@ class ProviderStreamAbortedError(RuntimeError):
         route: RouteIdentity | None = None,
         usage: ModelUsage | None = None,
         cost_micros: int = 0,
+        cost_known: bool = True,
         stop_reason: str = _UNSPECIFIED_STOP,
         provider_request_id: str = "unknown",
         tool_call_count: int = 0,
@@ -2325,6 +2335,7 @@ class ProviderStreamAbortedError(RuntimeError):
         self.route = route
         self.usage = usage or ModelUsage()
         self.cost_micros = cost_micros
+        self.cost_known = cost_known
         self.stop_reason = stop_reason
         self.provider_request_id = provider_request_id
         self.tool_call_count = tool_call_count
@@ -2640,10 +2651,12 @@ class _StreamOutcome:
     text: str
     usage: ModelUsage
     cost_micros: int
+    cost_known: bool
     stop_reason: str
     provider_request_id: str
     context_tokens: int | None
     stream_error: str | None
+    interrupted: bool
     channel_reply: str | None
     tool_call_count: int
     shape: StreamShape
@@ -2723,6 +2736,10 @@ class ProviderModelClient:
         from local_operator.compaction.thresholds import CompactionSettings
 
         self._stream_fn = stream_fn
+        # Concurrent tasks must never borrow another episode's budget authority.
+        self._dispatch_account: ContextVar[Any] = ContextVar(
+            "evaluation_dispatch_account", default=None
+        )
         self._route = route
         self._model_spec = model_spec
         if action_binding not in (LEGACY_ACTION_BINDING, COMPACT_ACTION_BINDING):
@@ -2816,7 +2833,10 @@ class ProviderModelClient:
         from local_operator.harness.types import ChatRequest
 
         self._context.append_new_turns(history)
-        compaction, extra_usage, extra_cost = await self._maybe_compact()
+        compaction, extra_usage, extra_cost, extra_cost_known = await self._maybe_compact()
+        account = self._dispatch_account.get()
+        if account is not None:
+            account.compaction = compaction
 
         # The system prompt rides in ``system_blocks`` rather than as a message
         # so the provider can place a cache breakpoint after this stable block;
@@ -2970,6 +2990,7 @@ class ProviderModelClient:
         text = outcome.text
         usage = outcome.usage
         cost_micros = outcome.cost_micros
+        cost_known = outcome.cost_known and extra_cost_known
         stop_reason = outcome.stop_reason
         provider_request_id = outcome.provider_request_id
         context_tokens = outcome.context_tokens
@@ -3037,7 +3058,9 @@ class ProviderModelClient:
         # ``stop_reason`` alone would swallow the recoverable case where the
         # provider refused only AFTER streaming a parseable batch -- that text
         # is real model output and stays on the correctable rejection path.
-        if (stream_error or stop_reason not in _NORMAL_CONTENT_STOPS) and not text.strip():
+        if outcome.interrupted or (
+            (stream_error or stop_reason not in _NORMAL_CONTENT_STOPS) and not text.strip()
+        ):
             raise ProviderStreamAbortedError(
                 stream_error or f"provider ended the stream as '{stop_reason}' with no content",
                 # The same billing provenance a rejection carries, and for the
@@ -3046,6 +3069,7 @@ class ProviderModelClient:
                 route=self._route,
                 usage=usage,
                 cost_micros=cost_micros,
+                cost_known=cost_known,
                 stop_reason=stop_reason,
                 provider_request_id=provider_request_id,
                 prompt_cache_key=self._prompt_cache_key,
@@ -3112,6 +3136,7 @@ class ProviderModelClient:
                 route=self._route,
                 usage=usage,
                 cost_micros=cost_micros,
+                cost_known=cost_known,
                 stop_reason=stop_reason,
                 provider_request_id=provider_request_id,
                 prompt_cache_key=self._prompt_cache_key,
@@ -3234,6 +3259,7 @@ class ProviderModelClient:
                 route=self._route,
                 usage=usage,
                 cost_micros=cost_micros,
+                cost_known=cost_known,
                 stop_reason=stop_reason,
                 provider_request_id=provider_request_id,
                 # The rejection path is where this number matters MOST: a reply
@@ -3289,7 +3315,7 @@ class ProviderModelClient:
         self._context.append_challenge(shown, challenge, observation)
         return challenge
 
-    async def _maybe_compact(self) -> tuple[CompactionRecord | None, ModelUsage | None, int]:
+    async def _maybe_compact(self) -> tuple[CompactionRecord | None, ModelUsage | None, int, bool]:
         """Run one compaction pass when the frame budget or the resolved trigger says so.
 
         Two inputs, one pass. The frame budget (``rebuild_due``) is the usual
@@ -3329,7 +3355,7 @@ class ProviderModelClient:
 
         messages = self._context.messages
         if not messages:
-            return None, None, 0
+            return None, None, 0, True
         frame_due = self._context.rebuild_due()
         # The trigger judges what the provider will BILL for this request, not
         # what the local ruler counts: the provider's last figure described the
@@ -3361,14 +3387,16 @@ class ProviderModelClient:
             tokens_before, window, self._compaction, wire_bytes=wire_before
         )
         if not (frame_due or threshold_due):
-            return None, None, 0
+            return None, None, 0, True
         threshold = resolve_threshold_tokens(window, self._compaction) if token_due else None
 
         summary_usage: ModelUsage | None = None
         summary_cost = 0
+        summary_cost_known = True
+        summary_failure: AuxiliaryStreamAborted | None = None
 
         async def summarize(prompt: str) -> str:
-            nonlocal summary_usage, summary_cost
+            nonlocal summary_usage, summary_cost, summary_cost_known, summary_failure
             # TODO(F3, review round 2): this path discards ``_err`` and
             # ``_stop``, so a compaction summary call that the provider REFUSED
             # returns empty text and is folded into the context as a legitimate
@@ -3381,9 +3409,18 @@ class ProviderModelClient:
             # The summary request offers no tools (``_summary_request`` sends
             # ``tool_choice="none"`` with an empty list), so the channel fields
             # are inert here — a summary is prose by definition.
-            summary = await self._stream(self._summary_request(prompt))
+            summary = await self._stream(self._summary_request(prompt), purpose="compaction")
             summary_usage = summary.usage
             summary_cost = summary.cost_micros
+            summary_cost_known = summary.cost_known
+            if summary.interrupted:
+                # A partial summary is not a valid context, even when the
+                # monetary budget is uncapped. Its receipt is journaled by the
+                # runner separately because no decision request was sent.
+                # The shared compaction pass logs this exception before the
+                # runner's redactor sees it; provider error text may be secret.
+                summary_failure = AuxiliaryStreamAborted("summary stream interrupted")
+                raise summary_failure
             return summary.text
 
         before = len(messages)
@@ -3420,6 +3457,10 @@ class ProviderModelClient:
             # (contract amendment 8).
             world_root=None,
         )
+        # The shared pass normally degrades a failed summarizer to a refusal;
+        # this host must not then dispatch on an incomplete paid summary.
+        if summary_failure is not None:
+            raise summary_failure
         # The pass returns the pruned list even when it refused to summarize; either
         # way it is the prefix to send from now on.
         self._context.replace(result.messages)
@@ -3469,7 +3510,7 @@ class ProviderModelClient:
         # of that (review round 4, m8). Returning nothing here would hide it
         # behind a bare ``message_count`` drop.
         if shed == 0 and frames_dropped == 0 and not result.ran and not result.pruned:
-            return None, None, 0
+            return None, None, 0, True
         record = CompactionRecord(
             strategy=result.strategy or "prune",
             # The pass measures its own "before" AFTER its prune step (that is
@@ -3488,7 +3529,7 @@ class ProviderModelClient:
             messages_after=len(self._context.messages),
             summary_text=result.summary_text,
         )
-        return record, summary_usage, summary_cost
+        return record, summary_usage, summary_cost, summary_cost_known
 
     def _priced_estimate(self, messages: Sequence[Any]) -> int:
         """The local estimate corrected to what the provider will bill for frames.
@@ -3665,16 +3706,36 @@ class ProviderModelClient:
             replayable=True,
         )
 
-    async def _stream(self, request: Any) -> _StreamOutcome:
+    @contextmanager
+    def bind_dispatch_account(self, account: Any) -> Any:
+        """Borrow episode authority only during its own decision, even on errors."""
+        token = self._dispatch_account.set(account)
+        try:
+            yield
+        finally:
+            self._dispatch_account.reset(token)
+
+    async def _stream(self, request: Any, *, purpose: str = "decision") -> _StreamOutcome:
+        account = self._dispatch_account.get()
+        dispatch_id = uuid.uuid4().hex
+        if account is not None:
+            account.before_dispatch()
+            # A dispatched call with no final usage is incomplete, not free.
+            account.record(dispatch_id, cost_micros=0, cost_known=False)
         text = ""
         usage = ModelUsage()
         cost_micros = 0
+        # No usage receipt is not evidence that the provider billed zero.
+        cost_known = False
         # A stream that never emits an ``end`` event never told us how it
         # ended, so it starts abnormal and only a real marker makes it normal.
         stop_reason = _UNSPECIFIED_STOP
         provider_request_id = "unknown"
         context_tokens: int | None = None
         stream_error: str | None = None
+        interrupted = False
+        terminal_seen = False
+        stream_completed = False
         # Per-event counters, kept for the rejection artifact. They are what
         # makes "the model generated nothing visible" distinguishable from
         # "the client dropped what it generated": a refusal with a large
@@ -3689,52 +3750,92 @@ class ProviderModelClient:
         # is the harness loop's, so the two agree on what a provider's fragments
         # add up to (``LoopRunner._assemble_tool_call``).
         channel_calls: dict[int, dict[str, Any]] = {}
-        async for event in self._stream_fn(request, None):
-            if event.type == "text_delta":
-                content_deltas += 1
-                text += event.delta
-            elif event.type == "reasoning_delta":
-                # Counted, never read into ``text``: private reasoning is not a
-                # decision channel, and treating it as one would parse a
-                # model's thinking as its answer.
-                reasoning_deltas += 1
-            elif event.type == "tool_call_delta":
-                tool_call_deltas += 1
-                state = channel_calls.setdefault(event.index, {"name": "", "arg_parts": []})
-                if event.name:
-                    state["name"] += event.name
-                if event.argument_delta:
-                    state["arg_parts"].append(event.argument_delta)
-            elif event.type == "usage":
-                usage, cost_micros = _usage_from(
-                    event.usage,
-                    requested_provider=self._model_spec.provider,
-                    requested_model_id=self._model_spec.model_id,
-                )
-                context_tokens = _context_tokens_from(event.usage)
-            elif event.type == "end":
-                # NOT ``or "stop"``. An empty marker is an ABSENT marker, and
-                # normalizing it to a normal content stop would let a stream
-                # that said nothing about how it ended take the parse path --
-                # the exact misdiagnosis the allow-list below exists to stop.
-                stop_reason = event.stop_reason or _UNSPECIFIED_STOP
-                if event.usage is not None:
-                    usage, cost_micros = _usage_from(
+        try:
+            async for event in self._stream_fn(request, None):
+                if event.type == "text_delta":
+                    content_deltas += 1
+                    text += event.delta
+                elif event.type == "reasoning_delta":
+                    # Counted, never read into ``text``: private reasoning is not a
+                    # decision channel, and treating it as one would parse a
+                    # model's thinking as its answer.
+                    reasoning_deltas += 1
+                elif event.type == "tool_call_delta":
+                    tool_call_deltas += 1
+                    state = channel_calls.setdefault(event.index, {"name": "", "arg_parts": []})
+                    if event.name:
+                        state["name"] += event.name
+                    if event.argument_delta:
+                        state["arg_parts"].append(event.argument_delta)
+                elif event.type == "usage":
+                    usage, cost_micros, cost_known = _usage_from(
                         event.usage,
                         requested_provider=self._model_spec.provider,
                         requested_model_id=self._model_spec.model_id,
                     )
                     context_tokens = _context_tokens_from(event.usage)
-                # The provider's own request id is the only handle that ties a
-                # bundle's model_response back to the provider's records, so it
-                # is worth carrying when the wire client reports one.
-                provider_request_id = _provider_request_id(event.provider_payload)
-                # The wire clients are the ONLY layer where the provider's
-                # actual terminal marker (``content_filter``, ``refusal``,
-                # ``SAFETY``…) is still visible; downstream sees only the
-                # normalized stop. Dropping this field is what left a refused
-                # episode's evidence blaming the model's JSON.
-                stream_error = event.error
+                    if account is not None:
+                        # A stream can still terminate without a final receipt.
+                        account.record(dispatch_id, cost_micros=cost_micros, cost_known=False)
+                elif event.type == "end":
+                    terminal_seen = True
+                    # NOT ``or "stop"``. An empty marker is an ABSENT marker, and
+                    # normalizing it to a normal content stop would let a stream
+                    # that said nothing about how it ended take the parse path --
+                    # the exact misdiagnosis the allow-list below exists to stop.
+                    stop_reason = event.stop_reason or _UNSPECIFIED_STOP
+                    if event.usage is not None:
+                        usage, cost_micros, cost_known = _usage_from(
+                            event.usage,
+                            requested_provider=self._model_spec.provider,
+                            requested_model_id=self._model_spec.model_id,
+                        )
+                        context_tokens = _context_tokens_from(event.usage)
+                    if account is not None:
+                        # A normal terminal event can confirm the latest usage
+                        # trailer even when it carries no second usage object.
+                        account.record(dispatch_id, cost_micros=cost_micros, cost_known=cost_known)
+                    # The provider's own request id is the only handle that ties a
+                    # bundle's model_response back to the provider's records, so it
+                    # is worth carrying when the wire client reports one.
+                    provider_request_id = _provider_request_id(event.provider_payload)
+                    # The wire clients are the ONLY layer where the provider's
+                    # actual terminal marker (``content_filter``, ``refusal``,
+                    # ``SAFETY``…) is still visible; downstream sees only the
+                    # normalized stop. Dropping this field is what left a refused
+                    # episode's evidence blaming the model's JSON.
+                    stream_error = event.error
+            stream_completed = True
+        except Exception as error:
+            # Keep observed token and subtotal evidence, but a broken stream
+            # cannot prove that the final provider charge was reported.
+            cost_known = False
+            if account is not None:
+                account.record(dispatch_id, cost_micros=cost_micros, cost_known=False)
+            interrupted = True
+            stop_reason = _UNSPECIFIED_STOP
+            stream_error = f"{type(error).__name__}: {error}"
+        finally:
+            # This is synchronous: cancellation must preserve the observed
+            # snapshot without waiting or replacing the original exception.
+            final_known = stream_completed and terminal_seen and cost_known
+            if account is not None:
+                account.record(dispatch_id, cost_micros=cost_micros, cost_known=final_known)
+                if purpose == "compaction":
+                    from local_operator.evaluation.runner.dispatch_account import (
+                        SummaryCharge,
+                    )
+
+                    account.record_summary(
+                        SummaryCharge(
+                            dispatch_id=dispatch_id,
+                            usage=usage.model_copy(deep=True),
+                            cost_micros=cost_micros,
+                            cost_known=final_known,
+                            provider_request_id=provider_request_id,
+                        )
+                    )
+        cost_known = stream_completed and terminal_seen and cost_known
         from local_operator.harness.types import ToolCall
 
         # THE REPLY-ASSEMBLY BOUNDARY, and the only place a reply is rewritten.
@@ -3826,10 +3927,12 @@ class ProviderModelClient:
             text=text,
             usage=usage,
             cost_micros=cost_micros,
+            cost_known=cost_known,
             stop_reason=stop_reason,
             provider_request_id=provider_request_id,
             context_tokens=context_tokens,
             stream_error=stream_error,
+            interrupted=interrupted,
             channel_reply=channel_reply,
             # Every call the stream carried, including any the model made to a
             # name we never offered. Counted for the evidence bundle, and now
@@ -4199,7 +4302,7 @@ def _usage_from(
     *,
     requested_provider: str = "",
     requested_model_id: str = "",
-) -> tuple[ModelUsage, int]:
+) -> tuple[ModelUsage, int, bool]:
     """Copy provider counts and price the call, clamped to the evidence range.
 
     ``reasoning_tokens`` is a SUBSET of ``output_tokens`` in the harness's
@@ -4219,10 +4322,8 @@ def _usage_from(
     wrong zero and an honest one: only aggregators precompute ``usage.cost``,
     so reading the receipt alone priced every DIRECT-provider request at 0
     while its token counts were real -- and the episode's budget caps key on
-    this figure. An unpriced model still yields 0, because the evidence payload
-    has no "unknown" encoding: the distinction upstream between ``None`` and a
-    real ``0.0`` cannot be represented here, and inventing a price would be
-    worse than under-reporting one.
+    this figure. An unpriced model yields a zero subtotal and a separate false
+    coverage flag: the subtotal alone is not evidence that the call was free.
     """
 
     model_usage = ModelUsage(
@@ -4241,17 +4342,18 @@ def _usage_from(
 
     reported = _usage_cost(usage)
     if reported is not None:
-        return model_usage, max(0, round(reported * 1_000_000))
+        return model_usage, max(0, round(reported * 1_000_000)), True
     # The stamp is the spec that ACTUALLY served (``stream_with_failover``
     # rewrites the request to a fallback and stamps the on-the-wire spec onto
     # the usage for exactly this reason); the request is the honest fallback
     # when nothing stamped one.
     provider = getattr(usage, "provider", None) or requested_provider
     model_id = getattr(usage, "model_id", None) or requested_model_id
-    return model_usage, _table_cost_micros(usage, provider=provider, model_id=model_id)
+    cost = _table_cost_micros(usage, provider=provider, model_id=model_id)
+    return model_usage, cost if cost is not None else 0, cost is not None
 
 
-def _table_cost_micros(usage: Any, *, provider: str, model_id: str) -> int:
+def _table_cost_micros(usage: Any, *, provider: str, model_id: str) -> int | None:
     """Micro-USD for one call the provider did not bill, from the shared table.
 
     WHY this exists: only some routes state a dollar amount on the wire
@@ -4274,16 +4376,12 @@ def _table_cost_micros(usage: Any, *, provider: str, model_id: str) -> int:
     resolver answers from the warm memo or the static registry and schedules an
     off-loop refresh on a miss, which is the same policy the TUI prices with.
     The registry row is not a guess dressed as data: a row with no prices
-    returns 0 here, exactly as a failed lookup does.
-
-    TOTAL and NON-RAISING: an unpriced or unknown model is legitimate (the
-    evidence reads 0, which the payload's missing "unknown" encoding already
-    requires), while a wrong zero for a route the registry prices is not -- so
-    "unknown" must degrade here rather than abort an episode.
+    returns None here, exactly as a failed lookup does. An unpriced or unknown
+    model is legitimate, and must stay unknown rather than become a free call.
     """
 
     if not provider or not model_id:
-        return 0
+        return None
     try:
         from local_operator.model.configure import (
             cost_for_usage,
@@ -4298,8 +4396,8 @@ def _table_cost_micros(usage: Any, *, provider: str, model_id: str) -> int:
             # pricing concern can never delay or fail the episode's stream.
             refresh_model_info_background(provider, model_id)
         if not (info.input_price or info.output_price):
-            return 0
+            return None
         return max(0, round(cost_for_usage(provider, info, usage) * 1_000_000))
     except Exception:  # noqa: BLE001 -- an unpriceable call is not an episode error
         logger.debug("eval evidence: cost table lookup failed for %s/%s", provider, model_id)
-        return 0
+        return None

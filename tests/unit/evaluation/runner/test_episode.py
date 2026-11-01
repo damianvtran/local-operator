@@ -16,7 +16,7 @@ import json
 import os
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, AsyncIterator
 
 import pytest
 
@@ -294,12 +294,14 @@ async def test_happy_episode_writes_every_event_in_protocol_order(
         "model_request",
         "model_response",
         "usage_cost",
+        "cost_coverage",
         "action_batch",
         "environment_step",
         "observation",
         "model_request",
         "model_response",
         "usage_cost",
+        "cost_coverage",
         "action_batch",
         "finalization_start",
         "scoring_start",
@@ -1642,7 +1644,16 @@ async def test_a_hidden_second_batch_in_an_actions_string_never_executes(
     hidden = json.dumps({"zzz": {"actions": [dict(action)]}})
     reply = json.dumps({"actions": array + " , " + hidden})
 
-    client = _client(ChannelStream(reply), model_spec=_spec(supports_tools=True))
+    class KnownFreeChannelStream(ChannelStream):
+        async def _events(self) -> AsyncIterator[Any]:
+            async for event in super()._events():
+                # This security regression exercises rejection retries rather
+                # than the independent unknown-cost budget stop.
+                if event.type == "end":
+                    event = event.model_copy(update={"usage": Usage(usd_cost=0.0)})
+                yield event
+
+    client = _client(KnownFreeChannelStream(reply), model_spec=_spec(supports_tools=True))
     adapter = FakeAdapter(tmp_path, episode_id, score=ScoreArtifact(status="scored", binary=1))
     runner = _runner(tmp_path, episode_id, adapter=adapter, model=client)
 
@@ -2148,6 +2159,408 @@ async def test_a_direct_providers_table_price_reaches_the_budget_cap(
 
 
 @pytest.mark.asyncio
+async def test_unknown_provider_cost_stops_a_capped_episode(
+    tmp_path: Path, episode_id: str
+) -> None:
+    class UnknownCostStream(DirectProviderStream):
+        async def _events(self, request: Any) -> Any:
+            yield StreamTextDelta(delta=_wait_reply(request.messages[-1]))
+            usage = Usage(
+                input_tokens=100, output_tokens=10, provider="unpriceable", model_id="unknown"
+            )
+            yield StreamUsageEvent(usage=usage)
+            yield StreamEndEvent(stop_reason="stop", usage=usage)
+
+    adapter = FakeAdapter(tmp_path, episode_id)
+    client = ProviderModelClient(
+        UnknownCostStream(),
+        route=ROUTE,
+        model_spec=ModelSpec(provider="unpriceable", model_id="unknown"),
+        artifact_root=tmp_path / "artifacts",
+        prompt_cache_key="probe",
+    )
+    runner = EpisodeRunner(
+        build_spec(episode_id, caps={"provider_usd_micros": 1_000_000}),
+        build_config(tmp_path, max_steps=4),
+        selector=selector(tmp_path),
+        model=client,
+        launch=lambda _: adapter,
+        rescue=_rescue_ok,
+    )
+    outcome = await runner.run()
+    root = outcome.bundle_root
+    assert root is not None and verify_bundle(root).valid
+    assert len(payloads(root, UsageCostPayload)) == 1
+    import json
+
+    events = [json.loads(line) for line in (root / "events.jsonl").read_text().splitlines()]
+    coverage = [event["payload"] for event in events if event["kind"] == "cost_coverage"]
+    assert len(coverage) == 1 and coverage[0]["cost_known"] is False
+    # Reportability is independent: this fixture marks every budget resource
+    # optional, so the sealed coverage event is the completeness authority.
+    steps = payloads(root, EnvironmentStepPayload)
+    assert steps[-1].truncated is True
+    assert steps[-1].truncation_reason == "cost-unreported"
+
+
+@pytest.mark.parametrize(
+    "summary_case",
+    [
+        "unknown",
+        "uncapped",
+        "known-zero",
+        "normal-priced",
+        "at-cap",
+        "cycle-cap",
+        "pass-error",
+        "summary-error",
+        "summary-cancel",
+        "summary-cancel-empty",
+        "summary-cancel-append-failure",
+        "summary-cancel-seal-failure",
+        "summary-cancel-abandon-failure",
+    ],
+)
+@pytest.mark.asyncio
+async def test_unknown_summary_blocks_next_dispatch_and_preserves_usage(
+    tmp_path: Path, episode_id: str, monkeypatch: pytest.MonkeyPatch, summary_case: str
+) -> None:
+    from local_operator.compaction import pass_ as compaction_pass
+    from local_operator.compaction import thresholds
+    from local_operator.compaction.api import SUMMARIZATION_SYSTEM_PROMPT
+    from local_operator.compaction.pass_ import CompactionPassResult
+    from local_operator.evaluation.runner.episode import _EvidenceFailure
+
+    async def compact(messages: Any, *, summarize: Any, **kwargs: Any) -> Any:
+        text = await summarize("summarize synthetic context")
+        if summary_case == "pass-error":
+            raise RuntimeError("synthetic compaction failure after paid summary")
+        return CompactionPassResult(
+            messages=list(messages),
+            ran=True,
+            reason=None,
+            strategy="context-full",
+            tokens_before=100,
+            tokens_after=10,
+            pruned=False,
+            frames_dropped=0,
+            summary_text=text,
+        )
+
+    monkeypatch.setattr(thresholds, "should_compact", lambda *a, **kw: True)
+    monkeypatch.setattr(compaction_pass, "run_compaction_pass", compact)
+
+    class SummaryStream(DirectProviderStream):
+        def __init__(self) -> None:
+            self.summaries = 0
+            self.decisions = 0
+
+        async def _events(self, request: Any) -> Any:
+            is_summary = bool(
+                request.system_blocks and request.system_blocks[0] == SUMMARIZATION_SYSTEM_PROMPT
+            )
+            if is_summary:
+                self.summaries += 1
+                if summary_case == "summary-cancel-empty":
+                    import asyncio
+
+                    raise asyncio.CancelledError()
+                yield StreamTextDelta(delta="synthetic summary")
+                summary_cost = {
+                    "unknown": None,
+                    "uncapped": None,
+                    "known-zero": 0.0,
+                    "normal-priced": 0.1,
+                    "at-cap": 1.0,
+                    "cycle-cap": 0.1,
+                    "pass-error": 0.1,
+                    "summary-error": 0.1,
+                    "summary-cancel": 0.1,
+                    "summary-cancel-append-failure": 0.1,
+                    "summary-cancel-seal-failure": 0.1,
+                    "summary-cancel-abandon-failure": 0.1,
+                }[summary_case]
+                usage = Usage(
+                    input_tokens=100,
+                    output_tokens=10,
+                    provider="unpriceable",
+                    model_id="unknown",
+                    usd_cost=summary_cost,
+                )
+            else:
+                self.decisions += 1
+                yield StreamTextDelta(delta=_wait_reply(request.messages[-1]))
+                usage = Usage(
+                    input_tokens=10,
+                    output_tokens=5,
+                    usd_cost=0.2 if summary_case == "normal-priced" else 0.0,
+                )
+            yield StreamUsageEvent(usage=usage)
+            if is_summary and summary_case == "summary-error":
+                raise ConnectionError("synthetic summary interruption")
+            if is_summary and summary_case in (
+                "summary-cancel",
+                "summary-cancel-append-failure",
+                "summary-cancel-seal-failure",
+                "summary-cancel-abandon-failure",
+            ):
+                import asyncio
+
+                raise asyncio.CancelledError()
+            yield StreamEndEvent(stop_reason="stop", usage=usage)
+
+    stream = SummaryStream()
+    adapter = FakeAdapter(tmp_path, episode_id)
+    client = ProviderModelClient(
+        stream,
+        route=ROUTE,
+        model_spec=ModelSpec(provider="unpriceable", model_id="unknown", context_window=100_000),
+        artifact_root=tmp_path / "artifacts",
+        prompt_cache_key="probe",
+    )
+    spec = build_spec(episode_id, caps={"provider_usd_micros": 1_000_000})
+    if summary_case in (
+        "uncapped",
+        "summary-error",
+        "summary-cancel",
+        "summary-cancel-empty",
+        "summary-cancel-append-failure",
+        "summary-cancel-seal-failure",
+        "summary-cancel-abandon-failure",
+    ):
+        from dataclasses import replace
+
+        from local_operator.evaluation.receipts import (
+            BudgetAuthorization,
+            ResourceAmount,
+            UncappedAllowance,
+            reserve_budget,
+        )
+
+        allowance = UncappedAllowance(
+            resource="provider_usd_micros",
+            reason="synthetic uncapped test",
+            authorized_by="test",
+            authorized_at_ms=0,
+            reporting="optional",
+        )
+        budget = BudgetAuthorization(
+            episode_id=episode_id,
+            allowances=tuple(
+                allowance if item.resource == "provider_usd_micros" else item
+                for item in spec.budget.allowances
+            ),
+        )
+        reservation = reserve_budget(
+            budget,
+            "episode",
+            [ResourceAmount(resource=item.resource, value=1) for item in budget.allowances],
+        )
+        spec = replace(spec, budget=budget, reservations=(reservation,))
+    runner = EpisodeRunner(
+        spec,
+        build_config(
+            tmp_path,
+            max_steps=1 if summary_case == "normal-priced" else 4,
+            max_cycle_cost_micros=100_000 if summary_case == "cycle-cap" else None,
+        ),
+        selector=selector(tmp_path),
+        model=client,
+        launch=lambda _: adapter,
+        rescue=_rescue_ok,
+    )
+    if summary_case == "summary-cancel-append-failure":
+        original_append = runner._append
+
+        def fail_auxiliary(kind: Any, payload: Any) -> None:
+            if kind == "auxiliary_usage_cost":
+                raise _EvidenceFailure("synthetic evidence failure", operation="append")
+            original_append(kind, payload)
+
+        monkeypatch.setattr(runner, "_append", fail_auxiliary)
+    if summary_case in ("summary-cancel-seal-failure", "summary-cancel-abandon-failure"):
+
+        async def fail_seal(reason: str) -> Any:
+            raise _EvidenceFailure("synthetic seal failure", operation="seal")
+
+        monkeypatch.setattr(runner, "_finalize_cancelled", fail_seal)
+        if summary_case == "summary-cancel-abandon-failure":
+            from local_operator.evaluation.evidence.store import EvidenceWriter
+
+            def fail_abandon(*args: Any, **kwargs: Any) -> Any:
+                raise OSError("synthetic abandon failure")
+
+            monkeypatch.setattr(EvidenceWriter, "abandon", fail_abandon)
+    cancellation_error: BaseException | None = None
+    if summary_case in (
+        "summary-cancel",
+        "summary-cancel-empty",
+        "summary-cancel-append-failure",
+        "summary-cancel-seal-failure",
+        "summary-cancel-abandon-failure",
+    ):
+        import asyncio
+
+        with pytest.raises(asyncio.CancelledError) as cancelled:
+            await runner.run()
+        cancellation_error = cancelled.value
+        root = tmp_path / "evidence" / episode_id
+        outcome = None
+    else:
+        outcome = await runner.run()
+        assert outcome.bundle_root is not None
+        root = outcome.bundle_root
+    assert stream.summaries >= 1
+    if summary_case in ("summary-cancel-seal-failure", "summary-cancel-abandon-failure"):
+        assert cancellation_error is not None
+        assert runner._provider_cost_micros == 100_000
+        assert not runner._dispatch_account.completed_auxiliary
+        assert isinstance(cancellation_error.__cause__, _EvidenceFailure)
+        assert verify_bundle(root).terminal_state != "sealed"
+        if summary_case == "summary-cancel-abandon-failure":
+            assert "bundle remains unsealed" in " ".join(getattr(cancellation_error, "__notes__", ()))
+            assert "synthetic abandon failure" not in " ".join(
+                getattr(cancellation_error, "__notes__", ())
+            )
+        return
+    if summary_case == "summary-cancel-append-failure":
+        assert cancellation_error is not None
+        assert len(runner._dispatch_account.completed_auxiliary) == 1
+        assert stream.decisions == 0
+        assert runner._provider_cost_micros == 0
+        assert isinstance(cancellation_error.__cause__, _EvidenceFailure)
+        assert verify_bundle(root).terminal_state != "sealed"
+        return
+    assert verify_bundle(root).valid
+    if summary_case in ("pass-error", "summary-error", "summary-cancel", "summary-cancel-empty"):
+        import json
+
+        events = [json.loads(line) for line in (root / "events.jsonl").read_text().splitlines()]
+        auxiliary = [e["payload"] for e in events if e["kind"] == "auxiliary_usage_cost"]
+        assert stream.decisions == 0 and len(auxiliary) == 1
+        expected_input, expected_cost = (
+            (0, 0) if summary_case == "summary-cancel-empty" else (100, 100_000)
+        )
+        assert (
+            auxiliary[0]["input_tokens"] == expected_input
+            and auxiliary[0]["cost_microusd"] == expected_cost
+        )
+        assert auxiliary[0]["cost_known"] is (summary_case == "pass-error")
+        return
+    assert outcome is not None
+    if summary_case in ("known-zero", "uncapped", "normal-priced"):
+        assert stream.decisions >= 1
+        if summary_case == "normal-priced":
+            import json
+
+            events = [json.loads(line) for line in (root / "events.jsonl").read_text().splitlines()]
+            assert not any(e["kind"] == "auxiliary_usage_cost" for e in events)
+            assert [r.cost_microusd for r in payloads(root, UsageCostPayload)] == [300_000]
+            assert payloads(root, ReconciliationPayload)[0].provider_cost_microusd == 300_000
+        if summary_case == "uncapped":
+            import json
+
+            events = [json.loads(line) for line in (root / "events.jsonl").read_text().splitlines()]
+            assert any(
+                e["kind"] == "cost_coverage" and e["payload"]["cost_known"] is False for e in events
+            )
+        return
+    assert stream.summaries == 1
+    assert stream.decisions == 0
+    import json
+
+    events = [json.loads(line) for line in (root / "events.jsonl").read_text().splitlines()]
+    auxiliary = [e["payload"] for e in events if e["kind"] == "auxiliary_usage_cost"]
+    assert len(auxiliary) == 1 and auxiliary[0]["input_tokens"] == 100
+    assert auxiliary[0]["cost_known"] is (summary_case != "unknown")
+    expected_cost = {"unknown": 0, "at-cap": 1_000_000, "cycle-cap": 100_000}[summary_case]
+    assert auxiliary[0]["cost_microusd"] == expected_cost
+    assert not payloads(root, UsageCostPayload)
+    assert not payloads(root, ModelRequestPayload)
+    assert not payloads(root, ModelResponsePayload)
+    assert payloads(root, ReconciliationPayload)[0].provider_cost_microusd == expected_cost
+    assert sum(e["kind"] == "context_compaction" for e in events) == 1
+    assert (
+        outcome.truncation_reason
+        == {"unknown": "cost-unreported", "at-cap": "budget-cap", "cycle-cap": "cost-cycle-cap"}[
+            summary_case
+        ]
+    )
+
+
+def test_failed_auxiliary_append_keeps_paid_snapshot(
+    tmp_path: Path, episode_id: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.evaluation.runner.dispatch_account import (
+        DispatchAccount,
+        SummaryCharge,
+    )
+
+    adapter = FakeAdapter(tmp_path, episode_id)
+    runner = EpisodeRunner(
+        build_spec(episode_id),
+        build_config(tmp_path),
+        selector=selector(tmp_path),
+        model=ScriptedModel(),
+        launch=lambda _: adapter,
+        rescue=_rescue_ok,
+    )
+    account = DispatchAccount(max_cost_micros=None, max_cycle_cost_micros=None)
+    account.record_summary(
+        SummaryCharge("dispatch", ModelUsage(input_tokens=100), 42, False, "unknown")
+    )
+
+    def fail_append(*args: Any, **kwargs: Any) -> None:
+        raise OSError("synthetic evidence write failure")
+
+    monkeypatch.setattr(runner, "_append", fail_append)
+    with pytest.raises(OSError, match="synthetic evidence"):
+        runner._record_blocked_auxiliary(account)
+    assert len(account.completed_auxiliary) == 1
+    assert runner._provider_cost_micros == 0
+
+
+@pytest.mark.asyncio
+async def test_unknown_cost_rejection_never_dispatches_retry_under_monetary_cap(
+    tmp_path: Path, episode_id: str
+) -> None:
+    class UnknownRejectStream(DirectProviderStream):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def _events(self, request: Any) -> Any:
+            self.calls += 1
+            yield StreamTextDelta(delta="not a valid decision")
+            usage = Usage(
+                input_tokens=100, output_tokens=10, provider="unpriceable", model_id="unknown"
+            )
+            yield StreamUsageEvent(usage=usage)
+            yield StreamEndEvent(stop_reason="stop", usage=usage)
+
+    stream = UnknownRejectStream()
+    adapter = FakeAdapter(tmp_path, episode_id)
+    client = ProviderModelClient(
+        stream,
+        route=ROUTE,
+        model_spec=ModelSpec(provider="unpriceable", model_id="unknown"),
+        artifact_root=tmp_path / "artifacts",
+        prompt_cache_key="probe",
+    )
+    runner = EpisodeRunner(
+        build_spec(episode_id, caps={"provider_usd_micros": 1_000_000}),
+        build_config(tmp_path, max_steps=4),
+        selector=selector(tmp_path),
+        model=client,
+        launch=lambda _: adapter,
+        rescue=_rescue_ok,
+    )
+    outcome = await runner.run()
+    assert stream.calls == 1
+    assert outcome.bundle_root is not None and verify_bundle(outcome.bundle_root).valid
+    assert len(payloads(outcome.bundle_root, UsageCostPayload)) == 1
+
+
+@pytest.mark.asyncio
 async def test_budget_cap_truncates_not_cancels(tmp_path: Path, episode_id: str) -> None:
     """A reached provider-cost cap is enforced as a scored truncation, where
     before it was only reported as an overrun after the fact."""
@@ -2378,14 +2791,16 @@ async def test_one_rejected_decision_is_re_prompted_and_the_corrected_batch_proc
     # corrected attempt's triple.
     kinds = _kinds(root)
     first_request = kinds.index("model_request")
-    assert kinds[first_request : first_request + 7] == [
+    assert kinds[first_request : first_request + 9] == [
         "model_request",
         "model_response",
         "usage_cost",
+        "cost_coverage",
         "error",
         "model_request",
         "model_response",
         "usage_cost",
+        "cost_coverage",
     ]
 
 

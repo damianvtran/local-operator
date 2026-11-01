@@ -905,6 +905,7 @@ async def test_a_provider_receipt_still_wins_over_the_table() -> None:
     decision = await _client(stream, model_spec=spec).decide(current, _turns(current))
 
     assert decision.cost_micros == 700
+    assert decision.cost_known is True
 
 
 @pytest.mark.asyncio
@@ -920,6 +921,7 @@ async def test_a_reported_zero_is_a_known_zero_and_is_not_re_estimated() -> None
     decision = await _client(stream, model_spec=spec).decide(current, _turns(current))
 
     assert decision.cost_micros == 0
+    assert decision.cost_known is True
 
 
 @pytest.mark.asyncio
@@ -982,6 +984,7 @@ async def test_unknown_model_degrades_to_zero_rather_than_a_guess() -> None:
     decision = await _client(stream, model_spec=spec).decide(current, _turns(current))
 
     assert decision.cost_micros == 0
+    assert decision.cost_known is False
 
 
 @pytest.mark.asyncio
@@ -1029,6 +1032,118 @@ async def test_client_raises_on_an_unparseable_reply() -> None:
     assert rejected.provider_request_id == "chatcmpl-REJ"
     assert rejected.route == ROUTE
     assert rejected.diagnostic.startswith("Your previous reply was rejected:")
+
+
+@pytest.mark.asyncio
+async def test_rejected_unpriceable_reply_keeps_unknown_cost() -> None:
+    current = observation()
+    stream = ScriptedStream("not a decision", usage=Usage(input_tokens=11, output_tokens=7))
+    spec = ModelSpec(provider="unpriceable", model_id="no-such-model")
+    with pytest.raises(DecisionRejected) as info:
+        await _client(stream, model_spec=spec).decide(current, _turns(current))
+    assert info.value.cost_micros == 0
+    assert info.value.cost_known is False
+
+
+@pytest.mark.asyncio
+async def test_concurrent_dispatch_bindings_cannot_charge_another_episode() -> None:
+    import asyncio
+
+    from local_operator.evaluation.runner.dispatch_account import DispatchAccount
+
+    stream = ScriptedStream("", usage=Usage(usd_cost=0.001))
+    client = _client(stream)
+    account_a = DispatchAccount(max_cost_micros=None, max_cycle_cost_micros=None)
+    account_b = DispatchAccount(max_cost_micros=None, max_cycle_cost_micros=None)
+    ready = asyncio.Event()
+    done = asyncio.Event()
+
+    async def first() -> None:
+        with client.bind_dispatch_account(account_a):
+            await ready.wait()
+            await client._stream(client._summary_request("synthetic first"))
+            done.set()
+
+    async def second() -> None:
+        with client.bind_dispatch_account(account_b):
+            ready.set()
+            await done.wait()
+            await client._stream(client._summary_request("synthetic second"))
+
+    await asyncio.gather(first(), second())
+    assert account_a.cost_micros == 1000
+    assert account_b.cost_micros == 1000
+
+
+@pytest.mark.asyncio
+async def test_cancelled_binding_releases_episode_account() -> None:
+    import asyncio
+
+    from local_operator.evaluation.runner.dispatch_account import DispatchAccount
+
+    client = _client(ScriptedStream("", usage=Usage(usd_cost=0.001)))
+    account = DispatchAccount(max_cost_micros=None, max_cycle_cost_micros=None)
+    with pytest.raises(asyncio.CancelledError):
+        with client.bind_dispatch_account(account):
+            raise asyncio.CancelledError()
+    await client._stream(client._summary_request("synthetic after cancellation"))
+    assert account.cost_micros == 0
+
+
+@pytest.mark.asyncio
+async def test_interrupted_stream_cannot_accept_partial_valid_reply() -> None:
+    from local_operator.evaluation.runner.provider_client import (
+        ProviderStreamAbortedError,
+    )
+
+    current = observation()
+
+    class InterruptedStream(ScriptedStream):
+        async def _events(self) -> AsyncIterator[Any]:
+            yield StreamTextDelta(delta=finish_payload(current))
+            yield StreamUsageEvent(usage=Usage(input_tokens=123, usd_cost=0.001))
+            raise ConnectionError("synthetic interruption")
+
+    with pytest.raises(ProviderStreamAbortedError) as info:
+        await _client(InterruptedStream("unused")).decide(current, _turns(current))
+    assert info.value.usage.input_tokens == 123
+    assert info.value.cost_known is False
+
+
+@pytest.mark.asyncio
+async def test_exception_after_terminal_retracts_known_dispatch_receipt() -> None:
+    from local_operator.evaluation.runner.dispatch_account import DispatchAccount
+
+    class InterruptedStream(ScriptedStream):
+        async def _events(self) -> AsyncIterator[Any]:
+            yield StreamEndEvent(stop_reason="stop", usage=Usage(usd_cost=0.001))
+            raise ConnectionError("synthetic late interruption")
+
+    client = _client(InterruptedStream("unused"))
+    account = DispatchAccount(max_cost_micros=None, max_cycle_cost_micros=None)
+    with client.bind_dispatch_account(account):
+        outcome = await client._stream(client._summary_request("synthetic"))
+    assert outcome.interrupted and outcome.cost_known is False
+    assert account.cost_micros == 1000 and account.cost_known is False
+
+
+@pytest.mark.asyncio
+async def test_interrupted_stream_retains_partial_usage_as_incomplete() -> None:
+    from local_operator.evaluation.runner.provider_client import (
+        ProviderStreamAbortedError,
+    )
+
+    class InterruptedStream(ScriptedStream):
+        async def _events(self) -> AsyncIterator[Any]:
+            yield StreamUsageEvent(usage=Usage(input_tokens=123, output_tokens=7, usd_cost=0.001))
+            raise ConnectionError("synthetic interruption")
+
+    current = observation()
+    with pytest.raises(ProviderStreamAbortedError) as info:
+        await _client(InterruptedStream("unused")).decide(current, _turns(current))
+    assert info.value.usage.input_tokens == 123
+    assert info.value.cost_micros == 1000
+    assert info.value.cost_known is False
 
 
 # ---------------------------------------------------------------------------
@@ -2034,6 +2149,52 @@ async def test_provider_client_history_is_append_only_between_rebuilds(tmp_path:
     ]
     assert shapes[10] == (10, 11, 21)
     assert shapes[11] == (11, 3, 23)
+
+
+@pytest.mark.asyncio
+async def test_real_compaction_pass_does_not_swallow_interrupted_summary(tmp_path: Path) -> None:
+    from local_operator.compaction.api import SUMMARIZATION_SYSTEM_PROMPT
+    from local_operator.compaction.thresholds import CompactionSettings
+    from local_operator.evaluation.runner.provider_client import AuxiliaryStreamAborted
+
+    class InterruptedSummary(RecordingStream):
+        def __call__(self, request: Any, signal: Any) -> AsyncIterator[Any]:
+            if request.system_blocks and request.system_blocks[0] == SUMMARIZATION_SYSTEM_PROMPT:
+                self.summary_requests.append(request)
+                return self._broken()
+            return super().__call__(request, signal)
+
+        async def _broken(self) -> AsyncIterator[Any]:
+            yield StreamUsageEvent(usage=Usage(input_tokens=1000, usd_cost=0.001))
+            raise ConnectionError("synthetic summary interruption")
+
+    stream = InterruptedSummary(_wait_reply)
+    client = ProviderModelClient(
+        stream,
+        route=ROUTE,
+        model_spec=ModelSpec(provider="provider", model_id="model", context_window=20_000),
+        artifact_root=tmp_path,
+        compaction=CompactionSettings(
+            strategy="context-full", keep_recent_tokens=1200, threshold_percent=0.4
+        ),
+        keep_recent_frames=3,
+        rebuild_every_frames=8,
+    )
+    history: list[EpisodeTurn] = []
+    interrupted = False
+    for sequence in range(6):
+        current = _framed_observation(tmp_path, sequence, text=f"screen {sequence} " + "x " * 60)
+        history.append(EpisodeTurn(observation=current))
+        previous_decisions = len(stream.requests)
+        try:
+            decision = await client.decide(current, tuple(history))
+        except AuxiliaryStreamAborted:
+            assert len(stream.summary_requests) == 1
+            assert len(stream.requests) == previous_decisions
+            interrupted = True
+            break
+        history[-1] = history[-1].model_copy(update={"batch": decision.action_batch})
+    assert interrupted, "the real compaction pass never attempted a summary"
 
 
 @pytest.mark.asyncio
