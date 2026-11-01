@@ -2014,7 +2014,18 @@ BUDGET_BILLED_TOKENS = 34_935
 # check that nothing child-only moved. main-now's own overshoot (30,823 against
 # its committed 30,669) is main's drift, stated in the top arm's entry.
 # Ceiling = measured head + the 55-token band (30,909 + 55).
-BUDGET_CHILD_BILLED_TOKENS = 30_964
+# RAISED 30,964 -> 30,976: an explicit baseline increase, NOT compression.
+# Measured on origin/main 0174798aad36 with clean HOME/config and this script:
+#   top    97,086 chars = ~34,923 billed / unchanged budget 34,935 (12 spare)
+#   child  86,112 chars = ~30,976 billed / new budget 30,976 (0 spare)
+# Main #3241's reply-intent fields add 250 effective published-schema chars
+# (306 raw minus 56 titles already stripped), consuming the prior 78-token
+# child headroom and exceeding its ceiling by 12. Required names, defaults and
+# authority descriptions remain intact. Publisher 8e1d6d7 adds ZERO context
+# versus its base ad9afc9d; this rebaseline is separate from that feature.
+# The long-term <=30,000 billed-token target remains unmet; any further child
+# growth must fail rather than silently spending newly invented headroom.
+BUDGET_CHILD_BILLED_TOKENS = 30_976
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:
