@@ -26,18 +26,25 @@ from local_operator.procstate import ProcessSample
 from tests.unit.scripts.test_run_bounded import memory_wrapper  # noqa: F401
 
 
-def _as_typed_census(view):
+def _as_typed_census(view, raw):
     """An EXPLICITLY optimistic census for a synthetic world.
 
     Optimism belongs in fixtures, never in the product: production readers state
     their own coverage, and `_members` fails closed when one does not. A fake's
     world is complete by construction, so it says so here, once, where it can be
     seen -- rather than the module assuming it on the fake's behalf.
+
+    ``raw`` IS REQUIRED and must supply the fake's RAW NAMESPACE (the numbers its
+    process table holds), never the filtered membership. Reflection was tried and
+    failed: a plain closure over `kernel.census` has no `__self__`, so it silently
+    fell back to the filtered list and reported a live leader as unseen -- the
+    exact defect production was cured of. A parameter that must be supplied
+    cannot guess (review round 11, Q6).
     """
 
     def wrapped(pgid, deadline):
         pids = view(pgid, deadline)
-        return owned.CensusResult(tuple(pids), True, pgid in pids)
+        return owned.CensusResult(tuple(pids), True, pgid in set(raw()))
 
     return wrapped
 
@@ -100,7 +107,7 @@ class Kernel:
         return owned.OwnedGroup.capture(
             leader or self.leader,
             parent_pid=self.parent,
-            census=_as_typed_census(self.census),
+            census=_as_typed_census(self.census, lambda: self.rows),
             samples=self.samples,
             identity=self.identity,
             scheme=lambda: SCHEME,
@@ -189,7 +196,7 @@ def test_a_zombie_leader_omitted_from_the_census_still_signals():
     def without_leader(pgid, deadline):
         return [pid for pid in original(pgid, deadline) if pid != kernel.leader]
 
-    cap.census = without_leader
+    cap.census = _as_typed_census(without_leader, lambda: kernel.rows)
     verdict = cap.signal(signal.SIGKILL, deadline=kernel.clock() + 5.0)
     assert verdict.status == "SIGNALED", verdict.reason
     assert verdict.anchor == "leader-reservation"
@@ -207,7 +214,7 @@ def test_the_same_omitted_corpse_with_a_foreign_birth_still_refuses():
     def without_leader(pgid, deadline):
         return [pid for pid in original(pgid, deadline) if pid != kernel.leader]
 
-    cap.census = without_leader
+    cap.census = _as_typed_census(without_leader, lambda: kernel.rows)
     verdict = cap.signal(signal.SIGKILL, deadline=kernel.clock() + 5.0)
     assert verdict.status == "REFUSED", verdict.reason
     assert verdict.refusal_class == "pin_lost", verdict.reason
@@ -227,7 +234,7 @@ def test_a_pid_in_only_one_of_the_two_censuses_is_included_not_refused():
         found = original(pgid, deadline)
         return found if calls["n"] % 2 else [pid for pid in found if pid != 20]
 
-    cap.census = flickering
+    cap.census = _as_typed_census(flickering, lambda: kernel.rows)
     verdict = cap.signal(signal.SIGTERM, deadline=kernel.clock() + 5.0)
     assert verdict.status in {"SIGNALED", "OBSERVED_EMPTY"}, verdict.reason
     if verdict.status == "SIGNALED":
@@ -363,7 +370,7 @@ def test_c3_removing_the_residency_re_check_lets_a_stranger_die():
     cap2 = mutant.OwnedGroup.capture(
         kernel2.leader,
         parent_pid=kernel2.parent,
-        census=_as_typed_census(kernel2.census),
+        census=_as_typed_census(kernel2.census, lambda: kernel2.rows),
         samples=kernel2.samples,
         identity=kernel2.identity,
         scheme=lambda: SCHEME,

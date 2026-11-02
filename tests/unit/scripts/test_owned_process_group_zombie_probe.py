@@ -94,7 +94,11 @@ def test_a_zombie_leader_is_visible_to_the_group_census_on_this_platform():
             "platform": sys.platform,
             "zombie_sample": sample.zombie,
             "zombie_in_group_census": visible,
-            "census": census,
+            "census": {
+                "pids": list(census.pids),
+                "complete": census.complete,
+                "leader_seen": census.leader_seen,
+            },
             "reservation_claimable": verdict.refusal_class != "pin_lost",
             "anchor": verdict.anchor,
             "reason": verdict.reason,

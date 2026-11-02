@@ -898,9 +898,15 @@ class OwnedGroup:
                     survey = self.census(self.pgid, deadline)
                 except Exception:  # noqa: BLE001 - an unreadable survey is not absence
                     raise Unknown("leader unseen and the namespace could not be surveyed") from None
-                if not (getattr(survey, "complete", False) is True) or getattr(
-                    survey, "leader_seen", True
-                ):
+                if survey is None:
+                    # A reader that states nothing states no coverage (round 9): the
+                    # reason names that, so callers can tell it from a partial read.
+                    raise Unknown("leader unseen and the census reader supplied no coverage claim")
+                if getattr(survey, "complete", False) is not True:
+                    raise Unknown(
+                        "census incomplete: leader unseen and no complete survey omits it"
+                    )
+                if getattr(survey, "leader_seen", True):
                     raise Unknown("leader unseen but no complete survey omits it")
                 state = "gone"
             if state == "gone":
