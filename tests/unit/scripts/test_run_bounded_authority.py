@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import ast
 import io
+import os
 import signal
 import subprocess
 from pathlib import Path
@@ -24,7 +25,6 @@ from tests.unit.scripts.test_run_bounded import memory_wrapper  # noqa: F401
 @pytest.mark.parametrize(
     "mode,expected",
     [
-        ("reuse-finally", 126),
         ("finally-reuse", 124),
         ("grace-reuse", 124),
         ("forward-unknown", 143),
@@ -103,7 +103,11 @@ def test_each_wrapper_path_reauthorizes_without_unbounded_wait(
     def capture(*args, **kwargs):
         cap = real_capture(
             10,
-            parent_pid=1,
+            # THE LEADER'S PARENT IS THIS PROCESS. With `parent_pid=1` capture
+            # samples a parent row that does not exist, refuses "leader/parent birth
+            # unavailable", and every path below is pre-empted at admission -- which
+            # is why all five once reported 126 instead of their terminal code.
+            parent_pid=os.getpid(),
             census=fake.census,
             samples=fake.samples,
             identity=fake.identity,
@@ -280,3 +284,53 @@ def test_no_timeout_refusal_exits_without_unknown_signal_or_unbounded_wait(
     )
     assert wrapper.run(["synthetic"], timeout=None, grace=0.05, stream=io.StringIO()) == 126
     assert receipts and all(handler is None for handler in handlers.values())
+
+
+def _reuse_world(monkeypatch):
+    """A captured, admissible run whose leader's number is reused afterwards."""
+    from test_owned_process_group import Fake
+
+    monkeypatch.setattr(owned.procstate, "birth_scheme", lambda: "fixture")
+    fake = Fake()
+    cap = owned.OwnedGroup.capture(
+        10,
+        parent_pid=os.getpid(),
+        census=fake.census,
+        samples=fake.samples,
+        identity=fake.identity,
+        scheme=lambda: "fixture",
+        clock=fake.clock,
+        signal_group=lambda *a: fake.calls.append(a),
+        deadline=5,
+    )
+    assert cap.last.status == "VERIFIED", cap.last.reason
+    return fake, cap
+
+
+def test_a_detectable_reuse_refuses_with_pin_lost(monkeypatch):
+    """ARM 1 -- the reuse the design CAN see: a readable foreign birth.
+
+    The leader's number now answers with a DIFFERENT birth token, at a resolution
+    the mechanism actually has. That is positive proof the reservation was given
+    up, so the answer is `pin_lost` and no syscall.
+    """
+    fake, cap = _reuse_world(monkeypatch)
+    fake.rows[10] = (1, 10, 10, "SOMEONE-ELSE", True)
+    verdict = cap.signal(signal.SIGKILL, deadline=fake.clock() + 5.0)
+    assert verdict.status == "REFUSED", verdict.reason
+    assert verdict.refusal_class == "pin_lost", verdict.reason
+    assert fake.calls == []
+
+
+def test_a_same_second_reuse_completes_and_the_limit_is_named(monkeypatch):
+    """ARM 2 -- the reuse we deliberately do NOT claim to see.
+
+    A reuse within one birth-resolution tick is not detectable; this arm pins that
+    limit, it does not endorse it. The authority is owner-alive plus exclusive reap
+    at second resolution (C2's documented UNSUPPORTED boundary), so the run keeps
+    its own terminal state rather than manufacturing a refusal it cannot justify.
+    """
+    fake, cap = _reuse_world(monkeypatch)
+    # Same birth token as the receipt: indistinguishable from our own corpse.
+    verdict = cap.refresh(deadline=fake.clock() + 5.0)
+    assert verdict.status in {"VERIFIED", "OBSERVED_EMPTY"}, verdict.reason
