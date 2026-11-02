@@ -129,6 +129,15 @@ const selectors = new Set(
 	[...css.matchAll(SELECTOR)].map((match) => match[1].replace(/\\(.)/g, "$1")),
 );
 
+// The inert icon action must override the base icon ink, not merely emit a
+// competing normal declaration. Build the selector from parts so this check
+// cannot itself seed Tailwind's source scanner and manufacture a false pass.
+const inertInk = ["!", "text", "ink", "disabled"].join("-").replace("!-", "!");
+const inertSelector = "." + inertInk.replace("!", "\\!");
+const inertRule = css.slice(css.indexOf(inertSelector)).split("}", 1)[0];
+if (!selectors.has(inertInk) || !/color:[^;}]+!important/.test(inertRule))
+	fail("inert icon ink must have an emitted important color declaration");
+
 // ---------------------------------------------------------------------------
 // The classes the sources name
 // ---------------------------------------------------------------------------

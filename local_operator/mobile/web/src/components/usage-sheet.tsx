@@ -350,7 +350,10 @@ export function UsageSheet({ open, onClose }: { open: boolean; onClose: () => vo
 
 	const action = unsupported ? null : <Button variant="icon" aria-label={t("relay.shell.usage.refresh")}
 		aria-disabled={inert || undefined} aria-busy={refreshing || undefined}
-		className={inert ? "text-ink-disabled" : "text-ink-muted"}
+		// The icon variant already supplies muted ink. Override its cascade
+		// explicitly while inert; adding a normal disabled token loses to the
+		// variant's later CSS rule (D8/Q5). Same important idiom as its !px-0.
+		className={inert ? "!text-ink-disabled" : undefined}
 		onClick={() => { if (inert) return; if (error && data === null) load(); else refresh(true); }}>
 		{refreshing ? <Spinner className="size-4" /> : <ChromeIcon name="refresh" />}
 	</Button>;

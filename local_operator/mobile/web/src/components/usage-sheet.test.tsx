@@ -51,6 +51,7 @@ it("paints the cached GET, then refreshes unforced on open", async () => {
 	// inert via aria-disabled, never native `disabled`, which would drop focus.
 	const button = screen.getByRole("button", { name: "Refresh usage" });
 	expect(button.getAttribute("aria-disabled")).toBe("true");
+	expect(button.classList.contains("!text-ink-disabled")).toBe(true);
 	expect(button.hasAttribute("disabled")).toBe(false);
 	fireEvent.click(button);
 	expect(refreshUsage).toHaveBeenCalledTimes(1);
@@ -210,6 +211,7 @@ it("a throttled forced refresh keeps focus, announces once and falls back to Upd
 	// U4: a cooldown, not a usage limit.
 	expect(await screen.findByText("Just refreshed — you can refresh again in 3 seconds.", { selector: "[aria-hidden] , [aria-hidden] *" })).toBeTruthy();
 	expect(button.getAttribute("aria-disabled")).toBe("true");
+	expect(button.classList.contains("!text-ink-disabled")).toBe(true);
 	// U1: focus stays on the sheet's main action.
 	expect(document.activeElement).toBe(button);
 	// U3: the spoken sentence is fixed at entry while the visible one ticks.
@@ -220,6 +222,7 @@ it("a throttled forced refresh keeps focus, announces once and falls back to Upd
 	expect(spoken()).toBe("Just refreshed — you can refresh again in 3 seconds.");
 	await act(async () => { vi.advanceTimersByTime(2500); });
 	expect(button.hasAttribute("aria-disabled")).toBe(false);
+	expect(button.classList.contains("!text-ink-disabled")).toBe(false);
 	expect(document.activeElement).toBe(button);
 	// U7: after the cooldown the line shows freshness again, never blank, and
 	// says once that refreshing is available.
