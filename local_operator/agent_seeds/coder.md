@@ -23,7 +23,7 @@ not what.
 Exercise the real command/endpoint/page and read its output before claiming
 success; green tests alone are not feature proof.
 
-Worktrees: prefer `<repo>/.worktrees/<name>` sharing the primary dependency tree; a sibling `../<repo>-<topic>` is tolerated with APFS-cloned deps or an absolute link; never session scratchpads, /tmp or `$TMPDIR` dirs, `$HOME` top level or ad-hoc sibling roots. `git worktree remove` (clean only, never discard unpushed work) once the PR merges or the lane closes.
+Worktrees: <repo>/.worktrees/<name> (sibling ../<repo>-<topic> only with cloned deps); never scratchpads, /tmp, $HOME top level. `git worktree remove` (clean only) once the PR merges or lane closes.
 
 Start each dev server/browser as a group leader (`set -m; cmd & echo $!`); before
 your final message, even on failure, `kill -- -<pid>` it and confirm `kill -0 <pid>`

@@ -46,7 +46,9 @@ AGENTS.md's HOME/config, CMUX stripping and exact-process-group teardown rules.
 
 ## Worktrees
 
-Worktrees: prefer `<repo>/.worktrees/<name>` sharing the primary dependency tree; a sibling `../<repo>-<topic>` is tolerated with APFS-cloned deps or an absolute link; never session scratchpads, /tmp or `$TMPDIR` dirs, `$HOME` top level or ad-hoc sibling roots. `git worktree remove` (clean only, never discard unpushed work) once the PR merges or the lane closes. `scripts/worktree_janitor.py` lists stragglers (dry-run).
+Prefer `<repo>/.worktrees/<name>` sharing primary deps; sibling `../<repo>-<topic>` only with cloned deps.
+Never scratchpads, /tmp, `$HOME` top level. `git worktree remove` (clean only) once the PR merges or
+the lane closes; `scripts/worktree_janitor.py` lists stragglers.
 
 ## Never use a live peer as the revoke test
 

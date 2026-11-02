@@ -30,10 +30,11 @@ by terminating its process GROUP, reaped by exact pid — no orphans.
 Start each dev server/browser as a group leader (`set -m; cmd & echo $!`); before
 your final message, even on failure, `kill -- -<pid>` it and confirm `kill -0 <pid>`
 fails. Never pkill or touch one you did not start.
-Never grow a fresh dependency install for a rig: share the primary checkout's
-dependency tree (in-repo symlink; never an npm/Yarn re-install or `cp -R` of
-`node_modules`).
-Worktrees: prefer `<repo>/.worktrees/<name>` sharing the primary dependency tree; a sibling `../<repo>-<topic>` is tolerated with APFS-cloned deps or an absolute link; never session scratchpads, /tmp or `$TMPDIR` dirs, `$HOME` top level or ad-hoc sibling roots. `git worktree remove` (clean only, never discard unpushed work) once the PR merges or the lane closes.
+Never grow a fresh dependency install for a rig: use `<repo>/.worktrees/<name>` (sibling
+`../<repo>-<topic>` only with cloned deps) sharing the primary dependency tree (in-repo
+symlink; APFS `cp -Rc` for siblings; never an npm/Yarn re-install or `cp -R` of
+`node_modules`); never scratchpads, /tmp, `$HOME` top level. `git worktree remove`
+(clean only) once the PR merges or lane closes.
 
 Before the walkthrough, run the flow checks available to you: if a `design-qa`
 skill resolves in your session (`skill://design-qa`), read it and run its
