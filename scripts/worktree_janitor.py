@@ -51,10 +51,9 @@ import argparse
 import json
 import os
 import subprocess
-import time
 import sys
+import time
 from pathlib import Path
-
 
 DEFAULT_MIN_AGE_HOURS = 24.0
 
@@ -166,7 +165,9 @@ def main(argv: list[str] | None = None) -> int:
         default=DEFAULT_MIN_AGE_HOURS,
         help="ancestry-only removals need HEAD unchanged this long (default %(default)s)",
     )
-    parser.add_argument("--apply", action="store_true", help="run `git worktree remove` on REMOVE rows")
+    parser.add_argument(
+        "--apply", action="store_true", help="run `git worktree remove` on REMOVE rows"
+    )
     args = parser.parse_args(argv)
     repo = str(Path(args.repo).expanduser().resolve())
     trees = _worktrees(repo)
