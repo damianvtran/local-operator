@@ -20,6 +20,7 @@ from local_operator.harness.types import (
     AgentEndEvent,
     AgentTool,
     StreamEndEvent,
+    StreamEvent,
     StreamTextDelta,
     StreamToolCallDelta,
     TextContent,
@@ -46,7 +47,7 @@ def batch(*calls):
     return [*calls, StreamEndEvent(stop_reason="toolUse")]
 
 
-def final(text="QA_FINAL_SENTINEL"):
+def final(text="QA_FINAL_SENTINEL") -> list[StreamEvent]:
     return [StreamTextDelta(delta=text), StreamEndEvent(stop_reason="stop")]
 
 
@@ -201,7 +202,8 @@ def emit_proof(label, report):
     if os.environ.get("CI", "").strip().lower() not in {"1", "true"}:
         return
     # Hash node identity instead of interpolating arbitrary test ids into paths.
-    node = os.environ.get("PYTEST_CURRENT_TEST", label).split(" (", 1)[0]
+    current_test = os.environ.get("PYTEST_CURRENT_TEST") or label
+    node = current_test.split(" (", 1)[0]
     key = hashlib.sha256((node + "|" + label).encode()).hexdigest()[:24]
     serial = _PROOF_SERIAL.get(key, 0)
     _PROOF_SERIAL[key] = serial + 1
@@ -594,8 +596,7 @@ async def run_case(case, tmp_path, monkeypatch):
             ),
             flush=True,
         )
-        if nested:
-            roots = require_worker_identity(events)
+        roots = require_worker_identity(events) if nested else []
         assert ends, "no actual owning end emitted"
         assert side_count == expected_effects or case == "cancel-and-fresh"
         assert len(report["effects"]) == side_count, "physical effect records disagree with counter"
@@ -650,6 +651,7 @@ async def run_case(case, tmp_path, monkeypatch):
                 if isinstance(event, ToolExecutionEndEvent) and event.tool_name == "no_reply"
             ]
             assert len(quiet_results) == 1 and not quiet_results[0].is_error
+            assert quiet_results[0].result.details is not None
             assert quiet_results[0].result.details.get("quiet_request_pending") is True
             assert any(
                 root.is_error

@@ -9,7 +9,7 @@ import asyncio
 import pytest
 
 from local_operator.compaction.api import CompactionSettings
-from local_operator.harness.types import AgentEndEvent, CustomMessage
+from local_operator.harness.types import AgentEndEvent, CustomMessage, StreamEvent
 from local_operator.session.runtime.serving import ServingSessionHandle
 from tests.unit.session.test_fold_forward_compaction import (
     TEXT_MODEL,
@@ -45,7 +45,7 @@ async def compaction_case(tmp_path, monkeypatch):
     home = bind_home(monkeypatch)
     timeline = []
     session = None
-    scripts = [final("QA seed reply") for _ in range(3)] + [
+    scripts: list[list[StreamEvent]] = [final("QA seed reply") for _ in range(3)] + [
         batch(call("no_reply")),
         final("QA next owner answer"),
     ]
@@ -244,7 +244,7 @@ async def job_boundary(when, tmp_path, monkeypatch):
     injected = False
     message = CustomMessage(
         custom_type="job_result",
-        attribution="job",
+        attribution="user",
         id="qa-owned-job-boundary",
         details={"job_id": "qa-finite-job", "text": "QA settled job"},
     )

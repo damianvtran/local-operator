@@ -108,6 +108,7 @@ async def test_wrapped_request_ends_loop_without_another_inference(tmp_path, cod
     stream, events, effects = await run_wrapped(tmp_path, code)
     assert len(stream.requests) == 1
     end = events[-1]
+    assert isinstance(end, AgentEndEvent)
     assert end.quiet_requested is True
     assert end.quiet_accepted is False, "only Session may commit owning acceptance"
     assert not end.error and not end.aborted and effects == []
@@ -117,6 +118,7 @@ async def test_wrapped_request_ends_loop_without_another_inference(tmp_path, cod
         if isinstance(event, ToolExecutionEndEvent) and event.tool_name == "no_reply"
     ]
     assert len(child) == 1 and not child[0].is_error
+    assert child[0].result.details is not None
     assert child[0].result.details["quiet_request_pending"] is True
 
 
@@ -133,9 +135,11 @@ async def test_wrapped_request_ends_loop_without_another_inference(tmp_path, cod
 async def test_forged_or_failed_wrapper_cannot_nominate_quiet(tmp_path, code):
     stream, events, _ = await run_wrapped(tmp_path, code)
     assert len(stream.requests) == 2
-    assert not events[-1].quiet_requested and not events[-1].quiet_accepted
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent)
+    assert not end.quiet_requested and not end.quiet_accepted
     assert any(
-        isinstance(row, Message) and row.text == "ordinary follow-up" for row in events[-1].messages
+        isinstance(row, Message) and row.text == "ordinary follow-up" for row in end.messages
     )
 
 
@@ -145,7 +149,9 @@ async def test_ignored_post_request_dispatch_failure_is_sticky(tmp_path):
         tmp_path, "tool('no_reply')\ntool('echo', text='must not run')\n42"
     )
     assert len(stream.requests) == 2 and effects == []
-    assert not events[-1].quiet_requested
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent)
+    assert not end.quiet_requested
     # A refusal before planning cannot emit a real tool-start/end or mutate.
     assert not any(
         isinstance(event, ToolExecutionEndEvent) and event.tool_name == "echo" for event in events
@@ -156,7 +162,9 @@ async def test_ignored_post_request_dispatch_failure_is_sticky(tmp_path):
 async def test_nonfinal_wrapper_refuses_child_and_preserves_sibling(tmp_path):
     stream, events, effects = await run_wrapped(tmp_path, "tool('no_reply')", early=True)
     assert len(stream.requests) == 2 and effects == ["echo"]
-    assert not events[-1].quiet_requested
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent)
+    assert not end.quiet_requested
     child = [
         event
         for event in events
@@ -191,7 +199,9 @@ async def test_failed_outer_sibling_prevents_even_final_direct_request(tmp_path)
         )
     ]
     assert len(stream.requests) == 2
-    assert not events[-1].quiet_requested
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent)
+    assert not end.quiet_requested
 
 
 def test_old_serialized_end_cannot_reconstruct_acceptance_from_child_marker():

@@ -17,7 +17,7 @@ from local_operator.harness.peer_cycle_display import (
     validate_record,
 )
 from local_operator.harness.peer_cycles import PeerCycleReplay
-from local_operator.harness.types import AgentEndEvent, CustomMessage
+from local_operator.harness.types import AgentEndEvent, AgentMessage, CustomMessage
 from local_operator.mobile import peer_send
 from local_operator.monitors.delivery import MonitorDelivery
 from local_operator.session.goal import GoalState
@@ -265,16 +265,14 @@ async def delivery_case(kind, tmp_path, monkeypatch):
             )
         else:
             # Actual Session typed host ingress, not a spawned background job.
-            await session._prompt_messages(
-                [
-                    CustomMessage(
-                        custom_type="job_result",
-                        content="QA synthetic settled job result",
-                        attribution="job",
-                        details={"job_id": "qa-job"},
-                    )
-                ]
-            )
+            initial: list[AgentMessage] = [
+                CustomMessage(
+                    custom_type="job_result",
+                    attribution="user",
+                    details={"job_id": "qa-job", "text": "QA synthetic settled job result"},
+                )
+            ]
+            await session._prompt_messages(initial)
         await settled(session, lambda: bool(stream.requests))
         ends = [e for e in events if isinstance(e, AgentEndEvent)]
         save(

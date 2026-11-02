@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
@@ -41,7 +42,7 @@ def quiet_stream(*later):
 def peer_input():
     return CustomMessage(
         custom_type="peer_message",
-        attribution="peer",
+        attribution="user",
         details={"text": "synthetic peer acknowledgement"},
     )
 
@@ -180,7 +181,8 @@ async def test_delivered_notification_exception_never_overrides_a_person(tmp_pat
         session._run_notified = True
         assert await session._quiet_end_refusal() is None
         session._run_triggers.add("user")
-        assert "person" in (await session._quiet_end_refusal()).lower()
+        refusal = await session._quiet_end_refusal()
+        assert refusal is not None and "person" in refusal.lower()
     finally:
         await session.dispose()
 
@@ -194,7 +196,9 @@ async def test_compaction_producer_does_not_revive_a_quiet_request(tmp_path):
         )
         # No compaction API is provided: the quiet-specific producer gate must
         # return BEFORE consulting stale length/recovery-band bookkeeping.
-        session._after_compaction_pass(SimpleNamespace(), SimpleNamespace(tokens_after=12))
+        session._after_compaction_pass(
+            cast(Any, SimpleNamespace()), cast(Any, SimpleNamespace(tokens_after=12))
+        )
         assert not session._continuation_queue
         assert session._held_context_tokens == 12
     finally:
@@ -252,8 +256,8 @@ def test_final_accepted_event_fences_both_runtime_model_subscribers():
     owner = SimpleNamespace()
     event = AgentEndEvent(quiet_accepted=True)
     assert quiet_completion_accepted(event)
-    ServingSessionHandle._maybe_judge_goal(owner, event)
-    ServingSessionHandle._maybe_supplement(owner, event)
+    ServingSessionHandle._maybe_judge_goal(cast(Any, owner), event)
+    ServingSessionHandle._maybe_supplement(cast(Any, owner), event)
     assert not quiet_completion_accepted(AgentEndEvent(quiet_requested=True))
 
 
@@ -264,4 +268,4 @@ def test_error_abort_cutoff_take_precedence_over_acceptance(fields):
     from local_operator.session.session import Session
 
     event = AgentEndEvent(quiet_accepted=True, **fields)
-    assert not Session._run_ended_quiet(None, event)
+    assert not Session._run_ended_quiet(cast(Any, None), event)
