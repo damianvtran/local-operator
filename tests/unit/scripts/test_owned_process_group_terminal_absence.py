@@ -9,7 +9,6 @@ absent by our own authorised act. The send path never gains that licence: it cal
 
 from __future__ import annotations
 
-from local_operator import owned_process_group as owned
 from tests.unit.scripts.test_run_bounded_run_record import World
 
 
@@ -112,4 +111,3 @@ def test_the_r2_reproduction_a_leader_removed_without_a_signal_refuses():
     terminal = cap.refresh(deadline=world.clock() + 1.0, terminal=True)
     assert terminal.status == "REFUSED", terminal.reason
     assert "requires a recorded kill" in terminal.reason, terminal.reason
-
