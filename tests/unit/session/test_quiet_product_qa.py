@@ -113,13 +113,35 @@ def _event_proof(event):
     return out
 
 def worker_identity_code():
-    expected=hashlib.sha256(Path(eval_tool.__file__).with_name('eval_worker.py').read_bytes()).hexdigest()
+    expected=hashlib.sha256((WT/'local_operator/tools/eval_worker.py').read_bytes()).hexdigest()
     return ('import os,json,hashlib,pathlib,sys\n'
         'p=pathlib.Path(sys.modules["__main__"].__file__).resolve()\n'
-        f'assert p.is_relative_to(pathlib.Path({str(WT)!r}))\n'
+        f'assert p==pathlib.Path({str(WT/'local_operator/tools/eval_worker.py')!r})\n'
         f'assert hashlib.sha256(p.read_bytes()).hexdigest()=={expected!r}\n'
         "print('QA_WORKER_IDENTITY='+json.dumps({'pid':os.getpid(),'pgid':os.getpgrp(),"
         "'path':str(p),'sha256':hashlib.sha256(p.read_bytes()).hexdigest()}))\n")
+
+
+def tool_result_text(event):
+    return '\n'.join(getattr(part,'text','') for part in event.result.content)
+
+
+def require_worker_identity(events):
+    # Negative outcomes are meaningful only AFTER this exact protocol source
+    # ran. A path/hash assertion failure must not satisfy an expected error.
+    expected_path=WT/'local_operator/tools/eval_worker.py'
+    expected=hashlib.sha256(expected_path.read_bytes()).hexdigest()
+    roots=[event for event in events if isinstance(event,ToolExecutionEndEvent)
+           and event.tool_name=='eval']
+    assert roots,'no actual enclosing eval result'
+    for root in roots:
+        receipts=[]
+        for line in tool_result_text(root).splitlines():
+            if line.startswith('QA_WORKER_IDENTITY='):
+                receipts.append(json.loads(line.split('=',1)[1]))
+        assert any(receipt.get('sha256')==expected and receipt.get('path')==str(expected_path)
+                   for receipt in receipts),'worker source identity prefix did not succeed'
+    return roots
 
 
 def emit_proof(label,report):
@@ -244,15 +266,7 @@ async def run_case(case, tmp_path, monkeypatch):
                         execute=effect, concurrency='shared'),
               AgentTool(name='qa_error', parameters={'type':'object','properties':{}},
                         execute=fail, concurrency='shared'), eval_tool.build_eval_tool()]
-    expected_worker_hash = hashlib.sha256((Path(eval_tool.__file__).resolve().with_name('eval_worker.py')).read_bytes()).hexdigest()
-    worker = (
-        'import os,json,hashlib,pathlib,sys\n'
-        'p=pathlib.Path(sys.modules["__main__"].__file__).resolve()\n'
-        f'assert p.is_relative_to(pathlib.Path({str(WT)!r}))\n'
-        f'assert hashlib.sha256(p.read_bytes()).hexdigest()=={expected_worker_hash!r}\n'
-        "print('QA_WORKER_IDENTITY='+json.dumps({'pid':os.getpid(),'pgid':os.getpgrp(),"
-        "'path':str(p),'sha256':hashlib.sha256(p.read_bytes()).hexdigest()}))\n"
-    )
+    worker = worker_identity_code()
     code = worker + "tool('no_reply')"
     if case == 'wrapped-post-tool':
         code += "; tool('qa_effect')"
@@ -320,6 +334,7 @@ async def run_case(case, tmp_path, monkeypatch):
     session.set_approval_handler(approve)
     snapshot = {}
     reopened = None
+    fresh_request_offset = None
     try:
         if case in {'user-direct','user-wrapped'}:
             await asyncio.wait_for(session.prompt('QA actual user requires words'),20)
@@ -336,6 +351,7 @@ async def run_case(case, tmp_path, monkeypatch):
             await asyncio.wait_for(asyncio.gather(*later),20)
             await settled(session)
         if case == 'cancel-and-fresh':
+            fresh_request_offset = len(provider.requests)
             await asyncio.wait_for(session.prompt('QA fresh real user after cancellation'),20)
             await settled(session)
         snapshot = await session.refresh_attention()
@@ -359,6 +375,8 @@ async def run_case(case, tmp_path, monkeypatch):
         print('QA_RESULT='+json.dumps({'case':case,'requests':len(provider.requests),
             'accepted':len(accepted),'effects':side_count,
             'end_generations':[e.generation for e in ends]}),flush=True)
+        if nested:
+            roots = require_worker_identity(events)
         assert ends, 'no actual owning end emitted'
         assert side_count == expected_effects or case=='cancel-and-fresh'
         assert len(report['effects']) == side_count, 'physical effect records disagree with counter'
@@ -374,6 +392,16 @@ async def run_case(case, tmp_path, monkeypatch):
             assert first_end < second_request, 'later request preceded old owning end'
         elif case == 'cancel-and-fresh':
             assert not accepted, 'aborted/fresh user turn inherited quiet acceptance'
+            assert len(ends)==2 and ends[0].aborted, 'old owner did not actually abort'
+            assert not ends[1].aborted and not ends[1].error
+            assert ends[0].generation != ends[1].generation, 'fresh user reused the aborted generation'
+            assert fresh_request_offset is not None and len(provider.requests)>fresh_request_offset
+            fresh_request=provider.requests[fresh_request_offset]
+            fresh_input='QA fresh real user after cancellation'
+            assert sum(fresh_input in str(getattr(row,'text','')) for row in fresh_request.messages)==1
+            assert sum(fresh_input in str(getattr(row,'text','')) for row in session.history())==1
+            assert any(getattr(row,'role',None)=='assistant' and 'QA_FRESH_AFTER_ABORT' in str(getattr(row,'text',''))
+                       for row in ends[1].messages), 'fresh user got no visible answer'
         elif expected_quiet:
             assert len(accepted)==1 and len(ends)==1
             expected_requests = 2 if case=='notify-then-quiet' else 1
@@ -381,8 +409,30 @@ async def run_case(case, tmp_path, monkeypatch):
         else:
             assert not accepted, 'refusal/error/forged request falsely accepted'
             assert len(provider.requests)>=2
+        if case == 'wrapped-exception':
+            quiet_results=[event for event in events if isinstance(event,ToolExecutionEndEvent)
+                           and event.tool_name=='no_reply']
+            assert len(quiet_results)==1 and not quiet_results[0].is_error
+            assert quiet_results[0].result.details.get('quiet_request_pending') is True
+            assert any(root.is_error and 'RuntimeError' in tool_result_text(root)
+                       and 'QA_AFTER_REQUEST_ERROR' in tool_result_text(root) for root in roots), (
+                'the intended cell exception after a provisional request was not observed')
+        if case == 'forged-marker':
+            assert all(not root.is_error for root in roots), 'forged-dictionary cell did not succeed'
+            assert not any(isinstance(event,ToolExecutionEndEvent) and event.tool_name=='no_reply'
+                           for event in events), 'forged marker unexpectedly dispatched no_reply'
+        if case == 'user-wrapped':
+            assert any(isinstance(event,ToolExecutionEndEvent) and event.tool_name=='no_reply'
+                       and event.is_error and 'A person asked this turn' in tool_result_text(event)
+                       for event in events), 'actual person refusal was not observed'
         if case == 'wrapped-post-tool':
             assert side_count==0,'post-request dispatch produced forbidden side effect'
+            assert any('later tool() calls are refused' in tool_result_text(root) for root in roots), (
+                'post-request dispatch was not refused for the intended reason')
+        if case == 'restart-attention':
+            reopened_attention=snapshot['qa_reopened_attention']
+            assert reopened_attention.get('completion_token') is None, 'quiet completion was republished'
+            assert reopened_attention.get('unseen') is False, 'quiet restart created an unseen notification'
         if case.startswith('user-') or case=='wake-required':
             results = [e for e in events if isinstance(e,ToolExecutionEndEvent)]
             assert any(e.is_error for e in results),'real Session door did not refuse'

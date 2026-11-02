@@ -23,7 +23,8 @@ from local_operator.tools import eval as ev
 from local_operator.mobile import peer_send
 from tests.unit.session.test_session import make_session
 from tests.unit.session.test_quiet_product_qa import (WT, REPORTS, call, batch, final, serialized,
-                                RecordingProvider, settled, emit_proof, worker_identity_code)
+                                RecordingProvider, settled, emit_proof, worker_identity_code,
+                                require_worker_identity, tool_result_text)
 
 
 def bind_home(monkeypatch):
@@ -136,8 +137,13 @@ async def goal_case(state,wrapped,tmp_path,monkeypatch,host='serving'):
                 if (tmp_path/'sess'/'goal.json').exists() else None,
              'coverage_note':'Real '+host+' owner/subscriber; supplements default settings, no forced enabled supplement'})
         # Rendered-frame capture belongs to separate visual evidence, not JSON proof uploads.
+        if wrapped:
+            require_worker_identity(events)
         assert ends
         if state in {'active','legacy-constructor'}:
+            assert any(getattr(event,'tool_name',None)=='no_reply' and getattr(event,'is_error',False)
+                       and 'active runtime goal still requires work' in tool_result_text(event)
+                       for event in events),'actual standing-goal refusal was not observed'
             assert not any(e.quiet_accepted for e in ends),'standing goal was silenced'
             assert len(main_requests)==2 and len(judge_requests)==1
             assert session.goal_status=='done','actual judge verdict not persisted'
@@ -280,6 +286,8 @@ async def certificate_case(wrapped,delivery_error,tmp_path,monkeypatch):
         save(name,{'deliveries':deliveries,'requests':len(stream.requests),
              'events':[serialized(e) for e in events],'records':records,'cold':cold,'raw_replay':raw,
              'seam':'Actual builtin send/Session/eval; synthetic resolution+wire only; identity redactor safe ONLY synthetic payloads'})
+        if wrapped:
+            require_worker_identity(events)
         assert len(deliveries)==1
         if delivery_error:
             assert not records and not raw,'failed exchange got finite success certificate'
