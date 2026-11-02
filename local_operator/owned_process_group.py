@@ -140,7 +140,14 @@ def _darwin_all_pids(deadline, clock):
         if written == ctypes.sizeof(buffer):
             capacity *= 2
             continue
-        pids = [pid for pid in buffer[: written // size] if pid > 0]
+        raw = list(buffer[: written // size])
+        # A FILTER THAT TURNS "I COULD NOT SEE" INTO "THERE IS NOTHING" IS FORBIDDEN.
+        # A non-positive pid in the returned rows is not padding to be skipped: it
+        # means the read is not the enumeration this census claims it is, so the
+        # whole read is unreadable rather than quietly shorter (review round 8, R3).
+        if any(pid <= 0 for pid in raw):
+            raise Unknown("malformed libproc PID rows: non-positive entry")
+        pids = raw
         if len(set(pids)) != len(pids):
             raise Unknown("malformed libproc PID rows")
         # ONE LINE, ONLY WHEN A CENSUS COMES BACK WITHOUT THE GROUP IT WAS ASKED
@@ -473,6 +480,14 @@ class OwnedGroup:
             "proof": [],
             "residuals": [],
         }
+        #: EVERY SIGNAL THIS CAPABILITY ACTUALLY DELIVERED. Appended only at the
+        #: success site in `signal()` (after the checked syscall returns SIGNALED),
+        #: never on a refusal path. The terminal report is allowed to rest on the
+        #: census precisely because this run ENDED the group; without this record a
+        #: terminal verdict would describe an event that never happened (review
+        #: round 8, R2), and it lives here rather than in the runner because the
+        #: runner is a different object and would leave this door open.
+        self.kills = []
         self.census, self.samples, self.identity = census, samples, identity
         self.scheme, self.clock, self._send = scheme, clock, signal_group
         self.initial_error = "unproven initial identity"
@@ -709,6 +724,12 @@ class OwnedGroup:
         probe-streak rule enforce. Only two successful strict censuses whose union
         is empty may report OBSERVED_EMPTY here.
         """
+        # NO KILL, NO TERMINAL ABSENCE. The census may decide only for a group this
+        # run actually ended: a run that never sent anything has proved nothing
+        # about an end, and empty-therefore-clean is exactly the laundering the
+        # reviewer reproduced (R2).
+        if not self.kills:
+            raise Unknown("terminal absence requires a recorded kill")
         try:
             first = self._members(deadline)
             second = self._members(deadline)
@@ -940,6 +961,7 @@ class OwnedGroup:
                 "REFUSED", "checked signal failed:" + type(exc).__name__, result.members
             )
             return self.last
+        self.kills.append(signum)
         self.last = Verdict(
             "SIGNALED",
             "checked owner-alive signal; non-atomic race remains",
