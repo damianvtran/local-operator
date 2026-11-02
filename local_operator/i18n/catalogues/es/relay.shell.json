@@ -52,7 +52,7 @@
   "relay.shell.usage.refresh_ready": "Ya puedes volver a actualizar.",
   "relay.shell.usage.retry": "Reintentar",
   "relay.shell.usage.account": "Cuenta {index, number}",
-  "relay.shell.usage.accounts_order": "Las cuentas se numeran según el orden en que se iniciaron en el ordenador.",
+  "relay.shell.usage.accounts_order": "Las cuentas se numeran según el orden en que se inició sesión con ellas en el ordenador.",
   "relay.shell.usage.resets_in": "se restablece en {countdown}",
   "relay.shell.usage.reset_now": "restableciéndose ahora",
   "relay.shell.usage.countdown_days": "{days, number} d {hours, number} h",

@@ -2753,6 +2753,25 @@
       },
       "status": "passed",
       "note": "relay.shell 64 keys read in full at this en hash. No defects: glossary использование, вы-imperative, throttled plural one/few/many/other in the accusative after через (секунду/секунды/секунд), countdown abbreviations д/ч/мин. Аккаунт vs учётная запись both occur in the catalogues; kept аккаунт (short card label). 0 blocker / 0 major. No rendered or native-speaker pass claimed."
+    },
+    {
+      "locale": "ru",
+      "namespace": "relay.shell",
+      "source_sha256": "412c31bd9071bc06a886dd3144a350afa4c6cc0c89dedac696f7f38d5c30fc22",
+      "translator": {
+        "agent": "coder subagent 763f25259988 (lopdev team)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "reviewer subagent 2926722c72a8 (lopdev team, independent i18n auditor, round 2)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round 2 re-audit at this en hash: changed updated/reset/throttled, new keys refresh_ready, unlimited_generic, accounts_order, row_a11y_bare(_reset). throttled drops 'лимит', keeps one/few/many/other accusative after через; аккаунт consistent with account/reauth; 'Обновлено: {when}' / 'Сброс: {when}' fit both time-only and date+time. No fixes needed. 0 blocker / 0 major. No rendered or native-speaker pass claimed."
     }
   ]
 }

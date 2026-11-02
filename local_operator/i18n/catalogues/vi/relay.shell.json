@@ -49,7 +49,7 @@
   "relay.shell.usage.refresh_failed": "Không làm mới được. Đang hiển thị lượng sử dụng gần nhất đã biết.",
   "relay.shell.usage.refresh_timeout": "Làm mới quá thời gian chờ. Đang hiển thị lượng sử dụng gần nhất đã biết.",
   "relay.shell.usage.throttled": "Vừa làm mới — có thể làm mới lại sau {seconds, plural, other {# giây}}.",
-  "relay.shell.usage.refresh_ready": "Bạn có thể làm mới lại.",
+  "relay.shell.usage.refresh_ready": "Có thể làm mới lại.",
   "relay.shell.usage.retry": "Thử lại",
   "relay.shell.usage.account": "Tài khoản {index, number}",
   "relay.shell.usage.accounts_order": "Tài khoản được đánh số theo thứ tự đăng nhập trên máy tính.",

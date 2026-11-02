@@ -2421,6 +2421,25 @@
       },
       "status": "passed",
       "note": "relay.shell 64 keys read in full at this en hash. Fixes: updated and throttled carried spaces between Chinese text and the time/number runs — removed per the zh-CN guide (no space between Chinese and Latin/digit runs; throttled arm '#秒'); account/reauth used 账号 while the catalogues use 账户 (43 vs 4) — standardised on 账户 and dropped the space before the index. Plural other-only, …… ellipsis and full-width punctuation verified. 0 blocker / 0 major unresolved. No rendered pass claimed."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "relay.shell",
+      "source_sha256": "412c31bd9071bc06a886dd3144a350afa4c6cc0c89dedac696f7f38d5c30fc22",
+      "translator": {
+        "agent": "coder subagent 763f25259988 (lopdev team)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "reviewer subagent 2926722c72a8 (lopdev team, independent i18n auditor, round 2)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "Round 2 re-audit at this en hash: changed updated/reset/throttled, new keys refresh_ready, unlimited_generic, accounts_order, row_a11y_bare(_reset). Fix: reset was '{when}重置', which reads as a past event; now '将于{when}重置' (future, matching 'Resets at'). Round-1 fixes intact: no spaces around CJK/number runs (#秒, 更新于{when}), 账户 throughout incl. accounts_order; throttled drops 上限. other-only plural. 0 blocker / 0 major unresolved. No rendered or native-speaker pass claimed."
     }
   ]
 }

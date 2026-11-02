@@ -52,7 +52,7 @@
   "relay.shell.usage.refresh_ready": "اب دوبارہ ریفریش کر سکتے ہیں۔",
   "relay.shell.usage.retry": "دوبارہ کوشش کریں",
   "relay.shell.usage.account": "اکاؤنٹ {index, number}",
-  "relay.shell.usage.accounts_order": "اکاؤنٹس کو کمپیوٹر پر سائن اِن کی ترتیب سے نمبر دیے گئے ہیں۔",
+  "relay.shell.usage.accounts_order": "اکاؤنٹس کو کمپیوٹر پر سائن ان کی ترتیب سے نمبر دیے گئے ہیں۔",
   "relay.shell.usage.resets_in": "{countdown} میں بحالی",
   "relay.shell.usage.reset_now": "ابھی بحال ہو رہا ہے",
   "relay.shell.usage.countdown_days": "{days, number} دن {hours, plural, one {# گھنٹہ} other {# گھنٹے}}",

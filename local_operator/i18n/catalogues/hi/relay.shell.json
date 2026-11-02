@@ -52,7 +52,7 @@
   "relay.shell.usage.refresh_ready": "अब फिर से रीफ़्रेश कर सकते हैं।",
   "relay.shell.usage.retry": "फिर कोशिश करें",
   "relay.shell.usage.account": "खाता {index, number}",
-  "relay.shell.usage.accounts_order": "खातों को कंप्यूटर पर साइन इन किए जाने के क्रम में क्रमांकित किया गया है।",
+  "relay.shell.usage.accounts_order": "खातों के नंबर कंप्यूटर पर साइन इन के क्रम में दिए गए हैं।",
   "relay.shell.usage.resets_in": "{countdown} में रीसेट",
   "relay.shell.usage.reset_now": "अभी रीसेट हो रहा है",
   "relay.shell.usage.countdown_days": "{days, number} दिन {hours, number} घं",

@@ -2735,6 +2735,25 @@
       },
       "status": "passed",
       "note": "relay.shell 64 keys read in full at this en hash. No defects: glossary उपयोग/मॉडल, आप-imperative, ।-punctuation, throttled plural one/other with # (सेकंड invariant), countdown abbreviations घं/मि are uninflected abbreviations so no plural upgrade needed. Disposition: relay.shell keeps प्रोवाइडर as elsewhere in Hindi relay copy. 0 blocker / 0 major. No rendered pass claimed."
+    },
+    {
+      "locale": "hi",
+      "namespace": "relay.shell",
+      "source_sha256": "412c31bd9071bc06a886dd3144a350afa4c6cc0c89dedac696f7f38d5c30fc22",
+      "translator": {
+        "agent": "coder subagent 763f25259988 (lopdev team)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "reviewer subagent 2926722c72a8 (lopdev team, independent i18n auditor, round 2)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "Round 2 re-audit at this en hash: changed updated/reset/throttled, new keys refresh_ready, unlimited_generic, accounts_order, row_a11y_bare(_reset). Fix: accounts_order used the heavy 'क्रमांकित किया गया है' passive, against the hi guide's no-Sanskritisation rule; now 'खातों के नंबर … क्रम में दिए गए हैं'. throttled avoids 'सीमा'; one/other plural kept; nukta in रीफ़्रेश. 0 blocker / 0 major unresolved. No rendered or native-speaker pass claimed."
     }
   ]
 }

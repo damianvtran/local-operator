@@ -29,7 +29,7 @@
   "relay.shell.usage.remaining": "剩余{value, number}{unit}",
   "relay.shell.usage.used": "已用{value, number}{unit}",
   "relay.shell.usage.fraction": "已用{value, number, percent}",
-  "relay.shell.usage.reset": "{when}重置",
+  "relay.shell.usage.reset": "将于{when}重置",
   "relay.shell.usage.command": "显示提供商的缓存用量",
   "relay.shell.usage.as_of": "截至{value, date, medium}，{value, time, short}。",
   "relay.shell.usage.stale": "可能已过时。",
