@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Run a gate command in its OWN process group with checked signal authority.
+"""Run an explicit cleanup-required (default) or command-status contract.
+
+The group lifecycle, signal and memory claims below describe cleanup-required
+ONLY. Explicit --contract=command-status supervises only the direct child and
+ALWAYS reports group/descendant cleanup UNKNOWN. Its deadlines request signals;
+it promises neither hard wall-time nor RAM bounds and refuses positive group
+memory grants rather than silently degrading their scope.
 
 WHY THIS EXISTS
 ---------------
@@ -99,7 +105,7 @@ pytest worker cap follows in `conftest.py`).
 
 RUN RECORD
 ----------
-Every SPAWNED run writes two JSON records under
+Every SPAWNED cleanup-required run writes two identity JSON records under
 `$LOCAL_OPERATOR_SCRATCHPAD` (else `$LOCAL_OPERATOR_CONFIG_DIR`, else
 `~/.local-operator`) + `/run-bounded-runs/`:
 `<run_id>.spawn.json` at spawn, before the leader can be reaped, and
@@ -118,6 +124,15 @@ and `believed` naming the attempted identities — so "refused with a record" is
 distinguishable from "no record", which means no run was spawned. The record
 filesystem work is bounded by `_RECORD_BUDGET_SECONDS`, so a wedged home
 directory costs that budget rather than the gate.
+
+Each invocation also publishes a fresh ``run-bounded-completion/v1`` sibling,
+including unsupported-backend and policy refusals that never spawned a child.
+Identity records and integer status are not cleanup certificates; admission
+requires this invocation's expected challenge and directory, strict success, and
+an accepted authoritative owned-group terminal proof. Descendant cleanup is
+always unknown. Completion publication uses fsync and non-overwriting hard-link
+publication, but promises neither directory crash durability nor a filesystem
+deadline; this is separate from the bounded legacy identity writer above.
 """
 
 from __future__ import annotations
@@ -137,7 +152,11 @@ from typing import IO, Sequence
 # canonical stdlib-only guard from THIS script's tree, not a stale tool install
 # or another worktree's editable finder. No dependency installation is needed.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from local_operator import memory_guard, owned_process_group  # noqa: E402
+from local_operator import (  # noqa: E402
+    bounded_contract,
+    memory_guard,
+    owned_process_group,
+)
 
 #: Exit status for a fired bound. `timeout(1)` uses the same number.
 EXIT_TIMEOUT = 124
@@ -286,9 +305,10 @@ def _verdict_record(verdict):
 def _ownership_record(owner, verdict):
     """How ownership was established, as a SIBLING object callers opt into.
 
-    The three downstream lanes bind QA evidence to a run's ownership, and a
-    schema change would break them: this rides beside ``verdict`` under its own
-    schema instead of widening a published one.
+    Keep the existing identity schema stable for the run-record and incident
+    fixtures. These observations do not certify cleanup: proof-dependent callers
+    must admit the fresh completion receipt. An earlier comment referred to three
+    unnamed downstream lanes; no production readers identifying them were found.
 
     ``proof`` is the exact set a signal was proven against; ``residuals`` is the
     set that was SEEN and declined, and ``refusal_class`` names why (``pin_lost``,
@@ -497,7 +517,44 @@ def _memory_budget(override_mb: int | None) -> tuple[memory_guard.Budget, str]:
     return memory_guard.compute_budget(override_mb=ceiling), source
 
 
-def run(
+def _child_environment(budget):
+    # Source integration required two independent edits: define this builder,
+    # then replace the old inline policy with a call. There is no atomic "move".
+    # The integrated-AST and undefined-name regressions enforce one definition
+    # shared by strict execution and the dispatcher, without an ordered applier.
+    child_env = os.environ.copy()
+    # Nested cooperative wrappers inherit the effective (possibly tightened)
+    # ceiling, not the original wider grant. env -i must carry it explicitly.
+    child_env[memory_guard.RESOLVED_MEMORY_MB_ENV] = str(budget.ceiling_mb)
+    # THE GATE TRAVELS WITH THE ENVIRONMENT WE BUILD. This builder hands the child a
+    # mapping it assembled rather than the ambient one, so inheriting the switch by
+    # accident is not a property it can rely on: the next builder may start from
+    # scratch. Same carrier the other builders set (tui/notify.ENV_DISABLE).
+    child_env.setdefault(_NO_NOTIFICATIONS_ENV, "1")
+    node_options = child_env.get("NODE_OPTIONS", "")
+    # Match whole options after unquoting: a raw regex misses quoted heap flags
+    # and can mistake a heap-looking substring in --title's value for a flag.
+    try:
+        option_tokens = shlex.split(node_options)
+    except ValueError:
+        # Leave malformed caller text for the child to diagnose, but don't let
+        # an unmatched quote trick us into recognising a larger heap option.
+        option_tokens = []
+    heaps = [
+        match.group(1)
+        for token in option_tokens
+        if (match := re.fullmatch(r"--max[-_]old[-_]space[-_]size=(\+?\d+)", token))
+    ]
+    # V8 resolves repeated flags last-wins: append after a smaller effective
+    # value, preserving unrelated options and leaving a larger caller cap alone.
+    if not heaps or int(heaps[-1]) < NODE_HEAP_MB:
+        child_env["NODE_OPTIONS"] = (
+            f"{node_options} " if node_options else ""
+        ) + f"--max-old-space-size={NODE_HEAP_MB}"
+    return child_env
+
+
+def _run_cleanup_required(
     argv: Sequence[str],
     *,
     timeout: float | None,
@@ -505,6 +562,8 @@ def run(
     memory_mb: int | None = None,
     stream: IO[str] = sys.stderr,
     run_id: str | None = None,
+    _budget=None,
+    _outcome=None,
 ) -> int:
     """Run `argv` as a fresh process group and return its status.
 
@@ -521,7 +580,7 @@ def run(
         stream.write("[run_bounded] no command was given\n")
         return EXIT_NOT_STARTED
     try:
-        budget, budget_source = _memory_budget(memory_mb)
+        budget, budget_source = _memory_budget(memory_mb) if _budget is None else _budget
         if budget.ceiling_mb > 0 and not hasattr(os, "killpg"):
             raise ValueError("a child process-group memory ceiling requires POSIX process groups")
     except ValueError as exc:
@@ -552,35 +611,7 @@ def run(
         stop["signum"] = signum
         # Handlers latch intent only; probes and syscalls run in the main loop.
 
-    child_env = os.environ.copy()
-    # Nested cooperative wrappers inherit the effective (possibly tightened)
-    # ceiling, not the original wider grant. env -i must carry it explicitly.
-    child_env[memory_guard.RESOLVED_MEMORY_MB_ENV] = str(budget.ceiling_mb)
-    # THE GATE TRAVELS WITH THE ENVIRONMENT WE BUILD. This builder hands the child a
-    # mapping it assembled rather than the ambient one, so inheriting the switch by
-    # accident is not a property it can rely on: the next builder may start from
-    # scratch. Same carrier the other builders set (tui/notify.ENV_DISABLE).
-    child_env.setdefault(_NO_NOTIFICATIONS_ENV, "1")
-    node_options = child_env.get("NODE_OPTIONS", "")
-    # Match whole options after unquoting: a raw regex misses quoted heap flags
-    # and can mistake a heap-looking substring in --title's value for a flag.
-    try:
-        option_tokens = shlex.split(node_options)
-    except ValueError:
-        # Leave malformed caller text for the child to diagnose, but don't let
-        # an unmatched quote trick us into recognising a larger heap option.
-        option_tokens = []
-    heaps = [
-        match.group(1)
-        for token in option_tokens
-        if (match := re.fullmatch(r"--max[-_]old[-_]space[-_]size=(\+?\d+)", token))
-    ]
-    # V8 resolves repeated flags last-wins: append after a smaller effective
-    # value, preserving unrelated options and leaving a larger caller cap alone.
-    if not heaps or int(heaps[-1]) < NODE_HEAP_MB:
-        child_env["NODE_OPTIONS"] = (
-            f"{node_options} " if node_options else ""
-        ) + f"--max-old-space-size={NODE_HEAP_MB}"
+    child_env = _child_environment(budget)
 
     previous = {sig: signal.signal(sig, _forward) for sig in FORWARDED_SIGNALS}
     try:
@@ -590,6 +621,8 @@ def run(
         for sig, handler in previous.items():
             signal.signal(sig, handler)
         stream.write(f"[run_bounded] could not start {argv[0]!r}: {exc}\n")
+        if _outcome is not None:
+            _outcome.termination_cause = "spawn-failure"
         return EXIT_NOT_STARTED
     pgid = proc.pid
     # ONE REPRESENTATION for the horizon, normalised here where it enters: the
@@ -654,6 +687,9 @@ def run(
         return require(_signal_group(owner, signum, deadline=until), phase)
 
     def bounded_wait(until):
+        # All consuming waits revoke FIRST, including failed/timed-out attempts.
+        # The accepted terminal proof, if any, was captured before this boundary.
+        owner.revoke()
         try:
             proc.wait(timeout=0 if refused else max(0.0, until - time.monotonic()))
         except subprocess.TimeoutExpired:
@@ -668,6 +704,9 @@ def run(
     # overwriting the caller's actual outcome (timeout 124, memory 137, a monitor
     # error's raise). The code is now decided by the path that produced it.
     rc = 128 + stop["signum"] if stop["signum"] else None
+    if _outcome is not None and stop["signum"]:
+        _outcome.termination_cause = "interruption"
+        _outcome.wrapper_exit_code = rc
     exited = False
     unanswered = 0
     try:
@@ -682,8 +721,14 @@ def run(
             timed_out = now >= deadline
             if signum:
                 rc = 128 + signum
+                if _outcome is not None:
+                    _outcome.termination_cause = "interruption"
+                    _outcome.wrapper_exit_code = rc
             elif timed_out:
                 rc = EXIT_TIMEOUT
+                if _outcome is not None:
+                    _outcome.termination_cause = "deadline"
+                    _outcome.wrapper_exit_code = rc
             # Enrolment needs a still-live creation chain, and any signal re-proves
             # inside `signal()`. Between signals the census runs on a bounded
             # cadence rather than once per poll: see _AUTHORITY_REFRESH_SECONDS.
@@ -760,6 +805,9 @@ def run(
                 if guard.should_kill(sample):
                     _report(stream, f"[run_bounded] {guard.over_budget_message(sample)}")
                     rc = EXIT_MEMORY
+                    if _outcome is not None:
+                        _outcome.termination_cause = "memory-policy"
+                        _outcome.wrapper_exit_code = rc
                     send(signal.SIGKILL, "memory", begin_cleanup(0.25))
                     break
                 notice = guard.soft_notice(sample)
@@ -819,6 +867,8 @@ def run(
             # there is one source of truth and the call site cannot claim a kill
             # that never happened (round 9, R2).
             terminal = owner.refresh(deadline=until, terminal=bool(owner.terminating_sends))
+            if _outcome is not None:
+                _outcome.accept_terminal(owner, terminal)
             if terminal.status != "OBSERVED_EMPTY":
                 refused = True
                 # KEEP THE CLASS. Dropping it made the record say only "not observed
@@ -840,13 +890,9 @@ def run(
                     start_utc=run_started_utc,
                 )
             waited = bounded_wait(until)
-            if exited and waited:
-                # Only now is the corpse reaped, and only now is the child's own
-                # status meaningful: it could not be read earlier without giving
-                # the reservation away.
-                status = proc.poll()
-                if status is not None:
-                    rc = 128 - status if status < 0 else status
+            if _outcome is not None and waited and proc.returncode is not None:
+                _outcome.command_exit_code = bounded_contract.shell_status(proc.returncode)
+            # Wrapper status is selected after handler restoration below.
             if not waited:
                 refused = True
                 result = owned_process_group.Verdict(
@@ -861,10 +907,37 @@ def run(
                     verdict=result,
                     start_utc=run_started_utc,
                 )
+        except Exception as exc:
+            if _outcome is not None:
+                _outcome.finalization_failed("strict-finalization", exc)
+            raise
         finally:
-            for sig, handler in previous.items():
-                signal.signal(sig, handler)
+            try:
+                for sig, handler in previous.items():
+                    try:
+                        signal.signal(sig, handler)
+                    except Exception as exc:
+                        if _outcome is None:
+                            raise
+                        _outcome.finalization_failed("handler-restoration", exc)
+            finally:
+                # Export the final latch before ANY exception crosses execute's
+                # separate stop dictionary. Normal-return code cannot do this.
+                if stop["signum"]:
+                    rc = 128 + stop["signum"]
+                    if _outcome is not None:
+                        _outcome.termination_cause = "interruption"
+                        _outcome.wrapper_exit_code = rc
+                elif _outcome is not None and _outcome.finalization_errors:
+                    rc = _outcome.wrapper_exit_code
 
+    # The inner finally exported interruption even on exceptional exits. Only
+    # an otherwise unselected normal result may now adopt the child's status.
+    if rc is None and exited and waited and proc.returncode is not None:
+        rc = bounded_contract.shell_status(proc.returncode)
+        if _outcome is not None:
+            _outcome.termination_cause = "child-signal" if proc.returncode < 0 else "child-exit"
+            _outcome.wrapper_exit_code = rc
     if rc is None:
         # Nothing determined a terminal code: either the child ended on its own (0)
         # or the path could not say (cleanup unproven).
@@ -873,6 +946,8 @@ def run(
         # The gate ran and passed; what is missing is proof of cleanup. Say that,
         # rather than reusing 125, which callers read as "the gate did not run".
         rc = EXIT_CLEANUP_UNPROVEN
+    if _outcome is not None:
+        _outcome.wrapper_exit_code = rc
     # The record a SUCCESSFUL run must leave behind: callers bind admission to it,
     # so it is written before the wrapper returns and after the leader is gone.
     _record_run(
@@ -894,18 +969,89 @@ def run(
     return rc
 
 
+def run(
+    argv,
+    *,
+    timeout,
+    grace,
+    memory_mb=None,
+    stream=sys.stderr,
+    run_id=None,
+    contract="cleanup-required",
+    _backend=None,
+):
+    # Resolve the inherited grant BEFORE contract dispatch. Opt-in never disables
+    # or widens a positive grant; direct-only mode refuses unenforceable policy.
+    receipt = bounded_contract.Receipt(_record_dir(), _resolve_run_id(run_id))
+    try:
+        resolved = _memory_budget(memory_mb)
+    except ValueError as exc:
+        # The structured receipt supplements the old actionable refusal; hiding
+        # the grant/override explanation made a correctly refused gate opaque.
+        _report(stream, f"[run_bounded] memory budget refused before spawn: {exc}")
+        outcome = bounded_contract.Outcome(
+            wrapper_exit_code=125,
+            termination_cause="memory-policy-refused",
+            cleanup_reason=str(exc),
+        )
+        try:
+            receipt.publish(contract, outcome)
+        except (OSError, ValueError, TypeError) as publication_error:
+            _report(
+                stream,
+                f"[run_bounded] completion publication failed: {type(publication_error).__name__}",
+            )
+        _report(
+            stream,
+            f"[run_bounded] contract={contract} rc=125 cause=memory-policy-refused cleanup=unknown",
+        )
+        return 125
+    budget, _ = resolved
+
+    def strict(outcome):
+        outcome.wrapper_exit_code = _run_cleanup_required(
+            argv,
+            timeout=timeout,
+            grace=grace,
+            memory_mb=memory_mb,
+            stream=stream,
+            run_id=receipt.run_id,
+            _budget=resolved,
+            _outcome=outcome,
+        )
+
+    return bounded_contract.execute(
+        argv,
+        contract=contract,
+        timeout=timeout,
+        grace=grace,
+        budget=budget,
+        child_env=_child_environment(budget),
+        receipt=receipt,
+        stream=stream,
+        strict=strict,
+        backend=_backend,
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="run_bounded.py",
-        description="Run a gate command in its own process group and reap the group.",
+        description=(
+            "cleanup-required (default): command success plus certified owned-group"
+            " cleanup. Explicit command-status: direct child only; cleanup UNKNOWN,"
+            " no hard wall-time/RAM guarantee."
+        ),
         # The short description deliberately does not use the whole module doc;
         # callers consulting --help still need the diagnostic that distinguishes
         # our memory stop from another process delivering SIGKILL (same status).
         epilog=(
             "Exit status: child status normally; 124 on timeout; 125 when the "
-            "command never started (or its memory budget was refused before "
+            "command never started (or backend/policy refused before "
             "spawn); 126 when the command ran but its owned group's cleanup "
-            "could not be proved; 137 with MEMORY LIMIT EXCEEDED on a measured "
+            "could not be proved under cleanup-required (command-status child "
+            "success remains 0 with cleanup UNKNOWN); 137 with MEMORY LIMIT "
+            "EXCEEDED on a measured "
             "memory breach. Status 137 alone can also mean external SIGKILL; "
             "inspect stderr. Every spawned run also writes "
             "run-bounded-runs/<run_id>.spawn.json and .exit.json naming the "
@@ -913,11 +1059,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--contract",
+        choices=bounded_contract.CONTRACTS,
+        default="cleanup-required",
+        help=(
+            "cleanup-required (default) needs certified group cleanup; "
+            "command-status explicitly supervises only the direct child, cleanup "
+            "always UNKNOWN, no hard wall-time or RAM guarantee"
+        ),
+    )
+    parser.add_argument(
         "--timeout",
         type=float,
         default=None,
         help=(
-            "seconds before the whole process group is signalled (default: no "
+            "seconds before requesting a stop (group under cleanup-required; "
+            "direct child only under command-status, no hard wall-time promise;"
+            " default: no "
             "bound). The local typed gate ships 1800 — twice ci.yml's 15-minute "
             "provision, because a whole-tree pyright measures 508-1170 s on a "
             "loaded host here and timing out a slow host is worse than waiting for "
@@ -930,7 +1088,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         type=int,
         default=None,
         help=(
-            "child process-group ceiling in MiB (default: bash tool's resolved budget, "
+            "sampled owned-group ceiling in MiB (cleanup-required only; "
+            "command-status refuses positive ceilings rather than weakening "
+            "them; default: bash tool's resolved budget, "
             "otherwise auto); positive inherited budgets can only be tightened; "
             "0 disables only without a positive inherited budget"
         ),
@@ -940,7 +1100,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         type=float,
         default=DEFAULT_GRACE_SECONDS,
         help=(
-            "seconds between SIGTERM and SIGKILL for a group that ignores "
+            "seconds between SIGTERM and SIGKILL requests to the selected "
+            "contract's signal scope when it ignores "
             f"SIGTERM (default {DEFAULT_GRACE_SECONDS:g})."
         ),
     )
@@ -968,6 +1129,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         grace=args.grace,
         memory_mb=args.memory_mb,
         run_id=args.run_id,
+        contract=args.contract,
     )
 
 

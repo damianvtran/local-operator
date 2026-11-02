@@ -33,7 +33,7 @@ def _as_typed_census(view):
 
     def wrapped(pgid, deadline):
         pids = view(pgid, deadline)
-        return owned.CensusResult(tuple(pids), True, pgid in pids)
+        return owned.AuthoritativeCensus(tuple(pids), True, pgid in pids)
 
     return wrapped
 

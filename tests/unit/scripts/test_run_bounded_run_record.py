@@ -34,7 +34,7 @@ def _as_typed_census(view):
 
     def wrapped(pgid, deadline):
         pids = view(pgid, deadline)
-        return owned.CensusResult(tuple(pids), True, pgid in pids)
+        return owned.AuthoritativeCensus(tuple(pids), True, pgid in pids)
 
     return wrapped
 
@@ -140,6 +140,7 @@ def _install(wrapper, monkeypatch, cap, status=0):
         NS(
             Popen=lambda *a, **k: NS(
                 pid=10,
+                returncode=status,
                 poll=lambda: (_record_exit(), status)[1],
                 wait=lambda **_: (_record_exit(), status)[1],
             ),
@@ -253,12 +254,13 @@ def test_the_flag_reaches_the_run_contract(wrapper, monkeypatch):
                 "grace": wrapper.DEFAULT_GRACE_SECONDS,
                 "memory_mb": None,
                 "run_id": "qa-cli",
+                "contract": "cleanup-required",
             },
         )
     ]
 
 
-def test_a_broken_record_directory_warns_and_does_not_change_the_gate(
+def test_a_broken_record_directory_warns_and_refuses_completion_success(
     wrapper, monkeypatch, tmp_path
 ):
     blocker = tmp_path / "not-a-directory"
@@ -268,7 +270,11 @@ def test_a_broken_record_directory_warns_and_does_not_change_the_gate(
     _install(wrapper, monkeypatch, world.capture())
     output = io.StringIO()
     assert (
-        wrapper.run(["synthetic"], timeout=None, grace=0.05, stream=output, run_id="qa-broken") == 0
+        wrapper.run(["synthetic"], timeout=None, grace=0.05, stream=output, run_id="qa-broken")
+        == 126
     )
     assert "record write failed (spawn)" in output.getvalue()
     assert "record write failed (exit)" in output.getvalue()
+    # Identity writes remain best effort, but failed completion publication must
+    # not return success: no usable receipt exists for proof-dependent admission.
+    assert "completion publication failed" in output.getvalue()

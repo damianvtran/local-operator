@@ -39,7 +39,7 @@ def _as_typed_census(view):
 
     def wrapped(pgid, deadline):
         pids = view(pgid, deadline)
-        return owned.CensusResult(tuple(pids), True, pgid in pids)
+        return owned.AuthoritativeCensus(tuple(pids), True, pgid in pids)
 
     return wrapped
 
@@ -173,7 +173,7 @@ def _fake_process(poll_status, world=None):
         # The child has ALREADY exited: the wrapper no longer asks `poll()` to find
         # that out (it samples the leader), so the synthetic world must state it.
         world.corpse = True
-    return NS(pid=10, poll=poll, wait=lambda **_: poll_status)
+    return NS(pid=10, returncode=poll_status, poll=poll, wait=lambda **_: poll_status)
 
 
 def _install(wrapper, monkeypatch, world, send, process):

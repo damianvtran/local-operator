@@ -402,7 +402,17 @@ def strict_census(pgid, deadline):
             # FAIL CLOSED: a reader that cannot state its coverage supplies no
             # certificate, and none is manufactured for it here.
             return CensusResult(tuple(pids), False, bool(leader_seen), "reader stated no coverage")
-        return CensusResult(tuple(pids), True, bool(leader_seen))
+        # Coverage belongs to this backend's accounting argument, not to a
+        # libproc byte count or the legacy complete boolean. This instrument
+        # on this installed OS has no authoritative Darwin constructor.
+        if sys.platform.startswith("linux"):
+            return AuthoritativeCensus(tuple(pids), True, bool(leader_seen))
+        return CensusResult(
+            tuple(pids),
+            False,
+            bool(leader_seen),
+            "this instrument cannot certify coverage on this installed OS",
+        )
     except (OSError, ValueError, TypeError) as exc:
         raise Unknown("strict membership probe failed") from exc
 
@@ -535,6 +545,15 @@ class CensusResult:
     reason: str = ""
 
 
+@dataclass(frozen=True)
+class AuthoritativeCensus(CensusResult):
+    """Coverage-bearing result; production construction is strict Linux only.
+
+    Synthetic positive controls must explicitly choose an authoritative backend;
+    returning legacy complete=True is deliberately insufficient.
+    """
+
+
 class OwnedGroup:
     def __init__(self, seal, leader, *, census, samples, identity, scheme, clock, signal_group):
         if seal is not _SEAL or type(leader) is not int or leader <= 1:
@@ -566,6 +585,21 @@ class OwnedGroup:
         self.scheme, self.clock, self._send = scheme, clock, signal_group
         self.initial_error = "unproven initial identity"
         self.last = Verdict("REFUSED", self.initial_error)
+        self._revoked = False
+        self._terminal_result = None
+
+    def revoke(self):
+        # Reaping releases the reservation even if wait times out or raises.
+        # Revocation is monotone; no refresh or cached VERIFIED restores it.
+        self._revoked = True
+
+    def accepted_terminal(self, verdict):
+        return (
+            not self._revoked
+            and verdict is self._terminal_result
+            and verdict is self.last
+            and verdict.status == "OBSERVED_EMPTY"
+        )
 
     @classmethod
     def capture(
@@ -695,7 +729,7 @@ class OwnedGroup:
         if self.clock() >= deadline:
             raise Unknown("ownership deadline exhausted")
         seen = self.census(self.pgid, deadline)
-        if isinstance(seen, CensusResult):
+        if isinstance(seen, AuthoritativeCensus):
             if not seen.complete:
                 # INCOMPLETE VISIBILITY IS NOT EMPTINESS. This is the door R3 came
                 # through: a successful call that could not vouch for the namespace
@@ -848,6 +882,7 @@ class OwnedGroup:
             "terminal census complete and empty after a terminating send by this run",
             (),
         )
+        self._terminal_result = self.last
         return self.last
 
     def refresh(self, *, deadline, terminal=False):
@@ -870,6 +905,12 @@ class OwnedGroup:
         # what a caller binds QA to, and the final refresh of a run normally returns
         # OBSERVED_EMPTY -- popping them there published `anchor: null` and
         # `proof: []` on every successful run.
+        if self._revoked:
+            self.last = Verdict(
+                "REFUSED", "signal authority irreversibly revoked", refusal_class="pin_lost"
+            )
+            return self.last
+        self._terminal_result = None
         for stale in ("residuals", "error", "vanished"):
             self.probe.pop(stale, None)
         members = []
@@ -902,7 +943,7 @@ class OwnedGroup:
                     # A reader that states nothing states no coverage (round 9): the
                     # reason names that, so callers can tell it from a partial read.
                     raise Unknown("leader unseen and the census reader supplied no coverage claim")
-                if getattr(survey, "complete", False) is not True:
+                if not isinstance(survey, AuthoritativeCensus) or survey.complete is not True:
                     raise Unknown(
                         "census incomplete: leader unseen and no complete survey omits it"
                     )
@@ -946,6 +987,7 @@ class OwnedGroup:
                     self.last = Verdict(
                         "OBSERVED_EMPTY", "retained corpse and complete no-live-member census"
                     )
+                    self._terminal_result = self.last
                     return self.last
                 raise Unknown("live leader absent from a complete census: contradictory")
             samples = self._samples(set(members) | {self.leader}, deadline)
@@ -972,6 +1014,7 @@ class OwnedGroup:
                 self.last = Verdict(
                     "OBSERVED_EMPTY", "reserved group holds no live member", tuple(members)
                 )
+                self._terminal_result = self.last
                 return self.last
             for pid in live:
                 parent, group, sid = self.identity(pid)
@@ -1004,6 +1047,8 @@ class OwnedGroup:
                 anchor=pin,
             )
         except Exception as exc:
+            if isinstance(exc, PinLost):
+                self.revoke()
             self.last = Verdict(
                 "REFUSED",
                 type(exc).__name__ + ":" + str(exc),
@@ -1054,6 +1099,8 @@ class OwnedGroup:
         # ago" -- the non-atomicity this module discloses rather than hides.
         final_state, _ = self._leader_witness(deadline)
         if final_state != "held":
+            if final_state == "reaped":
+                self.revoke()
             self.last = Verdict(
                 "REFUSED",
                 (
@@ -1067,6 +1114,13 @@ class OwnedGroup:
             )
             self.probe["residuals"] = _identities(self.receipts, {}, result.members)
             self.probe["anchor"] = result.anchor
+            return self.last
+        # Check at the mutation boundary as well as refresh entry: a cached
+        # VERIFIED verdict cannot lend authority after a consuming wait.
+        if self._revoked:
+            self.last = Verdict(
+                "REFUSED", "signal authority irreversibly revoked", refusal_class="pin_lost"
+            )
             return self.last
         try:
             self._send(self.pgid, signum)

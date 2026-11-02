@@ -143,7 +143,7 @@ def test_a_healthy_run_with_no_kill_still_reports_observed_empty():
     world.exited = True  # the child exits by itself; nothing is signalled
     # complete and leader-seen: the corpse is still in the namespace while the
     # group holds nobody, which is the ordinary clean ending.
-    cap.census = lambda _pgid, _deadline: owned.CensusResult((), True, True)
+    cap.census = lambda _pgid, _deadline: owned.AuthoritativeCensus((), True, True)
     verdict = cap.refresh(deadline=world.clock() + 1.0)
     assert verdict.status == "OBSERVED_EMPTY", verdict.reason
     assert cap.terminating_sends == [], cap.terminating_sends
@@ -153,7 +153,7 @@ def test_an_incomplete_census_refuses_at_members_with_a_visibility_reason():
     """Edge 4: not-complete is UNKNOWN VISIBILITY, never a non-empty group."""
     world, cap = _live_owned_group()
     assert cap.signal(9, deadline=world.clock() + 1.0).status == "SIGNALED"
-    cap.census = lambda _pgid, _deadline: owned.CensusResult((), False, False)
+    cap.census = lambda _pgid, _deadline: owned.AuthoritativeCensus((), False, False)
     terminal = cap.refresh(deadline=world.clock() + 1.0, terminal=True)
     assert terminal.status == "REFUSED", terminal.reason
     assert "census incomplete" in terminal.reason, terminal.reason
@@ -181,7 +181,7 @@ def test_an_unseen_leader_with_no_send_refuses():
     proven wrong — QA round 2 was right to call that out.
     """
     world, cap = _live_owned_group()
-    cap.census = lambda _pgid, _deadline: owned.CensusResult((), True, False)
+    cap.census = lambda _pgid, _deadline: owned.AuthoritativeCensus((), True, False)
     verdict = cap.refresh(deadline=world.clock() + 1.0)
     assert verdict.status == "REFUSED", verdict.reason
     assert "never saw the leader" in verdict.reason, verdict.reason
@@ -253,7 +253,7 @@ def test_the_public_verdict_carries_the_census_reason():
     """
     world, cap = _live_owned_group()
     assert cap.signal(9, deadline=world.clock() + 1.0).status == "SIGNALED"
-    cap.census = lambda _pgid, _deadline: owned.CensusResult(
+    cap.census = lambda _pgid, _deadline: owned.AuthoritativeCensus(
         (), False, False, "coverage not stated"
     )
     terminal = cap.refresh(deadline=world.clock() + 1.0, terminal=True)

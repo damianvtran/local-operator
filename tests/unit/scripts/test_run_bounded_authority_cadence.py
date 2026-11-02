@@ -31,7 +31,7 @@ def _as_typed_census(view):
 
     def wrapped(pgid, deadline):
         pids = view(pgid, deadline)
-        return owned.CensusResult(tuple(pids), True, pgid in pids)
+        return owned.AuthoritativeCensus(tuple(pids), True, pgid in pids)
 
     return wrapped
 
@@ -114,6 +114,8 @@ def _refresh_points(wrapper, monkeypatch, constant):
     monkeypatch.setattr(wrapper, "time", Clock())
 
     class Process:
+        # Match the consumed Popen status, independently of the group proof.
+        returncode = 0
         pid = 10
 
         def poll(self):

@@ -162,7 +162,7 @@ def test_handlers_are_installed_before_the_child_is_spawned():
     cannot be hit on demand.
     """
     source = (REPO / "scripts" / "run_bounded.py").read_text()
-    body = source[source.index("def run(") : source.index("def main(")]
+    body = source[source.index("def _run_cleanup_required(") : source.index("def run(")]
 
     assert "signal.signal(" in body, "the wrapper installs no signal handler at all"
     assert body.index("signal.signal(") < body.index("subprocess.Popen("), (
@@ -188,7 +188,11 @@ def test_a_command_that_cannot_start_is_not_a_pass(reap_markers):
     result = _wrapper(["--timeout", "5", "--", "/nonexistent/interpreter-xyz"])
 
     assert result.returncode == 125
-    assert "could not start" in result.stderr
+    # Unsupported strict backends refuse even earlier than executable lookup.
+    # Both outcomes mean no command ran; neither can certify cleanup.
+    assert (
+        "could not start" if sys.platform.startswith("linux") else "unsupported-backend"
+    ) in result.stderr
 
 
 def test_a_bound_kills_the_whole_group_not_just_the_leader(reap_markers):
@@ -322,6 +326,14 @@ def memory_wrapper(monkeypatch):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     monkeypatch.delenv(module.memory_guard.RESOLVED_MEMORY_MB_ENV, raising=False)
+    # These tests inject kernel/process facts, so choose the synthetic authority
+    # explicitly. Native Darwin cannot supply coverage and must never be promoted
+    # merely to keep this shared synthetic matrix running.
+    monkeypatch.setattr(
+        module.bounded_contract,
+        "selected_backend",
+        lambda: module.bounded_contract.Backend("synthetic-authoritative", True, "test kernel"),
+    )
     return module
 
 
@@ -420,7 +432,9 @@ def test_child_memory_unsupported_positive_refuses_before_spawn(memory_wrapper, 
     from types import SimpleNamespace
 
     monkeypatch.setattr(memory_wrapper, "_memory_budget", lambda value: (_test_budget(48), "unit"))
-    monkeypatch.setattr(memory_wrapper, "os", SimpleNamespace())
+    # Remove only the unsupported primitive; the real dispatcher now builds the
+    # environment and receipt before entering this synthetic strict boundary.
+    monkeypatch.setattr(memory_wrapper, "os", SimpleNamespace(environ=dict(os.environ)))
     monkeypatch.setattr(
         memory_wrapper,
         "subprocess",

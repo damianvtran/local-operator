@@ -44,7 +44,7 @@ def _as_typed_census(view, raw):
 
     def wrapped(pgid, deadline):
         pids = view(pgid, deadline)
-        return owned.CensusResult(tuple(pids), True, pgid in set(raw()))
+        return owned.AuthoritativeCensus(tuple(pids), True, pgid in set(raw()))
 
     return wrapped
 
@@ -409,6 +409,8 @@ def test_the_grace_loop_costs_no_census_and_signals_cost_at_most_two(
     )
 
     class Process:
+        # Match the consumed Popen status, independently of the group proof.
+        returncode = 0
         pid = 10
         polls = 0
 
@@ -469,6 +471,8 @@ def test_the_leader_is_not_reaped_before_the_terminal_census(wrapper, monkeypatc
     kernel.rows[20] = (kernel.leader, kernel.leader, kernel.leader, "child")
 
     class Process:
+        # Match the consumed Popen status, independently of the group proof.
+        returncode = 0
         pid = 10
 
         def poll(self):
@@ -515,6 +519,8 @@ def test_a_zombie_grandchild_does_not_hold_the_cleanup_unproven(wrapper, monkeyp
     kernel.rows[20] = (kernel.leader, kernel.leader, kernel.leader, "grandchild")
 
     class Process:
+        # Match the consumed Popen status, independently of the group proof.
+        returncode = 0
         pid = 10
 
         def poll(self):
@@ -627,6 +633,8 @@ def test_a_run_without_a_timeout_no_longer_compares_against_none(wrapper, monkey
     kernel.corpses.add(20)
 
     class Process:
+        # Match the consumed Popen status, independently of the group proof.
+        returncode = 0
         pid = 10
 
         def poll(self):
@@ -685,6 +693,8 @@ def test_the_discarded_authority_guard_has_an_executed_deletion_control(
         )
 
         class Process:
+            # Match the consumed Popen status, independently of the group proof.
+            returncode = 0
             pid = 10
 
             def poll(self):
@@ -749,6 +759,8 @@ def test_a_terminal_observed_empty_still_records_the_anchor_and_the_proof(
     kernel.rows[20] = (kernel.leader, kernel.leader, kernel.leader, "grandchild")
 
     class Process:
+        # Match the consumed Popen status, independently of the group proof.
+        returncode = 0
         pid = 10
 
         def poll(self):

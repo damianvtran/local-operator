@@ -1,0 +1,1030 @@
+"""Synthetic contract and policy regressions; real CLI coverage lives separately.
+
+Deleting the authority-type guard must break the observation-only promotion test,
+not merely change diagnostic text. Environment tests intentionally use the real
+builder: replacing it with a stub hid a missing definition in the POC.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import io
+import json
+import signal
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from local_operator import bounded_contract as contracts
+from local_operator import owned_process_group as groups
+
+
+@pytest.fixture
+def runner():
+    path = Path(__file__).resolve().parents[3] / "scripts" / "run_bounded.py"
+    spec = importlib.util.spec_from_file_location("bounded_contract_runner_test", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def forbidden(*args, **kwargs):
+    pytest.fail("forbidden spawn, group signal, handler mutation, or strict fallback")
+
+
+def receipt_row(receipt):
+    return json.loads(receipt.path.read_text(encoding="utf-8"))
+
+
+class Available:
+    @staticmethod
+    def available():
+        return True
+
+
+def invoke(
+    tmp_path,
+    *,
+    contract="command-status",
+    direct=None,
+    budget=0,
+    timeout=None,
+    strict=forbidden,
+    backend=None,
+):
+    receipt = contracts.Receipt(tmp_path, "caller-reused-id")
+    stream = io.StringIO()
+    rc = contracts.execute(
+        ["synthetic-command"],
+        contract=contract,
+        timeout=timeout,
+        grace=0.1,
+        budget=SimpleNamespace(ceiling_mb=budget),
+        child_env={},
+        receipt=receipt,
+        stream=stream,
+        strict=strict,
+        backend=backend or contracts.ObservationOnlyBackend(),
+        direct=direct or forbidden,
+        boundary=Available,
+    )
+    return rc, receipt, stream.getvalue()
+
+
+def test_default_refuses_before_spawn_and_handlers(runner, monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        runner, "_memory_budget", lambda mb: (SimpleNamespace(ceiling_mb=0), "test")
+    )
+    monkeypatch.setattr(runner, "_record_dir", lambda: tmp_path)
+    monkeypatch.setattr(runner, "_child_environment", lambda budget: {})
+    monkeypatch.setattr(runner.subprocess, "Popen", forbidden)
+    monkeypatch.setattr(contracts.signal, "signal", forbidden)
+    monkeypatch.setattr(runner, "_signal_group", forbidden)
+    stream = io.StringIO()
+    assert (
+        runner.run(
+            ["never-start"],
+            timeout=1,
+            grace=0.1,
+            stream=stream,
+            _backend=contracts.ObservationOnlyBackend(),
+        )
+        == 125
+    )
+    row = json.loads(next(tmp_path.glob("*.completion.json")).read_text())
+    assert row["requested_contract"] == "cleanup-required"
+    assert row["termination_cause"] == "unsupported-backend"
+    assert row["command_exit_code"] is None
+    assert row["cleanup_status"] == "unknown"
+    assert "pgid" not in row
+    assert not list(tmp_path.glob("*.spawn.json"))
+
+
+@pytest.mark.parametrize("child_rc", [0, 7, 124, 125, 126, 130, -signal.SIGTERM])
+def test_command_status_uses_direct_child_and_never_group_sender(monkeypatch, tmp_path, child_rc):
+    monkeypatch.setattr(groups.OwnedGroup, "capture", forbidden)
+    monkeypatch.setattr(contracts.os, "killpg", forbidden)
+
+    class Child:
+        pid = 43210
+
+        def wait(self, *, timeout):
+            assert timeout == 0
+            return child_rc
+
+    class Boundary(contracts.DirectChild):
+        def terminal(self):
+            return True
+
+    def direct(argv, **kwargs):
+        contracts.supervise_direct(argv, **kwargs, spawn=lambda *a, **k: Child(), boundary=Boundary)
+
+    rc, receipt, text = invoke(tmp_path, direct=direct)
+    # Independent oracle: sharing shell_status here let its negative-status
+    # mutation survive by changing both the implementation and expectation.
+    assert rc == (128 + abs(child_rc) if child_rc < 0 else child_rc)
+    row = receipt_row(receipt)
+    assert row["command_exit_code"] == rc
+    assert row["termination_cause"] == ("child-signal" if child_rc < 0 else "child-exit")
+    assert row["cleanup_status"] == "unknown"
+    assert row["signal_scope"] == "direct-child"
+    assert "contract=command-status" in text and "cleanup=unknown" in text
+    assert not contracts.admit_cleanup(
+        receipt.path, expected_invocation_id=receipt.invocation_id, expected_directory=tmp_path
+    )
+
+
+def test_deadline_is_policy_outcome_not_cleanup(monkeypatch, tmp_path):
+    monkeypatch.setattr(contracts.os, "killpg", forbidden)
+    now = [0.0]
+    sends = []
+    monkeypatch.setattr(contracts.os, "kill", lambda pid, sig: sends.append((pid, sig)))
+
+    class Child:
+        pid = 43210
+
+        def wait(self, **kwargs):
+            return 0  # Child itself succeeds after stop request; deadline wins.
+
+    class Boundary(contracts.DirectChild):
+        def terminal(self):
+            return bool(sends)
+
+    def direct(argv, **kwargs):
+        contracts.supervise_direct(
+            argv,
+            **kwargs,
+            spawn=lambda *a, **k: Child(),
+            boundary=Boundary,
+            clock=lambda: now[0],
+            sleep=lambda dt: now.__setitem__(0, now[0] + dt),
+        )
+
+    rc, receipt, text = invoke(tmp_path, timeout=0.01, direct=direct)
+    row = receipt_row(receipt)
+    assert rc == 124 and row["termination_cause"] == "deadline"
+    assert sends == [(43210, signal.SIGTERM)]
+    assert row["command_exit_code"] == 0 and row["cleanup_status"] == "unknown"
+    assert "no hard RAM bound" in row["memory_guarantee"]
+    assert row["deadline_guarantee"].startswith("none:")
+
+
+def test_positive_grant_cannot_be_disabled_or_widened(runner, monkeypatch, tmp_path):
+    monkeypatch.setenv(runner.memory_guard.RESOLVED_MEMORY_MB_ENV, "128")
+    monkeypatch.setattr(runner, "_record_dir", lambda: tmp_path)
+    monkeypatch.setattr(runner.subprocess, "Popen", forbidden)
+    for requested in (0, 129):
+        assert (
+            runner.run(
+                ["never-start"],
+                timeout=None,
+                grace=0.1,
+                memory_mb=requested,
+                contract="command-status",
+                stream=io.StringIO(),
+            )
+            == 125
+        )
+    # A positive valid group grant is not falsely re-labelled direct-only RAM
+    # enforcement. Availability requires a separately authorized zero grant.
+    rc, receipt, text = invoke(tmp_path, budget=128)
+    assert rc == 125 and receipt_row(receipt)["termination_cause"] == "unsupported-policy"
+
+
+def test_observation_complete_flag_is_not_authority():
+    cap = object.__new__(groups.OwnedGroup)
+    cap.clock = lambda: 0
+    cap.pgid = 43210
+    cap.terminating_sends = []
+    # Mutation target: changing AuthoritativeCensus back to CensusResult would
+    # accept this positive complete flag and make this test fail.
+    cap.census = lambda *args: groups.CensusResult((43210,), True, True)
+    with pytest.raises(groups.Unknown):
+        cap._members(1)
+    cap.census = lambda *args: groups.AuthoritativeCensus((43210,), True, True)
+    assert cap._members(1) == [43210]
+
+
+def test_sentinel_cannot_borrow_authority_from_empty_rows():
+    cap = object.__new__(groups.OwnedGroup)
+    cap.clock, cap.pgid, cap.terminating_sends = lambda: 0, 43210, [signal.SIGKILL]
+    cap.census = contracts.ObservationOnlyBackend().census
+    with pytest.raises(groups.Unknown):
+        cap._terminal_absence(1)
+
+
+def test_revocation_beats_cached_verdict_at_mutation_boundary(monkeypatch):
+    cap = object.__new__(groups.OwnedGroup)
+    cap._revoked = False
+    cap.pgid = 43210
+    cap.clock = lambda: 0
+    cap._send = forbidden
+    verified = groups.Verdict("VERIFIED", "cached", (43210,))
+    cap.refresh = lambda **kwargs: verified
+    cap._leader_witness = lambda deadline: ("held", None)
+    cap.revoke()
+    # Even replacing refresh with a cached positive control cannot restore send.
+    assert cap.signal(signal.SIGKILL, deadline=1).status == "REFUSED"
+    cap.revoke()
+    assert cap._revoked is True
+
+
+def test_only_exact_accepted_terminal_can_construct_proven_empty():
+    cap = object.__new__(groups.OwnedGroup)
+    cap._revoked = False
+    cap.last = groups.Verdict("OBSERVED_EMPTY", "synthetic authoritative terminal")
+    cap._terminal_result = None
+    outcome = contracts.Outcome()
+    outcome.accept_terminal(cap, cap.last)
+    assert outcome.cleanup_status == "unknown"
+    cap._terminal_result = cap.last
+    outcome.accept_terminal(cap, cap.last)
+    assert outcome.cleanup_status == "proven-empty"
+    cap.revoke()
+    second = contracts.Outcome()
+    second.accept_terminal(cap, cap.last)
+    assert second.cleanup_status == "unknown"
+
+
+def test_missing_stale_and_command_status_receipts_never_admit(tmp_path):
+    receipt = contracts.Receipt(tmp_path, "same-id")
+    assert not contracts.admit_cleanup(
+        receipt.path, expected_invocation_id=receipt.invocation_id, expected_directory=tmp_path
+    )
+    outcome = contracts.Outcome(0, 0, "child-exit", "proven-empty", "synthetic test certificate")
+    receipt.publish("cleanup-required", outcome)
+    assert contracts.admit_cleanup(
+        receipt.path, expected_invocation_id=receipt.invocation_id, expected_directory=tmp_path
+    )
+    fresh = contracts.Receipt(tmp_path, "same-id")
+    assert fresh.invocation_id != receipt.invocation_id
+    assert not contracts.admit_cleanup(
+        receipt.path, expected_invocation_id=fresh.invocation_id, expected_directory=tmp_path
+    )
+    fresh.publish("command-status", outcome)  # Forged status alone cannot admit.
+    assert not contracts.admit_cleanup(
+        fresh.path, expected_invocation_id=fresh.invocation_id, expected_directory=tmp_path
+    )
+    before = receipt.path.read_bytes()
+    with pytest.raises(FileExistsError):
+        receipt.publish("cleanup-required", outcome)
+    assert receipt.path.read_bytes() == before
+
+
+def test_failed_fsync_never_publishes_admissible_success(monkeypatch, tmp_path):
+    def fail(fd):
+        raise OSError("synthetic storage failure")
+
+    monkeypatch.setattr(contracts.os, "fsync", fail)
+
+    def strict(outcome):
+        outcome.command_exit_code, outcome.wrapper_exit_code = 0, 0
+        outcome.termination_cause = "child-exit"
+        outcome.cleanup_status = "proven-empty"
+
+    rc, receipt, text = invoke(
+        tmp_path,
+        contract="cleanup-required",
+        strict=strict,
+        backend=contracts.Backend("synthetic-authoritative", True, "test"),
+    )
+    assert rc == 126 and not receipt.path.exists()
+    assert "publication failed" in text
+    pending = receipt.path.with_suffix(".pending")
+    # Complete strict-success JSON survives fsync failure. JSON fields alone
+    # would admit this SAME invocation, so this kills the missing-path guard.
+    row = json.loads(pending.read_text())
+    assert row["wrapper_exit_code"] == row["command_exit_code"] == 0
+    assert row["cleanup_status"] == "proven-empty"
+    assert row["requested_contract"] == "cleanup-required"
+    assert not contracts.admit_cleanup(
+        pending, expected_invocation_id=receipt.invocation_id, expected_directory=tmp_path
+    )
+    assert not contracts.admit_cleanup(
+        receipt.path, expected_invocation_id=receipt.invocation_id, expected_directory=tmp_path
+    )
+
+
+def test_supported_strict_retains_existing_gate_and_nonzero_cause(tmp_path):
+    def strict(outcome):
+        outcome.wrapper_exit_code = 137
+        outcome.termination_cause = "memory-policy"
+        outcome.cleanup_reason = "terminal proof failed"
+
+    rc, receipt, text = invoke(
+        tmp_path,
+        contract="cleanup-required",
+        strict=strict,
+        backend=contracts.Backend("synthetic-authoritative", True, "test"),
+    )
+    assert rc == 137
+    assert receipt_row(receipt)["termination_cause"] == "memory-policy"
+
+
+def test_strict_child_success_requires_terminal_certificate(tmp_path):
+    def strict(outcome):
+        outcome.command_exit_code = outcome.wrapper_exit_code = 0
+        outcome.termination_cause = "child-exit"
+
+    rc, receipt, text = invoke(
+        tmp_path,
+        contract="cleanup-required",
+        strict=strict,
+        backend=contracts.Backend("synthetic-authoritative", True, "test"),
+    )
+    assert rc == 126
+    row = receipt_row(receipt)
+    assert row["command_exit_code"] == 0 and row["cleanup_status"] == "unknown"
+    assert row["termination_cause"] == "child-exit"
+
+
+def test_revoking_wait_that_raises_cannot_restore_direct_send(monkeypatch):
+    class Child:
+        pid = 43210
+
+        def wait(self, **kwargs):
+            raise RuntimeError("synthetic consuming-wait failure")
+
+    child = contracts.DirectChild(Child())
+    monkeypatch.setattr(contracts.os, "kill", forbidden)
+    with pytest.raises(RuntimeError):
+        child.reap()
+    with pytest.raises(RuntimeError, match="revoked"):
+        child.send(signal.SIGTERM)
+    child.revoke()
+    with pytest.raises(RuntimeError, match="revoked"):
+        child.send(signal.SIGKILL)
+
+
+def test_unseen_observation_does_not_reach_terminal_promotion():
+    cap = object.__new__(groups.OwnedGroup)
+    cap.leader = cap.pgid = 43210
+    cap._revoked = False
+    cap._terminal_result = None
+    cap.receipts = {43210: SimpleNamespace()}
+    cap.probe = {}
+    cap.terminating_sends = [signal.SIGKILL]
+    cap._leader_witness = lambda deadline: ("unseen", None)
+    cap.census = contracts.ObservationOnlyBackend().census
+    cap._terminal_absence = forbidden
+    # Mutation target P1: an observation that claims complete=True and omits
+    # the leader must not reach the otherwise-accepted terminal path.
+    assert cap.refresh(deadline=1, terminal=True).status == "REFUSED"
+
+
+@pytest.mark.parametrize(
+    "cause,status", [("deadline", 124), ("interruption", 130), ("memory-policy", 137)]
+)
+def test_established_nonzero_survives_supervision_and_publication_failure(tmp_path, cause, status):
+    class BrokenReceipt(contracts.Receipt):
+        def publish(self, contract, outcome):
+            raise OSError("synthetic publication failure")
+
+    def strict(outcome):
+        outcome.wrapper_exit_code = status
+        outcome.termination_cause = cause
+        raise RuntimeError("synthetic cleanup failure")
+
+    rc = contracts.execute(
+        ["synthetic"],
+        contract="cleanup-required",
+        timeout=1,
+        grace=0,
+        budget=SimpleNamespace(ceiling_mb=0),
+        child_env={},
+        receipt=BrokenReceipt(tmp_path, "same-id"),
+        stream=io.StringIO(),
+        strict=strict,
+        backend=contracts.Backend("synthetic-authoritative", True, "test"),
+    )
+    assert rc == status
+
+
+def test_interruption_is_not_confused_with_child_returning_130(tmp_path):
+    def direct(argv, **kwargs):
+        kwargs["stop"]["signum"] = signal.SIGINT
+
+        class Child:
+            pid = 43210
+
+            def wait(self, **kw):
+                return 0
+
+        class Boundary(contracts.DirectChild):
+            def terminal(self):
+                return True
+
+        contracts.supervise_direct(argv, **kwargs, spawn=lambda *a, **k: Child(), boundary=Boundary)
+
+    rc, receipt, text = invoke(tmp_path, direct=direct)
+    row = receipt_row(receipt)
+    assert rc == 130 and row["command_exit_code"] == 0
+    assert row["termination_cause"] == "interruption" and row["cleanup_status"] == "unknown"
+
+
+def test_summary_names_default_contract(tmp_path):
+    rc, receipt, text = invoke(tmp_path, contract="cleanup-required")
+    assert rc == 125
+    assert "contract=cleanup-required" in text and "cleanup=unknown" in text
+
+
+def strict_success(outcome):
+    outcome.command_exit_code = outcome.wrapper_exit_code = 0
+    outcome.termination_cause = "child-exit"
+    outcome.cleanup_status = "proven-empty"
+
+
+def test_strict_success_never_claims_descendant_cleanup(tmp_path):
+    rc, receipt, _ = invoke(
+        tmp_path,
+        contract="cleanup-required",
+        strict=strict_success,
+        backend=contracts.Backend("synthetic-authoritative", True, "test"),
+    )
+    row = receipt_row(receipt)
+    assert rc == 0 and row["cleanup_status"] == "proven-empty"
+    assert row["descendant_cleanup"] == "unknown"
+    assert contracts.admit_cleanup(
+        receipt.path, expected_invocation_id=receipt.invocation_id, expected_directory=tmp_path
+    )
+    # Even a successfully linked pending inode is NOT the published pathname.
+    assert not contracts.admit_cleanup(
+        receipt.path.with_suffix(".pending"),
+        expected_invocation_id=receipt.invocation_id,
+        expected_directory=tmp_path,
+    )
+    assert not contracts.admit_cleanup(
+        receipt.path,
+        expected_invocation_id=receipt.invocation_id,
+        expected_directory=tmp_path / "other",
+    )
+
+
+def test_final_collision_is_independent_of_pending_collision(tmp_path):
+    receipt = contracts.Receipt(tmp_path, "same-id")
+    original = b"existing final must not be overwritten\n"
+    receipt.path.write_bytes(original)
+    pending = receipt.path.with_suffix(".pending")
+    assert not pending.exists()
+    outcome = contracts.Outcome()
+    strict_success(outcome)
+    with pytest.raises(FileExistsError):
+        receipt.publish("cleanup-required", outcome)
+    # Kills replacing os.link with os.replace: pending creation succeeds here,
+    # unlike the old second-publish test, which failed before reaching the link.
+    assert receipt.path.read_bytes() == original
+    assert json.loads(pending.read_text())["cleanup_status"] == "proven-empty"
+
+
+def test_errant_direct_supervisor_cannot_promote_group_cleanup(tmp_path):
+    def direct(argv, *, outcome, **kwargs):
+        strict_success(outcome)
+
+    rc, receipt, _ = invoke(tmp_path, direct=direct)
+    row = receipt_row(receipt)
+    assert rc == 0 and row["command_exit_code"] == 0
+    assert row["cleanup_status"] == "unknown"
+    assert row["descendant_cleanup"] == "unknown"
+
+
+@pytest.mark.parametrize("point", ["terminal", "reap", "revoke"])
+def test_direct_late_interruption_is_not_child_success(point):
+    stop = {"signum": 0}
+    outcome = contracts.Outcome()
+
+    class Child:
+        pid = 43210
+
+        def wait(self, *, timeout):
+            assert timeout == 0
+            if point == "reap":
+                stop["signum"] = signal.SIGINT
+            return 0
+
+    class Boundary(contracts.DirectChild):
+        def terminal(self):
+            if point == "terminal":
+                stop["signum"] = signal.SIGINT
+            return True
+
+        def revoke(self):
+            super().revoke()
+            if point == "revoke":
+                stop["signum"] = signal.SIGINT
+
+    contracts.supervise_direct(
+        ["synthetic"],
+        timeout=None,
+        grace=0,
+        env={},
+        outcome=outcome,
+        stop=stop,
+        spawn=lambda *a, **k: Child(),
+        boundary=Boundary,
+    )
+    assert outcome.command_exit_code == 0
+    assert outcome.wrapper_exit_code == 130
+    assert outcome.termination_cause == "interruption"
+
+
+@pytest.mark.parametrize("point", ["return", "restore"])
+def test_execute_reconciles_direct_return_and_handler_restore(monkeypatch, tmp_path, point):
+    handlers = {}
+    previous = object()
+
+    def fake_signal(sig, handler):
+        if handler is previous:
+            if point == "restore" and sig == signal.SIGINT:
+                handlers[sig](signal.SIGINT, None)
+        else:
+            handlers[sig] = handler
+        return previous
+
+    monkeypatch.setattr(contracts.signal, "signal", fake_signal)
+
+    def direct(argv, *, outcome, stop, **kwargs):
+        strict_success(outcome)
+        if point == "return":
+            stop["signum"] = signal.SIGINT
+
+    rc, receipt, _ = invoke(tmp_path, direct=direct)
+    row = receipt_row(receipt)
+    assert rc == 130 and row["command_exit_code"] == 0
+    assert row["termination_cause"] == "interruption"
+
+
+@pytest.fixture
+def strict_boundary(runner, monkeypatch, tmp_path):
+    """Integrated strict runner with NO real spawn, census, wait or handlers.
+
+    The wait's assertion discriminates revocation-before-consumption, including
+    TimeoutExpired; merely checking eventual owner state misses that ordering.
+    """
+    state = {
+        "point": None,
+        "wait_timeout": False,
+        "wait_calls": 0,
+        "wait_revoked": [],
+        "child_status": 0,
+        "raise_at_point": False,
+        "restore_attempts": [],
+    }
+    handlers = {}
+    previous = object()
+
+    def interrupt():
+        handlers[signal.SIGINT](signal.SIGINT, None)
+
+    def fake_signal(sig, handler):
+        if handler is previous:
+            state["restore_attempts"].append(sig)
+            if state["point"] == "restore" and sig == signal.SIGINT:
+                interrupt()
+                if state["raise_at_point"]:
+                    raise RuntimeError("synthetic restoration failure")
+        else:
+            handlers[sig] = handler
+        return previous
+
+    class Owner:
+        last = groups.Verdict("VERIFIED", "synthetic held reservation")
+        terminating_sends = []
+        revoked = False
+        terminal = None
+
+        def leader_terminal(self, deadline):
+            return True
+
+        def refresh(self, *, deadline, terminal=False):
+            if terminal and state["point"] == "census":
+                interrupt()
+                if state["raise_at_point"]:
+                    raise RuntimeError("synthetic final census failure")
+            self.last = groups.Verdict("OBSERVED_EMPTY", "synthetic group only")
+            if terminal:
+                self.terminal = self.last
+            return self.last
+
+        def accepted_terminal(self, verdict):
+            return not self.revoked and verdict is self.terminal
+
+        def revoke(self):
+            self.revoked = True
+
+    owner = Owner()
+    # Ensure terminal=True is used in final census, without any real send.
+    owner.terminating_sends = [signal.SIGKILL]
+
+    class Child:
+        pid = 43210
+        returncode = None
+
+        def poll(self):
+            pytest.fail("a second consuming poll bypassed the wait boundary")
+
+        def wait(self, *, timeout):
+            state["wait_calls"] += 1
+            # Observe outside execute's exception handler too: otherwise an
+            # AssertionError here can masquerade as the expected timeout rc126.
+            state["wait_revoked"].append(owner.revoked)
+            assert owner.revoked, "strict wait consumed before authority revocation"
+            if state["point"] == "wait":
+                interrupt()
+                if state["raise_at_point"]:
+                    raise RuntimeError("synthetic consuming wait failure")
+            if state["wait_timeout"]:
+                raise runner.subprocess.TimeoutExpired("synthetic", timeout)
+            self.returncode = state["child_status"]
+            return self.returncode
+
+    monkeypatch.setattr(runner.signal, "signal", fake_signal)
+    monkeypatch.setattr(runner.subprocess, "Popen", lambda *a, **k: Child())
+    monkeypatch.setattr(groups.OwnedGroup, "capture", lambda *a, **k: owner)
+    monkeypatch.setattr(runner, "_signal_group", lambda *a, **k: owner.last)
+    monkeypatch.setattr(runner, "_record_run", lambda *a, **k: None)
+    monkeypatch.setattr(runner, "_record_dir", lambda: tmp_path)
+    monkeypatch.setattr(runner, "_child_environment", lambda budget: {})
+    monkeypatch.setattr(
+        runner,
+        "_memory_budget",
+        lambda mb: (SimpleNamespace(ceiling_mb=0, reason="synthetic zero grant"), "test"),
+    )
+    monkeypatch.setattr(runner.time, "monotonic", lambda: 0.0)
+    monkeypatch.setattr(runner.time, "sleep", forbidden)
+
+    def run():
+        rc = runner.run(
+            ["synthetic"],
+            timeout=None,
+            grace=0,
+            stream=io.StringIO(),
+            _backend=contracts.Backend("synthetic-authoritative", True, "test"),
+        )
+        path = next(tmp_path.glob("*.completion.json"))
+        row = json.loads(path.read_text())
+        admitted = contracts.admit_cleanup(
+            path, expected_invocation_id=row["invocation_id"], expected_directory=tmp_path
+        )
+        return rc, row, admitted
+
+    return state, run
+
+
+@pytest.mark.parametrize("point", [None, "census", "wait", "restore"])
+def test_strict_finalization_reconciles_late_interruptions(strict_boundary, point):
+    state, run = strict_boundary
+    state["point"] = point
+    rc, row, admitted = run()
+    assert state["wait_calls"] == 1
+    assert row["command_exit_code"] == 0 and row["cleanup_status"] == "proven-empty"
+    assert row["descendant_cleanup"] == "unknown"
+    assert rc == (0 if point is None else 130)
+    assert row["termination_cause"] == ("child-exit" if point is None else "interruption")
+    assert admitted is (point is None)
+
+
+@pytest.mark.parametrize("wait_timeout", [False, True])
+def test_strict_wait_revokes_before_success_or_timeout(strict_boundary, wait_timeout):
+    state, run = strict_boundary
+    state["wait_timeout"] = wait_timeout
+    rc, row, admitted = run()
+    assert state["wait_calls"] == 1
+    assert state["wait_revoked"] == [True]
+    assert rc == (126 if wait_timeout else 0)
+    assert row["command_exit_code"] == (None if wait_timeout else 0)
+    assert admitted is (not wait_timeout)
+
+
+@pytest.mark.parametrize("child_status,expected", [(-signal.SIGTERM, 143), (7, 7)])
+def test_strict_child_status_has_independent_shell_oracle(strict_boundary, child_status, expected):
+    state, run = strict_boundary
+    state["child_status"] = child_status
+    rc, row, admitted = run()
+    assert state["wait_revoked"] == [True]
+    assert rc == expected and row["command_exit_code"] == expected
+    assert row["termination_cause"] == ("child-signal" if child_status < 0 else "child-exit")
+    assert not admitted
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("schema", "other-schema"),
+        ("invocation_id", "0" * 32),
+        ("requested_contract", "command-status"),
+        ("record_phase", "pending"),
+        ("cleanup_scope", "descendants"),
+        ("cleanup_status", "unknown"),
+        ("wrapper_exit_code", 130),
+        ("command_exit_code", 7),
+        ("termination_cause", "interruption"),
+    ],
+)
+def test_admission_checks_each_success_predicate_independently(tmp_path, field, value):
+    receipt = contracts.Receipt(tmp_path, "same-id")
+    # Make the invocation mismatch deterministic, not probability-dependent.
+    receipt.invocation_id = "1" * 32
+    receipt.path = tmp_path / f"{receipt.invocation_id}.completion.json"
+    outcome = contracts.Outcome()
+    strict_success(outcome)
+    row = receipt.publish("cleanup-required", outcome)
+    assert contracts.admit_cleanup(
+        receipt.path, expected_invocation_id=receipt.invocation_id, expected_directory=tmp_path
+    )
+    row[field] = value
+    receipt.path.write_text(json.dumps(row))
+    assert not contracts.admit_cleanup(
+        receipt.path, expected_invocation_id=receipt.invocation_id, expected_directory=tmp_path
+    )
+
+
+@pytest.mark.parametrize("mismatch", ["terminal", "last", "argument"])
+def test_terminal_authority_requires_both_identities_and_status(mismatch):
+    cap = object.__new__(groups.OwnedGroup)
+    cap._revoked = False
+    accepted = groups.Verdict("OBSERVED_EMPTY", "synthetic terminal")
+    equal_but_not_same = groups.Verdict("OBSERVED_EMPTY", "synthetic terminal")
+    cap._terminal_result = cap.last = accepted
+    supplied = accepted
+    if mismatch == "terminal":
+        cap._terminal_result = equal_but_not_same
+    elif mismatch == "last":
+        cap.last = equal_but_not_same
+    else:
+        # Both identities match but the status is not terminal absence.
+        supplied = cap._terminal_result = cap.last = groups.Verdict("VERIFIED", "live")
+    outcome = contracts.Outcome()
+    outcome.accept_terminal(cap, supplied)
+    assert outcome.cleanup_status == "unknown"
+
+
+def test_canonical_name_cannot_be_a_symlink_to_unpublished_pending(tmp_path):
+    receipt = contracts.Receipt(tmp_path, "same-id")
+    pending = receipt.path.with_suffix(".pending")
+    outcome = contracts.Outcome()
+    strict_success(outcome)
+    # Construct strict-success content without claiming publication succeeded.
+    row = {
+        "schema": contracts.SCHEMA,
+        "invocation_id": receipt.invocation_id,
+        "requested_contract": "cleanup-required",
+        "record_phase": "complete",
+        "cleanup_scope": "owned-process-group",
+        "cleanup_status": "proven-empty",
+        "wrapper_exit_code": 0,
+        "command_exit_code": 0,
+        "termination_cause": "child-exit",
+    }
+    pending.write_text(json.dumps(row))
+    receipt.path.symlink_to(pending)
+    assert not contracts.admit_cleanup(
+        receipt.path, expected_invocation_id=receipt.invocation_id, expected_directory=tmp_path
+    )
+
+
+@pytest.fixture(autouse=True)
+def synthetic_handler_registry(monkeypatch):
+    # These synthetic invoke() cases must never install OS handlers; per-test
+    # boundary fakes may override. Real CLI cells execute in a separate process.
+    handlers = {}
+
+    def register(sig, handler):
+        previous = handlers.get(sig, signal.SIG_DFL)
+        handlers[sig] = handler
+        return previous
+
+    monkeypatch.setattr(contracts.signal, "signal", register)
+
+
+@pytest.mark.parametrize("point", ["census", "wait", "restore"])
+def test_strict_finalization_signal_plus_exception_preserves_interruption(strict_boundary, point):
+    state, run = strict_boundary
+    state["point"] = point
+    state["raise_at_point"] = True
+    rc, row, admitted = run()
+    assert rc == 130 and row["wrapper_exit_code"] == 130
+    assert row["termination_cause"] == "interruption"
+    assert row["finalization_status"] == "failed"
+    stage = "handler-restoration" if point == "restore" else "strict-finalization"
+    assert row["finalization_errors"] == [f"{stage}:RuntimeError"]
+    assert row["command_exit_code"] == (0 if point == "restore" else None)
+    assert state["restore_attempts"] == list(contracts.FORWARDED)
+    assert not admitted
+
+
+@pytest.mark.parametrize("interrupt", [False, True])
+@pytest.mark.parametrize(
+    "cause,status", [("child-exit", 0), ("deadline", 124), ("memory-policy", 137)]
+)
+def test_execute_restoration_exception_publishes_failure_and_attempts_remaining_handlers(
+    monkeypatch, tmp_path, interrupt, cause, status
+):
+    handlers = {}
+    previous = object()
+    attempts = []
+
+    def fake_signal(sig, handler):
+        if handler is previous:
+            attempts.append(sig)
+            if sig == signal.SIGINT:
+                if interrupt:
+                    handlers[sig](signal.SIGINT, None)
+                raise RuntimeError("synthetic restoration failure")
+        else:
+            handlers[sig] = handler
+        return previous
+
+    monkeypatch.setattr(contracts.signal, "signal", fake_signal)
+
+    def direct(argv, *, outcome, **kwargs):
+        outcome.command_exit_code = 0
+        outcome.wrapper_exit_code = status
+        outcome.termination_cause = cause
+
+    rc, receipt, text = invoke(tmp_path, direct=direct)
+    row = receipt_row(receipt)
+    expected = 130 if interrupt else (126 if cause == "child-exit" else status)
+    expected_cause = (
+        "interruption"
+        if interrupt
+        else ("finalization-failure" if cause == "child-exit" else cause)
+    )
+    assert rc == expected and row["wrapper_exit_code"] == expected
+    assert row["termination_cause"] == expected_cause
+    assert row["command_exit_code"] == 0
+    assert row["finalization_status"] == "failed"
+    assert row["finalization_errors"] == ["handler-restoration:RuntimeError"]
+    assert attempts == list(contracts.FORWARDED)
+    assert f"rc={expected} cause={expected_cause}" in text
+    assert not contracts.admit_cleanup(
+        receipt.path, expected_invocation_id=receipt.invocation_id, expected_directory=tmp_path
+    )
+
+
+@pytest.mark.parametrize(
+    "malformed_id",
+    ["a" * 31, "a" * 33, "g" + "a" * 31],
+    ids=["short-hex", "long-hex", "non-hex-correct-length"],
+)
+def test_admission_rejects_malformed_expected_id_despite_matching_path_and_json(
+    tmp_path, malformed_id
+):
+    # All other predicates agree. Deleting JUST the length or character guard
+    # admits its corresponding malformed case; a mismatched path cannot mask it.
+    receipt = contracts.Receipt(tmp_path, "same-id")
+    receipt.invocation_id = malformed_id
+    receipt.path = tmp_path / f"{malformed_id}.completion.json"
+    outcome = contracts.Outcome()
+    strict_success(outcome)
+    row = receipt.publish("cleanup-required", outcome)
+    assert row["invocation_id"] == malformed_id
+    assert receipt.path == tmp_path / f"{malformed_id}.completion.json"
+    assert not contracts.admit_cleanup(
+        receipt.path, expected_invocation_id=malformed_id, expected_directory=tmp_path
+    )
+
+
+@pytest.mark.parametrize("ceiling", [0, 128, 4096])
+def test_real_child_environment_carries_resolved_budget_and_default_gate(
+    runner, monkeypatch, ceiling
+):
+    monkeypatch.setenv(runner.memory_guard.RESOLVED_MEMORY_MB_ENV, "99999")
+    monkeypatch.delenv(runner._NO_NOTIFICATIONS_ENV, raising=False)
+    monkeypatch.setenv("BOUNDED_UNRELATED", "preserved")
+    before = dict(runner.os.environ)
+    env = runner._child_environment(SimpleNamespace(ceiling_mb=ceiling))
+    assert env[runner.memory_guard.RESOLVED_MEMORY_MB_ENV] == str(ceiling)
+    assert env[runner._NO_NOTIFICATIONS_ENV] == "1"
+    assert env["BOUNDED_UNRELATED"] == "preserved"
+    assert dict(runner.os.environ) == before, "building a child's policy must not mutate the parent"
+
+
+@pytest.mark.parametrize("gate", ["0", "1", ""])
+def test_real_child_environment_preserves_explicit_notification_policy(runner, monkeypatch, gate):
+    monkeypatch.setenv(runner._NO_NOTIFICATIONS_ENV, gate)
+    assert (
+        runner._child_environment(SimpleNamespace(ceiling_mb=64))[runner._NO_NOTIFICATIONS_ENV]
+        == gate
+    )
+
+
+@pytest.mark.parametrize(
+    "options, append",
+    [
+        (None, True),
+        ("", True),
+        ("--trace-warnings", True),
+        ("--trace-warnings --max-old-space-size=16", True),
+        ("--max_old_space_size=+8192 --trace-warnings", False),
+        ('"--max-old-space-size=8192" --trace-warnings', False),
+        ("--max-old-space-size=8192 --max-old-space-size=32", True),
+        ("--max-old-space-size=32 --max-old-space-size=8192", False),
+        ('--title="contains --max-old-space-size=8192"', True),
+        ('--title="unclosed', True),
+    ],
+)
+def test_real_child_environment_heap_floor_preserves_unrelated_flags(
+    runner, monkeypatch, options, append
+):
+    if options is None:
+        monkeypatch.delenv("NODE_OPTIONS", raising=False)
+    else:
+        monkeypatch.setenv("NODE_OPTIONS", options)
+    env = runner._child_environment(SimpleNamespace(ceiling_mb=128))
+    expected = options or ""
+    if append:
+        expected = (
+            expected + " " if expected else ""
+        ) + f"--max-old-space-size={runner.NODE_HEAP_MB}"
+    assert runner.NODE_HEAP_MB == 6144
+    assert env["NODE_OPTIONS"] == expected
+    # The V8 heap floor is deliberately not the group admission ceiling.
+    assert env[runner.memory_guard.RESOLVED_MEMORY_MB_ENV] == "128"
+
+
+def test_real_child_environment_heap_floor_boundary(runner, monkeypatch):
+    for heap in (runner.NODE_HEAP_MB - 1, runner.NODE_HEAP_MB, runner.NODE_HEAP_MB + 1):
+        options = f"--trace-warnings --max-old-space-size={heap}"
+        monkeypatch.setenv("NODE_OPTIONS", options)
+        result = runner._child_environment(SimpleNamespace(ceiling_mb=0))["NODE_OPTIONS"]
+        assert result == (
+            options + f" --max-old-space-size={runner.NODE_HEAP_MB}"
+            if heap < runner.NODE_HEAP_MB
+            else options
+        )
+
+
+def test_environment_extraction_is_one_definition_and_two_real_call_sites(runner):
+    import ast
+
+    # Direct source delivery has no ordered patch applier. Enforce its replacement
+    # invariant on the integrated AST: one policy body, both execution paths wired
+    # to it, and no second inline copy that a later extraction could edit instead.
+    tree = ast.parse(Path(runner.__file__).read_text())
+    definitions = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "_child_environment"
+    ]
+    assert len(definitions) == 1
+    callers = set()
+    policy_owners = set()
+    for function in [node for node in tree.body if isinstance(node, ast.FunctionDef)]:
+        for node in ast.walk(function):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "_child_environment"
+            ):
+                callers.add(function.name)
+            if isinstance(node, ast.Constant) and node.value == "NODE_OPTIONS":
+                policy_owners.add(function.name)
+    assert callers == {"run", "_run_cleanup_required"}
+    assert policy_owners == {"_child_environment"}
+
+
+def test_integrated_sources_have_no_undefined_names_and_checker_rejects_missing_builder(runner):
+    from pyflakes.api import check
+    from pyflakes.reporter import Reporter
+
+    # flake8 (the existing CI + check-changed gate) includes F821. Check the
+    # integrated files too, and prove this is load-bearing with the exact POC
+    # defect: a call whose definition was described but never emitted.
+    paths = [Path(runner.__file__), Path(contracts.__file__), Path(groups.__file__), Path(__file__)]
+    for path in paths:
+        errors = io.StringIO()
+        assert check(path.read_text(), str(path), Reporter(errors, errors)) == 0, errors.getvalue()
+    source = Path(runner.__file__).read_text()
+    assert source.count("def _child_environment(") == 1
+    mutant = source.replace("def _child_environment(", "def _missing_environment_builder(")
+    errors = io.StringIO()
+    assert check(mutant, str(runner.__file__), Reporter(errors, errors)) >= 2
+    assert errors.getvalue().count("undefined name '_child_environment'") == 2
+
+
+def test_broken_summary_preserves_original_supervision_error(tmp_path):
+    output = io.StringIO()
+    output.close()
+    receipt = contracts.Receipt(tmp_path, "broken-summary")
+
+    def strict(outcome):
+        raise RuntimeError("original monitor error")
+
+    with pytest.raises(RuntimeError, match="original monitor error"):
+        contracts.execute(
+            ["synthetic"],
+            contract="cleanup-required",
+            timeout=None,
+            grace=0,
+            budget=SimpleNamespace(ceiling_mb=0),
+            child_env={},
+            receipt=receipt,
+            stream=output,
+            strict=strict,
+            backend=contracts.Backend("synthetic-authoritative", True, "test"),
+        )
+    row = receipt_row(receipt)
+    assert row["supervision_error"] == "RuntimeError"
+    assert row["wrapper_exit_code"] == 126
+    assert row["cleanup_status"] == "unknown"

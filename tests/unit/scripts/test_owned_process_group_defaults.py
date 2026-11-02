@@ -86,12 +86,9 @@ def test_default_capture_subsecond_native_or_explicit_fallback_refusal(
         assert cap.last.status == "REFUSED"
         assert not calls and not signals
         return
-    if native_available:
-        assert cap.last.status == "VERIFIED"
-        assert cap.signal(9, deadline=deadline).status == "SIGNALED"
-        assert signals == [(10, 9)]
-    else:
-        assert cap.last.status == "REFUSED"
-        assert cap.signal(9, deadline=deadline).status == "REFUSED"
-        assert not signals
-    assert calls
+    # Darwin row equality is observation, never a coverage certificate. The old
+    # default admission premise is intentionally unavailable, regardless of the
+    # lower native sampler. Refuse before sampling and never invoke the sender.
+    assert cap.last.status == "REFUSED"
+    assert cap.signal(9, deadline=deadline).status == "REFUSED"
+    assert not calls and not signals
