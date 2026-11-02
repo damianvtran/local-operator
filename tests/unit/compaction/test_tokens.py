@@ -1263,12 +1263,15 @@ def test_a_reference_charge_covers_the_sentence_the_serializer_renders():
 
 
 def test_a_text_document_is_bounded_by_the_extraction_limit():
-    from local_operator.providers.documents import MAX_FALLBACK_TEXT_CHARS
+    from local_operator.harness.document_limits import (
+        DOCUMENT_CHARS_PER_TOKEN,
+        MAX_FALLBACK_TEXT_CHARS,
+    )
 
     huge = _document("text/plain", "log.txt", 32_000_000, injection="extracted")
     small = _document("text/plain", "log.txt", 30_000, injection="extracted")
     huge_tokens = estimate_tokens(Message(role="user", content=[huge]))
-    assert huge_tokens <= (MAX_FALLBACK_TEXT_CHARS + 400) // 3
+    assert huge_tokens <= (MAX_FALLBACK_TEXT_CHARS + 400) // DOCUMENT_CHARS_PER_TOKEN
     assert estimate_tokens(Message(role="user", content=[small])) < huge_tokens
     assert messages_tokens_upper_bound([Message(role="user", content=[huge])]) >= huge_tokens
 

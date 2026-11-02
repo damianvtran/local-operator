@@ -66,6 +66,7 @@ import hashlib
 import io
 import json
 import logging
+import re
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Sequence
@@ -74,6 +75,7 @@ from local_operator.harness.document_limits import (
     DOCUMENT_CHARS_PER_TOKEN,
     DOCUMENT_WINDOW_SHARE,
     MAX_FALLBACK_TEXT_CHARS,
+    MAX_NATIVE_PDF_PAGES,
     is_text_mime,
 )
 from local_operator.harness.pdf_pages import known_pdf_page_count, pdf_page_count
@@ -278,43 +280,53 @@ def document_form(
     (a caller that cannot name the model, e.g. the legacy ``/v1/chat`` door)
     takes the SMALL limit: unknown is not evidence of a large window, and the
     cost of guessing wrong in the other direction is a paid provider 400.
+
+    EVERY row, the OpenAI Responses wire included, is then narrowed to the
+    window-derived page cap (:func:`_window_page_cap`), so a PDF is sent
+    natively only when the ruler's per-page charge fits its share of the
+    window.
     """
     form = DOCUMENT_FORMS.get(provider)
     if provider == "openai" and wire == "openai-responses":
-        form = _OPENAI_RESPONSES if supports_images else None
-        return form
-    if form is None or form.wire not in _WIRE_FOR_REQUEST:
-        return None
-    if _WIRE_FOR_REQUEST[form.wire] != wire:
-        return None
-    if form.wire in {"openai_chat", "openai_responses"} and not supports_images:
-        return None
-    if form.wire == "anthropic" and (context_window or 0) < ANTHROPIC_LARGE_CONTEXT_WINDOW:
-        form = replace(form, max_pages=ANTHROPIC_SMALL_CONTEXT_MAX_PAGES)
+        # Not an early return: the Responses row is a different wire for the
+        # same provider id, but a 600-page PDF costs the same window here as
+        # anywhere, so it takes the same window-derived page cap below.
+        if not supports_images:
+            return None
+        form = _OPENAI_RESPONSES
+    else:
+        if form is None or form.wire not in _WIRE_FOR_REQUEST:
+            return None
+        if _WIRE_FOR_REQUEST[form.wire] != wire:
+            return None
+        if form.wire in {"openai_chat", "openai_responses"} and not supports_images:
+            return None
+        if form.wire == "anthropic" and (context_window or 0) < ANTHROPIC_LARGE_CONTEXT_WINDOW:
+            form = replace(form, max_pages=ANTHROPIC_SMALL_CONTEXT_MAX_PAGES)
     window_pages = _window_page_cap(context_window)
-    if window_pages is not None:
-        form = replace(
-            form,
-            max_pages=window_pages if form.max_pages is None else min(form.max_pages, window_pages),
-        )
-    return form
+    return replace(
+        form,
+        max_pages=window_pages if form.max_pages is None else min(form.max_pages, window_pages),
+    )
 
 
-def _window_page_cap(context_window: int | None) -> int | None:
+def _window_page_cap(context_window: int | None) -> int:
     """Native PDF pages one document may carry in a ``context_window`` model.
 
     The token ruler charges a native page :data:`PDF_PAGE_TOKEN_ESTIMATE`; a
     document gets ``1 / DOCUMENT_WINDOW_SHARE`` of the window, so the cap is
-    that share divided by the per-page charge (100 pages at 1M, 20 at 200k).
+    that share divided by the per-page charge (100 pages at 1M, 20 at 200k),
+    never above :data:`MAX_NATIVE_PDF_PAGES` (the ruler's own ceiling).
     Beyond it the PDF is EXTRACTED instead, whose text is bounded by
-    :func:`document_text_cap`. ``None`` for an unknown window: no evidence of
-    a limit, so the table's own page ceiling stands.
+    :func:`document_text_cap`. An unknown window takes the ceiling: no evidence
+    of room, and the same "unknown is small" rule the Anthropic row applies.
     """
     if not context_window or context_window <= 0:
-        return None
+        return MAX_NATIVE_PDF_PAGES
     from local_operator.compaction.tokens import PDF_PAGE_TOKEN_ESTIMATE
 
-    return max(1, context_window // DOCUMENT_WINDOW_SHARE // PDF_PAGE_TOKEN_ESTIMATE)
+    share = max(1, context_window // DOCUMENT_WINDOW_SHARE // PDF_PAGE_TOKEN_ESTIMATE)
+    return min(share, MAX_NATIVE_PDF_PAGES)
 
 
 def document_text_cap(context_window: int | None) -> int | None:
@@ -440,20 +452,21 @@ def document_native_ok(
     if form is None or block.mime_type != "application/pdf":
         return False
     raw: bytes | None = None
-    if form.max_pages is not None:
-        cached, pages = known_pdf_page_count(block.digest)
-        if not cached:
-            raw = _decoded(block)
-            if raw is None:
-                return False
-            pages = pdf_page_count(raw, block.digest)
-        # An UNCOUNTABLE PDF is not native: if the page structure cannot be
-        # read here, a provider's own parser is at least as likely to refuse
-        # it, and "send and hope" is exactly what the contract forbids. The
-        # fallback then extracts (or degrades to a reference), which never
-        # spends a paid request on a shape the provider rejects.
-        if pages is None or pages > form.max_pages:
+    cached, pages = known_pdf_page_count(block.digest)
+    if not cached:
+        raw = _decoded(block)
+        if raw is None:
             return False
+        pages = pdf_page_count(raw, block.digest)
+    # An UNCOUNTABLE PDF is not native, whether or not the row has a page
+    # limit: if the page structure cannot be read here, a provider's own
+    # parser is at least as likely to refuse it, and "send and hope" is
+    # exactly what the contract forbids. The fallback then extracts (or
+    # degrades to a reference), which never spends a paid request on a shape
+    # the provider rejects. It is also what lets the token ruler charge an
+    # uncountable PDF as the reference sentence it will render.
+    if pages is None or (form.max_pages is not None and pages > form.max_pages):
+        return False
     encoded = _encoded_length(block, raw)
     if encoded > form.max_bytes:
         return False
@@ -532,7 +545,7 @@ def _extract_pdf(block: "DocumentContent", raw: bytes, max_chars: int | None = N
     header = f"[Document: {block.filename} ({block.mime_type}, {block.bytes} bytes)]"
     cached = _read_cached_text(digest)
     if cached is not None:
-        return f"{header}\n{_clip_extraction(cached, max_chars, block.filename)}"
+        return f"{header}\n{_finish_extraction(cached, max_chars, block.filename)}"
     try:
         from pypdf import PdfReader
 
@@ -567,7 +580,38 @@ def _extract_pdf(block: "DocumentContent", raw: bytes, max_chars: int | None = N
     if total > pages_read:
         body += f"\n[... only the first {pages_read} of {total} pages were read]"
     _write_cached_text(digest, body)
-    return f"{header}\n{_clip_extraction(body, max_chars, block.filename)}"
+    return f"{header}\n{_finish_extraction(body, max_chars, block.filename)}"
+
+
+_PAGE_MARKER_RE = re.compile(r"^--- page (\d+) ---\n", re.MULTILINE)
+
+
+def _empty_pages_notice(body: str, filename: str) -> str:
+    """A leading note when extracted pages carry no text, else ``""``.
+
+    A scanned PDF has no text layer, so extraction returns bare page markers.
+    That used to be a PDF the provider could read natively; once a page cap
+    sends it here the model would otherwise answer as if the document were
+    blank. Derived from the body (cached or fresh) rather than stored in the
+    cache, so a cache entry written before this note existed gets it too.
+    """
+    parts = _PAGE_MARKER_RE.split(body)[1:]  # [page, text, page, text, ...]
+    texts = parts[1::2]
+    empty = sum(
+        1 for text in texts if not text.strip() or text.lstrip().startswith("[... only the first")
+    )
+    if not empty:
+        return ""
+    return (
+        f"[Note: {empty} of {len(texts)} extracted pages of {filename} contained no readable "
+        "text (scanned images or blank pages). Their content was NOT passed to you; do not "
+        "treat the document as empty.]\n"
+    )
+
+
+def _finish_extraction(body: str, max_chars: int | None, filename: str) -> str:
+    """The extraction as sent: empty-page note first, then the window clip."""
+    return _empty_pages_notice(body, filename) + _clip_extraction(body, max_chars, filename)
 
 
 def _clip_extraction(body: str, max_chars: int | None, filename: str) -> str:

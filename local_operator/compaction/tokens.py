@@ -119,6 +119,7 @@ from local_operator.harness.document_limits import (
     DOCUMENT_CHARS_PER_TOKEN,
     DOCUMENT_WINDOW_SHARE,
     MAX_FALLBACK_TEXT_CHARS,
+    MAX_NATIVE_PDF_PAGES,
     is_text_mime,
 )
 from local_operator.harness.pdf_pages import known_pdf_page_count, pdf_page_count
@@ -163,12 +164,12 @@ PDF_PAGE_TOKEN_ESTIMATE = 2_500
 
 #: Ceiling for ONE PDF block's local token charge, in the same unit. A
 #: thousand-page PDF at the per-page estimate would be 2.5M tokens, which is
-#: beyond every context this harness serves; the cap keeps one file from
-#: making the whole history's figure absurd. 100 pages is also the most the
-#: request builder will send NATIVELY to a 1M-window model (a quarter of the
-#: window at the per-page charge, see ``documents.document_form``); a longer
-#: PDF is extracted instead, and that text is bounded below this too.
-MAX_DOCUMENT_TOKEN_ESTIMATE = 100 * PDF_PAGE_TOKEN_ESTIMATE
+#: beyond every context this harness serves. Derived from
+#: ``MAX_NATIVE_PDF_PAGES`` rather than chosen separately: that is the most
+#: pages the request builder ever sends NATIVELY (``documents.document_form``),
+#: so the charge never sits below what a native PDF costs, on any window. A
+#: longer PDF is extracted instead, and that text is bounded below this too.
+MAX_DOCUMENT_TOKEN_ESTIMATE = MAX_NATIVE_PDF_PAGES * PDF_PAGE_TOKEN_ESTIMATE
 
 #: Characters the serializer adds around a document's text: the
 #: ``[Document: name (mime)]`` header and the code fence of a text file, or the
@@ -220,12 +221,13 @@ def _document_token_estimate(block: DocumentContent) -> int:
                     pages = pdf_page_count(raw, block.digest)
         if pages is not None:
             return min(pages * PDF_PAGE_TOKEN_ESTIMATE, MAX_DOCUMENT_TOKEN_ESTIMATE)
-        # An uncountable PDF is never sent native (``document_native_ok``
-        # needs a page count), and the extractor opens it with the SAME
+        # An uncountable PDF is never sent native on ANY row:
+        # ``document_native_ok`` requires a page count whether or not the row
+        # carries a page limit. The extractor then opens it with the SAME
         # ``PdfReader(strict=False)`` that just failed to count it (encrypted,
         # truncated, not a PDF at all), so it renders the one-sentence
         # reference. Charging the extractor's character bound here instead
-        # (133k tokens) would refuse every request on a 128k-window model for
+        # (200k tokens) would refuse every request on a 128k-window model for
         # a file whose real render is ~50 tokens.
         return _reference_tokens(block)
     if is_text_mime(block.mime_type):
@@ -243,10 +245,11 @@ def document_render_excess(messages: Sequence[Message], context_window: int) -> 
     but every serializer cuts a document's text to
     ``1 / DOCUMENT_WINDOW_SHARE`` of the model's window
     (``documents.document_text_cap``) and sends a PDF native only within the
-    same share. So a document never costs more than that share, and the charge
-    above it is a trigger-side over-estimate that must not reach a REFUSAL:
-    a 400k-character log is charged 133k tokens, which on a 32k-window model
-    would refuse a request whose real render is ~8k.
+    same share (``documents._window_page_cap``, on every row). So a document
+    never costs more than that share, and the charge above it is a
+    trigger-side over-estimate that must not reach a REFUSAL: a 400k-character
+    log is charged 200k tokens, which on a 32k-window model would refuse a
+    request whose real render is ~8k.
     """
     if context_window <= 0:
         return 0
