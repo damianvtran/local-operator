@@ -269,10 +269,20 @@
     "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
     "note": "Compact two-unit countdown, days and hours (e.g. 2d 4h). Use the locale's short unit abbreviations; must stay very short (about 8 cells)."
   },
+  "relay.shell.usage.countdown_day": {
+    "role": "usage sheet display",
+    "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
+    "note": "Compact countdown of whole days when the hour part is zero (e.g. 3d). Locale short abbreviation; very short."
+  },
   "relay.shell.usage.countdown_hours": {
     "role": "usage sheet display",
     "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
     "note": "Compact two-unit countdown, hours and minutes (e.g. 14h 5m). Locale short abbreviations; very short."
+  },
+  "relay.shell.usage.countdown_hour": {
+    "role": "usage sheet display",
+    "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
+    "note": "Compact countdown of whole hours when the minute part is zero (e.g. 2h). Locale short abbreviation; very short."
   },
   "relay.shell.usage.countdown_minutes": {
     "role": "usage sheet display",

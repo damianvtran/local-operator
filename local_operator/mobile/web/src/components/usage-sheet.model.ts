@@ -98,10 +98,16 @@ export function orderRows(limits: PhoneUsageLimit[]): UsageRow[] {
 		.map(({ limit, kind, tone, remaining }) => ({ limit, kind, tone, remaining }));
 }
 
-/** The desktop's "binding" idea: the non-paid row closest to refusing work.
- *  Worst tone wins, then least remaining; unknown never outranks a measured row. */
+/** The desktop's "binding" idea: the row closest to refusing work for the
+ *  WHOLE account. Included windows only — a spent family cap stops one model
+ *  family, not the account, so it must not paint the card "Exhausted" (it has
+ *  its own row and the family_caps note). Family caps bind only when the
+ *  account reports nothing else. Worst tone wins, then least remaining;
+ *  unknown never outranks a measured row. Paid rows never bind. */
 export function bindingRow(rows: UsageRow[]): UsageRow | null {
-	const gating = rows.filter((row) => row.kind !== "paid" && !row.limit.unlimited);
+	const usable = rows.filter((row) => row.kind !== "paid" && !row.limit.unlimited);
+	const included = usable.filter((row) => row.kind === "included");
+	const gating = included.length ? included : usable;
 	let best: UsageRow | null = null;
 	for (const row of gating) {
 		if (!best) { best = row; continue; }
@@ -165,7 +171,9 @@ export function buildUsageModel(reports: PhoneUsageReport[], collator: Intl.Coll
 
 /** Two-unit countdown parts (the desktop's `formatCountdown` shape). */
 export type Countdown = { unit: "days"; days: number; hours: number }
+	| { unit: "day"; days: number }
 	| { unit: "hours"; hours: number; minutes: number }
+	| { unit: "hour"; hours: number }
 	| { unit: "minutes"; minutes: number }
 	| { unit: "now" };
 
@@ -176,8 +184,10 @@ export function countdown(resetsAtMs: number, nowMs: number): Countdown {
 	const days = Math.floor(totalMinutes / 1440);
 	const hours = Math.floor((totalMinutes % 1440) / 60);
 	const minutes = totalMinutes % 60;
-	if (days > 0) return { unit: "days", days, hours };
-	if (hours > 0) return { unit: "hours", hours, minutes };
+	// Two units at most, and a zero second unit is dropped ("3d", "2h"), the
+	// desktop's formatCountdown shape.
+	if (days > 0) return hours > 0 ? { unit: "days", days, hours } : { unit: "day", days };
+	if (hours > 0) return minutes > 0 ? { unit: "hours", hours, minutes } : { unit: "hour", hours };
 	return { unit: "minutes", minutes };
 }
 

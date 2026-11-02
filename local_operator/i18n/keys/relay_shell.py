@@ -64,8 +64,16 @@ def usage_continue() -> Msg:
     return Msg("relay.shell.usage.continue", {})
 
 
+def usage_countdown_day(*, days: int | float) -> Msg:
+    return Msg("relay.shell.usage.countdown_day", {"days": days})
+
+
 def usage_countdown_days(*, days: int | float, hours: int | float) -> Msg:
     return Msg("relay.shell.usage.countdown_days", {"days": days, "hours": hours})
+
+
+def usage_countdown_hour(*, hours: int | float) -> Msg:
+    return Msg("relay.shell.usage.countdown_hour", {"hours": hours})
 
 
 def usage_countdown_hours(*, hours: int | float, minutes: int | float) -> Msg:

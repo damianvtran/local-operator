@@ -352,7 +352,9 @@ export type MessageParams = {
   "relay.shell.usage.blocked": undefined;
   "relay.shell.usage.command": undefined;
   "relay.shell.usage.continue": undefined;
+  "relay.shell.usage.countdown_day": { "days": number };
   "relay.shell.usage.countdown_days": { "days": number; "hours": number };
+  "relay.shell.usage.countdown_hour": { "hours": number };
   "relay.shell.usage.countdown_hours": { "hours": number; "minutes": number };
   "relay.shell.usage.countdown_minutes": { "minutes": number };
   "relay.shell.usage.eligibility_unknown": undefined;

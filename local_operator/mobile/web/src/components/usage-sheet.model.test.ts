@@ -49,6 +49,11 @@ describe("row ordering", () => {
 		]);
 		expect(bindingRow(rows)?.limit.window).toBe("7d");
 		expect(bindingRow(orderRows([limit(used(null)), limit({ window: "7d", ...used(0.1) })]))?.limit.window).toBe("7d");
+		// A spent family cap never makes the whole account read "Exhausted".
+		const capped = orderRows([limit(used(0.1)), limit({ family_cap: true, shared: false, family: "fable", ...used(1) })]);
+		expect(bindingRow(capped)?.kind).toBe("included");
+		// ...unless the account reports only family caps.
+		expect(bindingRow(orderRows([limit({ family_cap: true, shared: false, ...used(1) })]))?.kind).toBe("family");
 	});
 });
 
@@ -95,6 +100,8 @@ describe("countdown and refresh phase", () => {
 		expect(countdown(now + (14 * 60 + 5) * 60_000, now)).toEqual({ unit: "hours", hours: 14, minutes: 5 });
 		expect(countdown(now + 42 * 60_000, now)).toEqual({ unit: "minutes", minutes: 42 });
 		expect(countdown(now + 1, now)).toEqual({ unit: "minutes", minutes: 1 });
+		expect(countdown(now + 3 * 1440 * 60_000, now)).toEqual({ unit: "day", days: 3 });
+		expect(countdown(now + 2 * 60 * 60_000, now)).toEqual({ unit: "hour", hours: 2 });
 		expect(countdown(now, now)).toEqual({ unit: "now" });
 	});
 

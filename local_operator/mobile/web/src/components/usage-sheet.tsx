@@ -102,8 +102,10 @@ function countdownText(resetsAtMs: number, nowMs: number): string {
 	const parts = countdown(resetsAtMs, nowMs);
 	if (parts.unit === "now") return t("relay.shell.usage.reset_now");
 	const value = parts.unit === "days" ? t("relay.shell.usage.countdown_days", { days: parts.days, hours: parts.hours })
-		: parts.unit === "hours" ? t("relay.shell.usage.countdown_hours", { hours: parts.hours, minutes: parts.minutes })
-			: t("relay.shell.usage.countdown_minutes", { minutes: parts.minutes });
+		: parts.unit === "day" ? t("relay.shell.usage.countdown_day", { days: parts.days })
+			: parts.unit === "hours" ? t("relay.shell.usage.countdown_hours", { hours: parts.hours, minutes: parts.minutes })
+				: parts.unit === "hour" ? t("relay.shell.usage.countdown_hour", { hours: parts.hours })
+					: t("relay.shell.usage.countdown_minutes", { minutes: parts.minutes });
 	return t("relay.shell.usage.resets_in", { countdown: value });
 }
 
@@ -178,7 +180,7 @@ function AccountCard({ account, now }: { account: UsageAccount; now: number }) {
 			{account.reauth
 				? <span className="shrink-0 text-meta font-medium text-warning">{t("relay.shell.usage.reauth_short")}</span>
 				: binding && <div className="flex shrink-0 flex-col items-end">
-					<span className={cn("text-meta font-medium", TONE_TEXT[binding.tone])}>
+					<span className={cn("text-meta font-medium", dim ? "text-ink-dim" : TONE_TEXT[binding.tone])}>
 						{binding.tone === "exhausted" && <span aria-hidden>✕ </span>}
 						{toneWord(binding.tone)}
 						{percent !== null && <span className="ms-1.5 font-mono text-mono-sm tabular-nums">{t("relay.shell.usage.remaining_percent", { value: percent / 100 })}</span>}
@@ -279,7 +281,10 @@ export function UsageSheet({ open, onClose }: { open: boolean; onClose: () => vo
 	const collator = useMemo(() => new Intl.Collator(locale.uiLocale), [locale.uiLocale]);
 	const providers = useMemo(() => data ? buildUsageModel(data.reports, collator) : null, [data, collator]);
 	const refreshing = phase.kind === "refreshing";
-	const status = statusLine(throttled ? phase : phase.kind === "throttled" ? { kind: "idle" } : phase, now);
+	// "Showing last known usage" is only true when something is shown: with no
+	// data the body's loading/error state speaks, not the status line.
+	const status = data === null && phase.kind !== "refreshing" ? null
+		: statusLine(throttled ? phase : phase.kind === "throttled" ? { kind: "idle" } : phase, now);
 	const asOf = data?.refreshed_at ?? data?.cached_at ?? null;
 
 	const action = <Button variant="icon" aria-label={t("relay.shell.usage.refresh")}
