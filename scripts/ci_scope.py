@@ -225,6 +225,29 @@ BUDGET_SCRIPTS = frozenset(
 #: `BUDGET_SCRIPTS` already uses for `context-budget`.
 CLI_SANITY_SCRIPTS = frozenset({"scripts/check_streaming_contract.py"})
 
+#: The scripts the three `packaging-*` jobs execute: the wheel is slimmed by one
+#: and the size budget and the installed-artifact smoke run from the other two.
+#: A diff confined to `tests/**` cannot reach any of them, and cannot reach the
+#: artifact either -- `pyproject.toml`'s `[tool.setuptools.packages.find]`
+#: includes `local_operator*` only and `MANIFEST.in` grafts nothing test-shaped,
+#: so no distribution this job builds carries `tests/`.
+PACKAGING_SCRIPTS = frozenset(
+    {
+        "scripts/slim_wheel.py",
+        "scripts/check_dist_size.py",
+        "scripts/smoke_wheel.py",
+    }
+)
+
+#: Categories that cannot change the built wheel, and the ONLY reason the flag
+#: may go false. `docs/**` and root `*.md` are not package data (the shipped
+#: markdown lives under `local_operator/`, which `category_of` reports as
+#: `python`), and `tests/**` is excluded from the wheel by the manifest. The
+#: predicate is a SUBSET test on this closed set rather than "no category is
+#: live", so a category nobody enumerated here arms the flag rather than
+#: silencing it.
+PACKAGING_INERT_CATEGORIES = frozenset({CAT_DOCS, CAT_TESTS})
+
 #: What the two `xplat-probe-*` jobs read from `scripts/`. The battery
 #: (`scripts/xplat_probe.py`) is stdlib-only and self-driving, so `scripts/**`
 #: as a whole is deliberately NOT an input — the same choice `CLI_SANITY_SCRIPTS`
@@ -373,6 +396,11 @@ FLAGS = (
     "types",
     "budget",
     "unit",
+    # Distinct from `unit` on purpose: `unit` says "tests must run", which is
+    # true for a tests-only diff, while `packaging` says "the wheel must be
+    # rebuilt", which is false for it. Folding the two together put a wheel
+    # build and three install-smoke legs on every test-only PR.
+    "packaging",
     "tui",
     "windows",
     "xplat",
@@ -396,8 +424,8 @@ JOB_FLAGS: dict[str, tuple[str, ...]] = {
     "tui-e2e": ("tui",),
     "cli-sanity": ("cli",),
     "server-sanity": ("server",),
-    "packaging-smoke-build": ("unit",),
-    "packaging-smoke": ("unit",),
+    "packaging-smoke-build": ("packaging",),
+    "packaging-smoke": ("packaging",),
     "source-import-314": ("unit",),
     "i18n": ("i18n",),
 }
@@ -743,6 +771,10 @@ FLAG_REASONS: dict[str, str] = {
     "types": "at least one changed path outside the inert set (docs/**, web-only)",
     "budget": "a path that can change the assembled start-of-session context",
     "unit": "at least one changed path outside the inert set (docs/**, web-only)",
+    "packaging": (
+        "a category outside {docs, tests}, or a script the packaging jobs run: "
+        "the wheel is built from local_operator* and tests/ is not in it"
+    ),
     "tui": "same predicate as `unit`, deliberately (scripts/** is a tui input)",
     "windows": "a path the Windows job reads, or a manifest/CI/gate config",
     "xplat": (
@@ -867,6 +899,10 @@ def flags_for(
 
     live = any(cat not in PY_INERT_CATEGORIES for cat in cats)
     unit = live
+    # SUBSET, not "is any category live": `unit` is deliberately live for
+    # `tests/**` (a changed test must run), but a tests-only diff has nothing
+    # the wheel is built from, so packaging must not inherit `live`.
+    packaging = not cats <= PACKAGING_INERT_CATEGORIES or bool(path_set & PACKAGING_SCRIPTS)
     # `cli == server == audit` deliberately (see PERMISSIVE_DEPS): the two
     # live-LLM jobs `need:` pip-audit, so an `audit` narrower than `cli` would
     # let a `local_operator/**`-only diff skip the audit and therefore skip the
@@ -915,6 +951,7 @@ def flags_for(
         "types": live,
         "budget": budget,
         "unit": unit,
+        "packaging": packaging,
         "tui": unit,
         "windows": windows,
         "xplat": xplat,

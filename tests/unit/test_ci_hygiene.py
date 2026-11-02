@@ -1972,7 +1972,7 @@ def test_a_docs_only_diff_runs_two_cheap_checks_and_code_still_runs_everything()
     tests_only = scope.classify(["tests/unit/test_ci_hygiene.py"])
     for flag in ("lint", "types", "unit", "tui"):
         assert tests_only[flag] is True, f"a tests-only diff must still run {flag}"
-    for flag in ("budget", "windows", "audit", "cli", "server"):
+    for flag in ("budget", "windows", "audit", "cli", "server", "packaging"):
         assert tests_only[flag] is False, (
             f"a tests-only diff set {flag}=True, but nothing in that job reads "
             "tests/ (see the design's per-class cost analysis)"
@@ -2038,6 +2038,80 @@ def test_extension_and_web_only_diffs_route_to_the_right_jobs() -> None:
         assert web[flag] is False, (
             f"a web-only diff set {flag}=True; `local_operator/mobile/web/**` is "
             "inert for every Python job"
+        )
+
+
+def test_packaging_is_a_separate_question_from_unit() -> None:
+    """A19. `unit` asks whether the suite must run; `packaging` whether the wheel
+    must be rebuilt. They differ on exactly one class, and that class is the
+    reason the flag exists.
+
+    Sharing `unit` was safe but expensive: the jobs build and install the
+    distribution the release ships, and `tests/` is in no distribution this
+    repository builds (`[tool.setuptools.packages.find] include =
+    ["local_operator*"]`, and `MANIFEST.in` grafts nothing test-shaped). So a
+    tests-only PR paid for a wheel build plus three install-smoke legs whose
+    inputs it could not touch -- four jobs per run, measured on run
+    41233849362 (`test/fallback-sweep`: 19 jobs, of which packaging contributed
+    4).
+
+    The two adversarial cases Aida's rule names are here as assertions, not as
+    prose: a file under `docs/` that the linter or a test actually reads is NOT
+    the `docs` category (A6 pins the same rule from the other side), and a
+    mobile-web change that also touches a shared i18n catalogue is a live diff
+    (the catalogue is read by the i18n job, and this predicate is a SUBSET test
+    on a closed set, so any unenumerated category arms the flag).
+
+    Mutations that must fail this: derive `packaging` from `live`/`unit`; drop
+    the `PACKAGING_SCRIPTS` arm; widen `PACKAGING_INERT_CATEGORIES` with any
+    live category (e.g. `scripts` or `i18n`).
+    """
+    scope = _scope()
+
+    tests_only = scope.classify(["tests/unit/test_ci_hygiene.py"])
+    assert tests_only["unit"] is True, "a changed test must still run the suite"
+    assert tests_only["packaging"] is False, (
+        "a tests-only diff would rebuild the wheel, but no distribution this repo "
+        "builds contains tests/"
+    )
+    plan = scope.job_plan(tests_only)
+    assert plan["packaging-smoke-build"] == "skip", f"packaging still runs: {plan}"
+    assert (
+        scope.classify(["docs/a.md", "tests/unit/test_x.py"])["packaging"] is False
+    ), "docs next to tests must not arm a wheel rebuild either"
+
+    # The packaging jobs' own inputs always arm it, so a change to the slimmer or
+    # the size budget still exercises what it changed.
+    for script in sorted(scope.PACKAGING_SCRIPTS):
+        assert (REPO / script).is_file(), f"{script} is gone; this case is stale"
+        assert scope.classify([script])["packaging"] is True, f"{script} did not arm packaging"
+
+    # Adversarial 1: a `docs/**` path that is really code. `category_of` sends
+    # `.py`/`.pyi` under docs/ to `other` (live), so it can never be the inert
+    # class this flag keys on.
+    docs_code = "docs/store/assets/build_assets.py"
+    assert scope.category_of(docs_code) != scope.CAT_DOCS
+    assert (
+        scope.classify([docs_code])["packaging"] is True
+    ), "a Python file under docs/ skipped the wheel rebuild"
+
+    # Adversarial 2: a mobile-web change that also edits a shared i18n catalogue.
+    # The catalogue is a live category, so the subset test fails and packaging
+    # runs -- and i18n does too.
+    mixed = scope.classify(["local_operator/mobile/web/src/app.tsx", "i18n/ledger.json"])
+    assert mixed["packaging"] is True, "an i18n catalogue edit skipped the wheel rebuild"
+    assert mixed["i18n"] is True, "an i18n catalogue edit skipped the i18n job"
+
+    # Everything else -- manifest, an unenumerated path, a package file -- arms it.
+    for paths in (
+        ["pyproject.toml"],
+        ["newdir/unknown.bin"],
+        ["local_operator/cli.py"],
+        ["scripts/shard_tests.py"],
+    ):
+        assert scope.classify(paths)["packaging"] is True, (
+            f"{paths} skipped the wheel rebuild; the predicate must be a subset of "
+            "a closed inert set, not a denylist"
         )
 
 

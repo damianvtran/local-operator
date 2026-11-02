@@ -126,6 +126,7 @@ jobs:
       types: ${{ steps.classify.outputs.types }}
       budget: ${{ steps.classify.outputs.budget }}
       unit: ${{ steps.classify.outputs.unit }}
+      packaging: ${{ steps.classify.outputs.packaging }}
       tui: ${{ steps.classify.outputs.tui }}
       windows: ${{ steps.classify.outputs.windows }}
       xplat: ${{ steps.classify.outputs.xplat }}
@@ -458,13 +459,17 @@ jobs:
   # class is about); the publish gate in publish.yml installs the exact release
   # artifact, which does include it.
   #
-  # Gate: the existing `unit` flag — packaging is code, not docs. Do not invent
-  # a flag; `scripts/ci_scope.py` registers both jobs under `unit`.
+  # Gate: the `packaging` flag, which is NOT `unit`. `unit` answers "must the
+  # test suite run", and it is true for a tests-only diff; this job answers
+  # "must the wheel be rebuilt", and `tests/` is not in that wheel (the
+  # manifest's `packages.find` includes `local_operator*`). Sharing `unit` put
+  # these four jobs on every test-only PR whose diff could not reach them.
+  # `scripts/ci_scope.py` owns the predicate and the argument for its safety.
   packaging-smoke-build:
     needs: [changes]
     if: >-
       !cancelled() &&
-      needs.changes.outputs.unit != 'false'
+      needs.changes.outputs.packaging != 'false'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -502,7 +507,7 @@ jobs:
     needs: [changes, packaging-smoke-build]
     if: >-
       !cancelled() &&
-      needs.changes.outputs.unit != 'false' &&
+      needs.changes.outputs.packaging != 'false' &&
       needs.packaging-smoke-build.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 10

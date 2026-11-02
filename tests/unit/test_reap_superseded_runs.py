@@ -5,8 +5,10 @@ mode of this script is cancelling work somebody needs. The rules under test are
 the ones in `scripts/reap_superseded_runs.py`'s docstring:
 
 * only `queued` runs are touched -- a started run is doing work;
-* protected branches (`main`, `release-next-*`) are never touched -- a gate
-  that can be cancelled is not a gate;
+* `release-next-*` is never touched -- a gate that can be cancelled is not a gate;
+* `main` is eligible ONLY as a queued `push` run proven to be an ancestor of the
+  tip and NOT a tag target, with `release-next-*`, dispatch runs, tag targets
+  and unreadable ancestry/tag reads all keeping the run (rules 2a-2d);
 * the pull request's head is authoritative for a PR run: a current head keeps
   the run at ANY age (the fork-PR case), and a moved head makes it
   superseded, with the branch tip only corroborating;
@@ -60,10 +62,16 @@ def _run(**over):
 
 @pytest.fixture
 def api(monkeypatch):
-    """Replace the three API reads; each test sets only the ones it needs."""
-    state = {"pr": {}, "tip": {}}
+    """Replace the API reads; each test sets only the ones it needs.
+
+    `ancestor` defaults to False so a `main` case has to STATE its ancestry:
+    the whole point of rule 2c is that "older than the tip" is not the same
+    reading as "in the tip's history".
+    """
+    state = {"pr": {}, "tip": {}, "ancestor": False}
     monkeypatch.setattr(reaper, "pr_head_sha", lambda repo, n: state["pr"].get(n))
     monkeypatch.setattr(reaper, "branch_tip", lambda repo, b: state["tip"].get(b))
+    monkeypatch.setattr(reaper, "is_ancestor", lambda repo, older, newer: state["ancestor"])
     return state
 
 
@@ -73,8 +81,9 @@ def test_a_running_job_is_never_touched(api):
     assert "not queued" in reason
 
 
-@pytest.mark.parametrize("branch", ["main", "release-next", "release-next-0-83-0"])
-def test_protected_branches_are_never_touched(api, branch):
+@pytest.mark.parametrize("branch", ["release-next", "release-next-0-83-0"])
+def test_release_branches_are_never_touched(api, branch):
+    """Rule 2, unchanged by the `main` reversal: a release gate is not cancellable."""
     api["tip"][branch] = "b" * 40  # tip HAS moved
     should, reason = reaper.decide("o/r", _run(head_branch=branch), 5.0)
     assert not should
@@ -237,7 +246,9 @@ def test_abandonment_never_overrides_the_protected_branch_rule(api):
     ancient = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=37)).strftime(
         "%Y-%m-%dT%H:%M:%SZ"
     )
-    should, reason = reaper.decide("o/r", _run(head_branch="main", created_at=ancient), 5.0, 24.0)
+    should, reason = reaper.decide(
+        "o/r", _run(head_branch="release-next-0-83-0", created_at=ancient), 5.0, 24.0
+    )
     assert not should
     assert "protected branch" in reason
 
@@ -302,10 +313,183 @@ def test_a_rerun_of_an_old_run_is_protected_by_the_grace_period(api):
     assert "grace period" in reason
 
 
-def _old(hours: int) -> str:
+def _old(hours: float) -> str:
     return (
         datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=hours)
     ).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _main_run(**over):
+    """A queued POST-MERGE run: `push` on `main`, half an hour old."""
+    base = {
+        "head_branch": reaper.PROTECTED_MAIN,
+        "event": "push",
+        "head_sha": "a" * 40,
+        "created_at": _old(0.5),
+    }
+    base.update(over)
+    return _run(**base)
+
+
+def test_a_superseded_queued_main_run_is_cancelled(api):
+    """Rule 2a: the reversal. Queued, push, ancestor, no tag -> eligible.
+
+    Measured on 2026-10-29: 16 such runs were cancelled by hand after each was
+    proven an ancestor of the newest with `git merge-base --is-ancestor`. They
+    were post-merge CI for commits `main` had already moved past, sitting in a
+    queue that was 38 deep against a 20-job pool.
+    """
+    api["tip"][reaper.PROTECTED_MAIN] = "b" * 40
+    api["ancestor"] = True
+    should, reason = reaper.decide("o/r", _main_run(), 5.0, 24.0, frozenset())
+    assert should, reason
+    assert "superseded post-merge CI" in reason
+
+
+def test_a_main_run_that_a_tag_points_at_is_never_cancelled(api):
+    """Rule 2b. `20d8c7c3fc` is v0.91.0 and `85f3b9097b` is v0.91.1.
+
+    Both were ancestor-of-tip queued runs, so every other rule would have
+    cancelled them -- and cancelling a published release's CI record is not
+    recoverable.
+    """
+    api["tip"][reaper.PROTECTED_MAIN] = "b" * 40
+    api["ancestor"] = True
+    should, reason = reaper.decide("o/r", _main_run(), 5.0, 24.0, frozenset({"a" * 40}))
+    assert not should
+    assert "release tag target" in reason
+
+
+def test_an_unreadable_tag_list_keeps_every_main_run(api):
+    """Rule 2b's fail-closed half: no tag list is not an empty tag list."""
+    api["tip"][reaper.PROTECTED_MAIN] = "b" * 40
+    api["ancestor"] = True
+    should, reason = reaper.decide("o/r", _main_run(), 5.0, 24.0, None)
+    assert not should
+    assert "tag targets unreadable" in reason
+
+
+def test_a_main_run_outside_the_tips_history_is_kept(api):
+    """Rule 2c: a force-push/rebase is not supersession.
+
+    `head_sha != tip` alone would cancel a commit `main` no longer contains;
+    its CI record is the only record that commit will ever have.
+    """
+    api["tip"][reaper.PROTECTED_MAIN] = "b" * 40
+    api["ancestor"] = False
+    should, reason = reaper.decide("o/r", _main_run(), 5.0, 24.0, frozenset())
+    assert not should
+    assert "not in the history" in reason
+
+
+def test_a_main_run_that_is_the_tip_is_kept(api):
+    api["tip"][reaper.PROTECTED_MAIN] = "a" * 40
+    api["ancestor"] = True
+    should, reason = reaper.decide("o/r", _main_run(), 5.0, 24.0, frozenset())
+    assert not should
+    assert "tip is this commit" in reason
+
+
+def test_a_started_main_run_is_never_cancelled(api):
+    api["tip"][reaper.PROTECTED_MAIN] = "b" * 40
+    api["ancestor"] = True
+    should, reason = reaper.decide("o/r", _main_run(status="in_progress"), 5.0, 24.0, frozenset())
+    assert not should
+    assert "not queued" in reason
+
+
+def test_a_dispatch_run_on_main_is_kept(api):
+    """Rule 2d: a hand-dispatched run was asked for by a person."""
+    api["tip"][reaper.PROTECTED_MAIN] = "b" * 40
+    api["ancestor"] = True
+    should, reason = reaper.decide(
+        "o/r", _main_run(event="workflow_dispatch"), 5.0, 24.0, frozenset()
+    )
+    assert not should
+    assert "rule 2d" in reason
+
+
+def test_an_unreadable_ancestry_keeps_the_main_run(api, monkeypatch):
+    """Rule 2c's fail-closed half: an outage is not a proof of supersession."""
+    api["tip"][reaper.PROTECTED_MAIN] = "b" * 40
+
+    def boom(repo, older, newer):
+        raise reaper.ApiError("HTTP 502", 502)
+
+    monkeypatch.setattr(reaper, "is_ancestor", boom)
+    should, reason = reaper.decide("o/r", _main_run(), 5.0, 24.0, frozenset())
+    assert not should
+    assert "ancestry unreadable" in reason
+
+
+def test_a_fresh_main_run_is_inside_the_grace_period(api):
+    """A grace period that did not cover `main` would race every merge."""
+    api["tip"][reaper.PROTECTED_MAIN] = "b" * 40
+    api["ancestor"] = True
+    fresh = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=1)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    should, reason = reaper.decide("o/r", _main_run(created_at=fresh), 5.0, 24.0, frozenset())
+    assert not should
+    assert "grace period" in reason
+
+
+def test_the_sweep_logs_every_post_merge_cancellation(monkeypatch, capsys):
+    """The audit list: a cancelled run must be named by id and SHA in the log.
+
+    The queue's absence is not evidence of what was cancelled, so the sweep
+    prints the list itself. It also reads the tag list ONCE, not per run.
+    """
+    runs = [_main_run(id=501), _main_run(id=502, head_sha="c" * 40)]
+    reads = []
+
+    def fake_gh(path: str, *, method: str = "GET"):
+        return {"status": "queued"} if method == "GET" else None
+
+    def fake_tags(repo: str):
+        reads.append(repo)
+        return frozenset()
+
+    monkeypatch.setattr(reaper, "queued_runs", lambda repo: runs)
+    monkeypatch.setattr(reaper, "tag_targets", fake_tags)
+    monkeypatch.setattr(reaper, "branch_tip", lambda repo, b: "b" * 40)
+    monkeypatch.setattr(reaper, "is_ancestor", lambda repo, older, newer: True)
+    monkeypatch.setattr(reaper, "gh_api", fake_gh)
+    monkeypatch.setattr(reaper.sys, "argv", ["x", "--repo", "o/r"])
+
+    rc = reaper.main()
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert reads == ["o/r"], f"the tag list was read {len(reads)} times, not once"
+    assert "post-merge main runs cancelled: 2" in out, out
+    assert "run 501 aaaaaaaaa" in out and "run 502 ccccccccc" in out, out
+
+
+def test_a_sweep_with_nothing_on_main_never_reads_the_tag_list(monkeypatch, capsys):
+    """The tag listing is paginated and only a `main` decision consults it.
+
+    The first draft read it unconditionally at the top of `main()`, which spent
+    pages of API calls on every sweep AND broke the ghost/refusal tests: their
+    `gh_api` stub answers a single-run body, so the listing came back as a dict
+    and iterating it raised `'str' object has no attribute 'get'`. This pins the
+    read to the branch that needs it.
+    """
+    runs = [_run(id=7, head_branch="feat/x", created_at=_old(48), updated_at=_old(48))]
+    reads = []
+
+    def fake_tags(repo: str):
+        reads.append(repo)
+        return frozenset()
+
+    monkeypatch.setattr(reaper, "queued_runs", lambda repo: runs)
+    monkeypatch.setattr(reaper, "tag_targets", fake_tags)
+    monkeypatch.setattr(reaper, "decide", lambda *a, **k: (False, "kept by the test"))
+    monkeypatch.setattr(reaper.sys, "argv", ["x", "--repo", "o/r"])
+
+    rc = reaper.main()
+    capsys.readouterr()
+    assert rc == 0
+    assert reads == [], "a sweep with nothing on main read the tag listing anyway"
 
 
 def _cancel_stub(status: int):
