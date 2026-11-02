@@ -1643,3 +1643,551 @@ def test_unpinned_preview_fails_closed_outside_org_contract(tmp_path: Path, case
     )
     assert outcome.state != "pushed"
     assert server.commit_calls == []
+
+
+# -- a commit TIMEOUT is an uncertain outcome, never a definite refusal ------------------
+#
+# Production incident: the real Hub APPLIED an org skill commit but answered after
+# the client's 15s read limit (server-side moderation ran ~19s). The client settled
+# the record ``failed``/``hub-error`` with no stored intent, so the operator saw a
+# refusal for a write that had landed. These tests pin the three fixes: the commit
+# is not cut by a read limit shorter than the budget, a timeout that still fires is
+# reconcilable, and the reconciliation reads the Hub before it ever resends.
+
+_ORG_SKILL: dict[str, Any] = dict(
+    kind="skill",
+    captured_local=_document_fields(),
+    accepted=_document_fields(),
+    current_local=_document_fields(seed="b"),
+    remote_latest=_document_fields(),
+    org_skill=True,
+)
+
+
+def _hub_handler(*, commit: Any, calls: list[str], revision: str = "rev-a") -> Any:
+    """A MockTransport hub: preview answers honestly, ``commit`` decides the rest."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if request.url.path.endswith("/preview"):
+            calls.append("preview")
+            return httpx.Response(
+                200,
+                json={
+                    "result": {
+                        "revision": revision,
+                        "status": "unchanged",
+                        "document": body["document"],
+                        "unresolved": [],
+                        "changes": [],
+                        "transform": {"model": "not_applied"},
+                    }
+                },
+            )
+        calls.append("commit")
+        return commit(request, body)
+
+    return handler
+
+
+def _org_transport(handler: Any) -> tuple[AsyncDispatcher, HttpPushTransport]:
+    disp = _dispatcher(handler)
+    return disp, _transport(disp, kind="skill", hub_id="s1")
+
+
+def test_a_slow_commit_is_not_cut_by_the_short_read_limit() -> None:
+    """The commit's read timeout is the attempt budget; the preview keeps its short one."""
+
+    seen: dict[str, dict[str, Any]] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        stage = "preview" if request.url.path.endswith("/preview") else "commit"
+        seen[stage] = dict(request.extensions["timeout"])
+        return httpx.Response(200, json={"result": {"revision": TOKEN, "document": {}}})
+
+    async def run() -> None:
+        disp = AsyncDispatcher(
+            client=httpx.AsyncClient(
+                transport=httpx.MockTransport(handler), timeout=httpx.Timeout(15.0, connect=5.0)
+            )
+        )
+        transport = _transport(disp, kind="skill", hub_id="s1")
+        for call in (transport.preview, transport.commit):
+            kwargs: dict[str, Any] = {
+                "document": {"instructions": "x"},
+                "expected_revision": TOKEN,
+                "budget": _budget(),
+            }
+            if call == transport.commit:
+                kwargs.update(preview_token="pin", accept_unresolved=[])
+            await call(**kwargs)
+        await disp.aclose()
+
+    asyncio.run(run())
+    assert seen["preview"]["read"] == 15.0  # a preview writes nothing: stays short
+    assert seen["commit"]["read"] > 100.0  # ~ the 120s automatic budget minus the reserve
+    assert seen["commit"]["connect"] == 5.0  # connect stays short: unsent proves unwritten
+
+
+def test_a_real_slow_commit_that_applies_the_write_reports_pushed(tmp_path: Path) -> None:
+    """The incident, end to end over a real socket: applied-then-slow must not fail."""
+
+    import threading
+    import time
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    state: dict[str, Any] = {"revision": "rev-a", "writes": 0}
+
+    class Hub(BaseHTTPRequestHandler):
+        def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
+            pass
+
+        def do_PUT(self) -> None:  # noqa: N802 - http.server's spelling
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            if self.path.split("?")[0].endswith("/preview"):
+                result: dict[str, Any] = {
+                    "revision": state["revision"],
+                    "status": "unchanged",
+                    "document": body["document"],
+                    "unresolved": [],
+                    "changes": [],
+                    "transform": {"model": "not_applied"},
+                }
+            else:
+                state["writes"] += 1  # the write is durable BEFORE the slow answer
+                state["revision"] = "rev-b"
+                time.sleep(0.8)  # "moderation": longer than the client's read limit below
+                result = {"revision": "rev-b", "accepted_document": body, "operation_id": "srv"}
+            data = json.dumps({"result": result}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Hub)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    async def run() -> tuple[PushOutcome, Outbox]:
+        # A 0.3s read limit stands in for production's 15s; the budget is 120s.
+        disp = AsyncDispatcher(read_timeout=0.3)
+        disp.client = httpx.AsyncClient(timeout=httpx.Timeout(0.3, connect=5.0), trust_env=False)
+        transport = _transport(
+            disp, kind="skill", hub_id="s1", base_url=f"http://127.0.0.1:{server.server_port}/v1/"
+        )
+        outcome, out, _ = await _run(tmp_path, transport=transport, **_ORG_SKILL)
+        await disp.aclose()
+        return outcome, out
+
+    try:
+        outcome, out = asyncio.run(run())
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+    assert state["writes"] == 1  # one write: no resend
+    assert outcome.state == "pushed" and outcome.revision == "rev-b"
+    assert _stored(out, "org-v2--op1").state == "done"
+
+
+@pytest.mark.parametrize("exc_type", [httpx.ReadTimeout, httpx.WriteTimeout])
+def test_a_commit_timeout_is_uncertain_and_keeps_the_verbatim_intent(
+    tmp_path: Path, exc_type: type[httpx.TimeoutException]
+) -> None:
+    calls: list[str] = []
+
+    def commit(request: httpx.Request, body: Any) -> httpx.Response:
+        raise exc_type("timed out", request=request)
+
+    disp, transport = _org_transport(_hub_handler(commit=commit, calls=calls))
+    outcome, out, _ = asyncio.run(_run(tmp_path, transport=transport, **_ORG_SKILL))
+    asyncio.run(disp.aclose())
+    assert (outcome.state, outcome.reason) == ("pending-reconciliation", "deadline")
+    assert outcome.outage is False  # not an outage: the outcome is unknown, not refused
+    record = _stored(out, "org-v2--op1")
+    assert record.state == "pending-reconciliation"
+    assert record.error_class != "hub-error"
+    assert isinstance(record.intent, dict) and record.intent["unpinned_org_skill"] is True
+    assert calls == ["preview", "commit"]
+
+
+@pytest.mark.parametrize("stage", ["preview", "commit"])
+def test_a_timeout_that_proves_nothing_was_written_stays_a_retryable_outage(
+    tmp_path: Path, stage: str
+) -> None:
+    """A preview timeout (writes nothing) and a connect/pool timeout (never sent) retry."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        is_preview = request.url.path.endswith("/preview")
+        if stage == "preview" and is_preview:
+            raise httpx.ReadTimeout("slow preview", request=request)
+        if is_preview:
+            return httpx.Response(
+                200,
+                json={
+                    "result": {
+                        "revision": "rev-a",
+                        "status": "unchanged",
+                        "document": json.loads(request.content)["document"],
+                        "unresolved": [],
+                        "changes": [],
+                        "transform": {"model": "not_applied"},
+                    }
+                },
+            )
+        raise httpx.ConnectTimeout("never connected", request=request)
+
+    disp, transport = _org_transport(handler)
+    outcome, out, _ = asyncio.run(_run(tmp_path, transport=transport, **_ORG_SKILL))
+    asyncio.run(disp.aclose())
+    assert (outcome.state, outcome.reason, outcome.outage) == ("refused", "hub-error", True)
+    assert _stored(out, "org-v2--op1").state == "failed"
+
+
+def _timed_out_then(tmp_path: Path, **later: Any) -> tuple[PushOutcome, list[str], Outbox]:
+    """Leave an uncertain org commit behind, then run the next attempt with ``later``."""
+
+    def commit(request: httpx.Request, body: Any) -> httpx.Response:
+        raise httpx.ReadTimeout("timed out", request=request)
+
+    disp, transport = _org_transport(_hub_handler(commit=commit, calls=[]))
+    asyncio.run(_run(tmp_path, transport=transport, **_ORG_SKILL))
+    asyncio.run(disp.aclose())
+
+    calls: list[str] = []
+    healthy = later.pop("commit", lambda request, body: httpx.Response(412, json={}))
+    disp2, transport2 = _org_transport(_hub_handler(commit=healthy, calls=calls))
+    args = {**_ORG_SKILL, **later}
+    outcome, out, _ = asyncio.run(_run(tmp_path, transport=transport2, **args))
+    asyncio.run(disp2.aclose())
+    return outcome, calls, out
+
+
+def test_reconciliation_settles_without_resending_when_the_hub_already_has_it(
+    tmp_path: Path,
+) -> None:
+    """Read-then-compare: the hub moved on to exactly the stored commit's content."""
+
+    served = _document_fields(seed="b")  # what the first, timed-out commit sent
+    outcome, calls, out = _timed_out_then(
+        tmp_path, expected="rev-b", current_local=served, remote_latest=served
+    )
+    assert outcome.state == "pushed" and outcome.revision == "rev-b"
+    assert calls == []  # no preview, no commit: nothing was resent
+    record = _stored(out, "org-v2--op1")
+    assert record.state == "done" and record.result == {"revision": "rev-b", "reconciled": True}
+
+
+def test_reconciliation_does_not_claim_a_landing_over_a_newer_local_edit(
+    tmp_path: Path,
+) -> None:
+    """The hub serving the stored content must not hide a LATER unsent local edit."""
+
+    outcome, calls, out = _timed_out_then(
+        tmp_path,
+        expected="rev-b",
+        remote_latest=_document_fields(seed="b"),  # the hub serves the stored commit...
+        current_local=_document_fields(seed="c"),  # ...but the person edited again since
+    )
+    # Not provably a clean landing: the verbatim replay runs and CAS refuses it.
+    assert outcome.state == "conflict" and calls == ["commit"]
+    assert _stored(out, "org-v2--op1").state == "failed"
+
+
+def test_reconciliation_resends_verbatim_when_the_hub_never_moved(tmp_path: Path) -> None:
+    """Same revision as the stored commit's If-Match: it cannot have landed -> replay."""
+
+    sent: list[dict[str, Any]] = []
+
+    def commit(request: httpx.Request, body: Any) -> httpx.Response:
+        sent.append({"if_match": request.headers["If-Match"], "body": body})
+        return httpx.Response(
+            200, json={"result": {"revision": "rev-b", "accepted_document": body}}
+        )
+
+    outcome, calls, out = _timed_out_then(tmp_path, expected="rev-a", commit=commit)
+    assert outcome.state == "pushed"
+    assert calls == ["commit"]  # no second (paid) preview
+    assert sent[0]["if_match"] == "rev-a"
+    assert _stored(out, "org-v2--op1").state == "done"
+
+
+# -- the connection dies WITHOUT an answer: classify by "may it have been processed?" ----
+#
+# A proxy idle cutoff during the Hub's ~19s moderation closes the socket after the
+# write applied. That surfaces as ReadError / RemoteProtocolError, not a timeout,
+# and used to fall through to the generic ``hub-error`` refusal (intent erased).
+
+
+class _DropHub:
+    """A loopback Hub that applies the commit, then closes the socket unanswered."""
+
+    def __init__(self, *, drop_stage: str, mode: str = "close") -> None:
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        self.writes = 0
+        self.revision = "rev-a"
+        self.requests: list[str] = []
+        hub = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
+                pass
+
+            def do_PUT(self) -> None:  # noqa: N802 - http.server's spelling
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                stage = "preview" if self.path.split("?")[0].endswith("/preview") else "commit"
+                hub.requests.append(stage)
+                if stage == "commit":
+                    hub.writes += 1  # the write is durable BEFORE the connection dies
+                    hub.revision = "rev-b"
+                if stage == drop_stage:
+                    self.close_connection = True
+                    if mode == "garbage":
+                        self.wfile.write(b"NOT-HTTP\r\n\r\n")
+                    self.wfile.flush()
+                    self.connection.close()
+                    return
+                result = {
+                    "revision": hub.revision,
+                    "status": "unchanged",
+                    "document": body.get("document", body),
+                    "unresolved": [],
+                    "changes": [],
+                    "transform": {"model": "not_applied"},
+                }
+                data = json.dumps({"result": result}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self.server.server_port}/v1/"
+
+    def close(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join()
+
+
+def _real_socket_push(tmp_path: Path, base_url: str) -> tuple[PushOutcome, Outbox]:
+    async def run() -> tuple[PushOutcome, Outbox]:
+        disp = AsyncDispatcher()
+        disp.client = httpx.AsyncClient(timeout=httpx.Timeout(5.0), trust_env=False)
+        transport = _transport(disp, kind="skill", hub_id="s1", base_url=base_url)
+        outcome, out, _ = await _run(tmp_path, transport=transport, **_ORG_SKILL)
+        await disp.aclose()
+        return outcome, out
+
+    outcome, out = asyncio.run(run())
+    return outcome, out
+
+
+@pytest.mark.parametrize("mode", ["close", "garbage"])
+def test_a_commit_whose_connection_dies_unanswered_is_uncertain(tmp_path: Path, mode: str) -> None:
+    """Applied-then-dropped (ReadError/RemoteProtocolError): intent kept, not refused."""
+
+    hub = _DropHub(drop_stage="commit", mode=mode)
+    try:
+        outcome, out = _real_socket_push(tmp_path, hub.base_url)
+    finally:
+        hub.close()
+    assert hub.writes == 1  # the Hub DID apply it: a ``failed`` verdict would be false
+    assert (outcome.state, outcome.reason, outcome.outage) == (
+        "pending-reconciliation",
+        "deadline",
+        False,
+    )
+    record = _stored(out, "org-v2--op1")
+    assert record.state == "pending-reconciliation" and record.error_class != "hub-error"
+    assert isinstance(record.intent, dict) and record.intent["unpinned_org_skill"] is True
+
+
+def test_the_same_dropped_connection_on_a_preview_stays_a_retryable_outage(
+    tmp_path: Path,
+) -> None:
+    """A preview writes nothing, so a drop there is a plain retry, never a reconciliation."""
+
+    hub = _DropHub(drop_stage="preview")
+    try:
+        outcome, out = _real_socket_push(tmp_path, hub.base_url)
+    finally:
+        hub.close()
+    assert hub.requests == ["preview"]  # no commit was ever dispatched
+    assert (outcome.state, outcome.reason, outcome.outage) == ("refused", "hub-error", True)
+    assert _stored(out, "org-v2--op1").state == "failed"
+
+
+def test_a_refused_connection_on_the_commit_is_still_a_retryable_outage(tmp_path: Path) -> None:
+    """ConnectError proves the request was never sent: outage, not uncertain."""
+
+    import socket
+
+    with socket.socket() as probe:  # a port nothing listens on
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+
+    def commit_only_unreachable(request: httpx.Request, body: Any) -> httpx.Response:
+        raise httpx.ConnectError("refused", request=request)
+
+    disp, transport = _org_transport(_hub_handler(commit=commit_only_unreachable, calls=[]))
+    outcome, out, _ = asyncio.run(_run(tmp_path, transport=transport, **_ORG_SKILL))
+    asyncio.run(disp.aclose())
+    assert (outcome.state, outcome.reason, outcome.outage) == ("refused", "hub-error", True)
+    assert _stored(out, "org-v2--op1").state == "failed"
+
+    # And over a real socket: nothing listening at all (preview refuses first).
+    outcome2, _out2 = _real_socket_push(tmp_path / "real", f"http://127.0.0.1:{port}/v1/")
+    assert (outcome2.state, outcome2.reason, outcome2.outage) == ("refused", "hub-error", True)
+
+
+@pytest.mark.parametrize(
+    "exc_type, uncertain",
+    [
+        (httpx.ReadError, True),
+        (httpx.RemoteProtocolError, True),
+        (httpx.WriteError, True),
+        (httpx.CloseError, True),
+        (httpx.DecodingError, True),
+        (httpx.ReadTimeout, True),
+        (httpx.WriteTimeout, True),
+        (httpx.ConnectError, False),
+        (httpx.ConnectTimeout, False),
+        (httpx.PoolTimeout, False),
+        (httpx.ProxyError, False),
+        (httpx.UnsupportedProtocol, False),
+        (httpx.LocalProtocolError, False),
+    ],
+)
+def test_commit_stage_error_classification_table(
+    tmp_path: Path, exc_type: type[httpx.RequestError], uncertain: bool
+) -> None:
+    """Pin the whole table: only a provably-unsent request is a plain outage."""
+
+    def commit(request: httpx.Request, body: Any) -> httpx.Response:
+        raise exc_type("boom", request=request)
+
+    disp, transport = _org_transport(_hub_handler(commit=commit, calls=[]))
+    outcome, out, _ = asyncio.run(_run(tmp_path, transport=transport, **_ORG_SKILL))
+    asyncio.run(disp.aclose())
+    expected = ("pending-reconciliation", False) if uncertain else ("refused", True)
+    assert (outcome.state, outcome.outage) == expected
+    assert _stored(out, "org-v2--op1").state == (
+        "pending-reconciliation" if uncertain else "failed"
+    )
+
+
+# -- BUNDLE form on the read-before-replay "landed" path (exact tree hash) ---------------
+
+
+def _bundle_timeout_then(tmp_path: Path, *, remote: dict[str, Any], local: dict[str, Any]) -> Any:
+    sent = _bundle_fields(seed="b")  # the bundle the first, timed-out commit published
+    uploads: list[Mapping[str, Any]] = []
+
+    def commit(request: httpx.Request, body: Any) -> httpx.Response:
+        raise httpx.ReadTimeout("timed out", request=request)
+
+    disp, transport = _org_transport(_hub_handler(commit=commit, calls=[]))
+    common: dict[str, Any] = dict(
+        kind="skill",
+        captured_local=_bundle_fields(),
+        accepted=_bundle_fields(),
+        bundle_attested=True,
+        bundle_upload=lambda doc: uploads.append(doc) or {"hash": doc["bundle"]["hash"]},
+        org_skill=True,
+    )
+    first, out, _ = asyncio.run(
+        _run(
+            tmp_path,
+            transport=transport,
+            current_local=sent,
+            remote_latest=_bundle_fields(),
+            **common,
+        )
+    )
+    asyncio.run(disp.aclose())
+    assert first.state == "pending-reconciliation"
+
+    calls: list[str] = []
+    disp2, transport2 = _org_transport(
+        _hub_handler(commit=lambda r, b: httpx.Response(412, json={}), calls=calls)
+    )
+    second, out2, _ = asyncio.run(
+        _run(
+            tmp_path,
+            transport=transport2,
+            expected="rev-b",
+            current_local=local,
+            remote_latest=remote,
+            **common,
+        )
+    )
+    asyncio.run(disp2.aclose())
+    return second, calls, out2
+
+
+def test_a_landed_bundle_commit_settles_without_resending(tmp_path: Path) -> None:
+    """The Hub serves the exact tree we published: settle, upload and send nothing."""
+
+    sent = _bundle_fields(seed="b")
+    outcome, calls, out = _bundle_timeout_then(tmp_path, remote=sent, local=sent)
+    assert outcome.state == "pushed" and outcome.revision == "rev-b"
+    assert calls == []
+    assert _stored(out, "org-v2--op1").result == {"revision": "rev-b", "reconciled": True}
+
+
+def test_a_bundle_with_a_different_tree_hash_is_not_called_landed(tmp_path: Path) -> None:
+    """Bundles compare EXACTLY: any other tree is somebody else's write -> replay -> 412."""
+
+    sent = _bundle_fields(seed="b")
+    other = _bundle_fields(seed="z")
+    outcome, calls, out = _bundle_timeout_then(tmp_path, remote=other, local=sent)
+    assert outcome.state == "conflict" and calls == ["commit"]
+    assert _stored(out, "org-v2--op1").state == "failed"
+
+
+def test_a_dropped_commit_that_landed_is_reconciled_by_reading_the_hub_not_resent(
+    tmp_path: Path,
+) -> None:
+    """QA case J end to end: drop -> intent kept -> next attempt settles, sends nothing.
+
+    The first push runs against a real socket whose Hub applies the commit and then
+    hangs up. The second runs after a check has read the Hub again (revision moved,
+    content equals what was sent, local unchanged): it must settle ``done``/
+    ``reconciled`` with NO second preview and NO second commit.
+    """
+
+    hub = _DropHub(drop_stage="commit")
+    try:
+        first, out = _real_socket_push(tmp_path, hub.base_url)
+    finally:
+        hub.close()
+    assert first.state == "pending-reconciliation" and hub.writes == 1
+
+    sent = _ORG_SKILL["current_local"]  # what the dropped commit carried
+    calls: list[str] = []
+    disp, transport = _org_transport(
+        _hub_handler(commit=lambda r, b: httpx.Response(412, json={}), calls=calls)
+    )
+    second, out2, _ = asyncio.run(
+        _run(
+            tmp_path,
+            transport=transport,
+            expected="rev-b",
+            **{**_ORG_SKILL, "remote_latest": sent},
+        )
+    )
+    asyncio.run(disp.aclose())
+    assert (second.state, second.revision) == ("pushed", "rev-b")
+    assert calls == []  # no second preview, no second commit
+    assert hub.writes == 1
+    assert _stored(out2, "org-v2--op1").result == {"revision": "rev-b", "reconciled": True}
