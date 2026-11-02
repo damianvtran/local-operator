@@ -320,6 +320,13 @@ def _refusal_of(exc: BaseException) -> str:
     return "publish-document-invalid"
 
 
+def org_skill_operation_id(operation_id: str) -> str:
+    """Keep new org intents out of paths older runtimes can rewrite."""
+    # Every legacy push id starts with `push-`; a prefix outside that grammar
+    # cannot collide even when a skill's own valid ID contains `org-v2`.
+    return f"org-v2--{operation_id}"
+
+
 async def push_item(
     *,
     kind: Kind,
@@ -337,6 +344,93 @@ async def push_item(
     document_builder: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
     bundle_attested: bool = False,
     bundle_upload: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
+    org_skill: bool = False,
+) -> PushOutcome:
+    """Serialize an org skill's dispatch so a pending intent has one live owner."""
+    kwargs = dict(
+        kind=kind,
+        local_id=local_id,
+        captured_local=captured_local,
+        accepted=accepted,
+        current_local=current_local,
+        remote_latest=remote_latest,
+        expected_revision=expected_revision,
+        transport=transport,
+        outbox=outbox,
+        operation_id=operation_id,
+        budget=budget,
+        opts=opts,
+        document_builder=document_builder,
+        bundle_attested=bundle_attested,
+        bundle_upload=bundle_upload,
+        org_skill=org_skill,
+    )
+    if kind != "skill":
+        return await _push_item_inner(**kwargs)
+    if not org_skill:
+        # A changed or unverified scope must not bypass an unresolved org intent
+        # by starting a fresh publication in the legacy namespace.
+        prior = outbox.read(org_skill_operation_id(operation_id))
+        if prior is not None and prior.state in ("pending", "pending-reconciliation"):
+            return PushOutcome(
+                "skipped", operation_id=operation_id, reason="org-reconciliation-required"
+            )
+        return await _push_item_inner(**kwargs)
+    # Old workers do not honor the new operation lock and may rewrite the old
+    # outbox path. A separate namespace makes the durable intent inaccessible to
+    # them; CAS still arbitrates any competing writes to the remote row.
+    scoped_id = org_skill_operation_id(operation_id)
+    with outbox.org_skill_operation(scoped_id) as acquired:
+        if not acquired:
+            return PushOutcome("skipped", operation_id=scoped_id, reason="operation-in-progress")
+        # Earlier unreleased candidates used a suffix in the legacy namespace.
+        # Do not strand an intent from that candidate, nor confuse another
+        # skill whose legitimate ID happens to end in the same suffix.
+        prior_candidate = outbox.read(f"{operation_id}-org-v2")
+        if (
+            prior_candidate is not None
+            and prior_candidate.local_id == local_id
+            and prior_candidate.state in ("pending", "pending-reconciliation")
+            and isinstance(prior_candidate.intent, Mapping)
+            and prior_candidate.intent.get("unpinned_org_skill") is True
+        ):
+            return PushOutcome(
+                "skipped", operation_id=operation_id, reason="prior-version-reconciliation-required"
+            )
+        legacy = outbox.read(operation_id)
+        if legacy is not None and (
+            legacy.state == "pending-reconciliation"
+            or (legacy.state == "pending" and legacy.intent is not None)
+        ):
+            return PushOutcome(
+                "skipped", operation_id=operation_id, reason="legacy-reconciliation-required"
+            )
+        # A pending legacy row with no intent has not yet dispatched a commit.
+        # Never mutate it: its owner may still be alive and could later dispatch.
+        # The two requests retain If-Match on the same remote revision, so only
+        # one can succeed if that older owner races this isolated operation.
+        kwargs["operation_id"] = scoped_id
+        return await _push_item_inner(**kwargs)
+
+
+async def _push_item_inner(
+    *,
+    kind: Kind,
+    local_id: str,
+    captured_local: Mapping[str, Any] | None,
+    accepted: Mapping[str, Any] | None,
+    current_local: Mapping[str, Any],
+    remote_latest: Mapping[str, Any],
+    expected_revision: str | None,
+    transport: PushTransport,
+    outbox: Outbox,
+    operation_id: str,
+    budget: OperationBudget,
+    opts: MergeOptions = MergeOptions(),
+    document_builder: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
+    bundle_attested: bool = False,
+    bundle_upload: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
+    org_skill: bool = False,
 ) -> PushOutcome:
     """Project and conditionally publish one authored item; settle the outbox.
 
@@ -359,7 +453,11 @@ async def push_item(
         kind, captured_local, accepted, current_local, remote_latest, expected_revision
     )
     attempt: Attempt | None = outbox.begin_attempt(
-        operation_id, kind=kind, local_id=local_id, input_fp=input_fp
+        operation_id,
+        kind=kind,
+        local_id=local_id,
+        input_fp=input_fp,
+        recover_org_skill_intent=kind == "skill" and org_skill,
     )
     if attempt is None:
         # Dead-lettered (over the attempt cap), inside its backoff window, or an
@@ -378,6 +476,8 @@ async def push_item(
             generation=generation,
             intent=attempt.replay,
             budget=budget,
+            kind=kind,
+            org_skill=org_skill,
         )
 
     try:
@@ -442,6 +542,7 @@ async def push_item(
             outbox, operation_id, generation, "bundle-unsupported-server", state="needs-review"
         )
 
+    unpinned_org_skill = False
     if is_bundle:
         preview_document: Mapping[str, Any] | None = document
         token = ""
@@ -486,7 +587,23 @@ async def push_item(
         preview_document = preview.get("document")
         pin = preview.get("pin")
         token = str(pin.get("token") or "") if isinstance(pin, Mapping) else ""
-        if not isinstance(preview_document, Mapping) or not token:
+        # Org skill documents deliberately have no generalization pin on the hub.
+        # Only a verified org-scope caller may accept that contract; the preview
+        # must also prove it returned our exact untransformed document. CAS still
+        # binds both preview and commit to the same remote revision above.
+        transform = preview.get("transform")
+        unpinned_org_skill = (
+            kind == "skill"
+            and org_skill
+            and not token
+            and status == "unchanged"
+            and not unresolved
+            and preview.get("changes") == []
+            and isinstance(transform, Mapping)
+            and transform.get("model") == "not_applied"
+            and preview_document == document
+        )
+        if not isinstance(preview_document, Mapping) or (not token and not unpinned_org_skill):
             return _settle_deterministic(
                 outbox, operation_id, generation, "unsupported-precondition"
             )
@@ -527,6 +644,9 @@ async def push_item(
         # A bundle commit carries NO pin, so replay must not demand one; the flag
         # is what distinguishes "no token needed" from "lost the token".
         "bundle": is_bundle,
+        # Only a successfully validated org preview may authorize a tokenless
+        # document replay; the retry also rechecks the current linked scope.
+        "unpinned_org_skill": unpinned_org_skill,
     }
     if not outbox.store_intent(operation_id, generation, intent):
         # Persisting the intent must succeed BEFORE a mutating dispatch: without
@@ -574,6 +694,8 @@ async def _replay_verbatim(
     generation: int,
     intent: Mapping[str, Any],
     budget: OperationBudget,
+    kind: Kind,
+    org_skill: bool,
 ) -> PushOutcome:
     """Resend one UNCERTAIN commit with exactly the stored bytes.
 
@@ -596,7 +718,14 @@ async def _replay_verbatim(
     accepts = list(intent.get("accept_unresolved") or [])
     expected = str(intent.get("expected_revision") or "")
     is_bundle = bool(intent.get("bundle"))
-    if not isinstance(document, Mapping) or not expected or (not token and not is_bundle):
+    unpinned_org_skill = (
+        intent.get("unpinned_org_skill") is True and kind == "skill" and org_skill and not accepts
+    )
+    if (
+        not isinstance(document, Mapping)
+        or not expected
+        or (not token and not is_bundle and not unpinned_org_skill)
+    ):
         return PushOutcome(
             "skipped", operation_id=operation_id, reason="reconciliation-intent-invalid"
         )

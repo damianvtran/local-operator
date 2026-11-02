@@ -644,6 +644,11 @@ class HubSyncRunner:
             document_builder=self._document_builder(ctx, c),
             bundle_attested=bundle_attested,
             bundle_upload=bundle_upload,
+            org_skill=(
+                c.kind == "skill"
+                and record.identity is not None
+                and record.identity.visibility == "org"
+            ),
         )
         report.skipped = None
         await self._offload(self._record_push, ctx, c, outcome)
