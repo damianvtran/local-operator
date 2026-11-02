@@ -44,15 +44,19 @@ def _spec(name: str) -> SlashCommand:
 
 
 def test_every_published_row_carries_the_message_it_was_rendered_from() -> None:
-    """The wire's 46 rows are all catalogued, so all 46 can render in any locale.
+    """The wire's 48 rows are all catalogued, so all 48 can render in any locale.
 
     The withheld rows are the ones whose copy lives outside ``wire.*`` (TUI
     pages) — they still carry their message, they are simply not served. A row
     with no message would silently stay English on every surface, which is the
     defect this change removes, so the count and the namespace are pinned.
+
+    46 -> 48 (PR #3143): ``/radient`` and ``/saver`` are published at
+    ``session.saver``; their copy is ``wire.radient_saver.command.*``, carried
+    through ``_desc`` like every other row.
     """
     published = [spec for spec in SLASH_COMMANDS if spec.desktop_destination]
-    assert len(published) == 46
+    assert len(published) == 48
     for spec in published:
         assert spec.description_message is not None, spec.name
         assert spec.description_message.code.startswith("wire."), spec.name

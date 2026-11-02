@@ -29,6 +29,8 @@ knows" would be the wrong conclusion to draw from the first two.
 
 from __future__ import annotations
 
+import asyncio
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -234,16 +236,46 @@ class _Frames:
 
 
 async def _settle(pilot, frames: _Frames, *, quiet: int = 6) -> None:
-    """Pump until the frame signature stops moving."""
+    """Wait for content, then pump until the frame signature stops moving.
+
+    Silence before the session factory finishes is not a settled transcript.
+    Counting it let this helper return with no content frames under CI load,
+    so callers indexed an empty list before testing the reveal at all. Keep
+    every captured frame (including the FIRST) for the geometry assertions;
+    readiness must not discard an early bad frame or wait for its repair.
+    """
     seen = -1
     stable = 0
-    while stable < quiet:
-        await pilot.pause()
-        if len(frames.samples) == seen:
-            stable += 1
-        else:
-            stable = 0
-            seen = len(frames.samples)
+    async with asyncio.timeout(15):
+        while stable < quiet:
+            await pilot.pause()
+            if not frames.content():
+                stable = 0
+                continue
+            if len(frames.samples) == seen:
+                stable += 1
+            else:
+                stable = 0
+                seen = len(frames.samples)
+
+
+@pytest.mark.asyncio
+async def test_settle_does_not_mistake_a_delayed_first_frame_for_quiet() -> None:
+    """A slow factory can stay silent longer than the six quiet display pumps."""
+    frames = _Frames.__new__(_Frames)
+    frames.samples = []
+    pauses = 0
+
+    async def pause() -> None:
+        nonlocal pauses
+        pauses += 1
+        if pauses == 8:
+            frames.samples.append({"target": True, "parked": False, "blocks": 1, "rows": []})
+        await asyncio.sleep(0)
+
+    await _settle(SimpleNamespace(pause=pause), frames)
+    assert pauses >= 14  # first content at 8, then six quiet pumps
+    assert len(frames.content()) == 1
 
 
 def _mcp_rows(frame: dict[str, Any], failures: dict[str, str]) -> list[dict[str, Any]]:

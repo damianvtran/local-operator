@@ -84,11 +84,41 @@
           "path": "local_operator/saver/chain.py",
           "symbol": "saver.chain.notice_message",
           "note": "returns a Msg; its caller renders it into a printed notice"
+        },
+        {
+          "path": "local_operator/saver/command.py",
+          "symbol": "saver.command._tr / saver_slash",
+          "note": "shared slash receipts render Msg values to SlashResult.text strings"
+        },
+        {
+          "path": "local_operator/exec_startup.py",
+          "symbol": "add_startup_arguments / apply_saver_startup",
+          "note": "argparse help renders directly in help_locale; refusal_text is printed on stderr"
+        },
+        {
+          "path": "local_operator/session/runtime/serving.py",
+          "symbol": "ServingSessionHandle._slash_result",
+          "note": "namespace usage receipt renders into SlashResult.text, not a message identity"
+        },
+        {
+          "path": "local_operator/tui/app.py",
+          "symbol": "OperatorApp._saver_command / _saver_label",
+          "note": "system notice and band badge consume rendered strings"
+        },
+        {
+          "path": "local_operator/slash_commands.py",
+          "symbol": "_desc / describe",
+          "note": "Msg stays in-process on registry rows; desktop and phone receive the rendered description string"
         }
       ],
       "references": {
+        "exec_startup.py": 2,
         "saver/chain.py": 1,
-        "settings_io.py": 10
+        "saver/command.py": 16,
+        "session/runtime/serving.py": 3,
+        "settings_io.py": 10,
+        "slash_commands.py": 3,
+        "tui/app.py": 6
       }
     },
     "wire.aida_cadence": {

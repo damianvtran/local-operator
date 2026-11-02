@@ -3472,7 +3472,25 @@ class Session:
         system_blocks_provider: Callable[..., list[str]] | Callable[..., Awaitable[list[str]]],
     ) -> None:
         self._model = model
+        # Tri-state conversation choice: None follows the global setting/agent
+        # pin; True/False are explicit overrides journaled for resume.
+        self.radient_saver_choice: bool | None = None
+        #: The last real balance read for this session's gate, cached so a
+        #: reporting surface never has to guess or block (see
+        #: ``saver/command.py::cached_availability``). ``None`` = never read.
+        self._saver_availability: Any = None
+        #: The last sign-in answer, stamped by the same read. Read by the
+        #: badge instead of the credential store, which shells out per call.
+        self._saver_signed_in: bool | None = None
+        #: The launching agent's Saver pin (team slot, then profile), stamped by
+        #: ``harness.subagent`` on a child it spawns and read by
+        #: ``saver.command.saver_choices``. ``None`` = no pin, the resolver's
+        #: "fall through" value, which is what every non-child session holds.
+        self._saver_agent_pin_value: bool | None = None
         self._stream_fn = stream_fn
+        saver_bridge = getattr(self._stream_fn, "bind_saver_session", None)
+        if callable(saver_bridge):
+            saver_bridge(self)
         notice_bridge = getattr(self._stream_fn, "set_notice_handler", None)
         if callable(notice_bridge):
             # The stream owns provider routing; the session owns ordered event
@@ -5192,6 +5210,9 @@ class Session:
         # that model already restored, or the pin reads as stranded and is
         # dropped.
         self._restore_selected_model()
+        from local_operator.saver.command import restore_saver_choice
+
+        restore_saver_choice(self)
         # Subagents and todos: both live only in memory during a session, so a
         # resume rebuilds them from the transcript here — the job rows and comms
         # records that make the subagent panel and ``hub op='resume'`` work, and

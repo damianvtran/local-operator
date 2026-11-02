@@ -12,6 +12,18 @@
   "wire.radient_saver.notice.signed_out": "Radient Saver приостановлен в этой сессии, потому что вы не вошли в Radient. Введите /login radient, чтобы пользоваться Saver.",
   "wire.radient_saver.notice.no_credit": "Radient Saver приостановлен в этой сессии, потому что на балансе Radient нет средств. Пополните баланс на console.radienthq.com, чтобы пользоваться Saver.",
   "wire.radient_saver.notice.rate_limited": "Radient Saver занят, поэтому вся история отправляется, пока он снова не начнёт принимать запросы.",
-  "wire.radient_saver.notice.disabled": "Radient Saver недоступен при текущей конфигурации, поэтому отправляется вся история.",
-  "wire.radient_saver.notice.oversize": "Одно сообщение в этом разговоре слишком велико для Radient Saver, поэтому оно остаётся без сокращения. Saver продолжает сокращать остальную часть разговора."
+  "wire.radient_saver.notice.disabled": "Radient Saver недоступен для этого запроса, поэтому отправляется весь ваш диалог. Больше ничего не затронуто.",
+  "wire.radient_saver.notice.oversize": "Одно сообщение в этом разговоре слишком велико для Radient Saver, поэтому оно остаётся без сокращения. Saver продолжает сокращать остальную часть разговора.",
+  "wire.radient_saver.command.description": "Настроить Radient Saver для этой сессии",
+  "wire.radient_saver.command.radient_description": "Radient Saver (/radient saver)",
+  "wire.radient_saver.command.usage": "Используйте /saver или /radient saver, затем on, off, status или inherit. Команда /saver без аргумента переключает состояние; inherit следует глобальной настройке.",
+  "wire.radient_saver.command.enabled": "Radient Saver включён для этой сессии. Глобальная настройка не изменилась.",
+  "wire.radient_saver.command.disabled": "Radient Saver отключён для этой сессии. Глобальная настройка не изменилась; /saver inherit снова следует ей.",
+  "wire.radient_saver.command.inherited": "Radient Saver для этой сессии теперь следует глобальной настройке и назначению агента.",
+  "wire.radient_saver.command.status.on": "Radient Saver: включён для этой сессии. Введите /saver off, чтобы отключить его, или /saver inherit, чтобы следовать глобальной настройке.",
+  "wire.radient_saver.command.status.off": "Radient Saver: отключён для этой сессии. Введите /saver on, чтобы включить его; если глобальная настройка отключена, включите её в /settings, раздел Radient Saver.",
+  "wire.radient_saver.command.badge": "saver",
+  "wire.radient_saver.notice.unknown_balance": "Radient Saver не удалось проверить ваш баланс Radient, поэтому ничего не изменилось. Повторите /saver on чуть позже.",
+  "wire.radient_saver.notice.no_session": "Radient Saver требует открытого диалога; откройте его и повторите попытку.",
+  "wire.radient_saver.notice.gate_off": "Radient Saver отключён в ваших настройках, поэтому эта сессия не может его включить. Включите его в /settings, раздел Radient Saver, затем /saver on."
 }

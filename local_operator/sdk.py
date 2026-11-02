@@ -631,6 +631,18 @@ async def _build_session(
             )
         ) from error
 
+    if spec.radient_saver is not None:
+        from local_operator.saver.command import refusal_text, set_saver_choice
+
+        # A program asked for a state the gate will not honour (signed out, mode
+        # off, empty balance). The writer refuses to journal it, and a caller
+        # that is told nothing would build a session whose stated policy is not
+        # in effect — the one thing a programmatic caller cannot check for
+        # itself, so it is an error rather than a warning.
+        result = await set_saver_choice(session, spec.radient_saver)
+        if not result.written:
+            await session.dispose()
+            raise SessionSpecError(refusal_text(result.decision))
     if mode == "attach":
         # A viewer, or nothing. create_session(has_ui=True) hands back an
         # AttachedSession only when a live runtime already owns the id; a cold
