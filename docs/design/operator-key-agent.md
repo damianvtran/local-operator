@@ -10,8 +10,10 @@ wheel retag), `local_operator/operator/macos/` (the client), the
 This document is the context a future reader needs and the measurements behind the
 decisions. Every number in it was taken on this machine unless it says otherwise:
 macOS 27.0 (26A428), arm64, uid 501, signed with this project's `Developer ID
-Application` identity (team `SHA2U6KT7V`) — named by TEAM ID rather than by the
-certificate's common name, because this document is meant to be shareable.
+Application` identity (team `SHA2U6KT7V`). Releases are now signed with the Radient Inc.
+organization identity, `Developer ID Application: Radient Inc. (SHA2U6KT7V)`; the
+measurements were taken under the earlier individual certificate of the SAME team, and
+§8 explains why a change of leaf certificate within one team leaves them valid.
 
 ---
 
@@ -273,7 +275,8 @@ the selftest uses to exercise the dictionary's ownership of a number.
 deliberately unlike the `*-latest` runners elsewhere in that file: the signing
 toolchain must not move under the artefact the entitlement depends on.
 
-1. the p12 from `secrets.MACOS_SIGNING_P12_BASE64` decoded at `0600` under
+1. the Radient Inc. organization identity's p12 from `secrets.MACOS_DEVID_APP_P12_BASE64`
+   (password `secrets.MACOS_DEVID_APP_P12_PASSWORD`) decoded at `0600` under
    `$RUNNER_TEMP`, imported into a **throwaway keychain** (the operator's login
    keychain is never touched);
 2. `security set-key-partition-list` — without it the identity imports and `codesign`
@@ -284,8 +287,13 @@ toolchain must not move under the artefact the entitlement depends on.
    assembled binary really carries both slices** (the tag is not a binary, and `--binary`
    skips the compile), assemble the bundle, assert the profile authorizes exactly what the
    entitlements claim AND that it is still current and names the signing certificate, sign
-   with the identity addressed **by hash** (so the workflow carries nobody's name), and
-   `codesign --verify --strict`;
+   with the identity addressed **by hash**, and `codesign --verify --strict`; then
+   **assert who signed it**: the job reads `Authority=` and `TeamIdentifier=` back off the
+   finished signature and fails unless the chain is exactly
+   `Developer ID Application: Radient Inc. (SHA2U6KT7V)` → `Developer ID Certification
+   Authority` → `Apple Root CA` on team `SHA2U6KT7V`. The structural checks alone cannot
+   tell two certificates of the same team apart — a retired p12 with its matching
+   retired profile passes all of them — so the identity is pinned by name here;
 5. run the helper's `selftest`;
 6. retag the pure wheel into `local_operator-<v>-py3-none-macosx_11_0_universal2.whl`
    with the signed bundle injected at the path the runtime resolves, its execute bit
@@ -335,7 +343,7 @@ document, a script or an operator's habit should imply that form works.
 application identifier for `codesign` to accept it, and an app id is public — it is in
 the signature of every wheel we publish and `codesign -d` prints it from any installed
 helper. The *profile* carries the certificate, is bound to this team, and must be
-refreshable, so it travels as `secrets.MACOS_SIGNING_PROFILE_BASE64`; committing it
+refreshable, so it travels as `secrets.MACOS_KEYAGENT_PROFILE_BASE64`; committing it
 would put one team's identity into every fork's build. A fork substitutes its own app
 id, profile and `Info.plist` together — and the runtime pins the identifier and team it
 expects, so a wheel signed for another identity is **refused** rather than trusted.
@@ -361,22 +369,83 @@ guarantee.
 
 ## 8. Renewal and rotation
 
-* **The Developer ID certificate expires after 5 years.** Rotate before it lapses and
-  keep the old one importable until wheels signed by it have aged out of use: the
-  entitlement is checked against the signature at run time, so a wheel signed by an
-  expired certificate stops working on the day the certificate expires — for users who
-  already installed it.
-* **The profile expires 2044-09-20, but a team admin can revoke the App ID or the
-  profile at any time**, and a revoked profile turns `create` into a **SIGKILL** (§2,
-  Q). That is why the signal case has its own diagnosis and its own copy: the failure
-  tells the operator their key agent was killed for a bad or missing profile, not that
-  the key is absent.
-* Rotating means: new profile in `MACOS_SIGNING_PROFILE_BASE64`, updated app id in
-  `packaging/macos/keyagent.entitlements` and `Info.plist` if they change,
-  `TEAM_IDENTIFIER`/`BUNDLE_IDENTIFIER` in `local_operator/operator/macos/keyagent.py`,
-  and a release. The runtime deliberately **refuses** a helper it does not recognize,
-  so a half-rotated state fails loudly at the pre-flight instead of silently signing
-  with something unexpected.
+**What signs a release today.** The Radient Inc. organization identity,
+`Developer ID Application: Radient Inc. (SHA2U6KT7V)` (Developer ID G2 Sub-CA), with the
+Developer ID profile *Local Operator key agent (Developer ID, Radient Inc)* for App ID
+`SHA2U6KT7V.com.local-operator.lopkeyagent`. In CI they are `MACOS_DEVID_APP_P12_BASE64`
+/ `MACOS_DEVID_APP_P12_PASSWORD` and `MACOS_KEYAGENT_PROFILE_BASE64`. The earlier
+individual identity's `MACOS_SIGNING_P12_*` / `MACOS_SIGNING_PROFILE_BASE64` are left in
+the secret store as the rollback path and nothing reads them; rolling back means pointing
+the job at them AND changing its `EXPECTED_AUTHORITY`, because the post-sign assertion
+refuses any other leaf.
+
+**Why the move from the individual identity is not a break.** The account was converted
+to an organization, so the TEAM ID IS UNCHANGED. Every check that gates the key agent
+keys on the team and the identifiers, never on the leaf certificate's name, serial or
+hash: the designated requirement (`identifier` + Developer ID anchor +
+`leaf[subject.OU] = SHA2U6KT7V`), the runtime pre-flight (`TEAM_IDENTIFIER` and
+`BUNDLE_IDENTIFIER` in `local_operator/operator/macos/keyagent.py`), and the
+profile/signature pairing, which compares the profile's `DeveloperCertificates` with
+whatever leaf signed THIS bundle rather than a pinned one. So nothing in the source
+changed for the new certificate; only the secrets and the job's identity assertion did.
+
+**Keychain continuity: keys created by an individually-signed key agent stay usable.**
+The Secure Enclave key is generated by `se-keyagent.c` with `kSecAttrTokenID =
+kSecAttrTokenIDSecureEnclave`, `kSecAttrIsPermanent`, `kSecAttrApplicationTag` = the tag,
+and a `SecAccessControl` of `kSecAccessControlPrivateKeyUsage |
+kSecAccessControlUserPresence` at `WhenPasscodeSetThisDeviceOnly` (falling back to
+`WhenUnlockedThisDeviceOnly`). It sets NO `kSecAttrAccessGroup` on create or on the
+`SecItemCopyMatching` lookup, so the item lives in the process's default access group:
+its `com.apple.application-identifier`, `SHA2U6KT7V.com.local-operator.lopkeyagent`.
+That string is built from the team id and the bundle id — not from the certificate —
+and both are unchanged, so an organization-signed key agent resolves the same group and
+finds the same items. The new profile grants it (`com.apple.application-identifier`
+equal to that value; its `keychain-access-groups` is Apple's wildcard `SHA2U6KT7V.*`,
+which the key agent does not claim — see §2 on why it carries the application
+identifier alone). Measured across the change on one Mac with a synthetic tag: the
+released individually-signed helper created the key, and the organization-signed helper
+built by this job's rehearsal saw it (`exists`) and returned a byte-identical public
+point (`public`); the evidence is on the pull request that moved the job.
+
+**Expiry, and what it means for each piece.**
+
+* **The certificate expires 2027-12-02.** Every release signature carries a secure
+  timestamp (§7), so wheels already installed keep validating after that date; what
+  stops is the ability to sign NEW releases, and `keyagent-macos` is a hard dependency
+  of `pypi-publish`, so an expired identity stops every platform's release, not only
+  macOS. Renew well before it.
+* **The profile expires 2044-10-28 — but that date is not the one that matters.** A
+  Developer ID profile authorizes specific certificates (`DeveloperCertificates`); once
+  the certificate it embeds expires or is revoked, the profile no longer authorizes any
+  NEW signature, and the assembly script's pairing check (step 5b) refuses it. The
+  profile's practical life is the certificate's.
+* **A team admin can revoke the App ID or the profile at any time**, and a revoked
+  profile turns `create` into a **SIGKILL** (§2, Q). That is why the signal case has its
+  own diagnosis and its own copy: the failure tells the operator their key agent was
+  killed for a bad or missing profile, not that the key is absent.
+
+**Renewal procedure.** (1) Create a new CSR and from it a new *Developer ID Application*
+certificate under the Radient Inc. organization team. (2) Regenerate BOTH Developer ID
+profiles against it — this key agent's (`SHA2U6KT7V.com.local-operator.lopkeyagent`) and
+the desktop app's (`SHA2U6KT7V.com.local-operator`, which lives in the
+local-operator-ui repository) — because each embeds the certificate it authorizes and
+an old profile beside a new certificate fails the pairing check. (3) Export the identity
+as a p12 and replace the GitHub secrets (`MACOS_DEVID_APP_P12_BASE64`,
+`MACOS_DEVID_APP_P12_PASSWORD`, `MACOS_KEYAGENT_PROFILE_BASE64` here; their counterparts
+in the desktop repository) from the operator's encrypted credential store, never from a
+file left on disk. (4) Rehearse with `gh workflow run publish.yml --ref main` (it signs
+and cannot publish) before the next release. A renewal under the same organization keeps
+the same `Authority=` name, so `EXPECTED_AUTHORITY` does not change; a different
+organization or team does change it, and also `TEAM_IDENTIFIER`, the entitlements file
+and `Info.plist` — which is a new access group, so keys created under the old team are
+NOT reachable by the new helper and the operator key has to be re-initialized.
+
+**Rotating the App ID or team** means: new profile in `MACOS_KEYAGENT_PROFILE_BASE64`,
+updated app id in `packaging/macos/keyagent.entitlements` and `Info.plist`,
+`TEAM_IDENTIFIER`/`BUNDLE_IDENTIFIER` in `local_operator/operator/macos/keyagent.py`, the
+job's `EXPECTED_AUTHORITY`/`EXPECTED_TEAM`, and a release. The runtime deliberately
+**refuses** a helper it does not recognize, so a half-rotated state fails loudly at the
+pre-flight instead of silently signing with something unexpected.
 
 ## 9. What is deliberately not proven here
 
