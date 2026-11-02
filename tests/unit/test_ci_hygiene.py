@@ -539,16 +539,23 @@ def _shard_step_run(job: str) -> str:
 #: third pytest step, or this one under another id, fails ``_pytest_steps``.
 SERIAL_STEP_ID = "serial_controls"
 ORDINARY_STEP_ID = "shard_pytest"
+#: tui-e2e's own pair. The Darwin evidence step is there because the sharded unit
+#: job is ubuntu-only: the macOS leg is the only place a group census's treatment
+#: of an unreaped zombie leader can be measured, and an unnamed extra pytest
+#: invocation is exactly what this audit exists to refuse.
+E2E_STEP_ID = "e2e_shard_pytest"
+DARWIN_STEP_ID = "darwin_pin"
 
 
 def _pytest_steps(job: str) -> list[dict[str, Any]]:
     """Every step of `job` that invokes pytest, with the job's allowance enforced.
 
-    One step for every job but the unit job, which has EXACTLY two and they are the
-    ones the design names: the ordinary shard run (`shard_pytest`) and the serial
-    controls (`serial_controls`). The old rule ("exactly one pytest step") would
-    either reject the design or, relaxed to "at least one", let an arbitrary extra
-    command ride along unaudited; this keeps both honest.
+    One step for every job but the two audited pairs: the unit job's ordinary shard
+    run (`shard_pytest`) and serial controls (`serial_controls`), and tui-e2e's
+    partitioned e2e run (`e2e_shard_pytest`) and Darwin evidence step
+    (`darwin_pin`). The old rule ("exactly one pytest step") would reject either
+    addition, and relaxing it to "at least one" would let an arbitrary extra
+    command ride along unaudited; naming the ids keeps both honest.
     """
     steps = [s for s in _steps(job) if "pytest" in (s.get("run") or "")]
     if job == "test":
@@ -556,6 +563,12 @@ def _pytest_steps(job: str) -> list[dict[str, Any]]:
         assert ids == [ORDINARY_STEP_ID, SERIAL_STEP_ID], (
             f"{job} must run exactly its two audited pytest steps "
             f"({ORDINARY_STEP_ID}, {SERIAL_STEP_ID}) in that order, got {ids}"
+        )
+    elif job == "tui-e2e":
+        ids = [s.get("id") for s in steps]
+        assert ids == [E2E_STEP_ID, DARWIN_STEP_ID], (
+            f"{job} must run exactly its two audited pytest steps "
+            f"({E2E_STEP_ID}, {DARWIN_STEP_ID}) in that order, got {ids}"
         )
     else:
         assert len(steps) == 1, f"{job} must have exactly one pytest step, got {len(steps)}"

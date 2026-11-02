@@ -444,7 +444,7 @@ def test_child_memory_unsupported_positive_refuses_before_spawn(memory_wrapper, 
     ],
 )
 def test_child_memory_loop_preserves_owned_cleanup_contract(
-    memory_wrapper, monkeypatch, mode, expected
+    memory_wrapper, monkeypatch, tmp_path, mode, expected
 ):
     """Exercise real Guard decisions; fake only readings/process/clock/syscalls.
 
@@ -455,6 +455,7 @@ def test_child_memory_loop_preserves_owned_cleanup_contract(
     from types import SimpleNamespace
 
     wrapper = memory_wrapper
+    monkeypatch.setenv("LOCAL_OPERATOR_SCRATCHPAD", str(tmp_path))
     mg = wrapper.memory_guard
     budget = _test_budget(48)
     monkeypatch.setattr(wrapper, "_memory_budget", lambda value: (budget, "inherited"))
@@ -494,7 +495,7 @@ def test_child_memory_loop_preserves_owned_cleanup_contract(
                 self.status = 0
             return self.status
 
-        def wait(self):
+        def wait(self, timeout=None):
             self.waits += 1
             return self.status
 
@@ -506,15 +507,43 @@ def test_child_memory_loop_preserves_owned_cleanup_contract(
         spawned.append(kwargs)
         return process
 
-    monkeypatch.setattr(wrapper, "subprocess", SimpleNamespace(Popen=popen))
+    monkeypatch.setattr(
+        wrapper,
+        "subprocess",
+        SimpleNamespace(Popen=popen, TimeoutExpired=subprocess.TimeoutExpired),
+    )
 
-    def group(pgid, signum):
-        assert pgid == process.pid
-        group_calls.append((pgid, signum))
-        process.status = -int(signum)
-        return True
+    # This memory-policy matrix fakes the authority boundary. The separate
+    # owned-group matrix exercises real authority with injected kernel facts.
+    opg = wrapper.owned_process_group
 
-    monkeypatch.setattr(wrapper, "_signal_group", group)
+    class Owner:
+        pgid = process.pid
+        receipts = {}
+        last = opg.Verdict("VERIFIED", "fake acquisition")
+
+        def refresh(self, **kwargs):
+            return opg.Verdict(
+                "OBSERVED_EMPTY" if process.status is not None else "VERIFIED", "fake"
+            )
+
+        def leader_terminal(self, deadline):
+            # The seam that replaced Popen.poll(): the same mode gating, asked of
+            # the capability instead of the child handle, so the loop never reaps.
+            return process.status is not None
+
+        def signal(self, signum, **kwargs):
+            group_calls.append((self.pgid, signum))
+            process.status = -int(signum)
+            return opg.Verdict("SIGNALED", "fake")
+
+    monkeypatch.setattr(
+        wrapper,
+        "owned_process_group",
+        SimpleNamespace(
+            OwnedGroup=SimpleNamespace(capture=lambda *args, **kwargs: Owner()), Verdict=opg.Verdict
+        ),
+    )
     real_guard = mg.Guard
 
     def guard(pgid, resolved):

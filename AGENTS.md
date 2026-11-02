@@ -887,11 +887,17 @@ measured; 300 s in an earlier run for a 300 s one), where the wrapper SIGKILLs t
 group after `--grace` and clears the same tree in 5 s **with `--grace 2`** (the
 shipped `--grace` default of 10 takes ~13 s for it). It keeps
 `timeout(1)`'s statuses (124 on a fired bound, 125 when the command could not
-start), reports **128 + signum** when a signal ends the run — forwarded by this
+start, 126 when the command ran and produced its own status but the wrapper could
+not prove its owned group was cleaned up — deliberately distinct from 125, since
+"did not run" and "ran, residuals unknown" call for different follow-up), reports
+**128 + signum** when a signal ends the run — forwarded by this
 wrapper, or delivered to the child by someone else, where `sys.exit` used to
 render the raw `-9` as 247 — forwards **SIGHUP and SIGQUIT** as well as
 SIGINT/SIGTERM (SIGHUP used to kill the wrapper and leave the group alive), writes
-diagnostics to stderr only, and reports what it reaped.
+diagnostics to stderr only, and reports what it reaped. Every spawned run also
+writes `run-bounded-runs/<run_id>.spawn.json` and `.exit.json` naming the group it
+owned (`--run-id` or `$LOCAL_OPERATOR_RUN_ID` binds the id); see
+`scripts/run_bounded.py`'s RUN RECORD section for the schema.
 
 Its own limit, stated: a `SIGKILL` to the wrapper itself cannot be caught, so
 nothing runs a sweep in that case — what protects the group there is that the

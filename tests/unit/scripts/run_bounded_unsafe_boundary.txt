@@ -1,0 +1,10 @@
+# Exact base 7fc80d3b936 scripts/run_bounded.py _signal_group; NEVER native.
+def _signal_group(pgid: int, signum: int) -> bool:
+    """Signal every process in `pgid`. False when the group is already gone."""
+    if pgid <= 0:
+        return False
+    try:
+        os.killpg(pgid, signum)
+    except (ProcessLookupError, PermissionError):
+        return False
+    return True
