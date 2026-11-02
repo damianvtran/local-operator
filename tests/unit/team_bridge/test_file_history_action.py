@@ -222,10 +222,12 @@ async def test_mixed_manifest_rejects_whole_snapshot_when_one_file_expires(monke
 
     store, registry = Store(), InertFileActionRegistry()
     s = scope(registry)
-    source = page([
-        file(expires_at="2099-01-01T00:00:00Z"),
-        file("batt_bbbbbbbb", expires_at="2101-01-01T00:00:00Z"),
-    ])
+    source = page(
+        [
+            file(expires_at="2099-01-01T00:00:00Z"),
+            file("batt_bbbbbbbb", expires_at="2101-01-01T00:00:00Z"),
+        ]
+    )
     context = await history.commission_human_history(
         client(monkeypatch, store, lambda _: streamed_json(source)), registry, s, lambda: s
     )
