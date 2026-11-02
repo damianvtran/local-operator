@@ -44,6 +44,12 @@ source-only checks are not native proof. Failed setup stops dispatch: report the
 prerequisite and bounded repair. Use the harness browser, no second stack; follow
 AGENTS.md's HOME/config, CMUX stripping and exact-process-group teardown rules.
 
+## Worktrees
+
+Prefer `<repo>/.worktrees/<name>` sharing primary deps; sibling `../<repo>-<topic>` only with cloned deps.
+Never scratchpads, /tmp, `$HOME` top level. `git worktree remove` (clean only) once the PR merges or
+the lane closes; `scripts/worktree_janitor.py` lists stragglers.
+
 ## Never use a live peer as the revoke test
 
 Never remove a live peer to test revocation. Use a disposable peer; if none can

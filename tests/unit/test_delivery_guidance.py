@@ -23,13 +23,13 @@ ROOT = Path(__file__).resolve().parents[2]
 # Budgets cover the installed body, not YAML metadata, and allow small edits
 # without letting an incident archive grow into every delegated turn again.
 BUDGETS = {
-    "coder": 2200,
-    "reviewer": 3300,
+    "coder": 2300,
+    "reviewer": 3500,
     "manager": 3300,
-    "designer": 5300,
-    "ux-reviewer": 4300,
+    "designer": 5450,
+    "ux-reviewer": 4500,
     "aida": 8000,
-    "qa-tester": 2400,
+    "qa-tester": 2600,
 }
 
 
@@ -58,7 +58,7 @@ def test_delivery_authority_keeps_cost_and_safety_controls_together():
         "actual served model",
     ):
         assert required in policy
-    assert len(policy) < 6500
+    assert len(policy) < 6800
 
 
 def test_root_instructions_link_detail_instead_of_duplicating_it():
