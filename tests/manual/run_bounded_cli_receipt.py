@@ -70,7 +70,7 @@ def _census(path: Path) -> None:
                 "zombie": sample.zombie if sample else None,
             }
         )
-    members = owned.strict_census(record["workload_pgid"], time.monotonic() + 1)
+    members = owned.strict_census(record["workload_pgid"], time.monotonic() + 1).pids
     print(json.dumps({"facts": facts, "workload_group": members}), flush=True)
     if members or any(f["exists"] is not False for f in facts):
         raise SystemExit("CLI residual/unknown; no automatic cleanup")

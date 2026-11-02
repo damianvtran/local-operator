@@ -37,7 +37,9 @@ def test_growth_beyond_slack_is_not_silently_truncated():
             buffer[n] = n + 1
         return 70 * ctypes.sizeof(ctypes.c_int)
 
-    assert len(o.strict_darwin(10, 5, listpids=call, clock=lambda: 0)) == 70
+    pids, complete, leader_seen = o.strict_darwin(10, 5, listpids=call, clock=lambda: 0)
+    assert len(pids) == 70
+    assert complete is True, (complete, leader_seen)
     assert len(sizes) == 2 and sizes[1] > sizes[0]
 
 
@@ -56,7 +58,9 @@ def test_zero_size_query_still_fetches_for_arrival_race():
         buffer[0] = 10
         return 4
 
-    assert o.strict_darwin(10, 5, listpids=call, clock=lambda: 0) == [10]
+    pids, _complete, leader_seen = o.strict_darwin(10, 5, listpids=call, clock=lambda: 0)
+    assert pids == [10]
+    assert leader_seen is True
 
 
 @pytest.mark.parametrize("row", ["broken", "22 (mismatch) S 1 10 10", "10 (name) S bad 10 10"])

@@ -123,7 +123,7 @@ def main():
         census = {}
         for pg in groups:
             try:
-                census[str(pg)] = owned.strict_census(pg, time.monotonic() + 1)
+                census[str(pg)] = owned.strict_census(pg, time.monotonic() + 1).pids
             except Exception as exc:
                 census[str(pg)] = None
                 errors.append("census:" + type(exc).__name__)
