@@ -1,11 +1,13 @@
 """Fail-closed model projection of conversation wake envelopes.
 
 The human journal may record a card before a turn can hydrate its body. A
-journal flush is only tool-pair-safe, not admission-safe. Therefore every model
-renderer substitutes the same content-free pending marker for EVERY card. Only the native
-ephemeral frame may carry screened source metadata and body together; journal
-envelopes have no byte-bound admission proof and NEVER render as model text.
-Live presentation capabilities cannot survive transcript reconstruction.
+journal flush is only tool-pair-safe, not admission-safe. Every model renderer
+substitutes the same content-free history marker for EVERY journal card,
+regardless of reservation state. It describes retained content, not delivery
+status. Only the native ephemeral frame may carry screened source metadata and
+body together; journal envelopes have no byte-bound admission proof and NEVER
+render as model text. Live presentation capabilities cannot survive transcript
+reconstruction.
 """
 
 from __future__ import annotations
@@ -19,7 +21,11 @@ if TYPE_CHECKING:
     from .types import ConversationFeedRef
 
 logger = logging.getLogger(__name__)
-PENDING_CARD = "[team_bridge: delivery_pending]"
+# This model-facing marker describes history retention, not pending or completed
+# delivery. Identical bytes in every reservation state keep it from becoming a
+# completion oracle; journal envelopes cannot attest admission. Keep the existing
+# constant name so callers do not need to change for this wording-only fix.
+PENDING_CARD = "[team_bridge: body not retained in history]"
 
 
 def is_conversation_card(details: Mapping[str, Any]) -> bool:
@@ -42,8 +48,8 @@ def model_card_text(message: Any, messages: list[Any]) -> str:
     # Even a content-free completed-vs-missing hint is an inbox-state oracle
     # without current conversation membership authority. A synchronous model
     # renderer must not grow a new authenticated network read for a cosmetic
-    # hint; no reservation lookup is needed when every card has one status.
-    logger.info("bridge: card assembly pending code=delivery_pending")
+    # hint; no reservation lookup is needed for a state-independent marker.
+    logger.debug("bridge: journal card body not retained in history")
     return PENDING_CARD
 
 
