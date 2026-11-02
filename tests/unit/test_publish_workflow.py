@@ -473,10 +473,16 @@ KEYAGENT_AUTHORITY = "Developer ID Application: Radient Inc. (SHA2U6KT7V)"
 def _keyagent_identity_problems(doc: dict[Any, Any]) -> list[str]:
     steps = doc["jobs"]["keyagent-macos"]["steps"]
     env_values = " ".join(str(v) for s in steps for v in (s.get("env") or {}).values())
-    problems = [f"{name} is not bound" for name in sorted(KEYAGENT_SECRETS)
-                if f"secrets.{name} " not in env_values + " "]
-    problems += [f"{name} (retired) is still read" for name in sorted(RETIRED_KEYAGENT_SECRETS)
-                 if f"secrets.{name}" in env_values]
+    problems = [
+        f"{name} is not bound"
+        for name in sorted(KEYAGENT_SECRETS)
+        if f"secrets.{name} " not in env_values + " "
+    ]
+    problems += [
+        f"{name} (retired) is still read"
+        for name in sorted(RETIRED_KEYAGENT_SECRETS)
+        if f"secrets.{name}" in env_values
+    ]
     assertions = [s for s in steps if (s.get("env") or {}).get("EXPECTED_AUTHORITY")]
     if not assertions or assertions[0]["env"]["EXPECTED_AUTHORITY"] != KEYAGENT_AUTHORITY:
         problems.append("no post-sign assertion of the organization Authority")
@@ -501,7 +507,8 @@ def test_the_identity_checker_catches_a_reverted_secret_and_a_dropped_assertion(
     )
     dropped = copy.deepcopy(doc)
     dropped["jobs"]["keyagent-macos"]["steps"] = [
-        s for s in dropped["jobs"]["keyagent-macos"]["steps"]
+        s
+        for s in dropped["jobs"]["keyagent-macos"]["steps"]
         if not (s.get("env") or {}).get("EXPECTED_AUTHORITY")
     ]
     assert "no post-sign assertion of the organization Authority" in (
