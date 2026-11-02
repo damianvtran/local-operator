@@ -452,6 +452,63 @@ def test_the_pypi_publisher_still_depends_on_the_signed_macos_wheel() -> None:
     )
 
 
+# The Radient Inc. organization identity and its key-agent profile. The team id did
+# not change when the individual account became an organization, so a run fed the
+# retired individual p12 + profile (still stored, as the rollback path) would pass
+# every structural check in the job; only these bindings and the post-sign Authority
+# assertion distinguish the two identities.
+KEYAGENT_SECRETS = {
+    "MACOS_DEVID_APP_P12_BASE64",
+    "MACOS_DEVID_APP_P12_PASSWORD",
+    "MACOS_KEYAGENT_PROFILE_BASE64",
+}
+RETIRED_KEYAGENT_SECRETS = {
+    "MACOS_SIGNING_P12_BASE64",
+    "MACOS_SIGNING_P12_PASSWORD",
+    "MACOS_SIGNING_PROFILE_BASE64",
+}
+KEYAGENT_AUTHORITY = "Developer ID Application: Radient Inc. (SHA2U6KT7V)"
+
+
+def _keyagent_identity_problems(doc: dict[Any, Any]) -> list[str]:
+    steps = doc["jobs"]["keyagent-macos"]["steps"]
+    env_values = " ".join(str(v) for s in steps for v in (s.get("env") or {}).values())
+    problems = [f"{name} is not bound" for name in sorted(KEYAGENT_SECRETS)
+                if f"secrets.{name} " not in env_values + " "]
+    problems += [f"{name} (retired) is still read" for name in sorted(RETIRED_KEYAGENT_SECRETS)
+                 if f"secrets.{name}" in env_values]
+    assertions = [s for s in steps if (s.get("env") or {}).get("EXPECTED_AUTHORITY")]
+    if not assertions or assertions[0]["env"]["EXPECTED_AUTHORITY"] != KEYAGENT_AUTHORITY:
+        problems.append("no post-sign assertion of the organization Authority")
+    return problems
+
+
+def test_the_key_agent_is_signed_with_the_organization_identity() -> None:
+    """The signing job reads the organization secrets and asserts who signed."""
+    assert _keyagent_identity_problems(_workflow()) == []
+
+
+def test_the_identity_checker_catches_a_reverted_secret_and_a_dropped_assertion() -> None:
+    doc = _workflow()
+    reverted = copy.deepcopy(doc)
+    for step in reverted["jobs"]["keyagent-macos"]["steps"]:
+        for key, value in (step.get("env") or {}).items():
+            step["env"][key] = str(value).replace(
+                "MACOS_KEYAGENT_PROFILE_BASE64", "MACOS_SIGNING_PROFILE_BASE64"
+            )
+    assert "MACOS_SIGNING_PROFILE_BASE64 (retired) is still read" in (
+        _keyagent_identity_problems(reverted)
+    )
+    dropped = copy.deepcopy(doc)
+    dropped["jobs"]["keyagent-macos"]["steps"] = [
+        s for s in dropped["jobs"]["keyagent-macos"]["steps"]
+        if not (s.get("env") or {}).get("EXPECTED_AUTHORITY")
+    ]
+    assert "no post-sign assertion of the organization Authority" in (
+        _keyagent_identity_problems(dropped)
+    )
+
+
 # --- the checker itself, against the two defects it exists to catch -------------
 # Without these, a checker that returned `[]` for every input would pass every
 # assertion above — the failure mode this whole module is a response to.
