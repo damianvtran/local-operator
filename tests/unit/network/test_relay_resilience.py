@@ -174,6 +174,127 @@ def test_an_observed_endpoint_is_a_last_resort_dial_candidate() -> None:
     assert relay._dial_candidates(member) == ["99.79.190.164:4097", "172.31.22.23:4097"]
 
 
+# -- the self-race (2026-11-02): never dial our own listener --------------------
+#
+# The Mac's row for the node carried ``observed_endpoint = 10.0.2.169:4097`` -- the
+# Mac's OWN LAN address and listen port. ``probe_candidates`` races every candidate
+# and our own listener answers in < 1 ms, so every dial self-linked. These cells pin
+# the dial-time filter and the record-time guard against a fake live interface table.
+
+
+def _own_table(monkeypatch: pytest.MonkeyPatch, *held: str) -> None:
+    rows = [("en0", 0x1, address) for address in held]
+    monkeypatch.setattr(relay.addresses, "_interface_ipv4s", lambda: list(rows))
+
+
+def _poisoned_member() -> Any:
+    return cast(
+        Any,
+        SimpleNamespace(
+            device_id="d_node",
+            active=True,
+            endpoints=["172.31.18.0:4097", "16.52.146.32:4097"],
+            observed_endpoint="10.0.2.169:4097",
+        ),
+    )
+
+
+def test_a_candidate_on_our_own_interface_and_port_is_never_dialled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _own_table(monkeypatch, "10.0.2.169", "100.96.8.130")
+    assert relay._reaches_own_listener("10.0.2.169:4097", 4097)
+    assert relay._reaches_own_listener("100.96.8.130:4097", 4097)
+    # Same host, different port: a second relay on this machine (every two-relay
+    # rig) is a real peer and must stay dialable.
+    assert not relay._reaches_own_listener("10.0.2.169:4098", 4097)
+    # A foreign host on our port is the normal case.
+    assert not relay._reaches_own_listener("16.52.146.32:4097", 4097)
+    # The pre-existing loopback rule is unchanged: our port drops, another stays.
+    assert relay._reaches_own_listener("127.0.0.1:4097", 4097)
+    assert not relay._reaches_own_listener("127.0.0.1:4098", 4097)
+
+
+def test_the_interface_table_is_read_at_dial_time_and_unreadable_filters_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sleep/wake moves addresses, so the answer follows the table NOW, not at start."""
+    _own_table(monkeypatch, "192.168.0.242")
+    assert not relay._reaches_own_listener("10.0.2.169:4097", 4097)
+    _own_table(monkeypatch, "10.0.2.169")  # the Mac rejoins 10.0.2.x
+    assert relay._reaches_own_listener("10.0.2.169:4097", 4097)
+    monkeypatch.setattr(relay.addresses, "_interface_ipv4s", lambda: None)
+    assert not relay._reaches_own_listener("10.0.2.169:4097", 4097), "never drop on a guess"
+
+
+def test_a_poisoned_observed_endpoint_is_dropped_from_redial_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _own_table(monkeypatch, "10.0.2.169")
+    server: Any = SimpleNamespace(settings=relay.NetworkSettings(port=4097))
+    member = _poisoned_member()
+    assert relay._dial_candidates(member)[-1] == "10.0.2.169:4097", "the poison is in the row"
+    assert relay.RelayServer._redial_candidates(server, member) == [
+        "172.31.18.0:4097",
+        "16.52.146.32:4097",
+    ]
+    member.endpoints = ["127.0.0.1:4097", "127.0.0.1:4098"]
+    assert relay.RelayServer._redial_candidates(server, member) == ["127.0.0.1:4098"]
+
+
+def test_the_probe_dial_never_races_our_own_listener(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``_ensure_link_with_probe`` is the path the live link died on: pin what it races."""
+    _own_table(monkeypatch, "10.0.2.169")
+    member = _poisoned_member()
+    record = SimpleNamespace(network_id="n_x", epoch=3, member=lambda _d: member)
+    monkeypatch.setattr(relay.store, "list_networks", lambda _root: [record])
+    raced: list[list[str]] = []
+
+    def fake_probe(endpoints: Any, **_kw: Any) -> Any:
+        raced.append(list(endpoints))
+        return relay.CandidateProbe(
+            sock=None, winner="", attempts=[], complete=True, reason="refused"
+        )
+
+    monkeypatch.setattr(relay, "probe_candidates", fake_probe)
+    server: Any = SimpleNamespace(
+        settings=relay.NetworkSettings(port=4097), root=None, _link_for=lambda _d: None
+    )
+    server._redial_candidates = lambda m: relay.RelayServer._redial_candidates(server, m)
+    link, reason, _attempts = relay.RelayServer._ensure_link_with_probe(server, "d_node")
+    assert link is None and reason == "refused"
+    assert raced == [["172.31.18.0:4097", "16.52.146.32:4097"]]
+
+
+def _observe(monkeypatch: pytest.MonkeyPatch, peer_addr: str) -> str:
+    member = SimpleNamespace(active=True, observed_endpoint="")
+    record = SimpleNamespace(member=lambda _d: member)
+
+    class _Mutate:
+        def __enter__(self) -> Any:
+            return record
+
+        def __exit__(self, *_exc: Any) -> None:
+            return None
+
+    monkeypatch.setattr(relay.store, "mutate", lambda _n, _r: _Mutate())
+    monkeypatch.setattr(relay.store, "save", lambda _rec, _root: None)
+    server: Any = SimpleNamespace(root=None)
+    relay.RelayServer._note_observed_endpoint(
+        server, "n_x", "d_node", peer_addr, ["172.31.18.0:4097"]
+    )
+    return member.observed_endpoint
+
+
+def test_an_inbound_link_from_our_own_address_is_not_recorded_as_observed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _own_table(monkeypatch, "10.0.2.169")
+    assert _observe(monkeypatch, "10.0.2.169:52311") == "", "our own address is no evidence"
+    assert _observe(monkeypatch, "127.0.0.1:52311") == "", "loopback still skipped"
+    assert _observe(monkeypatch, "16.52.146.32:52311") == "16.52.146.32:4097"
+
+
 def test_newest_seen_picks_the_freshest_evidence() -> None:
     assert relay._newest_seen(None, None, None) is None
     assert relay._newest_seen(None, 10.0, 12.5) == 12.5
