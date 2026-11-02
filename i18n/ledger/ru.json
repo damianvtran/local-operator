@@ -1,6 +1,5 @@
 {
   "schema": 1,
-  "locale": "ru",
   "entries": [
     {
       "locale": "ru",
@@ -2606,46 +2605,6 @@
     },
     {
       "locale": "ru",
-      "namespace": "wire.slash",
-      "source_sha256": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
-      "translator": {
-        "agent": "i18n-translator (session aec007cb64fd)",
-        "model": "radient/auto",
-        "date": "2026-10-29"
-      },
-      "auditor": {
-        "agent": "i18n-auditor (session 1ad20cd0410c; instance 1ad20cd0410c-slash2-ru)",
-        "model": "radient/auto",
-        "date": "2026-10-29",
-        "result": "passed",
-        "findings": 0
-      },
-      "status": "passed",
-      "note": "PR #3088 width rewrite, re-audited at the committed bytes. 13 of 52 values rewritten by i18n-translator (session aec007cb64fd) (actual model radient/auto; provider-quota fallback); round-1 audit 2c04d4b44ec7-slash-ru rejected the shortened bytes (0B/3M/5m/5n) and round-2 independent audit 1ad20cd0410c-slash2-ru on the new bytes passed 0B/0M/6m/5n. target sha256 09b51528fb14e80fd3db33367624762ef33c47a4668a1a99e6946f451bd5761f; en source unchanged (b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202). Evidence: i18n/audits/evidence/ru/wire.slash/ru29s2/record.json (receipt.json + verdicts copied verbatim). Previous rows for this pair described audits of the pre-rewrite values and are superseded."
-    },
-    {
-      "locale": "ru",
-      "namespace": "wire.errors.session_host",
-      "source_sha256": "b7d6561be15577c118ec333586f7c809e65471c5dfd0dd839abee700b2ed1ba0",
-      "translator": {
-        "agent": "i18n-translator (lopdev, host-copy-ru)",
-        "session": "bd43602aa8db",
-        "model": "openai/gpt-6.1-sol",
-        "date": "2026-10-31"
-      },
-      "auditor": {
-        "agent": "i18n-auditor (lopdev, host-ru-audit-b)",
-        "session": "df0e9229eed3",
-        "model": "openai/gpt-6.1-sol",
-        "date": "2026-10-31",
-        "result": "passed",
-        "findings": 0
-      },
-      "status": "passed",
-      "note": "Dual blind passes: i18n/audits/evidence/ru/wire.errors.session_host/host-ru-a1/record.json; i18n/audits/evidence/ru/wire.errors.session_host/host3222b/record.json. Both pass, 0 findings; actual quota fallback model recorded."
-    },
-    {
-      "locale": "ru",
       "namespace": "wire.radient_saver",
       "source_sha256": "b788556b5ee09248dc2691a8820d620879856f6f014680cd31bb91fc90d0f576",
       "translator": {
@@ -2692,6 +2651,26 @@
       },
       "status": "passed",
       "note": "Two independent audits, as safety copy requires (docs/I18N.md, Add or extend a locale, step 3): round 1 by translation-auditor on radient/auto at b3b1c2aec56 — 5 pass / 2 reject (fr + vi majors) with 6 minors and 5 nits, all answered in the PR's round-1 remediation comment, fr and vi fixed at 6f3b8e3, TA9 (quoting of {name}) fixed at 9d4bed5; round 2 by a different translation-auditor session on radient/alpha at 9d4bed55040 — 7 PASS / 0 REJECT, 0 blocker, 1 minor, 6 nit, safety-copy gate closed for these nine keys. Both rounds' actual models are the fallback chain, not the requested anthropic/claude-opus-5-5 (gpt-6-astra → kimi/k3.1-pro → radient/auto | radient/alpha). Accepted, non-gating dispositions deferred to the locale work: F1 (hi 'idle': wire.sessions says निष्क्रिय, relay.chrome.session.subtitle.idle ships आइडल — hi-guide call), F2/F3 ({seconds} unit: zh-CN 秒 and vi giây are the shipped conventions, this wave keeps s), F4 (fr stop_self_refused repeats 'cette'), F5 (hi approval-line tails), F6 ('hold window' mechanism word reads as data retention; needs a glossary row + seven guides), F7 (ru style guide records «в простой», copy ships «в простое»). Evidence: i18n/audits/evidence/ru/wire.sessions/wsr2/. Unresolved blocker/major: 0. This row is fresh only at en source ad2c68cbc8dc98f81875b0c1b3960be4cdfed27113bc326ae26045d93d75585a; any English byte change lapses it."
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.failure_details",
+      "source_sha256": "7dda49aa521bc226787d48077a3276de4e80a99c0488892cc60e99e142f33c99",
+      "target_sha256": "a386dbb758a00b13d62fdb418ad0ab085567bef592c56f5d58ed1f32b4f25984",
+      "translator": {
+        "agent": "i18n-translator",
+        "session": "78096b086c9b",
+        "model": "openai/gpt-6.1-sol"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "7409da368379",
+        "model": "openai/gpt-6.1-sol",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Provenance supplied in ledger-assembly brief for PR #3307 head 5bc1b4b2336c85a13ad405466782995cf2aaf4dc; translator base b2750ae6540. Independent audit PASS, 0 findings, 17 keys. Context SHA-256 05eb64e49f9a898ff780e7529ffc96a78fcf676d9bbbca4bc068c62dd6d1828a. Assembly verified current source, target, context hashes and key parity. Second independent PASS, 0 findings: i18n-auditor session 96b7d78a3ff6, model openai/gpt-6.1-sol."
     }
   ]
 }
