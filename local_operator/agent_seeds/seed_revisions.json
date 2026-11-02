@@ -510,9 +510,9 @@
         "class": null
       },
       {
-        "sha": "998f97911dd374c96d3dde3c804581ac4c2fdebd",
+        "sha": "d6353d7de77c7128656c24140b91a6eaf8d74013",
         "version": "1.3.5",
-        "instructions_sha256": "c6502ee998d92e6f15fad90ebcb26fac48d9d90326927ddaa73144cc4a7ea739",
+        "instructions_sha256": "abda4e297bb4867ca7c6ae1ec4a3faa74dc4ea018421b2d2279bcfbec1d58e0a",
         "description": "Writing or changing code: implementing a ticket, building a feature, fixing a bug, adding a function — an independent, well-specified slice that can proceed without further decisions.",
         "tools": null,
         "effort": "default",
@@ -734,9 +734,9 @@
         "class": null
       },
       {
-        "sha": "998f97911dd374c96d3dde3c804581ac4c2fdebd",
+        "sha": "d6353d7de77c7128656c24140b91a6eaf8d74013",
         "version": "1.5.8",
-        "instructions_sha256": "337408678226cec688a7fc4664722ac89c292d192e4ea726543842b11f38b218",
+        "instructions_sha256": "33d1c3cf02c3ca714cf0b007d4a2146e2245d2e6eb34f1db2c88b5573592b223",
         "description": "Checking how something LOOKS to the user: reviewing a screen or terminal UI, whether a layout, spacing, colour or copy reads well, making an interface nicer — a design/UX round on a user-visible change.",
         "tools": null,
         "effort": null,
@@ -1272,9 +1272,9 @@
         "class": null
       },
       {
-        "sha": "998f97911dd374c96d3dde3c804581ac4c2fdebd",
+        "sha": "d6353d7de77c7128656c24140b91a6eaf8d74013",
         "version": "1.0.5",
-        "instructions_sha256": "3f30b113005192770c420c7ae29d4ee3fc2c010a4fcc6998619daf8658fb018a",
+        "instructions_sha256": "af06068c4358b735915e8dff6b242ec8cdfcd318c85817f821084a950dca2e41",
         "description": "Independently testing whether a pull request, patch or feature actually works end to end; reproducing a bug, validating side effects, or checking remediation regressions.",
         "tools": [
           "read",
@@ -1601,9 +1601,9 @@
         "class": null
       },
       {
-        "sha": "998f97911dd374c96d3dde3c804581ac4c2fdebd",
+        "sha": "d6353d7de77c7128656c24140b91a6eaf8d74013",
         "version": "1.3.10",
-        "instructions_sha256": "d61d8d514880097afebaeb8cae65226b3fc32a9d00e6c467df23aae036ce9833",
+        "instructions_sha256": "b9b119781ea695bced90aa49a5343369060177196c075b147142ae6755abc589",
         "description": "Reviewing a pull request, merge request, diff, commit range or patch for defects and bugs; auditing or critiquing code someone else (or another agent) wrote.",
         "tools": [
           "read",
@@ -1943,9 +1943,9 @@
         "class": null
       },
       {
-        "sha": "998f97911dd374c96d3dde3c804581ac4c2fdebd",
+        "sha": "d6353d7de77c7128656c24140b91a6eaf8d74013",
         "version": "1.4.8",
-        "instructions_sha256": "22086367c1d167bb5b5a726903a93d433c64ad95c4d50d5b6ceb6961924da69f",
+        "instructions_sha256": "99a22373e2889aa3a18bac7895499551d6c45d00e5bb601d18440fbc118b9b7c",
         "description": "Reviewing the user EXPERIENCE of a change — interaction flow, keyboard/input handling, discoverability, feedback and error messaging, copy tone, and whether a task can actually be completed smoothly — as distinct from a visual/design review of how it looks.",
         "tools": null,
         "effort": null,
