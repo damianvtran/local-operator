@@ -25,6 +25,23 @@ from local_operator import owned_process_group as owned
 from local_operator.procstate import ProcessSample
 from tests.unit.scripts.test_run_bounded import memory_wrapper  # noqa: F401
 
+
+def _as_typed_census(view):
+    """An EXPLICITLY optimistic census for a synthetic world.
+
+    Optimism belongs in fixtures, never in the product: production readers state
+    their own coverage, and `_members` fails closed when one does not. A fake's
+    world is complete by construction, so it says so here, once, where it can be
+    seen -- rather than the module assuming it on the fake's behalf.
+    """
+
+    def wrapped(pgid, deadline):
+        pids = view(pgid, deadline)
+        return owned.CensusResult(tuple(pids), True, pgid in pids)
+
+    return wrapped
+
+
 SCHEME = "reservation-fixture"
 
 
@@ -83,7 +100,7 @@ class Kernel:
         return owned.OwnedGroup.capture(
             leader or self.leader,
             parent_pid=self.parent,
-            census=self.census,
+            census=_as_typed_census(self.census),
             samples=self.samples,
             identity=self.identity,
             scheme=lambda: SCHEME,
@@ -346,7 +363,7 @@ def test_c3_removing_the_residency_re_check_lets_a_stranger_die():
     cap2 = mutant.OwnedGroup.capture(
         kernel2.leader,
         parent_pid=kernel2.parent,
-        census=kernel2.census,
+        census=_as_typed_census(kernel2.census),
         samples=kernel2.samples,
         identity=kernel2.identity,
         scheme=lambda: SCHEME,

@@ -11,6 +11,22 @@ from local_operator import owned_process_group as owned
 from local_operator.procstate import ProcessSample
 
 
+def _as_typed_census(view):
+    """An EXPLICITLY optimistic census for a synthetic world.
+
+    Optimism belongs in fixtures, never in the product: production readers state
+    their own coverage, and `_members` fails closed when one does not. A fake's
+    world is complete by construction, so it says so here, once, where it can be
+    seen -- rather than the module assuming it on the fake's behalf.
+    """
+
+    def wrapped(pgid, deadline):
+        pids = view(pgid, deadline)
+        return owned.CensusResult(tuple(pids), True, pgid in pids)
+
+    return wrapped
+
+
 class Fake:
     def __init__(self):
         #: birth is `str | None` on purpose: an unreadable birth is a fact the
@@ -39,7 +55,7 @@ class Fake:
         return owned.OwnedGroup.capture(
             10,
             parent_pid=os.getpid(),
-            census=self.census,
+            census=_as_typed_census(self.census),
             samples=self.samples,
             identity=self.identity,
             scheme=lambda: self.scheme,

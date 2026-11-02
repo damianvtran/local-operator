@@ -182,7 +182,11 @@ def strict_darwin(pgid, deadline, *, listpids=None, clock=time.monotonic):
     if listpids is None:
         members = []
         unknown = []
-        for pid in _darwin_all_pids(deadline, clock):
+        # THE RAW NAMESPACE, before any group filter: `leader_seen` must answer
+        # "was this pid in the enumeration at all", not "was it a member".
+        raw_pids = list(_darwin_all_pids(deadline, clock))
+        leader_seen = pgid in raw_pids
+        for pid in raw_pids:
             if clock() >= deadline:
                 raise Unknown("strict census deadline")
             try:
@@ -210,7 +214,7 @@ def strict_darwin(pgid, deadline, *, listpids=None, clock=time.monotonic):
             )
         if pgid not in members:
             _report_census_miss(pgid, deadline)
-        return sorted(members)
+        return sorted(members), True, leader_seen
     lib = resources._darwin_libproc() if listpids is None else None
     call = listpids if listpids is not None else getattr(lib, "proc_listpids", None)
     if call is None or pgid <= 1:
@@ -339,7 +343,9 @@ def strict_linux(
                 result.append(int(entry))
         last = {n for n in listdir("/proc") if n.isdigit()}
         if first - disappeared == last:
-            return sorted(result)
+            # RAW NAMESPACE, before the group filter, for the same reason as Darwin.
+            leader_seen = str(pgid) in (first | last)
+            return sorted(result), True, leader_seen
     raise Unknown("unstable /proc census")
 
 
@@ -355,12 +361,16 @@ def strict_census(pgid, deadline):
     """
     try:
         if sys.platform == "darwin":
-            pids = strict_darwin(pgid, deadline)
+            pids, complete, leader_seen = strict_darwin(pgid, deadline)
         elif sys.platform.startswith("linux"):
-            pids = strict_linux(pgid, deadline)
+            pids, complete, leader_seen = strict_linux(pgid, deadline)
         else:
             raise Unknown("strict group census unsupported")
-        return CensusResult(tuple(pids), True, pgid in pids)
+        if complete is not True:
+            # FAIL CLOSED: a reader that cannot state its coverage supplies no
+            # certificate, and none is manufactured for it here.
+            return CensusResult(tuple(pids), False, bool(leader_seen), "reader stated no coverage")
+        return CensusResult(tuple(pids), True, bool(leader_seen))
     except (OSError, ValueError, TypeError) as exc:
         raise Unknown("strict membership probe failed") from exc
 
@@ -489,6 +499,8 @@ class CensusResult:
     pids: tuple[int, ...]
     complete: bool
     leader_seen: bool
+    #: Why coverage could not be claimed; empty when it could.
+    reason: str = ""
 
 
 class OwnedGroup:
@@ -517,7 +529,7 @@ class OwnedGroup:
         #: terminal verdict would describe an event that never happened (review
         #: round 8, R2), and it lives here rather than in the runner because the
         #: runner is a different object and would leave this door open.
-        self.kills = []
+        self.terminating_sends = []
         self.census, self.samples, self.identity = census, samples, identity
         self.scheme, self.clock, self._send = scheme, clock, signal_group
         self.initial_error = "unproven initial identity"
@@ -656,13 +668,18 @@ class OwnedGroup:
                 # INCOMPLETE VISIBILITY IS NOT EMPTINESS. This is the door R3 came
                 # through: a successful call that could not vouch for the namespace
                 # must never become "there is nothing".
-                raise Unknown("census incomplete: the namespace could not be fully surveyed")
+                raise Unknown("census incomplete: " + (seen.reason or "coverage not stated"))
+            if not seen.leader_seen and not self.terminating_sends:
+                # A namespace that never contained the leader, while we hold an
+                # unreaped reservation and have sent nothing that could end it, is a
+                # contradiction rather than an absence.
+                raise Unknown("census never saw the leader and nothing was sent")
             members = list(seen.pids)
         else:
-            # LEGACY SEAM: an injected double returns a bare list. Production
-            # censuses always answer `CensusResult`; a list cannot vouch for itself,
-            # so it is treated as complete only because a fake's world is synthetic.
-            members: list[int] = list(seen) if seen else []
+            # A READER THAT SUPPLIES NO COVERAGE CLAIM IS NOT COMPLETE. Optimism
+            # belongs in fixtures, which return CensusResult explicitly; the product
+            # fails closed here so a future third backend cannot inherit a hole.
+            raise Unknown("census reader supplied no coverage claim")
         if (
             members is None
             or any(type(p) is not int or p <= 0 for p in members)
@@ -737,24 +754,28 @@ class OwnedGroup:
         """
         anchor = self.receipts.get(self.leader)
         if anchor is None:
-            return "unreadable", None
+            return "unverifiable", None
         try:
             samples = self._samples([self.leader], deadline)
         except Exception:  # noqa: BLE001 - a failed sample is unreadable, never absent
             return "unreadable", None
         sample = samples.get(self.leader)
-        if sample is None or sample.birth is None:
+        if sample is None:
+            # GONE: the row is absent. That is what our own authorised termination
+            # produces, and the only state the terminal path may accept as an end.
+            return "gone", None
+        if sample.birth is None:
             # A MISSING ROW IS NOT PROOF OF REAPING. It is the ambiguous
             # observation: the census demonstrably omits processes on macOS, so
             # "not listed" and "the reader failed" are indistinguishable here.
             # Only a READABLE FOREIGN birth below may be `pin_lost`; everything
             # this branch can see is `unreadable`.
-            return "unreadable", sample
+            return "unverifiable", sample
         held = sample.is_birth(anchor.scheme, anchor.birth)
         if held is True:
             return "held", sample
         if held is None:
-            return "unreadable", sample
+            return "unverifiable", sample
         return "reaped", sample
 
     def _terminal_absence(self, deadline):
@@ -770,20 +791,22 @@ class OwnedGroup:
         # run actually ended: a run that never sent anything has proved nothing
         # about an end, and empty-therefore-clean is exactly the laundering the
         # reviewer reproduced (R2).
-        if not self.kills:
-            raise Unknown("terminal absence requires a recorded kill")
+        if not self.terminating_sends:
+            raise Unknown("terminal absence requires a recorded terminating send")
         try:
             first = self._members(deadline)
             second = self._members(deadline)
         except Exception as exc:  # noqa: BLE001 - unreadable is never absent
-            raise Unknown("terminal census unreadable: " + type(exc).__name__) from None
+            # PRESERVE THE CAUSE: the classifier's own words must reach the verdict,
+            # so a caller can tell "census incomplete" from "malformed".
+            raise Unknown("terminal census unreadable: " + str(exc)) from None
         members = sorted(set(first) | set(second))
         if members:
             raise Unknown("terminal census still lists members")
         self.probe["members"] = []
         self.last = Verdict(
             "OBSERVED_EMPTY",
-            "terminal census complete and empty after the authorised kill",
+            "terminal census complete and empty after a terminating send by this run",
             (),
         )
         return self.last
@@ -826,7 +849,9 @@ class OwnedGroup:
             self.probe["witness"] = state
             if state == "reaped":
                 raise PinLost("leader reaped or birth mismatch: reservation released")
-            if state == "unreadable":
+            if state == "unverifiable":
+                raise Unknown("leader witness unreadable: identity of the leader unproven")
+            if state == "gone":
                 if terminal:
                     # THE ONLY PLACE THE CENSUS MAY DECIDE. A send never reaches
                     # here: `signal()` calls `refresh(deadline=...)` without
@@ -1003,7 +1028,11 @@ class OwnedGroup:
                 "REFUSED", "checked signal failed:" + type(exc).__name__, result.members
             )
             return self.last
-        self.kills.append(signum)
+        if signum in (signal.SIGKILL, signal.SIGTERM):
+            # THE FACT IS NARROW ON PURPOSE: a checked send happened AND it is one
+            # this code's ladder uses to end a group. `0`, SIGCONT, SIGSTOP and the
+            # rest prove delivery, not an ending.
+            self.terminating_sends.append(signum)
         self.last = Verdict(
             "SIGNALED",
             "checked owner-alive signal; non-atomic race remains",

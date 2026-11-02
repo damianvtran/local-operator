@@ -23,6 +23,22 @@ from local_operator import owned_process_group as owned
 from tests.unit.scripts.test_run_bounded import memory_wrapper  # noqa: F401
 
 
+def _as_typed_census(view):
+    """An EXPLICITLY optimistic census for a synthetic world.
+
+    Optimism belongs in fixtures, never in the product: production readers state
+    their own coverage, and `_members` fails closed when one does not. A fake's
+    world is complete by construction, so it says so here, once, where it can be
+    seen -- rather than the module assuming it on the fake's behalf.
+    """
+
+    def wrapped(pgid, deadline):
+        pids = view(pgid, deadline)
+        return owned.CensusResult(tuple(pids), True, pgid in pids)
+
+    return wrapped
+
+
 class World:
     def __init__(self, birth="leader"):
         # The creator row IS this process: the leader's kernel parent must be us
@@ -80,7 +96,7 @@ class World:
             10,
             deadline=self.clock() + 5.0,
             parent_pid=os.getpid(),
-            census=self.census,
+            census=_as_typed_census(self.census),
             samples=self.samples,
             identity=identity or self.identity,
             # A REGISTERED SCHEME, not an invented name. `is_birth` is three-valued

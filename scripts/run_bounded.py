@@ -814,11 +814,11 @@ def run(
             # TERMINAL ONLY: the leader is legitimately gone once we have killed
             # the group, so the end may be reported from the census. `signal()`
             # never passes this flag -- the send path stays witness-first.
-            # DERIVED FROM THE OWNER, not a runner-side flag: `owner.kills` is the
-            # capability's own record of a delivered signal, so there is one source
-            # of truth for "this run ended the group" and the call site cannot claim
-            # a kill that never happened (round 8, R2).
-            terminal = owner.refresh(deadline=until, terminal=bool(owner.kills))
+            # DERIVED FROM THE OWNER, not a runner-side flag: `terminating_sends`
+            # records only the signals this code's ladder uses to END a group, so
+            # there is one source of truth and the call site cannot claim a kill
+            # that never happened (round 9, R2).
+            terminal = owner.refresh(deadline=until, terminal=bool(owner.terminating_sends))
             if terminal.status != "OBSERVED_EMPTY":
                 refused = True
                 # KEEP THE CLASS. Dropping it made the record say only "not observed

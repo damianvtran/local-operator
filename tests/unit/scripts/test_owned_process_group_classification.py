@@ -28,6 +28,22 @@ from local_operator import owned_process_group as owned
 from tests.unit.scripts.test_run_bounded import memory_wrapper  # noqa: F401
 
 
+def _as_typed_census(view):
+    """An EXPLICITLY optimistic census for a synthetic world.
+
+    Optimism belongs in fixtures, never in the product: production readers state
+    their own coverage, and `_members` fails closed when one does not. A fake's
+    world is complete by construction, so it says so here, once, where it can be
+    seen -- rather than the module assuming it on the fake's behalf.
+    """
+
+    def wrapped(pgid, deadline):
+        pids = view(pgid, deadline)
+        return owned.CensusResult(tuple(pids), True, pgid in pids)
+
+    return wrapped
+
+
 class World:
     """Synthetic kernel facts. Nothing here is a host capability."""
 
@@ -78,7 +94,7 @@ class World:
             # so every caller states the budget it is willing to spend.
             deadline=self.clock() + 5.0,
             parent_pid=self.parent,
-            census=self.census,
+            census=_as_typed_census(self.census),
             samples=self.samples,
             identity=self.identity,
             scheme=lambda: self.scheme,
@@ -244,7 +260,7 @@ def _foreign_birth_run(wrapper, monkeypatch, module):
         world.pgid,
         deadline=world.clock() + 5.0,
         parent_pid=world.parent,
-        census=world.census,
+        census=_as_typed_census(world.census),
         samples=world.samples,
         identity=world.identity,
         scheme=lambda: world.scheme,
@@ -399,7 +415,7 @@ def test_importing_without_the_signal_primitive_succeeds_and_refuses():
         world.pgid,
         deadline=world.clock() + 5.0,
         parent_pid=world.parent,
-        census=world.census,
+        census=_as_typed_census(world.census),
         samples=world.samples,
         identity=world.identity,
         scheme=lambda: "fixture",

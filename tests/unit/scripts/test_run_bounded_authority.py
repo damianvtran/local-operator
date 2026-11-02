@@ -22,6 +22,22 @@ from tests.unit.scripts.test_owned_process_group import Fake
 from tests.unit.scripts.test_run_bounded import memory_wrapper  # noqa: F401
 
 
+def _as_typed_census(view):
+    """An EXPLICITLY optimistic census for a synthetic world.
+
+    Optimism belongs in fixtures, never in the product: production readers state
+    their own coverage, and `_members` fails closed when one does not. A fake's
+    world is complete by construction, so it says so here, once, where it can be
+    seen -- rather than the module assuming it on the fake's behalf.
+    """
+
+    def wrapped(pgid, deadline):
+        pids = view(pgid, deadline)
+        return owned.CensusResult(tuple(pids), True, pgid in pids)
+
+    return wrapped
+
+
 @pytest.mark.parametrize(
     "mode,expected",
     [
@@ -108,7 +124,7 @@ def test_each_wrapper_path_reauthorizes_without_unbounded_wait(
             # unavailable", and every path below is pre-empted at admission -- which
             # is why all five once reported 126 instead of their terminal code.
             parent_pid=os.getpid(),
-            census=fake.census,
+            census=_as_typed_census(fake.census),
             samples=fake.samples,
             identity=fake.identity,
             scheme=lambda: "fixture",
@@ -295,7 +311,7 @@ def _reuse_world(monkeypatch):
     cap = owned.OwnedGroup.capture(
         10,
         parent_pid=os.getpid(),
-        census=fake.census,
+        census=_as_typed_census(fake.census),
         samples=fake.samples,
         identity=fake.identity,
         scheme=lambda: "fixture",
