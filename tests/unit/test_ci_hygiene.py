@@ -10,7 +10,7 @@ These exist because three defects all produced a *silent* green:
 - #381: ``[tool.pyright] exclude`` *replaces* pyright's built-in defaults.
   Dropping ``**/.*`` makes a local run type-check all of site-packages.
 - #1238: the whole job set ran on every diff, so a one-line docs edit paid for
-  the six-shard matrix, a Windows run, a macOS TUI run, a live-LLM run and a
+  the seven-shard matrix, a Windows run, a macOS TUI run, a live-LLM run and a
   dependency audit — 16 checks for a file no gate reads. The gate is a
   classifier (`scripts/ci_scope.py`) shared with `make check-changed`; the
   assertions below pin its predicates, its fail-open direction, and the wiring
@@ -782,8 +782,8 @@ def test_the_unresolved_error_names_the_string_that_was_tried(
 
 def test_unit_shard_capacity_changes_without_relaxing_timeout() -> None:
     """The fleet repair buys parallel capacity, never fewer tests or a higher cap."""
-    assert _shard_plan("test") == ("unit", 6)
-    assert shard_tests.TREES["unit"].default_shards == 6
+    assert _shard_plan("test") == ("unit", 7)
+    assert shard_tests.TREES["unit"].default_shards == 7
     assert _ci_jobs()["test"]["timeout-minutes"] == 38
 
 
@@ -2676,7 +2676,7 @@ def test_a_local_run_classifies_the_diff_instead_of_running_everything(
 def test_coverage_report_inherits_a_skipped_test_job_and_has_no_always() -> None:
     """A14. `coverage-report` must not get an `always()`.
 
-    It combines the six shard artifacts. If `test` was skipped there are zero
+    It combines the seven shard artifacts. If `test` was skipped there are zero
     artifacts, and `coverage combine` over nothing goes red on a PR that changed
     nothing the unit suite reads. GitHub's default — a skipped need skips the
     dependent — is exactly the wanted behaviour here, so this job keeps
