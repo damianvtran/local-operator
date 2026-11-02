@@ -811,7 +811,10 @@ def run(
                     break
                 if attempt < 4:
                     time.sleep(min(_POLL_SECONDS, max(0, until - time.monotonic())))
-            terminal = owner.refresh(deadline=until)
+            # TERMINAL ONLY: the leader is legitimately gone once we have killed
+            # the group, so the end may be reported from the census. `signal()`
+            # never passes this flag -- the send path stays witness-first.
+            terminal = owner.refresh(deadline=until, terminal=True)
             if terminal.status != "OBSERVED_EMPTY":
                 refused = True
                 # KEEP THE CLASS. Dropping it made the record say only "not observed

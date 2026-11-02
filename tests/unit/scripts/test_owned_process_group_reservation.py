@@ -637,7 +637,10 @@ def test_the_discarded_authority_guard_has_an_executed_deletion_control(
     ASK = {"armed": True}
 
     def once_then_verified(kernel):
-        def refresh(*, deadline):
+        def refresh(*, deadline, terminal=False):
+            # `terminal` is the real signature's terminal licence; this fake answers
+            # the same either way, so the control keeps asserting the guard it owns.
+            del terminal
             if ASK["armed"]:
                 ASK["armed"] = False
                 return owned.Verdict(

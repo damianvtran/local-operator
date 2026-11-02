@@ -700,7 +700,32 @@ class OwnedGroup:
             return "unreadable", sample
         return "reaped", sample
 
-    def refresh(self, *, deadline):
+    def _terminal_absence(self, deadline):
+        """The END of a run we killed: complete-and-empty, or a refusal.
+
+        COMPLETE means complete: a census that raises, is truncated, or cannot
+        enumerate is an UNKNOWN population, and an unknown population is never
+        laundered into absence -- the same rule the admission refusal and the
+        probe-streak rule enforce. Only two successful strict censuses whose union
+        is empty may report OBSERVED_EMPTY here.
+        """
+        try:
+            first = self._members(deadline)
+            second = self._members(deadline)
+        except Exception as exc:  # noqa: BLE001 - unreadable is never absent
+            raise Unknown("terminal census unreadable: " + type(exc).__name__) from None
+        members = sorted(set(first) | set(second))
+        if members:
+            raise Unknown("terminal census still lists members")
+        self.probe["members"] = []
+        self.last = Verdict(
+            "OBSERVED_EMPTY",
+            "terminal census complete and empty after the authorised kill",
+            (),
+        )
+        return self.last
+
+    def refresh(self, *, deadline, terminal=False):
         """Prove the group is still ours by RESERVATION, not by membership.
 
         Ownership is not derived from who is in the group. The leader is held
@@ -739,6 +764,15 @@ class OwnedGroup:
             if state == "reaped":
                 raise PinLost("leader reaped or birth mismatch: reservation released")
             if state == "unreadable":
+                if terminal:
+                    # THE ONLY PLACE THE CENSUS MAY DECIDE. A send never reaches
+                    # here: `signal()` calls `refresh(deadline=...)` without
+                    # `terminal`, so REFUSED/unproven/pin_lost stay unreachable as a
+                    # send. The witness authorises a SEND; the census reports an END.
+                    # After a kill we ourselves performed, the leader is legitimately
+                    # gone and the stronger evidence cannot exist any more -- so the
+                    # terminal report may rest on the weaker one, and on nothing else.
+                    return self._terminal_absence(deadline)
                 raise Unknown("leader witness unreadable")
             try:
                 first = self._members(deadline)
