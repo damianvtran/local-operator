@@ -166,10 +166,24 @@ def parse_pending_default_enrollment(value: Any) -> tuple[str, int, str] | None:
 #: never wake a session.
 DEFAULT_TEAM_BRIDGE_SESSION = ""
 
+#: ``team_bridge.hold_alert_after_minutes`` — how long a conversation message may
+#: sit held in screening before the owner gets ONE local notification (see
+#: ``hold_alert.py``). ``0`` turns the alert off; the valid range is 0..10080
+#: (one week).
+#:
+#: DELIBERATELY NO ``/settings`` REGISTRY ROW. A row would change ``wire.settings``
+#: copy, and that edit changes the English source hash of the namespace and
+#: un-ships every locale's audited ledger row for it. The key is read from the
+#: config file like any other (a hand edit works); a settings row is a later,
+#: separately-translated change.
+DEFAULT_HOLD_ALERT_AFTER_MINUTES = 60
+HOLD_ALERT_MAX_MINUTES = 10080
+
 ENABLED_PATH = ("team_bridge", "enabled")
 ONBOARDING_PATH = ("team_bridge", "onboarding")
 DEFAULT_ENROLLMENT_PATH = ("team_bridge", "default_enrollment")
 SESSION_PATH = ("team_bridge", "session")
+HOLD_ALERT_AFTER_PATH = ("team_bridge", "hold_alert_after_minutes")
 
 
 #: Distinguishes "the key is absent" (the shipped default) from "the key is
@@ -223,11 +237,26 @@ def _session(value: Any) -> str:
     return DEFAULT_TEAM_BRIDGE_SESSION
 
 
+def _hold_alert_after_minutes(value: Any) -> int:
+    """Whole minutes in 0..10080, else the default.
+
+    A bool is an ``int`` to Python, so ``true`` must be refused by name; a float,
+    a string, a negative number or anything past a week reads as the default
+    rather than being coerced into a threshold nobody wrote.
+    """
+
+    if isinstance(value, bool) or not isinstance(value, int):
+        return DEFAULT_HOLD_ALERT_AFTER_MINUTES
+    if not 0 <= value <= HOLD_ALERT_MAX_MINUTES:
+        return DEFAULT_HOLD_ALERT_AFTER_MINUTES
+    return value
+
+
 @dataclass(frozen=True)
 class TeamBridgeSettings:
     """The local keys, defaulted and normalised.
 
-    Four: ``enabled`` and ``session`` are the registry's editable rows, and
+    Five: ``enabled`` and ``session`` are the registry's editable rows, and
     ``onboarding`` (the one-time dialog's shown-flag, §5.3) is internal state —
     deliberately NOT a registry row: it is UI bookkeeping, not a knob, and a
     public row would dress session-format state as configuration.
@@ -242,6 +271,8 @@ class TeamBridgeSettings:
     onboarding: str = DEFAULT_TEAM_BRIDGE_ONBOARDING
     session: str = DEFAULT_TEAM_BRIDGE_SESSION
     default_enrollment: Mapping[str, str] = field(default_factory=dict)
+    #: Minutes a held conversation message ages before the owner is told; 0 = off.
+    hold_alert_after_minutes: int = DEFAULT_HOLD_ALERT_AFTER_MINUTES
     #: Whether ``team_bridge.enabled`` was PRESENT in the document (any value,
     #: including a hand-edited ``null``, which reads OFF). It is what separates
     #: "the user said so" from "nobody said anything", the one distinction the
@@ -295,6 +326,9 @@ class TeamBridgeSettings:
             session=_session(get(SESSION_PATH, DEFAULT_TEAM_BRIDGE_SESSION)),
             default_enrollment=_default_enrollment(
                 get(DEFAULT_ENROLLMENT_PATH, DEFAULT_TEAM_BRIDGE_ENROLLMENT)
+            ),
+            hold_alert_after_minutes=_hold_alert_after_minutes(
+                get(HOLD_ALERT_AFTER_PATH, DEFAULT_HOLD_ALERT_AFTER_MINUTES)
             ),
         )
 

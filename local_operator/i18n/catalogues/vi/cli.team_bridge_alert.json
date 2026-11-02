@@ -1,0 +1,6 @@
+{
+  "cli.team_bridge_alert.long_hold.title": "Tin nhắn tác nhân: có tin nhắn bị giữ lâu",
+  "cli.team_bridge_alert.long_hold.body": "{count, plural, other {# tin nhắn}} đã bị giữ ở bước sàng lọc quá {minutes, plural, other {# phút}}. Tác nhân của bạn chưa nhận được các tin nhắn bị giữ. Chạy `lop team-bridge receiver status` để xem chi tiết.",
+  "cli.team_bridge_alert.cleared.title": "Tin nhắn tác nhân: không còn tin nhắn bị giữ lâu",
+  "cli.team_bridge_alert.cleared.body": "Hiện không có tin nhắn nào bị giữ ở bước sàng lọc quá {minutes, plural, other {# phút}}."
+}

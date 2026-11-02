@@ -1,0 +1,22 @@
+{
+  "cli.team_bridge_alert.long_hold.title": {
+    "role": "local owner notification (inbox item) title, raised by the agent-messages receiver",
+    "tone": "calm, factual, operator-facing; no alarm, no blame",
+    "note": "Agent messages is the product name of Team Bridge. Title of an inbox notification shown only to the owner when at least one message addressed to their agent has been HELD in screening (not delivered to the agent) for longer than the owner's threshold. Short fragment, no full stop. Never names a sender, message or conversation."
+  },
+  "cli.team_bridge_alert.long_hold.body": {
+    "role": "local owner notification (inbox item) body, raised by the agent-messages receiver",
+    "tone": "calm, factual, operator-facing; no alarm, no blame",
+    "note": "{count} is an integer >= 1: how many messages are held. {minutes} is the owner's threshold, an integer >= 1 (not the exact age). Both feed their own ICU plural with `#`; the two plurals live in one sentence, so keep each arm a complete phrase and use locale CLDR forms. 'Screening' is the agent-messages safety check that decides whether a message may reach the agent (glossary: same word as the status line 'Screening'). Three facts must survive: (1) the count; (2) held longer than the threshold; (3) the agent has NOT been given those messages (a held message is not an empty message and not proof it is harmful). The backticked command is a literal and stays byte-identical. Do not imply the messages were deleted or that anyone is reviewing them."
+  },
+  "cli.team_bridge_alert.cleared.title": {
+    "role": "local owner notification (inbox item) title, the 'all clear' update to the long-hold notification",
+    "tone": "calm, factual, reassuring but not celebratory",
+    "note": "Title of the update that replaces the long-hold notification once no message has been held longer than the threshold. Short fragment, no full stop. Say that long-held messages are gone, not that all messages were delivered."
+  },
+  "cli.team_bridge_alert.cleared.body": {
+    "role": "local owner notification (inbox item) body, the 'all clear' update",
+    "tone": "calm, factual",
+    "note": "{minutes} is the owner's threshold, an integer >= 1, feeding an ICU plural with `#`. States that no message is held in screening for longer than that. It does not claim the earlier messages were delivered (some may have been refused)."
+  }
+}

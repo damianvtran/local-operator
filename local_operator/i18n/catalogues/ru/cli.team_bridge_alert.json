@@ -1,0 +1,6 @@
+{
+  "cli.team_bridge_alert.long_hold.title": "Сообщения агентов: сообщения долго задерживаются",
+  "cli.team_bridge_alert.long_hold.body": "{count, plural, one {# сообщение задержано} few {# сообщения задержаны} many {# сообщений задержано} other {# сообщения задержано}} фильтрацией более {minutes, plural, one {# минуты} few {# минут} many {# минут} other {# минуты}}. Ваш агент не получил задержанные сообщения. Подробности: `lop team-bridge receiver status`.",
+  "cli.team_bridge_alert.cleared.title": "Сообщения агентов: долго задержанных сообщений больше нет",
+  "cli.team_bridge_alert.cleared.body": "Ни одно сообщение не задерживается фильтрацией дольше {minutes, plural, one {# минуты} few {# минут} many {# минут} other {# минуты}}."
+}
