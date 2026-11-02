@@ -39,7 +39,18 @@ def test_default_capture_subsecond_native_or_explicit_fallback_refusal(
     )
     monkeypatch.setattr(o.procstate, "birth_scheme", lambda: scheme)
     monkeypatch.setattr(o, "sys", NS(platform="darwin"))
-    monkeypatch.setattr(o, "os", NS(getpid=lambda: 1, getpgid=lambda _: 10, getsid=lambda _: 10))
+    monkeypatch.setattr(
+        o,
+        "os",
+        # `getpgrp` is real POSIX that the module legitimately calls; a double
+        # that omits it makes an AttributeError look like a production defect.
+        NS(
+            getpid=lambda: 1,
+            getpgid=lambda _: 10,
+            getsid=lambda _: 10,
+            getpgrp=lambda: 10,
+        ),
+    )
     monkeypatch.setattr(o.resources, "direct_ppid_pgid", lambda _: (1, 10))
 
     def listing(kind, group, buffer, capacity):

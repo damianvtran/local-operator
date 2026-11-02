@@ -200,6 +200,9 @@ RUN_ID_ENV = "LOCAL_OPERATOR_RUN_ID"
 #: Bound on ONE probe wait inside the run loop. The child's lifetime is not
 #: bounded -- a `--timeout`-less run may wait for it forever -- but no single
 #: instrument call may block the loop past this.
+_NO_NOTIFICATIONS_ENV = "LOCAL_OPERATOR_NO_NOTIFICATIONS"
+
+#: Bound on ONE probe wait inside the run loop.
 _PROBE_BUDGET_SECONDS = 0.5
 #: Consecutive unanswered probes before the instrument is called BROKEN. At the
 #: 50 ms poll cadence this is ~2 s of silence, so a busy sampler is not broken.
@@ -553,6 +556,11 @@ def run(
     # Nested cooperative wrappers inherit the effective (possibly tightened)
     # ceiling, not the original wider grant. env -i must carry it explicitly.
     child_env[memory_guard.RESOLVED_MEMORY_MB_ENV] = str(budget.ceiling_mb)
+    # THE GATE TRAVELS WITH THE ENVIRONMENT WE BUILD. This builder hands the child a
+    # mapping it assembled rather than the ambient one, so inheriting the switch by
+    # accident is not a property it can rely on: the next builder may start from
+    # scratch. Same carrier the other builders set (tui/notify.ENV_DISABLE).
+    child_env.setdefault(_NO_NOTIFICATIONS_ENV, "1")
     node_options = child_env.get("NODE_OPTIONS", "")
     # Match whole options after unquoting: a raw regex misses quoted heap flags
     # and can mistake a heap-looking substring in --title's value for a flag.
