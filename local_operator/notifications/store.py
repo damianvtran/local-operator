@@ -1002,6 +1002,26 @@ class NotificationStore:
 
         return self._read(body, None, "get_by_key")
 
+    def find_by_key(self, key: str) -> list[dict[str, Any]]:
+        """Every item holding ``key``, across all sessions (dismissed ones included).
+
+        The cross-session counterpart of :meth:`get_by_key`, for a caller that
+        raised a keyed item in a session it no longer knows (a restart after the
+        designated session moved). Same read-only path: an absent store answers
+        ``[]`` and is never created.
+        """
+        if not key:
+            return []
+
+        def body(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+            rows = conn.execute(
+                f"SELECT {_ITEM_COLUMNS} FROM items WHERE key=? ORDER BY session_id",
+                (key,),
+            ).fetchall()
+            return [_row_dict(row) for row in rows]
+
+        return self._read(body, [], "find_by_key")
+
     def history(self, item_id: str) -> list[dict[str, Any]]:
         """Earlier versions of one item, newest first (at most :data:`HISTORY_CAP`)."""
 

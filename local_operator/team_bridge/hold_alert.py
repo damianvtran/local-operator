@@ -18,9 +18,14 @@ does; a growing age would write a new revision (and re-notify) on every tick.
 CLEARING. One keyed update at priority ``low``, sent to the session that RAISED
 the alert (recorded per process, so a changed designated session cannot strand
 it) and only while that keyed item still exists: a pruned row is not re-created
-as a stray "cleared" item. A fresh process has no record, so it looks the keyed
-item up in the designated session's inbox and clears a standing ``normal`` one;
-that is how a restart (or a threshold of ``0``) cannot leave a stale alert up.
+as a stray "cleared" item. The clear looks the keyed item up in EVERY session's inbox
+(``NotificationStore.find_by_key``) and clears each standing ``normal`` one in
+the session that shows it, whatever this process remembers and wherever the
+designation points now; that is how a restart, a moved designation or a
+threshold of ``0`` cannot leave a stale alert up. One limit: with no designated
+session and nothing recorded by this process, a run with the alert enabled
+returns ``no_session`` without looking, so an alert stranded in an old session
+waits for a designation (a threshold of ``0`` clears it regardless).
 The notification store treats a later ``low`` -> ``normal`` as an escalation that
 revives a dismissed row, so a new incident reaches the owner again even if they
 dismissed the last one.
@@ -116,39 +121,44 @@ def _run(owner: Any, config_dir: Path, now: float | None) -> str:
     recorded = _raised.get(endpoint_id)
     store = Store(config_dir)
     session_id = store.designated_session_for_readonly(owner)
-    if not session_id and recorded is None:
-        # Nothing to raise into and nothing this process raised. (A restart with
-        # no designated session has no inbox to look in either.)
-        return "disabled" if minutes == 0 else "no_session"
     notifications = NotificationStore(config_dir)
     t = tr("cli.team_bridge_alert")
 
-    def clear(target: str, shown_minutes: int) -> bool:
-        """Send the one low update, only to an item that is still standing."""
+    def clear_standing(shown_minutes: int, *, keep: str | None = None) -> bool:
+        """Send the one low update to every standing alert, in the session showing it.
 
-        item = notifications.get_by_key(target, _key(endpoint_id))
-        if item is None or item["priority"] != "normal":
-            return False
-        notifications.notify(
-            target,
-            title=t(keys.cleared_title()),
-            body_md=t(keys.cleared_body(minutes=shown_minutes)),
-            priority="low",
-            key=_key(endpoint_id),
-        )
-        return True
+        Looked up across ALL sessions, not guessed from this process's memory or
+        the current designation: either can be wrong after a restart that follows
+        a designation change. Only a still-standing ``normal`` row is touched, so
+        a pruned row is never re-created as a stray "cleared" item. ``keep`` is the
+        session whose alert stays up (the one about to be raised or revised).
+        """
 
-    # Where an alert could be standing: the inbox this process raised it in, and
-    # the designated session (the only place a previous process could have put it).
-    inboxes = [target for target in dict.fromkeys((recorded, session_id)) if target]
+        cleared_any = False
+        for item in notifications.find_by_key(_key(endpoint_id)):
+            if item["session_id"] == keep or item["priority"] != "normal":
+                continue
+            notifications.notify(
+                item["session_id"],
+                title=t(keys.cleared_title()),
+                body_md=t(keys.cleared_body(minutes=shown_minutes)),
+                priority="low",
+                key=_key(endpoint_id),
+            )
+            cleared_any = True
+        return cleared_any
 
     if minutes == 0:
         # Disabled: a standing alert would otherwise outlive the setting. The
         # cleared copy needs a threshold, so it names the default one.
-        for target in inboxes:
-            clear(target, DEFAULT_HOLD_ALERT_AFTER_MINUTES)
+        clear_standing(DEFAULT_HOLD_ALERT_AFTER_MINUTES)
         _raised.pop(endpoint_id, None)
         return "disabled"
+
+    if not session_id and recorded is None:
+        # Nothing to raise into and nothing this process raised: no inbox to keep
+        # in step. (Only a threshold of ``0`` looks for a stranded alert here.)
+        return "no_session"
 
     found = store.long_holds_readonly(owner, older_than_s=minutes * 60.0, now=now)
     count = int(found["count"])
@@ -156,8 +166,11 @@ def _run(owner: Any, config_dir: Path, now: float | None) -> str:
     if count > 0:
         if not session_id:
             return "no_session"
-        if recorded is not None and recorded != session_id:
-            clear(recorded, minutes)  # the old inbox must not keep a stale alert
+        # An alert left in any other inbox (the designation moved, here or before
+        # a restart) must not stay up beside the new one.
+        if clear_standing(minutes, keep=session_id) or (
+            recorded is not None and recorded != session_id
+        ):
             _raised.pop(endpoint_id, None)
         outcome = notifications.notify(
             session_id,
@@ -178,5 +191,4 @@ def _run(owner: Any, config_dir: Path, now: float | None) -> str:
 
     # Nothing is held: clear what is standing, in the inbox that shows it.
     _raised.pop(endpoint_id, None)
-    cleared = [clear(target, minutes) for target in inboxes]
-    return "cleared" if any(cleared) else "none_held"
+    return "cleared" if clear_standing(minutes) else "none_held"

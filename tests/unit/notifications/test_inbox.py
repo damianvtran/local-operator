@@ -99,6 +99,23 @@ def test_get_by_key_reads_one_session_key_and_never_creates_the_store(tmp_path: 
     assert store.get_by_key(SID, "") is None  # an unkeyed row has no collapse identity
 
 
+def test_find_by_key_reads_every_session_and_never_creates_the_store(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    assert store.find_by_key("k") == []
+    assert not store.path.exists()  # a read never creates the store
+
+    store.notify(SID, title="A", body_md="1", key="k", priority="high")
+    store.notify("sess_other", title="B", body_md="2", key="k")
+    store.notify(SID, title="C", body_md="3", key="unrelated")
+
+    found = store.find_by_key("k")
+    assert sorted(row["session_id"] for row in found) == sorted([SID, "sess_other"])
+    assert {row["key"] for row in found} == {"k"}
+    assert next(row for row in found if row["session_id"] == SID)["priority"] == "high"
+    assert store.find_by_key("absent") == []
+    assert store.find_by_key("") == []  # an unkeyed row has no collapse identity
+
+
 def test_a_dismissed_key_absorbs_silently_and_an_escalation_revives_it(tmp_path: Path) -> None:
     """The dismissed row is what keeps a 5-minute wake from flooding the reel."""
     store = _store(tmp_path)
