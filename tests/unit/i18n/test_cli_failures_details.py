@@ -174,7 +174,8 @@ def test_exec_refusal_preserves_shell_safe_command(monkeypatch: pytest.MonkeyPat
         assert exc.value.code == 2
         assert seen[0].code == "cli.failure_details.positional_pair"
         message = seen[1]
-        assert message.params["count"] == len(extras) + 1
+        # Plain placeholders are text; only ICU plural selectors take numbers.
+        assert message.params["count"] == str(len(extras) + 1)
         if len(extras) == 1:
             assert message.code == "cli.failure_details.exec_two"
             assert shlex.split(str(message.params["command"])) == [

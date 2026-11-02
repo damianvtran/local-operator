@@ -17078,9 +17078,9 @@ def _reject_extra_positionals(parser: Any, args: Any) -> None:
         # Keep shell syntax out of the catalogue: translators must never alter
         # quoting, since this example is intended to be pasted into a shell.
         command = f"lop exec --name {shlex.quote(args.command)} {shlex.quote(extras[0])}"
-        message = _failure_details.exec_two(count=len(quoted), received=received, command=command)
+        message = _failure_details.exec_two(count=str(len(quoted)), received=received, command=command)
     else:
-        message = _failure_details.exec_many(count=len(quoted), received=received)
+        message = _failure_details.exec_many(count=str(len(quoted)), received=received)
     parser.error(_tr(message))
 
 
