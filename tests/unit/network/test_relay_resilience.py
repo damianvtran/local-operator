@@ -215,6 +215,94 @@ def test_a_candidate_on_our_own_interface_and_port_is_never_dialled(
     assert not relay._reaches_own_listener("127.0.0.1:4098", 4097)
 
 
+@pytest.mark.parametrize("bound", ["127.0.0.1", "10.0.2.170"])
+def test_a_specific_bind_keeps_a_same_port_peer_on_another_local_address(
+    monkeypatch: pytest.MonkeyPatch, bound: str
+) -> None:
+    """A local interface is not necessarily OUR listener (R1-1)."""
+    _own_table(monkeypatch, "10.0.2.169", "10.0.2.170")
+    member = _poisoned_member()
+    member.endpoints = [f"{bound}:4097", "10.0.2.169:4097", f"{bound}:4098"]
+    server: Any = SimpleNamespace(settings=relay.NetworkSettings(port=4097, listen_address=bound))
+    assert relay.RelayServer._redial_candidates(server, member) == [
+        "10.0.2.169:4097",
+        f"{bound}:4098",
+    ]
+
+
+def test_two_real_address_specific_listeners_can_share_a_port() -> None:
+    """Use real binds to prove the different-address/same-port case is legitimate."""
+    held = relay.addresses.local_ipv4_addresses()
+    if not held:
+        pytest.skip("no non-loopback IPv4 interface for distinct-address socket check")
+    with socket.socket() as own, socket.socket() as peer:
+        own.bind(("127.0.0.1", 0))
+        port = own.getsockname()[1]
+        peer.bind((held[0], port))
+        own.listen(1)
+        peer.listen(1)
+        endpoint = f"{held[0]}:{port}"
+        assert not relay._reaches_own_listener(endpoint, port, "127.0.0.1")
+        assert relay._reaches_own_listener(f"127.0.0.1:{port}", port, "127.0.0.1")
+        server: Any = SimpleNamespace(
+            _listener=own,
+            settings=relay.NetworkSettings(port=0),
+        )
+        member: Any = SimpleNamespace(
+            endpoints=[endpoint, f"127.0.0.1:{port}"], observed_endpoint=""
+        )
+        assert relay.RelayServer._redial_candidates(server, member) == [endpoint]
+        with socket.create_connection((held[0], port), timeout=1):
+            connection, _ = peer.accept()
+            connection.close()
+
+
+def test_doctor_skips_poisoned_self_hint_but_handshakes_the_foreign_winner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Doctor's wait_all race must not hand the self socket to its handshake (R1-2)."""
+    _own_table(monkeypatch, "10.0.2.169")
+    monkeypatch.setattr(relay.addresses, "local_ipv4_addresses", lambda: ["10.0.2.169"])
+    member = _poisoned_member()
+    member.name = "node"
+    member.endpoints = ["16.52.146.32:4097"]
+    raced: list[list[str]] = []
+    handshakes: list[str] = []
+    token = object()
+
+    def fake_probe(endpoints: Any, **kwargs: Any) -> Any:
+        assert kwargs["wait_all"] is True
+        raced.append(list(endpoints))
+        return relay.CandidateProbe(
+            sock=cast(Any, token),
+            winner=member.endpoints[0],
+            attempts=[relay.CandidateAttempt(member.endpoints[0], True, "ok")],
+            complete=True,
+            reason="",
+        )
+
+    def handshake(_record: Any, _member: Any, endpoint: str, sock: Any, _remaining: Any) -> Any:
+        assert sock is token
+        handshakes.append(endpoint)
+        return {
+            "check": "handshake",
+            "device_id": member.device_id,
+            "endpoint": endpoint,
+            "ok": True,
+            "detail": "ok",
+        }
+
+    monkeypatch.setattr(relay, "probe_candidates", fake_probe)
+    server: Any = SimpleNamespace(settings=relay.NetworkSettings(port=4097), _handshake=handshake)
+    server._redial_candidates = lambda m: relay.RelayServer._redial_candidates(server, m)
+    rows = relay.RelayServer._probe_member(server, cast(Any, object()), member, deadline=None)
+    assert raced == [["16.52.146.32:4097"]]
+    assert handshakes == ["16.52.146.32:4097"]
+    skipped = next(row for row in rows if row["endpoint"] == member.observed_endpoint)
+    assert skipped["code"] == "self_listener" and skipped["detail"] == "not_attempted"
+    assert skipped["ok"] and skipped["observed"]["out_of_scope"]
+
+
 def test_the_interface_table_is_read_at_dial_time_and_unreadable_filters_nothing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

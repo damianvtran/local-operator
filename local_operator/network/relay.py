@@ -968,7 +968,7 @@ def _dial_candidates(member: MemberRecord) -> list[str]:
     return candidates
 
 
-def _reaches_own_listener(endpoint: str, own_port: int) -> bool:
+def _reaches_own_listener(endpoint: str, own_port: int, listen_address: str = "0.0.0.0") -> bool:
     """Whether dialling ``endpoint`` would connect to THIS relay's own listener.
 
     THE SELF-RACE (2026-11-02, Mac ⇄ lop-remote-node-2). ``probe_candidates`` races
@@ -981,10 +981,12 @@ def _reaches_own_listener(endpoint: str, own_port: int) -> bool:
     the race does not help: whenever the self candidate is tried it answers. The
     only fix is never to dial it.
 
-    BOTH halves must match. Two relays on one host (every two-relay test rig, and
-    a same-host pair in the field) listen on DIFFERENT ports, so own-address on
-    another port is a real peer and stays dialable. Loopback on our port is the
-    long-standing dial-only case (``_redial_candidates``' original rule).
+    The bound address matters as well as the port: a wildcard IPv4 listener
+    accepts every local IPv4 address, but a specific bind accepts only that
+    address. Two same-host relays can share a port on DISTINCT bound addresses;
+    neither is self merely because the interface table contains the other's IP.
+    Different ports stay dialable too. ``bind()`` records the effective port in
+    settings, including when the kernel chooses it for a configured zero.
 
     The interface table is read NOW, on every call, never cached: sleep/wake and
     network changes rewrite it, and an address that was a foreign host's an hour
@@ -993,23 +995,36 @@ def _reaches_own_listener(endpoint: str, own_port: int) -> bool:
     nothing: dropping a candidate on a guess could strand a reachable peer.
     """
     host, sep, port = str(endpoint or "").rpartition(":")
-    if _is_loopback_endpoint(endpoint):
-        return not port.isdigit() or int(port) == own_port
-    if not sep or not port.isdigit() or int(port) != own_port:
+    loopback = _is_loopback_endpoint(endpoint)
+    if not sep or not port.isdigit():
+        return loopback and listen_address == "0.0.0.0"
+    if int(port) != own_port:
         return False
-    return addresses.interface_for_address(host.strip("[]")) is not None
+    host = host.strip("[]").lower()
+    if listen_address != "0.0.0.0":
+        # No DNS lookup: the listener is AF_INET and the observation is an IP
+        # literal. Preserve the existing localhost spelling for same-host rigs.
+        bound = listen_address.lower()
+        return ("127.0.0.1" if host == "localhost" else host) == (
+            "127.0.0.1" if bound == "localhost" else bound
+        )
+    if loopback:
+        return True
+    return addresses.interface_for_address(host) is not None
 
 
-def _dialable_candidates(member: MemberRecord, own_port: int) -> list[str]:
+def _dialable_candidates(
+    member: MemberRecord, own_port: int, listen_address: str = "0.0.0.0"
+) -> list[str]:
     """``_dial_candidates`` minus every address that would reach this relay itself.
 
-    The one filter both dial paths share (the redial schedule and
-    ``_ensure_link_with_probe``), so "which candidates are us" has one answer.
+    The redial schedule, session/listing dial and doctor share this filter, so
+    "which candidates are us" has one answer even for a poisoned stored hint.
     """
     return [
         endpoint
         for endpoint in _dial_candidates(member)
-        if not _reaches_own_listener(endpoint, own_port)
+        if not _reaches_own_listener(endpoint, own_port, listen_address)
     ]
 
 
@@ -6375,15 +6390,21 @@ class RelayServer:
 
         A dial-only device declares loopback (``advertise_endpoints``: "do not try
         to call me first"); on the default port that is OUR OWN listener, and a
-        redial there is a ``self_link`` row per attempt. Loopback on another port
-        stays (a same-host pair of relays, as every two-relay rig is).
+        redial there is a ``self_link`` row per attempt. Another port stays, as
+        does the same port on a different IP when our listener binds specifically.
 
-        The same holds for one of this host's own interface addresses on our port
-        (``_reaches_own_listener``): a poisoned ``observed_endpoint`` naming us
-        would otherwise keep this member "redialable" forever while every dial
-        self-links.
+        A wildcard listener also accepts this host's own interface addresses on
+        our port: a poisoned ``observed_endpoint`` naming us would otherwise keep
+        this member "redialable" forever while every dial self-links.
         """
-        return _dialable_candidates(member, int(self.settings.port or 0))
+        # Prefer the socket's actual bind (including hostname resolution); settings
+        # are the pre-bind fallback used by admission checks and isolated rigs.
+        listener = getattr(self, "_listener", None)
+        if listener is not None:
+            host, port = listener.getsockname()[:2]
+        else:
+            host, port = self.settings.listen_address, int(self.settings.port or 0)
+        return _dialable_candidates(member, int(port), str(host))
 
     def _membership_loop(self) -> None:
         """The scheduled half of membership convergence, with no surface involved.
@@ -14078,8 +14099,13 @@ class RelayServer:
                     "detail": "no_endpoint",
                 }
             ]
+        # Waiting for all sockets does not change the first-connect winner:
+        # doctor must exclude the same self-listener targets as ordinary dials.
+        # Keep a skipped row rather than pretending the discarded hint was tried.
+        candidates = self._redial_candidates(member)
+        skipped = [endpoint for endpoint in _dial_candidates(member) if endpoint not in candidates]
         probe = probe_candidates(
-            _dial_candidates(member),
+            candidates,
             deadline=deadline,
             connect_cap=PROBE_CONNECT_TIMEOUT_S,
             wait_all=True,
@@ -14104,7 +14130,18 @@ class RelayServer:
                 )
             else:
                 winner_row = self._handshake(record, member, probe.winner, probe.sock, remaining)
-        rows: list[dict[str, Any]] = []
+        rows: list[dict[str, Any]] = [
+            {
+                "check": "reachability",
+                "device_id": member.device_id,
+                "endpoint": endpoint,
+                "ok": True,
+                "code": "self_listener",
+                "detail": "not_attempted",
+                "observed": {"out_of_scope": True},
+            }
+            for endpoint in skipped
+        ]
         for attempt in probe.attempts:
             if attempt.endpoint == probe.winner and winner_row is not None:
                 rows.append(winner_row)
