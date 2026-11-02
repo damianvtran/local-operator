@@ -46,12 +46,14 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import contextvars
+import json
 import logging
 import math
 import os
 import sys
 import threading
 import time
+import uuid
 import weakref
 from dataclasses import dataclass
 from pathlib import Path
@@ -2440,10 +2442,11 @@ def _answer_resolves_send_marker(
       answered that this token is not acceptable (spent, revoked, or already
       rotated away), and the caller records the tombstone that is the outcome.
       There is nothing left for the marker to protect;
-    * a failure answer that carries this server's ``X-MCP-Refresh-Rotation:
+    * a ``5xx`` answer that ALSO carries this server's ``X-MCP-Refresh-Rotation:
       not-committed`` assertion (``rotation_not_committed``) — the request did
       not reach the step that consumes the token, so the token is still
-      presentable. Keeping the marker for it costs the user up to
+      presentable. The status is necessary but never sufficient: a bare 5xx
+      without the assertion keeps the marker. Keeping the marker for it costs the user up to
       :data:`UNCONFIRMED_SEND_TTL_S` of refused refreshes and, on a one-hour
       access token, the very sign-in the operator reported. The flag is
       produced by :func:`_non_consumption_assertion` from the HEADER alone:
@@ -2468,9 +2471,7 @@ def _answer_resolves_send_marker(
     """
     if status_code == 200:
         return True
-    return (status_code == 400 and invalid_grant) or (
-        status_code >= 500 and rotation_not_committed
-    )
+    return (status_code == 400 and invalid_grant) or (status_code >= 500 and rotation_not_committed)
 
 
 def _stored_token_is_fresh(storage: "McpTokenStorage", tokens: Any) -> bool:
@@ -3834,6 +3835,11 @@ async def _discover_oauth_endpoints_uncached(server_url: str) -> _OAuthProbe:
                 break
 
             asm: OAuthMetadata | None = None
+            # Bound before the loop: the populated return reads this, and a
+            # capability must never be inferred from an assignment that did not
+            # happen. The outer best-effort handler would catch an unbound read,
+            # but it would then discard a probe whose metadata was valid.
+            asm_assertion_opt_in = False
             for url in build_oauth_authorization_server_metadata_discovery_urls(
                 auth_server_url, server_url
             ):
@@ -4368,7 +4374,11 @@ def _non_consumption_assertion(
             values = getter(name)
         except Exception:  # noqa: BLE001
             return None
-        if not values or len(values) != 1:
+        # ``getattr`` erases the return type to ``object``, so the shape is
+        # checked rather than assumed: anything that is not a list or tuple is
+        # an answer we cannot attribute to this attempt, and failing closed is
+        # the only safe reading.
+        if not isinstance(values, (list, tuple)) or len(values) != 1:
             return None
         return str(values[0]).strip().lower()
 
@@ -4896,10 +4906,15 @@ async def _perform_refresh_exchange(
         # BOUND to this specific refresh rather than to "a" refresh. A bare
         # boolean header is replayable and could be attributed to the wrong
         # attempt by an intermediary; an echo of our own nonce is not.
-        import uuid
-
+        #
+        # Sent ONLY to issuers that advertise the capability. An issuer that
+        # never opted in must see the same request bytes it saw before this
+        # change: an extra header on a Cloudflare-fronted token endpoint is
+        # precisely the kind of difference a bot rule can react to, and the
+        # nonce is meaningless to an issuer that will not echo it.
         attempt_id = uuid.uuid4().hex
-        headers[ROTATION_ATTEMPT_HEADER] = attempt_id
+        if endpoints.rotation_assertion_supported:
+            headers[ROTATION_ATTEMPT_HEADER] = attempt_id
 
         auth_method = client_info.token_endpoint_auth_method
         if auth_method == "client_secret_post" and client_info.client_secret:

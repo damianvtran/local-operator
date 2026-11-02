@@ -1651,6 +1651,11 @@ async def test_the_bound_assertion_clears_the_marker_and_the_token_is_reused(
         assert first == "failed"
         assert endpoint.rotation_count == 0, "the refusal must not have consumed the token"
         assert storage.send_unconfirmed() is False, "a bound assertion clears the marker"
+        # The binding only works if the nonce actually went out, exactly once: an
+        # opted-in issuer echoes what we sent, so absence or duplication here
+        # would make the assertion untraceable to this attempt.
+        sent = [h.get(ATTEMPT.lower()) for h in endpoint.request_headers]
+        assert sent == [sent[0]] and sent[0], f"expected one attempt nonce, saw {sent!r}"
 
         async with auth_mod._oauth_refresh_lock(SERVER_URL) as lock:
             second = await auth_mod._refresh_oauth_token_locked(
@@ -1824,4 +1829,9 @@ async def test_an_issuer_without_the_capability_is_ignored_even_with_the_header(
             "an unproven issuer's header must never clear the marker, however "
             "well-formed it looks"
         )
+        # The header must not reach an issuer that never advertised the
+        # capability: those refreshes must stay byte-identical to before.
+        assert all(
+            ATTEMPT.lower() not in h for h in ep.request_headers
+        ), "an unadvertised capability must not add headers to the wire"
     assert len(ep.requests) == 1

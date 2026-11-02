@@ -56,7 +56,7 @@ class FakeTokenEndpoint:
         on_reject: Callable[[], Awaitable[None]] | None = None,
         commit_then_fail_status: int | None = None,
         refuse_before_rotation: tuple[int, str] | None = None,
-        refuse_headers: dict[str, str] | None = None,
+        refuse_headers: dict[str, str | list[str]] | None = None,
         refuse_for_requests: int = 1,
         commit_then_fail_error: str = "server_error",
     ) -> None:
@@ -98,6 +98,10 @@ class FakeTokenEndpoint:
         #: succeeds afterwards.
         self.refuse_for_requests = refuse_for_requests
         self.requests: list[dict[str, str]] = []
+        # Every request's headers, lower-cased, in arrival order. Recorded so a
+        # test can assert what actually went on the wire — in particular that a
+        # header is ABSENT for an issuer that never advertised the capability.
+        self.request_headers: list[dict[str, str]] = []
         self.reuse_attempts = 0
         self.rotation_count = 0
         self.revoked = False
@@ -131,6 +135,7 @@ class FakeTokenEndpoint:
             for line in head.decode("latin-1").split("\r\n")[1:]:
                 name, _, value = line.partition(":")
                 headers[name.strip().lower()] = value.strip()
+            self.request_headers.append(dict(headers))
             length = int(headers.get("content-length", "0") or 0)
             body = await reader.readexactly(length) if length else b""
             status, payload = self._decide(dict(parse_qsl(body.decode("utf-8"))))
