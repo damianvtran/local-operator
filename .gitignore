@@ -77,6 +77,10 @@ bench/
 # requires it) for a rule that can never apply inside that subtree.
 /.worktrees/
 
-# pytest HOME/TMPDIR sandboxes created by local verification runs
+# pytest HOME/TMPDIR sandboxes created by local verification runs.
+# Their absolute "current" symlinks make git source snapshots unextractable
+# under tar's data filter. Keep local sandboxes, not their machine-bound links,
+# out of source; root anchoring preserves intentional nested fixture paths.
+/.tmp/
 /.tmp-tmp/
 /.tmp-home/
