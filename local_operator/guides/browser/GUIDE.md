@@ -402,6 +402,10 @@ Same `browser` tool. Actions:
   with click refs like `e5`)
 - `screenshot` (writes a PNG; works on the background tab)
 - `click` / `type` (by CSS selector or a snapshot ref; trusted input events)
+- `press key="Tab"` (keyboard input to the owned page; desktop app support
+  required). Keys: `Tab`, atomic `Shift+Tab`, `Enter`, `Escape`, `ArrowUp`,
+  `ArrowDown`, `ArrowLeft`, `ArrowRight`. Other keys receive `unsupported_key`;
+  an older app receives `capability_unsupported` with an update instruction.
 - `scroll` (by direction, pixel delta, or scroll an element into view)
 - `logs` (the tab's console output and uncaught exceptions since it opened —
   for debugging web apps)
