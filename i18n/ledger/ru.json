@@ -2942,6 +2942,27 @@
       },
       "status": "passed",
       "note": "Independent delta audit: only new wire.skill_adoption.projection_unsupported; prior completed whole-namespace/D3 audits carry with exact previous target hash compatibility. Platform refusal, unchanged local skill/link, supported-platform adoption and ordinary strict-install alternative preserved. Target SHA-256 f390b84b69ac993d093a73a83801988b691ebd93f4ec8a4a8a13f46e4c442234; context SHA-256 9227b4d2536eeedd7423e09bb9e31309e5b2e06a99a7df86594a256f56d0715c. Evidence: i18n/audits/skill-adoption-projection-delta-5ad13f38d6e6.json. No native Windows, rendered RTL or executable QA claim."
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.team_bridge_alert",
+      "source_sha256": "cb3fcf96f055cafb2b61702cb0888f2b64f8cc6bcc0372a203fd81b12a5e6c6b",
+      "translator": {
+        "agent": "i18n-translator (coder subagent)",
+        "session": "unknown",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (i18n-audit-a, task subagent)",
+        "session": "886288cfe273",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit (not the translator) of cli.team_bridge_alert at source hash cb3fcf96f055: key set and ICU placeholder/plural-structure parity with en, required CLDR arms for the locale, `lop team-bridge receiver status` byte-identical, safety meaning (count, held longer than threshold, agent NOT given the messages, no deletion/review claim, cleared text does not claim delivery), 'Agent messages' title and 'held' wording against the locale's cli.team_bridge catalogue and glossary/style guide. 0 blocker / 0 major / 0 minor. one/few/many/other present; verb and genitive minute forms agree in every arm (1 сообщение задержано, 2 сообщения задержаны, 5 сообщений задержано; более 1 минуты/2 минут/5 минут); 'задержано' and 'Фильтрация' match cli.team_bridge. Single independent audit pass; no cross-model second audit."
     }
   ]
 }

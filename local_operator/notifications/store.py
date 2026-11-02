@@ -982,6 +982,26 @@ class NotificationStore:
 
         return self._read(body, None, "get")
 
+    def get_by_key(self, session_id: str, key: str) -> dict[str, Any] | None:
+        """The item a session holds under ``key``, or ``None``.
+
+        The read side of :meth:`notify`'s collapse key (one row per
+        ``(session_id, key)``). Read-only: an absent store answers ``None`` and is
+        never created, so a caller that only wants to know whether an alert it
+        raised earlier is still standing does not move the doorbell.
+        """
+        if not key:
+            return None
+
+        def body(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            row = conn.execute(
+                f"SELECT {_ITEM_COLUMNS} FROM items WHERE session_id=? AND key=?",
+                (session_id, key),
+            ).fetchone()
+            return _row_dict(row) if row is not None else None
+
+        return self._read(body, None, "get_by_key")
+
     def history(self, item_id: str) -> list[dict[str, Any]]:
         """Earlier versions of one item, newest first (at most :data:`HISTORY_CAP`)."""
 

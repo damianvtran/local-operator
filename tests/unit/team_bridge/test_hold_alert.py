@@ -10,7 +10,9 @@ Pinned here: the store reader counts only conversation holds once per message an
 skips the two owner-action waits; the alert is contentless (a count and the
 threshold, no id, sender, body or age); a repeat inside the throttle does no
 notification I/O; an unchanged count writes no new revision; a drained queue
-sends exactly one low-priority "cleared" update; and nothing in the tick (or its
+sends exactly one low-priority "cleared" update to the session that holds the alert
+(after a restart, a session change or a switch-off too, and never for a pruned row);
+and nothing in the tick (or its
 hook in the loop) can kill the connector.
 """
 
@@ -94,11 +96,7 @@ def test_long_holds_counts_old_conversation_holds_once_per_message(tmp_path: Pat
 
     found = store.long_holds_readonly(_owner(), older_than_s=HOUR, now=now)
 
-    assert found == {
-        "count": 2,
-        "oldest_created_at": now - 5 * HOUR,
-        "dominant_hold_class": "screening_unavailable",
-    }
+    assert found == {"count": 2}
 
 
 def test_long_holds_excludes_owner_action_waits_pair_ids_and_damaged_rows(tmp_path: Path) -> None:
@@ -113,12 +111,11 @@ def test_long_holds_excludes_owner_action_waits_pair_ids_and_damaged_rows(tmp_pa
 
     found = store.long_holds_readonly(_owner(), older_than_s=HOUR, now=now)
 
-    assert found["count"] == 1
-    assert found["dominant_hold_class"] == "awaiting_review"
+    assert found == {"count": 1}
 
 
 def test_long_holds_empty_absent_and_fenced_answer_zero(tmp_path: Path) -> None:
-    zero = {"count": 0, "oldest_created_at": None, "dominant_hold_class": None}
+    zero = {"count": 0}
     assert Store(tmp_path / "absent").long_holds_readonly(_owner(), older_than_s=1) == zero
     assert not (tmp_path / "absent").exists()
 
@@ -249,12 +246,135 @@ def test_a_drained_queue_sends_one_low_cleared_update_then_nothing(tmp_path: Pat
     assert _items(tmp_path)[0]["revision"] == 2
 
 
-def test_a_hold_that_drains_in_another_process_is_not_cleared_here(tmp_path: Path) -> None:
-    """Only the process that raised the alert clears it."""
+def test_nothing_standing_and_nothing_held_sends_nothing(tmp_path: Path) -> None:
+    """With no alert in the inbox there is nothing to clear: no row is created."""
 
     _enrolled(tmp_path)
     assert asyncio.run(_tick(tmp_path, Clock(), 10 * HOUR)) == "none_held"
     assert not (tmp_path / "notifications.db").exists()
+
+
+def _raise_then_forget(tmp_path: Path, store: Store, clock: Clock, now: float) -> str:
+    """Raise the alert, then drop every in-process record (a restart)."""
+
+    stored = _composite("bcmsg_a")
+    _raw_hold(tmp_path, stored, "provider_error", created_at=now - 3 * HOUR)
+    assert asyncio.run(_tick(tmp_path, clock, now)) == "raised"
+    hold_alert._raised.clear()
+    hold_alert._last_tick.clear()
+    return stored
+
+
+def test_a_restart_clears_an_alert_the_previous_process_left_standing(tmp_path: Path) -> None:
+    store = _enrolled(tmp_path)
+    now = 10 * HOUR
+    clock = Clock()
+    stored = _raise_then_forget(tmp_path, store, clock, now)
+    store.delete_hold(_owner(), stored)
+
+    assert asyncio.run(_tick(tmp_path, clock, now)) == "cleared"
+
+    [item] = _items(tmp_path)
+    assert item["priority"] == "low" and item["revision"] == 2
+    clock.value += hold_alert.THROTTLE_S
+    assert asyncio.run(_tick(tmp_path, clock, now)) == "none_held"  # an already-low item stays
+    assert _items(tmp_path)[0]["revision"] == 2
+
+
+def test_disabling_the_alert_clears_the_one_this_process_raised(tmp_path: Path) -> None:
+    _enrolled(tmp_path)
+    now = 10 * HOUR
+    _raw_hold(tmp_path, _composite("bcmsg_a"), "provider_error", created_at=now - 3 * HOUR)
+    clock = Clock()
+    assert asyncio.run(_tick(tmp_path, clock, now)) == "raised"
+
+    _threshold(tmp_path, 0)
+    clock.value += hold_alert.THROTTLE_S
+    assert asyncio.run(_tick(tmp_path, clock, now)) == "disabled"
+
+    [item] = _items(tmp_path)
+    assert item["priority"] == "low" and item["revision"] == 2
+    assert hold_alert._raised == {}
+
+
+def test_disabling_after_a_restart_clears_a_standing_alert_too(tmp_path: Path) -> None:
+    store = _enrolled(tmp_path)
+    now = 10 * HOUR
+    clock = Clock()
+    _raise_then_forget(tmp_path, store, clock, now)
+
+    _threshold(tmp_path, 0)
+    assert asyncio.run(_tick(tmp_path, clock, now)) == "disabled"
+
+    assert _items(tmp_path)[0]["priority"] == "low"
+
+
+def test_the_clear_goes_to_the_session_that_raised_it_after_the_designation_moves(
+    tmp_path: Path,
+) -> None:
+    store = _enrolled(tmp_path, session="sess_old")
+    now = 10 * HOUR
+    stored = _composite("bcmsg_a")
+    _raw_hold(tmp_path, stored, "provider_error", created_at=now - 3 * HOUR)
+    clock = Clock()
+    assert asyncio.run(_tick(tmp_path, clock, now)) == "raised"
+
+    store.update_designated_session(_owner(), "sess_new")
+    store.delete_hold(_owner(), stored)
+    clock.value += hold_alert.THROTTLE_S
+    assert asyncio.run(_tick(tmp_path, clock, now)) == "cleared"
+
+    [item] = _items(tmp_path)
+    assert item["session_id"] == "sess_old" and item["priority"] == "low"
+
+
+def test_a_session_change_while_held_moves_the_alert_and_clears_the_old_one(
+    tmp_path: Path,
+) -> None:
+    store = _enrolled(tmp_path, session="sess_old")
+    now = 10 * HOUR
+    _raw_hold(tmp_path, _composite("bcmsg_a"), "provider_error", created_at=now - 3 * HOUR)
+    clock = Clock()
+    asyncio.run(_tick(tmp_path, clock, now))
+
+    store.update_designated_session(_owner(), "sess_new")
+    clock.value += hold_alert.THROTTLE_S
+    assert asyncio.run(_tick(tmp_path, clock, now)) == "raised"
+
+    by_session = {item["session_id"]: item for item in _items(tmp_path)}
+    assert by_session["sess_new"]["priority"] == "normal"
+    assert by_session["sess_old"]["priority"] == "low"
+
+
+def test_a_pruned_alert_is_not_recreated_as_a_stray_cleared_item(tmp_path: Path) -> None:
+    store = _enrolled(tmp_path)
+    now = 10 * HOUR
+    clock = Clock()
+    stored = _raise_then_forget(tmp_path, store, clock, now)
+    hold_alert._raised[_owner().endpoint_id] = "sess_cos"  # this process still believes it
+    notifications = NotificationStore(tmp_path)
+    with notifications._connect() as conn:  # simulate the retention prune of the row
+        conn.execute("DELETE FROM items")
+    store.delete_hold(_owner(), stored)
+
+    assert asyncio.run(_tick(tmp_path, clock, now)) == "none_held"
+    assert _items(tmp_path) == []
+    assert hold_alert._raised == {}
+
+
+def test_a_dismissed_alert_is_still_cleared_quietly_without_reviving(tmp_path: Path) -> None:
+    store = _enrolled(tmp_path)
+    now = 10 * HOUR
+    clock = Clock()
+    stored = _raise_then_forget(tmp_path, store, clock, now)
+    notifications = NotificationStore(tmp_path)
+    [item] = _items(tmp_path)
+    notifications.apply("dismiss", ids=[(item["id"], item["revision"])])
+    store.delete_hold(_owner(), stored)
+
+    assert asyncio.run(_tick(tmp_path, clock, now)) == "cleared"
+
+    assert notifications.list_items(state="unread")[0] == []  # still dismissed
 
 
 def test_a_later_incident_revives_a_dismissed_alert(tmp_path: Path) -> None:
@@ -286,6 +406,7 @@ def test_threshold_zero_disables(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     _threshold(tmp_path, 0)
 
     assert asyncio.run(_tick(tmp_path, Clock(), now)) == "disabled"
+    # Nothing standing to clear, so nothing is written (and nothing is created).
     assert not (tmp_path / "notifications.db").exists()
 
 

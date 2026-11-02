@@ -1,6 +1,6 @@
 {
   "cli.team_bridge_alert.long_hold.title": "智能体消息：有消息被长时间暂扣",
-  "cli.team_bridge_alert.long_hold.body": "{count, plural, other {有 # 条消息}}在筛查中被暂扣已超过 {minutes, plural, other {# 分钟}}。你的智能体尚未收到这些被暂扣的消息。详情请运行 `lop team-bridge receiver status`。",
+  "cli.team_bridge_alert.long_hold.body": "{count, plural, other {有#条消息}}已被暂扣超过{minutes, plural, other {#分钟}}，尚未送达你的智能体。详情请运行`lop team-bridge receiver status`。",
   "cli.team_bridge_alert.cleared.title": "智能体消息：已无长时间暂扣的消息",
-  "cli.team_bridge_alert.cleared.body": "目前没有消息在筛查中被暂扣超过 {minutes, plural, other {# 分钟}}。"
+  "cli.team_bridge_alert.cleared.body": "目前没有消息被暂扣超过{minutes, plural, other {#分钟}}。"
 }
