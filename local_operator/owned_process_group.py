@@ -165,8 +165,28 @@ def _darwin_all_pids(deadline, clock):
             }
         )
         _LAST_ENUMERATION["_first"] = pids[:5]
-        return pids
+        # THE COVERAGE TRAVELS WITH THE READ (review round 5, R6). Reading the
+        # process-global ledger after this returns let a second census in another
+        # thread overwrite it, so a partial read could inherit a complete
+        # certificate. The global below stays DIAGNOSTIC ONLY and is never read
+        # for a decision.
+        return pids, required, written, len(pids)
     raise Unknown("saturated libproc census")
+
+
+def _libproc_coverage(required, written, rows):
+    """Coverage the libproc read can actually CLAIM, from the size-query contract.
+
+    `required` is the kernel's own row budget in bytes and `rows` is what we
+    parsed. A short (or empty) answer against a non-zero budget is a PARTIAL read,
+    never an empty group. One calculation, shared by the production path and the
+    injected `listpids` seam -- review round 4 found the guard living only in the
+    seam branch, so production still certified a population nobody measured.
+    """
+    size = ctypes.sizeof(ctypes.c_int)
+    if type(required) is not int or required <= 0:
+        return False
+    return written == required and rows * size == required
 
 
 def strict_darwin(pgid, deadline, *, listpids=None, clock=time.monotonic):
@@ -184,7 +204,7 @@ def strict_darwin(pgid, deadline, *, listpids=None, clock=time.monotonic):
         unknown = []
         # THE RAW NAMESPACE, before any group filter: `leader_seen` must answer
         # "was this pid in the enumeration at all", not "was it a member".
-        raw_pids = list(_darwin_all_pids(deadline, clock))
+        raw_pids, required, written, parsed = _darwin_all_pids(deadline, clock)
         leader_seen = pgid in raw_pids
         for pid in raw_pids:
             if clock() >= deadline:
@@ -214,7 +234,11 @@ def strict_darwin(pgid, deadline, *, listpids=None, clock=time.monotonic):
             )
         if pgid not in members:
             _report_census_miss(pgid, deadline)
-        return sorted(members), True, leader_seen
+        # THE CERTIFICATE COMES FROM THE READ, even here: `_darwin_all_pids`
+        # recorded the size query and what it parsed, and anything short of the
+        # full budget is incomplete.
+        complete = _libproc_coverage(required, written, parsed)
+        return sorted(members), complete, leader_seen
     lib = resources._darwin_libproc() if listpids is None else None
     call = listpids if listpids is not None else getattr(lib, "proc_listpids", None)
     if call is None or pgid <= 1:
@@ -242,7 +266,15 @@ def strict_darwin(pgid, deadline, *, listpids=None, clock=time.monotonic):
         pids = list(buffer[: written // size])
         if any(p <= 0 for p in pids) or len(set(pids)) != len(pids):
             raise Unknown("malformed libproc PID rows")
-        return sorted(pids)
+        # COMPLETENESS IS EARNED FROM THE READ. `needed` is the kernel's own row
+        # budget from the size query; a shorter answer -- including zero bytes from
+        # a non-zero budget -- is a PARTIAL read, never an empty group. Asserting
+        # True here (review round 3, R3) certified a population nobody measured.
+        complete = _libproc_coverage(needed, written, len(pids))
+        # THE SEAM IS TYPED HERE TOO: this branch serves the injected `listpids`
+        # reader as well as the live libproc one. leader_seen is the RAW namespace
+        # read, before any group filter, for the same reason as everywhere else.
+        return sorted(pids), complete, pgid in pids
     raise Unknown("saturated libproc census")
 
 
@@ -757,13 +789,20 @@ class OwnedGroup:
             return "unverifiable", None
         try:
             samples = self._samples([self.leader], deadline)
+        except PermissionError:
+            # ROUTED, NOT RENAMED (review round 3, R1): an unreadable row is
+            # identity uncertainty and must take the same branch as every other
+            # unverifiable witness.
+            return "unverifiable", None
         except Exception:  # noqa: BLE001 - a failed sample is unreadable, never absent
-            return "unreadable", None
+            return "unverifiable", None
         sample = samples.get(self.leader)
         if sample is None:
-            # GONE: the row is absent. That is what our own authorised termination
-            # produces, and the only state the terminal path may accept as an end.
-            return "gone", None
+            # A MISSING SAMPLE IS NOT PROOF OF ABSENCE (review round 3, R3b): the
+            # sampling contract keeps it unknown, and `_proc_samples` omits rows on
+            # OSError. `gone` is established POSITIVELY in `refresh`, from a census
+            # that is complete AND did not contain this number.
+            return "unseen", None
         if sample.birth is None:
             # A MISSING ROW IS NOT PROOF OF REAPING. It is the ambiguous
             # observation: the census demonstrably omits processes on macOS, so
@@ -851,6 +890,19 @@ class OwnedGroup:
                 raise PinLost("leader reaped or birth mismatch: reservation released")
             if state == "unverifiable":
                 raise Unknown("leader witness unreadable: identity of the leader unproven")
+            if state == "unseen":
+                # `gone` IS POSITIVELY ESTABLISHED, never inferred from a missing
+                # sample: only a census that is COMPLETE and did not contain this
+                # number proves the namespace no longer holds it.
+                try:
+                    survey = self.census(self.pgid, deadline)
+                except Exception:  # noqa: BLE001 - an unreadable survey is not absence
+                    raise Unknown("leader unseen and the namespace could not be surveyed") from None
+                if not (getattr(survey, "complete", False) is True) or getattr(
+                    survey, "leader_seen", True
+                ):
+                    raise Unknown("leader unseen but no complete survey omits it")
+                state = "gone"
             if state == "gone":
                 if terminal:
                     # THE ONLY PLACE THE CENSUS MAY DECIDE. A send never reaches
@@ -923,8 +975,11 @@ class OwnedGroup:
             final_state, final_witness = self._leader_witness(deadline)
             if final_state == "reaped":
                 raise PinLost("reservation lost during proof")
-            if final_state == "unreadable":
-                raise Unknown("witness unreadable during proof")
+            if final_state != "held":
+                # A REQUIREMENT, NOT A BLACKLIST (review round 3, R4): `VERIFIED`
+                # needs the witness to still HOLD at the end; unknown names must
+                # not fall through to it by not being on a list.
+                raise Unknown("witness %s during proof" % final_state)
             # An unreadable witness at the end of the proof is a REFUSAL, never a
             # defaulted anchor: defaulting would publish a pin this run never held.
             if final_witness is None:

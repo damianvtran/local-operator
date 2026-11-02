@@ -97,10 +97,14 @@ def test_foreign_reuse_with_an_unreadable_birth_without_a_kill_refuses():
 def test_foreign_reuse_with_an_unreadable_birth_after_a_kill_does_not_leak_authority():
     """The terminal licence is for REPORTING; it never reaches the send path."""
     world, cap = _live_owned_group()
+    parent = _live_parent(world)  # BEFORE the send: `World.send` pops row 10
     assert cap.signal(9, deadline=world.clock() + 1.0).status == "SIGNALED"
-    _foreign_unreadable(world, _live_parent(world))
+    _foreign_unreadable(world, parent)
     terminal = cap.refresh(deadline=world.clock() + 1.0, terminal=True)
-    assert terminal.status == "OBSERVED_EMPTY", terminal.reason
+    # A PRESENT row whose birth cannot be read is `unverifiable`, not `gone`:
+    # identity uncertainty refuses rather than reporting a clean end.
+    assert terminal.status == "REFUSED", terminal.reason
+    assert "identity" in terminal.reason, terminal.reason
     # A SECOND SEND ON THE SAME CAPABILITY MUST STILL REFUSE.
     again = cap.signal(9, deadline=world.clock() + 1.0)
     assert again.status == "REFUSED", again.reason
@@ -125,7 +129,7 @@ def test_the_r2_reproduction_a_leader_removed_without_a_signal_refuses():
     assert strict.status == "REFUSED", strict.reason
     terminal = cap.refresh(deadline=world.clock() + 1.0, terminal=True)
     assert terminal.status == "REFUSED", terminal.reason
-    assert "requires a recorded kill" in terminal.reason, terminal.reason
+    assert "requires a recorded terminating send" in terminal.reason, terminal.reason
 
 
 def test_a_healthy_run_with_no_kill_still_reports_observed_empty():
@@ -137,10 +141,12 @@ def test_a_healthy_run_with_no_kill_still_reports_observed_empty():
     """
     world, cap = _live_owned_group()
     world.exited = True  # the child exits by itself; nothing is signalled
-    cap.census = lambda _pgid, _deadline: ()  # complete: the group holds nobody
+    # complete and leader-seen: the corpse is still in the namespace while the
+    # group holds nobody, which is the ordinary clean ending.
+    cap.census = lambda _pgid, _deadline: owned.CensusResult((), True, True)
     verdict = cap.refresh(deadline=world.clock() + 1.0)
     assert verdict.status == "OBSERVED_EMPTY", verdict.reason
-    assert cap.kills == [], cap.kills
+    assert cap.terminating_sends == [], cap.terminating_sends
 
 
 def test_an_incomplete_census_refuses_at_members_with_a_visibility_reason():
@@ -154,7 +160,13 @@ def test_an_incomplete_census_refuses_at_members_with_a_visibility_reason():
 
 
 def _live_parent(world):
-    """Read the leader's parent WITHOUT sending: `World.send` pops the row."""
+    """Read the leader's parent WITHOUT sending: `World.send` pops the row.
+
+    The assertion lives HERE, at the read, because the whole defect was a read
+    that ran after the pop: a guard placed after assignment would only prove the
+    KeyError had not happened yet.
+    """
+    assert 10 in world.rows, "row 10 must exist at the moment it is read"
     return world.rows[10][0]
 
 
@@ -162,11 +174,11 @@ def _live_parent(world):
 
 
 def test_an_unseen_leader_with_no_send_refuses():
-    """MUTATION: delete the contradiction check in `_members`.
+    """REGRESSION GUARD, not red evidence for this delta.
 
-    Current code: REFUSED ('census never saw the leader and nothing was sent').
-    Pre-fix code: no such check existed, so the empty census reached the terminal
-    path and reported OBSERVED_EMPTY.
+    MUTATION: delete the contradiction check in `_members`. Against the old head
+    it fails only on the reason/status pairing, not because the old behaviour was
+    proven wrong — QA round 2 was right to call that out.
     """
     world, cap = _live_owned_group()
     cap.census = lambda _pgid, _deadline: owned.CensusResult((), True, False)
@@ -189,7 +201,10 @@ def test_sigcont_does_not_justify_a_terminal_absence():
 
 
 def test_a_nonpositive_pid_row_is_unknown_not_a_shorter_read(monkeypatch):
-    """MUTATION: restore `if pid > 0` in `_darwin_all_pids`.
+    """REGRESSION GUARD: would already PASS at 68cefd268dc — it protects the
+    restored guard, it is not red evidence for this delta.
+
+    MUTATION: restore `if pid > 0` in `_darwin_all_pids`.
 
     Goes through the NATIVE seam, because the group-level `partial_enumeration`
     test passes either way and would not catch this.
@@ -247,7 +262,10 @@ def test_the_public_verdict_carries_the_census_reason():
 
 
 def test_an_injected_none_census_stays_unknown():
-    """MUTATION: coerce `None` to `[]` at the reader branch."""
+    """REGRESSION GUARD: fails at the old head on the constructor/API shape.
+
+    MUTATION: coerce `None` to `[]` at the reader branch.
+    """
     world, cap = _live_owned_group()
     cap.census = lambda _pgid, _deadline: None
     verdict = cap.refresh(deadline=world.clock() + 1.0)
@@ -256,7 +274,9 @@ def test_an_injected_none_census_stays_unknown():
 
 
 def test_an_unreadable_identity_refuses_even_after_a_kill():
-    """MUTATION: accept `unverifiable` in the terminal path.
+    """DISCRIMINATOR for the split; the old head fails it on the state name.
+
+    MUTATION: accept `unverifiable` in the terminal path.
 
     A foreign process on the leader's pid whose birth cannot be read is identity
     uncertainty, not proof that our leader vanished by our own act.
@@ -268,3 +288,94 @@ def test_an_unreadable_identity_refuses_even_after_a_kill():
     terminal = cap.refresh(deadline=world.clock() + 1.0, terminal=True)
     assert terminal.status == "REFUSED", terminal.reason
     assert "identity" in terminal.reason, terminal.reason
+
+
+def test_a_short_libproc_read_is_incomplete_on_the_PRODUCTION_path(monkeypatch):
+    """DISCRIMINATOR for review round 4: it must exercise the LIVE path.
+
+    `listpids=` bypasses `resources._darwin_libproc`, which is exactly why the
+    hardcoded `True` survived two rounds. The size query claims two rows and the
+    read returns none, so the certificate must be False.
+    """
+
+    class Lib:
+        def proc_listpids(self, _flag, _pid, buf, size):
+            if buf is None:
+                return ctypes.sizeof(ctypes.c_int) * 2  # budget: two rows
+            return 0  # nothing written
+
+    monkeypatch.setattr(owned.resources, "_darwin_libproc", lambda: Lib())
+    pids, complete, leader_seen = owned.strict_darwin(10, time.monotonic() + 5.0)
+    assert pids == [], pids
+    assert complete is False, (complete, dict(owned._LAST_ENUMERATION))
+    assert leader_seen is False
+
+
+def test_a_concurrent_census_cannot_lend_its_certificate(monkeypatch):
+    """DISCRIMINATOR for review round 5, R6 — the two-thread interleaving.
+
+    THE ORDERING IS THE WHOLE TEST (review rounds 6-7). The partial read must
+    publish its own ledger entry and only THEN be interrupted by a full census,
+    so the shared-state version computes coverage from the OTHER call's numbers.
+    `_report_census_miss` runs exactly between `_darwin_all_pids` returning and
+    the coverage computation, which is the only hook at that seam -- a blocked
+    read (the earlier attempt) released the partial call AFTER the full one, so
+    the partial overwrote the ledger with its own values and both versions passed.
+    """
+    import threading
+
+    partial_read = threading.Event()
+
+    class Lib:
+        def proc_listpids(self, _flag, _pid, buf, size):
+            if buf is None:
+                return ctypes.sizeof(ctypes.c_int) * 2  # budget: two rows
+            if threading.current_thread().name == "partial":
+                partial_read.set()
+                return 0  # the partial read: nothing written
+            buf[0] = 10
+            buf[1] = 77
+            return ctypes.sizeof(ctypes.c_int) * 2
+
+    monkeypatch.setattr(owned.resources, "_darwin_libproc", lambda: Lib())
+
+    original_miss = owned._report_census_miss
+    ran_full = []
+    state = {"entered": False, "done": False}
+
+    def miss_hook(pgid, deadline):
+        # BETWEEN the partial read and its coverage computation the ledger has
+        # already been published; a FULL census then overwrites it. The nested
+        # census runs on its OWN thread: running it on "partial" re-entered this
+        # hook before `ran_full` was appended and recursed (review round 8).
+        if threading.current_thread().name == "partial" and not state["done"]:
+            if state["entered"]:
+                return original_miss(pgid, deadline)
+            state["entered"] = True
+
+            def run_full():
+                ran_full.append(owned.strict_darwin(pgid, time.monotonic() + 5.0))
+                state["done"] = True
+
+            full = threading.Thread(target=run_full, name="full", daemon=True)
+            full.start()
+            full.join(10.0)
+        return original_miss(pgid, deadline)
+
+    monkeypatch.setattr(owned, "_report_census_miss", miss_hook)
+
+    result = {}
+
+    def partial():
+        result["a"] = owned.strict_darwin(10, time.monotonic() + 5.0)
+
+    worker = threading.Thread(target=partial, name="partial", daemon=True)
+    worker.start()
+    worker.join(10.0)
+    assert not worker.is_alive(), "the partial read never finished"
+    assert ran_full, "the full census never ran inside the window"
+    assert ran_full[0][1] is True, ("the full census was not complete", ran_full[0])
+    assert "a" in result, "the worker raised instead of recording a result"
+    pids, complete, _ = result["a"]
+    assert pids == [], pids
+    assert complete is False, ("a PARTIAL read inherited a certificate", complete)
