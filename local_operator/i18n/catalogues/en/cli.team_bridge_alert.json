@@ -1,0 +1,6 @@
+{
+  "cli.team_bridge_alert.long_hold.title": "Agent messages: held messages are waiting",
+  "cli.team_bridge_alert.long_hold.body": "{count, plural, one {# message has} other {# messages have}} been held in screening for more than {minutes, plural, one {# minute} other {# minutes}}. Your agent has not been given held messages. Run `lop team-bridge receiver status` for details.",
+  "cli.team_bridge_alert.cleared.title": "Agent messages: no long-held messages now",
+  "cli.team_bridge_alert.cleared.body": "No message has been held in screening for more than {minutes, plural, one {# minute} other {# minutes}} now."
+}

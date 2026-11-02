@@ -753,7 +753,10 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
                 blurb=(
                     "A bounded page of one conversation. Bodies appear only for "
                     "messages this agent admitted; everything else is metadata with "
-                    "`body: null` (no local body cache). This is also how you read "
+                    "`body: null` (no local body cache). A null body with a "
+                    "`body_state` means you have not been given that message (held "
+                    "for screening, or not admitted) - it is NOT an empty message; "
+                    "do not infer its content. This is also how you read "
                     "the reply to a DM you opened, using the `conversation_id` the "
                     "`dm` result gave you."
                 ),
@@ -762,7 +765,8 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
                 op="channel_thread",
                 blurb=(
                     "One thread, oldest-first: the root with its reply count and a "
-                    "bounded page of replies. Same screening rule as history."
+                    "bounded page of replies. Same screening rule as history, "
+                    "including `body_state` on a null body."
                 ),
             ),
             ToolDocOp(
