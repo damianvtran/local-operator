@@ -132,7 +132,9 @@ async def test_exact_human_history_commissions_only_response_files(monkeypatch):
     assert len(requests) == 1
     assert requests[0].url.path == "/v1/messaging/conversations/bcv_aaaaaaaa/messages"
     assert dict(requests[0].url.params) == {
-        "tenant_id": "tnt_alpha", "limit": "1", "before_seq": "1002"
+        "tenant_id": "tnt_alpha",
+        "limit": "1",
+        "before_seq": "1002",
     }
     op = registry.start(handle, "batt_aaaaaaaa")
     assert registry.claim(op).binding.account_id == "acc_1"
@@ -148,8 +150,12 @@ async def test_far_older_message_uses_one_authenticated_targeted_read(monkeypatc
     # Model the hub's newest-first exclusive cursor with 900 newer roots.
     target = page()["result"]["messages"][0]
     newer = [
-        {"id": f"bcmsg_{seq:08d}", "seq": seq, "conversation_id": "bcv_aaaaaaaa",
-         "files": [file("batt_bbbbbbbb")]}
+        {
+            "id": f"bcmsg_{seq:08d}",
+            "seq": seq,
+            "conversation_id": "bcv_aaaaaaaa",
+            "files": [file("batt_bbbbbbbb")],
+        }
         for seq in range(1002, 1902)
     ]
 
@@ -169,10 +175,16 @@ async def test_far_older_message_uses_one_authenticated_targeted_read(monkeypatc
     assert store.refreshes == 0
 
 
-@pytest.mark.parametrize("field,value", [
-    ("id", "bcmsg_bbbbbbbb"), ("conversation_id", "bcv_bbbbbbbb"),
-    ("seq", 1000), ("seq", True), ("seq", "1001"),
-])
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("id", "bcmsg_bbbbbbbb"),
+        ("conversation_id", "bcv_bbbbbbbb"),
+        ("seq", 1000),
+        ("seq", True),
+        ("seq", "1001"),
+    ],
+)
 async def test_targeted_history_rejects_wrong_response_identity(monkeypatch, field, value):
     store, registry, requests = Store(), InertFileActionRegistry(), []
     s = scope(registry)
@@ -236,9 +248,11 @@ def thread_page():
 async def test_distant_thread_reply_is_selected_with_inclusive_cursor(monkeypatch):
     store, registry, queries = Store(), InertFileActionRegistry(), []
     s = replace(scope(registry), thread_root_id="bcmsg_rootaaaa")
-    target = thread_page()["result"]["replies"][0]
-    older = [dict(target, id=f"bcmsg_{seq:08d}", seq=seq, files=[file("batt_bbbbbbbb")])
-             for seq in range(1, 901)]
+    target: dict[str, Any] = thread_page()["result"]["replies"][0]
+    older: list[dict[str, Any]] = [
+        dict(target, id=f"bcmsg_{seq:08d}", seq=seq, files=[file("batt_bbbbbbbb")])
+        for seq in range(1, 901)
+    ]
 
     def handler(request):
         queries.append((request.url.path, dict(request.url.params)))
@@ -250,8 +264,12 @@ async def test_distant_thread_reply_is_selected_with_inclusive_cursor(monkeypatc
     handle = await history.commission_human_history(
         client(monkeypatch, store, handler), registry, s, lambda: s
     )
-    assert queries == [("/v1/messaging/conversations/bcv_aaaaaaaa/messages/bcmsg_rootaaaa/replies",
-                        {"tenant_id": "tnt_alpha", "limit": "1", "after_seq": "1001"})]
+    assert queries == [
+        (
+            "/v1/messaging/conversations/bcv_aaaaaaaa/messages/bcmsg_rootaaaa/replies",
+            {"tenant_id": "tnt_alpha", "limit": "1", "after_seq": "1001"},
+        )
+    ]
     registry.claim(registry.start(handle, "batt_aaaaaaaa"))
     with pytest.raises(ActionUnavailable):
         registry.start(handle, "batt_bbbbbbbb")
@@ -267,16 +285,19 @@ async def test_distant_thread_reply_is_selected_with_inclusive_cursor(monkeypatc
     assert store.refreshes == 0
 
 
-@pytest.mark.parametrize("part,field,value", [
-    ("root", "id", "bcmsg_otheraaa"),
-    ("root", "conversation_id", "bcv_bbbbbbbb"),
-    ("root", "thread_root_id", "bcmsg_otheraaa"),
-    ("reply", "id", "bcmsg_bbbbbbbb"),
-    ("reply", "conversation_id", "bcv_bbbbbbbb"),
-    ("reply", "thread_root_id", "bcmsg_otheraaa"),
-    ("reply", "seq", 1000),
-    ("reply", "seq", True),
-])
+@pytest.mark.parametrize(
+    "part,field,value",
+    [
+        ("root", "id", "bcmsg_otheraaa"),
+        ("root", "conversation_id", "bcv_bbbbbbbb"),
+        ("root", "thread_root_id", "bcmsg_otheraaa"),
+        ("reply", "id", "bcmsg_bbbbbbbb"),
+        ("reply", "conversation_id", "bcv_bbbbbbbb"),
+        ("reply", "thread_root_id", "bcmsg_otheraaa"),
+        ("reply", "seq", 1000),
+        ("reply", "seq", True),
+    ],
+)
 async def test_thread_reply_identity_is_independently_checked(monkeypatch, part, field, value):
     store, registry, requests = Store(), InertFileActionRegistry(), []
     s = replace(scope(registry), thread_root_id="bcmsg_rootaaaa")

@@ -370,7 +370,7 @@ async def commission_human_history(
             conversation_id=scope.conversation_id,
             message_id=scope.message_id,
             file_ids=files,
-        thread_root_id=scope.thread_root_id,
+            thread_root_id=scope.thread_root_id,
         ),
         ttl_seconds=30,
         expected_epoch=scope.registry_epoch,
