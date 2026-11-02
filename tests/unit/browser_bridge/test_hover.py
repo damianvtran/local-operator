@@ -23,7 +23,24 @@ from local_operator.browser_bridge.protocol import (
 from local_operator.harness.types import BrowserSurface, ToolContext
 from local_operator.tools import builtin
 
-HIT = {"tag": "button", "id": "menu", "className": "btn primary", "role": "button"}
+# The REAL host shape (verbatim from local-operator-ui#1602's `hover #row-1`
+# capture): `hit` is the whole hit_test answer, topmost element first. An earlier
+# revision of this fake sent a flat descriptor the host never produces, which
+# kept the tests green while every real reply said "element under the pointer: ?".
+HIT = {
+    "count": 2,
+    "elements": [
+        {
+            "tag": "li",
+            "id": "row-1",
+            "role": "",
+            "className": "row",
+            "rect": {"x": 16, "y": 147.02, "width": 520, "height": 49.5},
+            "styles": {"display": "flex", "position": "static"},
+        },
+        {"tag": "ul", "id": "rows", "role": "", "className": "list"},
+    ],
+}
 
 
 class App:
@@ -49,6 +66,7 @@ class App:
             "x": 120.5,
             "y": 40,
             "hit": HIT,
+            "hovered": True,
         }
 
 
@@ -87,7 +105,12 @@ async def test_selector_hover_sends_only_the_selector_and_names_the_hit() -> Non
     assert not result.is_error, result.text
     assert app.sent == [("hover", {"tab": "ui:7:synthetic", "selector": "#menu"})]
     assert result.text.startswith("Hovered #menu at (120.5, 40)")
-    assert "element under the pointer: button#menu.btn.primary (role=button)" in result.text
+    # Regression (QA Q1 / review R1-1): the topmost of the host's real
+    # {count, elements} answer is named, never the "?" fallback.
+    assert "element under the pointer: li#row-1.row." in result.text
+    assert "pointer: ?" not in result.text
+    assert "no :hover" not in result.text
+    assert (result.details or {})["hovered"] is True
     assert "Page: " in result.text
     assert (result.details or {})["hit"] == HIT
     assert (result.details or {})["x"] == 120.5
@@ -99,7 +122,9 @@ async def test_coordinate_hover_sends_x_and_y_only() -> None:
     result = await hover(app, x=10, y=0)
     assert not result.is_error, result.text
     assert app.sent == [("hover", {"tab": "ui:7:synthetic", "x": 10.0, "y": 0.0})]
-    assert result.text.startswith("Hovered (10, 0)")
+    # The point is stated once (QA Q4): the call already carried it.
+    assert result.text.startswith("Hovered (10, 0); element under the pointer: li#row-1")
+    assert "at (" not in result.text
 
 
 @pytest.mark.asyncio
@@ -263,8 +288,8 @@ async def test_host_invalid_arguments_internal_is_rendered_as_a_bad_argument() -
         ),
         (
             ["hover", "press", "press_chord"],
-            {"action": "press", "key": "cmd+shift+p", "selector": "#q"},
-            {"method": "press", "params": {"key": "Shift+Meta+p", "selector": "#q"}},
+            {"action": "press", "key": "ctrl+shift+p", "selector": "#q"},
+            {"method": "press", "params": {"key": "Control+Shift+p", "selector": "#q"}},
         ),
         (
             ["press"],  # an older app: the original keys only, same frame as before
@@ -314,7 +339,14 @@ async def test_real_loopback_wire_capture_against_a_fake_desktop_peer(
                 {
                     "id": frame["id"],
                     "ok": True,
-                    "result": {"url": "https://example.test/", "title": "T", "x": 1, "y": 2},
+                    "result": {
+                        "url": "https://example.test/",
+                        "title": "T",
+                        "x": 1,
+                        "y": 2,
+                        "hit": HIT,
+                        "hovered": True,
+                    },
                 }
             )
 
@@ -355,6 +387,10 @@ async def test_real_loopback_wire_capture_against_a_fake_desktop_peer(
         print("gated:", result.text)
         return
     assert not result.is_error, result.text
+    if expect_frame["method"] == "hover":
+        # The real {count, elements} reply must render through the real client.
+        assert "element under the pointer: li#row-1.row" in result.text
+        print("hover text:", result.text)
     assert len(frames) == 1
     frame = frames[0]
     assert frame["method"] == expect_frame["method"]
@@ -362,3 +398,76 @@ async def test_real_loopback_wire_capture_against_a_fake_desktop_peer(
     assert sent == expect_frame["params"]
     assert set(frame["params"]) <= {"tab", "requester", "session_label", *expect_frame["params"]}
     print("wire frame:", json.dumps(frame, sort_keys=True))
+
+
+@pytest.mark.asyncio
+async def test_flat_hit_descriptor_is_still_tolerated() -> None:
+    class Flat(App):
+        async def call(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+            payload = await super().call(method, params)
+            payload["hit"] = {"tag": "button", "id": "menu", "className": "btn"}
+            return payload
+
+    result = await hover(Flat(), selector="#menu")
+    assert "element under the pointer: button#menu.btn" in result.text
+
+
+@pytest.mark.asyncio
+async def test_hovered_false_is_reported_not_swallowed() -> None:
+    class Ignored(App):
+        async def call(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+            payload = await super().call(method, params)
+            payload["hovered"] = False
+            return payload
+
+    result = await hover(Ignored(), selector="#menu")
+    assert not result.is_error
+    assert "the page shows no :hover on that element" in result.text
+    assert (result.details or {})["hovered"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("host_message", "needle"),
+    [
+        ("Node does not have a layout object", "Hover the row or parent that reveals it first"),
+        (
+            "#irow is inside a frame; hover it by position with x and y (take them from hit_test)",
+            "'hit_test' inside a frame only reports the frame element itself",
+        ),
+        ("1 frame(s) could not be entered", "A selector cannot cross an iframe boundary"),
+    ],
+)
+async def test_hover_failures_carry_actionable_guidance(host_message: str, needle: str) -> None:
+    from local_operator.browser_bridge.backend import BridgeError
+    from local_operator.browser_bridge.protocol import ErrorCode
+
+    class Failing(App):
+        async def call(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+            raise BridgeError(ErrorCode.INTERNAL, host_message, {})
+
+    result = await hover(Failing(), selector="#x")
+    assert result.is_error
+    assert needle in result.text
+    assert "take them from hit_test" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_hover_hint_is_not_added_to_other_actions() -> None:
+    from local_operator.browser_bridge.backend import BridgeError
+    from local_operator.browser_bridge.protocol import ErrorCode
+
+    class Failing(App):
+        async def call(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+            raise BridgeError(ErrorCode.INTERNAL, "Node does not have a layout object", {})
+
+    result = await builtin._bridge_action(
+        "t",
+        owned_surface(),
+        "click",
+        builtin.BrowserParams(action="click", selector="#x"),
+        None,
+        client=Failing(),
+    )
+    assert result.is_error
+    assert "reveals it" not in result.text

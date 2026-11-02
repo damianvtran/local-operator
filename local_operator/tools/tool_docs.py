@@ -338,7 +338,7 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             ),
             ToolDocOp(
                 op="hover",
-                blurb="Move the pointer onto selector= or x/y; desktop app only.",
+                blurb="Move the pointer onto selector= XOR x+y; desktop app only.",
             ),
             ToolDocOp(op="scroll", blurb="Move the viewport."),
             ToolDocOp(op="logs", blurb="Console + errors."),

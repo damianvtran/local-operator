@@ -25,7 +25,7 @@ Sequences for common cases. Keep the order: wait, read, act, capture. Adapt acti
 
 ## Hover and keyboard states
 
-1. Snapshot, then `hover` the trigger (selector, or x/y from `hit_test`); the reply names the element under the pointer: confirm it is the one you meant.
+1. Snapshot, then `hover` the trigger (selector, or x/y from a `screenshot`/`hit_test`); the reply names the element under the pointer: confirm it is the one you meant. Controls that appear only on hover (`display:none` until then) need the revealing row hovered first.
 2. Re-read or `query` for the menu, tooltip or `:hover` style that should now exist; screenshot it. Move the pointer off (hover elsewhere) and check it goes away.
 3. For shortcuts, `press` one chord (`Control+K`, `Shift+Tab`, `Escape`); pass `selector` to focus a field first. Confirm the visible effect, not only the absence of an error.
 

@@ -64,6 +64,10 @@ REFUSED_KEYS = [
     "\n",
     " ",
     "Control+ ",
+    "é",
+    "€",
+    "😀",
+    "Control+é",
 ]
 
 
@@ -267,7 +271,7 @@ def test_original_eight_keys_canonicalise_to_themselves(key: str) -> None:
         ("ctrl+k", "Control+k"),
         ("Cmd+Shift+P", "Shift+Meta+P"),
         ("command+option+Delete", "Alt+Meta+Delete"),
-        ("Meta+Alt+Control+Shift+Enter", "Shift+Control+Alt+Meta+Enter"),
+        ("Meta+Alt+Control+Shift+Enter", "Control+Alt+Shift+Meta+Enter"),
         ("e", "e"),
         ("E", "E"),
         ("/", "/"),
@@ -278,7 +282,6 @@ def test_original_eight_keys_canonicalise_to_themselves(key: str) -> None:
         ("f5", "F5"),
         ("F12", "F12"),
         ("Alt+ArrowLeft", "Alt+ArrowLeft"),
-        ("é", "é"),
     ],
 )
 def test_chords_are_canonicalised_by_the_harness(raw: str, canonical: str) -> None:
@@ -415,3 +418,35 @@ def test_press_and_hover_stay_write_tier_like_click(monkeypatch) -> None:
     assert tool.approval_tier == "write"
     for action in ("click", "type", "press", "hover"):
         assert tool.call_approval_tier({"action": action}) == "write"
+
+
+def test_non_ascii_base_key_is_refused_locally_with_an_accurate_reason() -> None:
+    # The host's printable table is ASCII only; refusing locally avoids a round
+    # trip to the same answer and keeps the documented grammar true.
+    chord, reason = builtin._canonical_press_chord("é")
+    assert chord == "" and "not printable ASCII" in reason
+
+
+@pytest.mark.parametrize("surface", ["execute_browser", "_execute_browser"])
+@pytest.mark.asyncio
+async def test_refusal_echo_of_a_long_key_is_bounded(surface: str) -> None:
+    # A credential-sized string pasted into `key` must not be copied whole into
+    # the error text or its details (the host bounds its own echo the same way).
+    secret = "hunter2-" * 105  # 840 characters
+    result = await getattr(builtin, surface)("t", {"action": "press", "key": secret})
+    assert result.is_error
+    assert secret not in result.text
+    assert len(result.text) < 900
+    assert result.details is not None
+    assert result.details["key"] == secret[:24] + "..."
+    assert len(result.details["key"]) == 27
+
+
+def test_modifier_order_matches_the_desktop_hosts_echo() -> None:
+    # Host MODIFIER_ORDER is Control, Alt, Shift, Meta; both halves must agree so
+    # the sent key, the host's echo and the text the model reads are one string.
+    assert builtin._canonical_press_chord("Meta+Shift+Alt+Control+F5") == (
+        "Control+Alt+Shift+Meta+F5",
+        "",
+    )
+    assert builtin._canonical_press_chord("Shift+Control+K") == ("Control+Shift+K", "")

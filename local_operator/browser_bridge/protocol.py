@@ -314,8 +314,9 @@ METHODS = (
     "click",
     "type",
     "press",
-    # Kept beside `press`: the desktop host's own METHODS list is expected to
-    # mirror this order (test_hover.py pins the neighbours).
+    # Kept beside `press` for readers. The desktop host appends `hover` at the
+    # end of ITS list: METHODS order is vocabulary, not wire, and nothing may
+    # depend on it matching the host's.
     "hover",
     "close",
     "status",

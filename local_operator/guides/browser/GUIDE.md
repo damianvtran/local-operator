@@ -405,7 +405,7 @@ Same `browser` tool. Actions:
 - `press key="Control+K"` (ONE key chord to the owned page; desktop app only).
   `key` = optional modifiers (`Shift`, `Control`, `Alt`, `Meta`; `Ctrl`, `Cmd`,
   `Command`, `Option` accepted) joined by `+`, then one base key: a single
-  character, or `Enter`, `Escape`, `Tab`, `Backspace`, `Delete`, `Space`, arrows,
+  printable ASCII character, or `Enter`, `Escape`, `Tab`, `Backspace`, `Delete`, `Space`, arrows,
   `Home`, `End`, `PageUp`, `PageDown`, `F1`–`F12`. Optional `selector` focuses
   that element first. No repeat count, no sequences, and not a way to enter text
   (use `type`; credentials via `secret_ref`) — anything else is `unsupported_key`.
@@ -418,7 +418,10 @@ Same `browser` tool. Actions:
   default key actions.
 - `hover` (`selector` or `x`+`y`, not both; desktop app only): scrolls the target
   into view without activating the tab, moves the pointer to its centre and
-  reports the element under it — for `:hover` styles, tooltips and hover menus.
+  reports the element under it (and `hovered`: false means the page showed no
+  `:hover`) — for `:hover` styles, tooltips and hover menus. A hidden target
+  (`no layout object`) needs its revealing row hovered first; inside an iframe use
+  `x`/`y` (selectors cannot cross frames; `hit_test` only sees the `<iframe>`).
 - `scroll` (by direction, pixel delta, or scroll an element into view)
 - `logs` (the tab's console output and uncaught exceptions since it opened —
   for debugging web apps)

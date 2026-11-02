@@ -22607,7 +22607,10 @@ _BROWSER_PRESS_LEGACY_KEYS = (
 )
 
 #: Canonical modifier spellings, in the order a canonical chord lists them.
-_BROWSER_PRESS_MODIFIERS = ("Shift", "Control", "Alt", "Meta")
+#: This is the desktop host's own ``MODIFIER_ORDER`` (it echoes the chord in this
+#: order), so the key the harness sends, the key the host reports and the key the
+#: model reads back are one string, not two spellings of the same chord.
+_BROWSER_PRESS_MODIFIERS = ("Control", "Alt", "Shift", "Meta")
 
 #: Accepted spelling (lower-cased) -> canonical modifier. The aliases are the
 #: names agents and other tools habitually use; the host only ever sees the
@@ -22647,11 +22650,24 @@ _BROWSER_PRESS_NAMED_KEYS = {
 
 _BROWSER_PRESS_GRAMMAR = (
     "'press' takes ONE chord: optional modifiers (Shift, Control, Alt, Meta; also Ctrl, "
-    "Cmd, Command, Option) joined by '+', then one base key — a single character, or "
-    "Enter, Escape, Tab, Backspace, Delete, Space, ArrowUp/Down/Left/Right, Home, End, "
-    "PageUp, PageDown, F1-F12 (e.g. 'Control+K', 'Shift+Tab', 'e'). Entering text is not a "
-    "key press: use 'type' (with 'secret_ref' for credentials)."
+    "Cmd, Command, Option) joined by '+', then one base key — a single printable ASCII "
+    "character, or Enter, Escape, Tab, Backspace, Delete, Space, ArrowUp/Down/Left/Right, "
+    "Home, End, PageUp, PageDown, F1-F12 (e.g. 'Control+K', 'Shift+Tab', 'e'). Entering "
+    "text is not a key press: use 'type' (with 'secret_ref' for credentials)."
 )
+
+
+#: How much of a refused key the harness echoes back. The host applies the same
+#: bound (its ``describeRefusedKey``) so a credential-sized string pasted into
+#: ``key`` is not copied whole into an error, its ``details`` and the logs.
+_PRESS_ECHO_MAX = 24
+
+
+def _press_echo(raw: str) -> str:
+    """``repr`` of at most ``_PRESS_ECHO_MAX`` characters of a refused key."""
+    if len(raw) <= _PRESS_ECHO_MAX:
+        return repr(raw)
+    return repr(raw[:_PRESS_ECHO_MAX]) + "..."
 
 
 def _canonical_press_chord(raw: str) -> tuple[str, str]:
@@ -22680,7 +22696,7 @@ def _canonical_press_chord(raw: str) -> tuple[str, str]:
         if canonical is None:
             # Multi-character junk before the last '+' is the signature of typed
             # text ("hello+world"); name it as such rather than as a bad modifier.
-            return "", f"{token!r} is not a modifier"
+            return "", f"{_press_echo(token)} is not a modifier"
         if canonical in seen:
             return "", f"duplicate modifier {canonical}"
         seen.append(canonical)
@@ -22690,7 +22706,11 @@ def _canonical_press_chord(raw: str) -> tuple[str, str]:
     if named is not None:
         base = named
     elif len(base) != 1:
-        return "", f"{base!r} is not a key name (this looks like text entry)"
+        return "", f"{_press_echo(base)} is not a key name (this looks like text entry)"
+    elif not base.isascii():
+        # The host's printable table is ASCII only; refusing here keeps the
+        # refusal local and accurate instead of a round trip to the same answer.
+        return "", f"{_press_echo(base)} is not printable ASCII (only ASCII can be pressed)"
     elif not base.isprintable() or base.isspace():
         return "", "a whitespace or control character cannot be pressed by value (use 'Space')"
     ordered = [name for name in _BROWSER_PRESS_MODIFIERS if name in seen]
@@ -22713,9 +22733,47 @@ def _browser_press_refusal(
     return _error(
         tool_call_id,
         "browser",
-        f"unsupported_key: {params.key!r} ({reason}). {_BROWSER_PRESS_GRAMMAR}",
-        details={"error_code": "unsupported_key", "key": params.key},
+        f"unsupported_key: {_press_echo(params.key)} ({reason}). {_BROWSER_PRESS_GRAMMAR}",
+        details={
+            "error_code": "unsupported_key",
+            "key": params.key[:_PRESS_ECHO_MAX]
+            + ("..." if len(params.key) > _PRESS_ECHO_MAX else ""),
+        },
     )
+
+
+def _hover_failure_hint(message: str) -> str:
+    """Agent guidance for the two hover failures the host can only describe tersely.
+
+    Appended by the harness, not the host, so the wording can improve without a
+    desktop release. Both cases were measured (QA round 1 on PR #3326):
+
+    * ``Node does not have a layout object`` — the target exists but is not
+      rendered (``display:none``), the usual Slack-style row action that appears
+      only while its row is hovered. ``click`` fails identically; the way through
+      is to hover whatever REVEALS it, then retry.
+    * a target inside an iframe — a selector cannot cross the frame boundary,
+      and ``hit_test`` at a point inside a frame reports only the ``iframe``/
+      ``body``/``html`` chain, so it cannot find the inner element. ``hover`` with
+      x/y does reach into same- and cross-origin frames, so the advice is to
+      derive the point from the iframe's own rect plus the inner offset (a
+      ``screenshot`` shows it).
+    """
+    lowered = message.lower()
+    if "layout object" in lowered:
+        return (
+            "\nThe element has no layout box (it is hidden until something reveals it). "
+            "Hover the row or parent that reveals it first (by selector, or by x/y), "
+            "then hover this element."
+        )
+    if "frame" in lowered:
+        return (
+            "\nA selector cannot cross an iframe boundary, and 'hit_test' inside a frame "
+            "only reports the frame element itself. Hover with x and y instead: take the "
+            "iframe's position from its rect ('query' or 'hit_test' on the <iframe>) and "
+            "the inner element's offset from a 'screenshot'."
+        )
+    return ""
 
 
 def _press_chord_gate(
@@ -24501,6 +24559,15 @@ async def _bridge_call(
                     "(or the browser extension), or pass a snapshot ref ('snapshot' shows "
                     "them) / a CSS selector instead."
                 )
+        if action == "hover":
+            # Older host copy suggests hit_test for the inner target, but that
+            # tool only sees the iframe itself. Do not leave conflicting advice
+            # ahead of the corrective hint.
+            message = message.replace(
+                "(take them from hit_test)",
+                "(take them from a screenshot or the iframe's rect plus the inner offset)",
+            )
+            message += _hover_failure_hint(message)
         problem = _error(tool_call_id, "browser", message)
         # Carry the TYPED wire code so callers can branch on it (dead-pin
         # recovery, handle-drop) instead of substring-matching the human
@@ -27144,24 +27211,40 @@ async def _bridge_action(
             details={**details, "key": chord},
         )
     if action == "hover":
-        hit = result.get("hit") if isinstance(result.get("hit"), dict) else {}
+        raw_hit = result.get("hit")
+        hit: dict[str, Any] = raw_hit if isinstance(raw_hit, dict) else {}
+        # The host's `hit` is the whole hit_test answer, `{count, elements: [...]}`
+        # topmost first (verbatim capture in local-operator-ui#1602), NOT a single
+        # descriptor: the element under the pointer is `elements[0]`. A flat
+        # descriptor is still tolerated so an older/other host reads sensibly.
+        elements = _geometry_entry_list(hit, "elements")
+        top = elements[0] if elements else (hit if hit.get("tag") else {})
         hx, hy = result.get("x"), result.get("y")
+        has_point = isinstance(hx, (int, float)) and isinstance(hy, (int, float))
+        # An x/y call already states the point; only a selector call needs it echoed.
         at = (
             f" at ({_geometry_number(hx)}, {_geometry_number(hy)})"
-            if isinstance(hx, (int, float)) and isinstance(hy, (int, float))
+            if has_point and params.selector.strip()
             else ""
         )
         asked = params.selector.strip() or (
             f"({_geometry_number(params.x)}, {_geometry_number(params.y)})"
         )
-        under = f"; element under the pointer: {_geometry_ident(hit)}" if hit else ""
+        under = f"; element under the pointer: {_geometry_ident(top)}" if top else ""
+        # `hovered` is the host's own check that the page entered :hover on that
+        # element. False means the move was delivered but the page ignored it, so
+        # the reply must not read as a plain success.
+        hovered = result.get("hovered")
+        verdict = "; the page shows no :hover on that element" if hovered is False else ""
         details.update(hit=hit)
-        if at:
+        if has_point:
             details.update(x=hx, y=hy)
+        if isinstance(hovered, bool):
+            details.update(hovered=hovered)
         return _text(
             tool_call_id,
             "browser",
-            f"Hovered {_target_phrase(asked, result)}{at}{under}. "
+            f"Hovered {_target_phrase(asked, result)}{at}{under}{verdict}. "
             f"Page: {_page_line(title, href)}",
             details=details,
         )

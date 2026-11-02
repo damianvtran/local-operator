@@ -135,12 +135,18 @@ safety, so neither is offered there.
 - `hover`: `selector` (CSS, snapshot ref or a11y locator) **or** `x`+`y` viewport
   pixels; both is a validation error, so is neither. The host scrolls the target
   into view without activating the tab/window, moves the pointer to its centre
-  and returns `x`, `y`, a `hit` descriptor of the element under the pointer and the
-  page line.
+  and returns `x`, `y`, `hit` (the whole `hit_test` answer, `{count, elements: [...]}`
+  topmost first — the reply names `elements[0]`), `hovered` (the host's own check
+  that the page entered `:hover` on that element; `false` is reported, not hidden)
+  and the page line. A hidden (`display:none`) target fails with a hint to hover
+  whatever reveals it first; an element inside an iframe cannot be reached by
+  selector — use `x`/`y` (they do reach same- and cross-origin frames), taking the
+  iframe's position from its rect and the inner offset from a `screenshot`.
 - `press`: `key` is one chord — optional modifiers `Shift|Control|Alt|Meta`
   (`Ctrl`, `Cmd`, `Command`, `Option` accepted; the **harness** canonicalises them
-  and lists them in that order before sending) joined by `+`, then one base key
-  (a single printable character, or `Enter`, `Escape`, `Tab`, `Backspace`,
+  and lists them in the host's own order — `Control, Alt, Shift, Meta` — before
+  sending) joined by `+`, then one base key
+  (a single printable ASCII character, or `Enter`, `Escape`, `Tab`, `Backspace`,
   `Delete`, `Space`, the arrows, `Home`, `End`, `PageUp`, `PageDown`, `F1`–`F12`).
   Optional `selector` focuses the element first (no editable requirement). One
   chord per call; unknown names, multi-character strings, duplicate modifiers and
