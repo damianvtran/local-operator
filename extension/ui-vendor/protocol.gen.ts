@@ -2,7 +2,7 @@
 // Vendored copy for local-operator-ui: protocol.gen.ts (wire declarations).
 // Source of truth: local-operator local_operator/browser_bridge/protocol.py + gen_ts.py + extension/src/driver/*.ts (13 modules: access-flow.ts, access-queue.ts, ax-compact.ts, ax-locator.ts, deadline.ts, element-query.ts, errors.ts, file-transfer-policy.ts, file-transfer.tables.gen.ts, geometry-read.ts, origin-policy.ts, psl.gen.ts, scroll-expressions.ts)
 // PROTO_VERSION: 1
-// Inputs sha256: 897b96df864920222d1e53e2aaf52d8a9d0ccd3106f0c06f7e72e933084facc6
+// Inputs sha256: 5d60e52331fa77905e93990fdc899e3baa31dcca4de8bf7a8a8c8819e537cea0
 // An INPUT hash, never a git SHA: a stamp over commits would go red on every
 // commit that touched nothing this generator reads, and a gate that cries wolf
 // gets deleted. Regenerate with `python -m local_operator.browser_bridge.gen_ts`;
@@ -72,7 +72,7 @@ export const CAPABILITY_SWITCHES: Record<string, { label: string; permission: st
   "upload": { label: 'Allow uploads', permission: '' },
 };
 
-export type Method = 'open' | 'goto' | 'read' | 'snapshot' | 'screenshot' | 'click' | 'type' | 'press' | 'hover' | 'close' | 'status' | 'tabs' | 'scroll' | 'logs' | 'styles' | 'hit_test' | 'ancestors' | 'query' | 'request_access' | 'await_access' | 'cancel_access' | 'retitle' | 'owner_inspect' | 'owner_recover' | 'owner_finish' | 'owner_retain' | 'owner_release' | 'download' | 'upload' | 'network_start' | 'network_stop' | 'network_read' | 'network_clear' | 'record_start' | 'record_stop';
+export type Method = 'open' | 'goto' | 'read' | 'snapshot' | 'screenshot' | 'click' | 'type' | 'press' | 'hover' | 'select' | 'close' | 'status' | 'tabs' | 'scroll' | 'logs' | 'styles' | 'hit_test' | 'ancestors' | 'query' | 'request_access' | 'await_access' | 'cancel_access' | 'retitle' | 'owner_inspect' | 'owner_recover' | 'owner_finish' | 'owner_retain' | 'owner_release' | 'download' | 'upload' | 'network_start' | 'network_stop' | 'network_read' | 'network_clear' | 'record_start' | 'record_stop';
 // Wire methods ONLY the desktop app's browser host serves. They are in `Method`
 // because the vocabulary is shared, but this build must not serve or advertise
 // them: network capture needs a standing channel the extension's worker lifetime

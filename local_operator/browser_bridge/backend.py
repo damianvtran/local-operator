@@ -833,6 +833,14 @@ def _capability_message(error: BridgeError, *, host: str) -> str:
         DESKTOP_ONLY_METHODS,
     )
 
+    if error.data.get("reason") == "aria_select_unsupported":
+        # This extension build safely serves native <select> without Input.*,
+        # not application-specific ARIA popups. An update/re-pair cannot turn
+        # native setters into an ARIA selection flow.
+        return (
+            "the extension can select native <select> options, but this target is an "
+            "ARIA/custom control. Open the page with backend='ui' to select it."
+        )
     method = str(error.data.get("method") or "that action")
     peer = str(error.data.get("extension_version") or "")
     remedy = _CAPABILITY_HOST_REMEDY.get(host, _CAPABILITY_HOST_REMEDY[HOST_EXTENSION])

@@ -126,6 +126,7 @@ def test_scroll_logs_and_tabs_are_advertised_actions() -> None:
             "press",
             # Trusted pointer movement is owned-page CDP input on the desktop host.
             "hover",
+            "select",
             "scroll",
             "logs",
             "tabs",

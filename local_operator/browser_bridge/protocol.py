@@ -183,6 +183,7 @@ CAPABILITY_GATED_METHODS: frozenset[str] = frozenset(
         # Pointer hover is the same story: an app that predates it has no
         # handler and would answer a bare `internal`.
         "hover",
+        "select",
         "download",
         "upload",
         "styles",
@@ -318,6 +319,7 @@ METHODS = (
     # end of ITS list: METHODS order is vocabulary, not wire, and nothing may
     # depend on it matching the host's.
     "hover",
+    "select",
     "close",
     "status",
     # tabs lists every live extension-owned surface. It exists because parallel
@@ -485,6 +487,8 @@ COMMAND_TIMEOUTS = {
     "press": 25.0,
     # hover scrolls the target into view and moves the pointer once; no settle.
     "hover": 20.0,
+    # DOM selection + bounded read-back; never waits for an OS popup.
+    "select": 25.0,
     "read": 20.0,
     "snapshot": 20.0,
     "screenshot": 20.0,
