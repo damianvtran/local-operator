@@ -70,6 +70,12 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Sequence
 
+from local_operator.harness.document_limits import (
+    DOCUMENT_CHARS_PER_TOKEN,
+    DOCUMENT_WINDOW_SHARE,
+    MAX_FALLBACK_TEXT_CHARS,
+    is_text_mime,
+)
 from local_operator.harness.pdf_pages import known_pdf_page_count, pdf_page_count
 from local_operator.harness.types import DocumentContent
 
@@ -104,22 +110,6 @@ __all__ = [
 #: document it only half read.
 MAX_FALLBACK_PAGES = 200
 MAX_FALLBACK_CHARS = 400_000
-
-#: How much of a text-ish file the fallback keeps. The same 400k character
-#: bound: text has no page structure to count, and the notice names the cut.
-MAX_FALLBACK_TEXT_CHARS = 400_000
-
-#: One document may claim at most this share of the model's context window
-#: once rendered, as ``1 / DOCUMENT_WINDOW_SHARE``. A quarter leaves the rest of
-#: the window to the conversation, the system prompt and the reply; without it
-#: a single large file filled a small-window model by itself and compaction,
-#: which can only shed OTHER history, could never make the next request fit.
-DOCUMENT_WINDOW_SHARE = 4
-
-#: Characters per token the fallback text is budgeted at. Deliberately the
-#: pessimistic end (English prose is ~4, code and CJK nearer 2-3): a cap that
-#: under-counts would let a rendered document exceed its share of the window.
-DOCUMENT_CHARS_PER_TOKEN = 3
 
 #: Anthropic documents are capped at 600 pages, but only 100 when the request's
 #: context window is under 1M tokens (its PDF page states both). A model whose
@@ -266,21 +256,6 @@ def document_budget_for_request(
         len(tool.name) + len(json.dumps(tool.parameters, sort_keys=True)) for tool in request.tools
     )
     return _request_room(form, request.messages, extra)
-
-
-#: MIME prefixes/suffixes the fallback can read as text. PDF is handled by
-#: extraction first; these are the "text-ish" second arm of contract §3.
-_TEXT_MIMES = frozenset(
-    {
-        "application/json",
-        "application/xml",
-        "application/yaml",
-    }
-)
-
-
-def is_text_mime(mime_type: str) -> bool:
-    return mime_type.startswith("text/") or mime_type in _TEXT_MIMES
 
 
 def document_form(

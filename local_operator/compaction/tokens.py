@@ -115,6 +115,12 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Callable, Sequence
 
+from local_operator.harness.document_limits import (
+    DOCUMENT_CHARS_PER_TOKEN,
+    DOCUMENT_WINDOW_SHARE,
+    MAX_FALLBACK_TEXT_CHARS,
+    is_text_mime,
+)
 from local_operator.harness.pdf_pages import known_pdf_page_count, pdf_page_count
 from local_operator.harness.types import (
     AttachmentContent,
@@ -123,11 +129,6 @@ from local_operator.harness.types import (
     TextContent,
 )
 from local_operator.optional import missing_extra_error
-from local_operator.providers.documents import (
-    DOCUMENT_WINDOW_SHARE,
-    MAX_FALLBACK_TEXT_CHARS,
-    is_text_mime,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -168,11 +169,6 @@ PDF_PAGE_TOKEN_ESTIMATE = 2_500
 #: window at the per-page charge, see ``documents.document_form``); a longer
 #: PDF is extracted instead, and that text is bounded below this too.
 MAX_DOCUMENT_TOKEN_ESTIMATE = 100 * PDF_PAGE_TOKEN_ESTIMATE
-
-#: Characters per token the rendered-document charges assume. Matches
-#: ``documents.DOCUMENT_CHARS_PER_TOKEN`` (the render-side caps are expressed
-#: in the same ratio, so ruler and render cannot drift apart).
-_DOCUMENT_CHARS_PER_TOKEN = 3
 
 #: Characters the serializer adds around a document's text: the
 #: ``[Document: name (mime)]`` header and the code fence of a text file, or the
@@ -255,7 +251,7 @@ def document_render_excess(messages: Sequence[Message], context_window: int) -> 
     if context_window <= 0:
         return 0
     share = context_window // DOCUMENT_WINDOW_SHARE + _DOCUMENT_FRAMING_CHARS // (
-        _DOCUMENT_CHARS_PER_TOKEN
+        DOCUMENT_CHARS_PER_TOKEN
     )
     return sum(
         max(0, _document_token_estimate(block) - share)
@@ -291,7 +287,7 @@ def document_wire_bytes(block: DocumentContent) -> int:
 
 def _text_tokens(chars: int, *, framing: int = _DOCUMENT_FRAMING_CHARS) -> int:
     """Tokens for ``chars`` characters of rendered document text."""
-    return (chars + framing) // _DOCUMENT_CHARS_PER_TOKEN
+    return (chars + framing) // DOCUMENT_CHARS_PER_TOKEN
 
 
 #: Fallback ratio when tiktoken is unavailable: ~4 chars per token.
