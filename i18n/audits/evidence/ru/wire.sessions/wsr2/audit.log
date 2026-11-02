@@ -1,0 +1,28 @@
+# wire.sessions / ru — verification re-run by the implementer at the ledger commit
+# revision 9d4bed5504093b63c6ff59a87fce63246d7e6226  (round-1 audited revision b3b1c2aec56fdc615f16e57fadfd606eb3cefe96)
+# this is the mechanical half re-executed here; the linguistic verdicts are the two
+# auditor comments on PR #3102, quoted in report.md and record.json.
+SHA256 local_operator/i18n/catalogues/en/wire.sessions.json ad2c68cbc8dc98f81875b0c1b3960be4cdfed27113bc326ae26045d93d75585a
+SHA256 local_operator/i18n/catalogues/en/wire.sessions.context.json 1604fc3efe1d6aedf054c948324de3629df8c942744cf1c37a89ddf8de346e2f
+SHA256 local_operator/i18n/catalogues/ru/wire.sessions.json e90d0465f8167f67b89d9e2c566ab94ec7ee0a68f6229656f0df6e51cbfc6afc
+KEYS locale=ru count=9 en=9 equal=True
+PASS wire.sessions.approval_stop_local args=['address'] cells=122
+  RENDER остановить worker-7, если сессия в простое: освобождает аренду сессии и никогда не подаёт сигнал; отказ, пока она работает
+PASS wire.sessions.approval_stop_peer args=['address', 'peer'] cells=88
+  RENDER остановить worker-7 на build-box: в этой сборке всегда отказ, ничего не будет отправлено
+PASS wire.sessions.stop_pending args=['name', 'seconds'] cells=122
+  RENDER «review-loop» приняла остановку, но не завершилась за 10 с. Сигнал не подавался — прочитайте список сессий перед повтором.
+PASS wire.sessions.stop_refused_busy args=['name'] cells=163
+  RENDER «review-loop» сейчас работает (ход, одобрение, субагент или задание), поэтому ничего не остановлено и сигнал не подавался. Повторите, когда сессия будет в простое.
+PASS wire.sessions.stop_refused_old_owner args=['name'] cells=207
+  RENDER «review-loop» работает на более старой сборке, которая не может обещать остановку только в простое, поэтому ничего не остановлено и сигнал не подавался. Повтор не поможет — попросите оператора остановить её.
+PASS wire.sessions.stop_refused_unanswered args=['name'] cells=164
+  RENDER «review-loop» не ответила, поэтому подтвердить остановку только в простое не удалось и сигнал не подавался. Сначала прочитайте список сессий — возможно, её уже нет.
+PASS wire.sessions.stop_refused_wake args=['name'] cells=194
+  RENDER «review-loop» в простое, но запланированное пробуждение наступает внутри окна удержания, поэтому ничего не остановлено и сигнал не подавался. Повторите после того, как это пробуждение сработает.
+PASS wire.sessions.stop_remote_refused args=[] cells=209
+  RENDER Сессию на другом устройстве нельзя остановить отсюда в этой сборке: гарантировать выход без сигналов и только в простое невозможно, поэтому ничего не отправлено. Оператор может остановить её на том устройстве.
+PASS wire.sessions.stop_self_refused args=[] cells=98
+  RENDER Эта цель — текущая сессия, а сессия не может остановить саму себя. Остановите её из другой сессии.
+WIDTH locale=ru min=88 max=209; plural: none of the nine keys is an ICU plural message; nfc=ok controls=none quotes=verified-by-audit
+RESULT ru: mechanical PASS

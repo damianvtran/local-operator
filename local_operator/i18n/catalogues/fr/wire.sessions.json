@@ -1,0 +1,11 @@
+{
+  "wire.sessions.approval_stop_local": "arrêter {address} si elle est inactive : libère le bail de la session et n’envoie jamais de signal ; refusé pendant qu’elle travaille",
+  "wire.sessions.approval_stop_peer": "arrêter {address} sur {peer} : toujours refusé sur ce build, rien ne sera envoyé",
+  "wire.sessions.stop_pending": "L’arrêt a été accepté par « {name} », mais la session n’était pas encore sortie après {seconds} s. Aucun signal n’a été envoyé — lisez la liste des sessions avant de réessayer.",
+  "wire.sessions.stop_refused_busy": "« {name} » travaille en ce moment (un tour, une approbation, un sous-agent ou une tâche), donc rien n’a été arrêté et aucun signal n’a été envoyé. Réessayez une fois la session inactive.",
+  "wire.sessions.stop_refused_old_owner": "« {name} » tourne sur un build plus ancien qui ne peut pas promettre un arrêt réservé aux sessions inactives, donc rien n’a été arrêté et aucun signal n’a été envoyé. Réessayer n’y changera rien — demandez à l’opérateur de l’arrêter.",
+  "wire.sessions.stop_refused_unanswered": "« {name} » n’a pas répondu, donc un arrêt réservé aux sessions inactives n’a pas pu être confirmé et aucun signal n’a été envoyé. Lisez d’abord la liste des sessions — elle a peut-être déjà disparu.",
+  "wire.sessions.stop_refused_wake": "« {name} » est inactive, mais un réveil planifié tombe dans la fenêtre de rétention, donc rien n’a été arrêté et aucun signal n’a été envoyé. Réessayez une fois ce réveil déclenché.",
+  "wire.sessions.stop_remote_refused": "Une session sur un autre appareil ne peut pas être arrêtée d’ici sur ce build : aucune sortie sans signal et réservée aux sessions inactives ne peut être garantie, donc rien n’a été envoyé. L’opérateur peut l’arrêter sur cet appareil.",
+  "wire.sessions.stop_self_refused": "Cette cible est cette session même, et une session ne peut pas s’arrêter elle-même. Arrêtez-la depuis une autre session."
+}

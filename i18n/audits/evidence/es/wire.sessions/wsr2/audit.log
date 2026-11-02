@@ -1,0 +1,28 @@
+# wire.sessions / es — verification re-run by the implementer at the ledger commit
+# revision 9d4bed5504093b63c6ff59a87fce63246d7e6226  (round-1 audited revision b3b1c2aec56fdc615f16e57fadfd606eb3cefe96)
+# this is the mechanical half re-executed here; the linguistic verdicts are the two
+# auditor comments on PR #3102, quoted in report.md and record.json.
+SHA256 local_operator/i18n/catalogues/en/wire.sessions.json ad2c68cbc8dc98f81875b0c1b3960be4cdfed27113bc326ae26045d93d75585a
+SHA256 local_operator/i18n/catalogues/en/wire.sessions.context.json 1604fc3efe1d6aedf054c948324de3629df8c942744cf1c37a89ddf8de346e2f
+SHA256 local_operator/i18n/catalogues/es/wire.sessions.json df8d73a99b4213d4be708b553a98be397511046b982a4f6cc995a2d8c80be400
+KEYS locale=es count=9 en=9 equal=True
+PASS wire.sessions.approval_stop_local args=['address'] cells=126
+  RENDER detener worker-7 si está inactiva: libera la concesión de la sesión y nunca envía señales; se rechaza mientras esté trabajando
+PASS wire.sessions.approval_stop_peer args=['address', 'peer'] cells=89
+  RENDER detener worker-7 en build-box: en esta compilación siempre se rechaza, no se enviará nada
+PASS wire.sessions.stop_pending args=['name', 'seconds'] cells=141
+  RENDER “review-loop” aceptó la detención, pero seguía sin salir tras 10 s. No se envió ninguna señal — lee la lista de sesiones antes de reintentar.
+PASS wire.sessions.stop_refused_busy args=['name'] cells=210
+  RENDER “review-loop” está trabajando ahora mismo (un turno, una aprobación, un subagente o un trabajo en segundo plano), así que no se detuvo nada y no se envió ninguna señal. Vuelve a intentarlo cuando esté inactiva.
+PASS wire.sessions.stop_refused_old_owner args=['name'] cells=232
+  RENDER “review-loop” ejecuta una compilación más antigua que no puede prometer una detención limitada a sesiones inactivas, así que no se detuvo nada y no se envió ninguna señal. Reintentar no cambiará eso: pide al operador que la detenga.
+PASS wire.sessions.stop_refused_unanswered args=['name'] cells=187
+  RENDER “review-loop” no respondió, así que no se pudo confirmar una detención limitada a sesiones inactivas y no se envió ninguna señal. Lee primero la lista de sesiones: puede que ya no exista.
+PASS wire.sessions.stop_refused_wake args=['name'] cells=212
+  RENDER “review-loop” está inactiva, pero un despertar programado vence dentro de la ventana de retención, así que no se detuvo nada y no se envió ninguna señal. Vuelve a intentarlo cuando ese despertar se haya activado.
+PASS wire.sessions.stop_remote_refused args=[] cells=235
+  RENDER Una sesión en otro dispositivo no se puede detener desde aquí en esta compilación: no se puede garantizar una salida sin señales y limitada a sesiones inactivas, así que no se envió nada. El operador puede detenerla en ese dispositivo.
+PASS wire.sessions.stop_self_refused args=[] cells=104
+  RENDER Ese destino es esta misma sesión, y una sesión no puede detenerse a sí misma. Deténla desde otra sesión.
+WIDTH locale=es min=89 max=235; plural: none of the nine keys is an ICU plural message; nfc=ok controls=none quotes=verified-by-audit
+RESULT es: mechanical PASS
