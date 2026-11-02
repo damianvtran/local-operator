@@ -7,6 +7,7 @@ created; no status response is ever permission to signal an operating-system PID
 
 from __future__ import annotations
 
+import inspect
 import os
 import subprocess
 import tempfile
@@ -206,38 +207,46 @@ def test_each_cleanup_entrypoint_audits_before_legacy_action(
     artifact.parent.mkdir(parents=True, exist_ok=True)
     artifact.touch()
     outer = harness._BROKER_FREE
-    monkeypatch.setattr(harness, "_BROKER_FREE", state)
-    monkeypatch.setattr(harness, "_fail_session_on_runtime_root_escapes", lambda session: None)
 
     def forbidden(*args, **kwargs):
         pytest.fail("broker-free cleanup entered forgiving legacy discovery or signalling")
 
-    for name in ("_temp_roots", "_secret_config_dirs", "_session_sweep_candidates"):
-        monkeypatch.setattr(harness, name, forbidden)
-    monkeypatch.setattr(client, "broker_status", forbidden)
-    monkeypatch.setattr(client, "is_running", forbidden)
-    monkeypatch.setattr(os, "kill", forbidden)
-    item = SimpleNamespace(funcargs={"isolate_environment": tmp_path})
-    try:
-        if entrypoint == "call":
-            hook = harness.pytest_runtest_call(cast(pytest.Item, item))
-            next(hook)
-            with pytest.raises(StopIteration):
+    # Restore both state and negative seams before the REAL call-wrapper audit.
+    # In default mode it legitimately uses legacy discovery; leaving our traps
+    # installed until monkeypatch fixture teardown falsely fails that audit.
+    with monkeypatch.context() as patch:
+        patch.setattr(harness, "_BROKER_FREE", state)
+        patch.setattr(harness, "_fail_session_on_runtime_root_escapes", lambda session: None)
+        for name in ("_temp_roots", "_secret_config_dirs", "_session_sweep_candidates"):
+            patch.setattr(harness, name, forbidden)
+        patch.setattr(client, "broker_status", forbidden)
+        patch.setattr(client, "is_running", forbidden)
+        patch.setattr(os, "kill", forbidden)
+        item = SimpleNamespace(funcargs={"isolate_environment": tmp_path})
+        try:
+            if entrypoint == "call":
+                hook = harness.pytest_runtest_call(cast(pytest.Item, item))
                 next(hook)
-        elif entrypoint == "teardown":
-            fixture = harness.stop_secret_brokers_started_by_this_test.__wrapped__(item, tmp_path)
-            next(fixture)
-            with pytest.raises(StopIteration):
+                with pytest.raises(StopIteration):
+                    next(hook)
+            elif entrypoint == "teardown":
+                fixture = inspect.unwrap(harness.stop_secret_brokers_started_by_this_test)(
+                    item, tmp_path
+                )
                 next(fixture)
-        else:
-            session = SimpleNamespace(exitstatus=pytest.ExitCode.OK)
-            harness.pytest_sessionfinish(cast(pytest.Session, session))
-            assert session.exitstatus == pytest.ExitCode.TESTS_FAILED
-        assert any("unexpected broker artifact" in problem for problem in state.violations)
-        assert artifact.exists()
-    finally:
-        artifact.unlink()
-        monkeypatch.setattr(harness, "_BROKER_FREE", outer)
+                with pytest.raises(StopIteration):
+                    next(fixture)
+            else:
+                session = SimpleNamespace(exitstatus=pytest.ExitCode.OK)
+                harness.pytest_sessionfinish(cast(pytest.Session, session))
+                assert session.exitstatus == pytest.ExitCode.TESTS_FAILED
+            assert any("unexpected broker artifact" in problem for problem in state.violations)
+            assert artifact.exists()
+        finally:
+            artifact.unlink()  # only this control's synthetic, non-live lock
+    assert harness._BROKER_FREE is outer
+    assert harness._temp_roots is not forbidden
+    assert client.broker_status is not forbidden
 
 
 def test_late_finalizer_deleted_config_surviving_fallback_fails_terminal_audit(
@@ -257,7 +266,7 @@ def test_late_finalizer_deleted_config_surviving_fallback_fails_terminal_audit(
         next(hook)
         with pytest.raises(StopIteration):
             next(hook)
-        fixture = harness.stop_secret_brokers_started_by_this_test.__wrapped__(item, tmp_path)
+        fixture = inspect.unwrap(harness.stop_secret_brokers_started_by_this_test)(item, tmp_path)
         next(fixture)
         with pytest.raises(StopIteration):
             next(fixture)
@@ -639,11 +648,11 @@ def test_session_factory_initialization_never_calls_destructive_accessor(
         patch.setattr(harness, "_SESSION_BASETEMP", harness._SESSION_BASETEMP)
         if preexisting:
             with pytest.raises(RuntimeError, match="initial root creation failed"):
-                harness._capture_session_basetemp.__wrapped__(factory)
+                inspect.unwrap(harness._capture_session_basetemp)(factory)
             assert marker.read_text() == "owned test marker"
             assert owner.violations
         else:
-            harness._capture_session_basetemp.__wrapped__(factory)
+            inspect.unwrap(harness._capture_session_basetemp)(factory)
             assert factory._basetemp == fresh
             assert fresh.is_dir()
             assert harness._SESSION_BASETEMP == fresh

@@ -1198,7 +1198,7 @@ def pytest_broker_free_prepare(config: pytest.Config) -> None:
         home = os.environ.get("HOME")
         directory = os.environ.get("LOCAL_OPERATOR_CONFIG_DIR")
         temporary = os.environ.get("TMPDIR")
-        if not all((base, home, directory, temporary)):
+        if not isinstance(base, str) or not base or not home or not directory or not temporary:
             raise pytest.UsageError("--broker-free requires isolated HOME/config/TMPDIR/basetemp")
         if os.name != "nt":
             import pwd
@@ -1843,7 +1843,9 @@ def pytest_runtest_call(item: pytest.Item) -> Iterator[None]:
         yield
     finally:
         if _BROKER_FREE is not None:
-            roots = tuple(value for value in item.funcargs.values() if isinstance(value, Path))
+            roots = tuple(
+                value for value in getattr(item, "funcargs", {}).values() if isinstance(value, Path)
+            )
             _BROKER_FREE.discover(roots)
             _BROKER_FREE.audit()
         else:
@@ -1854,7 +1856,7 @@ def pytest_runtest_call(item: pytest.Item) -> Iterator[None]:
 
 
 @pytest.hookimpl(wrapper=True)
-def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo):
+def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[object]):
     report = yield
     if _BROKER_FREE is not None and _BROKER_FREE.violations:
         report.sections.append(("broker-free violations", "\n".join(_BROKER_FREE.violations)))
@@ -1864,7 +1866,7 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo):
 
 
 @pytest.hookimpl(wrapper=True)
-def pytest_fixture_setup(fixturedef: pytest.FixtureDef, request: pytest.FixtureRequest):
+def pytest_fixture_setup(fixturedef: pytest.FixtureDef[object], request: pytest.FixtureRequest):
     result = yield
     if _BROKER_FREE is not None and isinstance(result, Path):
         _BROKER_FREE.discover((result,))
@@ -2188,7 +2190,9 @@ def _reap_brokers_of_this_test(item: pytest.Item) -> None:
     two can never drift into disagreeing about what this test owns.
     """
     if _BROKER_FREE is not None:
-        roots = tuple(value for value in item.funcargs.values() if isinstance(value, Path))
+        roots = tuple(
+            value for value in getattr(item, "funcargs", {}).values() if isinstance(value, Path)
+        )
         _BROKER_FREE.discover(roots)
         _BROKER_FREE.audit()
         return
