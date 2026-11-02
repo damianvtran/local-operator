@@ -402,10 +402,26 @@ Same `browser` tool. Actions:
   with click refs like `e5`)
 - `screenshot` (writes a PNG; works on the background tab)
 - `click` / `type` (by CSS selector or a snapshot ref; trusted input events)
-- `press key="Tab"` (keyboard input to the owned page; desktop app support
-  required). Keys: `Tab`, atomic `Shift+Tab`, `Enter`, `Escape`, `ArrowUp`,
-  `ArrowDown`, `ArrowLeft`, `ArrowRight`. Other keys receive `unsupported_key`;
-  an older app receives `capability_unsupported` with an update instruction.
+- `press key="Control+K"` (ONE key chord to the owned page; desktop app only).
+  `key` = optional modifiers (`Shift`, `Control`, `Alt`, `Meta`; `Ctrl`, `Cmd`,
+  `Command`, `Option` accepted) joined by `+`, then one base key: a single
+  printable ASCII character, or `Enter`, `Escape`, `Tab`, `Backspace`, `Delete`, `Space`, arrows,
+  `Home`, `End`, `PageUp`, `PageDown`, `F1`–`F12`. Optional `selector` focuses
+  that element first. No repeat count, no sequences, and not a way to enter text
+  (use `type`; credentials via `secret_ref`) — anything else is `unsupported_key`.
+  An app that predates chords/`selector` still serves `Tab`, `Shift+Tab`, `Enter`,
+  `Escape` and the arrows; a wider press gets `capability_unsupported` with an
+  update instruction. The extension cannot do either: it holds no foreground tab,
+  and Chrome drops synthetic CDP `Input.*` on the intentionally-inactive one (the
+  recorded constraint behind click/type/scroll's in-page dispatch), so a "press"
+  or "hover" there would be an untrusted lookalike that skips `:hover` and
+  default key actions.
+- `hover` (`selector` or `x`+`y`, not both; desktop app only): scrolls the target
+  into view without activating the tab, moves the pointer to its centre and
+  reports the element under it (and `hovered`: false means the page showed no
+  `:hover`) — for `:hover` styles, tooltips and hover menus. A hidden target
+  (`no layout object`) needs its revealing row hovered first; inside an iframe use
+  `x`/`y` (selectors cannot cross frames; `hit_test` only sees the `<iframe>`).
 - `scroll` (by direction, pixel delta, or scroll an element into view)
 - `logs` (the tab's console output and uncaught exceptions since it opened —
   for debugging web apps)

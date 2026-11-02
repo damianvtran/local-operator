@@ -1000,6 +1000,9 @@ def test_every_action_degrades_without_cmux(monkeypatch) -> None:
         args = {"action": action, "url": "https://x.y"}
         if action == "press":
             args["key"] = "Tab"
+        if action == "hover":
+            # Same rule: a well-formed target reaches the unavailable-host refusal.
+            args["selector"] = "#menu"
         result = _run(forced, "t1", args, context)
         if action == "inspect_ownership":
             assert not result.is_error
