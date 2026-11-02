@@ -384,6 +384,9 @@ def static_feature_flags() -> dict[str, Any]:
         # every row would be invented client-side.
         "mcp_catalog": 2,
         "radient": 1,
+        # Human profile writes carry a durable login receipt and bounded image
+        # relay. Older daemons must not be mistaken for an editable account.
+        "account_profile": 1,
         # The organization surfaces on the Radient proxy (design §4.7):
         # the four closed operations `memberships.list`, `org_agents.list`,
         # `org_teams.list` and `org_team.get`, and the three frozen
