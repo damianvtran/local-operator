@@ -34011,11 +34011,11 @@ class NoReplyParams(BaseModel):
 #: until the tool is activated, while the system prompt is paid on EVERY
 #: request of every session — including the children that can never call it.
 _NO_REPLY_DESCRIPTION = (
-    "End this turn silently when a peer message, wake, monitor or job result "
-    "needs no reply and no action. Nothing is shown or notified — never answer "
-    "an acknowledgement with an acknowledgement, and never write filler such "
-    "as '(no action needed)'. Refused if the user asked something or the "
-    "wake/monitor asked to notify."
+    "Request silence for a peer, wake, monitor or job result needing no reply "
+    "or action. Call once: final root call, or last action in the final foreground "
+    "eval. Then stop — no final text, polling or repeat. Host checks precede "
+    "acceptance; later tool() calls invalidate it. Never acknowledge acknowledgements "
+    "or write filler. Pending person, notification or active-goal obligations refuse."
 )
 
 
@@ -34093,11 +34093,12 @@ async def execute_no_reply(
     return _text(
         tool_call_id,
         "no_reply",
-        "Quiet.",
-        # ``useless`` so the prune pass blanks the content later; the marker
-        # rides ``details``, which never reaches a provider.
+        "Quiet requested; pending the owning session's terminal checks.",
+        # Retain the historical finite-exchange fact for display/certificates,
+        # but it is NOT acceptance. Only the owning terminal event carries that
+        # authority; neither persisted details nor Python repr can create it.
         useless=True,
-        details={QUIET_TURN_KEY: True},
+        details={QUIET_TURN_KEY: True, "quiet_request_pending": True},
     )
 
 

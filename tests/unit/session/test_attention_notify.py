@@ -852,6 +852,7 @@ async def test_a_peer_only_quiet_run_publishes_nothing(tmp_path: Path) -> None:
         ends = _ends(events)
         assert len(ends) == 1
         assert ends[0].notify is False, "the one value every notifier reads"
+        assert ends[0].quiet_requested and ends[0].quiet_accepted
 
         state = await session.refresh_attention()
         assert state["completion_token"] is None, "no completion row was published"
@@ -1078,10 +1079,10 @@ async def test_a_quiet_batch_whose_re_entry_errors_still_notifies(tmp_path: Path
         ends = _ends(events)
         assert ends, "the run still ends with an end event"
         end = ends[-1]
-        assert session._run_ended_quiet(end) is True, (
-            "the quiet marker is still the run's last word — this test is about "
-            "the error arm's exemption, not about the predicate"
-        )
+        assert (
+            session._run_ended_quiet(end) is False
+        ), "a retained child request marker must never override the owning error"
+        assert end.quiet_accepted is False
         assert end.notify is True, "the error arm always notifies"
         state = await session.refresh_attention()
         assert state["kind"] == "error"
