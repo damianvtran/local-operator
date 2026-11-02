@@ -72,7 +72,8 @@ THE CHANNEL OPS work the conversation domain AS THIS SESSION'S AGENT:
   as a blank message: ``held`` (screening has not released it; only a coarse
   ``hold_class`` and ``held_for_s`` are shown), ``not_admitted``,
   ``rejected`` (hub-supplied only, never derived here), or ``unavailable``
-  (the agent's own post could not be read back right now). It means this agent
+  (the agent's own post could not be read back in this read: the read-back
+  failed, or the page held more own posts than one read fetches). It means this agent
   has not been given that message; it is NOT an empty message and its content
   must not be inferred. No body, hold code or category is ever shown.
   There is intentionally no local body cache here. The one
@@ -2217,9 +2218,16 @@ async def _restore_own_bodies(
 
 #: The closed ``body_state.state`` vocabulary an agent may be shown on a row
 #: whose ``body`` is null. ``unavailable`` is local-only (the agent's own post
-#: could not be read back); the other three may also arrive from the hub.
+#: could not be read back in this read, whether the fetch failed or the row was
+#: past :data:`OWN_BODY_FETCH_MAX`); the other three may also arrive from the hub.
 _HUB_BODY_STATES = frozenset({"held", "rejected", "not_admitted"})
 _BODY_STATE_SINCE_MAX = 40
+#: ``since`` is a timestamp the model will read as one: only the ISO-8601 shape
+#: (``T`` separator, explicit zone) passes, so a hub string cannot smuggle prose
+#: through a field that looks like data. ASCII digits only (``re.ASCII``).
+_BODY_STATE_SINCE = re.compile(
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})", re.ASCII
+)
 
 
 def _hub_body_state(value: Any) -> dict[str, str] | None:
@@ -2238,7 +2246,11 @@ def _hub_body_state(value: Any) -> dict[str, str] | None:
         return None
     kept = {"state": state}
     since = value.get("since")
-    if isinstance(since, str) and len(since) <= _BODY_STATE_SINCE_MAX:
+    if (
+        isinstance(since, str)
+        and len(since) <= _BODY_STATE_SINCE_MAX
+        and _BODY_STATE_SINCE.fullmatch(since) is not None
+    ):
         kept["since"] = since
     return kept
 
@@ -2267,12 +2279,20 @@ async def _annotate_body_state(runtime: BridgeRuntime, rows: list[Any]) -> None:
         if row.get("body") is not None:
             row.pop("body_state", None)
             continue
+        # Reduce (or drop) the hub's value on EVERY null-body row first: a row
+        # whose id is not a conversation message id still passes through this
+        # function, and must not carry a reason/category/long string onward.
+        reduced = _hub_body_state(row.get("body_state"))
+        if reduced is None:
+            row.pop("body_state", None)
+        else:
+            row["body_state"] = reduced
         message_id = row.get("id")
         if (
             not isinstance(message_id, str)
             or _CONVERSATION_MESSAGE_ID.fullmatch(message_id) is None
         ):
-            continue
+            continue  # no local state is ever derived for a non-conversation id
         pending.append(row)
     if not pending:
         return
@@ -2311,8 +2331,10 @@ async def _annotate_body_state(runtime: BridgeRuntime, rows: list[Any]) -> None:
             and sender.get("account_id") == own
             and sender.get("kind") == "agent"
         ):
-            # The owner's own agent post whose read-back failed: the text exists
-            # and is ours, it just could not be fetched right now.
+            # The owner's own agent post that is still null after the read-back
+            # pass: the fetch failed, or the row sat past OWN_BODY_FETCH_MAX and
+            # was never tried. Either way the text exists and is ours, it just
+            # could not be read back in THIS read.
             row["body_state"] = {"state": "unavailable"}
         else:
             row["body_state"] = {"state": "not_admitted"}

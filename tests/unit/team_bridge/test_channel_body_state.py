@@ -244,6 +244,105 @@ async def test_an_overlong_since_is_dropped(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "since",
+    [
+        "2026-11-01 10:00:00",  # not the ISO "T" shape
+        "yesterday afternoon, the user said CANARY-SINCE",
+        "2026-11-01T10:00:00",  # no zone
+        "２０２６-11-01T10:00:00Z",  # non-ASCII digits
+        "2026-11-01T10:00:00Z\n",
+        "",
+    ],
+)
+async def test_a_since_that_is_not_an_iso_timestamp_is_dropped_but_state_kept(
+    tmp_path: Path, since: str
+) -> None:
+    hub = FakeHub()
+    theirs = hub.add(THEM, CANARY, body_state={"state": "held", "since": since})
+    _enrolled(tmp_path)
+
+    rows = await _history(_runtime(hub, tmp_path))
+
+    assert rows[theirs]["body_state"] == {"state": "held"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "since",
+    ["2026-11-01T10:00:00Z", "2026-11-01T10:00:00.123456+05:30", "2026-11-01T10:00:00-08:00"],
+)
+async def test_an_iso_since_is_kept(tmp_path: Path, since: str) -> None:
+    hub = FakeHub()
+    theirs = hub.add(THEM, CANARY, body_state={"state": "rejected", "since": since})
+    _enrolled(tmp_path)
+
+    rows = await _history(_runtime(hub, tmp_path))
+
+    assert rows[theirs]["body_state"] == {"state": "rejected", "since": since}
+
+
+@pytest.mark.asyncio
+async def test_a_null_body_row_with_a_non_conversation_id_never_keeps_a_raw_hub_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The id check used to ``continue`` before the hub value was reduced."""
+
+    hub = FakeHub()
+    _enrolled(tmp_path)
+    raw = {
+        "state": "held",
+        "since": "2026-11-01T10:00:00Z",
+        "reason": CANARY,
+        "categories": ["prompt_injection"],
+        "long": "x" * 500,
+    }
+
+    async def messages(conversation_id: str, **_: Any) -> dict[str, Any]:
+        return {
+            "messages": [
+                {"id": "bmsg_pair", "seq": 1, "body": None, "body_state": dict(raw)},
+                {"id": "weird", "seq": 2, "body": None, "body_state": {"state": "nope", "x": 1}},
+                {"id": 7, "seq": 3, "body": None, "body_state": dict(raw)},
+                {"id": "bmsg_plain", "seq": 4, "body": None},
+            ],
+            "has_more": False,
+        }
+
+    monkeypatch.setattr(hub, "conversation_messages", messages)
+    outcome = await execute_bridge(
+        _runtime(hub, tmp_path), {"op": "channel_history", "channel_id": CONV, "limit": 20}
+    )
+
+    rows = json.loads(outcome["content"].split("\n\n", 1)[1])["messages"]
+    assert rows[0]["body_state"] == {"state": "held", "since": "2026-11-01T10:00:00Z"}
+    assert "body_state" not in rows[1]  # invalid hub value on a non-conversation id: removed
+    assert rows[2]["body_state"] == {"state": "held", "since": "2026-11-01T10:00:00Z"}
+    assert "body_state" not in rows[3]  # no local state is ever derived for such an id
+    for forbidden in (CANARY, "prompt_injection", "categories", "reason", "xxxx"):
+        assert forbidden not in outcome["content"]
+
+
+@pytest.mark.asyncio
+async def test_own_posts_beyond_the_read_back_cap_are_unavailable_not_blank(
+    tmp_path: Path,
+) -> None:
+    """Rows past ``OWN_BODY_FETCH_MAX`` are never tried; they still say why they are null."""
+
+    from local_operator.team_bridge.tool import OWN_BODY_FETCH_MAX
+
+    hub = FakeHub()
+    mine = [hub.add(ME, f"m{i}") for i in range(OWN_BODY_FETCH_MAX + 2)]
+    hub.body_error = RuntimeError("hub down")
+    _enrolled(tmp_path)
+
+    rows = await _history(_runtime(hub, tmp_path))
+
+    assert len(hub.body_calls) == OWN_BODY_FETCH_MAX
+    assert all(rows[m]["body_state"] == {"state": "unavailable"} for m in mine)
+
+
+@pytest.mark.asyncio
 async def test_a_hub_body_state_on_a_row_with_a_body_is_removed(tmp_path: Path) -> None:
     hub = FakeHub()
     admitted = hub.add(THEM, "hello", body_state={"state": "held"})

@@ -1,6 +1,6 @@
 {
   "cli.team_bridge_alert.long_hold.title": "Mensajes de agentes: hay mensajes retenidos desde hace tiempo",
-  "cli.team_bridge_alert.long_hold.body": "{count, plural, one {# mensaje lleva retenido} many {# de mensajes llevan retenidos} other {# mensajes llevan retenidos}} en el filtrado más de {minutes, plural, one {# minuto} many {# de minutos} other {# minutos}}. Tu agente no ha recibido los mensajes retenidos. Ejecuta `lop team-bridge receiver status` para ver los detalles.",
+  "cli.team_bridge_alert.long_hold.body": "{count, plural, one {# mensaje lleva retenido} many {# de mensajes llevan retenidos} other {# mensajes llevan retenidos}} más de {minutes, plural, one {# minuto} many {# de minutos} other {# minutos}} sin llegar a tu agente. Ejecuta `lop team-bridge receiver status` para ver los detalles.",
   "cli.team_bridge_alert.cleared.title": "Mensajes de agentes: ya no hay mensajes retenidos desde hace tiempo",
-  "cli.team_bridge_alert.cleared.body": "Ningún mensaje lleva retenido en el filtrado más de {minutes, plural, one {# minuto} many {# de minutos} other {# minutos}}."
+  "cli.team_bridge_alert.cleared.body": "Ahora ningún mensaje lleva retenido más de {minutes, plural, one {# minuto} many {# de minutos} other {# minutos}}."
 }

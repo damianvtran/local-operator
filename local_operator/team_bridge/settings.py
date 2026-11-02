@@ -167,9 +167,9 @@ def parse_pending_default_enrollment(value: Any) -> tuple[str, int, str] | None:
 DEFAULT_TEAM_BRIDGE_SESSION = ""
 
 #: ``team_bridge.hold_alert_after_minutes`` — how long a conversation message may
-#: sit held in screening before the owner gets ONE local notification (see
-#: ``hold_alert.py``). ``0`` turns the alert off; the valid range is 0..10080
-#: (one week).
+#: sit held (in screening, or admitted and awaiting delivery) before the owner
+#: gets ONE local notification (see ``hold_alert.py``). ``0`` turns the alert
+#: off; the valid range is 0..10080 (one week).
 #:
 #: DELIBERATELY NO ``/settings`` REGISTRY ROW. A row would change ``wire.settings``
 #: copy, and that edit changes the English source hash of the namespace and

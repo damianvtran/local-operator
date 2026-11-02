@@ -2735,6 +2735,27 @@
       },
       "status": "passed",
       "note": "Dual blind passes: i18n/audits/evidence/vi/wire.errors.session_host/vh31a1/record.json; i18n/audits/evidence/vi/wire.errors.session_host/261031-host-9d47b/record.json. Both pass, 0 findings; actual quota fallback model recorded."
+    },
+    {
+      "locale": "vi",
+      "namespace": "cli.team_bridge_alert",
+      "source_sha256": "cb3fcf96f055cafb2b61702cb0888f2b64f8cc6bcc0372a203fd81b12a5e6c6b",
+      "translator": {
+        "agent": "i18n-translator (coder subagent)",
+        "session": "unknown",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "i18n-auditor-b (task subagent, independent of translator)",
+        "session": "2d9d6b78802f",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Single independent audit (not dual-blind; high-visibility safety copy may still need a second independent audit per docs/I18N.md). Checked: 4/4 keys present; ICU placeholder parity ({count},{minutes}); vi plural 'other' only, rendered at 1 and 60; backticked `lop team-bridge receiver status` byte-identical; NFC; held/not-given-to-agent/not-deleted meaning preserved; wording consistent with cli.team_bridge ('Tin nhắn tác nhân', 'Sàng lọc', 'bị giữ'). 0 findings."
     }
   ]
 }

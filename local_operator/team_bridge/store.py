@@ -2715,7 +2715,7 @@ class Store:
         }
 
     def hold_states_readonly(
-        self, owner: OwnerSnapshot, message_ids: Sequence[str], *, now: float | None = None
+        self, owner: OwnerSnapshot, message_ids: Sequence[str]
     ) -> dict[str, dict[str, Any]]:
         """Which of ``message_ids`` are held here, as a coarse class and a start time.
 
@@ -2732,8 +2732,7 @@ class Store:
         point of view without disclosing moderation detail, so the caller cannot
         ask for it. Read-only over an EXISTING store, under the same live-owner
         fence as :meth:`screening_status_readonly`; an absent store or a fenced
-        owner answers ``{}``. ``now`` is accepted for symmetry with the sibling
-        readers and is unused (the caller owns the clock).
+        owner answers ``{}``.
 
         KEYS. One SELECT, each row mapped through :func:`screening_hold_message_id`
         so the bare and composite spellings of a message both match; the earliest
@@ -2782,8 +2781,8 @@ class Store:
         WHY THIS EXISTS. A held message is silent to the person it is for; the
         long-hold alert (``hold_alert.py``) tells the owner once the oldest has
         waited past their threshold. Answers
-        ``{"count", "oldest_created_at", "dominant_hold_class"}`` and nothing
-        else — no id, no code, no sender.
+        ``{"count"}`` and nothing else — no id, no code, no sender, no age (the
+        alert's content must move only when the count does).
 
         WHAT COUNTS. Only conversation messages: the stored key is the composite
         feed ref of a ``bcmsg_`` id, or the bare ``bcmsg_`` id (the screener's own
@@ -2802,7 +2801,7 @@ class Store:
         from local_operator.team_bridge.engagement import HOLD_OPEN_CHIEF_OF_STAFF
         from local_operator.team_bridge.types import is_conversation_message_id
 
-        empty: dict[str, Any] = {"count": 0, "oldest_created_at": None, "dominant_hold_class": None}
+        empty: dict[str, Any] = {"count": 0}
         cutoff = (time.time() if now is None else float(now)) - float(older_than_s)
         with self._connect_readonly() as conn:
             if conn is None:
@@ -2815,7 +2814,7 @@ class Store:
                 (_owner_key(owner),),
             ).fetchall()
         excluded = {HOLD_OPEN_CHIEF_OF_STAFF, "bridge_off"}
-        held: dict[str, tuple[float, str]] = {}
+        held: dict[str, float] = {}
         for row in rows:
             if row["hold_code"] in excluded:
                 continue
@@ -2826,20 +2825,9 @@ class Store:
             if created is None:
                 continue
             prior = held.get(bare)
-            if prior is None or created < prior[0]:
-                held[bare] = (created, delivery_hold_class(row["hold_code"]))
-        old = {bare: entry for bare, entry in held.items() if entry[0] <= cutoff}
-        if not old:
-            return empty
-        classes: dict[str, int] = {}
-        for _created, hold_class in old.values():
-            classes[hold_class] = classes.get(hold_class, 0) + 1
-        return {
-            "count": len(old),
-            "oldest_created_at": min(entry[0] for entry in old.values()),
-            # Highest count wins; a tie resolves alphabetically so the answer is stable.
-            "dominant_hold_class": min(classes, key=lambda name: (-classes[name], name)),
-        }
+            if prior is None or created < prior:
+                held[bare] = created
+        return {"count": sum(1 for created in held.values() if created <= cutoff)}
 
     def designated_session_for_readonly(self, owner: OwnerSnapshot) -> str | None:
         """The designated CoS session id, read-only, under the same live fence.

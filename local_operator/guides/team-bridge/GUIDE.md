@@ -143,6 +143,17 @@ local-operator-bridge-connector.service` command to read it.
 resync, not on every quiet poll, so an old time on a quiet account is normal.
 `logs` is the better liveness signal.
 
+## Long-held messages
+
+When a message has been held (in screening, or admitted and waiting for
+delivery) for longer than `team_bridge.hold_alert_after_minutes` (default 60,
+`0` turns it off, maximum 10080), the receiver raises one inbox notification in
+the designated session and clears it once nothing is held that long. It has no
+`lop config edit` key: run `lop config open` and add
+`hold_alert_after_minutes: <minutes>` under `values:` > `team_bridge:`. The
+receiver re-reads it without a restart. `lop team-bridge receiver status` shows
+what is held.
+
 ## Linux: lingering
 
 Without lingering, systemd only runs a user's services while that user is
