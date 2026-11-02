@@ -9,9 +9,6 @@ absent by our own authorised act. The send path never gains that licence: it cal
 
 from __future__ import annotations
 
-import pytest
-
-from local_operator import owned_process_group as owned
 from tests.unit.scripts.test_run_bounded_run_record import World
 
 
