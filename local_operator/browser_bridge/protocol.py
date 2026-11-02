@@ -177,6 +177,9 @@ CAPABILITY_SWITCH_LOCATION = (
 #: peer into a typed, actionable `capability_unsupported` instead.
 CAPABILITY_GATED_METHODS: frozenset[str] = frozenset(
     {
+        # Old desktop hosts have no keyboard handler; refuse before sending
+        # so their missing capability is typed, not a generic bridge failure.
+        "press",
         "download",
         "upload",
         "styles",
@@ -291,6 +294,7 @@ METHODS = (
     "screenshot",
     "click",
     "type",
+    "press",
     "close",
     "status",
     # tabs lists every live extension-owned surface. It exists because parallel
@@ -402,6 +406,9 @@ METHODS = (
 #: test. Generated into both
 #: TypeScript targets so the two sides cannot drift.
 DESKTOP_ONLY_METHODS: tuple[str, ...] = (
+    # Owned-page CDP keyboard input is implemented only by the desktop host.
+    # Other peers neither advertise nor serve it and get capability_unsupported.
+    "press",
     "network_start",
     "network_stop",
     "network_read",
@@ -446,6 +453,7 @@ COMMAND_TIMEOUTS = {
     "goto": 30.0,
     "click": 25.0,
     "type": 25.0,
+    "press": 25.0,
     "read": 20.0,
     "snapshot": 20.0,
     "screenshot": 20.0,
@@ -530,6 +538,9 @@ class ErrorCode(StrEnum):
     NAV_FAILED = "nav_failed"
     NAV_TIMEOUT = "nav_timeout"
     ELEMENT_NOT_FOUND = "element_not_found"
+    # Desktop keyboard allowlist refusal must survive Response decoding as a
+    # typed error, not become an unreadable-response / bridge failure.
+    UNSUPPORTED_KEY = "unsupported_key"
     ORIGIN_DENIED = "origin_denied"
     ORIGIN_PROMPT_PENDING = "origin_prompt_pending"
     # A top-level open/goto to an origin the user has not approved. Raised

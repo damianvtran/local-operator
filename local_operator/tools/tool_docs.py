@@ -329,6 +329,10 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
                 op="type",
                 blurb="Type text, or a stored secret via 'secret_ref', into a field.",
             ),
+            ToolDocOp(
+                op="press",
+                blurb="Keyboard input to the owned page; requires desktop app support.",
+            ),
             ToolDocOp(op="scroll", blurb="Move the viewport."),
             ToolDocOp(op="logs", blurb="Console + errors."),
             ToolDocOp(

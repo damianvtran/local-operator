@@ -21219,6 +21219,7 @@ BROWSER_ACTIONS = (
     "screenshot",
     "click",
     "type",
+    "press",
     "close",
     # scroll and logs are served by BOTH non-cmux hosts (the paired Local
     # Operator browser extension and the desktop app's browser host); the cmux
@@ -21312,6 +21313,7 @@ BROWSER_ACTIONS = (
 #: drift apart.
 CMUX_UNSUPPORTED_BROWSER_ACTIONS = frozenset(
     {
+        "press",
         "scroll",
         "logs",
         "network_start",
@@ -21527,6 +21529,13 @@ class BrowserParams(BaseModel):
     # … expected one of …`), which is the self-correction path that makes the
     # cut safe (slimming wave, audit item 2).
     action: str = Field(description="The browser action to run.")
+    key: str = Field(
+        default="",
+        description=(
+            "'press': Tab, Shift+Tab, Enter, Escape, ArrowUp/Down/Left/Right; "
+            "keyboard input to the owned page (desktop app support required)."
+        ),
+    )
     url: str = Field(
         default="",
         description=(
@@ -22500,6 +22509,34 @@ def _validate_record_fields(action: str, params: BrowserParams) -> str:
                 f"default {_files.RECORD_DEFAULT_DURATION_S:g}); got {params.timeout_s:g}"
             )
     return ""
+
+
+# Exact spellings mirror desktop input.ts: Shift+Tab is one atomic chord, not
+# arbitrary modifier syntax. Validate before discovery and again at wire dispatch
+# so neither an unavailable host nor a direct internal caller bypasses the guard.
+_BROWSER_PRESS_KEYS = (
+    "Tab",
+    "Shift+Tab",
+    "Enter",
+    "Escape",
+    "ArrowUp",
+    "ArrowDown",
+    "ArrowLeft",
+    "ArrowRight",
+)
+
+
+def _browser_press_refusal(
+    tool_call_id: str, action: str, params: BrowserParams
+) -> ToolResult | None:
+    if action != "press" or params.key in _BROWSER_PRESS_KEYS:
+        return None
+    return _error(
+        tool_call_id,
+        "browser",
+        f"unsupported_key: {params.key!r}; 'press' accepts only " + ", ".join(_BROWSER_PRESS_KEYS),
+        details={"error_code": "unsupported_key", "key": params.key},
+    )
 
 
 def _validate_browser_args(action: str, params: BrowserParams) -> str:
@@ -26635,6 +26672,9 @@ async def _bridge_action(
     — so this function is shared rather than forked, and only the handful of
     sentences that name a PROCESS use the host.
     """
+    refusal = _browser_press_refusal(tool_call_id, action, params)
+    if refusal is not None:
+        return refusal
     host = _host_of_client(client)
     surface = state.surface_id
     if action in _NETWORK_ACTIONS:
@@ -26678,6 +26718,8 @@ async def _bridge_action(
         wire["selector"] = params.selector.strip()
         if action == "type":
             wire["text"] = params.text
+    elif action == "press":
+        wire["key"] = params.key
     elif action == "scroll":
         # Only send the params the caller actually set, so the extension's
         # precedence (selector > x/y > direction > default) sees an unset param
@@ -26825,6 +26867,13 @@ async def _bridge_action(
         return _bridge_logs_result(tool_call_id, params, result, details, title, href)
     if action in ("styles", "hit_test", "ancestors", "query"):
         return _bridge_geometry_result(tool_call_id, action, params, result, details)
+    if action == "press":
+        return _text(
+            tool_call_id,
+            "browser",
+            f"Pressed {params.key!r} in the owned page. Page: {_page_line(title, href)}",
+            details={**details, "key": params.key},
+        )
     if action == "click":
         navigation = "" if result.get("navigated") else " (no navigation)"
         return _text(
@@ -27044,6 +27093,17 @@ async def execute_browser(
             else {"version": 1, "local_scope_missing": True}
         )
         return _text(tool_call_id, "browser", json.dumps(result, sort_keys=True), details=result)
+    # Keyboard arguments must fail before ownership discovery/recovery can dial
+    # a peer. Keep the preflight specific to this additive action so existing
+    # actions retain their established validation/ownership ordering.
+    if str(args.get("action", "")).strip().lower() == "press":
+        try:
+            keyboard = BrowserParams(**args)
+        except ValidationError as exc:
+            return _validation_error(tool_call_id, "browser", exc)
+        refusal = _browser_press_refusal(tool_call_id, "press", keyboard)
+        if refusal is not None:
+            return refusal
     state = _browser_state(context)
     resource = getattr(state, "resource", None)
     if resource is None or state.surface_id.startswith("surface:"):
@@ -27651,6 +27711,9 @@ async def _execute_browser(
             "browser",
             f"unknown action: {action} (expected one of {', '.join(BROWSER_ACTIONS)})",
         )
+    refusal = _browser_press_refusal(tool_call_id, action, params)
+    if refusal is not None:
+        return refusal
     cmux_available = cmux_browser_available()
     # Classify EACH host ONCE per action and reuse that answer for both the
     # backend decision and the demotion diagnostic, so they can never describe
