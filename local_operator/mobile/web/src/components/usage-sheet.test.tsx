@@ -192,14 +192,17 @@ it("a failed or timed-out refresh keeps the cached cards and says so", async () 
 });
 
 it("a throttled forced refresh keeps focus, announces once and falls back to Updated", async () => {
-	vi.useFakeTimers({ shouldAdvanceTime: true });
+	// Own the clock completely: automatic advancement races React's effect
+	// that installs the one-second interval, so 1100ms could still show 3s.
+	vi.useFakeTimers();
 	vi.mocked(getUsage).mockResolvedValue(envelope([report()]));
 	vi.mocked(refreshUsage).mockResolvedValueOnce(envelope([report()], {
 		refresh: { status: "ok", forced: false, retry_after_ms: null }, refreshed_at: Date.now(),
 	}));
 	render(<UsageSheet open onClose={() => undefined} />);
-	const button = await screen.findByRole("button", { name: "Refresh usage" });
-	await vi.waitFor(() => expect(button.hasAttribute("aria-disabled")).toBe(false));
+	await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+	const button = screen.getByRole("button", { name: "Refresh usage" });
+	expect(button.hasAttribute("aria-disabled")).toBe(false);
 	expect(screen.getByText(/^Updated /)).toBeTruthy();
 	vi.mocked(refreshUsage).mockResolvedValueOnce(envelope([report()], {
 		refresh: { status: "throttled", forced: false, retry_after_ms: 3000 },
@@ -209,7 +212,8 @@ it("a throttled forced refresh keeps focus, announces once and falls back to Upd
 	expect(refreshUsage).toHaveBeenLastCalledWith(true);
 	const live = document.querySelector("[aria-live]")!;
 	// U4: a cooldown, not a usage limit.
-	expect(await screen.findByText("Just refreshed — you can refresh again in 3 seconds.", { selector: "[aria-hidden] , [aria-hidden] *" })).toBeTruthy();
+	await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+	expect(screen.getByText("Just refreshed — you can refresh again in 3 seconds.", { selector: "[aria-hidden] , [aria-hidden] *" })).toBeTruthy();
 	expect(button.getAttribute("aria-disabled")).toBe("true");
 	expect(button.classList.contains("!text-ink-disabled")).toBe(true);
 	// U1: focus stays on the sheet's main action.
@@ -217,10 +221,10 @@ it("a throttled forced refresh keeps focus, announces once and falls back to Upd
 	// U3: the spoken sentence is fixed at entry while the visible one ticks.
 	const spoken = () => live.querySelector(".sr-only")?.textContent;
 	expect(spoken()).toBe("Just refreshed — you can refresh again in 3 seconds.");
-	await act(async () => { vi.advanceTimersByTime(1100); });
+	await act(async () => { await vi.advanceTimersByTimeAsync(1100); });
 	expect(live.querySelector("[aria-hidden]")?.textContent).toMatch(/in 2 seconds/);
 	expect(spoken()).toBe("Just refreshed — you can refresh again in 3 seconds.");
-	await act(async () => { vi.advanceTimersByTime(2500); });
+	await act(async () => { await vi.advanceTimersByTimeAsync(2500); });
 	expect(button.hasAttribute("aria-disabled")).toBe(false);
 	expect(button.classList.contains("!text-ink-disabled")).toBe(false);
 	expect(document.activeElement).toBe(button);

@@ -132,10 +132,13 @@ const selectors = new Set(
 // The inert icon action must override the base icon ink, not merely emit a
 // competing normal declaration. Build the selector from parts so this check
 // cannot itself seed Tailwind's source scanner and manufacture a false pass.
-const inertInk = ["!", "text", "ink", "disabled"].join("-").replace("!-", "!");
+const inertInk = "!" + ["text", "ink", "disabled"].join("-");
 const inertSelector = "." + inertInk.replace("!", "\\!");
-const inertRule = css.slice(css.indexOf(inertSelector)).split("}", 1)[0];
-if (!selectors.has(inertInk) || !/color:[^;}]+!important/.test(inertRule))
+// Require the exact base selector followed immediately by its declaration
+// block: a hover variant with important ink must never mask a broken base.
+const escapedInertSelector = inertSelector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const inertRule = new RegExp(escapedInertSelector + "\\{[^}]*color:[^;}]+!important");
+if (!selectors.has(inertInk) || !inertRule.test(css))
 	fail("inert icon ink must have an emitted important color declaration");
 
 // ---------------------------------------------------------------------------
