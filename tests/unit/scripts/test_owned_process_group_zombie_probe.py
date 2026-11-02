@@ -48,6 +48,24 @@ def test_a_zombie_leader_is_visible_to_the_group_census_on_this_platform():
             signal_group=lambda *args: None,
             deadline=time.monotonic() + 5.0,
         )
+        if cap.last.status != "VERIFIED":
+            # DIAGNOSTIC ONLY, macOS leg. The runner reports an empty census for a
+            # LIVE leader and we cannot yet tell TRULY EMPTY from UNREADABLE. Print
+            # the enumeration's own numbers so the runner answers with facts. Read
+            # only: nothing here asserts, and the assertion below is unchanged.
+            ledger = dict(owned._LAST_ENUMERATION)
+            try:
+                outcome = "found:pgid=%d" % os.getpgid(pid)
+            except ProcessLookupError:
+                outcome = "absent:ESRCH"
+            except PermissionError:
+                outcome = "unreadable:EPERM"
+            except OSError as exc:
+                outcome = "unreadable:" + type(exc).__name__
+            print(
+                "MACOS-CENSUS-DIAG leader=%d child_outcome=%s ledger=%r" % (pid, outcome, ledger),
+                flush=True,
+            )
         assert cap.last.status == "VERIFIED", ("capture of a live leader", cap.last.reason)
 
         os.write(write_fd, b"x")
@@ -64,7 +82,9 @@ def test_a_zombie_leader_is_visible_to_the_group_census_on_this_platform():
         assert sample.zombie is True, "the sampler does not report the corpse as terminal"
 
         census = owned.strict_census(pid, time.monotonic() + 5.0)
-        visible = pid in census
+        # strict_census answers a CensusResult: membership is in `.pids`, and
+        # `.complete` is the enumeration's own claim about its coverage.
+        visible = pid in census.pids
         verdict = cap.refresh(deadline=time.monotonic() + 5.0)
         # With a corpse and nothing else in it, the group has no live member and
         # refresh answers OBSERVED_EMPTY — that is not a lost reservation. What
@@ -160,8 +180,8 @@ def test_a_new_session_child_is_visible_to_the_census():
         # The census is measured while the child is ALIVE (it sleeps for 30 s), so
         # a lookup miss is a census answer rather than a race with an exit.
         assert os.getsid(child) != os.getsid(0), "the child must be in a NEW session"
-        members = owned.strict_census(child, time.monotonic() + 5.0)
-        assert child in members, (child, members)
+        result = owned.strict_census(child, time.monotonic() + 5.0)
+        assert child in result.pids, (child, result)
     finally:
         # Deterministic reap of EXACTLY our own child: ignore an already-gone pid,
         # then wait for the one we forked so no zombie outlives the test.
