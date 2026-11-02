@@ -39,11 +39,10 @@ by terminating its process GROUP, reaped by exact pid — no orphans.
 Start each dev server/browser as a group leader (`set -m; cmd & echo $!`); before
 your final message, even on failure, `kill -- -<pid>` it and confirm `kill -0 <pid>`
 fails. Never pkill or touch one you did not start.
-Never grow a fresh dependency install for a rig: use a worktree at
-`<repo>/.worktrees/<name>` (never sibling dirs, `$HOME`, /tmp or scratchpads) with the
-shared dependency tree (in-repo symlink; never an npm/Yarn re-install or `cp -R` of
-`node_modules`). `git worktree remove` it once the PR merges or the lane closes
-(clean only; never discard unpushed work).
+Never grow a fresh dependency install for a rig: share the primary checkout's
+dependency tree (in-repo symlink; never an npm/Yarn re-install or `cp -R` of
+`node_modules`).
+Worktrees: prefer `<repo>/.worktrees/<name>` sharing the primary dependency tree; a sibling `../<repo>-<topic>` is tolerated with APFS-cloned deps or an absolute link; never session scratchpads, /tmp or `$TMPDIR` dirs, `$HOME` top level or ad-hoc sibling roots. `git worktree remove` (clean only, never discard unpushed work) once the PR merges or the lane closes.
 
 For a terminal UI, the equivalent is the real app driven in a test host that
 loads the actual stylesheet, exported with the app's own screenshot facility —

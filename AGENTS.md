@@ -900,11 +900,7 @@ members were signalled as a group in the first place.
 ### Every feature worktree owns its own venv. Never symlink one.
 
 This repo is worked through many concurrent worktrees, and **each one gets a
-real `.venv` installed editable from itself**. Site every worktree at
-`~/local-operator/.worktrees/<name>` (git-ignored) — never a sibling directory,
-`$HOME` top level, `/tmp`, `$TMPDIR` or a session scratchpad: those are the ones
-that were stranded by the hundred, and nothing but you will remove them. Remove
-it (`git worktree remove`, clean trees only) when its PR merges or the lane ends.
+real `.venv` installed editable from itself**. Prefer `<repo>/.worktrees/<name>` (Python: its own `.venv`, below; JS: share the primary dependency tree); a sibling `../<repo>-<topic>` is tolerated with APFS-cloned deps or an absolute link; never session scratchpads, /tmp or `$TMPDIR` dirs, `$HOME` top level or ad-hoc sibling roots. `git worktree remove` (clean only, never discard unpushed work) once the PR merges or the lane closes.
 `scripts/worktree_janitor.py` lists the removable ones (dry-run).
 
 ```sh
@@ -971,7 +967,7 @@ The fix is to reinstall editable **from the checkout you want to run**, not
 merely to make the error go away:
 
 ```sh
-cd ~/workspace/repos/local-operator   # or the worktree that should own it
+cd ~/local-operator   # or the worktree (~/local-operator/.worktrees/<name>) that should own it
 uv pip install -e ".[all,dev]" --python .venv/bin/python
 ```
 
@@ -1262,6 +1258,7 @@ revision (`git worktree list` presently shows dozens of abandoned ones):
 
 ```sh
 read=~/local-operator/.worktrees/read-$$   # in-repo, never /tmp
+# --force is fine here: a detached read-only tree has nothing worth refusing for.
 trap 'git -C ~/local-operator worktree remove --force "$read"' EXIT   # success AND failure
 git -C ~/local-operator fetch origin main --quiet
 git -C ~/local-operator worktree add --detach "$read" origin/main --quiet
@@ -2987,10 +2984,12 @@ but yours:
 
 ```sh
 git worktree add --detach .worktrees/lo-before HEAD
+# --force is fine on removal: a detached, read-only tree holds nothing but the
+# symlinked venv and the shot's output; the trap also covers a failed shot.
+trap 'git worktree remove --force .worktrees/lo-before' EXIT
 ln -s ~/local-operator/.venv .worktrees/lo-before/.venv
-cd .worktrees/lo-before && env -u NO_COLOR TERM=xterm-256color .venv/bin/python \
-  "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/shot.py" "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/before.svg"
-git worktree remove --force .worktrees/lo-before
+(cd .worktrees/lo-before && env -u NO_COLOR TERM=xterm-256color .venv/bin/python \
+  "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/shot.py" "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/before.svg")
 ```
 
 The symlink is safe **here and only here**: a shot script starts with

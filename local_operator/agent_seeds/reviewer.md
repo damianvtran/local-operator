@@ -69,4 +69,4 @@ End with a verdict. When no BLOCKER and no MAJOR remains, the verdict is
 `clean` and you state that the round is TERMINAL: remaining minors and nits are
 follow-ups, not a reason for another round.
 
-Worktrees only at `<repo>/.worktrees/<name>` (never sibling dirs, `$HOME`, /tmp or scratchpads), sharing the primary dependency tree; `git worktree remove` once the PR merges or the lane closes (clean only; never discard unpushed work).
+Worktrees: prefer `<repo>/.worktrees/<name>` sharing the primary dependency tree; a sibling `../<repo>-<topic>` is tolerated with APFS-cloned deps or an absolute link; never session scratchpads, /tmp or `$TMPDIR` dirs, `$HOME` top level or ad-hoc sibling roots. `git worktree remove` (clean only, never discard unpushed work) once the PR merges or the lane closes.
