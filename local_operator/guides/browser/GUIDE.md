@@ -425,11 +425,13 @@ Same `browser` tool. Actions:
 - `select selector="#language" options=["English (U.S.)"]`: choose a native
   `<select>` option by trimmed label (exact, then case-insensitive), then value,
   or by zero-based integer index. Multiple selects replace the entire set;
-  `options:[]` is refused. Single selects need exactly one option.
+  `options:[]` clears a native multiple select; single selects need exactly one
+  option and refuse `[]`. Blank strings/lists over 100 entries are refused; use
+  an index for a blank-label option.
   No OS popup/window activation; input/change events notify controlled forms.
   Desktop also serves ARIA combobox/listbox triggers; the extension serves native
   selects only (custom controls get a typed desktop-only refusal). A miss lists
-  up to 50 available options; use those, not guessed labels. Unverified ARIA
+  up to 50 available options; use those, not guessed labels. Unverified
   selection is reported as such — inspect the page before retrying.
 - `scroll` (by direction, pixel delta, or scroll an element into view)
 - `logs` (the tab's console output and uncaught exceptions since it opened —

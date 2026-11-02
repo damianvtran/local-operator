@@ -394,7 +394,7 @@ MEASURED_TOKENS: dict[str, int] = {
     # wording on `press`. Measured by this test's own print.
     # Select adds the native/ARIA operation and its host scope; deliberately
     # measured by this test after adding the one-line BrowserParams.options.
-    "browser": 1964,
+    "browser": 1968,
     # NEW (code-requests PR1b): the ``code_requests`` doc — relation and lane
     # vocabulary, the freshness rule and the data-not-instructions framing.
     # 475 tokens is the deliberate cost of the reference detail staying OFF the

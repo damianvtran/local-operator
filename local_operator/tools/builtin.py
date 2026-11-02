@@ -21609,7 +21609,9 @@ class BrowserParams(BaseModel):
     )
     options: list[str | int] = Field(
         default_factory=list,
-        description="'select': option labels/values (strings) or zero-based indexes (integers).",
+        description=(
+            "'select': labels/values or zero-based indexes; [] clears native multiple selects."
+        ),
     )
 
     @field_validator("options", mode="before")
@@ -21621,6 +21623,10 @@ class BrowserParams(BaseModel):
             raise ValueError(
                 "'options' must be a list of strings or integer indexes (not booleans)"
             )
+        if len(value) > 100:
+            raise ValueError("'options' accepts at most 100 entries")
+        if any(isinstance(item, str) and not item.strip() for item in value):
+            raise ValueError("'options' strings must not be empty or blank; use an index instead")
         if any(isinstance(item, int) and item < 0 for item in value):
             raise ValueError("'options' indexes must be zero-based and non-negative")
         return value
@@ -22946,11 +22952,6 @@ def _validate_browser_args(action: str, params: BrowserParams) -> str:
         if "options" not in params.model_fields_set:
             return (
                 "'select' needs options: labels/values (strings) or zero-based indexes (integers)"
-            )
-        if not params.options:
-            return (
-                "'select' options:[] is refused; supply at least one option "
-                "(single selects need exactly one)"
             )
         return _validate_selector(params.selector, "select")
     if action == "hover":
@@ -27286,10 +27287,18 @@ async def _bridge_action(
         details.update(selected=selected, kind=result.get("kind"))
         if isinstance(verified, bool):
             details["verified"] = verified
+        # [] is a legitimate clear request for a native multiple select. Only
+        # the host knows multiplicity; the harness must pass it through, while
+        # retaining honest unverified feedback if the live read is inconclusive.
+        operation = (
+            "Cleared selection"
+            if not params.options and not selected
+            else f"Selected {labels or '(none)'}"
+        )
         return _text(
             tool_call_id,
             "browser",
-            f"Selected {labels or '(none)'} in {params.selector.strip()}{verdict}. "
+            f"{operation} in {params.selector.strip()}{verdict}. "
             f"Page: {_page_line(title, href)}",
             details=details,
         )

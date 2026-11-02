@@ -9,8 +9,8 @@ import { readNativeSelection, selectNative } from "./select-native";
  */
 export async function selectOptions(params: Record<string, unknown>, requestId: string): Promise<Record<string, unknown>> {
   const requested = params.options;
-  if (!Array.isArray(requested) || requested.length === 0 || requested.some((v) => typeof v !== "string" && !(typeof v === "number" && Number.isInteger(v) && v >= 0))) {
-    throw new BridgeCommandError("internal", "options must be a non-empty list of labels/values or non-negative integer indexes", { reason: "invalid_arguments" });
+  if (!Array.isArray(requested) || requested.length > 100 || requested.some((v) => typeof v === "string" ? !v.trim() : !(typeof v === "number" && Number.isSafeInteger(v) && v >= 0))) {
+    throw new BridgeCommandError("internal", "options must be a list of at most 100 non-blank labels/values or non-negative integer indexes", { reason: "invalid_arguments" });
   }
   const surface = await requireSurface(params.tab);
   const resolved = await resolveTarget(surface, params.selector);

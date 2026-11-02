@@ -26,7 +26,7 @@ Sequences for common cases. Keep the order: wait, read, act, capture. Adapt acti
 ## Select controls
 
 1. Snapshot the select/combobox trigger. `select selector=… options=["English (U.S.)"]` (strings are labels/values; integers are zero-based indexes), not arrow-key presses on macOS OS popups.
-2. Verify the selected label/value and dependent form state. For multiple selects supply the exact replacement set (`options:[]` is refused); single selects accept one option. If the host says selection is unverified, inspect before retrying.
+2. Verify the selected label/value and dependent form state. For multiple selects supply the exact replacement set (`options:[]` clears native multiples; single selects refuse it); single selects accept one option. If the host says selection is unverified, inspect before retrying.
 3. Exercise disabled options and a nonexistent label; the typed miss must list available options. Use that list to correct the call rather than guessing. Desktop handles ARIA controls; extension supports native `<select>` only.
 
 ## Hover and keyboard states

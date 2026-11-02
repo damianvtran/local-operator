@@ -90,7 +90,9 @@ def test_protocol_and_schema_are_additive():
         ({"selector": "#s"}, "needs options"),
         ({"options": [0]}, "requires a selector"),
         ({"selector": "--help", "options": [0]}, "flag-shaped"),
-        ({"selector": "#s", "options": []}, "options:[] is refused"),
+        ({"selector": "#s", "options": [""]}, "empty or blank"),
+        ({"selector": "#s", "options": [" \t"]}, "empty or blank"),
+        ({"selector": "#s", "options": [0] * 101}, "at most 100"),
         ({"selector": "#s", "options": [True]}, "booleans"),
         ({"selector": "#s", "options": [1.5]}, "integer indexes"),
         ({"selector": "#s", "options": [-1]}, "non-negative"),
@@ -108,7 +110,7 @@ async def test_bad_arguments_fail_before_discovery(monkeypatch, entrypoint, fiel
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("options", [["English (U.S.)"], [1], ["001", 2]])
+@pytest.mark.parametrize("options", [["English (U.S.)"], [1], ["001", 2], []])
 async def test_wire_retains_strings_and_indexes(options):
     app = App()
     result = await select(app, options)
@@ -225,7 +227,31 @@ async def test_cmux_is_unsupported_and_select_is_write_tier(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_real_loopback_capture_uses_the_actual_selected_result_shape(tmp_path):
+@pytest.mark.parametrize(
+    "options,reply,expected_text",
+    [
+        (["English (U.S.)"], {"result": RESULT}, "Selected 'English (U.S.)'"),
+        (
+            [],
+            {"result": {**RESULT, "selected": [], "verified": True}},
+            "Cleared selection in #language",
+        ),
+        (
+            [],
+            {
+                "error": {
+                    "code": "element_not_found",
+                    "message": "a single select needs exactly one option",
+                    "data": {"reason": "single_select"},
+                }
+            },
+            "single select needs exactly one option",
+        ),
+    ],
+)
+async def test_real_loopback_capture_uses_the_actual_selected_result_shape(
+    tmp_path, options, reply, expected_text
+):
     from local_operator.ui_browser.backend import UiHostClient
     from local_operator.ui_browser.state import UiHostState, publish
 
@@ -245,7 +271,7 @@ async def test_real_loopback_capture_uses_the_actual_selected_result_shape(tmp_p
         def do_POST(self):
             frame = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             frames.append(frame)
-            self.reply({"id": frame["id"], "ok": True, "result": RESULT})
+            self.reply({"id": frame["id"], "ok": "error" not in reply, **reply})
 
         def log_message(self, format, *args):
             pass
@@ -268,10 +294,16 @@ async def test_real_loopback_capture_uses_the_actual_selected_result_shape(tmp_p
             ),
             tmp_path,
         )
-        result = await select(UiHostClient(tmp_path), ["English (U.S.)"])
-        assert not result.is_error and (result.details or {})["selected"] == SELECTED
+        result = await select(UiHostClient(tmp_path), options)
+        assert result.is_error == ("error" in reply)
+        assert expected_text in result.text
+        if "error" in reply:
+            assert (result.details or {})["error_code"] == "element_not_found"
+            assert (result.details or {})["reason"] == "single_select"
+        else:
+            assert (result.details or {})["selected"] == reply["result"]["selected"]
         assert len(frames) == 1 and frames[0]["method"] == "select"
-        assert frames[0]["params"]["options"] == ["English (U.S.)"]
+        assert frames[0]["params"]["options"] == options
         print("wire:", json.dumps(frames[0], sort_keys=True))
         print("result:", result.text)
     finally:

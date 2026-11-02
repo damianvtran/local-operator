@@ -63,16 +63,18 @@ try {
     node.options[1].value = "en-US";
     assert.equal(applyAndRead(node, [1]).selected[0].index, 1);
   });
-  test("multiple replaces the set, deduplicates, and [] is refused", () => {
+  test("multiple replaces the set, deduplicates, and [] clears with input/change", () => {
     const node = fixture(true);
     assert.deepEqual(applyAndRead(node, [0, "French", 0]).selected.map((o) => o.index), [0, 1]);
     assert.deepEqual(applyAndRead(node, [1]).selected.map((o) => o.index), [1]);
-    assert.equal(applyAndRead(node, []).error.data.reason, "invalid_options");
-    assert.deepEqual(node.options.flatMap((o, i) => o.selected ? [i] : []), [1]);
+    const before = node.events.length;
+    assert.deepEqual(applyAndRead(node, []), {kind:"native", selected:[], verified:true});
+    assert.deepEqual(node.events.slice(before), [["input",true],["change",true]]);
+    assert.deepEqual(node.options.flatMap((o, i) => o.selected ? [i] : []), []);
   });
   test("single >1/empty, disabled control/option/optgroup refuse before side effects", () => {
     for (const request of [[], [0, 1]]) {
-      const node = fixture(); assert.equal(applyAndRead(node, request).error.data.reason, "invalid_options"); assert.deepEqual(node.events, []);
+      const node = fixture(); assert.equal(applyAndRead(node, request).error.data.reason, "single_select"); assert.deepEqual(node.events, []);
     }
     const node = fixture(true);
     node.disabled = true;
@@ -139,6 +141,19 @@ try {
     assert.equal(out.selected[0].value, "fr"); assert.equal(out.kind, "native"); assert.equal(out.verified, true);
     assert.deepEqual(calls, ["DOM.resolveNode", "Runtime.callFunctionOn", "DOM.resolveNode", "Runtime.callFunctionOn"]);
     await assert.rejects(selectOptions({ tab: "t7", selector: "e5", options: ["missing"] }, "r1"), (e) => e.code === "element_not_found" && e.data.available.length === 4);
+    node.multiple = true;
+    const cleared = await selectOptions({ tab:"t7", selector:"e5", options:[] }, "r1");
+    assert.deepEqual(cleared.selected, []); assert.equal(cleared.verified, true);
+    assert.deepEqual(node.events.slice(-2), [["input",true],["change",true]]);
+    console.log("native multiple []: selected=[], verified=true; input/change fired");
+    node.multiple = false;
+    const eventCount = node.events.length;
+    await assert.rejects(selectOptions({ tab:"t7", selector:"e5", options:[] }, "r1"), (e) => e.code === "element_not_found" && e.data.reason === "single_select");
+    assert.equal(node.events.length, eventCount);
+    for (const options of [[""],["  "],[true],[1.2],Array(101).fill(0)]) {
+      await assert.rejects(selectOptions({tab:"t7",selector:"e5",options},"r1"), (e) => e.data.reason === "invalid_arguments");
+    }
+    assert.equal(node.events.length, eventCount);
   });
   test("replacement negative control: live default beats detached applied Beta", async () => {
     for (const delayed of [false, true]) {

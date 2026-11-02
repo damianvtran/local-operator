@@ -344,7 +344,7 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
                 op="select",
                 blurb=(
                     "Choose options by label/value or zero-based index in selector=; "
-                    "native or ARIA (desktop); extension native only."
+                    "native or ARIA (desktop); extension native only. [] clears native multiples."
                 ),
             ),
             ToolDocOp(op="scroll", blurb="Move the viewport."),

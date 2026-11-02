@@ -26,8 +26,13 @@ export function selectNative(this: Element, requested: Array<string | number>): 
   if (select.disabled || select.matches(":disabled")) {
     return fail("select_disabled", "the select is disabled; nothing was changed");
   }
-  if (requested.length === 0 || (!select.multiple && requested.length !== 1)) {
-    return fail("invalid_options", "options must be non-empty; a single select needs exactly one option; nothing was changed");
+  if (requested.length > 100 || requested.some((entry) => typeof entry === "string" ? !entry.trim() : !Number.isSafeInteger(entry) || entry < 0)) {
+    return fail("invalid_arguments", "options needs at most 100 non-blank labels/values or non-negative integer indexes; nothing was changed");
+  }
+  // Multiplicity is known only here, not at the harness. [] deliberately clears
+  // a native multiple select, but cannot be used to clear a single select.
+  if (!select.multiple && requested.length !== 1) {
+    return fail("single_select", "a single select needs exactly one option; nothing was changed");
   }
   const options = Array.from(select.options);
   const label = (option: HTMLOptionElement) => option.label.trim();

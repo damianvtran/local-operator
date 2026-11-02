@@ -173,7 +173,10 @@ The extension re-resolves the live control after a bounded reconciliation grace
 and reads selection from that node, never detached pre-render options; a missing
 or detached target is reported unverified.
 Single selects take exactly one option; multiple selects replace the whole
-non-empty set. `options:[]` is refused for both kinds. Disabled selects/options are refused before changes.
+set. `options:[]` clears a native multiple select; single selects refuse it
+(`element_not_found`, reason `single_select`, no mutation). Disabled
+selects/options are refused before changes. Blank strings and lists over 100
+entries are refused; use a zero-based index for an option with a blank label.
 
 The desktop host also handles ARIA combobox/listbox (or `aria-haspopup=listbox`)
 triggers: open, click the matching role=option and verify observable selection.
