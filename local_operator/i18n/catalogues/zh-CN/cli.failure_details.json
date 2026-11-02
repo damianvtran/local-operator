@@ -1,0 +1,19 @@
+{
+  "cli.failure_details.unrecognized": "无法识别的参数：{arguments}",
+  "cli.failure_details.argument": "参数{argument}：{message}",
+  "cli.failure_details.expected_one": "需要一个参数",
+  "cli.failure_details.expected_optional": "最多接受一个参数",
+  "cli.failure_details.expected_some": "至少需要一个参数",
+  "cli.failure_details.expected_count": "{count, plural, other {需要#个参数}}",
+  "cli.failure_details.invalid_number": "无效的{type}值：{value}",
+  "cli.failure_details.ambiguous": "选项有歧义：{option}可能匹配{matches}",
+  "cli.failure_details.required_group": "必须指定{names}中的一个参数",
+  "cli.failure_details.conflict": "不能与参数{argument}同时使用",
+  "cli.failure_details.ignored_value": "已忽略显式参数{value}",
+  "cli.failure_details.not_seconds": "{value}不是有效的秒数",
+  "cli.failure_details.finite_seconds": "秒数必须为有限数值",
+  "cli.failure_details.positive_seconds": "必须大于零",
+  "cli.failure_details.positional_pair": "{first}和{last}",
+  "cli.failure_details.exec_two": "exec只接受一个位置参数作为提示词，却收到{count}个位置参数：{received}。\n第一个位置参数是提示词，不是标题。要为本次运行命名，通过--name传入标题：\n  {command}\n（--workstream是标志，用于发布本次运行，不接受值。）",
+  "cli.failure_details.exec_many": "exec只接受一个位置参数作为提示词，却收到{count}个位置参数：{received}。\n第一个位置参数是提示词，不是标题：通过--name传入标题，并用引号将提示词括为一个位置参数——多余的位置参数不会被使用。\n（--workstream是标志，用于发布本次运行，不接受值。）"
+}

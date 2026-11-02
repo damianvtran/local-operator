@@ -1,0 +1,19 @@
+{
+ "cli.failure_details.unrecognized": "нераспознанные аргументы: {arguments}",
+ "cli.failure_details.argument": "аргумент {argument}: {message}",
+ "cli.failure_details.expected_one": "ожидался один аргумент",
+ "cli.failure_details.expected_optional": "ожидалось не более одного аргумента",
+ "cli.failure_details.expected_some": "ожидался хотя бы один аргумент",
+ "cli.failure_details.expected_count": "{count, plural, one {ожидался # аргумент} few {ожидалось # аргумента} many {ожидалось # аргументов} other {ожидалось # аргумента}}",
+ "cli.failure_details.invalid_number": "недопустимое значение {type}: {value}",
+ "cli.failure_details.ambiguous": "неоднозначная опция: {option} может соответствовать {matches}",
+ "cli.failure_details.required_group": "необходимо указать один из аргументов {names}",
+ "cli.failure_details.conflict": "нельзя использовать с аргументом {argument}",
+ "cli.failure_details.ignored_value": "явно заданный аргумент {value} проигнорирован",
+ "cli.failure_details.not_seconds": "{value} не является числом секунд",
+ "cli.failure_details.finite_seconds": "требуется конечное число секунд",
+ "cli.failure_details.positive_seconds": "значение должно быть больше нуля",
+ "cli.failure_details.positional_pair": "{first} и {last}",
+ "cli.failure_details.exec_two": "exec принимает ОДИН позиционный промпт, передано позиционных аргументов: {count} ({received}).\nПервый позиционный аргумент — промпт, а не название. Чтобы задать название запуска, передайте его через --name:\n  {command}\n(--workstream — флаг: он публикует запуск и не принимает значения.)",
+ "cli.failure_details.exec_many": "exec принимает ОДИН позиционный промпт, передано позиционных аргументов: {count} ({received}).\nПервый позиционный аргумент — промпт, а не название: передайте название через --name, а промпт заключите в кавычки как ОДИН позиционный аргумент — лишние позиционные аргументы не используются.\n(--workstream — флаг: он публикует запуск и не принимает значения.)"
+}

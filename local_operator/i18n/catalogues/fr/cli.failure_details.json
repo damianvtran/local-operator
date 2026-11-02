@@ -1,0 +1,19 @@
+{
+  "cli.failure_details.unrecognized": "arguments non reconnus : {arguments}",
+  "cli.failure_details.argument": "argument {argument} : {message}",
+  "cli.failure_details.expected_one": "un argument attendu",
+  "cli.failure_details.expected_optional": "au plus un argument attendu",
+  "cli.failure_details.expected_some": "au moins un argument attendu",
+  "cli.failure_details.expected_count": "{count, plural, one {# argument attendu} many {# d’arguments attendus} other {# arguments attendus}}",
+  "cli.failure_details.invalid_number": "valeur {type} invalide : {value}",
+  "cli.failure_details.ambiguous": "option ambiguë : {option} peut correspondre à {matches}",
+  "cli.failure_details.required_group": "un des arguments {names} est requis",
+  "cli.failure_details.conflict": "non autorisé avec l’argument {argument}",
+  "cli.failure_details.ignored_value": "argument explicite {value} ignoré",
+  "cli.failure_details.not_seconds": "{value} n’est pas un nombre de secondes",
+  "cli.failure_details.finite_seconds": "doit être un nombre fini de secondes",
+  "cli.failure_details.positive_seconds": "doit être supérieur à zéro",
+  "cli.failure_details.positional_pair": "{first} et {last}",
+  "cli.failure_details.exec_two": "exec accepte UN SEUL prompt positionnel, mais a reçu {count} arguments positionnels : {received}.\nLe premier argument positionnel est le prompt, pas un titre. Pour nommer l’exécution, passer le titre via --name :\n  {command}\n(--workstream est une option — elle publie l’exécution et ne prend aucune valeur.)",
+  "cli.failure_details.exec_many": "exec accepte UN SEUL prompt positionnel, mais a reçu {count} arguments positionnels : {received}.\nLe premier argument positionnel est le prompt, pas un titre : passer le titre via --name et mettre le prompt entre guillemets pour en faire l’UNIQUE argument positionnel — les arguments positionnels supplémentaires ne sont pas traités.\n(--workstream est une option — elle publie l’exécution et ne prend aucune valeur.)"
+}
