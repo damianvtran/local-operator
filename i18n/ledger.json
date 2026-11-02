@@ -2571,6 +2571,28 @@
       "note": "Provenance supplied in ledger-assembly brief for PR #3307 head 5bc1b4b2336c85a13ad405466782995cf2aaf4dc; translator base b2750ae6540. Independent audit PASS, 0 findings, 17 keys. Context SHA-256 05eb64e49f9a898ff780e7529ffc96a78fcf676d9bbbca4bc068c62dd6d1828a. Assembly verified current source, target, context hashes and key parity."
     },
     {
+      "locale": "es",
+      "namespace": "cli.failure_details",
+      "source_sha256": "7dda49aa521bc226787d48077a3276de4e80a99c0488892cc60e99e142f33c99",
+      "target_sha256": "a80b3872d2746a467c89d456fb5890d4e68844e378a61f0c16382329c0fddff6",
+      "translator": {
+        "agent": "i18n-translator",
+        "session": "825c400bd2e6",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-01"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "fc1dfc453f09",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-01",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Provenance supplied in ledger-assembly brief for PR #3307 head 5bc1b4b2336c85a13ad405466782995cf2aaf4dc; translator base b2750ae6540. Independent audit PASS, 0 findings, 17 keys. Context SHA-256 05eb64e49f9a898ff780e7529ffc96a78fcf676d9bbbca4bc068c62dd6d1828a. Assembly verified current source, target, context hashes and key parity. Dates are delegator-supplied dispatch/completion windows, not per-row timestamps. Target hash was verified during ledger assembly; this row does not assert the auditor published that hash. The delegator reports five slice-2 auditors did not publish target hashes; no locale-specific published-hash claim is made."
+    },
+    {
       "locale": "fr",
       "namespace": "tui.status",
       "source_sha256": "2403f9c4f37b40264f575929627b99a0bcabb0baf1bcb6a0b951c6c31ec6843a",
@@ -5080,6 +5102,28 @@
       },
       "status": "passed",
       "note": "Provenance supplied in ledger-assembly brief for PR #3307 head 5bc1b4b2336c85a13ad405466782995cf2aaf4dc; translator base b2750ae6540. Independent audit PASS, 0 findings, 17 keys. Context SHA-256 05eb64e49f9a898ff780e7529ffc96a78fcf676d9bbbca4bc068c62dd6d1828a. Assembly verified current source, target, context hashes and key parity."
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.failure_details",
+      "source_sha256": "7dda49aa521bc226787d48077a3276de4e80a99c0488892cc60e99e142f33c99",
+      "target_sha256": "7c92f9d6b0256f3034a9949bc9ca32ae99a5a3144001e977b1e9ec9cce1f61b9",
+      "translator": {
+        "agent": "i18n-translator",
+        "session": "1a73cf42d5d7",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-01"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "e90c2da6e6c7",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-01",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Provenance supplied in ledger-assembly brief for PR #3307 head 5bc1b4b2336c85a13ad405466782995cf2aaf4dc; translator base b2750ae6540. Independent audit PASS, 0 findings, 17 keys. Context SHA-256 05eb64e49f9a898ff780e7529ffc96a78fcf676d9bbbca4bc068c62dd6d1828a. Assembly verified current source, target, context hashes and key parity. Dates are delegator-supplied dispatch/completion windows, not per-row timestamps. Target hash was verified during ledger assembly; this row does not assert the auditor published that hash. The delegator reports five slice-2 auditors did not publish target hashes; no locale-specific published-hash claim is made."
     },
     {
       "locale": "hi",
@@ -7724,6 +7768,28 @@
       },
       "status": "passed",
       "note": "Provenance supplied in ledger-assembly brief for PR #3307 head 5bc1b4b2336c85a13ad405466782995cf2aaf4dc; translator base b2750ae6540. Independent audit PASS, 0 findings, 17 keys. Context SHA-256 05eb64e49f9a898ff780e7529ffc96a78fcf676d9bbbca4bc068c62dd6d1828a. Assembly verified current source, target, context hashes and key parity."
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.failure_details",
+      "source_sha256": "7dda49aa521bc226787d48077a3276de4e80a99c0488892cc60e99e142f33c99",
+      "target_sha256": "483bf6f56ac06c07eb2f078e47ca1672b39de7600b9b2225b478fa0c231217e3",
+      "translator": {
+        "agent": "i18n-translator",
+        "session": "b1905b3da0f3",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-01"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "ed4dcac39dcf",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-01",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Provenance supplied in ledger-assembly brief for PR #3307 head 5bc1b4b2336c85a13ad405466782995cf2aaf4dc; translator base b2750ae6540. Independent audit PASS, 0 findings, 17 keys. Context SHA-256 05eb64e49f9a898ff780e7529ffc96a78fcf676d9bbbca4bc068c62dd6d1828a. Assembly verified current source, target, context hashes and key parity. Dates are delegator-supplied dispatch/completion windows, not per-row timestamps. Target hash was verified during ledger assembly; this row does not assert the auditor published that hash. The delegator reports five slice-2 auditors did not publish target hashes; no locale-specific published-hash claim is made."
     },
     {
       "locale": "ru",
@@ -10388,6 +10454,28 @@
       "note": "Provenance supplied in ledger-assembly brief for PR #3307 head 5bc1b4b2336c85a13ad405466782995cf2aaf4dc; translator base b2750ae6540. Independent audit PASS, 0 findings, 17 keys. Context SHA-256 05eb64e49f9a898ff780e7529ffc96a78fcf676d9bbbca4bc068c62dd6d1828a. Assembly verified current source, target, context hashes and key parity. Second independent PASS, 0 findings: i18n-auditor session 96b7d78a3ff6, model openai/gpt-6.1-sol."
     },
     {
+      "locale": "ru",
+      "namespace": "cli.failure_details",
+      "source_sha256": "7dda49aa521bc226787d48077a3276de4e80a99c0488892cc60e99e142f33c99",
+      "target_sha256": "a386dbb758a00b13d62fdb418ad0ab085567bef592c56f5d58ed1f32b4f25984",
+      "translator": {
+        "agent": "i18n-translator",
+        "session": "78096b086c9b",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-01"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "7409da368379",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-01",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Provenance supplied in ledger-assembly brief for PR #3307 head 5bc1b4b2336c85a13ad405466782995cf2aaf4dc; translator base b2750ae6540. Independent audit PASS, 0 findings, 17 keys. Context SHA-256 05eb64e49f9a898ff780e7529ffc96a78fcf676d9bbbca4bc068c62dd6d1828a. Assembly verified current source, target, context hashes and key parity. Second independent PASS, 0 findings: i18n-auditor session 96b7d78a3ff6, model openai/gpt-6.1-sol. Dates are delegator-supplied dispatch/completion windows, not per-row timestamps. Target hash was verified during ledger assembly; this row does not assert the auditor published that hash. The delegator reports five slice-2 auditors did not publish target hashes; no locale-specific published-hash claim is made."
+    },
+    {
       "locale": "ur",
       "namespace": "cli.exec_remote_help",
       "source_sha256": "c555648c19dd25af507951dc828f3fffbedc44feb579192c9c3fa7c6952e365e",
@@ -12830,6 +12918,28 @@
       },
       "status": "passed",
       "note": "Provenance supplied in ledger-assembly brief for PR #3307 head 5bc1b4b2336c85a13ad405466782995cf2aaf4dc; translator base b2750ae6540. Independent audit PASS, 0 findings, 17 keys. Context SHA-256 05eb64e49f9a898ff780e7529ffc96a78fcf676d9bbbca4bc068c62dd6d1828a. Assembly verified current source, target, context hashes and key parity."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.failure_details",
+      "source_sha256": "7dda49aa521bc226787d48077a3276de4e80a99c0488892cc60e99e142f33c99",
+      "target_sha256": "9f5cce97d320df7e4c4440c8e3e497eab4c4ad70973dad02e29bbae1bdbe4750",
+      "translator": {
+        "agent": "i18n-translator",
+        "session": "bd89f27b2221",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-01"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "7cd298bc2ab1",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-01",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Provenance supplied in ledger-assembly brief for PR #3307 head 5bc1b4b2336c85a13ad405466782995cf2aaf4dc; translator base b2750ae6540. Independent audit PASS, 0 findings, 17 keys. Context SHA-256 05eb64e49f9a898ff780e7529ffc96a78fcf676d9bbbca4bc068c62dd6d1828a. Assembly verified current source, target, context hashes and key parity. Dates are delegator-supplied dispatch/completion windows, not per-row timestamps. Target hash was verified during ledger assembly; this row does not assert the auditor published that hash. The delegator reports five slice-2 auditors did not publish target hashes; no locale-specific published-hash claim is made."
     },
     {
       "locale": "vi",
@@ -15495,6 +15605,28 @@
       "note": "Provenance supplied in ledger-assembly brief for PR #3307 head 5bc1b4b2336c85a13ad405466782995cf2aaf4dc; translator base b2750ae6540. Independent audit PASS, 0 findings, 17 keys. Context SHA-256 05eb64e49f9a898ff780e7529ffc96a78fcf676d9bbbca4bc068c62dd6d1828a. Assembly verified current source, target, context hashes and key parity."
     },
     {
+      "locale": "vi",
+      "namespace": "cli.failure_details",
+      "source_sha256": "7dda49aa521bc226787d48077a3276de4e80a99c0488892cc60e99e142f33c99",
+      "target_sha256": "b5ea47387725fbb9eaa570aace8ed96326ab35bf418cd61f0a4bca689f2efd42",
+      "translator": {
+        "agent": "i18n-translator",
+        "session": "d2f42f1e8cb5",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-01"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "8d833fef15d2",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-01",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Provenance supplied in ledger-assembly brief for PR #3307 head 5bc1b4b2336c85a13ad405466782995cf2aaf4dc; translator base b2750ae6540. Independent audit PASS, 0 findings, 17 keys. Context SHA-256 05eb64e49f9a898ff780e7529ffc96a78fcf676d9bbbca4bc068c62dd6d1828a. Assembly verified current source, target, context hashes and key parity. Dates are delegator-supplied dispatch/completion windows, not per-row timestamps. Target hash was verified during ledger assembly; this row does not assert the auditor published that hash. The delegator reports five slice-2 auditors did not publish target hashes; no locale-specific published-hash claim is made."
+    },
+    {
       "locale": "zh-CN",
       "namespace": "cli.agents_help",
       "source_sha256": "d8118ece7b59b99295fde3496bd3c9ff3184455d75ed31dcee50e5e515fd3bf3",
@@ -17823,6 +17955,28 @@
       },
       "status": "passed",
       "note": "Provenance supplied in ledger-assembly brief for PR #3307 head 5bc1b4b2336c85a13ad405466782995cf2aaf4dc; translator base b2750ae6540. Independent audit PASS, 0 findings, 17 keys. Context SHA-256 05eb64e49f9a898ff780e7529ffc96a78fcf676d9bbbca4bc068c62dd6d1828a. Assembly verified current source, target, context hashes and key parity."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.failure_details",
+      "source_sha256": "7dda49aa521bc226787d48077a3276de4e80a99c0488892cc60e99e142f33c99",
+      "target_sha256": "7f9174aed89de7cae1e6d90cb17528480901e934ef04048df4dd66f3da409ad4",
+      "translator": {
+        "agent": "i18n-translator",
+        "session": "c7bceae44c15",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-01"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "978e59a6e8d6",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-01",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Provenance supplied in ledger-assembly brief for PR #3307 head 5bc1b4b2336c85a13ad405466782995cf2aaf4dc; translator base b2750ae6540. Independent audit PASS, 0 findings, 17 keys. Context SHA-256 05eb64e49f9a898ff780e7529ffc96a78fcf676d9bbbca4bc068c62dd6d1828a. Assembly verified current source, target, context hashes and key parity. Dates are delegator-supplied dispatch/completion windows, not per-row timestamps. Target hash was verified during ledger assembly; this row does not assert the auditor published that hash. The delegator reports five slice-2 auditors did not publish target hashes; no locale-specific published-hash claim is made."
     }
   ]
 }

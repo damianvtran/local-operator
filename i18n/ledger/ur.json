@@ -2434,6 +2434,26 @@
       "translator": {
         "agent": "i18n-translator",
         "session": "bd89f27b2221",
+        "model": "openai/gpt-6.1-sol"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "7cd298bc2ab1",
+        "model": "openai/gpt-6.1-sol",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Provenance supplied in ledger-assembly brief for PR #3307 head 5bc1b4b2336c85a13ad405466782995cf2aaf4dc; translator base b2750ae6540. Independent audit PASS, 0 findings, 17 keys. Context SHA-256 05eb64e49f9a898ff780e7529ffc96a78fcf676d9bbbca4bc068c62dd6d1828a. Assembly verified current source, target, context hashes and key parity."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.failure_details",
+      "source_sha256": "7dda49aa521bc226787d48077a3276de4e80a99c0488892cc60e99e142f33c99",
+      "target_sha256": "9f5cce97d320df7e4c4440c8e3e497eab4c4ad70973dad02e29bbae1bdbe4750",
+      "translator": {
+        "agent": "i18n-translator",
+        "session": "bd89f27b2221",
         "model": "openai/gpt-6.1-sol",
         "date": "2026-11-01"
       },
