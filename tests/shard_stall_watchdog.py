@@ -528,6 +528,36 @@ class _WorkerTimer:
         # Set when the dump target itself is unusable, so nothing retries a
         # failed open once per test for the rest of the run.
         self._disabled = False
+        # Only CI retention asks for a pre-test writer/ownership handoff. Keep
+        # timer arming and all local-run behavior unchanged. Retention failure
+        # must never disable the independent report timer or explicit hard bound.
+        from tests.shard_stall_artifact import ENV_REGISTRY, registered_handle
+
+        registry = os.environ.pop(ENV_REGISTRY, "")
+        self._registry = Path(registry) if registry else None
+        self._retention_fallback = False
+        self._registered = bool(registry)
+        if registry:
+            try:
+                self._handle = registered_handle(self._path, Path(registry))
+            except (OSError, ValueError):
+                # Fail retention closed, not the existing watchdog. Recovery
+                # keeps timer semantics but must use a non-eligible destination,
+                # never the inode a leftover receipt can still authorize.
+                self._deny_retention()
+
+    def _deny_retention(self) -> None:
+        """Separate timer recovery from every previously registered writer inode."""
+        from tests.shard_stall_artifact import note_registration_failure
+
+        self._registered = False
+        self._retention_fallback = True
+        # These denial records explain failure, but are not the safety boundary:
+        # either directory can become read-only after registration. arm() never
+        # writes fallback bytes into an inode any old receipt can authorize.
+        note_registration_failure(self._path.parent)
+        if self._registry is not None:
+            note_registration_failure(self._registry)
 
     def bound_for(self, nodeid: str) -> tuple[float, bool]:
         """The ``(seconds, exit)`` to arm for ``nodeid``.
@@ -585,7 +615,21 @@ class _WorkerTimer:
             # the dump is written from a C thread with a raw descriptor, so the
             # file cannot be opened at the moment it fires.
             if self._handle is None or self._handle.closed:
-                self._handle = self._path.open("w", encoding="utf-8")
+                # A CI registered handle must never silently reopen a replaced
+                # pathname as though it were the original writer inode.
+                if self._registered:
+                    self._deny_retention()
+                if self._retention_fallback:
+                    import tempfile
+
+                    # An anonymous, non-eligible writer cannot alias the original
+                    # still-live registered inode, even if BOTH denial writes
+                    # failed. Under retention failure only, diagnostic stacks
+                    # are not recoverable by the console/artifact reader; the
+                    # independent report/hard timer still operates as before.
+                    self._handle = tempfile.TemporaryFile(mode="w+", encoding="utf-8")
+                else:
+                    self._handle = self._path.open("w", encoding="utf-8")
             self._handle.write(f"{ARM_MARKER}{nodeid} exceeded {bound:g}s; every thread follows.\n")
             self._handle.flush()
             if self._armed:
@@ -890,7 +934,20 @@ def install(config, on_ci: bool = False) -> None:
         # Made here rather than lazily on the first dump, so that the directory a
         # reader (or the workflow's report step) is pointed at exists for the
         # whole run. An empty one is removed by :meth:`_Controller.cleanup`.
-        _RUN_DIR = DUMP_ROOT / f"run-{os.getpid()}"
+        # CI and its always-step share an explicit invocation identity, so the
+        # artifact never needs to search neighboring/stale pytest directories.
+        # Invalid protocol input disables that handoff, not pytest itself.
+        from tests.shard_stall_artifact import ENV_INVOCATION, provenance
+
+        # Consume the handoff: test-created nested pytest controllers must not
+        # inherit this identity and mix their dumps into the ordinary shard.
+        # Workers inherit ENV_RUN_DIR instead, as they already did.
+        identity = os.environ.pop(ENV_INVOCATION, "")
+        try:
+            provenance(identity)
+        except ValueError:
+            identity = f"run-{os.getpid()}"
+        _RUN_DIR = DUMP_ROOT / identity
         with contextlib.suppress(OSError):
             _RUN_DIR.mkdir(parents=True, exist_ok=True)
         os.environ[ENV_RUN_DIR] = str(_RUN_DIR)

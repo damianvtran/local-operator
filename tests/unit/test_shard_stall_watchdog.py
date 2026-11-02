@@ -44,6 +44,8 @@ def _isolated_module_state(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(watchdog, "DUMP_ROOT", tmp_path / "lo-shard-stall")
     monkeypatch.setattr(watchdog, "_RUN_DIR", None)
     monkeypatch.delenv(watchdog.ENV_RUN_DIR, raising=False)
+    # CI's ordinary invocation identity must not leak into synthetic controllers.
+    monkeypatch.delenv("LOCAL_OPERATOR_SHARD_STALL_INVOCATION", raising=False)
     monkeypatch.setattr(watchdog, "_CONTROLLER", None)
     monkeypatch.setattr(watchdog, "_WORKER", None)
     controllers = []
