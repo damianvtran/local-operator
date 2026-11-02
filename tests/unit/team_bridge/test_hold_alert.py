@@ -328,6 +328,59 @@ def test_the_clear_goes_to_the_session_that_raised_it_after_the_designation_move
     assert item["session_id"] == "sess_old" and item["priority"] == "low"
 
 
+def test_a_restart_after_the_designation_moved_still_clears_the_old_sessions_alert(
+    tmp_path: Path,
+) -> None:
+    # Q3: the alert stands in sess_old; the process dies (no record), the
+    # designation moves to sess_new and the holds drain.
+    store = _enrolled(tmp_path, session="sess_old")
+    now = 10 * HOUR
+    clock = Clock()
+    stored = _raise_then_forget(tmp_path, store, clock, now)
+    store.update_designated_session(_owner(), "sess_new")
+    store.delete_hold(_owner(), stored)
+
+    assert asyncio.run(_tick(tmp_path, clock, now)) == "cleared"
+
+    [item] = _items(tmp_path)  # nothing was created in sess_new
+    assert item["session_id"] == "sess_old" and item["priority"] == "low"
+    clock.value += hold_alert.THROTTLE_S
+    assert asyncio.run(_tick(tmp_path, clock, now)) == "none_held"
+
+
+def test_disabling_after_the_designation_moved_clears_the_old_sessions_alert(
+    tmp_path: Path,
+) -> None:
+    store = _enrolled(tmp_path, session="sess_old")
+    now = 10 * HOUR
+    clock = Clock()
+    _raise_then_forget(tmp_path, store, clock, now)
+    store.update_designated_session(_owner(), "sess_new")
+    _threshold(tmp_path, 0)
+
+    assert asyncio.run(_tick(tmp_path, clock, now)) == "disabled"
+
+    [item] = _items(tmp_path)
+    assert item["session_id"] == "sess_old" and item["priority"] == "low"
+
+
+def test_a_restart_after_a_move_leaves_a_dismissed_old_alert_dismissed(tmp_path: Path) -> None:
+    store = _enrolled(tmp_path, session="sess_old")
+    now = 10 * HOUR
+    clock = Clock()
+    stored = _raise_then_forget(tmp_path, store, clock, now)
+    [raised] = _items(tmp_path)
+    NotificationStore(tmp_path).apply("dismiss", ids=[(raised["id"], raised["revision"])])
+    store.update_designated_session(_owner(), "sess_new")
+    store.delete_hold(_owner(), stored)
+
+    asyncio.run(_tick(tmp_path, clock, now))
+
+    [item] = NotificationStore(tmp_path).list_items(state="dismissed")[0]
+    assert item["session_id"] == "sess_old" and item["priority"] == "low"
+    assert NotificationStore(tmp_path).list_items(state="unread")[0] == []
+
+
 def test_a_session_change_while_held_moves_the_alert_and_clears_the_old_one(
     tmp_path: Path,
 ) -> None:
