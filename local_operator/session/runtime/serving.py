@@ -904,6 +904,22 @@ class ServingSessionHandle(SessionHandle):
     #: exists to catch. See ``create_session`` for what waits on it.
     mcp_publication_gate: PublicationGate | None = None
 
+    #: The idle latch's recorded refusal cause, or ``""`` until ``begin_retire``
+    #: records one. ``server._idle_refusal_reason`` is its only reader: it turns the
+    #: string into the stop refusal's token (``busy`` / ``wake`` / ``leaving``), so
+    #: a handle that cannot answer the probe would report every refusal as work in
+    #: flight — the answer R3/Q-1 exists to stop producing.
+    #:
+    #: Declared at CLASS level for the reason the latch above gives: the server
+    #: reaches for it with a ``getattr`` capability probe, and the
+    #: capability-surface guard reads ``hasattr(ServingSessionHandle, name)``, so an
+    #: attribute that lived only on the instance reads as a capability the handle
+    #: cannot answer (measured: the guard's first report after this PR added the
+    #: probe). ``begin_retire`` is the only writer, and every path that refuses sets
+    #: it before returning ``False``, so the reader never sees this default in
+    #: practice — the class still has to state it for the probe to resolve.
+    _retire_refusal: str = ""
+
     def __init__(
         self,
         session: Any,
@@ -2359,13 +2375,36 @@ class ServingSessionHandle(SessionHandle):
         read as an invitation.
         """
         if getattr(self, "_disposing", False):
+            self._retire_refusal = "already disposing"
+            return False
+        # A stop cannot take over the successor promised by an update window.
+        # begin_update sets the handle flag before publishing it; end_update
+        # clears it only when that window closes. Checking the authoritative
+        # flag HERE keeps exclusion and retirement in the same owner-loop step,
+        # including the await while the update announces its handover (R7-1 /
+        # Q4-1). Do not put this in may_refresh or reject every retirement: the
+        # update itself must still latch runtime-retired inside its own window.
+        if cause == "user-stop" and getattr(self, "_updating", ""):
+            self._retire_refusal = "updating"
             return False
         try:
             reason = str(self.may_refresh() or "")
         except Exception:  # noqa: BLE001 — uncertainty keeps the runtime
             reason = "busy probe failed"
         if reason:
+            # THE REFUSAL'S CAUSE, KEPT FOR THE CALLER THAT ASKED. The reasons
+            # ``may_refresh`` gives have different next steps — work in flight
+            # clears on its own, a wake due in the warm window clears when it
+            # fires, and an unevaluable probe may not clear at all — and the
+            # stop ladder's receipt names one step, not three. Recorded here
+            # rather than re-probed by the caller, because a second sample would
+            # describe state this decision did not see (agent review round 1 D2,
+            # UX round 1 U2). Read back by
+            # ``server._idle_refusal_reason``; this attribute is that field's
+            # only reader.
+            self._retire_refusal = reason
             return False
+        self._retire_refusal = ""
         self._retiring_cause = cause or "retiring"
         self._retiring_detail = detail
         self._exit_committed = True

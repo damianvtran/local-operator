@@ -34,6 +34,7 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -55,6 +56,7 @@ from local_operator.session.attention import AttentionStore
 from local_operator.session.bulk_resume import ResumeOutcome, ResumeSelection
 from local_operator.session.runtime import control, registry
 from local_operator.session.runtime.types import SessionRecord
+from local_operator.tools import builtin
 from local_operator.tools.builtin import (
     _SESSIONS_OP_FIELDS,
     _SESSIONS_TOOL_DESCRIPTION,
@@ -868,9 +870,16 @@ def test_describe_approval_sentences_are_pinned() -> None:
         )
         == "open as a listed workstream (team release, profile coder): go"
     )
+    # The stop prompt now states the idle-only precondition and the no-signal
+    # promise, and the remote form states its own refusal instead of describing
+    # an act that never happens (design round 1 D5, UX round 1 U3/U5).
     assert _describe_sessions_approval({"op": "stop", "pid": 48213}, ".") == (
-        "stop pid 48213: ends its current run and releases the session lease"
+        "stop pid 48213 if it is idle: releases the session lease and never signals; "
+        "refused while it is working"
     )
+    assert _describe_sessions_approval(
+        {"op": "stop", "session": "s1", "peer": "cloud-node-1"}, "."
+    ) == ("stop session s1 on cloud-node-1: always refused on this build, nothing will be sent")
     assert _describe_sessions_approval({"op": "resume", "session": "abcdef123456"}, ".") == (
         "resume session abcdef123456: reopens its transcript headlessly"
     )
@@ -922,6 +931,10 @@ async def test_stop_runs_the_graceful_ladder_only(
         method = "socket"
         wakes_dormant = 1
         monitors_dormant = 0
+        # StopOutcome's own field, defaulted on the real class: a fake that omits
+        # it makes the tool's receipt renderer the only caller that can see the
+        # difference between a real outcome and this one.
+        reason = ""
         line = 'stopped "stoppable" — 1 wake dormant until you reopen it'
 
     async def _fake_stop(target: Any, **kwargs: Any) -> Any:
@@ -940,6 +953,7 @@ async def test_stop_runs_the_graceful_ladder_only(
         # v1 is the graceful ladder only: no SIGKILL from the tool, and the
         # marker records which front end asked.
         assert captured["force"] is False
+        assert captured["graceful_only"] is True
         assert captured["timeout_s"] == control.DEFAULT_TIMEOUT_S
         assert captured["_command"] == "sessions tool"
         assert (result.details or {})["method"] == "socket"
@@ -2851,7 +2865,6 @@ async def test_remote_ops_map_to_the_pilot_argv_and_bounds(
     assert calls == [
         (["network", "sessions", "--json", "--peer", PEER, "--send", "s1", "--", "go"], 600.0),
         (["network", "sessions", "--json", "--peer", PEER, "--engage", "s1"], 180.0),
-        (["network", "sessions", "--json", "--peer", PEER, "--stop", "s1"], 300.0),
         (
             [
                 "network",
@@ -2879,25 +2892,27 @@ async def test_remote_ops_map_to_the_pilot_argv_and_bounds(
         _context(root),
     )
     assert result.is_error and "<provider>/<model-id>" in result.text
-    assert len(calls) == 4
+    assert len(calls) == 3
 
 
 @pytest.mark.asyncio
-async def test_remote_stop_names_the_cli_force_escalation_on_skipped(
+async def test_remote_stop_refuses_without_sending_weaker_stop(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """§8.4: no force in the tool — the one outcome whose remedy is a flag
-    names the CLI escalation instead."""
-    _fake_mesh(
-        monkeypatch,
-        {"ok": False, "outcome": "skipped", "detail": "A turn is in flight there."},
-        rc=1,
-    )
+    """The mesh transport cannot promise the new idle-only capability yet."""
+
+    async def forbidden(*args, **kwargs):
+        raise AssertionError("remote stop must refuse before transport")
+
+    monkeypatch.setattr("local_operator.tools.builtin._mesh_cli_json", forbidden)
     result = await execute_sessions(
         "t", {"op": "stop", "peer": PEER, "session": "s1"}, None, None, _context(root)
     )
-    assert result.is_error  # the ladder did not end it
-    assert "lop network sessions --peer cloud-node-1 --stop s1 --force" in result.text
+    assert result.is_error
+    # Nothing was sent, and no command is offered: the tool cannot perform a
+    # remote stop at all on this build, so the operator stops it there.
+    assert "nothing was sent" in result.text
+    assert "--force" not in result.text
 
 
 def test_mesh_field_refusals_name_the_local_route() -> None:
@@ -3426,3 +3441,113 @@ def test_the_viewer_declares_that_it_adopts_a_move_destination() -> None:
     source = inspect.getsource(AttachClient)
     assert 'auth["cwd_adoption"] = True' in source
     assert "self._cwd_adoption = cwd_adoption" in source
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "method, reason, expected, is_error",
+    [
+        ("refused", "busy", "is working right now", True),
+        ("refused", "wake", "a scheduled wake is due", True),
+        ("refused", "old_owner", "runs an older build", True),
+        ("refused", "unanswered", "did not answer", True),
+        ("pending", "", "stop accepted by", False),
+        # An update window must remain an error/refusal at the tool boundary,
+        # using the ladder's conservative fallback rather than invented busy copy.
+        ("refused", "updating", "the ladder's own English line", True),
+    ],
+)
+async def test_stop_receipt_sentence_is_chosen_by_outcome(
+    root: Path, monkeypatch: pytest.MonkeyPatch, method, reason, expected, is_error
+) -> None:
+    """One receipt per cause, resolved through the catalogue, machine token kept.
+
+    Agent review round 1 R2 keys these sentences; UX round 1 U2 and design round
+    1 D2 give each cause its own next step. ``method``/``reason`` in ``details``
+    stay the stable machine account so a client never parses the sentence.
+    """
+
+    class _Outcome:
+        pid = 4242
+        session_id = "aaaa00000001"
+        name = "stoppable"
+        wakes_dormant = 0
+        monitors_dormant = 0
+        line = "the ladder's own English line"
+
+        def __init__(self) -> None:
+            self.method = method
+            self.reason = reason
+
+    class _Record:
+        pid = 4242
+        session_id = "aaaa00000001"
+        conversation_name = "stoppable"
+
+    monkeypatch.setattr(
+        builtin,
+        "_sessions_target",
+        AsyncMock(
+            return_value=builtin._SessionsTarget(
+                record=_Record(), session_id="", candidates=[], candidates_stored=False, error=""
+            )
+        ),
+    )
+    monkeypatch.setattr(control, "stop_session", AsyncMock(return_value=_Outcome()))
+    result = await execute_sessions(
+        "t", {"op": "stop", "session": "aaaa00000001"}, None, None, _context(root)
+    )
+    assert result.is_error is is_error
+    assert expected in result.text
+    # The headline is the outcome, not a wait line (design round 1 D4).
+    assert result.text.splitlines()[0] == result.text.splitlines()[0].strip()
+    details = result.details or {}
+    assert details["method"] == method
+    assert details.get("reason", "") == reason
+
+
+@pytest.mark.asyncio
+async def test_stop_puts_the_outcome_above_the_wait_lines(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The collapsed card headline must be the result, not the attempt.
+
+    Design round 1 D4: the TUI paints ``mark_failed(_first_line(text), text)``, so
+    a wait line first hid the outcome behind an expand.
+    """
+
+    class _Outcome:
+        pid = 4243
+        session_id = "aaaa00000002"
+        name = "stoppable"
+        method = "socket"
+        reason = ""
+        wakes_dormant = 0
+        monitors_dormant = 0
+        line = 'stopped "stoppable"'
+
+    class _Record:
+        pid = 4243
+        session_id = "aaaa00000002"
+        conversation_name = "stoppable"
+
+    async def _stop(target: Any, **kwargs: Any) -> Any:
+        kwargs["on_wait"]("waiting up to 2 min for it to answer")
+        return _Outcome()
+
+    monkeypatch.setattr(
+        builtin,
+        "_sessions_target",
+        AsyncMock(
+            return_value=builtin._SessionsTarget(
+                record=_Record(), session_id="", candidates=[], candidates_stored=False, error=""
+            )
+        ),
+    )
+    monkeypatch.setattr(control, "stop_session", _stop)
+    result = await execute_sessions(
+        "t", {"op": "stop", "session": "aaaa00000002"}, None, None, _context(root)
+    )
+    lines = result.text.splitlines()
+    assert lines[0] == 'stopped "stoppable"'
+    assert "waiting up to" in lines[1]

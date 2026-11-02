@@ -1,0 +1,28 @@
+# wire.sessions / zh-CN — verification re-run by the implementer at the ledger commit
+# revision 9d4bed5504093b63c6ff59a87fce63246d7e6226  (round-1 audited revision b3b1c2aec56fdc615f16e57fadfd606eb3cefe96)
+# this is the mechanical half re-executed here; the linguistic verdicts are the two
+# auditor comments on PR #3102, quoted in report.md and record.json.
+SHA256 local_operator/i18n/catalogues/en/wire.sessions.json ad2c68cbc8dc98f81875b0c1b3960be4cdfed27113bc326ae26045d93d75585a
+SHA256 local_operator/i18n/catalogues/en/wire.sessions.context.json 1604fc3efe1d6aedf054c948324de3629df8c942744cf1c37a89ddf8de346e2f
+SHA256 local_operator/i18n/catalogues/zh-CN/wire.sessions.json 8344314d40d247a70b30ed4ae75654ebf7382b63a4bc7950c5c73e3c5234a6e9
+KEYS locale=zh-CN count=9 en=9 equal=True
+PASS wire.sessions.approval_stop_local args=['address'] cells=64
+  RENDER 若worker-7空闲则停止：释放会话租约，绝不发送信号；正在工作时拒绝
+PASS wire.sessions.approval_stop_peer args=['address', 'peer'] cells=63
+  RENDER worker-7在build-box上无法停止：此构建一律拒绝，不会发送任何内容
+PASS wire.sessions.stop_pending args=['name', 'seconds'] cells=83
+  RENDER “review-loop”已接受停止，但10 s后仍未退出。没有发送任何信号——重试前先查看会话列表。
+PASS wire.sessions.stop_refused_busy args=['name'] cells=129
+  RENDER “review-loop”正在工作（一个轮次、一项审批、一个子智能体或一个任务），因此没有停止任何内容，也没有发送任何信号。等它空闲后再重试。
+PASS wire.sessions.stop_refused_old_owner args=['name'] cells=135
+  RENDER “review-loop”运行的是较旧的构建，无法保证只在空闲时停止，因此没有停止任何内容，也没有发送任何信号。重试不会改变这一点——让操作员停止它。
+PASS wire.sessions.stop_refused_unanswered args=['name'] cells=101
+  RENDER “review-loop”没有应答，无法确认只在空闲时停止，也没有发送任何信号。先查看会话列表——它可能已经不在了。
+PASS wire.sessions.stop_refused_wake args=['name'] cells=117
+  RENDER “review-loop”处于空闲状态，但定时唤醒落在保留窗口内，因此没有停止任何内容，也没有发送任何信号。等该唤醒触发后再重试。
+PASS wire.sessions.stop_remote_refused args=[] cells=126
+  RENDER 其他设备上的会话无法从此处用此构建停止：无法保证只在空闲时退出且不发送信号，因此没有发送任何内容。操作员可以在该设备上停止它。
+PASS wire.sessions.stop_self_refused args=[] cells=58
+  RENDER 该目标就是当前会话，会话无法停止自身。换一个会话来停止它。
+WIDTH locale=zh-CN min=58 max=135; plural: none of the nine keys is an ICU plural message; nfc=ok controls=none quotes=verified-by-audit
+RESULT zh-CN: mechanical PASS
