@@ -85,7 +85,11 @@ async def _claim(session, config_dir):
 async def _complete(session, config_dir, card):
     turn = await _claim(session, config_dir)
     candidate = turn.transform([card])
-    admitted = _text(session._render_history(candidate))
+    rendered = session._render_history(candidate)
+    admitted = _text(rendered)
+    # The journal marker must not replace the request-local admitted frame:
+    # its screened card metadata and body still reach the model byte-for-byte.
+    assert candidate[-1].details["text"] == _message_texts(rendered)[-1]
     assert PENDING_CARD in admitted and BODY in admitted, admitted
     assert "name-canary" not in admitted and "mention: no" not in admitted, admitted
     entry = await session._transcript.append_message(
@@ -131,7 +135,7 @@ async def test_raw_persisted_card_never_leaks_in_any_render_or_cold_replay(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_completed_admission_history_is_always_pending_without_an_envelope(tmp_path):
+async def test_completed_admission_history_has_neutral_marker_without_an_envelope(tmp_path):
     cfg = tmp_path / "cfg"
     store = _store(cfg)
     _reserve(store, config_dir=cfg)
@@ -143,6 +147,10 @@ async def test_completed_admission_history_is_always_pending_without_an_envelope
         original = json.dumps(card.model_dump(), sort_keys=True)
         _, candidate = await _complete(session, cfg, card)
         assert json.dumps(card.model_dump(), sort_keys=True) == original, "no journal mutation"
+        assert _row(cfg)["state"] == "completed"
+        # A past delivery must not be described as pending on every later turn.
+        journal_text = _text(session._render_history([card]))
+        assert "pending" not in journal_text.lower(), journal_text
         raw = session._transcript.build_llm_history()
         assert PENDING_CARD in _text(session._render_history(raw))
         assert "mention: no" not in _text(session._render_history(raw))
@@ -262,6 +270,58 @@ async def test_crash_without_completion_stays_pending_and_restart_can_retry(tmp_
             assert _row(cfg)["card_posted_at"] is None
         finally:
             await restarted.dispose()
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", ["completed", "missing", "claimed", "failed_hydration"])
+async def test_journal_marker_bytes_are_identical_in_every_reservation_state(
+    tmp_path, state, caplog
+):
+    class Unavailable(FakeBridgeClient):
+        async def conversation_body(self, *args, **kwargs):
+            raise RuntimeError("offline")
+
+    cfg = tmp_path / "cfg"
+    store = _store(cfg)
+    if state != "missing":
+        _reserve(store, config_dir=cfg)
+    client = Unavailable() if state == "failed_hydration" else FakeBridgeClient()
+    session = _session(tmp_path, CapturingStream([]), _runtime(cfg, client))
+    try:
+        card = _card(session)
+        if state == "completed":
+            await _complete(session, cfg, card)
+            assert _row(cfg)["state"] == "completed"
+        elif state == "claimed":
+            await _claim(session, cfg)
+            assert _row(cfg)["state"] == "claimed"
+        elif state == "failed_hydration":
+            turn = PendingTurn(_owner(), SESSION_ID, config_dir=cfg)
+            assert not await turn.open(
+                budget=session._pending_body_budget(), fetch=session._fetch_pending_body
+            )
+            assert _row(cfg)["state"] == "pending"
+        else:
+            with sqlite3.connect(state_db_path(cfg)) as conn:
+                assert conn.execute("SELECT COUNT(*) FROM body_reservations").fetchone()[0] == 0
+        # Pin bytes, not the implementation constant: every state must reveal
+        # exactly the same absence of retained body, never reservation status.
+        caplog.clear()
+        with caplog.at_level("INFO", logger="local_operator.team_bridge.card_projection"):
+            for rendered in (
+                session._render_history([card]),
+                _default_convert_to_llm([card]),
+            ):
+                text = _text(rendered)
+                assert text.encode("utf-8") == b"[team_bridge: body not retained in history]"
+                _assert_pending(text)
+        assert not [
+            record
+            for record in caplog.records
+            if record.name == "local_operator.team_bridge.card_projection" and record.levelno >= 20
+        ]
     finally:
         await session.dispose()
 
