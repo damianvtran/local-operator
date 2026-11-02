@@ -1133,7 +1133,7 @@ def test_unpinned_org_crash_recovers_verbatim(tmp_path: Path, landed: bool) -> N
         async def commit(self, **kwargs):
             raise RuntimeError("simulated process death after intent persistence")
 
-    args = dict(
+    args: dict[str, Any] = dict(
         kind="skill",
         captured_local=_document_fields(),
         accepted=_document_fields(),
@@ -1174,7 +1174,7 @@ def test_concurrent_org_workers_do_not_fence_or_replay_active_dispatch(tmp_path:
                 await release.wait()
                 return await super().commit(**kwargs)
 
-        args = dict(
+        args: dict[str, Any] = dict(
             kind="skill",
             captured_local=_document_fields(),
             accepted=_document_fields(),
@@ -1215,7 +1215,7 @@ def test_legacy_worker_cannot_erase_new_org_intent(tmp_path: Path) -> None:
                 await release.wait()
                 raise OperationDeadlineExceeded("uncertain")
 
-        args = dict(
+        args: dict[str, Any] = dict(
             kind="skill",
             captured_local=_document_fields(),
             accepted=_document_fields(),
@@ -1248,14 +1248,113 @@ def test_legacy_worker_cannot_erase_new_org_intent(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
-def test_prior_candidate_intent_is_not_silently_abandoned(tmp_path: Path) -> None:
+def test_stale_legacy_intent_does_not_race_moderation(
+    tmp_path: Path,
+) -> None:
+    from dataclasses import replace
+
+    out = Outbox(tmp_path)
+    old = out.enqueue(
+        operation_id="op1", kind="skill", local_id="a1", direction="push", generation=1
+    )
+    legacy_document = _document_fields(seed="c")
+    legacy = replace(
+        old,
+        state="pending-reconciliation",
+        intent={
+            "document": legacy_document,
+            "expected_revision": "rev-a",
+            "preview_token": "old-pin",
+        },
+    )
+    out._atomic_write(legacy)
+
+    class NewRevision(FakeTransport):
+        async def preview(self, *, document, expected_revision, budget):
+            assert expected_revision == "rev-b"
+            return {
+                "revision": "rev-b",
+                "status": "unchanged",
+                "document": dict(document),
+                "unresolved": [],
+                "changes": [],
+                "transform": {"model": "not_applied"},
+            }
+
+    transport = NewRevision()
+    result, _, _ = asyncio.run(
+        _run(
+            tmp_path,
+            transport=transport,
+            expected="rev-b",
+            kind="skill",
+            captured_local=_document_fields(),
+            accepted=_document_fields(),
+            current_local=_document_fields(seed="b"),
+            remote_latest=_document_fields(),
+            org_skill=True,
+        )
+    )
+    assert result.reason == "legacy-reconciliation-required"
+    assert not transport.preview_calls and not transport.commit_calls
+    assert _stored(out, "op1") == legacy
+
+
+@pytest.mark.parametrize("expected", [None, "rev-a", "rev-b"])
+def test_legacy_intent_without_drain_never_dispatches(tmp_path: Path, expected: str | None) -> None:
+    from dataclasses import replace
+
+    out = Outbox(tmp_path)
+    old = out.enqueue(
+        operation_id="op1", kind="skill", local_id="a1", direction="push", generation=1
+    )
+    legacy = replace(
+        old,
+        state="pending-reconciliation",
+        intent={"expected_revision": "rev-a", "document": _document_fields()},
+    )
+    out._atomic_write(legacy)
+    transport = FakeTransport()
+    result, _, _ = asyncio.run(
+        _run(
+            tmp_path,
+            transport=transport,
+            expected=expected,
+            kind="skill",
+            captured_local=_document_fields(),
+            accepted=_document_fields(),
+            current_local=_document_fields(seed="b"),
+            remote_latest=_document_fields(),
+            org_skill=True,
+        )
+    )
+    assert result.reason == "legacy-reconciliation-required"
+    assert not transport.preview_calls and not transport.commit_calls
+    assert _stored(out, "op1") == legacy
+
+
+@pytest.mark.parametrize(
+    "reason", ["legacy-reconciliation-required", "prior-version-reconciliation-required"]
+)
+def test_reconciliation_reason_points_to_operator_guide(reason: str) -> None:
+    from local_operator.cli import _reason_error, _skills_refusal
+
+    message = _skills_refusal(_reason_error(reason))
+    assert reason in message and "guide://extensions" in message
+    assert "force" not in message.lower()
+
+
+@pytest.mark.parametrize("intent", [None, {}, {"unpinned_org_skill": True}])
+def test_prior_candidate_intent_is_not_silently_abandoned(
+    tmp_path: Path, intent: dict[str, Any] | None
+) -> None:
     from dataclasses import replace
 
     out = Outbox(tmp_path)
     prior = out.enqueue(
         operation_id="op1-org-v2", kind="skill", local_id="a1", direction="push", generation=1
     )
-    out._atomic_write(replace(prior, intent={"unpinned_org_skill": True}))
+    out._atomic_write(replace(prior, intent=intent))
     transport = FakeTransport()
     result, _, _ = asyncio.run(
         _run(
@@ -1271,10 +1370,10 @@ def test_prior_candidate_intent_is_not_silently_abandoned(tmp_path: Path) -> Non
     )
     assert result.reason == "prior-version-reconciliation-required"
     assert not transport.preview_calls and not transport.commit_calls
-    assert _stored(out, "op1-org-v2").intent == {"unpinned_org_skill": True}
+    assert _stored(out, "op1-org-v2").intent == intent
 
 
-def test_legacy_intentless_active_worker_is_fenced_by_remote_cas(tmp_path: Path) -> None:
+def test_legacy_intentless_active_worker_blocks_new_publication(tmp_path: Path) -> None:
     class AtomicOrg(FakeTransport):
         revision = "rev-a"
         writes = 0
@@ -1313,22 +1412,25 @@ def test_legacy_intentless_active_worker_is_fenced_by_remote_cas(tmp_path: Path)
             remote_latest=_document_fields(),
             org_skill=True,
         )
-        assert result.state == "pushed" and transport.writes == 1
+        # A legacy preview can still enter paid moderation after our check.
+        # Refuse the new request instead of relying on CAS to prevent writes
+        # while accidentally allowing duplicate moderation side effects.
+        assert result.reason == "legacy-reconciliation-required"
+        assert transport.writes == 0
         assert out.store_intent("op1", old.generation, {"expected_revision": "rev-a"})
-        with pytest.raises(RemoteRevisionChanged):
-            await transport.commit(
-                document=_document_fields(),
-                preview_token="old-pin",
-                accept_unresolved=[],
-                expected_revision="rev-a",
-                budget=_budget(),
-            )
+        await transport.commit(
+            document=_document_fields(),
+            preview_token="old-pin",
+            accept_unresolved=[],
+            expected_revision="rev-a",
+            budget=_budget(),
+        )
         assert transport.writes == 1
 
     asyncio.run(run())
 
 
-def test_legacy_intentless_pending_does_not_strand_org_push(tmp_path: Path) -> None:
+def test_legacy_intentless_pending_fails_closed(tmp_path: Path) -> None:
     out = Outbox(tmp_path)
     original = out.enqueue(
         operation_id="op1", kind="skill", local_id="a1", direction="push", generation=1
@@ -1357,8 +1459,8 @@ def test_legacy_intentless_pending_does_not_strand_org_push(tmp_path: Path) -> N
             org_skill=True,
         )
     )
-    assert result.state == "pushed" and len(server.commit_calls) == 1
-    assert server.commit_calls[0]["expected_revision"] == "rev-a"
+    assert result.reason == "legacy-reconciliation-required"
+    assert not server.preview_calls and not server.commit_calls
     assert _stored(out, "op1") == original  # The legacy worker may still be alive.
 
 
@@ -1405,7 +1507,7 @@ def test_unpinned_org_commit_timeout_replays_after_restart(tmp_path: Path) -> No
                 "transform": {"model": "not_applied"},
             }
 
-    args = dict(
+    args: dict[str, Any] = dict(
         kind="skill",
         captured_local=_document_fields(),
         accepted=_document_fields(),
@@ -1440,7 +1542,7 @@ def test_unpinned_org_replay_requires_valid_intent_and_scope(tmp_path: Path, cas
                 "transform": {"model": "not_applied"},
             }
 
-    args = dict(
+    args: dict[str, Any] = dict(
         kind="skill",
         captured_local=_document_fields(),
         accepted=_document_fields(),

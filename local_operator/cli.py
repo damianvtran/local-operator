@@ -12873,6 +12873,8 @@ def _skills_push(args: argparse.Namespace, base_dir: Path) -> int:
         "revision": outcome.revision,
         "operation_id": outcome.operation_id,
     }
+    if outcome.reason in _SKILL_RECONCILIATION_REASONS:
+        payload["recovery_guide"] = "guide://extensions"
     if getattr(args, "json", False):
         print(_json.dumps(payload, indent=2))
     else:
@@ -12883,12 +12885,18 @@ def _skills_push(args: argparse.Namespace, base_dir: Path) -> int:
     return 0 if outcome.state in ("pushed", "no-op") else 1
 
 
+_SKILL_RECONCILIATION_REASONS = frozenset(
+    {"legacy-reconciliation-required", "prior-version-reconciliation-required"}
+)
+
+
 def _reason_error(code: str) -> Any:
     """A named push refusal as the LinkError the shared wording helper expects."""
 
     from local_operator.hub_sync.identity import LinkError
 
-    return LinkError(code, code)
+    detail = f"{code} — guide://extensions" if code in _SKILL_RECONCILIATION_REASONS else code
+    return LinkError(code, detail)
 
 
 def _skills_sync(args: argparse.Namespace, base_dir: Path) -> int:

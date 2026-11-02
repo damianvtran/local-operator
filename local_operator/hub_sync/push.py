@@ -347,7 +347,7 @@ async def push_item(
     org_skill: bool = False,
 ) -> PushOutcome:
     """Serialize an org skill's dispatch so a pending intent has one live owner."""
-    kwargs = dict(
+    kwargs: dict[str, Any] = dict(
         kind=kind,
         local_id=local_id,
         captured_local=captured_local,
@@ -391,24 +391,20 @@ async def push_item(
             prior_candidate is not None
             and prior_candidate.local_id == local_id
             and prior_candidate.state in ("pending", "pending-reconciliation")
-            and isinstance(prior_candidate.intent, Mapping)
-            and prior_candidate.intent.get("unpinned_org_skill") is True
         ):
             return PushOutcome(
-                "skipped", operation_id=operation_id, reason="prior-version-reconciliation-required"
+                "skipped",
+                operation_id=operation_id,
+                reason="prior-version-reconciliation-required",
             )
         legacy = outbox.read(operation_id)
-        if legacy is not None and (
-            legacy.state == "pending-reconciliation"
-            or (legacy.state == "pending" and legacy.intent is not None)
-        ):
+        if legacy is not None and legacy.state in ("pending", "pending-reconciliation"):
+            # Even a stale revision cannot prove an old request left paid
+            # moderation. Until an authoritative drain exists, never race it or
+            # alter the legacy row; operators need the retained evidence.
             return PushOutcome(
                 "skipped", operation_id=operation_id, reason="legacy-reconciliation-required"
             )
-        # A pending legacy row with no intent has not yet dispatched a commit.
-        # Never mutate it: its owner may still be alive and could later dispatch.
-        # The two requests retain If-Match on the same remote revision, so only
-        # one can succeed if that older owner races this isolated operation.
         kwargs["operation_id"] = scoped_id
         return await _push_item_inner(**kwargs)
 
