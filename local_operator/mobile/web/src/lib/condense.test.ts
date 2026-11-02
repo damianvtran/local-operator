@@ -49,6 +49,7 @@ import {
 	workedSecondsOf,
 } from "./condense-fold";
 import { collapsePlan } from "./condense-plan";
+import { composeCondensedEntries } from "./condense-view";
 import { isQuietTurnCall } from "./condense-segments";
 import { isFailedResult, isInternalReceipt } from "./condense-predicates";
 import { toCondenseRecords, rowKey, type CondenseRecord } from "./condense-records";
@@ -170,6 +171,7 @@ const RECORDS: Record<string, (id: string, i: number) => CondenseRecord> = {
 	}),
 	J: (id, i) => custom(id, i, "job_result"),
 	H: (id, i) => custom(id, i, "hub_message"),
+	Bi: (id, i) => custom(id, i, "team_bridge_message"),
 	X: (id, i) => custom(id, i, "monitor_prompt"),
 	Q: (id, i) => custom(id, i, "session_mcp_unavailable"),
 	I: (id, i) => custom(id, i, "session_incident", "error"),
@@ -403,10 +405,11 @@ describe("the condense parity fixture", () => {
 		/*
 		 * AND THE SIZE IS PINNED, so a desktop change that adds a wall of quiet
 		 * cases shows up as a diff in review instead of quietly shrinking what this
-		 * suite proves. `-28` is read from the corpus this copy pins (27 before the
-		 * bridge cases reseeded the property corpus, local-operator-ui #1529).
+		 * suite proves. 27 is independently counted from this corpus's Z/R
+		 * tokens (28 before incoming Bi reseeded the property sequences). No new
+		 * unexpressible token or skip predicate is added by the incoming port.
 		 */
-		expect(fromHelper.length).toBe(28);
+		expect(fromHelper.length).toBe(27);
 		/* Every skip carries the quiet pair, and none is skipped for another reason:
 		 * an unbuilt token would throw inside `seq`, never be filtered quietly. */
 		for (const entry of fromHelper) {
@@ -597,6 +600,7 @@ const WIRE: Record<string, WireToken> = {
 		wireEntry({ id, kind: "peer_message", text: "peer", details: { sender: {} } }),
 	J: (id) => wireEntry({ id, kind: "notice", text: "t", custom_type: "job_result" }),
 	H: (id) => wireEntry({ id, kind: "notice", text: "t", custom_type: "hub_message" }),
+	Bi: (id) => wireEntry({ id, kind: "notice", text: "t", custom_type: "team_bridge_message" }),
 	X: (id) => wireEntry({ id, kind: "notice", text: "t", custom_type: "monitor_prompt" }),
 	Q: (id) =>
 		wireEntry({ id, kind: "notice", text: "t", custom_type: "session_mcp_unavailable" }),
@@ -687,4 +691,21 @@ describe("the quiet-closed fallback the skip-list names", () => {
 		 * lost, only deferred to the merged run's settlement. */
 		expect(wire.runs[0].segments.length).toBeGreaterThan(0);
 	});
+});
+
+describe("incoming Bridge receipt wire mapping", () => {
+	it("keeps typed Bridge receipts in incoming action aggregation, not generic notices", () => {
+		const records = toCondenseRecords([wireEntry({ id: "incoming", kind: "notice", custom_type: "team_bridge_message", text: "metadata only" })]);
+		expect(records[0]?.kind).toBe("custom");
+		expect(isInternalReceipt(records[0]!)).toBe(true);
+		const boundary = toCondenseRecords([wireEntry({ id: "generic", kind: "notice", text: "team_bridge_message" })]);
+		expect(isInternalReceipt(boundary[0]!)).toBe(false);
+	});
+});
+
+it("keeps admitted history media as a visible source row while incoming Bridge work folds", () => {
+	const incoming = (id: string) => wireEntry({ id, kind: "notice", custom_type: "team_bridge_message", text: "Metadata only" });
+	const history = wireTool("bridge", { id: "history-image", images: [{ index: 0, mime_type: "image/png" }], details: { args: { op: "channel_history" } } });
+	const view = composeCondensedEntries([incoming("receipt-1"), history, incoming("receipt-2"), wireTool("bridge", { id: "post", details: { args: { op: "channel_post" } } }), wireTool("send", { id: "send" })], { live: true });
+	expect(view.entries.some(item => item.kind === "row" && item.entry.id === "history-image")).toBe(true);
 });
