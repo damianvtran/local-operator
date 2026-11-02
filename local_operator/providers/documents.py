@@ -89,8 +89,10 @@ __all__ = [
     "document_budget_for_messages",
     "document_budget_for_request",
     "document_native_ok",
+    "document_text_cap",
     "extract_document_text",
     "fallback_document_text",
+    "is_text_mime",
     "pdf_page_count",
 ]
 
@@ -106,6 +108,18 @@ MAX_FALLBACK_CHARS = 400_000
 #: How much of a text-ish file the fallback keeps. The same 400k character
 #: bound: text has no page structure to count, and the notice names the cut.
 MAX_FALLBACK_TEXT_CHARS = 400_000
+
+#: One document may claim at most this share of the model's context window
+#: once rendered, as ``1 / DOCUMENT_WINDOW_SHARE``. A quarter leaves the rest of
+#: the window to the conversation, the system prompt and the reply; without it
+#: a single large file filled a small-window model by itself and compaction,
+#: which can only shed OTHER history, could never make the next request fit.
+DOCUMENT_WINDOW_SHARE = 4
+
+#: Characters per token the fallback text is budgeted at. Deliberately the
+#: pessimistic end (English prose is ~4, code and CJK nearer 2-3): a cap that
+#: under-counts would let a rendered document exceed its share of the window.
+DOCUMENT_CHARS_PER_TOKEN = 3
 
 #: Anthropic documents are capped at 600 pages, but only 100 when the request's
 #: context window is under 1M tokens (its PDF page states both). A model whose
@@ -208,10 +222,18 @@ def _request_room(
     under-estimate sends a payload the provider refuses (the failure this
     class of fix exists to prevent).
     """
-    from local_operator.compaction.tokens import estimate_wire_bytes
+    from local_operator.compaction.tokens import (
+        document_wire_bytes,
+        estimate_wire_bytes,
+    )
 
+    # The SAME per-block figure ``estimate_wire_bytes`` charged, so the
+    # subtraction removes exactly the documents' share and leaves ``other``
+    # as the non-document payload. Subtracting the base64 size of a document
+    # the estimator charged as a ~50-token reference would drive ``other``
+    # negative and hand the room back to the next PDF.
     documents = sum(
-        encoded_document_bytes(block)
+        document_wire_bytes(block)
         for message in messages
         for block in message.content
         if isinstance(block, DocumentContent)
@@ -257,7 +279,7 @@ _TEXT_MIMES = frozenset(
 )
 
 
-def _is_text_mime(mime_type: str) -> bool:
+def is_text_mime(mime_type: str) -> bool:
     return mime_type.startswith("text/") or mime_type in _TEXT_MIMES
 
 
@@ -294,7 +316,42 @@ def document_form(
         return None
     if form.wire == "anthropic" and (context_window or 0) < ANTHROPIC_LARGE_CONTEXT_WINDOW:
         form = replace(form, max_pages=ANTHROPIC_SMALL_CONTEXT_MAX_PAGES)
+    window_pages = _window_page_cap(context_window)
+    if window_pages is not None:
+        form = replace(
+            form,
+            max_pages=window_pages if form.max_pages is None else min(form.max_pages, window_pages),
+        )
     return form
+
+
+def _window_page_cap(context_window: int | None) -> int | None:
+    """Native PDF pages one document may carry in a ``context_window`` model.
+
+    The token ruler charges a native page :data:`PDF_PAGE_TOKEN_ESTIMATE`; a
+    document gets ``1 / DOCUMENT_WINDOW_SHARE`` of the window, so the cap is
+    that share divided by the per-page charge (100 pages at 1M, 20 at 200k).
+    Beyond it the PDF is EXTRACTED instead, whose text is bounded by
+    :func:`document_text_cap`. ``None`` for an unknown window: no evidence of
+    a limit, so the table's own page ceiling stands.
+    """
+    if not context_window or context_window <= 0:
+        return None
+    from local_operator.compaction.tokens import PDF_PAGE_TOKEN_ESTIMATE
+
+    return max(1, context_window // DOCUMENT_WINDOW_SHARE // PDF_PAGE_TOKEN_ESTIMATE)
+
+
+def document_text_cap(context_window: int | None) -> int | None:
+    """Most characters of fallback text ONE document may render for this model.
+
+    ``1 / DOCUMENT_WINDOW_SHARE`` of the window at
+    :data:`DOCUMENT_CHARS_PER_TOKEN`. ``None`` (unknown window) leaves only the
+    global :data:`MAX_FALLBACK_CHARS` / :data:`MAX_FALLBACK_TEXT_CHARS` bounds.
+    """
+    if not context_window or context_window <= 0:
+        return None
+    return max(1, context_window * DOCUMENT_CHARS_PER_TOKEN // DOCUMENT_WINDOW_SHARE)
 
 
 #: Which request wire each table form belongs to. ``openrouter`` and
@@ -443,7 +500,7 @@ def document_injection(
     """
     if document_native_ok(block, form, budget=document_budget(form)):
         return "native"
-    if block.mime_type == "application/pdf" or _is_text_mime(block.mime_type):
+    if block.mime_type == "application/pdf" or is_text_mime(block.mime_type):
         return "extracted"
     return "reference"
 
@@ -454,7 +511,7 @@ def _cached_text_path(digest: str) -> Path:
     return AttachmentStore().root / f"{digest}.txt"
 
 
-def extract_document_text(block: "DocumentContent") -> str:
+def extract_document_text(block: "DocumentContent", max_chars: int | None = None) -> str:
     """The fallback text for ``block``, with page markers and a truncation note.
 
     PDFs are extracted with ``pypdf`` (lazily imported: it is a base
@@ -468,25 +525,31 @@ def extract_document_text(block: "DocumentContent") -> str:
     Text-ish MIME is decoded directly, bounded. Anything else yields the
     REFERENCE sentence — a model must never receive nothing for a file the
     user believes it can see.
+
+    ``max_chars`` is the caller's WINDOW-aware ceiling (:func:`document_text_cap`)
+    and only ever lowers the global bounds: the cache keeps the full extraction
+    so a later request on a bigger model is not served a clipped copy.
     """
     raw = _decoded(block)
     if raw is None:
         return _reference_text(block, reason="its stored bytes could not be decoded")
     if block.mime_type == "application/pdf":
-        return _extract_pdf(block, raw)
-    if _is_text_mime(block.mime_type):
+        return _extract_pdf(block, raw, max_chars)
+    if is_text_mime(block.mime_type):
+        limit = (
+            MAX_FALLBACK_TEXT_CHARS
+            if max_chars is None
+            else min(MAX_FALLBACK_TEXT_CHARS, max_chars)
+        )
         text = raw.decode("utf-8", errors="replace")
-        if len(text) > MAX_FALLBACK_TEXT_CHARS:
-            dropped = len(text) - MAX_FALLBACK_TEXT_CHARS
-            text = (
-                text[:MAX_FALLBACK_TEXT_CHARS]
-                + f"\n[... {dropped} characters truncated from {block.filename}]"
-            )
+        if len(text) > limit:
+            dropped = len(text) - limit
+            text = text[:limit] + f"\n[... {dropped} characters truncated from {block.filename}]"
         return f"[Document: {block.filename} ({block.mime_type})]\n```\n{text}\n```"
     return _reference_text(block)
 
 
-def _extract_pdf(block: "DocumentContent", raw: bytes) -> str:
+def _extract_pdf(block: "DocumentContent", raw: bytes, max_chars: int | None = None) -> str:
     # The cache holds the EXTRACTION only, never the display header: the same
     # bytes can be re-attached under a new filename, and a cached header would
     # then name a file the user is no longer sending.
@@ -494,7 +557,7 @@ def _extract_pdf(block: "DocumentContent", raw: bytes) -> str:
     header = f"[Document: {block.filename} ({block.mime_type}, {block.bytes} bytes)]"
     cached = _read_cached_text(digest)
     if cached is not None:
-        return f"{header}\n{cached}"
+        return f"{header}\n{_clip_extraction(cached, max_chars, block.filename)}"
     try:
         from pypdf import PdfReader
 
@@ -529,7 +592,17 @@ def _extract_pdf(block: "DocumentContent", raw: bytes) -> str:
     if total > pages_read:
         body += f"\n[... only the first {pages_read} of {total} pages were read]"
     _write_cached_text(digest, body)
-    return f"{header}\n{body}"
+    return f"{header}\n{_clip_extraction(body, max_chars, block.filename)}"
+
+
+def _clip_extraction(body: str, max_chars: int | None, filename: str) -> str:
+    """``body`` cut to ``max_chars`` with the cut announced, never silent."""
+    if max_chars is None or len(body) <= max_chars:
+        return body
+    return (
+        body[:max_chars] + f"\n[... {len(body) - max_chars} characters truncated from {filename} "
+        "to fit the model's context window]"
+    )
 
 
 def _read_cached_text(digest: str) -> str | None:
@@ -569,6 +642,6 @@ def _reference_text(block: "DocumentContent", *, reason: str | None = None) -> s
     )
 
 
-def fallback_document_text(block: "DocumentContent") -> str:
+def fallback_document_text(block: "DocumentContent", max_chars: int | None = None) -> str:
     """One entry point for the serializers' fallback arm."""
-    return extract_document_text(block)
+    return extract_document_text(block, max_chars)

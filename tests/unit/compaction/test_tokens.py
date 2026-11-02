@@ -1207,3 +1207,111 @@ def test_resetting_the_tokenizer_drops_the_preserved_turn_memo():
     tokens_mod.reset_tokenizer_state()
 
     assert len(tokens_mod._TEXT_LENGTH_CACHE) == 0
+
+
+# ---------------------------------------------------------------------------
+# Document blocks are charged by what the request RENDERS, not by their size
+# ---------------------------------------------------------------------------
+
+
+def _document(mime: str, filename: str, size: int, *, injection: str = "reference"):
+    import base64
+
+    from local_operator.harness.types import DocumentContent
+
+    return DocumentContent(
+        data=base64.b64encode(b"\x00\x01\x02" * (size // 3)).decode("ascii"),
+        mime_type=mime,
+        filename=filename,
+        bytes=size,
+        injection=injection,  # type: ignore[arg-type]
+    )
+
+
+@pytest.mark.parametrize("size", [1_000_000, 32_000_000], ids=["1MB", "32MB"])
+@pytest.mark.parametrize(
+    ("mime", "filename"),
+    [
+        ("video/quicktime", "clip.mov"),
+        ("audio/mpeg", "song.mp3"),
+        ("application/zip", "bundle.zip"),
+        ("application/octet-stream", "report.docx"),
+        ("video/mp4", "demo.mp4"),
+    ],
+)
+def test_a_reference_document_costs_its_sentence_not_its_bytes(mime, filename, size):
+    """The measured failure: 1 MB of video charged 1.33M tokens, 1.125 MB the
+    1.5M cap, so ``_effective_max_tokens`` refused every request and compaction
+    (which only sheds OTHER history) could never recover the session."""
+    message = Message(role="user", content=[_document(mime, filename, size)])
+    estimate = estimate_tokens(message)
+    assert 0 < estimate < 1000
+    assert estimate == estimate_tokens(
+        Message(role="user", content=[_document(mime, filename, 1_000)])
+    ), "a reference document's charge must not depend on its size"
+    assert messages_tokens_upper_bound([message]) >= estimate
+
+
+def test_a_reference_charge_covers_the_sentence_the_serializer_renders():
+    """The ruler may not sit BELOW the render: pins the charge to the real
+    ``_reference_text`` output at a long filename, in the ratio the ruler uses."""
+    from local_operator.providers.documents import extract_document_text
+
+    block = _document("video/mp4", "x" * 200 + ".mp4", 5_000_000)
+    rendered = extract_document_text(block)
+    assert estimate_tokens(Message(role="user", content=[block])) >= len(rendered) // 4
+
+
+def test_a_text_document_is_bounded_by_the_extraction_limit():
+    from local_operator.providers.documents import MAX_FALLBACK_TEXT_CHARS
+
+    huge = _document("text/plain", "log.txt", 32_000_000, injection="extracted")
+    small = _document("text/plain", "log.txt", 30_000, injection="extracted")
+    huge_tokens = estimate_tokens(Message(role="user", content=[huge]))
+    assert huge_tokens <= (MAX_FALLBACK_TEXT_CHARS + 400) // 3
+    assert estimate_tokens(Message(role="user", content=[small])) < huge_tokens
+    assert messages_tokens_upper_bound([Message(role="user", content=[huge])]) >= huge_tokens
+
+
+def test_an_unreadable_pdf_is_charged_its_reference_not_its_bytes():
+    """Uncountable means never native and never extractable: it renders the
+    reference sentence, so 3 MB of garbage must not read as 4M tokens."""
+    block = _document("application/pdf", "broken.pdf", 3_000_000, injection="extracted")
+    message = Message(role="user", content=[block])
+    assert 0 < estimate_tokens(message) < 1000
+    assert messages_tokens_upper_bound([message]) >= estimate_tokens(message)
+
+
+def test_a_legacy_oversized_block_is_re_estimated_from_the_stored_block():
+    """No migration: an old transcript carries only the block, and the estimate
+    is recomputed from it. The cache is keyed by message id, so a figure
+    computed by an older build never survives a process restart."""
+    message = Message(role="user", content=[_document("video/mp4", "old.mp4", 29_600_000)])
+    legacy_charge = 1_500_000  # what the byte-derived charge reported
+    assert estimate_tokens(message) < legacy_charge // 100
+    # Same process, stale cache entry: invalidation is the existing contract.
+    tokens_mod._ESTIMATE_CACHE[message.id] = legacy_charge
+    invalidate_message_cache(message)
+    assert estimate_tokens(message) < 1000
+
+
+def test_render_excess_removes_only_what_the_window_cap_would_cut():
+    """The refusal must not rest on the window-blind charge of a big text file.
+
+    A 32 MB log is charged for 400k characters (133k tokens). A 32k-window
+    model renders a quarter of its window of it, so the figure that decides a
+    refusal drops by the difference; a 1M model keeps the whole charge.
+    """
+    from local_operator.compaction.tokens import document_render_excess
+
+    message = Message(
+        role="user", content=[_document("text/plain", "log.txt", 32_000_000, injection="extracted")]
+    )
+    charge = estimate_tokens(message)
+    small = document_render_excess([message], 32_000)
+    assert 0 < small < charge
+    assert charge - small <= 32_000 // 4 + 100
+    assert document_render_excess([message], 1_000_000) == 0
+    assert document_render_excess([message], 0) == 0
+    reference = Message(role="user", content=[_document("video/mp4", "a.mp4", 5_000_000)])
+    assert document_render_excess([reference], 32_000) == 0

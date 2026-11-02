@@ -1180,3 +1180,95 @@ async def test_a_byte_triggered_pass_is_not_credited_to_the_advisor(tmp_path):
         "the receipt blames the advisor and _settle_advisor judges it by this pass"
     )
     await session.dispose()
+
+
+# ---------------------------------------------------------------------------
+# A non-PDF attachment must never wedge the session
+# ---------------------------------------------------------------------------
+
+#: Two MP4s (29.6 MB and 4.9 MB) took one real session down: each was charged
+#: one token per base64 character, so ``_effective_max_tokens`` refused every
+#: request and compaction had nothing it could shed.
+MP4_BYTES = 29_600_000
+
+
+class RefusesWhatTheProviderClientRefuses:
+    """A provider whose ONLY check is the client's own local size refusal.
+
+    ``_effective_max_tokens`` is the function every wire client calls before it
+    builds a body, and the one that raised ``prompt is too large`` in the
+    wedged session; running it on each request reproduces that refusal without
+    a network, so this fails on the byte-derived estimate for the right reason.
+    """
+
+    def __init__(self) -> None:
+        self.requests: list[ChatRequest] = []
+        self.refusals = 0
+
+    def __call__(self, request: ChatRequest, signal: AbortSignal | None):
+        from local_operator.providers.clients import _effective_max_tokens
+
+        self.requests.append(request)
+        refusal: ProviderError | None = None
+        try:
+            _effective_max_tokens(request)
+        except ProviderError as exc:
+            refusal = exc
+            self.refusals += 1
+
+        async def gen():
+            if refusal is not None:
+                raise refusal
+            yield StreamTextDelta(delta="ok")
+            yield StreamEndEvent(stop_reason="endTurn")
+
+        return gen()
+
+
+def _mp4_document(size: int = MP4_BYTES):
+    from local_operator.harness.types import DocumentContent
+
+    return DocumentContent(
+        data=base64.b64encode(b"\x00" * size).decode("ascii"),
+        mime_type="application/octet-stream",
+        filename="demo.mp4",
+        bytes=size,
+        injection="reference",
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_session_with_a_29mb_mp4_attachment_still_gets_a_response(tmp_path):
+    """THE regression for the wedged session: attach, then keep talking."""
+    model = ModelSpec(provider="test", model_id="m", context_window=200_000, max_output_tokens=8192)
+    stream = RefusesWhatTheProviderClientRefuses()
+    session = make_session(tmp_path, stream, model=model)
+
+    await session.prompt("what is in this?", documents=[_mp4_document()])
+    await session.prompt("and now?")
+
+    assert stream.refusals == 0, "the local size refusal fired on a ~50-token reference"
+    assert len(stream.requests) >= 2
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_legacy_oversized_block_in_the_transcript_recovers_without_migration(tmp_path):
+    """A transcript written while the attachment was over-charged is replayed as
+    it is: the estimate is recomputed from the stored block, so the session
+    answers on its very next turn."""
+    model = ModelSpec(provider="test", model_id="m", context_window=200_000, max_output_tokens=8192)
+    stream = RefusesWhatTheProviderClientRefuses()
+    session = make_session(tmp_path, stream, model=model)
+    await session.seed_history(
+        [
+            Message(role="user", content=[TextContent(text="old"), _mp4_document()]),
+            Message.assistant("I could not read that"),
+        ]
+    )
+
+    await session.prompt("try again")
+
+    assert stream.refusals == 0
+    assert stream.requests, "the prompt never reached the provider"
+    await session.dispose()
