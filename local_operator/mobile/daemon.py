@@ -10850,9 +10850,7 @@ def _phone_usage_projection(
             tone = (
                 limit.status
                 if limit.status in {"ok", "warning", "exhausted", "unknown"}
-                else amount.status()
-                if finite_fraction is not None
-                else "unknown"
+                else amount.status() if finite_fraction is not None else "unknown"
             )
             limits.append(
                 {

@@ -253,6 +253,7 @@ def test_snapshot_freshness_survives_phone_projection():
 
 # -- POST /api/usage/refresh ---------------------------------------------------
 
+
 def _refresh_body(**extra):
     body = {
         "reports": [],
@@ -276,7 +277,8 @@ def _authed_client(app):
 
 
 def _app():
-    return mobile.build_app(mobile.MobileDaemon(password="fixture-password", dial_registrants=False))
+    daemon = mobile.MobileDaemon(password="fixture-password", dial_registrants=False)
+    return mobile.build_app(daemon)
 
 
 def test_refresh_requires_pairing_and_same_origin(monkeypatch):
@@ -333,6 +335,7 @@ def test_concurrent_refreshes_share_one_fetch(monkeypatch):
 
     monkeypatch.setattr(mobile, "_refresh_phone_usage", refresh)
     app = _app()
+
     async def scenario():
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://phone") as client:
@@ -361,6 +364,7 @@ def test_slow_refresh_times_out_to_cached_data_without_cancelling(monkeypatch):
     monkeypatch.setattr(mobile, "_cached_phone_usage", _cached_body)
     monkeypatch.setattr(mobile, "PHONE_REFRESH_BOUND_S", 0.05)
     app = _app()
+
     async def scenario():
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://phone") as client:
@@ -400,9 +404,7 @@ def test_projection_derives_tone_fraction_state_and_account_positions():
                 UsageLimit("5h", "5 hour", UsageAmount(used_fraction=0.9, unit="percent"), "5h"),
                 UsageLimit("7d", "7 day", UsageAmount(used_fraction=1.04, unit="percent"), "7d"),
                 UsageLimit("x", "odd", UsageAmount(unit="unknown")),
-                UsageLimit(
-                    "v", "vendor", UsageAmount(used_fraction=0.1), status="exhausted"
-                ),
+                UsageLimit("v", "vendor", UsageAmount(used_fraction=0.1), status="exhausted"),
             ],
             consecutive_failures=1,
         ),
@@ -436,7 +438,17 @@ def test_get_keeps_original_keys_and_adds_only(monkeypatch):
     original = {"provider", "limits", "unavailable", "fetched_at"}
     assert original <= set(rows[0])
     original_limit = {
-        "amount", "paid_fallback", "available", "unlimited", "supersedes_tiers",
-        "family_cap", "shared", "window", "family", "resets_at_ms", "payable", "exhausted",
+        "amount",
+        "paid_fallback",
+        "available",
+        "unlimited",
+        "supersedes_tiers",
+        "family_cap",
+        "shared",
+        "window",
+        "family",
+        "resets_at_ms",
+        "payable",
+        "exhausted",
     }
     assert original_limit <= set(rows[0]["limits"][0])

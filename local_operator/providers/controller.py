@@ -81,7 +81,11 @@ from local_operator.providers.usage_cache import (
 if TYPE_CHECKING:  # auth_store stays off this module's runtime import graph
     from pathlib import Path
 
-    from local_operator.providers.auth_store import AuthStore, OAuthAccess, StoredCredential
+    from local_operator.providers.auth_store import (
+        AuthStore,
+        OAuthAccess,
+        StoredCredential,
+    )
     from local_operator.providers.oauth.callback_server import LoginCallbacks
 
 LoginCallbackFactory = Callable[[ProviderDefinition], "LoginCallbacks"]

@@ -547,9 +547,7 @@ async def test_read_only_seam_orders_accounts_by_login_regardless_of_cache_order
                 provider="anthropic",
                 identity=email,
                 limits=[
-                    UsageLimit(
-                        "5h", "5 hour", UsageAmount(used_fraction=i / 10, unit="percent")
-                    )
+                    UsageLimit("5h", "5 hour", UsageAmount(used_fraction=i / 10, unit="percent"))
                 ],
             )
             for i, email in enumerate(shuffled)
