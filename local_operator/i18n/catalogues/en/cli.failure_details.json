@@ -1,0 +1,19 @@
+{
+  "cli.failure_details.unrecognized": "unrecognized arguments: {arguments}",
+  "cli.failure_details.argument": "argument {argument}: {message}",
+  "cli.failure_details.expected_one": "expected one argument",
+  "cli.failure_details.expected_optional": "expected at most one argument",
+  "cli.failure_details.expected_some": "expected at least one argument",
+  "cli.failure_details.expected_count": "{count, plural, one {expected # argument} other {expected # arguments}}",
+  "cli.failure_details.invalid_number": "invalid {type} value: {value}",
+  "cli.failure_details.ambiguous": "ambiguous option: {option} could match {matches}",
+  "cli.failure_details.required_group": "one of the arguments {names} is required",
+  "cli.failure_details.conflict": "not allowed with argument {argument}",
+  "cli.failure_details.ignored_value": "ignored explicit argument {value}",
+  "cli.failure_details.not_seconds": "{value} is not a number of seconds",
+  "cli.failure_details.finite_seconds": "must be a finite number of seconds",
+  "cli.failure_details.positive_seconds": "must be greater than zero",
+  "cli.failure_details.positional_pair": "{first} and {last}",
+  "cli.failure_details.exec_two": "exec takes ONE positional prompt, got {count} positionals: {received}.\nThe first positional is the prompt, not a title. To name the run, pass the title via --name:\n  {command}\n(--workstream is a flag — it publishes the run and takes no value.)",
+  "cli.failure_details.exec_many": "exec takes ONE positional prompt, got {count} positionals: {received}.\nThe first positional is the prompt, not a title: pass the title via --name, and quote the prompt as the ONE positional — the extra positionals are not consumed.\n(--workstream is a flag — it publishes the run and takes no value.)"
+}

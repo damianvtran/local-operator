@@ -2311,6 +2311,48 @@
       },
       "status": "passed",
       "note": "Dual blind passes: i18n/audits/evidence/zh-CN/wire.errors.session_host/zh31a1/record.json; i18n/audits/evidence/zh-CN/wire.errors.session_host/host26b/record.json. Both pass, 0 findings; actual quota fallback model recorded."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.failure_details",
+      "source_sha256": "7dda49aa521bc226787d48077a3276de4e80a99c0488892cc60e99e142f33c99",
+      "target_sha256": "7f9174aed89de7cae1e6d90cb17528480901e934ef04048df4dd66f3da409ad4",
+      "translator": {
+        "agent": "i18n-translator",
+        "session": "c7bceae44c15",
+        "model": "openai/gpt-6.1-sol"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "978e59a6e8d6",
+        "model": "openai/gpt-6.1-sol",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Provenance supplied in ledger-assembly brief for PR #3307 head 5bc1b4b2336c85a13ad405466782995cf2aaf4dc; translator base b2750ae6540. Independent audit PASS, 0 findings, 17 keys. Context SHA-256 05eb64e49f9a898ff780e7529ffc96a78fcf676d9bbbca4bc068c62dd6d1828a. Assembly verified current source, target, context hashes and key parity."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.failure_details",
+      "source_sha256": "7dda49aa521bc226787d48077a3276de4e80a99c0488892cc60e99e142f33c99",
+      "target_sha256": "7f9174aed89de7cae1e6d90cb17528480901e934ef04048df4dd66f3da409ad4",
+      "translator": {
+        "agent": "i18n-translator",
+        "session": "c7bceae44c15",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-01"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "978e59a6e8d6",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-01",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Provenance supplied in ledger-assembly brief for PR #3307 head 5bc1b4b2336c85a13ad405466782995cf2aaf4dc; translator base b2750ae6540. Independent audit PASS, 0 findings, 17 keys. Context SHA-256 05eb64e49f9a898ff780e7529ffc96a78fcf676d9bbbca4bc068c62dd6d1828a. Assembly verified current source, target, context hashes and key parity. Dates are delegator-supplied dispatch/completion windows, not per-row timestamps. Target hash was verified during ledger assembly; this row does not assert the auditor published that hash. The delegator reports five slice-2 auditors did not publish target hashes; no locale-specific published-hash claim is made."
     }
   ]
 }
