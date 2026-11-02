@@ -42,6 +42,8 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
+import httpx
+
 from local_operator.hub_sync.budget import OperationBudget, OperationDeadlineExceeded
 from local_operator.hub_sync.identity import Kind, LinkError
 from local_operator.hub_sync.merge import MergeOptions
@@ -241,6 +243,26 @@ class HttpPushTransport:
             )
         except OperationDeadlineExceeded:
             raise
+        except httpx.TimeoutException as exc:
+            # A timeout that fired AFTER the commit request left this process proves
+            # nothing about the server: the Hub may still be running (or have
+            # finished) the write -- production saw a commit applied while the
+            # client's read limit expired mid-moderation. Reporting it as a
+            # definite ``hub-error`` settled the record ``failed`` and invited a
+            # blind re-publish. It is the SAME uncertain outcome as a budget
+            # expiry, so it takes the same path (pending-reconciliation holding the
+            # verbatim intent). Connect and pool timeouts are excluded: nothing was
+            # sent, so a plain outage retry is correct. A PREVIEW timeout is also
+            # excluded -- a preview writes nothing, so it stays a retryable outage.
+            if envelope or isinstance(exc, (httpx.ConnectTimeout, httpx.PoolTimeout)):
+                raise PushRefused(
+                    "hub-error",
+                    f"the hub request failed ({type(exc).__name__})",
+                    outage=True,
+                ) from exc
+            raise OperationDeadlineExceeded(
+                f"commit outcome unknown: {type(exc).__name__} before the hub answered"
+            ) from exc
         except Exception as exc:  # noqa: BLE001 - any transport failure is a named refusal
             raise PushRefused(
                 "hub-error", f"the hub request failed ({type(exc).__name__})", outage=True
@@ -474,6 +496,9 @@ async def _push_item_inner(
             budget=budget,
             kind=kind,
             org_skill=org_skill,
+            current_local=current_local,
+            remote_latest=remote_latest,
+            remote_revision=str(expected_revision or "").strip() or None,
         )
 
     try:
@@ -682,6 +707,46 @@ async def _push_item_inner(
     )
 
 
+def _already_landed(
+    kind: Kind,
+    *,
+    intent_document: Mapping[str, Any],
+    intent_expected: str,
+    current_local: Mapping[str, Any],
+    remote_latest: Mapping[str, Any],
+    remote_revision: str | None,
+) -> bool:
+    """True only when an uncertain commit PROVABLY landed.
+
+    Three facts must all hold, each one blocking a different false "landed":
+
+    * the hub's revision MOVED past the one the stored commit was conditioned on
+      (an unmoved revision means the write cannot have applied);
+    * the hub now serves exactly the stored commit's content (a later edit by
+      someone else is not our commit);
+    * today's local skill equals that content as well, because the receipt the
+      caller advances records the local bytes as "sent" -- advancing it over a newer
+      unsent local edit would hide that edit. In that case the verbatim replay is
+      left to refuse with ``remote-revision-changed`` (CAS keeps it harmless) and
+      the person pulls.
+
+    Anything unprovable (a non-mapping, an unfingerprintable side) is False, so
+    the existing replay path decides.
+    """
+
+    if kind != "skill" or not remote_revision or remote_revision == intent_expected:
+        return False
+    # The ONE skill-content comparator the manual-confirm reconciliation already
+    # uses (it normalizes the trailing whitespace the server canonicalizes away); a
+    # second, stricter comparator here would call a clean landing "different".
+    # Imported lazily: service imports this module at load time.
+    from local_operator.hub_sync.service import _same_content
+
+    return _same_content(intent_document, remote_latest) and _same_content(
+        current_local, remote_latest
+    )
+
+
 async def _replay_verbatim(
     *,
     transport: PushTransport,
@@ -692,6 +757,9 @@ async def _replay_verbatim(
     budget: OperationBudget,
     kind: Kind,
     org_skill: bool,
+    current_local: Mapping[str, Any],
+    remote_latest: Mapping[str, Any],
+    remote_revision: str | None,
 ) -> PushOutcome:
     """Resend one UNCERTAIN commit with exactly the stored bytes.
 
@@ -724,6 +792,29 @@ async def _replay_verbatim(
     ):
         return PushOutcome(
             "skipped", operation_id=operation_id, reason="reconciliation-intent-invalid"
+        )
+    if _already_landed(
+        kind,
+        intent_document=document,
+        intent_expected=expected,
+        current_local=current_local,
+        remote_latest=remote_latest,
+        remote_revision=remote_revision,
+    ):
+        # READ-THEN-COMPARE: the caller just read the hub. If it already serves the
+        # stored commit's content at a NEWER revision, the uncertain commit landed;
+        # resending would only 412. Settle it as accepted instead of leaving a
+        # phantom conflict, and let the caller advance the outbound receipt.
+        outbox.settle(
+            operation_id,
+            generation=generation,
+            result={"revision": remote_revision, "reconciled": True},
+        )
+        return PushOutcome(
+            "pushed",
+            operation_id=operation_id,
+            accepted={"accepted_document": dict(remote_latest), "operation_id": operation_id},
+            revision=remote_revision,
         )
     try:
         result = await transport.commit(
