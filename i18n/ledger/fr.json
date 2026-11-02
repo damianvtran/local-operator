@@ -2492,6 +2492,26 @@
       },
       "status": "passed",
       "note": "Dual blind passes: i18n/audits/evidence/fr/wire.errors.session_host/fr31a/record.json; i18n/audits/evidence/fr/wire.errors.session_host/h3222b/record.json. Both pass, 0 findings; actual quota fallback model recorded."
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.failure_details",
+      "source_sha256": "7dda49aa521bc226787d48077a3276de4e80a99c0488892cc60e99e142f33c99",
+      "target_sha256": "7c92f9d6b0256f3034a9949bc9ca32ae99a5a3144001e977b1e9ec9cce1f61b9",
+      "translator": {
+        "agent": "i18n-translator",
+        "session": "1a73cf42d5d7",
+        "model": "openai/gpt-6.1-sol"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "e90c2da6e6c7",
+        "model": "openai/gpt-6.1-sol",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Provenance supplied in ledger-assembly brief for PR #3307 head 5bc1b4b2336c85a13ad405466782995cf2aaf4dc; translator base b2750ae6540. Independent audit PASS, 0 findings, 17 keys. Context SHA-256 05eb64e49f9a898ff780e7529ffc96a78fcf676d9bbbca4bc068c62dd6d1828a. Assembly verified current source, target, context hashes and key parity."
     }
   ]
 }
