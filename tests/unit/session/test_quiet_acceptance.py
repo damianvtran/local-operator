@@ -3,6 +3,7 @@
 Real pipeline tests inject queued people at host settlement and new admissions
 at emitted acceptance. Small seam tests pin mechanical compaction/latch guards.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -12,7 +13,11 @@ from types import SimpleNamespace
 import pytest
 
 from local_operator.harness.types import (
-    AgentEndEvent, CustomMessage, Message, StreamEndEvent, StreamTextDelta,
+    AgentEndEvent,
+    CustomMessage,
+    Message,
+    StreamEndEvent,
+    StreamTextDelta,
     StreamToolCallDelta,
 )
 from local_operator.session.goal_judge import quiet_completion_accepted
@@ -22,15 +27,23 @@ from tests.unit.session.test_session import ScriptedStream, make_session
 
 
 def quiet_stream(*later):
-    return ScriptedStream([
-        [StreamToolCallDelta(index=0, id="quiet", name="no_reply", argument_delta="{}"),
-         StreamEndEvent(stop_reason="toolUse")], *later,
-    ])
+    return ScriptedStream(
+        [
+            [
+                StreamToolCallDelta(index=0, id="quiet", name="no_reply", argument_delta="{}"),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            *later,
+        ]
+    )
 
 
 def peer_input():
-    return CustomMessage(custom_type="peer_message", attribution="peer",
-                         details={"text": "synthetic peer acknowledgement"})
+    return CustomMessage(
+        custom_type="peer_message",
+        attribution="peer",
+        details={"text": "synthetic peer acknowledgement"},
+    )
 
 
 @pytest.mark.asyncio
@@ -39,11 +52,19 @@ async def test_real_pipeline_commits_only_one_terminal_quiet_end(tmp_path, wrapp
     stream = quiet_stream()
     tools = None
     if wrapped:
-        stream = ScriptedStream([[
-            StreamToolCallDelta(index=0, id="wrapper", name="eval",
-                                argument_delta=json.dumps({"code": "tool('no_reply')"})),
-            StreamEndEvent(stop_reason="toolUse"),
-        ]])
+        stream = ScriptedStream(
+            [
+                [
+                    StreamToolCallDelta(
+                        index=0,
+                        id="wrapper",
+                        name="eval",
+                        argument_delta=json.dumps({"code": "tool('no_reply')"}),
+                    ),
+                    StreamEndEvent(stop_reason="toolUse"),
+                ]
+            ]
+        )
         tools = [eval_tool.build_eval_tool()]
     session = make_session(tmp_path, stream, tools=tools)
     events = []
@@ -64,9 +85,12 @@ async def test_real_pipeline_commits_only_one_terminal_quiet_end(tmp_path, wrapp
 
 @pytest.mark.asyncio
 async def test_person_arriving_during_host_settlement_is_consumed_once_before_acceptance(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
-    stream = quiet_stream([StreamTextDelta(delta="handled late person"), StreamEndEvent(stop_reason="stop")])
+    stream = quiet_stream(
+        [StreamTextDelta(delta="handled late person"), StreamEndEvent(stop_reason="stop")]
+    )
     session = make_session(tmp_path, stream)
     injected = False
     events = []
@@ -84,8 +108,13 @@ async def test_person_arriving_during_host_settlement_is_consumed_once_before_ac
         ends = [event for event in events if isinstance(event, AgentEndEvent)]
         assert len(stream.requests) == 2 and len(ends) == 1
         assert not ends[0].quiet_accepted
-        assert sum(isinstance(row, Message) and "late-person-exactly-once" in row.text
-                   for row in stream.requests[1].messages) == 1
+        assert (
+            sum(
+                isinstance(row, Message) and "late-person-exactly-once" in row.text
+                for row in stream.requests[1].messages
+            )
+            == 1
+        )
         assert not session._has_awaiting_user()
     finally:
         await session.dispose()
@@ -115,8 +144,13 @@ async def test_input_after_accepted_end_gets_a_new_pipeline_and_generation(tmp_p
         assert ends[0].quiet_accepted and not ends[1].quiet_accepted
         assert ends[0].generation != ends[1].generation
         assert events.index(ends[0]) < events.index(starts[1])
-        assert sum(isinstance(row, Message) and row.text == "new-person-next-owner"
-                   for row in stream.requests[1].messages) == 1
+        assert (
+            sum(
+                isinstance(row, Message) and row.text == "new-person-next-owner"
+                for row in stream.requests[1].messages
+            )
+            == 1
+        )
     finally:
         await session.dispose()
 
@@ -155,8 +189,9 @@ async def test_delivered_notification_exception_never_overrides_a_person(tmp_pat
 async def test_compaction_producer_does_not_revive_a_quiet_request(tmp_path):
     session = make_session(tmp_path, ScriptedStream([]))
     try:
-        session._held_end = AgentEndEvent(quiet_requested=True,
-                                         messages=[Message(role="assistant", stop_reason="length")])
+        session._held_end = AgentEndEvent(
+            quiet_requested=True, messages=[Message(role="assistant", stop_reason="length")]
+        )
         # No compaction API is provided: the quiet-specific producer gate must
         # return BEFORE consulting stale length/recovery-band bookkeeping.
         session._after_compaction_pass(SimpleNamespace(), SimpleNamespace(tokens_after=12))
@@ -168,7 +203,9 @@ async def test_compaction_producer_does_not_revive_a_quiet_request(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_committed_latch_prevents_internal_same_owner_inference_without_dropping_work(tmp_path):
+async def test_committed_latch_prevents_internal_same_owner_inference_without_dropping_work(
+    tmp_path,
+):
     session = make_session(tmp_path, ScriptedStream([]))
     queued = Message.user("retained work")
     try:
@@ -220,8 +257,11 @@ def test_final_accepted_event_fences_both_runtime_model_subscribers():
     assert not quiet_completion_accepted(AgentEndEvent(quiet_requested=True))
 
 
-@pytest.mark.parametrize("fields", [{"error": "failed"}, {"aborted": True}, {"cut_off_cause": "cut"}])
+@pytest.mark.parametrize(
+    "fields", [{"error": "failed"}, {"aborted": True}, {"cut_off_cause": "cut"}]
+)
 def test_error_abort_cutoff_take_precedence_over_acceptance(fields):
     from local_operator.session.session import Session
+
     event = AgentEndEvent(quiet_accepted=True, **fields)
     assert not Session._run_ended_quiet(None, event)

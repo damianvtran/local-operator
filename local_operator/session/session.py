@@ -16458,8 +16458,12 @@ class Session:
         """
         # A child marker proves only the finite exchange. Never reconstruct
         # terminal acceptance from history, a renderer certificate, or repr.
-        return bool(event.quiet_accepted and not event.error and not event.aborted
-                    and not event.cut_off_cause)
+        return bool(
+            event.quiet_accepted
+            and not event.error
+            and not event.aborted
+            and not event.cut_off_cause
+        )
 
     def _quiet_end_callable(self) -> Callable[[], Awaitable[str | None]] | None:
         """The ``no_reply`` tool's quiet-end door, or ``None`` where silence is unavailable.
@@ -19083,8 +19087,15 @@ class Session:
         while True:
             await self._drain_continuation()
             held = self._held_end
-            if (held is None or not held.quiet_requested or held.error or held.aborted
-                    or held.cut_off_cause or self._abort_requested or self._disposed):
+            if (
+                held is None
+                or not held.quiet_requested
+                or held.error
+                or held.aborted
+                or held.cut_off_cause
+                or self._abort_requested
+                or self._disposed
+            ):
                 return
             refusal = await self._quiet_end_refusal()
             if self._abort_requested or self._disposed:
@@ -24179,8 +24190,9 @@ class Session:
         # the later agent-end reduction, every frontend briefly paints `after`
         # from compaction_end and then rebounds to `before` at turn settlement.
         self._held_context_tokens = outcome.tokens_after
-        if (self._quiet_accepted_generation is not None
-                or (self._held_end is not None and self._held_end.quiet_requested)):
+        if self._quiet_accepted_generation is not None or (
+            self._held_end is not None and self._held_end.quiet_requested
+        ):
             # A settled explicit quiet request supersedes stale length-based
             # resume bookkeeping, not genuine user/goal continuations. Gate the
             # producer: leaving this synthetic resume queued would revive it on

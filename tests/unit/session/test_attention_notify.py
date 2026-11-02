@@ -1079,9 +1079,9 @@ async def test_a_quiet_batch_whose_re_entry_errors_still_notifies(tmp_path: Path
         ends = _ends(events)
         assert ends, "the run still ends with an end event"
         end = ends[-1]
-        assert session._run_ended_quiet(end) is False, (
-            "a retained child request marker must never override the owning error"
-        )
+        assert (
+            session._run_ended_quiet(end) is False
+        ), "a retained child request marker must never override the owning error"
         assert end.quiet_accepted is False
         assert end.notify is True, "the error arm always notifies"
         state = await session.refresh_attention()

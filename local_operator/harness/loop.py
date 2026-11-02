@@ -3755,10 +3755,13 @@ class AgentLoop:
                         and assistant.tool_calls[-1].id in context.quiet_request_roots
                         and not context.quiet_request_failed
                         and len(tool_results) == len(assistant.tool_calls)
-                        and all(not result.is_error and not (result.details or {}).get(FAULT_KEY)
-                                and not (result.details or {}).get(OUTPUT_LIMIT_KEY)
-                                and not (result.details or {}).get("partial_result")
-                                for result in tool_results)
+                        and all(
+                            not result.is_error
+                            and not (result.details or {}).get(FAULT_KEY)
+                            and not (result.details or {}).get(OUTPUT_LIMIT_KEY)
+                            and not (result.details or {}).get("partial_result")
+                            for result in tool_results
+                        )
                     )
                     has_more_tool_calls = bool(assistant.tool_calls) and not context.quiet_candidate
                     if has_more_tool_calls and config.on_turn_end is not None:
@@ -5843,8 +5846,9 @@ class AgentLoop:
         real_quiet = tool.execute is execute_no_reply
         if real_quiet and not item.quiet_final_root:
             return self._synthetic_result(
-                call, "Quiet was not requested: no_reply must be the final root call; "
-                "finish the remaining work first."
+                call,
+                "Quiet was not requested: no_reply must be the final root call; "
+                "finish the remaining work first.",
             )
         forwarding_refusal = self._one_turn_forwarding_refusal(item, context, config)
         if forwarding_refusal is not None:
@@ -6009,8 +6013,9 @@ class AgentLoop:
                         # this error. Refuse BEFORE resolution/approval/side effects.
                         context.quiet_request_failed = True
                         return self._synthetic_result(
-                            nested, "Quiet request already pending; later tool() calls "
-                            "are refused and invalidate this request."
+                            nested,
+                            "Quiet request already pending; later tool() calls "
+                            "are refused and invalidate this request.",
                         ).model_dump(mode="json")
                     if name == "eval":
                         context.quiet_request_failed = True
@@ -6132,9 +6137,12 @@ class AgentLoop:
                                 ),
                             }
                         )
-                    if (result.is_error or (result.details or {}).get(FAULT_KEY)
-                            or (result.details or {}).get(OUTPUT_LIMIT_KEY)
-                            or (result.details or {}).get("partial_result")):
+                    if (
+                        result.is_error
+                        or (result.details or {}).get(FAULT_KEY)
+                        or (result.details or {}).get(OUTPUT_LIMIT_KEY)
+                        or (result.details or {}).get("partial_result")
+                    ):
                         context.quiet_request_failed = True
                     result.duration_s = time.monotonic() - started
                     queue.put_nowait(
@@ -6195,7 +6203,11 @@ class AgentLoop:
                 result,
                 secret_active=bool(context.one_turn_secret_leases),
             )
-            if real_quiet and not result.is_error and (result.details or {}).get(QUIET_TURN_KEY) is True:
+            if (
+                real_quiet
+                and not result.is_error
+                and (result.details or {}).get(QUIET_TURN_KEY) is True
+            ):
                 context.quiet_request_roots.add(item.quiet_root_id)
             return result
         except asyncio.CancelledError:

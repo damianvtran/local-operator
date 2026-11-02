@@ -101,7 +101,9 @@ async def test_an_allowed_end_stamps_the_marker_with_the_quiet_word() -> None:
     context = ToolContext(cwd=".", quiet_end=_allow)
     result = await tool.execute("c1", {}, None, None, context)
     assert not result.is_error
-    assert result.content[0].text == "Quiet requested; pending the owning session's terminal checks."
+    assert (
+        result.content[0].text == "Quiet requested; pending the owning session's terminal checks."
+    )
     assert result.details == {QUIET_TURN_KEY: True, "quiet_request_pending": True}
     assert result.useless is True, "the prune pass blanks the content later"
 
