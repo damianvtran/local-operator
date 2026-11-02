@@ -334,3 +334,7 @@ def test_a_same_second_reuse_completes_and_the_limit_is_named(monkeypatch):
     # Same birth token as the receipt: indistinguishable from our own corpse.
     verdict = cap.refresh(deadline=fake.clock() + 5.0)
     assert verdict.status in {"VERIFIED", "OBSERVED_EMPTY"}, verdict.reason
+    # "UNDETECTABLE" IS NOT "HARMLESS", so say what this arm does at the syscall:
+    # refresh signals nothing at all. The send path is a separate boundary and is
+    # unchanged; this arm only pins that the reuse cannot be SEEN here.
+    assert fake.calls == [], fake.calls

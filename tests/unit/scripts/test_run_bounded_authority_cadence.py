@@ -10,6 +10,7 @@ the per-poll sweep.
 from __future__ import annotations
 
 import io
+import os
 import subprocess
 from types import SimpleNamespace as NS
 
@@ -21,10 +22,21 @@ from tests.unit.scripts.test_run_bounded import memory_wrapper  # noqa: F401
 
 class World:
     def __init__(self):
-        self.rows = {1: (0, 1, 1, "creator"), 10: (1, 10, 10, "leader")}
+        # THE LEADER'S PARENT IS THIS PROCESS. With a creator row at pid 1, capture
+        # samples a parent that does not exist, refuses "leader/parent birth
+        # unavailable" at admission, and every path reports 126 before it can
+        # produce its own state -- the same fixture class proved in the authority file.
+        self.rows = {
+            os.getpid(): (0, os.getpid(), os.getpid(), "creator"),
+            10: (os.getpid(), 10, 10, "leader"),
+        }
         self.now = 0.0
         self.censuses = 0
         self.sample_calls = 0
+        #: WHEN the faked child exits. An event on the fake clock, never a count of
+        #: how many times the sampler was asked: a call count couples the fixture to
+        #: the implementation's call sequence.
+        self.exit_at = 0.05
 
     def clock(self):
         self.now += 0.001
@@ -36,9 +48,10 @@ class World:
 
     def samples(self, pids):
         self.sample_calls += 1
-        corpse = self.sample_calls > 2
         return {
-            pid: owned.procstate.ProcessSample(corpse and pid == 10, self.rows[pid][3])
+            pid: owned.procstate.ProcessSample(
+                pid == 10 and self.now >= self.exit_at, self.rows[pid][3]
+            )
             for pid in pids
             if pid in self.rows
         }
@@ -48,6 +61,17 @@ class World:
 
     def send(self, pgid, _signum):
         self.rows.pop(pgid, None)
+
+
+@pytest.fixture(autouse=True)
+def _fixture_birth_scheme(monkeypatch):
+    """The synthetic kernel speaks the ``fixture`` birth scheme.
+
+    Without this the receipt and the sampled token are compared under the HOST
+    scheme, the receipt is refused, and every later refresh reports "no leader
+    receipt" -- published as an unproven cleanup (126) for a healthy run.
+    """
+    monkeypatch.setattr(owned.procstate, "birth_scheme", lambda: "fixture")
 
 
 @pytest.fixture
@@ -86,7 +110,7 @@ def _refresh_points(wrapper, monkeypatch, constant):
     cap = owned.OwnedGroup.capture(
         10,
         deadline=world.clock() + 5.0,
-        parent_pid=1,
+        parent_pid=os.getpid(),
         census=world.census,
         samples=world.samples,
         identity=world.identity,
