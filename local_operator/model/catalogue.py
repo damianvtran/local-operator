@@ -472,7 +472,7 @@ class _ListingFetchLease:
             _held_leases.add(self)
         return True
 
-    def await_peer_briefly(self) -> None:
+    def await_peer_briefly(self, *, deadline: float | None = None) -> None:
         """Give the lease holder a moment, then return whatever is on disk.
 
         Polls the DOCUMENT, not the lease: the winner's atomic rename is the
@@ -481,9 +481,13 @@ class _ListingFetchLease:
         the full lease TTL on every failed peer fetch.
         """
         document = self._path.with_name(self._path.name[: -len(".fetching")])
-        deadline = time.monotonic() + _LISTING_LEASE_WAIT_S
-        while time.monotonic() < deadline:
-            time.sleep(0.05)
+        from local_operator.model.deadline import remaining
+
+        stop = time.monotonic() + remaining(_LISTING_LEASE_WAIT_S)
+        if deadline is not None:
+            stop = min(stop, deadline)
+        while time.monotonic() < stop:
+            time.sleep(min(0.05, max(0.0, stop - time.monotonic())))
             if document.exists():
                 try:
                     if time.time() - document.stat().st_mtime < _LISTING_LEASE_WAIT_S * 2:
@@ -838,6 +842,7 @@ def read_listing(
     cache_dir: Path | None = None,
     refetch_if: Callable[[dict[str, Any], float], bool] | None = None,
     revalidate: Callable[[], dict[str, Any]] | None = None,
+    deadline: float | None = None,
 ) -> Listing:
     """A provider's ``list_models()`` payload, stale-while-revalidate.
 
@@ -947,6 +952,12 @@ def read_listing(
     # and writes; losers give the winner a brief window, re-read, and serve
     # whatever is on disk — stale included, which is already this module's
     # stale-beats-absent rule. Every failure degrades to fetching.
+    from local_operator.model.deadline import remaining
+
+    def wait_budget() -> float:
+        budget = remaining(_LISTING_LEASE_WAIT_S)
+        return budget if deadline is None else min(budget, max(0.0, deadline - time.monotonic()))
+
     lease = _ListingFetchLease(path)
     if not lease.acquire():
         own = _in_flight_revalidation(path)
@@ -962,20 +973,20 @@ def read_listing(
             # wrong here: the caller's memo pins whatever this returns for the
             # day, so an id the refresh is about to land would stay missing
             # until midnight — the incident this trigger exists to prevent.
-            own.join(timeout=_LISTING_LEASE_WAIT_S)
+            own.join(timeout=wait_budget())
         else:
             sibling = _held_by_this_process(path)
             if sibling is not None:
                 # Same ceiling as the peer poll, but it returns the instant the
                 # sibling's attempt ends — success or failure (see the helper).
-                sibling._released.wait(timeout=_LISTING_LEASE_WAIT_S)
+                sibling._released.wait(timeout=wait_budget())
             elif not _failure_backoff_active(path):
                 # No sibling found AND no failure on record: a foreign holder.
                 # The backoff check covers a sibling that failed and released
                 # between our lost ``acquire`` and the lookup (review M1, forced:
                 # 2193-2230 ms) — its attempt is already over, so polling 2 s for
                 # the document it never wrote would be the stall this fixes.
-                lease.await_peer_briefly()
+                lease.await_peer_briefly(deadline=deadline)
         payload, age = _read_cache(path)
         # The attempt we waited on FAILED moments ago in this process (it recorded
         # the failure before releasing): answer as the backoff branch above does
@@ -1006,6 +1017,12 @@ def read_listing(
         # The lease is lost or stale; a cold machine must still start.
 
     try:
+        # Waiting for another reader cannot grant a fresh network budget.
+        from local_operator.model.deadline import check
+
+        check()
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError
         fresh = fetch()
     except Exception as exc:  # noqa: BLE001 - any client/transport error degrades
         # Recorded BEFORE the release: a sibling thread waiting on this lease

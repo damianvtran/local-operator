@@ -40,6 +40,11 @@ Source = Literal[
     "gate",
     "signed_out",
     "no_credit",
+    #: A WRITE was refused because the balance read could not answer. Distinct
+    #: from ``no_credit`` (a real empty balance) and from ``signed_out`` (a real
+    #: missing login): the copy has to say the check failed, not that the account
+    #: is empty, or a network blip reads as "add credit".
+    "unknown_balance",
     "session",
     "agent",
     "parent",
@@ -119,6 +124,51 @@ def resolve_saver(
         return SaverDecision(False, "signed_out")
     if not availability.positive_balance:
         return SaverDecision(False, "no_credit")
+    if session_choice is not None:
+        return SaverDecision(session_choice, "session")
+    if agent_pin is not None:
+        return SaverDecision(agent_pin, "agent")
+    if parent_value is not None:
+        return SaverDecision(parent_value, "parent")
+    if mode == "auto":
+        return SaverDecision(False, "auto_unavailable")
+    return SaverDecision(False, "default")
+
+
+def resolve_saver_setting(
+    settings: Mapping[str, Any] | None,
+    *,
+    signed_in: bool,
+    session_choice: bool | None = None,
+    agent_pin: bool | None = None,
+    parent_value: bool | None = None,
+) -> SaverDecision:
+    """The SESSION's own state: steps 1a, 1b and 2-5, without the balance half.
+
+    This answers a different question from :func:`resolve_saver` and must not be
+    mistaken for a second opinion on the same one. ``resolve_saver`` answers
+    "will the NEXT request splice", which needs the account's balance and is
+    therefore a network fact read at enable and re-read by the request path.
+    This answers "is Saver on for this conversation", which is a setting the
+    user set and the badge publishes.
+
+    WHY THE BALANCE IS OUT OF IT (review M3 / UX U3, round 1). Reporting a
+    network reading as session state gave both failures at once: a fabricated
+    positive published ON for a request the gate then refused, and an unread
+    balance published OFF for a session the gate would have served. The
+    balance still gets read where it decides something — at enable, which
+    refuses with ``no_credit``, and on the turn, where a depleted balance stops
+    the splice.
+
+    The two answers cannot drift: whenever a positive availability read exists,
+    ``resolve_saver_setting(...) == resolve_saver(settings, positive, ...)`` is
+    asserted by ``tests/unit/saver/test_command.py``.
+    """
+    mode = configured_mode(settings)
+    if mode == "off":
+        return SaverDecision(False, "gate")
+    if not signed_in:
+        return SaverDecision(False, "signed_out")
     if session_choice is not None:
         return SaverDecision(session_choice, "session")
     if agent_pin is not None:

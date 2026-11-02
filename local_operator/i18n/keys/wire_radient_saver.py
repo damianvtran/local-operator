@@ -10,6 +10,42 @@ from __future__ import annotations
 from ..messages import Msg
 
 
+def command_badge() -> Msg:
+    return Msg("wire.radient_saver.command.badge", {})
+
+
+def command_description() -> Msg:
+    return Msg("wire.radient_saver.command.description", {})
+
+
+def command_disabled() -> Msg:
+    return Msg("wire.radient_saver.command.disabled", {})
+
+
+def command_enabled() -> Msg:
+    return Msg("wire.radient_saver.command.enabled", {})
+
+
+def command_inherited() -> Msg:
+    return Msg("wire.radient_saver.command.inherited", {})
+
+
+def command_radient_description() -> Msg:
+    return Msg("wire.radient_saver.command.radient_description", {})
+
+
+def command_status_off() -> Msg:
+    return Msg("wire.radient_saver.command.status.off", {})
+
+
+def command_status_on() -> Msg:
+    return Msg("wire.radient_saver.command.status.on", {})
+
+
+def command_usage() -> Msg:
+    return Msg("wire.radient_saver.command.usage", {})
+
+
 def mode_choice_off_description() -> Msg:
     return Msg("wire.radient_saver.mode.choice.off.description", {})
 
@@ -38,8 +74,16 @@ def notice_disabled() -> Msg:
     return Msg("wire.radient_saver.notice.disabled", {})
 
 
+def notice_gate_off() -> Msg:
+    return Msg("wire.radient_saver.notice.gate_off", {})
+
+
 def notice_no_credit() -> Msg:
     return Msg("wire.radient_saver.notice.no_credit", {})
+
+
+def notice_no_session() -> Msg:
+    return Msg("wire.radient_saver.notice.no_session", {})
 
 
 def notice_oversize() -> Msg:
@@ -60,6 +104,10 @@ def notice_signed_out() -> Msg:
 
 def notice_unavailable() -> Msg:
     return Msg("wire.radient_saver.notice.unavailable", {})
+
+
+def notice_unknown_balance() -> Msg:
+    return Msg("wire.radient_saver.notice.unknown_balance", {})
 
 
 def section_description() -> Msg:

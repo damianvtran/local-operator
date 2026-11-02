@@ -153,6 +153,12 @@ _ATTACHMENT_ID = re.compile(ATTACHMENT_ID_PATTERN)
 #: ``client.ATTACHMENT_MAX_BYTES`` / ``ATTACHMENT_MIME_TYPES`` by a test.
 _ATTACHMENT_MAX_BYTES = 5 * 1024 * 1024
 _ATTACHMENT_SERVABLE = {"image/png", "image/jpeg"}
+#: An agent endpoint id in a desktop PATH: the client's own grammar
+#: (``client._ENDPOINT_ID``; the hub mints ``bep_`` + 32 hex), spelled here for
+#: the same boot-path reason as ``_ACCOUNT_ID`` and pinned equal by
+#: ``test_endpoint_grammar_matches_the_client``. Checked before any I/O so a
+#: renderer-supplied id can never reshape the upstream path.
+_ENDPOINT_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
 #: ``attachment_ids`` on a send or schedule: the hub's per-message bound and id
 #: grammar, enforced before the request leaves the machine.
 _ATTACHMENT_IDS = Field(default=None, min_length=1, max_length=4)
@@ -2909,10 +2915,76 @@ async def get_account_avatar(
     )
 
 
+@router.get("/v1/desktop/team-bridge/endpoints/{endpoint_id}/avatar")
+async def get_endpoint_avatar(
+    endpoint_id: str,
+    request: Request,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> Response:
+    """Relay one AGENT's own published picture, versioned, never a URL.
+
+    Capability ``team_bridge_endpoint_avatar``. WHY A SECOND ROUTE rather than
+    a ``kind`` on ``/accounts/{id}/avatar``: an agent's directory row is its
+    owner's row, and keying an agent's picture by account is exactly how the
+    owner's face ended up on "Aida (Damian Tran)" (2026-10-30). The path names
+    the ENDPOINT, so this route cannot answer with an account picture at all.
+
+    Deliberately the account relay's twin: the same closed query (``v`` 16
+    lowercase hex, ``size`` 64|256, the mandatory viewer receipt), the same
+    login fence and conditional-reuse rules (``client._avatar_read``, shared),
+    the same 1 MiB bound, type allowlist and response headers. The hub decides
+    who may see it (owner, or an active co-member while the endpoint is
+    active/paused, tenant taken from the endpoint row); a stale ``v`` is its
+    404, relayed as-is. Only the hub's directory ``avatar_url`` supplies the
+    version, and the client keys its cache ``endpoint:<id>`` so no account
+    entity and no other endpoint's entity can answer under this id.
+    """
+    query = request.query_params
+    keys = {"v", "size", "expected_account_id"}
+    if set(query) != keys or any(len(query.getlist(key)) != 1 for key in keys):
+        _raise_read("invalid_request")
+    if (
+        _ENDPOINT_ID.fullmatch(endpoint_id) is None
+        or not is_account_id(query["expected_account_id"])
+        or re.fullmatch(r"[0-9a-f]{16}", query["v"]) is None
+        or query["size"] not in {"64", "256"}
+    ):
+        _raise_read("invalid_request")
+    data, mime = await _conversation_reply(
+        _conversation_client(config_manager).fetch_endpoint_avatar(
+            endpoint_id,
+            v=query["v"],
+            size=int(query["size"]),
+            expected_account_id=query["expected_account_id"],
+        )
+    )
+    # The client also admits WebP for this route; this relay serves only what
+    # the hub actually re-encodes to (PNG or JPEG, agent-server
+    # ``encodeAccountAvatar``) and what the renderer and the compositor decode.
+    if mime not in _ATTACHMENT_SERVABLE or len(data) > 1024 * 1024:
+        _raise_read("malformed_page")
+    return Response(
+        content=data,
+        media_type=mime,
+        headers={
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "default-src 'none'; sandbox",
+            "Cache-Control": "private, no-store",
+        },
+    )
+
+
 _NOTIFICATION_AVATAR_REQUIRED = frozenset(
     {"tenant_id", "kind", "theme", "size", "initials", "expected_account_id"}
 )
 _NOTIFICATION_AVATAR_PHOTO = frozenset({"v", "avatar_account_id"})
+#: The agent's OWN picture: ``v`` plus the endpoint it belongs to. A separate
+#: shape (not a value of ``avatar_account_id``) so a person can never be drawn
+#: from an endpoint and an agent never from an account.
+_NOTIFICATION_AVATAR_AGENT = frozenset({"v", "avatar_endpoint_id"})
+#: Set on a composite when the agent's own picture was requested but the glyph
+#: was drawn. The desktop main process reads it (local-operator-ui #1544).
+_AVATAR_FALLBACK_HEADER = "X-Avatar-Fallback"
 
 
 @router.get("/v1/desktop/team-bridge/accounts/{target_account_id}/notification-avatar")
@@ -2939,6 +3011,15 @@ async def get_notification_avatar(
     * ``v`` + ``avatar_account_id``: both or neither. With them, the photo is
       read through the same closed ``/avatar`` relay (person only); without, an
       initials placeholder is drawn and no network is touched.
+    * ``v`` + ``avatar_endpoint_id`` (``person_agent`` only, capability
+      ``team_bridge_endpoint_avatar``): the agent's OWN picture, read through
+      the closed endpoint relay and drawn under the badge and agent marker.
+      Core first checks the tenant directory publishes exactly that picture for
+      the path account's agent. An unbound, failed or undecodable read draws
+      the agent glyph and answers ``X-Avatar-Fallback: glyph`` (a banner never
+      waits on, or loses, a cosmetic picture); a changed login still refuses.
+      Exactly one of the two photo shapes; a ``person`` naming an endpoint is
+      refused.
 
     ``avatar_account_id`` must equal the path account, so an avatar naming
     any other account is refused rather than drawn under someone else's name.
@@ -2965,12 +3046,19 @@ async def get_notification_avatar(
 
     query = request.query_params
     names = set(query)
-    photo_names = names & _NOTIFICATION_AVATAR_PHOTO
+    picture_names = names - _NOTIFICATION_AVATAR_REQUIRED
+    photo_names = picture_names if picture_names == _NOTIFICATION_AVATAR_PHOTO else set()
+    agent_names = picture_names if picture_names == _NOTIFICATION_AVATAR_AGENT else set()
     if (
         not _NOTIFICATION_AVATAR_REQUIRED <= names
-        or names - _NOTIFICATION_AVATAR_REQUIRED - _NOTIFICATION_AVATAR_PHOTO
-        or photo_names not in (set(), set(_NOTIFICATION_AVATAR_PHOTO))
+        or (picture_names and not (photo_names or agent_names))
         or any(len(query.getlist(key)) != 1 for key in names)
+    ):
+        _raise_read("invalid_request")
+    if agent_names and (
+        query["kind"] != "person_agent"
+        or _ENDPOINT_ID.fullmatch(query["avatar_endpoint_id"]) is None
+        or re.fullmatch(r"[0-9a-f]{16}", query["v"]) is None
     ):
         _raise_read("invalid_request")
     if (
@@ -2986,6 +3074,7 @@ async def get_notification_avatar(
         or (photo_names and query["avatar_account_id"] != target_account_id)
     ):
         _raise_read("invalid_request")
+    fell_back: list[bool] = []
     try:
         data = await _conversation_reply(
             _conversation_client(config_manager).notification_avatar(
@@ -2997,6 +3086,8 @@ async def get_notification_avatar(
                 initials=query["initials"],
                 v=query["v"] if photo_names else None,
                 expected_account_id=query["expected_account_id"],
+                endpoint=(query["avatar_endpoint_id"], query["v"]) if agent_names else None,
+                on_fallback=lambda: fell_back.append(True),
             )
         )
     except na.RendererBusy:
@@ -3012,6 +3103,11 @@ async def get_notification_avatar(
             "X-Content-Type-Options": "nosniff",
             "Content-Security-Policy": "default-src 'none'; sandbox",
             "Cache-Control": "private, no-store",
+            # An agent picture was asked for and the glyph was drawn instead
+            # (code review round 1, F1). The desktop keeps this answer for its
+            # short failure TTL, not the photo lease, so a hub blip does not pin
+            # the glyph for 15 minutes. Absent on every other answer.
+            **({_AVATAR_FALLBACK_HEADER: "glyph"} if fell_back else {}),
         },
     )
 
@@ -3368,8 +3464,30 @@ _OWNER_AUDIT_SERVABLE = {"image/png", "image/jpeg", "application/octet-stream"}
 _OWNER_AUDIT_FILE_MIME = "application/octet-stream"
 
 
+def _log_owner_audit_refusal(operation: str, status_class: str) -> None:
+    """Best-effort callback receiving only two immutable, non-sensitive fields."""
+
+    # The record path carries only operation + status class. A broken standard
+    # handler may print its own sink-only traceback via logging.handleError; we
+    # deliberately do not reconfigure global logging to suppress that diagnostic.
+    # Detaching from the refusal keeps its code, exact status and body out of it.
+    try:
+        logging.getLogger(__name__).warning(
+            "owner-audit refusal operation=%s status_class=%s", operation, status_class
+        )
+    except Exception:  # noqa: BLE001 — diagnostic sink failure must not affect a refusal
+        pass
+
+
 @contextmanager
-def _owner_audit_no_store() -> Iterator[None]:
+def _owner_audit_no_store(
+    operation: Literal[
+        "owner_audit_conversations",
+        "owner_audit_messages",
+        "owner_audit_replies",
+        "owner_audit_attachment",
+    ],
+) -> Iterator[None]:
     """Stamp ``private, no-store`` on any refusal raised inside the block.
 
     A success gets the header from the route's ``Response``; an
@@ -3383,6 +3501,19 @@ def _owner_audit_no_store() -> Iterator[None]:
         yield
     except HTTPException as exc:
         exc.headers = {**(exc.headers or {}), "Cache-Control": OWNER_AUDIT_CACHE_CONTROL}
+        # ONLY owner-audit, never the shared _raise_read. Warning makes expected
+        # security-relevant refusals visible without persisting authority-specific
+        # codes, exact statuses, bodies or identifiers. Pass only immutable values:
+        # contextlib.__exit__ keeps the sensitive exception active even after our
+        # except ends, and a broken StreamHandler can print that exception chain.
+        # A loop callback runs detached from that chain; it may log after the
+        # response is sent. Do not "fix" ordering by emitting inline. With no loop
+        # (or scheduling failure), losing a record is safer than leaking a refusal.
+        status_class = f"{exc.status_code // 100}xx"
+        try:
+            asyncio.get_running_loop().call_soon(_log_owner_audit_refusal, operation, status_class)
+        except Exception:  # noqa: BLE001 — preserve the original refusal on failure
+            pass
         raise
 
 
@@ -3462,7 +3593,7 @@ async def owner_audit_conversations(
     no unread counts — auditing never raises a badge.
     """
 
-    with _owner_audit_no_store():
+    with _owner_audit_no_store("owner_audit_conversations"):
         response.headers["Cache-Control"] = OWNER_AUDIT_CACHE_CONTROL
         query = _owner_audit_query(
             request, frozenset({"expected_account_id", "tenant_id", "limit", "cursor"})
@@ -3500,7 +3631,7 @@ async def owner_audit_messages(
     history route.
     """
 
-    with _owner_audit_no_store():
+    with _owner_audit_no_store("owner_audit_messages"):
         response.headers["Cache-Control"] = OWNER_AUDIT_CACHE_CONTROL
         _require_conversation_id(conversation_id)
         query = _owner_audit_query(
@@ -3543,7 +3674,7 @@ async def owner_audit_replies(
 ) -> CRUDResponse[Any]:
     """One audited thread: root plus chronological replies in the requested window."""
 
-    with _owner_audit_no_store():
+    with _owner_audit_no_store("owner_audit_replies"):
         response.headers["Cache-Control"] = OWNER_AUDIT_CACHE_CONTROL
         _require_conversation_id(conversation_id)
         _require_message_id(message_id)
@@ -3595,7 +3726,7 @@ async def owner_audit_attachment(
     never be rendered by the renderer under a type it chose.
     """
 
-    with _owner_audit_no_store():
+    with _owner_audit_no_store("owner_audit_attachment"):
         _require_conversation_id(conversation_id)
         _require_message_id(message_id)
         _require_attachment_id(attachment_id)

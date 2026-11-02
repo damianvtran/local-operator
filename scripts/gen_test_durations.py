@@ -1,156 +1,59 @@
-"""Regenerate a shard-balancing weight manifest (``tests/durations[-x].json``).
+"""Regenerate committed shard weights without changing test selection.
 
-Usage:
-    # Measure locally, then write the manifest. This is the path that works
-    # today, and how tests/durations.json was produced (slow; see the load
-    # warning below before starting one).
-    python -m pytest tests/unit --junit-xml=/tmp/d.xml
-    python scripts/gen_test_durations.py --junit /tmp/d.xml
+Preferred unit route (gh authentication required; no tests are executed)::
 
-    # The same tool writes every tree's manifest; `--tree` picks which, and
-    # defaults the output path to that tree's own manifest file.
-    python -m pytest tests/e2e -m e2e -n0 --junit-xml=/tmp/e2e.xml
-    python scripts/gen_test_durations.py --tree e2e --junit /tmp/e2e.xml
+    python scripts/gen_test_durations.py --cache-dir /path/to/timing-cache \
+        --ci-run 41295059480:1 --ci-run 41294499173:1 \
+        --ci-run 41294469202:1
 
-    # From JUnit XML you already have, possibly from CI -- its runs are on
-    # dedicated hardware. This route needs the workflow to emit the XML, which
-    # the shard jobs do (a `--junit-xml` + artifact upload per shard), so the
-    # artifacts are a legitimate source as of that step landing. Before it did,
-    # this docstring told the reader not to treat CI as an available option for
-    # exactly that reason.
-    #
-    # The artifact names are the ones the upload steps declare, and they are
-    # version-matrixed on the unit tree:
-    #   unit: junit-timings-<python>-<shard>      (junit-3.12-4.xml)
-    #   e2e:  junit-timings-e2e-<os>-<shard>      (junit-e2e-ubuntu-latest-2.xml)
-    # e.g.
-    #   for s in 0 1 2 3 4; do gh run download <run> -n junit-timings-3.12-$s -D u/; done
-    #   python scripts/gen_test_durations.py --tree unit --junit 'u/*.xml'
-    python scripts/gen_test_durations.py --junit report.xml [more.xml ...]
+CI mode requires >=3 distinct complete successful runs of the same unit job
+(Python 3.12, Linux). It binds immutable artifact IDs to attempt-specific job
+intervals, includes shard-zero serial controls, and takes the inclusive p75 of
+per-file totals across observed runs. Missing observations are NOT zero; sample
+counts and run/head/attempt/artifact provenance are committed with the weights.
+Cancelled/partial runs and ambiguous retry artifacts are rejected, not blended.
+The November 2026 sample is three PR branches created within eight minutes, so
+this is within-window calibration, not evidence of day-to-day stability.
 
-    # Aggregate a whole run's shard artifacts into the unit manifest:
-    python scripts/gen_test_durations.py --junit 'unit-xml/*.xml'
+JUnit testcase times are summed test-time, NOT elapsed job/pytest wall time.
+Worker imbalance, idle time, setup/teardown, and collection can affect the gap;
+this tool cannot attribute that gap or promise timeout headroom. See
+`docs/ci-test-durations.md` for source selection and reproducibility constraints.
 
-    # Prefer TWO OR MORE runs. The manifest is an average when `--runs` says how
-    # many complete runs the inputs cover, and one run is not enough: a single
-    # run fitted perfectly in-sample and landed ~1.7x out of sample, while the
-    # average of two scored 1.20x on both (measured 2026-09-19).
-    python scripts/gen_test_durations.py --runs 2 \
-        --junit 'run-a/*.xml' 'run-b/*.xml'
+Legacy local/e2e ingestion remains available::
 
-``scripts/shard_tests.py`` consumes the output; read its module docstring for
-why the manifest is committed rather than computed at workflow time, and why a
-file missing from it still runs. The two scripts share ONE registry of the
-shardable trees (``scripts/shard_tests.py::TREES``), imported here rather than
-restated: a second copy of "which manifest belongs to which tree" is how a
-manifest gets written for the wrong tree and silently degrades every shard to
-the fallback weight.
+    python scripts/gen_test_durations.py --tree e2e --junit 'reports/*.xml'
+    python scripts/gen_test_durations.py --runs 2 --junit 'run-a/*.xml' 'run-b/*.xml'
 
-WHAT THIS MEASURES, AND WHY LOCAL NUMBERS ARE LEGITIMATE
---------------------------------------------------------
-Only RELATIVE weights matter -- the partition never uses absolute seconds, so
-a manifest measured on a slower (or busier) machine than CI is still correct
-as long as the ORDERING survives. That is not assumed here, it was tested:
-weights measured locally, projected onto CI's then-current positional split,
-reproduced the five real CI shard wall times in exact rank order (5/5) at
-r = 0.985 against run 34140443526.
-
-That cross-check is the acceptance test for a regenerated manifest, and it is
-worth repeating rather than trusting, because the failure it guards against is
-subtle: the suite mixes I/O-bound Textual pilot tests (which wait on an event
-loop) with CPU-bound ones, so a loaded machine could in principle distort them
-differently rather than uniformly. It did not, but "did not last time" is not
-"cannot".
-
-``time`` in JUnit XML is the CALL phase only. Setup and teardown are excluded,
-which understates fixture-heavy files slightly; it is uniform enough not to
-matter for a partition and is noted so nobody re-derives the discrepancy.
-
-CAUTION: this repo is worked through many concurrent worktrees, and a full
-unit run is expensive. Do not launch one on a loaded box, and do not pass an
-explicit ``-n`` -- the root ``conftest.py`` sizes workers deliberately and an
-explicit count bypasses that cap. See AGENTS.md.
-
-WHEN TO REGENERATE
-------------------
-There is no schedule, and that is intentional -- a manifest nobody regenerates
-is worse than none only if staleness breaks something, and here it cannot:
-unmeasured files still run, at a pessimistic weight. Regenerate when CI shard
-times visibly diverge (the shard job prints its unmeasured-file count and
-projected minutes on every run), or after adding or removing a genuinely slow
-area of the suite.
-
-**Staleness does not stay marginal, and 2026-09-19 is the measurement that
-says so.** The unit manifest held 544 of the 722 files the shard job collects
-(178 unmeasured, 24.6%), and those unknowns were weighted at a guessed 22.4 s
-each -- 38% of every shard's projected load. The partition therefore reported a
-perfect 34.8 test-min for all five shards while the real per-shard pytest times
-on run 35419790955 were 699 s / 785 s / 658 s / 780 s / 634 s. That is the
-state this tool exists to fix, and the way to notice it is to compare the
-projected line against the pytest summary line in the SAME job log.
-
-**Both manifests now come from CI, and how they were fitted is worth
-keeping.** `tests/durations.json` and `tests/durations-e2e.json` were
-regenerated from the `junit-timings-*` artifacts of two runs of the PR that
-added the second tree and the artifact -- run A `35419790955` and run B
-`35420676112` -- so the weights describe the hardware that runs the suite.
-Two decisions came out of that, both from measurement:
-
-- **The unit manifest is the AVERAGE of two runs** (`--runs 2`), because one
-  run is not enough. Scoring each candidate partition on the measured per-file
-  times of the same three runs (one tree, one method -- see the note below):
-  fitting on A put 1.000x on A and 1.677x on B; fitting on B put 1.377x on A
-  and 1.000x on B; the average puts 1.189x on A and 1.200x on B. The in-sample
-  1.000x is the dangerous number here -- it says the partitioner did its job,
-  not that the weights are good. The cause is that a handful of files carry a
-  quarter of the tree and they swing hard between runs:
-  `tests/unit/tui/test_settings_view.py` measured 1042.9 s in A and 620.4 s in
-  B (0.59x), `test_ask_picker.py` 578.8 s then 901.6 s (1.56x), against a
-  median per-file ratio of 0.99 (p10 0.67, p90 1.30) over the 222 files above
-  5 s.
-
-  **Score every row on the same tree, or the table means nothing.** An earlier
-  revision of this note quoted 1.086x / 1.521x for main's pre-PR manifest and
-  1.196x / 1.205x for the average: those came from different trees (before and
-  after a rebase onto a main that had added and removed test files), so they
-  were not comparable. Recomputed on one tree, main's pre-PR manifest scores
-  1.275x (A) / 1.399x (B) / 1.264x (C) and the average scores 1.189x / 1.200x /
-  1.310x -- the average is the best worst-case row, but the C column is inside
-  the noise, so the honest claim is that the regeneration buys MEASURED
-  COVERAGE (no file left at a guessed weight) and a truthful projection, not a
-  demonstrably smaller spread on any one run.
-- **The e2e manifest is a single run (A, ubuntu legs only)**, because that tree
-  does not have the problem: its per-file run-to-run ratios sit at 0.96-1.01
-  for every file above 20 s (its cost is fixed waits, not work), and the
-  two-run average actually scored WORSE on the macOS legs (1.17x against
-  1.08x). Ubuntu-only keeps the printed `~N projected test-min` comparable to
-  one leg's pytest summary line; macOS ranks the same files the same way.
-
-What a regeneration CANNOT fix is worth as much as what it can:
-
-- **The partitioner is exact on the weights it is given, and that is a weak
-  claim.** The stale manifest's split scored 1.264x-1.399x across three runs;
-  the current one scores 1.189x / 1.200x / 1.310x on the same three. Most of
-  the wall spread people will see is NOT weight error: two runs of ONE manifest
-  over a near-identical tree gave shard walls 634-785 s (1.24x) and 461-846 s
-  (1.84x), with the slowest shard of one the fastest of the other, and their
-  totals within 0.4% of each other (12451 s vs 12401 s). More shards divide
-  that arithmetic without touching the variance; more runs are what shrink it.
-- **Test COUNT is not a signal.** A shard with the most tests (5614) had one of
-  the shortest walls, so a per-test setup/teardown term -- the phase JUnit
-  omits -- would move weight to the wrong shard. Do not add that term without a
-  measurement showing it earns its place.
+`--runs` preserves the historical mean mode for existing callers. Prefer CI
+p75 mode for unit regeneration; do not replay the full local suite to measure
+weights on this shared fleet. Unattributed testcases are fatal in either mode.
+All measured weights and the p90 fallback have a one-second floor so skipped
+modules never become free work. Unmeasured files still run at the fallback:
+`scripts/shard_tests.py` owns selection and the shared tree registry.
 """
 
 from __future__ import annotations
 
 import argparse
+import base64
 import glob
 import json
+import math
+import re
+import statistics
+import subprocess
 import sys
 import xml.etree.ElementTree as ET
+import zipfile
 from collections import defaultdict
+from datetime import datetime, timedelta
+from io import BytesIO
 from pathlib import Path
+from typing import Any
+
+import yaml
+from yaml.nodes import MappingNode, Node, ScalarNode, SequenceNode
 
 # The shardable-tree registry lives with the partitioner that consumes it, so
 # the two scripts cannot disagree about which manifest belongs to which tree.
@@ -229,16 +132,329 @@ def aggregate(xml_paths: list[Path], repo: Path = REPO) -> dict[str, float]:
                 # act on.
                 unresolved.add(source)
                 continue
-            per_file[path] += float(case.get("time") or 0.0)
+            seconds = float(case.get("time") or 0.0)
+            if not math.isfinite(seconds) or seconds < 0:
+                raise ValueError(f"invalid duration in {xml_path}: {seconds}")
+            per_file[path] += seconds
     if unresolved:
         # Loud, because a silently-dropped mapping understates a file's cost
         # and quietly unbalances the very thing this manifest exists to fix.
-        print(
-            f"warning: {len(unresolved)} classnames did not map to a file: "
-            f"{sorted(unresolved)[:3]}",
-            file=sys.stderr,
+        raise ValueError(
+            f"{len(unresolved)} classnames did not map to a file: {sorted(unresolved)}"
         )
     return dict(per_file)
+
+
+def percentile_weights(runs: list[dict[str, float]]) -> dict[str, float]:
+    """p75 of run-bound file totals; absent files are not zero-cost samples.
+
+    Branches add tests independently. Keep each observed file, record its sample
+    count in provenance, and let genuinely unobserved files retain the sharder
+    fallback. Linear interpolation is statistics.quantiles' inclusive method.
+    """
+    samples: dict[str, list[float]] = defaultdict(list)
+    for run in runs:
+        for path, seconds in run.items():
+            samples[path].append(seconds)
+    return {
+        path: (
+            statistics.quantiles(values, n=4, method="inclusive")[2]
+            if len(values) > 1
+            else values[0]
+        )
+        for path, values in samples.items()
+    }
+
+
+def _gh_json(endpoint: str) -> Any:
+    return json.loads(subprocess.check_output(["gh", "api", endpoint]))
+
+
+def _workflow_shards(workflow: str, *, require_default_checkout: bool = False) -> list[int]:
+    """Read a literal source matrix, never execute Actions expressions or YAML.
+
+    Safe composition retains duplicate keys (safe_load would silently overwrite
+    them). Reject aliases, merge keys, include/exclude and dynamic shard values:
+    those need a new validated schema, not an inferred count of observed jobs.
+    Other matrix axes may contain expressions; they are not evaluated here.
+    """
+
+    def mapping(node: Node | None) -> dict[str, Node]:
+        if not isinstance(node, MappingNode):
+            raise ValueError("source workflow: expected an unambiguous mapping")
+        result = {}
+        for key, value in node.value:
+            if not isinstance(key, ScalarNode) or key.value in result or key.value == "<<":
+                raise ValueError("source workflow: duplicate/ambiguous mapping key")
+            result[key.value] = value
+        return result
+
+    try:
+        if any(
+            isinstance(token, (yaml.tokens.AliasToken, yaml.tokens.AnchorToken))
+            for token in yaml.scan(workflow)
+        ):
+            raise ValueError("source workflow: aliases/anchors are not a literal matrix schema")
+        root = mapping(yaml.compose(workflow, Loader=yaml.SafeLoader))
+        job = mapping(mapping(root.get("jobs")).get("test"))
+        if require_default_checkout:
+            steps = job.get("steps")
+            if not isinstance(steps, SequenceNode) or not steps.value:
+                raise ValueError("source workflow: missing default checkout action")
+            first = mapping(steps.value[0])
+            uses = first.get("uses")
+            # This intentionally supports only this repo's first, unmodified
+            # checkout action. Any inputs/name/condition/custom checkout needs
+            # a separately validated contract, not execution-ref guesswork.
+            if (
+                set(first) != {"uses"}
+                or not isinstance(uses, ScalarNode)
+                or uses.value != "actions/checkout@v7"
+            ):
+                raise ValueError("source workflow: unsupported/custom checkout action")
+            for step in steps.value[1:]:
+                action = mapping(step).get("uses")
+                if isinstance(action, ScalarNode) and "checkout" in action.value:
+                    raise ValueError("source workflow: multiple checkout actions are unsupported")
+        matrix = mapping(mapping(job.get("strategy")).get("matrix"))
+        if "include" in matrix or "exclude" in matrix:
+            raise ValueError("source workflow: matrix include/exclude is unsupported")
+        shards = matrix.get("shard")
+        if not isinstance(shards, SequenceNode) or any(
+            not isinstance(value, ScalarNode)
+            or value.tag != "tag:yaml.org,2002:int"
+            or not re.fullmatch(r"[0-9]+", value.value)
+            for value in shards.value
+        ):
+            raise ValueError("source workflow: shard must be a literal integer sequence")
+        values = [int(value.value) for value in shards.value]
+        if values not in [list(range(n)) for n in (5, 6)]:
+            raise ValueError("source workflow: expected contiguous literal five/six shard matrix")
+        return values
+    except yaml.YAMLError as exc:
+        raise ValueError(f"source workflow: unreadable YAML: {exc}") from exc
+
+
+def _source_matrix(run: dict[str, Any], job: dict[str, Any]) -> tuple[list[int], dict[str, str]]:
+    """Bind the supported default checkout to execution semantics, not job text.
+
+    Checkout SHA alone is not workflow identity. Require authenticated checkout
+    step metadata, its bounded logs and default event ref, then validate actual
+    source action configuration. PR API head names the branch, not the merge:
+    ancestry PLUS independently byte-compatible head/merge workflows are required.
+    Custom refs, divergent workflows and unavailable evidence fail closed. There
+    is no mutable-main/PR-merge lookup or arbitrary-log provenance fallback.
+    """
+    event = run.get("event")
+    if event not in ("pull_request", "push"):
+        raise ValueError("source workflow: unsupported execution event")
+    checkout_steps = [
+        step for step in job.get("steps", []) if step.get("name") == "Run actions/checkout@v7"
+    ]
+    if len(checkout_steps) != 1:
+        raise ValueError("source workflow: missing/ambiguous checkout action step metadata")
+    step = checkout_steps[0]
+    try:
+        if (
+            step.get("number") != 2
+            or step.get("status") != "completed"
+            or step.get("conclusion") != "success"
+        ):
+            raise ValueError("source workflow: unsupported checkout action step metadata")
+        step_start = datetime.fromisoformat(step["started_at"].replace("Z", "+00:00"))
+        step_end = datetime.fromisoformat(step["completed_at"].replace("Z", "+00:00")) + timedelta(
+            seconds=1
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("source workflow: missing/invalid checkout step metadata") from exc
+    if event == "pull_request":
+        pulls = run.get("pull_requests", [])
+        if not pulls:
+            # Closed PRs disappear from historical run.pull_requests. The
+            # authenticated commit association is independent of job text;
+            # require exactly one same-repository PR, never infer its number
+            # from a printed checkout ref or look up today's mutable head.
+            pulls = _gh_json(f"repos/damianvtran/local-operator/commits/{run['head_sha']}/pulls")
+            if not isinstance(pulls, list) or any(
+                pull.get("base", {}).get("repo", {}).get("full_name")
+                != "damianvtran/local-operator"
+                for pull in pulls
+            ):
+                raise ValueError("source workflow: missing/ambiguous commit PR association")
+        if len(pulls) != 1 or type(pulls[0].get("number")) is not int:
+            raise ValueError("source workflow: missing/ambiguous run PR identity")
+        target = f"refs/remotes/pull/{pulls[0]['number']}/merge"
+        expected_checkout = ["--progress", "--force", target]
+    else:
+        branch = run.get("head_branch")
+        if not isinstance(branch, str) or not branch:
+            raise ValueError("source workflow: missing push branch identity")
+        expected_checkout = ["--progress", "--force", "-B", branch, f"refs/remotes/origin/{branch}"]
+    logs = subprocess.check_output(
+        [
+            "gh",
+            "api",
+            "--allow-escape-sequences",
+            f"repos/damianvtran/local-operator/actions/jobs/{job['id']}/logs",
+        ],
+        text=True,
+    )
+    # Server timestamps plus the Jobs API step window exclude test-produced
+    # checkout-shaped text. Untimestamped text is never runner evidence.
+    lines = []
+    for line in logs.splitlines():
+        stamp, separator, text = line.partition(" ")
+        try:
+            instant = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+            if separator and step_start <= instant < step_end:
+                lines.append(text)
+        except ValueError:
+            continue
+    if lines.count("##[group]Run actions/checkout@v7") != 1:
+        raise ValueError("source workflow: checkout action log is not bound to step metadata")
+    # actions/checkout emits the identity command immediately after its checkout
+    # group. Later test output can contain arbitrary SHA/command-looking text;
+    # it is not checkout evidence and must never select a workflow revision.
+    groups = [i for i, line in enumerate(lines) if line == "##[group]Checking out the ref"]
+    revisions = []
+    for start in groups:
+        end = next(
+            (i for i in range(start + 1, len(lines)) if lines[i] == "##[endgroup]"), len(lines)
+        )
+        checkout_commands = [
+            line.split("/git checkout ", 1)[1]
+            for line in lines[start:end]
+            if re.fullmatch(r"\[command\].*/git checkout .*", line)
+        ]
+        if checkout_commands != [" ".join(expected_checkout)]:
+            raise ValueError("source workflow: checkout is not the default execution ref")
+        if (
+            end + 2 < len(lines)
+            and re.fullmatch(r"\[command\].*/git log -1 --format=%H", lines[end + 1])
+            and re.fullmatch(r"[0-9a-f]{40}", lines[end + 2])
+        ):
+            revisions.append(lines[end + 2])
+    if len(groups) != 1 or len(revisions) != 1:
+        raise ValueError("source workflow: missing/ambiguous immutable checkout SHA in job log")
+    revision = revisions[0]
+    if run.get("event") == "pull_request":
+        commit = _gh_json(f"repos/damianvtran/local-operator/git/commits/{revision}")
+        if len(commit["parents"]) != 2 or run["head_sha"] not in [
+            parent["sha"] for parent in commit["parents"]
+        ]:
+            raise ValueError("source workflow: PR execution merge does not contain run head")
+    elif run.get("event") != "push" or revision != run["head_sha"]:
+        raise ValueError("source workflow: unsupported event or checkout/head mismatch")
+    source = _gh_json(
+        f"repos/damianvtran/local-operator/contents/.github/workflows/ci.yml?ref={revision}"
+    )
+    if source.get("encoding") != "base64":
+        raise ValueError("source workflow: missing base64 source content")
+    try:
+        workflow = base64.b64decode(source["content"]).decode("utf-8")
+    except (ValueError, UnicodeError) as exc:
+        raise ValueError("source workflow: unreadable source content") from exc
+    expected = _workflow_shards(workflow, require_default_checkout=True)
+    if event == "pull_request":
+        # The run's immutable branch HEAD is independently authenticated by
+        # GitHub. Require its workflow bytes to match the default merge's:
+        # checkout-shaped text cannot switch a six-shard head to a five-shard
+        # source. Divergent base/merge workflow changes are unsupported rather
+        # than guessed; these historical timing sources are byte-compatible.
+        head_source = _gh_json(
+            "repos/damianvtran/local-operator/contents/.github/workflows/ci.yml"
+            f"?ref={run['head_sha']}"
+        )
+        if (
+            head_source.get("encoding") != "base64"
+            or head_source.get("sha") != source["sha"]
+            or base64.b64decode(head_source.get("content", "")) != workflow.encode("utf-8")
+        ):
+            raise ValueError(
+                "source workflow: immutable head/execution workflow diverge; "
+                "unsupported source binding"
+            )
+    return expected, {"workflow_sha": revision, "workflow_blob": source["sha"]}
+
+
+def ci_run(run_id: int, attempt: int, cache: Path) -> tuple[dict[str, float], dict[str, Any]]:
+    """Admit only an entire successful Python 3.12 shard matrix from ONE attempt.
+
+    Artifact names historically omitted attempts. Bind each immutable artifact
+    ID to its job's execution interval instead of letting gh download merge
+    identically named artifacts from retries. Ambiguity is a fatal data error.
+    The cache is output only: metadata and immutable archives are fetched afresh.
+    """
+    endpoint = f"repos/damianvtran/local-operator/actions/runs/{run_id}"
+    run = _gh_json(f"{endpoint}/attempts/{attempt}")
+    job_page = _gh_json(f"{endpoint}/attempts/{attempt}/jobs?per_page=100")
+    jobs = job_page["jobs"]
+    if job_page.get("total_count", len(jobs)) > 100:
+        raise ValueError("job pagination required; refusing incomplete metadata")
+    artifacts = _gh_json(f"{endpoint}/artifacts?per_page=100")
+    if artifacts["total_count"] > 100:
+        raise ValueError("artifact pagination required; refusing incomplete metadata")
+    if run["status"] != "completed" or run["conclusion"] != "success":
+        raise ValueError(f"run {run_id} attempt {attempt} did not complete successfully")
+    if run["path"] != ".github/workflows/ci.yml":
+        raise ValueError(f"not a comparable CI workflow: {run['path']}")
+    shards = sorted(
+        (j for j in jobs if j["name"].startswith("test (3.12, ")),
+        key=lambda j: j["name"],
+    )
+    if not shards:
+        raise ValueError(f"run {run_id}: no unit shard jobs for source validation")
+    expected, workflow_source = _source_matrix(run, shards[0])
+    if [j["name"] for j in shards] != [f"test (3.12, {s})" for s in expected] or any(
+        j["conclusion"] != "success" for j in shards
+    ):
+        raise ValueError(
+            f"run {run_id}: incomplete or unsuccessful shard matrix; "
+            f"source {workflow_source.get('workflow_sha', run['head_sha'])} expects {expected}"
+        )
+    paths: list[Path] = []
+    sources = []
+    for shard, job in enumerate(shards):
+        name = f"junit-timings-3.12-{shard}"
+        matches = [
+            a
+            for a in artifacts["artifacts"]
+            if a["name"] in (name, f"{name}-attempt-{attempt}")
+            and not a["expired"]
+            and job["started_at"] <= a["created_at"] <= job["completed_at"]
+        ]
+        if len(matches) != 1:
+            raise ValueError(f"run {run_id} shard {shard}: ambiguous/missing attempt artifact")
+        artifact = matches[0]
+        archive = subprocess.check_output(
+            [
+                "gh",
+                "api",
+                f"repos/damianvtran/local-operator/actions/artifacts/{artifact['id']}/zip",
+            ]
+        )
+        directory = cache / f"{run_id}-{attempt}" / str(shard)
+        directory.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(BytesIO(archive)) as zipped:
+            expected = f"junit-3.12-{shard}.xml"
+            names = [expected] + (["junit-serial-controls-3.12-0.xml"] if shard == 0 else [])
+            for filename in names:
+                # Select exact known XML members; never extract arbitrary archive paths.
+                destination = directory / filename
+                destination.write_bytes(zipped.read(filename))
+                if not list(ET.parse(destination).getroot().iter("testcase")):
+                    raise ValueError(f"empty report: {destination}")
+                paths.append(destination)
+        sources.append({"shard": shard, "job_id": job["id"], "artifact_id": artifact["id"]})
+    totals = aggregate(paths)
+    return totals, {
+        "run_id": run_id,
+        "attempt": attempt,
+        "head": run["head_sha"],
+        "python": "3.12",
+        **workflow_source,
+        "shards": sources,
+    }
 
 
 def build_manifest(per_file: dict[str, float]) -> dict[str, object]:
@@ -270,7 +486,15 @@ def build_manifest(per_file: dict[str, float]) -> dict[str, object]:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=(__doc__ or "").split("\n")[0])
-    ap.add_argument("--junit", nargs="+", required=True, help="JUnit XML file(s) or globs")
+    ap.add_argument("--junit", nargs="+", help="JUnit XML file(s) or globs")
+    ap.add_argument(
+        "--ci-run",
+        action="append",
+        default=[],
+        metavar="RUN:ATTEMPT",
+        help="complete CI run attempt; repeat at least three times for p75",
+    )
+    ap.add_argument("--cache-dir", type=Path, help="directory for downloaded timing XML")
     ap.add_argument(
         "--runs",
         type=int,
@@ -298,6 +522,38 @@ def main(argv: list[str] | None = None) -> int:
     tree = TREES[args.tree]
     out = args.out if args.out is not None else tree.manifest
 
+    if args.ci_run:
+        if args.junit or args.runs != 1 or args.tree != "unit" or not args.cache_dir:
+            ap.error("--ci-run requires --cache-dir, unit tree, and no --junit/--runs")
+        try:
+            identities = [tuple(map(int, value.split(":"))) for value in args.ci_run]
+        except ValueError:
+            ap.error("--ci-run must be RUN:ATTEMPT (positive integers)")
+        if any(len(value) != 2 or min(value) < 1 for value in identities):
+            ap.error("--ci-run must be RUN:ATTEMPT (positive integers)")
+        if len({value[0] for value in identities}) < 3 or any(len(v) != 2 for v in identities):
+            ap.error("p75 requires at least three distinct complete run IDs (RUN:ATTEMPT)")
+        if len({value[0] for value in identities}) != len(identities):
+            ap.error("repeated run IDs would bias p75")
+        observations, provenance = [], []
+        for run_id, attempt in identities:
+            measured, source = ci_run(run_id, attempt, args.cache_dir)
+            observations.append(measured)
+            provenance.append(source)
+        manifest = build_manifest(percentile_weights(observations))
+        manifest["_provenance"] = {
+            "method": "p75-inclusive-per-run-file-total",
+            "runs": provenance,
+            "samples_per_file": {
+                path: sum(path in run for run in observations)
+                for path in sorted(set().union(*observations))
+            },
+        }
+        out.write_text(json.dumps(manifest, indent=1, sort_keys=True) + "\n")
+        print(f"wrote {out}: p75 from {len(observations)} complete CI run attempts")
+        return 0
+    if not args.junit:
+        ap.error("supply --junit or at least three --ci-run values")
     paths: list[Path] = []
     for pattern in args.junit:
         paths.extend(Path(p) for p in sorted(glob.glob(pattern)))

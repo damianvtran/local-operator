@@ -989,6 +989,23 @@ def _require_attachment_id(attachment_id: str) -> None:
         raise ValueError("attachment id is not a minted batt_ id")
 
 
+def _sniff_image(data: bytes) -> str | None:
+    """The image type ``data`` actually is, by magic bytes, or ``None``.
+
+    Covers exactly the avatar routes' closed sets (PNG, JPEG, WebP). Anything
+    else - SVG, HTML, a truncated header - is ``None`` and never matches a
+    declared type.
+    """
+
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
 def _require_endpoint_id(endpoint_id: str) -> None:
     """Refuse an endpoint id that could reshape the upstream path."""
 
@@ -1477,6 +1494,10 @@ class TeamBridgeClient:
                     headers=headers,
                     files=files,
                     content=content,
+                    # A response cap must not silently erase a JSON mutation.
+                    # All body forms share the bounded path, just as they do
+                    # the ordinary request path below.
+                    json=body,
                 ) as streamed:
                     # Avatar reads need a hard allocation bound as well as a
                     # decoded-size bound. Refuse an ignored identity request
@@ -4114,7 +4135,16 @@ class TeamBridgeClient:
                     avatar_cache.AVATAR_CACHE.put(key, cached)
                 return cached.body, cached.mime
         mime = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
-        if response.status_code != 200 or mime not in mime_types or not response.content:
+        # The bytes must BE the type the hub declared (security review round 1,
+        # S-1): a hub label alone let SVG/HTML through as `image/png`. The relay
+        # then serves the sniffed type, so a renderer never receives a label the
+        # payload contradicts. Shared by the account and the endpoint picture.
+        if (
+            response.status_code != 200
+            or mime not in mime_types
+            or not response.content
+            or _sniff_image(response.content) != mime
+        ):
             raise BridgeRefusal(
                 "bridge_invalid_response",
                 "Radient returned an invalid response.",  # i18n: ignore, no code
@@ -4126,33 +4156,153 @@ class TeamBridgeClient:
             avatar_cache.AVATAR_CACHE.put(key, Entity(response.content, mime, etag))
         return response.content, mime
 
+    async def account_profile_request(
+        self,
+        operation: Literal["read", "update", "upload", "remove"],
+        *,
+        expected_account_id: str,
+        expected_scope: str | None = None,
+        fields: Mapping[str, str] | None = None,
+        image: bytes | None = None,
+        mode: Literal["uploaded", "provider"] = "uploaded",
+    ) -> dict[str, Any]:
+        """One self-profile request under the exact login that opened the editor.
+
+        This reuses person OAuth, not Bridge enrollment or membership. The
+        opaque scope is a freshness receipt, NOT authorization: desktop auth
+        still gates the route and the stored OAuth JWT alone owns the upstream
+        target. Capture BEFORE refresh (including A→B→A), check immediately
+        before dispatch and after response, and never replay a mutation on 401.
+        A post-dispatch refusal suppresses stale success; it cannot undo a write
+        the upstream already committed.
+        """
+        import hashlib
+        import json
+
+        from local_operator.team_bridge.types import is_account_id
+
+        if not is_account_id(expected_account_id):
+            raise ValueError("Invalid account identifier")
+        captured = self._account_authority(expected_account_id)
+        scope_token = hashlib.sha256(json.dumps(captured).encode()).hexdigest()
+
+        def check_owner() -> None:
+            try:
+                current = self._account_authority(expected_account_id)
+            except (BridgeSignInRequired, BridgeRefusal):
+                current = None
+            if current != captured or (
+                expected_scope is not None and expected_scope != scope_token
+            ):
+                raise BridgeRefusal(
+                    ACCOUNT_MISMATCH_CODE, ACCOUNT_MISMATCH_SENTENCE, http_status=409
+                )
+
+        check_owner()
+        if operation != "read" and expected_scope is None:
+            raise BridgeRefusal(ACCOUNT_MISMATCH_CODE, ACCOUNT_MISMATCH_SENTENCE, http_status=409)
+        access = await self._guarded_access(expected_account_id)
+        check_owner()
+        if access is None or access.credential_id != captured[1][0]:
+            raise BridgeRefusal(ACCOUNT_MISMATCH_CODE, ACCOUNT_MISMATCH_SENTENCE, http_status=409)
+        method, path = {
+            "read": ("GET", f"/accounts/{expected_account_id}/profile"),
+            "update": ("PATCH", "/account/profile"),
+            "upload": ("PUT", "/account/avatar"),
+            "remove": ("DELETE", "/account/avatar"),
+        }[operation]
+        try:
+            response = await self._dispatch(
+                method,
+                path,
+                access.access_token,
+                params={"mode": mode} if operation == "remove" else None,
+                body=dict(fields) if operation == "update" and fields is not None else None,
+                files=(
+                    {"file": ("avatar", image, "application/octet-stream")}
+                    if operation == "upload" and image is not None
+                    else None
+                ),
+                max_response_bytes=32 * 1024,
+                identity_response_only=True,
+                pre_http_guard=check_owner,
+            )
+        except httpx.HTTPError as failure:
+            raise BridgeUnreachable() from failure
+        check_owner()
+        if response.status_code >= 400:
+            raise _refusal(response)
+        profile = _envelope_result(response)
+        # The account API may grow sensitive fields. The native editor only
+        # needs this presentation allowlist, never arbitrary upstream metadata.
+        allowed = {
+            "account_id",
+            "display_name",
+            "display_label",
+            "title",
+            "description",
+            "timezone",
+            "avatar_url",
+        }
+        projected: dict[str, Any] = {
+            k: v for k, v in profile.items() if k in allowed and isinstance(v, str)
+        }
+        if projected.get("account_id") != expected_account_id:
+            raise BridgeRefusal(
+                "bridge_invalid_response",
+                # i18n: ignore internal diagnosis; desktop sends only the code
+                "Radient returned an invalid response.",
+                http_status=502,
+            )
+        avatar = profile.get("avatar")
+        if isinstance(avatar, dict):
+            projected["avatar"] = {
+                k: v
+                for k, v in avatar.items()
+                if k in {"source", "hash", "updated_at"} and isinstance(v, str)
+            }
+        return {"scope": scope_token, "profile": projected}
+
     def _avatar_authority(
         self, expected_account_id: str
     ) -> tuple[tuple[str, str], tuple[int, str, str]]:
-        """``(scope, authority)`` for the CURRENT login, exactly as ``fetch_avatar`` keys it.
+        """Admit an image cache only after the shared login fence succeeds."""
+        from local_operator.team_bridge import avatar_cache
 
-        Local only (no refresh, no network): the notification composite uses it
-        to fence its render to the same login ``fetch_avatar`` authorized under.
-        Refuses like ``fetch_avatar`` does when the captured viewer is not the
-        signed-in login.
+        try:
+            scope, authority = self._account_authority(expected_account_id)
+        except (BridgeRefusal, BridgeSignInRequired):
+            from local_operator.paths import config_dir
+
+            scope = (str((self._config_dir or config_dir()).resolve()), self._base_url)
+            avatar_cache.admit(scope, None)
+            raise
+        avatar_cache.admit(scope, authority)
+        return scope, authority
+
+    def _account_authority(
+        self, expected_account_id: str
+    ) -> tuple[tuple[str, str], tuple[int, str, str]]:
+        """Cache-neutral authority for the current person OAuth login.
+
+        Local only (no refresh/network): both private image reads and account
+        profile writes capture the same row/account/durable incarnation before
+        any await. Cache admission belongs to the image wrapper, never to a
+        profile authorization check.
         """
 
         from local_operator.paths import config_dir
-        from local_operator.team_bridge import avatar_cache
 
         self._require_destination()
         store = self._auth_store()
         scope = (str((self._config_dir or config_dir()).resolve()), self._base_url)
         row = self._pinned_row()
         if row is None:
-            avatar_cache.admit(scope, None)
             raise BridgeSignInRequired(SIGN_IN_SENTENCE)
         incarnation = store.native_login_incarnation(row.id)
         if not incarnation or row.data.get("account_id") != expected_account_id:
-            avatar_cache.admit(scope, None)
             raise BridgeRefusal(ACCOUNT_MISMATCH_CODE, ACCOUNT_MISMATCH_SENTENCE, http_status=409)
         authority = (row.id, expected_account_id, incarnation)
-        avatar_cache.admit(scope, authority)
         return scope, authority
 
     async def notification_avatar(
@@ -4166,8 +4316,31 @@ class TeamBridgeClient:
         initials: str,
         v: str | None,
         expected_account_id: str,
+        endpoint: tuple[str, str] | None = None,
+        on_fallback: Callable[[], None] | None = None,
     ) -> bytes:
         """Render only after current-avatar authorization, never from stale bytes.
+
+        ``endpoint`` is first BOUND to the sender (security review round 1,
+        S-2): the tenant directory must list ``sender_account_id`` with an
+        agent whose ``endpoint_id`` is this one and whose published
+        ``avatar_url`` names this exact version. Otherwise the glyph is drawn,
+        so no caller can paint another agent's face under this sender's name,
+        mirroring the ``avatar_account_id`` arm's equality rule.
+
+        ``on_fallback`` is called when an agent picture was asked for and the
+        glyph was drawn instead (unbound, unreadable or undecodable), so the
+        route can tell the desktop to keep that answer for its short failure
+        TTL rather than its photo lease (code review round 1, F1).
+
+        ``endpoint`` is ``(endpoint_id, v)`` for a ``person_agent`` whose hub
+        directory publishes the agent's OWN picture. It is read through
+        :meth:`fetch_endpoint_avatar` (never the owner's account route) and is
+        best effort: an unreachable hub, a stale version or a refusal draws the
+        agent glyph rather than failing the banner, because the picture is
+        cosmetic and the desktop's 250 ms budget has no room for a retry. A
+        changed login is the exception and still refuses, so a queued read
+        cannot draw under the wrong viewer.
 
         The directory join belongs to the tenant-scoped desktop caller. Here
         tenant is validated as part of the closed contract (the desktop keys its
@@ -4195,8 +4368,12 @@ class TeamBridgeClient:
             or size not in na.SIZES
             or not na.valid_initials(initials)
             or (v is not None and re.fullmatch(r"[0-9a-f]{16}", v) is None)
+            or (endpoint is not None and kind != "person_agent")
+            or (endpoint is not None and re.fullmatch(r"[0-9a-f]{16}", endpoint[1]) is None)
         ):
             raise ValueError("invalid notification avatar request")
+        if endpoint is not None:
+            _require_endpoint_id(endpoint[0])
         scope, authority = self._avatar_authority(expected_account_id)
 
         def check_owner() -> None:
@@ -4222,16 +4399,89 @@ class TeamBridgeClient:
             photo, _mime = await self.fetch_avatar(
                 sender_account_id, v=v, size=size, expected_account_id=expected_account_id
             )
+        agent_picture: bytes | None = None
+        if endpoint is not None:
+            try:
+                if await self._endpoint_belongs_to(
+                    sender_account_id,
+                    endpoint,
+                    tenant_id=tenant_id,
+                    expected_account_id=expected_account_id,
+                ):
+                    agent_picture, _mime = await self.fetch_endpoint_avatar(
+                        endpoint[0],
+                        v=endpoint[1],
+                        size=size,
+                        expected_account_id=expected_account_id,
+                    )
+            except BridgeSignInRequired:
+                raise
+            except BridgeRefusal as refusal:
+                # A login change is a refusal, never a fallback: the glyph would
+                # be drawn under a viewer who no longer owns this request.
+                if refusal.code == ACCOUNT_MISMATCH_CODE:
+                    raise
+                agent_picture = None
         check_owner()
         data = await na.render(
             variant,
             origin=self._base_url,
             account_id=sender_account_id,
             photo=photo,
+            agent_picture=agent_picture,
             check_owner=check_owner,
+            on_fallback=on_fallback if endpoint is not None else None,
         )
         check_owner()
         return data
+
+    async def _endpoint_belongs_to(
+        self,
+        sender_account_id: str,
+        endpoint: tuple[str, str],
+        *,
+        tenant_id: str,
+        expected_account_id: str,
+    ) -> bool:
+        """Whether the tenant directory publishes THIS picture for THIS sender.
+
+        The directory is the same hub answer the desktop derived the endpoint
+        from, read under the same viewer fence. Binding key is
+        ``(sender account, agent.endpoint_id, agent.avatar.hash)``: three fields
+        of ONE row, so naming another agent's endpoint — even with its correct
+        current version — cannot paint it, and a malformed or missing directory
+        is "not bound" (the glyph), never a pass.
+
+        The version is read from ``agent.avatar.hash``, the documented field the
+        hub itself renders into ``?v=``, and NOT from the ``avatar_url`` string
+        (security review round 2, S-3): the URL is agent-server's rendering
+        detail, so keying on it makes any future reshuffle there silently glyph
+        every agent face — fail-closed, and invisible to both repos' tests. A
+        hub that publishes no structured hash still binds through an exactly
+        equal ``avatar_url``, which pins the same version; a row that publishes
+        a structured hash is judged on it alone, so the two can never disagree
+        about whether this is the picture.
+        """
+
+        directory = await self.directory(tenant_id, expected_account_id=expected_account_id)
+        members = directory.get("members") if isinstance(directory, dict) else None
+        if not isinstance(members, list):
+            return False
+        expected_url = f"/v1/messaging/endpoints/{endpoint[0]}/avatar?v={endpoint[1]}"
+        for member in members:
+            if not isinstance(member, dict) or member.get("account_id") != sender_account_id:
+                continue
+            agent = member.get("agent")
+            if not isinstance(agent, dict) or agent.get("endpoint_id") != endpoint[0]:
+                continue
+            avatar = agent.get("avatar")
+            if isinstance(avatar, dict) and isinstance(avatar.get("hash"), str):
+                if avatar["hash"] == endpoint[1]:
+                    return True
+                continue
+            if isinstance(agent.get("avatar_url"), str) and agent["avatar_url"] == expected_url:
+                return True
+        return False
 
     async def fetch_attachment(
         self,

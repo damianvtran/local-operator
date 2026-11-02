@@ -1,0 +1,16 @@
+{
+  "wire.settings.account_policy.label": "chính sách chọn tài khoản",
+  "wire.settings.account_policy.help": "Chọn các tài khoản khác đủ điều kiện trong cùng nhà cung cấp và bậc thông tin xác thực. Một lease tương thích, chưa hết hạn từ một yêu cầu thành công được ưu tiên với mọi chính sách; nó không đảm bảo trúng cache. “Đặt lại sớm nhất” ưu tiên lần nạp lại hằng tuần gần nhất, rồi lần nạp lại năm giờ khi hòa trong vòng một phút. Chính sách tường minh ghi đè cài đặt chọn tài khoản theo mức sử dụng kiểu cũ.",
+  "wire.settings.account_policy.reset_soonest.label": "Đặt lại sớm nhất",
+  "wire.settings.account_policy.reset_soonest.description": "Ưu tiên lần đặt lại gói đi kèm gần nhất; phân bổ các trường hợp hòa và báo cáo chưa rõ một cách xác định. Mặc định cho cấu hình mới.",
+  "wire.settings.account_policy.headroom.label": "Còn nhiều hạn mức nhất",
+  "wire.settings.account_policy.headroom.description": "Ưu tiên hạn mức còn lại đã lưu trong cache, phân bổ các tài khoản trong vòng mười điểm phần trăm so với tài khoản tốt nhất.",
+  "wire.settings.account_policy.fair.label": "Phân bổ công bằng",
+  "wire.settings.account_policy.fair.description": "Dùng cách phân bổ ổn định theo phiên thay vì xếp hạng các lần đặt lại hay hạn mức còn lại đã lưu trong cache.",
+  "wire.settings.account_policy.legacy.label": "chọn theo mức sử dụng kiểu cũ",
+  "wire.settings.account_policy.legacy.help": "Cài đặt tương thích, chỉ dùng khi chính sách chọn tài khoản không có: true chọn Còn nhiều hạn mức nhất; false chọn Phân bổ công bằng. Chính sách chọn tài khoản tường minh được ưu tiên. Hãy đặt lại dòng chính sách chọn tài khoản để khôi phục Đặt lại sớm nhất và xóa các ghi đè kiểu cũ.",
+  "wire.settings.account_policy.error.unavailable": "Định tuyến tài khoản không khả dụng.",
+  "wire.settings.account_policy.error.invalid_shape": "Chỉ mong đợi một trường value.",
+  "wire.settings.account_policy.error.invalid_json": "Mong đợi một đối tượng JSON.",
+  "wire.settings.account_policy.error.write_failed": "Không lưu được cài đặt. Hãy kiểm tra quyền cấu hình trên máy tính này rồi thử lại."
+}

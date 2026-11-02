@@ -1,0 +1,7 @@
+{
+  "cli.model_help.model": "Chuyển mô hình của một phiên lop khác đang chạy (như /model ở đó)",
+  "cli.model_help.target": "tên cuộc trò chuyện / id phiên / chuỗi con của cwd (không phân biệt hoa thường). Bỏ qua khi chọn bằng --pid/--session.",
+  "cli.model_help.selector": "mô hình cần chuyển sang, ví dụ deepseek/deepseek-flash",
+  "cli.model_help.pid": "chọn theo đúng pid",
+  "cli.model_help.session": "chọn theo đúng id phiên"
+}

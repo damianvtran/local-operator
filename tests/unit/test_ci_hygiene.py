@@ -10,7 +10,7 @@ These exist because three defects all produced a *silent* green:
 - #381: ``[tool.pyright] exclude`` *replaces* pyright's built-in defaults.
   Dropping ``**/.*`` makes a local run type-check all of site-packages.
 - #1238: the whole job set ran on every diff, so a one-line docs edit paid for
-  the five-shard matrix, a Windows run, a macOS TUI run, a live-LLM run and a
+  the six-shard matrix, a Windows run, a macOS TUI run, a live-LLM run and a
   dependency audit — 16 checks for a file no gate reads. The gate is a
   classifier (`scripts/ci_scope.py`) shared with `make check-changed`; the
   assertions below pin its predicates, its fail-open direction, and the wiring
@@ -744,30 +744,25 @@ def test_a_module_level_skip_resolves_through_its_name(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("classname", ["", ".", "..", "tests."])
-def test_a_classname_of_only_separators_is_dropped_not_raised(
-    classname: str, tmp_path: Path
-) -> None:
-    """The guard covers the empty-component CLASS, not just the empty string.
+def test_a_classname_of_only_separators_is_rejected(classname: str, tmp_path: Path) -> None:
+    """Unresolvable inputs fail with attribution context, not a Path crash.
 
-    `"."` splits to two empty components and reaches the SAME `ValueError` as
-    `""`, so `if not classname` closes the spelling pytest emits today and
-    leaves the other one open. Nothing emits `.` yet; the cost of the wider
-    guard is nothing, and the cost of the narrow one is a manifest that
-    silently stops being regenerated. `tests.` is here because a trailing
-    separator trims to `tests.py`, which names no test file and must be a drop,
-    not a crash.
+    Even a positive duration with a malformed classname cannot silently vanish
+    from the regenerated weights. Valid empty-classname skips resolve by name
+    in the separate real-pytest-shape regression above.
     """
     from scripts import gen_test_durations
 
     report = _junit_report(tmp_path, f'<testcase classname="{classname}" time="1.0"/>')
 
-    assert gen_test_durations.aggregate([report]) == {}
+    with pytest.raises(ValueError, match="did not map"):
+        gen_test_durations.aggregate([report])
 
 
-def test_the_unresolved_warning_names_the_string_that_was_tried(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+def test_the_unresolved_error_names_the_string_that_was_tried(
+    tmp_path: Path,
 ) -> None:
-    """A dropped mapping must be actionable: name the string actually tried.
+    """A rejected mapping must be actionable: name the string actually tried.
 
     On the empty-classname path the string tried is `name`, and the warning
     recorded the raw `classname` instead -- so the message printed `['']`,
@@ -781,10 +776,15 @@ def test_the_unresolved_warning_names_the_string_that_was_tried(
         tmp_path, '<testcase classname="" name="tests.unit.test_never_written" time="1.0"/>'
     )
 
-    assert gen_test_durations.aggregate([report]) == {}
-    err = capsys.readouterr().err
-    assert "tests.unit.test_never_written" in err, err
-    assert "['']" not in err, err
+    with pytest.raises(ValueError, match="tests.unit.test_never_written"):
+        gen_test_durations.aggregate([report])
+
+
+def test_unit_shard_capacity_changes_without_relaxing_timeout() -> None:
+    """The fleet repair buys parallel capacity, never fewer tests or a higher cap."""
+    assert _shard_plan("test") == ("unit", 6)
+    assert shard_tests.TREES["unit"].default_shards == 6
+    assert _ci_jobs()["test"]["timeout-minutes"] == 38
 
 
 def test_every_shard_matrix_job_uses_a_known_tree() -> None:
@@ -2676,7 +2676,7 @@ def test_a_local_run_classifies_the_diff_instead_of_running_everything(
 def test_coverage_report_inherits_a_skipped_test_job_and_has_no_always() -> None:
     """A14. `coverage-report` must not get an `always()`.
 
-    It combines the five shard artifacts. If `test` was skipped there are zero
+    It combines the six shard artifacts. If `test` was skipped there are zero
     artifacts, and `coverage combine` over nothing goes red on a PR that changed
     nothing the unit suite reads. GitHub's default — a skipped need skips the
     dependent — is exactly the wanted behaviour here, so this job keeps

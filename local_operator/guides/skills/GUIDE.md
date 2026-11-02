@@ -16,7 +16,7 @@ Fourteen builtin skills are packaged inside Local Operator itself. They are rele
 - `systematic-debugging` — root-cause defects instead of guessing: reproduce, isolate, instrument boundaries, kill hypotheses.
 - `engineering-principles` — smallest change, subtract before adding, data structures before logic, idempotency.
 - `code-review` — diff-first review with severity classification and terminal verdicts.
-- `responding-to-review` — answer findings one at a time: verify, fix/reject/defer with evidence, one batched round.
+- `responding-to-review` — record a disposition for each finding: verify, fix/reject/defer with evidence, one batched round (not per-finding commit/review cycles).
 - `design-qa` — deterministic UI/UX checks (contrast, spacing, overlap, clipping, copy) plus judgement rules for the rest.
 - `frontend-design` — deliberate interface design: plan before pixels, avoid the generic default look, hold a quality floor.
 - `browser-qa` — exercise a web app through a real browser: recon, selectors, console errors, screenshot evidence.

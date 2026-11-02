@@ -1,0 +1,7 @@
+{
+  "cli.install_help.install": "Quản lý các thế hệ cài đặt cục bộ (bố cục cho runtime `lop` ổn định)",
+  "cli.install_help.prune": "Xóa các thế hệ cài đặt mà không có gì đang chạy từ đó",
+  "cli.install_help.keep": "Số thế hệ không được tham chiếu cần giữ lại (mặc định: %(default)s; 0 trở lên). Thế hệ được một phiên đang chạy hoặc đã lưu nêu tên, và thế hệ mà `current` trỏ tới, không bao giờ bị xóa",
+  "cli.install_help.migrate": "Sao chép bản cài này vào bố cục thế hệ và trỏ `current` tới nó",
+  "cli.install_help.status": "Hiển thị bố cục cài đặt: con trỏ, các thế hệ và thứ mà một `lop` mới sẽ nạp"
+}

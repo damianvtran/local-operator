@@ -1,0 +1,23 @@
+{
+  "tui.usage.paid.continue": "đã dùng hết hạn mức đi kèm; sẽ tiếp tục trừ vào tín dụng",
+  "tui.usage.paid.family_caps": "giới hạn theo dòng mô hình vẫn áp dụng",
+  "tui.usage.paid.blocked": "Không thể chi tiêu",
+  "tui.usage.paid.eligibility_unknown": "Chưa rõ điều kiện chi tiêu",
+  "tui.usage.paid.unlimited": "Hạn mức trả phí không giới hạn",
+  "tui.usage.windows_count": "{count, plural, other {{shown} cửa sổ}}",
+  "tui.usage.exhausted": "{value} đã hết",
+  "tui.usage.near_limit": "{value} sắp chạm giới hạn",
+  "tui.usage.reported_balance": "{count, plural, other {{shown} số dư được báo cáo}}",
+  "tui.usage.not_reported": "{value} chưa được báo cáo",
+  "tui.usage.unavailable": "  ·  không có dữ liệu sử dụng",
+  "tui.usage.resets_in": ", đặt lại sau {value}",
+  "tui.usage.no_windows": "  chưa có cửa sổ nào được báo cáo",
+  "tui.usage.fetching": "đang lấy…",
+  "tui.usage.title": "Lượng sử dụng",
+  "tui.usage.sign_in_expired": "phiên đăng nhập {value} đã hết hạn",
+  "tui.usage.stale": "{value} đã cũ",
+  "tui.usage.refreshing": "đang làm mới…",
+  "tui.usage.refresh_failed": "làm mới thất bại — hiển thị số liệu đã biết gần nhất",
+  "tui.usage.showing_prefix": "hiển thị ",
+  "tui.usage.of_separator": " trên "
+}

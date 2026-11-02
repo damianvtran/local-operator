@@ -1697,7 +1697,9 @@ def reap_orphan_rows(config_dir: Path | str, *, keep: str = "") -> tuple[str, ..
             wake_store.write_entry(
                 root,
                 session_id,
-                cwd=str(entry.get("cwd") or Path.home()),
+                # Preserve an absent cwd in durable wake metadata too: inventing
+                # HOME here makes a later wake cancel a recorded directory move.
+                cwd=str(entry.get("cwd") or ""),
                 schedules=kept,
                 preserve=entry,
             )

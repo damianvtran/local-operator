@@ -273,32 +273,51 @@ def test_s1_parse_records_is_linear_in_the_record_length() -> None:
     assert elapsed < 2.0, elapsed
 
 
-def test_s1_provenance_is_not_one_span_scan_per_token() -> None:
-    """A repeated late token (p8) or 60k distinct invented tokens stay bounded.
+@pytest.mark.parametrize("invented", [False, True])
+def test_s1_provenance_is_not_one_span_scan_per_token(invented: bool) -> None:
+    """Reject both hostile records far below the CPU work of per-token scans.
 
-    Called on ``check_provenance`` directly so the bound is the algorithm's:
-    the old ``token in haystack`` did one scan of the ~1 MiB span per token.
+    Compare with the actual bad algorithm on this runner, not an absolute wall
+    deadline: source preparation and token estimation legitimately cost CPU,
+    and a slower core or scheduler pause must not turn those into a regression.
+    An indexed membership pass remains allowed: the forbidden work is scanning
+    the entire source for each output token, not examining each token at all.
     """
     from local_operator.saver.validate import check_provenance
 
     big = "\n".join(f"line {j} of src/module_{j}.py value_{j:06d}" for j in range(30_000))
     rows = saver_projection([Message(role="user", content=[TextContent(text="paste:\n" + big)])])
-    late = "value_029999"
-    started = time.perf_counter()
-    with pytest.raises(SaverRejected, match="provenance"):
-        check_provenance(HEADER + "\nuser: " + " ".join([late] * 60_000), rows)
-    known = time.perf_counter() - started
-    started = time.perf_counter()
+    tokens = [f"invented_{i:07d}" for i in range(60_000)] if invented else ["value_029999"] * 60_000
+    text = HEADER + "\nuser: " + " ".join(tokens)
+
+    # Warm with a SMALL record: a first tokenizer load is not per-token source
+    # scanning. Full hostile-record preparation remains inside the measured call.
+    warm_rows = saver_projection(
+        [Message(role="user", content=[TextContent(text="warmup\nvalue_029999")])]
+    )
     with pytest.raises(SaverRejected) as info:
-        check_provenance(
-            HEADER + "\nuser: " + " ".join(f"invented_{i:07d}" for i in range(60_000)), rows
-        )
-    invented = time.perf_counter() - started
+        check_provenance(HEADER + "\nuser: " + " ".join(tokens[:2]), warm_rows)
     assert info.value.reason == "provenance"
-    # Old algorithm: 60,000 scans of ~1.4 MB each. New: one index build plus at
-    # complete source-record matching, never one scan per output token.
-    assert known < 1.5, known
-    assert invented < 1.5, invented
+
+    # Sample evenly across the output rather than paying for 84 GB of scans in
+    # every suite run. Each sample still scans the SAME full source; only the
+    # number of repetitions is reduced. Scale its CPU to the full token count.
+    # Execute every sample: all()/any() would short circuit for invented tokens.
+    samples = [tokens[i * len(tokens) // 1024] for i in range(1024)]
+    started = time.thread_time()
+    found = sum(token in big for token in samples)
+    scan_cpu = (time.thread_time() - started) * len(tokens) / len(samples)
+    assert found == (0 if invented else len(samples))
+
+    started = time.thread_time()
+    with pytest.raises(SaverRejected) as info:
+        check_provenance(text, rows)
+    validation_cpu = time.thread_time() - started
+    assert info.value.reason == "provenance"
+    # The reference estimates the forbidden tokens*span work. A wide
+    # relative gap survives core-speed differences; thread CPU excludes time
+    # descheduled. External bounded runners provide hang safety, not this gate.
+    assert validation_cpu < scan_cpu / 8, (validation_cpu, scan_cpu)
 
 
 def test_s1_a_passed_deadline_refuses_as_busy() -> None:

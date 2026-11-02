@@ -1,0 +1,39 @@
+{
+  "locale": "vi",
+  "namespace": "mobile.setup",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 2,
+    "nit": 0
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 1,
+      "id": "VI-023",
+      "severity": "MINOR",
+      "namespace": "mobile.setup",
+      "key": "mobile.setup.cloudflared",
+      "english": "Install cloudflared 2025.4.0 or newer using your package manager (macOS: brew install cloudflared), then rerun lop tunnel setup. An agent may run the installation with normal tool approval.",
+      "current": "Cài cloudflared 2025.4.0 trở lên bằng trình quản lý gói của bạn (macOS: brew install cloudflared), rồi chạy lại lop tunnel setup. Tác nhân có thể chạy việc cài đặt này với sự chấp thuận công cụ thông thường.",
+      "problem": "Glossary 'approvals → phê duyệt' (9 uses in vi catalogues, 0 of 'chấp thuận'). 'sự chấp thuận công cụ thông thường' introduces a second term for tool approval; same in cloudflared_tui, mobile_bundle, mobile_bundle_tui (and title_quote 'cần bạn chấp thuận').",
+      "suggested": "… Tác nhân có thể chạy việc cài đặt này với phê duyệt công cụ thông thường. (and 'phê duyệt' in the sibling keys)",
+      "disposition": "fixed (remediation core-fix, session 5e0b68c135be)"
+    },
+    {
+      "round": 1,
+      "id": "VI-024",
+      "severity": "MINOR",
+      "namespace": "mobile.setup",
+      "key": "mobile.setup.failed",
+      "english": "Setup did not finish. Check lop tunnel setup --json, then retry with the current account/quote. Completed steps have not been undone.",
+      "current": "Thiết lập chưa hoàn tất. Kiểm tra lop tunnel setup --json, rồi thử lại với tài khoản/báo giá hiện tại. Các bước đã hoàn tất chưa được hoàn tác.",
+      "problem": "'chưa được hoàn tác' = 'not YET undone', which hints a rollback may follow; English states flatly that completed steps stay in place (a billing-relevant fact). Same in failed_tui, unexpected_failure, billing_activated_status.",
+      "suggested": "… Các bước đã hoàn tất vẫn được giữ nguyên, không bị hoàn tác.",
+      "disposition": "fixed (remediation core-fix, session 5e0b68c135be)"
+    }
+  ]
+}

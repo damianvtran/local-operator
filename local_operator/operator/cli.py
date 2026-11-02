@@ -30,17 +30,20 @@ from __future__ import annotations
 import argparse
 from typing import Any
 
+from local_operator.i18n.cli_help import help_text
+from local_operator.i18n.keys import cli_group_help as _gg
+
 #: The backends ``--backend`` accepts. ``auto`` is the presence ladder; the rest
 #: are explicit so an operator who wants the file fallback (a CI box, a
 #: container) can say so and be told what it costs.
 BACKEND_CHOICES = ("auto", "secure-enclave", "cng-presence", "file-only")
 
 
-def add_parser(subparsers: Any) -> None:
+def add_parser(subparsers: Any, *, help_locale: str | None = None) -> None:
     """Register ``lop operator`` and its verbs. Stdlib-only."""
     parser = subparsers.add_parser(
         "operator",
-        help="Operator authority: the key that may loosen a running approval gate",
+        help=help_text(_gg.operator(), help_locale),
     )
     actions = parser.add_subparsers(dest="operator_command")
 

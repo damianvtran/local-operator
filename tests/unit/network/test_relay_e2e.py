@@ -18,6 +18,7 @@ import time
 from argparse import Namespace
 from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -38,6 +39,9 @@ from local_operator.network.handshake import (
 from local_operator.paths import config_dir as ambient_config_dir
 from local_operator.session.retention import SESSIONS_DIRNAME
 from tests.unit.network import conftest as net_fixtures
+from tests.unit.network.relay_refusal_boundary import RefusalBoundary
+
+_REFUSAL_BOUNDARY = pytest.StashKey[RefusalBoundary]()
 
 NETWORK_NAME = "home-net"
 
@@ -94,7 +98,7 @@ def serve_shaped_relay(
 
 @pytest.fixture()
 def devices(
-    root: Path, monkeypatch: pytest.MonkeyPatch
+    root: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
 ) -> Iterator[tuple[relay.RelayServer, relay.RelayServer, str, int]]:
     """Two relays on loopback: A listening, B able to dial it."""
     root_a = root / "a"
@@ -109,6 +113,10 @@ def devices(
     server_b = serve_shaped_relay(
         root_b, monkeypatch, identity=identity_b, audit=audit_mod.AuditLog(root_b)
     )
+    # Only the incident-phase cells opt in. Hooks must precede A.start (and
+    # remain installed when _dialable_devices starts B), not run after yield.
+    if getattr(request, "param", None) == "refusal-boundary":
+        request.node.stash[_REFUSAL_BOUNDARY] = RefusalBoundary((server_a, server_b), monkeypatch)
     host, port = server_a.bind()
     server_a.bind_control()
     server_a.start()
@@ -122,6 +130,9 @@ def devices(
     finally:
         server_a.stop()
         server_b.stop()
+        boundary = request.node.stash.get(_REFUSAL_BOUNDARY, None)
+        if boundary is not None:
+            boundary.finish()
 
 
 def _init_network(server: relay.RelayServer, *, role: str = "admin") -> types.NetworkRecord:
@@ -2570,9 +2581,11 @@ def test_the_incident_fan_out_warns_once_per_survivor_thread(
         relay._incident_survivors_warned.discard(fresh)
 
 
+@pytest.mark.parametrize("devices", ["refusal-boundary"], indirect=True)
 def test_a_refused_leave_is_reported_as_a_refusal_not_as_a_reachable_peer(
     devices: tuple[relay.RelayServer, relay.RelayServer, str, int],
     monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
 ) -> None:
     """THE MEASURED RECEIPT (QA round 1 trust & operations, Q-R1-2), reproduced.
 
@@ -2589,6 +2602,8 @@ def test_a_refused_leave_is_reported_as_a_refusal_not_as_a_reachable_peer(
     """
     server_a, server_b, host, port = devices
     record = _dialable_devices(devices, monkeypatch)
+    boundary = request.node.stash[_REFUSAL_BOUNDARY]
+    boundary.dispose_setup(record.network_id)
     state = store.load_secrets(record.network_id, server_a.root)
     # A rotates and tells nobody: B's own record still says epoch 1.
     with store.mutate(record.network_id, server_a.root) as live:
@@ -2599,10 +2614,14 @@ def test_a_refused_leave_is_reported_as_a_refusal_not_as_a_reachable_peer(
             reason="test",
             root=server_a.root,
         )
+    boundary.arm(server_b, record.network_id, f"{host}:{port}")
     link, reason = server_b.dial(record.network_id, host=f"{host}:{port}", epoch=1)
     assert link is not None, f"the reconcile handshake failed: {reason}"
+    receiving = boundary.selected_pair(link)
+    assert receiving.link_id == link.link_id and receiving.phase == "reconcile"
 
     receipt = server_b.control_dispatch("net_disconnect", {"network": record.network_id})["detail"]
+    boundary.assert_clean()
     assert receipt["sent"] == 1, receipt
     assert receipt["acked"] == 0, receipt
     assert receipt["refused"] == [server_a.identity.device_id], receipt
@@ -2616,6 +2635,126 @@ def test_a_refused_leave_is_reported_as_a_refusal_not_as_a_reachable_peer(
     # The local half, unconditionally: stopped trusting, secret gone, trail kept.
     assert store.load(record.network_id, server_b.root).trust == "disconnected"
     assert not store.secrets_path(record.network_id, server_b.root).exists()
+
+
+@pytest.mark.parametrize("devices", ["refusal-boundary"], indirect=True)
+def test_refusal_boundary_waits_past_welcome_and_records_swallowed_dial_errors(
+    devices: tuple[relay.RelayServer, relay.RelayServer, str, int],
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+) -> None:
+    """Adversarial schedule, not a claim about the historical failure's phase.
+
+    Hold the receiving handler AFTER welcome but BEFORE registration. The real
+    dial can finish (its best-effort membership pull times out), but causal setup
+    must still refuse to call that receiver complete. No auth/policy body is faked.
+    """
+    server_a, server_b, host, port = devices
+    record = _dialable_devices(devices, monkeypatch)
+    boundary = request.node.stash[_REFUSAL_BOUNDARY]
+    boundary.dispose_setup(record.network_id)
+    state = store.load_secrets(record.network_id, server_a.root)
+    with store.mutate(record.network_id, server_a.root) as live:
+        relay.rotate_epoch(
+            live, state, by=server_a.identity.device_id, reason="test", root=server_a.root
+        )
+
+    paused, release, returned = threading.Event(), threading.Event(), threading.Event()
+    register = server_a.register_link
+    result: list[Any] = []
+    failures: list[BaseException] = []
+
+    def delayed_register(*args: Any, **kwargs: Any) -> Any:
+        paused.set()
+        assert release.wait(60), "control did not release receiving registration"
+        return register(*args, **kwargs)
+
+    def dial() -> None:
+        try:
+            result.append(server_b.dial(record.network_id, host=f"{host}:{port}", epoch=1))
+        except BaseException as exc:
+            failures.append(exc)
+        finally:
+            returned.set()
+
+    monkeypatch.setattr(server_a, "register_link", delayed_register)
+    sender = threading.Thread(target=dial, name="refusal-boundary-control", daemon=True)
+    boundary.arm(server_b, record.network_id, f"{host}:{port}", thread=sender)
+    sender.start()
+    try:
+        assert paused.wait(60), "listener never reached post-welcome registration"
+        assert returned.wait(60), "dial did not finish its bounded best-effort member pull"
+        assert not failures, failures
+        assert result and result[0][0] is not None, result
+        # Deterministic negative: the paused receiver cannot possibly complete.
+        # A zero-deadline barrier must reject it, even after the sender returned.
+        boundary.assert_clean()
+        with pytest.raises(AssertionError, match="causal setup incomplete"):
+            boundary.settle(timeout=0)
+        assert not release.is_set()
+    finally:
+        release.set()
+        sender.join(60)
+        assert not sender.is_alive()
+    link = result[0][0]
+    receiving = boundary.selected_pair(link)
+    assert receiving.phase == "reconcile" and receiving.link_id == link.link_id
+
+    # Simulate a producer swallowing its exception (as startup/background callers
+    # can). The persistent ledger still has to fail, BEFORE any socket is opened.
+    before = len(boundary.dials)
+    try:
+        server_b.dial(record.network_id, host=f"{host}:{port}", epoch=1)
+    except AssertionError:
+        pass
+    with pytest.raises(AssertionError, match="unexpected post-fence dial"):
+        boundary.assert_clean()
+    assert len(boundary.dials) == before
+    assert len(boundary.errors) == 1 and "unexpected post-fence dial" in boundary.errors[0]
+    # Acknowledge precisely the injected failure after proving the ledger caught
+    # it. Any other producer remains a teardown failure, not a suppressed error.
+    boundary.errors.pop()
+    boundary.assert_clean()
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_two_link_selection_is_insertion_order_characterization_not_a_phase_repro(reverse):
+    """Pin the two selectors' current divergence, not an unobserved CI schedule.
+
+    Synthetic links isolate selection only. This is NOT a transport reproduction
+    or a mandate to change either production rule; the incident cell instead
+    guarantees exactly one intended real link before it makes a phase claim.
+    """
+    called: list[str] = []
+
+    def candidate(name: str) -> Any:
+        def reply(*args: Any, **kwargs: Any) -> Any:
+            called.append(name)
+            return {"op": "error", "message": name}
+
+        return SimpleNamespace(
+            device_id="peer", network_id="net", alive=True, closing=False, request=reply
+        )
+
+    names = ["member", "reconcile"]
+    if reverse:
+        names.reverse()
+    links = {name: candidate(name) for name in names}
+    server = SimpleNamespace(
+        links=links,
+        identity=SimpleNamespace(device_id="self"),
+        store_view=SimpleNamespace(
+            network=lambda _: SimpleNamespace(
+                active_members=lambda: [SimpleNamespace(device_id="peer")],
+            )
+        ),
+        _member_name=lambda _: "peer",
+        _next_relay_req=lambda: 1,
+    )
+    assert relay.RelayServer._link_for(cast(Any, server), "peer") is links[names[0]]
+    rows = relay.RelayServer._incident_fan_out(cast(Any, server), "net", op="net_leave", fields={})
+    assert called == [names[-1]]
+    assert rows[0]["outcome"] == "refused" and rows[0]["reason"] == names[-1]
 
 
 # ---------------------------------------------------------------------------

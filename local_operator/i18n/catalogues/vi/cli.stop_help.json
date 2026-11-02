@@ -1,0 +1,11 @@
+{
+  "cli.stop_help.stop": "Dừng một phiên lop đang chạy (nhẹ nhàng trước, sau đó dùng tín hiệu)",
+  "cli.stop_help.target": "tên cuộc trò chuyện / id phiên / pid / chuỗi con của cwd (không phân biệt hoa thường)",
+  "cli.stop_help.pid": "chọn theo đúng pid",
+  "cli.stop_help.session": "chọn theo đúng id phiên",
+  "cli.stop_help.all": "dừng mọi phiên trên máy này (hỏi trên TTY; --yes để bỏ qua)",
+  "cli.stop_help.yes": "bỏ qua xác nhận --all (bắt buộc khi stdin không phải TTY)",
+  "cli.stop_help.json": "kết quả máy đọc được cho từng mục tiêu",
+  "cli.stop_help.timeout": "thời gian chờ thao tác nhẹ nhàng cho mỗi phiên trước khi leo thang (mặc định 10)",
+  "cli.stop_help.force": "leo thang vượt qua một lời từ chối hoặc một lần bỏ qua: gửi tín hiệu cho mục tiêu mà socket không xác nhận được danh tính, mục tiêu báo cáo có lượt đang chạy, hoặc mục tiêu đang thoát sau một tín hiệu — mỗi trường hợp đều có thể cắt ngang lượt đang chạy. Không cần cho runtime hợp tác giữa lượt: lệnh dừng thường kết thúc nó nhanh chóng qua socket của nó"
+}

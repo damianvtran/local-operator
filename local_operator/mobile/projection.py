@@ -72,6 +72,7 @@ from local_operator.harness.rows import (
     held_delivery_notice,
     is_ask_gate_divert_details,
     is_harness_chrome,
+    is_harness_injection,
     is_harness_notice_row,
     is_quiet_turn_call,
     is_quiet_turn_name,
@@ -3131,6 +3132,10 @@ class ProjectionFold:
         the thumbnails never appear for the sender.
         """
         if not isinstance(message, Message) or message.role != "user":
+            return False
+        # Mirror the history fold: a recovery event is model context, not a
+        # user message, even when replayed by an older unstamped producer.
+        if is_harness_injection(message) or is_harness_chrome(message.text):
             return False
         text = message.text
         refs = _image_refs(message)

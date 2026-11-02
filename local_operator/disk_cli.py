@@ -33,17 +33,22 @@ import json
 import sys
 from typing import Any
 
+from local_operator.i18n.cli_help import help_text
+from local_operator.i18n.keys import cli_group_help as _gg
+
 #: Kept words for the operator-facing rows. Output is operator CLI text,
 #: English-only, like the sessions-cleanup section (docs/I18N.md).
 _VERBS = {"dry-run": "would reclaim", "apply": "will reclaim"}
 
 
-def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
+def add_parser(
+    subparsers: Any, parent_parser: Any = None, *, help_locale: str | None = None
+) -> None:
     """Register ``lop disk`` and its ``reclaim`` action (stdlib-only)."""
     parents = [parent_parser] if parent_parser is not None else []
     disk = subparsers.add_parser(
         "disk",
-        help="Disk-pressure tools: measure first, reclaim only what is provably safe",
+        help=help_text(_gg.disk(), help_locale),
         parents=parents,
     )
     actions = disk.add_subparsers(dest="disk_command")

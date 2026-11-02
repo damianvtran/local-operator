@@ -1,0 +1,39 @@
+{
+  "locale": "vi",
+  "namespace": "cli.mobile_help",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 2,
+    "nit": 0
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 1,
+      "id": "VI-052",
+      "severity": "MINOR",
+      "namespace": "cli.mobile_help",
+      "key": "cli.mobile_help.password",
+      "english": "Show or rotate the portal password",
+      "current": "Hiển thị hoặc xoay vòng mật khẩu cổng",
+      "problem": "'cổng' is also this wave's word for port (cli.browser.port_line) and gate (mobile_help.status 'daemon, cổng'); 'mật khẩu cổng' is ambiguous for the phone portal password.",
+      "suggested": "Hiển thị hoặc xoay vòng mật khẩu cổng thông tin (portal)",
+      "disposition": "fixed (remediation core-fix, session 5e0b68c135be)"
+    },
+    {
+      "round": 2,
+      "id": "R2-VI-006",
+      "severity": "MINOR",
+      "namespace": "cli.mobile_help",
+      "key": "cli.mobile_help.status",
+      "english": "Daemon health, gate and live sessions",
+      "current": "Tình trạng daemon, cổng và các phiên đang chạy",
+      "problem": "Recurrence of VI-052 class (cổng ambiguity): «gate» is still «cổng», and the same namespace uses «cổng» for port (devices_port) and now «cổng thông tin» for portal. «Daemon health, gate and live sessions» therefore reads as «daemon, port and sessions».",
+      "suggested": "Tình trạng daemon, cổng kiểm soát truy cập và các phiên đang chạy (or keep «gate» Latin)",
+      "disposition": "fixed (remediation core-fix2, session 053117b4ad36)"
+    }
+  ]
+}
