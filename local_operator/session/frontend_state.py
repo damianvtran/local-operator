@@ -86,6 +86,7 @@ from local_operator.session.history_window import DisplayHistoryWindow
 from local_operator.session.runtime.types import RUNNING_SUBAGENT_STATUSES
 from local_operator.session.spend import (
     SessionSpend,
+    has_reported_tokens,
     serving_identity,
     usage_prices_known,
 )
@@ -8448,10 +8449,15 @@ class FrontendStateStore:
             "context_tokens": usage.context_tokens or usage.input_tokens or state.context_tokens,
             "context_is_estimate": False,
         }
-        if cost is not None or usage.input_tokens or usage.output_tokens:
+        if cost is not None or has_reported_tokens(usage):
             spend = self._accrue_call(session, usage, cost)
             changes.update(
-                cumulative_parent_cost=spend.usd,
+                # Off-record calls must publish the SAME nullable reading as
+                # refresh/restoration: raw zero hides an entirely unpriceable
+                # receipt. The shared predicate also retains cache-only and
+                # stamped all-zero receipts without inventing spend for an
+                # unused host. Known zero and mixed lower bounds stay numeric.
+                cumulative_parent_cost=spend.published_usd(),
                 cost_knowledge=spend.knowledge(),
                 usage_components=_capped_components(
                     list(state.usage_components) + list(usage.cost_components or [usage])
