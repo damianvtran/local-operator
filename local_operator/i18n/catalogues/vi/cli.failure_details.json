@@ -1,0 +1,19 @@
+{
+  "cli.failure_details.unrecognized": "đối số không được nhận diện: {arguments}",
+  "cli.failure_details.argument": "đối số {argument}: {message}",
+  "cli.failure_details.expected_one": "cần một đối số",
+  "cli.failure_details.expected_optional": "chỉ nhận tối đa một đối số",
+  "cli.failure_details.expected_some": "cần ít nhất một đối số",
+  "cli.failure_details.expected_count": "{count, plural, other {cần # đối số}}",
+  "cli.failure_details.invalid_number": "giá trị {type} không hợp lệ: {value}",
+  "cli.failure_details.ambiguous": "tùy chọn không rõ ràng: {option} có thể khớp với {matches}",
+  "cli.failure_details.required_group": "cần một trong các đối số {names}",
+  "cli.failure_details.conflict": "không được dùng cùng đối số {argument}",
+  "cli.failure_details.ignored_value": "đối số được chỉ định tường minh {value} bị bỏ qua",
+  "cli.failure_details.not_seconds": "{value} không phải là số giây",
+  "cli.failure_details.finite_seconds": "phải là số giây hữu hạn",
+  "cli.failure_details.positive_seconds": "phải lớn hơn không",
+  "cli.failure_details.positional_pair": "{first} và {last}",
+  "cli.failure_details.exec_two": "exec chỉ nhận MỘT prompt làm đối số vị trí, nhưng nhận được {count} đối số vị trí: {received}.\nĐối số vị trí đầu tiên là prompt, không phải tiêu đề. Để đặt tên lần chạy, truyền tiêu đề qua --name:\n  {command}\n(--workstream là cờ — xuất bản lần chạy và không nhận giá trị.)",
+  "cli.failure_details.exec_many": "exec chỉ nhận MỘT prompt làm đối số vị trí, nhưng nhận được {count} đối số vị trí: {received}.\nĐối số vị trí đầu tiên là prompt, không phải tiêu đề: truyền tiêu đề qua --name và đặt prompt trong dấu nháy để làm đối số vị trí DUY NHẤT — các đối số vị trí thừa không được xử lý.\n(--workstream là cờ — xuất bản lần chạy và không nhận giá trị.)"
+}
