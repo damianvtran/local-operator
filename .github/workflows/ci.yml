@@ -1081,7 +1081,8 @@ jobs:
         # serial run's data to this file first, so the rename moved to the
         # finalisation step below, after every pytest step of this job.
         run: |
-          pytest $(cat shard_tests.txt | tr '\n' ' ') $(printf -- '--deselect %s ' $SERIAL_CONTROLS) \
+          pytest -p tests.ci_order_owned_first \
+            $(cat shard_tests.txt | tr '\n' ' ') $(printf -- '--deselect %s ' $SERIAL_CONTROLS) \
             --cov --cov-fail-under=0 --cov-report= \
             --junit-xml=junit-${{ matrix.python-version }}-${{ matrix.shard }}.xml
 
