@@ -38,9 +38,13 @@ def _receipt(request: Request, *, write: bool) -> tuple[str, str | None]:
     query = request.query_params
     if set(query) != keys or any(len(query.getlist(key)) != 1 for key in keys):
         raise HTTPException(422, {"code": "invalid_request"})
+    from local_operator.team_bridge.types import is_account_id
+
     account_id = query["expected_account_id"]
     scope = query.get("scope")
-    if re.fullmatch(r"[A-Za-z0-9_-]{1,128}", account_id) is None or (
+    # The transport uses canonical account ids too. Admit with its ONE grammar
+    # here so malformed input gets 422 before client construction or OAuth.
+    if not is_account_id(account_id) or (
         write and (scope is None or re.fullmatch(r"[a-f0-9]{64}", scope) is None)
     ):
         raise HTTPException(422, {"code": "invalid_request"})
