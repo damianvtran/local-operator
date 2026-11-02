@@ -17,9 +17,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
 import local_operator.tools.builtin as builtin
 from local_operator import browser_files, scratchpad
+from local_operator.browser_bridge import backend as bridge_backend
 from local_operator.browser_bridge.backend import (
     HOST_EXTENSION,
     HOST_UI,
@@ -1018,6 +1020,38 @@ def test_an_unknown_record_reason_falls_back_to_the_host_message() -> None:
     assert "host text" in message
 
 
+def test_the_global_cap_keeps_the_count_copy() -> None:
+    message = format_error(
+        _wire_error(ErrorCode.BUSY, "record_limit", limit=2),
+        action="record_start",
+        host=HOST_UI,
+    )
+    assert "maximum of 2 recordings" in message
+
+
+def test_a_non_count_record_limit_keeps_the_hosts_remedy() -> None:
+    """M2: the size rule reuses `record_limit` and has no count."""
+    error = BridgeError(
+        ErrorCode.BUSY,
+        "stop the other 4K clip, or record at 1920x1080 or below",
+        {"reason": "record_limit"},
+    )
+    message = format_error(error, action="record_start", host=HOST_UI)
+    assert "record at 1920x1080 or below" in message
+    assert "maximum of" not in message
+
+
+def test_a_visible_refusal_keeps_the_hosts_remedy() -> None:
+    error = BridgeError(
+        ErrorCode.INTERNAL,
+        "activate another tab, or omit width/height",
+        {"reason": "record_size", "param": "size", "why": "visible"},
+    )
+    sentence = bridge_backend._record_reason_message(error, "record_size")
+    assert "activate another tab, or omit width/height" in sentence
+    assert sentence.endswith("Nothing was started.")
+
+
 def test_an_old_app_is_refused_as_a_build_that_predates_the_action() -> None:
     capabilities = HostCapabilities(methods=(), version="0.92.0")
     error = capability_refusal("record_start", host=HOST_UI, capabilities=capabilities)
@@ -1103,13 +1137,18 @@ def test_a_sized_start_sends_the_viewport_and_reports_it(
     ],
 )
 def test_an_unusable_size_is_refused_before_dispatch(size: dict[str, int], needle: str) -> None:
-    problem = builtin._validate_browser_args("record_start", _params("record_start", **size))
-    assert needle in problem
-    assert problem.endswith("Nothing was started.")
+    refusal = builtin._browser_args_problem("call", "record_start", _params("record_start", **size))
+    assert refusal is not None
+    assert needle in refusal.text
+    assert refusal.text.endswith("Nothing was started.")
+    assert (refusal.details or {})["reason"] == "record_size"
 
 
 def test_a_portrait_size_at_the_area_limit_is_allowed() -> None:
-    assert builtin._validate_browser_args("record_start", _params(width=2160, height=3840)) == ""
+    assert (
+        builtin._browser_args_problem("call", "record_start", _params(width=2160, height=3840))
+        is None
+    )
 
 
 @pytest.mark.parametrize(
@@ -1125,18 +1164,83 @@ def test_a_size_on_any_other_action_is_refused(action: str, size: dict[str, int]
     assert "only valid for 'record_start'" in problem
 
 
-def test_a_bad_size_is_typed_and_costs_no_wire_call(
+def test_a_bad_size_is_typed_through_the_real_entry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    result, seen = _call(
-        "record_start", tmp_path, monkeypatch, client=_SizedHost(), width=1921, height=1080
-    )
+    """M1: the tool's OWN `execute` (i.e. `execute_browser`) types the refusal.
+
+    The old text-only check in `_validate_browser_args` shadowed this result on
+    the real path; `_browser_record` is a private lane, so a test there proved
+    nothing about what a caller sees. No host is faked beyond the tool's
+    availability gate: the argument refusal must not depend on one being
+    reachable.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: True)
+    tool = builtin.build_browser_tool(_ctx(tmp_path))
+    assert tool is not None
+
+    async def _run():
+        return await tool.execute(
+            "call",
+            {"action": "record_start", "width": 1921, "height": 1080},
+            None,
+            None,
+            _ctx(tmp_path),
+        )
+
+    result = asyncio.run(_run())
     assert result.is_error
-    assert seen == []
     details = result.details or {}
     assert details["reason"] == "record_size"
     assert (details["param"], details["why"]) == ("width", "odd")
     assert result.text.endswith("Nothing was started.")
+
+
+def test_a_bad_size_is_refused_before_any_approval(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M2: the plan-time hook refuses without the gate being asked.
+
+    Driven through the real `AgentLoop` planning seam with the real tool object;
+    `request_approval` is the same callback the gate would call, so zero calls
+    there is the evidence the operator never saw a consent row for a clip that
+    could not start.
+    """
+    from local_operator.harness.loop import AgentLoop, LoopContext
+    from local_operator.harness.types import LoopConfig, Message, ModelSpec, ToolCall
+
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: True)
+    tool = builtin.build_browser_tool(_ctx(tmp_path))
+    assert tool is not None and tool.refuse_args is not None
+
+    approvals: list[str] = []
+
+    async def request_approval(tool_name: str, summary: str, **kwargs: object) -> bool:
+        approvals.append(summary)
+        return True
+
+    context = _ctx(tmp_path, session_id="rec-refuse")
+    context.request_approval = request_approval  # type: ignore[assignment]
+    planned = asyncio.run(
+        AgentLoop()._plan_call(  # noqa: SLF001 — the planning seam is the unit
+            ToolCall(
+                id="c",
+                name="browser",
+                arguments={"action": "record_start", "width": 1921, "height": 1080},
+            ),
+            LoopContext(system_blocks=[], tools=[tool], tool_context=context),
+            LoopConfig(
+                model=ModelSpec(provider="test", model_id="m", context_window=100_000),
+                convert_to_llm=lambda messages: [m for m in messages if isinstance(m, Message)],
+                stream_fn=lambda request, signal: None,
+            ),
+        )
+    )
+    assert planned.failure is not None
+    assert "must be even" in planned.failure.text
+    assert "Nothing was started." in planned.failure.text
+    assert approvals == []
 
 
 def test_an_app_without_sized_recording_is_refused_with_its_own_copy(
@@ -1169,6 +1273,14 @@ def test_the_extension_host_says_sized_recording_is_desktop_only() -> None:
     message = format_error(error, action="record_size", host=HOST_EXTENSION)
     assert "desktop app" in message
     assert "backend='ui'" in message
+    # The real gate on that host is the ACTION, because `record_start` is
+    # DESKTOP_ONLY: this is the sentence a sized call actually meets there.
+    action_error = capability_refusal(
+        "record_start", host=HOST_EXTENSION, capabilities=HostCapabilities()
+    )
+    action_message = format_error(action_error, action="record_start", host=HOST_EXTENSION)
+    assert "record_start" in action_message
+    assert "backend='ui'" in action_message
 
 
 def test_a_clip_that_comes_back_at_another_size_keeps_the_approval(
@@ -1186,7 +1298,12 @@ def test_a_clip_that_comes_back_at_another_size_keeps_the_approval(
     assert result.is_error
     assert "NOT at the 1920x1080" in result.text
     assert "1280x720" in result.text
-    assert (result.details or {})["why"] == "not_applied"
+    details = result.details or {}
+    assert details["why"] == "not_applied"
+    assert details["reason"] == "record_size_mismatch"
+    # A clip IS recording at the wrong size: the absent-reason whitelist must not
+    # read this as proof that nothing runs, or a `record_stop` would be refused.
+    assert "record_size_mismatch" not in builtin._RECORD_ABSENT_REASONS
     target = (result.details or {})["target"]
     # The encoder is running: the approved destination survives so the stop can
     # save what is actually being recorded.
@@ -1232,6 +1349,46 @@ def test_record_stop_still_saves_a_clip_that_came_back_at_the_wrong_size(
 
 def test_record_size_proves_no_recording_is_running() -> None:
     assert "record_size" in builtin._RECORD_ABSENT_REASONS
+
+
+def test_the_approval_row_and_the_executor_agree_on_string_sizes(tmp_path: Path) -> None:
+    """M3: `"3840"` and `3840.0` ARE 3840 to the executor, so the row names it."""
+    row = builtin._describe_browser_approval(
+        {
+            "action": "record_start",
+            "path": str(tmp_path / "clip.mp4"),
+            "width": "3840",
+            "height": "2160.0",
+        },
+        str(tmp_path),
+    )
+    assert row.endswith(" at 3840x2160")
+    assert builtin._record_size_from_args(
+        {"action": "record_start", "width": "3840", "height": "2160"}
+    ) == (3840, 2160)
+
+
+@pytest.mark.parametrize("width", [True, False, "3840.5", 3840.5, "abc"])
+def test_a_size_that_is_not_whole_pixels_is_refused(width: Any) -> None:
+    with pytest.raises(ValidationError):
+        builtin.BrowserParams(action="record_start", width=width, height=1080)
+
+
+def test_a_string_size_reaches_the_wire_at_the_size_the_row_named(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result, seen = _call(
+        "record_start",
+        tmp_path,
+        monkeypatch,
+        client=_SizedHost(),
+        width="1920",
+        height=1080.0,
+        reply={"recording": True, "path": "", "width": 1920, "height": 1080},
+    )
+    assert not result.is_error
+    assert seen[0][1]["width"] == 1920
+    assert seen[0][1]["height"] == 1080
 
 
 def test_the_approval_row_names_the_size(tmp_path: Path) -> None:

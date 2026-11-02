@@ -441,7 +441,8 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             "capture and never overwritten, timeout_s= caps the length, width=/height= "
             "size the viewport (both or neither, even, 240-3840, area at most "
             "3840x2160). A clip over 64 MiB is discarded (32 MiB inside a scratchpad): "
-            "about 150 s at 4K, 75 s in a scratchpad, so size timeout_s to suit. Desktop "
+            "worst case about 150 s at 4K, 75 s in a scratchpad, so size timeout_s to "
+            "suit. Desktop "
             "host only.\n"
             "- Hosts, setup, approvals, error meanings: ``guide://browser``."
         ),

@@ -399,10 +399,11 @@ MEASURED_TOKENS: dict[str, int] = {
     # width=/height= bounds and the 4K cap arithmetic (about 150 s at 64 MiB,
     # 75 s in a scratchpad) must be discoverable from the op the model calls;
     # the measured cost table and the viewport-reflow caveat stay in
-    # `guide://browser`, which is where the reference detail belongs. Both
-    # branches moved this one doc, so the number below is re-measured on the
-    # rebased tree by this test's own print, not the sum of the two branch
-    # deltas; no other tool's entry moved.
+    # `guide://browser`, which is where the reference detail belongs. The cap
+    # figures are a WORST CASE, not a typical rate, so that qualifier rides
+    # beside them (review round 1, m4). Both branches moved this one doc, so
+    # the number below is re-measured on the rebased tree by this test's own
+    # print, not the sum of the two branch deltas; no other tool's entry moved.
     "browser": 1968,
     # NEW (code-requests PR1b): the ``code_requests`` doc — relation and lane
     # vocabulary, the freshness rule and the data-not-instructions framing.

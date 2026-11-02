@@ -857,11 +857,16 @@ def _capability_message(error: BridgeError, *, host: str) -> str:
                 f"({remedy}) and retry at the size asked for, or call 'record_start' "
                 "without width/height for a 1280x720 clip — that works now."
             )
+        # `record_start` itself is DESKTOP_ONLY (`protocol.DESKTOP_ONLY_METHODS`),
+        # so on an extension host the real gate fires on the ACTION first and
+        # this capability is never asked (review NIT). The arm stays only so a
+        # direct `capability_refusal("record_size", host=…)` cannot fall through
+        # to the "no browser is attached" copy below, and it says the same thing
+        # as that action gate rather than a second version story.
         return (
-            "sized recording is served only by the Local Operator desktop app's browser; "
-            "the Chrome extension records the page at its own size. Open the page with "
-            "backend='ui' to record at a chosen size. Nothing else about this tab is "
-            "affected."
+            "sized recording is served only by the Local Operator desktop app's "
+            "browser; the Chrome extension records the page at its own size. Open the "
+            "page with backend='ui' to record at a chosen size."
         )
     if host == HOST_EXTENSION and method in DESKTOP_ONLY_METHODS:
         # A desktop-only method has NO remedy inside the extension: no update,
@@ -1000,14 +1005,27 @@ def _record_reason_message(error: BridgeError, reason: str) -> str:
         )
     if reason == "record_limit":
         limit = error.data.get("limit")
-        ceiling = (
-            f"its maximum of {limit} recordings"
-            if isinstance(limit, int)
-            else "an app-wide recording limit"
-        )
+        if isinstance(limit, int) and not isinstance(limit, bool):
+            # ONLY the global count is a limit. The host raises the same reason
+            # for RS5's size rule (one clip above 1920x1080 at a time), where
+            # "its maximum of 1 recordings" would be false for a caller that
+            # could start a 720p clip beside the 4K one it is really colliding
+            # with (review m2).
+            return (
+                f"the desktop app is already running its maximum of {limit} recordings; "
+                "nothing else may start until one stops or its timer fires. Nothing was "
+                "recorded."
+            )
+        # ...so for the size rule the host's own message carries the remedy (stop
+        # the large clip, or record at 1080p or below); pass it through rather
+        # than inventing a cap.
+        if detail:
+            return detail
         return (
-            f"the desktop app is already running {ceiling}; nothing else may start until "
-            "one stops or its timer fires. Nothing was recorded."
+            "the desktop app refused to start this recording: only one recording above "
+            "1920x1080 may run at a time, and another one is already running. Stop it with "
+            "'record_stop' (or wait for its timer), or record at 1920x1080 or below. "
+            "Nothing was recorded."
         )
     if reason == "record_size":
         why = str(error.data.get("why") or "")
@@ -1019,7 +1037,14 @@ def _record_reason_message(error: BridgeError, reason: str) -> str:
             "visible": "a tab the user is looking at cannot be resized out from under them",
             "not_applied": "the app could not apply that viewport to the tab",
         }.get(why, detail or "the app refused the size")
-        return f"the clip was not started at the size asked for: {cause}. Nothing was started."
+        # The host's message carries the REMEDY for the two runtime causes
+        # ("activate another tab, or omit width/height"), which the table above
+        # only names the cause of; dropping it left a refusal with no way
+        # forward (review m2). The static causes keep the harness's own words.
+        remedy = f" {detail}" if detail and why in {"visible", "not_applied"} else ""
+        return (
+            f"the clip was not started at the size asked for: {cause}.{remedy} Nothing was started."
+        )
     if reason == "record_too_large":
         cap = error.data.get("max_bytes")
         size = (

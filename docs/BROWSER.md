@@ -269,15 +269,19 @@ The host writes the file at stop; bytes never cross the RPC. The harness then
 judges what landed from disk — size equal to the host's report, non-zero, and
 the MP4 `ftyp` box at bytes 4..8 — so a path is only ever reported for a
 complete file. Capture size is the caller's: omit `width`/`height` and the clip is
-1280x720 as before, or give both (even, 240-3840, area at most 3840x2160) and
-the host resizes the tab's viewport to exactly that before it starts (RS1-RS4).
+1280x720 as before (a ceiling, not a promise: the clip is scaled to fit, so a
+visible, larger tab can come out smaller, e.g. 1144x720), or give both (even,
+240-3840, area at most 3840x2160) and
+the host resizes the tab's viewport to exactly that before it starts.
 `fps` (10) and audio (off) stay fixed. The clip is an MP4 with an AV1 track,
 which decoded in AVFoundation in the desktop PR's real-path run and is expected
 not to play in Chrome's `<video>` or H.264-only players (not tested in Chrome).
 Limits: `timeout_s` is the length (default 120 s, max 600 s; the host auto-stops
 and saves at it), 64 MiB per clip (32 MiB under a scratchpad, where a larger
 clip is discarded rather than truncated), one recording per session per tab and
-two app-wide. Closing the tab, losing the
+two app-wide, and only one recording above 1920x1080 at a time — a second large
+clip is refused as `record_limit`: stop the running large clip (or wait for its
+timer), or record at 1920x1080 or below. Closing the tab, losing the
 debugger to another client, or quitting the app discards an in-progress
 recording; nothing is on disk before the stop.
 

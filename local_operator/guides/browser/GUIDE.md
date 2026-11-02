@@ -504,17 +504,22 @@ does not have to be the visible one: recording reads the same pixels
 - `record_stop` stops the capture, saves it and reports the path and size. It
   is a `read`-tier call: the write was approved at start, and a stop the user
   denied would strand a running encoder until the timer fired.
-- **Choosing a size.** Omit `width`/`height` and the clip is today's 1280x720.
+- **Choosing a size.** Omit `width`/`height` and the clip is today's 1280x720
+  (a CEILING, not a promise: the unsized clip is scaled to fit, so a visible,
+  larger tab can come out smaller — e.g. 1144x720).
   Give BOTH (even, 240-3840, area at most 3840x2160 — so 2160x3840 portrait is
   fine and 3840x3840 is not) and the host resizes the tab's viewport to exactly
   that, then records it. One side alone, an odd side, or an area over 4K is
-  refused as `record_size` before anything starts, with a `why` of
+  refused as `record_size` before anything starts (the plan-time check refuses
+  it without even asking for approval), with a `why` of
   `incomplete`/`range`/`odd`/`area`.
 
   Measured on this machine (Electron 45 / Chromium 156, a deliberately
   worst-case page where every frame differs, 10 fps, 6 s clips — the encoder
   cost includes that page's own repaint, since it really is repainting at that
-  size):
+  size). The CPU and RSS columns are the encoder process's LIFETIME AVERAGES
+  over each 6 s clip, and 1440p was measured on the same 6 s clip; a longer
+  clip settles higher than the average suggests.
 
   | size | bytes/s | encoder CPU | encoder RSS |
   |---|---|---|---|
@@ -533,12 +538,24 @@ does not have to be the visible one: recording reads the same pixels
   the size the page really has, and it is also why a sized start is refused on
   the tab the user is looking at (`why: visible`): growing their view to 4K
   would put the clip over the app's own UI. If the user activates the recorded
-  tab mid-clip, the user wins and the clip may come out rescaled; record the
-  hidden agent tab and leave it hidden.
+  tab mid-clip, what the clip comes out as has NOT been measured here; record
+  the hidden agent tab and leave it hidden.
+- **Keep a clip to a second or two** at least when it is going to be watched: a
+  very short clip has few frames, and a one-frame AV1 track may not decode
+  everywhere. This is a precaution, not a measured threshold.
+- **One recording per session per tab, two app-wide, and only one recording
+  above 1920x1080 at a time.** A start that breaks the per-tab or app-wide rule
+  is refused as `record_active`/`record_limit`. A second large recording is
+  refused as `record_limit` too: stop the running large clip with `record_stop`
+  (or wait for its timer), or record at 1920x1080 or below. Closing the tab,
+  losing the debugger to another client, or quitting the app discards an
+  in-progress recording. Nothing reaches disk before the stop, so there is no
+  half-written file to clean up.
 - **Budget the length against the cap.** A clip that would exceed 64 MiB
   (32 MiB under a scratchpad) is discarded rather than truncated: a truncated
-  MP4 is invalid, so the error says nothing was saved. At 4K's ~434 KB/s that
-  is about **150 s** at the 64 MiB cap and about **75 s** inside a scratchpad,
+  MP4 is invalid, so the error says nothing was saved. At 4K's ~434 KB/s
+  (measured worst case) that is about **150 s** at the 64 MiB cap and about
+  **75 s** inside a scratchpad,
   against roughly 16 minutes at 720p — set `timeout_s` accordingly whenever you
   ask for 4K.
 - **Container and playback.** 10 fps, no audio, MP4 with an AV1 track. It plays
