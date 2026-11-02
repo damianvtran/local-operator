@@ -390,7 +390,9 @@ MEASURED_TOKENS: dict[str, int] = {
     # 1801 -> 1803 (+2, review round 2 m2): "not expected in Chrome's <video>" replaces
     # "not Chrome's <video>", because Chrome playback was never tested. Measured by
     # this test's own print.
-    "browser": 1863,
+    # 1863 -> 1908 (+45, issue #3248): the `hover` op and the chord/selector
+    # wording on `press`. Measured by this test's own print.
+    "browser": 1908,
     # NEW (code-requests PR1b): the ``code_requests`` doc — relation and lane
     # vocabulary, the freshness rule and the data-not-instructions framing.
     # 475 tokens is the deliberate cost of the reference detail staying OFF the

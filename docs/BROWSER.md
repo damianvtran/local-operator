@@ -121,6 +121,41 @@ handle the tool stored on the context it was handed survived exactly one turn,
 which broke `open X` → next message → `click Y` outright and stranded a cmux
 tab per turn that nothing could close.
 
+## Hover and key chords
+
+`hover` and `press` are served by the desktop app's browser host only; the
+extension and cmux refuse them (`capability_unsupported` naming the desktop app,
+and the cmux degrade). The extension's tab is intentionally inactive and Chrome
+drops synthetic CDP `Input.*` events on a hidden tab — the same measured
+constraint that makes `click`, `type` and `scroll` dispatch in-page — so the only
+thing it could send is an untrusted lookalike that fires handlers but neither
+`:hover` nor a trusted key default. Forcing the tab foreground would break focus
+safety, so neither is offered there.
+
+- `hover`: `selector` (CSS, snapshot ref or a11y locator) **or** `x`+`y` viewport
+  pixels; both is a validation error, so is neither. The host scrolls the target
+  into view without activating the tab/window, moves the pointer to its centre
+  and returns `x`, `y`, a `hit` descriptor of the element under the pointer and the
+  page line.
+- `press`: `key` is one chord — optional modifiers `Shift|Control|Alt|Meta`
+  (`Ctrl`, `Cmd`, `Command`, `Option` accepted; the **harness** canonicalises them
+  and lists them in that order before sending) joined by `+`, then one base key
+  (a single printable character, or `Enter`, `Escape`, `Tab`, `Backspace`,
+  `Delete`, `Space`, the arrows, `Home`, `End`, `PageUp`, `PageDown`, `F1`–`F12`).
+  Optional `selector` focuses the element first (no editable requirement). One
+  chord per call; unknown names, multi-character strings, duplicate modifiers and
+  an empty base are refused as `unsupported_key` before any host is dialled, and
+  the refusal points text entry at `type` (credentials via `secret_ref`).
+- **Old desktop hosts.** Both are capability-gated from the host's discovery
+  record. `hover` is gated on the `hover` method. `press` keeps its original
+  eight keys (`Tab`, `Shift+Tab`, `Enter`, `Escape`, arrows) working on any host
+  that advertises `press`; anything wider — another chord, or a `selector` — also
+  needs the host to advertise the `press_chord` capability token
+  (`PRESS_CHORD_CAPABILITY`), otherwise it is a typed `capability_unsupported`
+  telling the caller to update the app and which keys still work. Nothing is sent
+  that an older host would silently mis-handle.
+- Both are `write`-tier, like `click`/`type`, with the same origin gate.
+
 ## Network telemetry
 
 Four actions expose the owned tab's request stream: `network_start`,

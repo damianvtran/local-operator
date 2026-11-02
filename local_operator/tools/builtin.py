@@ -21284,6 +21284,10 @@ BROWSER_ACTIONS = (
     "click",
     "type",
     "press",
+    # Trusted pointer movement (selector or viewport x/y) so :hover styles,
+    # tooltips and hover menus can be exercised. Desktop host only: see
+    # DESKTOP_ONLY_METHODS for why the extension cannot deliver it.
+    "hover",
     "close",
     # scroll and logs are served by BOTH non-cmux hosts (the paired Local
     # Operator browser extension and the desktop app's browser host); the cmux
@@ -21378,6 +21382,7 @@ BROWSER_ACTIONS = (
 CMUX_UNSUPPORTED_BROWSER_ACTIONS = frozenset(
     {
         "press",
+        "hover",
         "scroll",
         "logs",
         "network_start",
@@ -21596,8 +21601,8 @@ class BrowserParams(BaseModel):
     key: str = Field(
         default="",
         description=(
-            "'press': Tab, Shift+Tab, Enter, Escape, ArrowUp/Down/Left/Right; "
-            "keyboard input to the owned page (desktop app support required)."
+            "'press': one key chord like 'Control+K', 'e', 'Shift+Tab' "
+            "(desktop app only); text entry belongs in 'type'."
         ),
     )
     url: str = Field(
@@ -21632,9 +21637,10 @@ class BrowserParams(BaseModel):
     selector: str = Field(
         default="",
         description="CSS selector, snapshot ref, or a11y locator for the "
-        'click/type target (role=checkbox[name="Active"], label=…, text=…) '
+        'click/type/hover target (role=checkbox[name="Active"], label=…, text=…) '
         "resolved against the a11y tree, so it survives framework ids. Also the "
-        "read/snapshot scope, query CSS, scroll element or download/upload control.",
+        "read/snapshot scope, query CSS, scroll element, 'press' focus target or "
+        "download/upload control.",
     )
     # The snapshot window. Three fields rather than a page token, because the
     # three questions an agent asks a cut tree are different: "give me the next
@@ -21684,11 +21690,11 @@ class BrowserParams(BaseModel):
     # extension/src/commands/scroll.ts).
     x: float | None = Field(
         default=None,
-        description="'scroll': x delta (right positive); for 'hit_test', the viewport x.",
+        description="'scroll': x delta (right positive); for 'hit_test'/'hover', the viewport x.",
     )
     y: float | None = Field(
         default=None,
-        description="'scroll': y delta (down positive); for 'hit_test', the viewport y.",
+        description="'scroll': y delta (down positive); for 'hit_test'/'hover', the viewport y.",
     )
     direction: str = Field(
         default="",
@@ -22489,7 +22495,7 @@ def _validate_locator_target(action: str, params: BrowserParams) -> str:
     kind = _locator_kind(params.selector)
     if not kind:
         return ""
-    if action in ("click", "type", "upload"):
+    if action in ("click", "type", "upload", "hover", "press"):
         # `upload` resolves its input through the same ref/CSS/locator path in
         # both hosts, so `label="Choose file"` names a file input there too
         # (agent review round 1, R1-5).
@@ -22575,10 +22581,21 @@ def _validate_record_fields(action: str, params: BrowserParams) -> str:
     return ""
 
 
-# Exact spellings mirror desktop input.ts: Shift+Tab is one atomic chord, not
-# arbitrary modifier syntax. Validate before discovery and again at wire dispatch
-# so neither an unavailable host nor a direct internal caller bypasses the guard.
-_BROWSER_PRESS_KEYS = (
+# ---- press chords ---------------------------------------------------------
+#
+# ``press`` sends ONE keyboard chord to the owned page: optional modifiers joined
+# by '+', then exactly one base key. The grammar is closed on purpose — the
+# desktop host maps each base key to a CDP key definition from a fixed table, and
+# the harness canonicalises BEFORE sending so the host never has to guess at
+# aliases or case. It is not a text-entry path: credentials and prose belong in
+# ``type`` (``secret_ref`` keeps a secret out of the transcript), and a chord is
+# the only thing ``press`` will ever accept, so there is no repeat count and no
+# key sequence to smuggle a typed string through.
+#
+# The original allowlist (Tab, Shift+Tab, Enter, Escape, the four arrows) is a
+# strict subset of this grammar and canonicalises to itself, so existing callers
+# and the wire frames an older desktop host understands are unchanged.
+_BROWSER_PRESS_LEGACY_KEYS = (
     "Tab",
     "Shift+Tab",
     "Enter",
@@ -22589,18 +22606,182 @@ _BROWSER_PRESS_KEYS = (
     "ArrowRight",
 )
 
+#: Canonical modifier spellings, in the order a canonical chord lists them.
+_BROWSER_PRESS_MODIFIERS = ("Shift", "Control", "Alt", "Meta")
+
+#: Accepted spelling (lower-cased) -> canonical modifier. The aliases are the
+#: names agents and other tools habitually use; the host only ever sees the
+#: canonical four.
+_BROWSER_PRESS_MODIFIER_ALIASES = {
+    "shift": "Shift",
+    "control": "Control",
+    "ctrl": "Control",
+    "alt": "Alt",
+    "option": "Alt",
+    "meta": "Meta",
+    "cmd": "Meta",
+    "command": "Meta",
+}
+
+#: The closed table of named base keys (lower-cased -> canonical).
+_BROWSER_PRESS_NAMED_KEYS = {
+    name.lower(): name
+    for name in (
+        "Enter",
+        "Escape",
+        "Tab",
+        "Backspace",
+        "Delete",
+        "Space",
+        "ArrowUp",
+        "ArrowDown",
+        "ArrowLeft",
+        "ArrowRight",
+        "Home",
+        "End",
+        "PageUp",
+        "PageDown",
+        *(f"F{number}" for number in range(1, 13)),
+    )
+}
+
+_BROWSER_PRESS_GRAMMAR = (
+    "'press' takes ONE chord: optional modifiers (Shift, Control, Alt, Meta; also Ctrl, "
+    "Cmd, Command, Option) joined by '+', then one base key — a single character, or "
+    "Enter, Escape, Tab, Backspace, Delete, Space, ArrowUp/Down/Left/Right, Home, End, "
+    "PageUp, PageDown, F1-F12 (e.g. 'Control+K', 'Shift+Tab', 'e'). Entering text is not a "
+    "key press: use 'type' (with 'secret_ref' for credentials)."
+)
+
+
+def _canonical_press_chord(raw: str) -> tuple[str, str]:
+    """``(canonical chord, "")`` or ``("", reason)`` for a requested ``press`` key.
+
+    Whitespace is never trimmed: ``"Shift+Tab "`` was refused by the original
+    allowlist and a stray space is more likely a pasted string than a chord.
+    """
+    if not raw:
+        return "", "the key is empty"
+    # A literal '+' as the base key ("Control++", or "+" alone) is the one place
+    # the separator is also content, so peel it off before splitting.
+    if raw.startswith("+") and raw != "+":
+        return "", "a chord cannot start with '+'; name the modifier first (e.g. 'Shift++')"
+    if raw == "+":
+        modifiers_part, base = "", "+"
+    elif raw.endswith("++"):
+        modifiers_part, base = raw[:-2], "+"
+        if not modifiers_part:
+            return "", "'++' is ambiguous; name the modifier first (e.g. 'Shift++')"
+    else:
+        modifiers_part, _, base = raw.rpartition("+")
+    seen: list[str] = []
+    for token in modifiers_part.split("+") if modifiers_part else []:
+        canonical = _BROWSER_PRESS_MODIFIER_ALIASES.get(token.lower())
+        if canonical is None:
+            # Multi-character junk before the last '+' is the signature of typed
+            # text ("hello+world"); name it as such rather than as a bad modifier.
+            return "", f"{token!r} is not a modifier"
+        if canonical in seen:
+            return "", f"duplicate modifier {canonical}"
+        seen.append(canonical)
+    if not base:
+        return "", "no base key after the modifiers"
+    named = _BROWSER_PRESS_NAMED_KEYS.get(base.lower())
+    if named is not None:
+        base = named
+    elif len(base) != 1:
+        return "", f"{base!r} is not a key name (this looks like text entry)"
+    elif not base.isprintable() or base.isspace():
+        return "", "a whitespace or control character cannot be pressed by value (use 'Space')"
+    ordered = [name for name in _BROWSER_PRESS_MODIFIERS if name in seen]
+    return "+".join([*ordered, base]), ""
+
+
+def _press_is_legacy_shape(chord: str, selector: str) -> bool:
+    """Whether an older desktop host (the original 8-key allowlist) can serve it."""
+    return not selector.strip() and chord in _BROWSER_PRESS_LEGACY_KEYS
+
 
 def _browser_press_refusal(
     tool_call_id: str, action: str, params: BrowserParams
 ) -> ToolResult | None:
-    if action != "press" or params.key in _BROWSER_PRESS_KEYS:
+    if action != "press":
+        return None
+    chord, reason = _canonical_press_chord(params.key)
+    if chord:
         return None
     return _error(
         tool_call_id,
         "browser",
-        f"unsupported_key: {params.key!r}; 'press' accepts only " + ", ".join(_BROWSER_PRESS_KEYS),
+        f"unsupported_key: {params.key!r} ({reason}). {_BROWSER_PRESS_GRAMMAR}",
         details={"error_code": "unsupported_key", "key": params.key},
     )
+
+
+def _press_chord_gate(
+    tool_call_id: str, chord: str, selector: str, client: Any
+) -> ToolResult | None:
+    """Refuse a widened ``press`` the attached host has not said it understands.
+
+    Hosts that advertise ``press`` today implement only the original eight keys
+    and ignore ``selector``: sending them ``Control+K`` would be answered with
+    ``unsupported_key`` (a lie about the key) and a selector would be dropped
+    without focusing anything (a silent mis-send). ``PRESS_CHORD_CAPABILITY`` is
+    the host's statement that it parses the full grammar, so the harness checks it
+    from the discovery record, before any socket call, and degrades to a typed
+    ``capability_unsupported`` that tells the caller what still works.
+
+    A host that does not serve ``press`` at all is NOT handled here: the ordinary
+    method gate in ``_bridge_call`` refuses it with the established copy (and the
+    extension with its desktop-only copy), which is the better sentence for it.
+    """
+    from local_operator.browser_bridge.backend import HostCapabilities
+    from local_operator.browser_bridge.protocol import PRESS_CHORD_CAPABILITY
+
+    if _press_is_legacy_shape(chord, selector):
+        return None
+    capabilities = client.capabilities() if client is not None else HostCapabilities()
+    if not capabilities.serves("press") or capabilities.serves(PRESS_CHORD_CAPABILITY):
+        return None
+    why = "a 'selector' to focus first" if selector.strip() else f"the chord {chord!r}"
+    problem = _error(
+        tool_call_id,
+        "browser",
+        "the attached desktop app's 'press' only understands "
+        f"{', '.join(_BROWSER_PRESS_LEGACY_KEYS)} with no selector, so {why} was not "
+        "sent. Please update the desktop app, then retry; those keys still work now, "
+        "and every other browser action is unaffected.",
+    )
+    problem.details = {
+        "error_code": "capability_unsupported",
+        "method": "press",
+        "capability": PRESS_CHORD_CAPABILITY,
+        "key": chord,
+    }
+    return problem
+
+
+def _validate_hover_args(params: BrowserParams) -> str:
+    """``hover`` names its target by selector XOR a viewport point.
+
+    Mutually exclusive rather than precedence-ordered (unlike ``scroll``): hover
+    moves a real pointer, and silently preferring one target over a second one
+    the caller also supplied would put the pointer somewhere they did not expect.
+    """
+    has_selector = bool(params.selector.strip())
+    has_x, has_y = params.x is not None, params.y is not None
+    if has_selector and (has_x or has_y):
+        return "'hover' takes a selector OR x and y, not both"
+    if has_selector:
+        return _validate_selector(params.selector, "hover")
+    if has_x != has_y:
+        return "'hover' needs both x and y (viewport pixels), or a selector"
+    if not has_x:
+        return "'hover' needs a selector (use 'snapshot' to find one) or x and y (viewport pixels)"
+    for axis, value in (("x", params.x), ("y", params.y)):
+        if value is None or not math.isfinite(value) or value < 0:
+            return f"'hover' {axis} must be a finite, non-negative viewport pixel (got {value!r})"
+    return ""
 
 
 def _validate_browser_args(action: str, params: BrowserParams) -> str:
@@ -22664,6 +22845,12 @@ def _validate_browser_args(action: str, params: BrowserParams) -> str:
             # read-back comparison in the lane still catches a failed fill.
             return ""
         return _validate_typed_text(params.text)
+    if action == "hover":
+        return _validate_hover_args(params)
+    if action == "press":
+        # The selector only says where focus goes first, so it is optional; a
+        # flag-shaped one is refused for the same reason every selector is.
+        return _validate_selector(params.selector, "press") if params.selector.strip() else ""
     if action == "snapshot":
         # Optional here — an absent selector snapshots the whole document —
         # which is why this is not the same shape as click/type.
@@ -26783,7 +26970,23 @@ async def _bridge_action(
         if action == "type":
             wire["text"] = params.text
     elif action == "press":
-        wire["key"] = params.key
+        # Canonical spelling, never the caller's: the host's table knows only
+        # these names, and an alias that reached it would be refused there.
+        chord, _reason = _canonical_press_chord(params.key)
+        gated = _press_chord_gate(tool_call_id, chord, params.selector, client)
+        if gated is not None:
+            return gated
+        wire["key"] = chord
+        if params.selector.strip():
+            wire["selector"] = params.selector.strip()
+    elif action == "hover":
+        # selector XOR x/y is guaranteed by _validate_browser_args; send only the
+        # half the caller chose so the host never sees a second target.
+        if params.selector.strip():
+            wire["selector"] = params.selector.strip()
+        else:
+            wire["x"] = params.x
+            wire["y"] = params.y
     elif action == "scroll":
         # Only send the params the caller actually set, so the extension's
         # precedence (selector > x/y > direction > default) sees an unset param
@@ -26932,11 +27135,35 @@ async def _bridge_action(
     if action in ("styles", "hit_test", "ancestors", "query"):
         return _bridge_geometry_result(tool_call_id, action, params, result, details)
     if action == "press":
+        chord = _canonical_press_chord(params.key)[0]
+        target = f" after focusing {params.selector.strip()}" if params.selector.strip() else ""
         return _text(
             tool_call_id,
             "browser",
-            f"Pressed {params.key!r} in the owned page. Page: {_page_line(title, href)}",
-            details={**details, "key": params.key},
+            f"Pressed {chord!r} in the owned page{target}. Page: {_page_line(title, href)}",
+            details={**details, "key": chord},
+        )
+    if action == "hover":
+        hit = result.get("hit") if isinstance(result.get("hit"), dict) else {}
+        hx, hy = result.get("x"), result.get("y")
+        at = (
+            f" at ({_geometry_number(hx)}, {_geometry_number(hy)})"
+            if isinstance(hx, (int, float)) and isinstance(hy, (int, float))
+            else ""
+        )
+        asked = params.selector.strip() or (
+            f"({_geometry_number(params.x)}, {_geometry_number(params.y)})"
+        )
+        under = f"; element under the pointer: {_geometry_ident(hit)}" if hit else ""
+        details.update(hit=hit)
+        if at:
+            details.update(x=hx, y=hy)
+        return _text(
+            tool_call_id,
+            "browser",
+            f"Hovered {_target_phrase(asked, result)}{at}{under}. "
+            f"Page: {_page_line(title, href)}",
+            details=details,
         )
     if action == "click":
         navigation = "" if result.get("navigated") else " (no navigation)"
@@ -27160,14 +27387,20 @@ async def execute_browser(
     # Keyboard arguments must fail before ownership discovery/recovery can dial
     # a peer. Keep the preflight specific to this additive action so existing
     # actions retain their established validation/ownership ordering.
-    if str(args.get("action", "")).strip().lower() == "press":
+    preflight_action = str(args.get("action", "")).strip().lower()
+    if preflight_action in ("press", "hover"):
         try:
             keyboard = BrowserParams(**args)
         except ValidationError as exc:
             return _validation_error(tool_call_id, "browser", exc)
-        refusal = _browser_press_refusal(tool_call_id, "press", keyboard)
+        refusal = _browser_press_refusal(tool_call_id, preflight_action, keyboard)
         if refusal is not None:
             return refusal
+        # Target shape (selector vs x/y, flag-shaped selectors) is as host-free as
+        # the key grammar, so it fails before a peer can be dialled too.
+        invalid = _validate_browser_args(preflight_action, keyboard)
+        if invalid:
+            return _error(tool_call_id, "browser", invalid)
     state = _browser_state(context)
     resource = getattr(state, "resource", None)
     if resource is None or state.surface_id.startswith("surface:"):
@@ -27778,6 +28011,12 @@ async def _execute_browser(
     refusal = _browser_press_refusal(tool_call_id, action, params)
     if refusal is not None:
         return refusal
+    if action in ("press", "hover"):
+        # Host-free target validation, before ANY discovery (the same ordering
+        # execute_browser's preflight gives the public entry point).
+        invalid = _validate_browser_args(action, params)
+        if invalid:
+            return _error(tool_call_id, "browser", invalid)
     cmux_available = cmux_browser_available()
     # Classify EACH host ONCE per action and reuse that answer for both the
     # backend decision and the demotion diagnostic, so they can never describe

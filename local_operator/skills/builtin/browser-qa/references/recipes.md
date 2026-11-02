@@ -23,6 +23,12 @@ Sequences for common cases. Keep the order: wait, read, act, capture. Adapt acti
 2. Click the nav item; await the new heading, not a timeout.
 3. Capture URL, heading, and count. Then go back; it must restore the previous view. Test both directions.
 
+## Hover and keyboard states
+
+1. Snapshot, then `hover` the trigger (selector, or x/y from `hit_test`); the reply names the element under the pointer: confirm it is the one you meant.
+2. Re-read or `query` for the menu, tooltip or `:hover` style that should now exist; screenshot it. Move the pointer off (hover elsewhere) and check it goes away.
+3. For shortcuts, `press` one chord (`Control+K`, `Shift+Tab`, `Escape`); pass `selector` to focus a field first. Confirm the visible effect, not only the absence of an error.
+
 ## Reproducing a front-end bug
 
 1. Reduce to the smallest steps: exact URL, exact sequence, exact data.

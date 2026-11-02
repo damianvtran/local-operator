@@ -539,6 +539,19 @@ def format_error(
         # for a reason this build does not know (D9). Rendered ahead of the
         # table so a generic `internal` sentence can never stand in for it.
         return record
+    if error.code == ErrorCode.INTERNAL and error.data.get("reason") == "invalid_arguments":
+        # The desktop host reports a refused argument (hover/press target shape)
+        # as `internal` + this reason rather than a new ErrorCode: a code a
+        # released daemon/session does not know hangs it. The harness validates
+        # these arguments before sending, so this only renders for a host whose
+        # rules are stricter or newer — and "the bridge broke" would be the wrong
+        # reading of a plain bad argument.
+        detail = str(error.message or "").strip()
+        return (
+            "the browser host rejected this call's arguments"
+            + (f": {detail}" if detail else "")
+            + ". Nothing was changed; fix the argument and retry."
+        )
     if error.code in messages:
         return messages[error.code]
     if error.code == ErrorCode.TAB_CLOSED:

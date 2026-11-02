@@ -124,6 +124,8 @@ def test_scroll_logs_and_tabs_are_advertised_actions() -> None:
             # Keyboard input is owned-page CDP input on the desktop host;
             # cmux cannot honor this narrow key contract.
             "press",
+            # Trusted pointer movement is owned-page CDP input on the desktop host.
+            "hover",
             "scroll",
             "logs",
             "tabs",

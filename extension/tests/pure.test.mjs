@@ -982,6 +982,28 @@ test("every wire method has a worker handler", async () => {
   assert.deepEqual(missing, [], `wire methods with no handler: ${missing}`);
 });
 
+// `hover` and `press` need trusted Input.dispatch{Mouse,Key}Event, which Chrome
+// drops on the extension's intentionally-inactive tab (see the constraint in
+// commands/input.ts). They are desktop-only, and the extension must therefore
+// neither serve nor ADVERTISE them: `capabilities` is derived from HANDLERS, so a
+// handler added here would make the harness send them to a host that can only
+// fake them in-page. Keep this test until a measured safe mechanism exists.
+test("the extension serves neither hover nor press (desktop-only)", async () => {
+  const generated = await readFile(new URL("../src/protocol.gen.ts", import.meta.url), "utf8");
+  const union = generated.match(/export type DesktopOnlyMethod = ([^;]+);/);
+  assert.ok(union, "protocol.gen.ts must declare the DesktopOnlyMethod union");
+  const desktopOnly = [...union[1].matchAll(/'([^']+)'/g)].map((m) => m[1]);
+  for (const method of ["hover", "press"]) {
+    assert.ok(desktopOnly.includes(method), `${method} must be generated as desktop-only`);
+  }
+  const worker = await readFile(new URL("../src/worker.ts", import.meta.url), "utf8");
+  const table = worker.match(/const HANDLERS[\s\S]*?=\s*\{([\s\S]*?)\n\};/);
+  assert.ok(table, "worker.ts must declare the HANDLERS table");
+  for (const method of ["hover", "press"]) {
+    assert.doesNotMatch(table[1], new RegExp(`^\\s{2}${method}\\s*[,:]`, "m"), `${method} has a handler`);
+  }
+});
+
 // The daemon accepts a WINDOW of protocol versions (MIN_SUPPORTED_PROTO..
 // PROTO_VERSION), which is only worth anything if the extension can MOVE inside
 // that window. A build whose hello pins the literal 1 keeps working, so nothing
