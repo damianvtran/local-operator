@@ -492,7 +492,6 @@ async def run_case(case, tmp_path, monkeypatch):
     provider = RecordingProvider(scripts, timeline)
     session = make_session(directory, provider, tools=custom, cwd=str(home), has_ui=True)
     assert any(t.name == "no_reply" for t in session._tools), "actual inventory missing no_reply"
-    later = []
     queued = False
 
     def observe(event):
@@ -512,13 +511,9 @@ async def run_case(case, tmp_path, monkeypatch):
             and not queued
         ):
             queued = True
-            # Public ingress scheduled during terminal subscriber fan-out;
-            # assertions below use emitted boundary order, not internal calls.
-            later.append(
-                asyncio.create_task(
-                    session.prompt("QA later actual user", message_id="qa-after-accepted-user")
-                )
-            )
+            # Real busy-composer ingress; prompt() is intentionally unavailable
+            # until this owner's lock releases. Steer must get its own reader.
+            session.steer("QA later actual user", message_id="qa-after-accepted-user")
 
     unsubscribe = session.subscribe(observe)
 
@@ -551,9 +546,11 @@ async def run_case(case, tmp_path, monkeypatch):
                 message_id="peer-" + "c" * 32,
             )
         await settled(session, lambda: bool(provider.requests))
-        if later:
-            await asyncio.wait_for(asyncio.gather(*later), 20)
-            await settled(session)
+        if case == "after-accepted-user":
+            await settled(
+                session,
+                lambda: sum(isinstance(event, AgentEndEvent) for event in events) >= 2,
+            )
         if case == "cancel-and-fresh":
             fresh_request_offset = len(provider.requests)
             await asyncio.wait_for(session.prompt("QA fresh real user after cancellation"), 20)
@@ -606,6 +603,11 @@ async def run_case(case, tmp_path, monkeypatch):
             assert len(accepted) == 1 and len(ends) == 2
             assert ends[0].quiet_accepted and not ends[1].quiet_accepted
             assert ends[0].generation != ends[1].generation
+            assert (
+                sum(getattr(row, "text", "") == "QA later actual user" for row in session.history())
+                == 1
+            )
+            assert not session._has_awaiting_user()
             first_end = next(
                 i
                 for i, row in enumerate(timeline)

@@ -34011,14 +34011,11 @@ class NoReplyParams(BaseModel):
 #: until the tool is activated, while the system prompt is paid on EVERY
 #: request of every session — including the children that can never call it.
 _NO_REPLY_DESCRIPTION = (
-    "Request a silent end when a peer message, wake, monitor or job result "
-    "needs no reply and no action. Call once as the final root call or final "
-    "action inside the final foreground eval; then stop — no final text, poll "
-    "or repeat. Host checks still precede acceptance. Later tool() calls are "
-    "refused and invalidate the request. Never answer "
-    "an acknowledgement with an acknowledgement, and never write filler such "
-    "as '(no action needed)'. Refused if the user asked something or the "
-    "wake/monitor asked to notify."
+    "Request silence for a peer, wake, monitor or job result needing no reply "
+    "or action. Call once: final root call, or last action in the final foreground "
+    "eval. Then stop — no final text, polling or repeat. Host checks precede "
+    "acceptance; later tool() calls invalidate it. Never acknowledge acknowledgements "
+    "or write filler. Pending person, notification or active-goal obligations refuse."
 )
 
 

@@ -3617,6 +3617,10 @@ class Session:
         # Pipeline-local terminal latch. Reset only on admission, not internal
         # _run_turn continuations sharing the same externally visible owner.
         self._quiet_accepted_generation: int | None = None
+        # A clean candidate may outlive its settled Team Bridge reservation.
+        # Capture its body ownership before _settle_pending_body clears it;
+        # only the final host recheck may use this per-owner witness.
+        self._quiet_requested_by_body = False
         self._attention_run_token: str | None = None
         #: §14's per-run trigger record: which origins this run's inputs had
         #: ("user" / "wake_prompt" / "monitor_prompt" / "internal") and
@@ -16976,7 +16980,7 @@ class Session:
         except Exception:  # noqa: BLE001 — unknown is "not active"
             return None
 
-    async def _quiet_end_refusal(self) -> str | None:
+    async def _quiet_end_refusal(self, *, held_body_request: bool = False) -> str | None:
         """The refusal sentence for a quiet end, or ``None`` when it is allowed.
 
         THE RULE IS A DENYLIST (review R4, docs/design/quiet-turns.md §4):
@@ -17010,7 +17014,11 @@ class Session:
         folds the queued row into its next request, so it keeps the refusal.
         """
         if "user" in self._run_triggers or (
-            self._has_awaiting_user() and not self._body_turn_yields_to_person()
+            self._has_awaiting_user()
+            and not (
+                self._body_turn_yields_to_person()
+                or (held_body_request and self._person_steer_queued())
+            )
         ):
             return "A person asked this turn; answer them in one line."
         # A ``notify:true`` delivery is answered by an inbox item as well as by
@@ -18482,6 +18490,7 @@ class Session:
             begin_message()
         self._attention_outcome = None
         self._quiet_accepted_generation = None
+        self._quiet_requested_by_body = False
         self._attention_run_token = str(uuid.uuid4())
         # This run has not yet said how it ended; a teardown that finds it so
         # must publish the outcome itself (see ``Session.dispose``).
@@ -19097,7 +19106,15 @@ class Session:
                 or self._disposed
             ):
                 return
-            refusal = await self._quiet_end_refusal()
+            # _run_turn already settled the reservation in its finally. Its
+            # clean body candidate must retain the same held-person exception
+            # as the tool-time door (Q-R3-1), without admitting a person into
+            # that body's owner. Consumed-user triggers still win unconditionally.
+            refusal = (
+                await self._quiet_end_refusal(held_body_request=True)
+                if self._quiet_requested_by_body
+                else await self._quiet_end_refusal()
+            )
             if self._abort_requested or self._disposed:
                 return
             if refusal:
@@ -19718,6 +19735,9 @@ class Session:
                         # Held until _maybe_compact has had its say; the
                         # pipeline flushes it if no continuation is queued.
                         self._held_end = event
+                        self._quiet_requested_by_body = bool(
+                            event.quiet_requested and self._pending_body_turn is not None
+                        )
                     continue
                 # The worked-turn guard for the project guardrail: a turn that
                 # ran no tools cannot have moved a project's record. Both halves

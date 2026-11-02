@@ -130,7 +130,28 @@ async def compaction_case(tmp_path, monkeypatch):
         assert entries and any(
             isinstance(m, CustomMessage) and m.custom_type == "compaction_summary" for m in after
         )
-        assert len(after) < len(before), "actual compacted context did not shrink"
+
+        def context_text(message):
+            text = getattr(message, "text", "")
+            if isinstance(message, CustomMessage) and message.custom_type == "compaction_summary":
+                text = message.details.get("summary", "")
+            return str(text)
+
+        # Compare only the pre-turn context, not the new quiet turn's peer,
+        # tool-call and tool-result rows. A summary may add a row while still
+        # replacing the seed body with far less text.
+        before_ids = {message.id for message in before}
+        after_pre_turn = [
+            message
+            for message in after
+            if message.id in before_ids
+            or (isinstance(message, CustomMessage) and message.custom_type == "compaction_summary")
+        ]
+        assert any("QA seed 0" in context_text(message) for message in before)
+        assert not any("QA seed 0" in context_text(message) for message in after)
+        assert sum(len(context_text(message)) for message in after_pre_turn) < sum(
+            len(context_text(message)) for message in before
+        ), "actual pre-turn context did not shrink"
         assert len(accepted) == 1 and not session._continuation_queue
         starts = [
             i

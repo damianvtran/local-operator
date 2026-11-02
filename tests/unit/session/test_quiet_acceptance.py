@@ -94,21 +94,37 @@ async def test_person_arriving_during_host_settlement_is_consumed_once_before_ac
     )
     session = make_session(tmp_path, stream)
     injected = False
+    host_refusals = []
+    original_refusal = session._quiet_end_refusal
     events = []
     session.subscribe(events.append)
 
     async def inject_at_post_run_compaction():
         nonlocal injected
         if not injected:
+            # Pin the ordinary/non-body side of the held-body exception: the
+            # request is already provisional, but no bridge reservation ever
+            # owned it. A newly queued person must still win at HOST recheck.
+            assert session._held_end is not None and session._held_end.quiet_requested
+            assert session._pending_body_turn is None
+            assert session._quiet_requested_by_body is False
             injected = True
             session.steer("late-person-exactly-once")
 
+    async def record_host_refusal(*, held_body_request=False):
+        refusal = await original_refusal(held_body_request=held_body_request)
+        if injected and session._held_end is not None and session._held_end.quiet_requested:
+            host_refusals.append((held_body_request, refusal))
+        return refusal
+
     monkeypatch.setattr(session, "_maybe_compact", inject_at_post_run_compaction)
+    monkeypatch.setattr(session, "_quiet_end_refusal", record_host_refusal)
     try:
         await session._prompt_messages([peer_input()])
         ends = [event for event in events if isinstance(event, AgentEndEvent)]
         assert len(stream.requests) == 2 and len(ends) == 1
         assert not ends[0].quiet_accepted
+        assert host_refusals == [(False, "A person asked this turn; answer them in one line.")]
         assert (
             sum(
                 isinstance(row, Message) and "late-person-exactly-once" in row.text
@@ -126,22 +142,38 @@ async def test_input_after_accepted_end_gets_a_new_pipeline_and_generation(tmp_p
     stream = quiet_stream([StreamTextDelta(delta="new answer"), StreamEndEvent(stop_reason="stop")])
     session = make_session(tmp_path, stream)
     events = []
-    tasks = []
 
     def observe(event):
         events.append(event)
         if isinstance(event, AgentEndEvent) and event.quiet_accepted:
-            # Real ingress queues behind the old pipeline lock; never call
-            # _run_turn directly and pretend that means a different owner.
-            tasks.append(asyncio.create_task(session.prompt("new-person-next-owner")))
+            # The composer uses steer while this owner still holds its lock.
+            # prompt() intentionally rejects that phase with TurnInFlight.
+            session.steer("new-person-next-owner", message_id="qa-next-owner-person")
 
     session.subscribe(observe)
     try:
         await session._prompt_messages([peer_input()])
-        await asyncio.gather(*tasks)
+
+        async def new_owner_settled():
+            while (
+                sum(isinstance(event, AgentEndEvent) for event in events) < 2
+                or session.is_streaming
+                or session._turn_lock.locked()
+            ):
+                await asyncio.sleep(0)
+
+        await asyncio.wait_for(new_owner_settled(), timeout=8)
         ends = [event for event in events if isinstance(event, AgentEndEvent)]
         starts = [event for event in events if getattr(event, "type", "") == "agent_start"]
         assert len(stream.requests) == 2 and len(ends) == len(starts) == 2
+        assert (
+            sum(
+                isinstance(row, Message) and row.text == "new-person-next-owner"
+                for row in session.history()
+            )
+            == 1
+        )
+        assert not session._has_awaiting_user()
         assert ends[0].quiet_accepted and not ends[1].quiet_accepted
         assert ends[0].generation != ends[1].generation
         assert events.index(ends[0]) < events.index(starts[1])
