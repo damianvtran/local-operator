@@ -268,8 +268,10 @@ never overwrites. Omitting it lands the clip under
 The host writes the file at stop; bytes never cross the RPC. The harness then
 judges what landed from disk — size equal to the host's report, non-zero, and
 the MP4 `ftyp` box at bytes 4..8 — so a path is only ever reported for a
-complete file. Capture parameters are fixed at up to 1280x720 (a ceiling: the
-clip is scaled to fit), 10 fps, audio off. The clip is an MP4 with an AV1 track,
+complete file. Capture size is the caller's: omit `width`/`height` and the clip is
+1280x720 as before, or give both (even, 240-3840, area at most 3840x2160) and
+the host resizes the tab's viewport to exactly that before it starts (RS1-RS4).
+`fps` (10) and audio (off) stay fixed. The clip is an MP4 with an AV1 track,
 which decoded in AVFoundation in the desktop PR's real-path run and is expected
 not to play in Chrome's `<video>` or H.264-only players (not tested in Chrome).
 Limits: `timeout_s` is the length (default 120 s, max 600 s; the host auto-stops

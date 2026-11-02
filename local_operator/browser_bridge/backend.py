@@ -844,6 +844,25 @@ def _capability_message(error: BridgeError, *, host: str) -> str:
     method = str(error.data.get("method") or "that action")
     peer = str(error.data.get("extension_version") or "")
     remedy = _CAPABILITY_HOST_REMEDY.get(host, _CAPABILITY_HOST_REMEDY[HOST_EXTENSION])
+    if method == "record_size":
+        # A capability on an action that ALREADY EXISTS (RS3), so the
+        # "built before this action existed" copy below would be false twice:
+        # `record_start` works on that build, at its default size. Kept in this
+        # function because it is the one place a capability refusal is worded,
+        # and named by its own remedy — update, or drop the size and record now.
+        if host == HOST_UI:
+            return (
+                "this build of the Local Operator desktop app cannot record at a chosen "
+                "size: it records only at the default 1280x720. Update Local Operator "
+                f"({remedy}) and retry at the size asked for, or call 'record_start' "
+                "without width/height for a 1280x720 clip — that works now."
+            )
+        return (
+            "sized recording is served only by the Local Operator desktop app's browser; "
+            "the Chrome extension records the page at its own size. Open the page with "
+            "backend='ui' to record at a chosen size. Nothing else about this tab is "
+            "affected."
+        )
     if host == HOST_EXTENSION and method in DESKTOP_ONLY_METHODS:
         # A desktop-only method has NO remedy inside the extension: no update,
         # toggle or re-pair makes it servable, and the old copy sent the user to
@@ -990,6 +1009,17 @@ def _record_reason_message(error: BridgeError, reason: str) -> str:
             f"the desktop app is already running {ceiling}; nothing else may start until "
             "one stops or its timer fires. Nothing was recorded."
         )
+    if reason == "record_size":
+        why = str(error.data.get("why") or "")
+        cause = {
+            "incomplete": "both width and height are required",
+            "range": "each side must be 240 to 3840 pixels",
+            "odd": "both sides must be even",
+            "area": "the area may not exceed 3840x2160",
+            "visible": "a tab the user is looking at cannot be resized out from under them",
+            "not_applied": "the app could not apply that viewport to the tab",
+        }.get(why, detail or "the app refused the size")
+        return f"the clip was not started at the size asked for: {cause}. Nothing was started."
     if reason == "record_too_large":
         cap = error.data.get("max_bytes")
         size = (
@@ -997,9 +1027,15 @@ def _record_reason_message(error: BridgeError, reason: str) -> str:
             if isinstance(cap, int) and cap > 0
             else "larger than the recording size limit"
         )
+        # RS5: when the host names the size it was recording, the refusal says
+        # WHICH ceiling was hit — at 4K the same 64 MiB is ~150 s, not ~16 min.
+        width, height = error.data.get("width"), error.data.get("height")
+        at_size = (
+            f" at {width}x{height}" if isinstance(width, int) and isinstance(height, int) else ""
+        )
         return (
-            f"the recording is {size}, so nothing was saved: a truncated MP4 is invalid "
-            "and a partial file would be reported as a clip. Record a shorter span "
+            f"the recording is {size}{at_size}, so nothing was saved: a truncated MP4 is "
+            "invalid and a partial file would be reported as a clip. Record a shorter span "
             "(timeout_s) and retry."
         )
     if reason == "record_aborted":

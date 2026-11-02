@@ -96,6 +96,7 @@ def _call(
     reply: dict[str, Any] | None = None,
     calls: list[tuple[str, dict[str, Any]]] | None = None,
     context: ToolContext | None = None,
+    client: Any = None,
     **kwargs: Any,
 ) -> tuple[Any, list[tuple[str, dict[str, Any]]]]:
     """One `_browser_record` call over a fake wire, recording what it sent."""
@@ -116,7 +117,7 @@ def _call(
             action,
             _params(action, **kwargs),
             context or _ctx(tmp_path),
-            client=_AdvertisedHost(),
+            client=client or _AdvertisedHost(),
         )
     )
     return result, seen
@@ -1042,3 +1043,220 @@ def test_a_capability_the_extension_can_serve_keeps_its_own_remedy() -> None:
     error = capability_refusal("download", host=HOST_EXTENSION, capabilities=HostCapabilities())
     message = format_error(error, action="download", host=HOST_EXTENSION)
     assert "desktop app" not in message
+
+
+# ---------------------------------------------------------------------------
+# Agent-chosen size up to 4K (RS1-RS9)
+# ---------------------------------------------------------------------------
+
+
+class _SizedHost(_AdvertisedHost):
+    """The same desktop host, advertising sized recording as well (RS3)."""
+
+    def capabilities(self) -> HostCapabilities:
+        return HostCapabilities(
+            methods=(*RECORD_ACTIONS, "record_size"), version="0.99.0", capabilities_known=True
+        )
+
+
+def test_an_unsized_start_is_the_old_wire_and_the_old_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Backward compatibility: no size ⇒ byte-identical wire, no size in the copy."""
+    result, seen = _call("record_start", tmp_path, monkeypatch)
+    assert not result.is_error
+    assert "width" not in seen[0][1]
+    assert "height" not in seen[0][1]
+    assert " at " not in result.text
+    assert "width" not in (result.details or {})
+
+
+def test_a_sized_start_sends_the_viewport_and_reports_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result, seen = _call(
+        "record_start",
+        tmp_path,
+        monkeypatch,
+        client=_SizedHost(),
+        width=1920,
+        height=1080,
+        reply={"recording": True, "path": "", "width": 1920, "height": 1080},
+    )
+    assert not result.is_error
+    assert (seen[0][1]["width"], seen[0][1]["height"]) == (1920, 1080)
+    assert "1920x1080" in result.text
+    assert (result.details or {})["width"] == 1920
+    assert (result.details or {})["height"] == 1080
+
+
+@pytest.mark.parametrize(
+    "size, needle",
+    [
+        ({"width": 1920}, "given together"),
+        ({"width": 100, "height": 100}, "240 to 3840"),
+        ({"width": 1920, "height": 4000}, "240 to 3840"),
+        ({"width": 1921, "height": 1080}, "must be even"),
+        # Area, not the longer edge: portrait 2160x3840 is legal, a 1:1 4K square
+        # is not, because the encoder's price tracks pixels.
+        ({"width": 3840, "height": 3840}, "8,294,400"),
+    ],
+)
+def test_an_unusable_size_is_refused_before_dispatch(size: dict[str, int], needle: str) -> None:
+    problem = builtin._validate_browser_args("record_start", _params("record_start", **size))
+    assert needle in problem
+    assert problem.endswith("Nothing was started.")
+
+
+def test_a_portrait_size_at_the_area_limit_is_allowed() -> None:
+    assert builtin._validate_browser_args("record_start", _params(width=2160, height=3840)) == ""
+
+
+@pytest.mark.parametrize(
+    "action, size",
+    [
+        ("record_stop", {"width": 1920, "height": 1080}),
+        ("screenshot", {"width": 1920, "height": 1080}),
+        ("snapshot", {"height": 720}),
+    ],
+)
+def test_a_size_on_any_other_action_is_refused(action: str, size: dict[str, int]) -> None:
+    problem = builtin._validate_browser_args(action, _params(action, **size))
+    assert "only valid for 'record_start'" in problem
+
+
+def test_a_bad_size_is_typed_and_costs_no_wire_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result, seen = _call(
+        "record_start", tmp_path, monkeypatch, client=_SizedHost(), width=1921, height=1080
+    )
+    assert result.is_error
+    assert seen == []
+    details = result.details or {}
+    assert details["reason"] == "record_size"
+    assert (details["param"], details["why"]) == ("width", "odd")
+    assert result.text.endswith("Nothing was started.")
+
+
+def test_an_app_without_sized_recording_is_refused_with_its_own_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The OLD host would record 1280x720 and report success, so the gate is local."""
+    result, seen = _call("record_start", tmp_path, monkeypatch, width=1920, height=1080)
+    assert result.is_error
+    assert seen == []
+    assert (result.details or {})["error_code"] == "capability_unsupported"
+    assert "1280x720" in result.text
+    assert "built before this action existed" not in result.text
+    assert "update" in result.text.lower()
+
+
+def test_the_record_size_capability_copy_names_the_working_fallback() -> None:
+    error = capability_refusal(
+        "record_size",
+        host=HOST_UI,
+        capabilities=HostCapabilities(methods=RECORD_ACTIONS, version="0.93.0"),
+    )
+    message = format_error(error, action="record_size", host=HOST_UI)
+    assert "only at the default 1280x720" in message
+    assert "Update Local Operator" in message
+    assert "built before this action existed" not in message
+
+
+def test_the_extension_host_says_sized_recording_is_desktop_only() -> None:
+    error = capability_refusal("record_size", host=HOST_EXTENSION, capabilities=HostCapabilities())
+    message = format_error(error, action="record_size", host=HOST_EXTENSION)
+    assert "desktop app" in message
+    assert "backend='ui'" in message
+
+
+def test_a_clip_that_comes_back_at_another_size_keeps_the_approval(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result, _ = _call(
+        "record_start",
+        tmp_path,
+        monkeypatch,
+        client=_SizedHost(),
+        width=1920,
+        height=1080,
+        reply={"recording": True, "path": "", "width": 1280, "height": 720},
+    )
+    assert result.is_error
+    assert "NOT at the 1920x1080" in result.text
+    assert "1280x720" in result.text
+    assert (result.details or {})["why"] == "not_applied"
+    target = (result.details or {})["target"]
+    # The encoder is running: the approved destination survives so the stop can
+    # save what is actually being recorded.
+    assert builtin._APPROVED_RECORDINGS["ui:7:nonce"] == target
+
+
+def test_a_sized_start_without_an_echo_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result, _ = _call(
+        "record_start", tmp_path, monkeypatch, client=_SizedHost(), width=1920, height=1080
+    )
+    assert result.is_error
+    assert "unreported size" in result.text
+
+
+def test_record_stop_still_saves_a_clip_that_came_back_at_the_wrong_size(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    start, _ = _call(
+        "record_start",
+        tmp_path,
+        monkeypatch,
+        client=_SizedHost(),
+        width=1920,
+        height=1080,
+        reply={"recording": True, "path": "", "width": 1280, "height": 720},
+    )
+    target = Path((start.details or {})["target"])
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(MP4_HEAD)
+    stop, seen = _call(
+        "record_stop",
+        tmp_path,
+        monkeypatch,
+        client=_SizedHost(),
+        reply={"path": str(target), "bytes": len(MP4_HEAD), "duration_ms": 10},
+    )
+    assert not stop.is_error
+    assert str(target) in stop.text
+    assert seen[0][0] == "record_stop"
+
+
+def test_record_size_proves_no_recording_is_running() -> None:
+    assert "record_size" in builtin._RECORD_ABSENT_REASONS
+
+
+def test_the_approval_row_names_the_size(tmp_path: Path) -> None:
+    row = builtin._describe_browser_approval(
+        {
+            "action": "record_start",
+            "path": str(tmp_path / "clip.mp4"),
+            "width": 3840,
+            "height": 2160,
+        },
+        str(tmp_path),
+    )
+    assert row.endswith(" at 3840x2160")
+    default_dir = builtin._describe_browser_approval(
+        {"action": "record_start", "width": 1920, "height": 1080}, str(tmp_path)
+    )
+    assert default_dir.endswith(" at 1920x1080")
+
+
+def test_the_hosts_own_size_refusal_ends_nothing_was_started() -> None:
+    from local_operator.browser_bridge import backend as bridge_backend
+
+    error = _wire_error(ErrorCode.INTERNAL, "record_size", param="width", why="odd")
+    sentence = bridge_backend._record_reason_message(error, "record_size")
+    assert "both sides must be even" in sentence
+    assert sentence.endswith("Nothing was started.")
+    message = format_error(error, action="record_start", host=HOST_UI)
+    assert "Nothing was started." in message
