@@ -1693,6 +1693,82 @@ class TestOAuthEndpointDiscovery:
         assert endpoints.protected_resource_metadata is not None
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("asm_extra", "redirect", "expected"),
+        [
+            ({"mcp_refresh_rotation_assertion": True}, False, True),
+            ({}, False, False),
+            ({"mcp_refresh_rotation_assertion": "true"}, False, False),
+            ({"mcp_refresh_rotation_assertion": True}, True, False),
+        ],
+        ids=["capability-true", "capability-absent", "capability-string", "redirected-answer"],
+    )
+    async def test_the_rotation_capability_requires_an_unredirected_truthy_field(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        asm_extra: dict[str, Any],
+        redirect: bool,
+        expected: bool,
+    ) -> None:
+        """The capability opt-in must be READ, not assumed.
+
+        Discovery is the only place the flag is derived; every durability test
+        builds ``DiscoveredOAuthEndpoints`` by hand, so without a test here the
+        reading itself is unexercised. The four cases are the readings the code
+        is allowed to take — the real field present and true, absent, present but
+        a string (JSON "true" is not Python True, and the check is identity), and
+        a capability arriving via a redirect (which does not establish that the
+        issuer we asked published it).
+        """
+        import httpx
+
+        from local_operator.mcp import auth as auth_mod
+
+        auth_mod._DISCOVERED_ENDPOINTS_CACHE.clear()
+
+        prm_body = {
+            "resource": self.URL,
+            "authorization_servers": ["https://mcp.example.com/v1/mcp"],
+        }
+        asm_body = {
+            "issuer": "https://mcp.example.com/v1/mcp",
+            "authorization_endpoint": "https://auth.example.com/authorize",
+            "token_endpoint": "https://auth.example.com/oauth/token",
+            **asm_extra,
+        }
+        redirected_url = "https://elsewhere.example.com/oauth-authorization-server"
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            if "oauth-protected-resource" in url:
+                return httpx.Response(200, json=prm_body)
+            if url == redirected_url:
+                return httpx.Response(200, json=asm_body)
+            if "oauth-authorization-server" in url:
+                if redirect:
+                    return httpx.Response(302, headers={"Location": redirected_url})
+                return httpx.Response(200, json=asm_body)
+            return httpx.Response(404)
+
+        transport = httpx.MockTransport(handler)
+        real_client = httpx.AsyncClient
+
+        def patched_client(*args: Any, **kwargs: Any) -> httpx.AsyncClient:
+            kwargs["transport"] = transport
+            return real_client(*args, **kwargs)
+
+        monkeypatch.setattr(httpx, "AsyncClient", patched_client)
+        endpoints = await auth_mod.discover_oauth_endpoints(self.URL)
+        assert endpoints is not None
+        # The endpoint still resolves in every case — the capability flag is the
+        # only thing these four differ on, which is what makes this a test of the
+        # reading rather than of discovery in general.
+        assert (
+            str(endpoints.oauth_metadata.token_endpoint) == "https://auth.example.com/oauth/token"
+        )
+        assert endpoints.rotation_assertion_supported is expected
+
+    @pytest.mark.asyncio
     async def test_a_prm_5xx_is_never_cached_as_an_answered_negative(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

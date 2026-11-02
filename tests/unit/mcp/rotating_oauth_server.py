@@ -55,6 +55,10 @@ class FakeTokenEndpoint:
         response_delay_s: float = 0.0,
         on_reject: Callable[[], Awaitable[None]] | None = None,
         commit_then_fail_status: int | None = None,
+        refuse_before_rotation: tuple[int, str] | None = None,
+        refuse_headers: dict[str, str | list[str]] | None = None,
+        refuse_for_requests: int = 1,
+        commit_then_fail_error: str = "server_error",
     ) -> None:
         self.access_token = access_token
         self.refresh_token = refresh_token
@@ -71,7 +75,33 @@ class FakeTokenEndpoint:
         #: issuer, and the only way to test the marker's clearing rule without
         #: guessing at one.
         self.commit_then_fail_status = commit_then_fail_status
+        #: The error code an accepted-then-failed refresh answers with. Lets a
+        #: test model the ADVERSARIAL shape directly: a provider that commits
+        #: the rotation and then answers 503 naming ``temporarily_unavailable`` —
+        #: the reason a bare status or RFC code may never be read as proof that
+        #: the token survived.
+        self.commit_then_fail_error = commit_then_fail_error
+        #: When set, an ACCEPTED refresh is refused with ``(status, error_code)``
+        #: BEFORE the rotation is applied, leaving the token untouched: the shape
+        #: of auth-svc's pre-CAS ``temporarily_unavailable``. The opposite of
+        #: ``commit_then_fail_status``, whose point is that the rotation HAPPENED
+        #: before the client was told anything usable.
+        self.refuse_before_rotation = refuse_before_rotation
+        #: Headers written with that refusal — how a test supplies the wire
+        #: contract the client keys on (``X-MCP-Refresh-Rotation: not-committed``)
+        #: and, just as important, how it proves the same 503 WITHOUT the header
+        #: stays ambiguous.
+        self.refuse_headers = refuse_headers or {}
+        #: How many requests the refusal above applies to. One (the default)
+        #: models an issuer that is unable for a moment and then recovers, which
+        #: is the only way a test can observe that the client's retry actually
+        #: succeeds afterwards.
+        self.refuse_for_requests = refuse_for_requests
         self.requests: list[dict[str, str]] = []
+        # Every request's headers, lower-cased, in arrival order. Recorded so a
+        # test can assert what actually went on the wire — in particular that a
+        # header is ABSENT for an issuer that never advertised the capability.
+        self.request_headers: list[dict[str, str]] = []
         self.reuse_attempts = 0
         self.rotation_count = 0
         self.revoked = False
@@ -105,9 +135,15 @@ class FakeTokenEndpoint:
             for line in head.decode("latin-1").split("\r\n")[1:]:
                 name, _, value = line.partition(":")
                 headers[name.strip().lower()] = value.strip()
+            self.request_headers.append(dict(headers))
             length = int(headers.get("content-length", "0") or 0)
             body = await reader.readexactly(length) if length else b""
             status, payload = self._decide(dict(parse_qsl(body.decode("utf-8"))))
+            headers_out = (
+                self._refusal_headers(headers.get("x-mcp-refresh-attempt", ""))
+                if status != 200
+                else {}
+            )
             if status != 200 and self.on_reject is not None:
                 # Awaited BEFORE the rejection is written, so the sibling's
                 # write lands after our pre-POST read and before the tombstone
@@ -117,7 +153,7 @@ class FakeTokenEndpoint:
                 # AFTER the rotation above: a client that walks away now has had
                 # its token spent and its rotation performed.
                 await asyncio.sleep(self.response_delay_s)
-            self._write(writer, status, payload)
+            self._write(writer, status, payload, headers_out)
         except Exception:  # noqa: BLE001 — a fixture must never fail a test by raising
             pass
         finally:
@@ -136,6 +172,18 @@ class FakeTokenEndpoint:
             self.reuse_attempts += 1
             self.revoked = True
             return 400, {"error": "invalid_grant"}
+        if (
+            self.refuse_before_rotation is not None
+            and len(self.requests) <= self.refuse_for_requests
+        ):
+            # Refuse WITHOUT rotating: nothing was spent, and the fixture must
+            # prove that rather than assert it — ``rotation_count`` stays put.
+            # Only the first ``refuse_for_requests`` requests are refused, so a
+            # test can model an issuer that is briefly unable and then recovers;
+            # a permanently-refusing fixture would make "the retry succeeds"
+            # unobservable however correct the client is.
+            status, code = self.refuse_before_rotation
+            return status, {"error": code}
         self.rotation_count += 1
         # Rotate, and invalidate the access token the old grant carried: a
         # rotating provider revokes every previously issued access token when
@@ -148,7 +196,7 @@ class FakeTokenEndpoint:
             # the committed state is the one a next exchange would have to
             # present, which is exactly what makes clearing the send marker on a
             # non-200 a family-revoking mistake.
-            return self.commit_then_fail_status, {"error": "server_error"}
+            return self.commit_then_fail_status, {"error": self.commit_then_fail_error}
         return 200, {
             "access_token": self.access_token,
             "token_type": "Bearer",
@@ -157,18 +205,46 @@ class FakeTokenEndpoint:
             "scope": "fixture",
         }
 
+    def _refusal_headers(self, attempt: str) -> dict[str, str | list[str]]:
+        """Response headers for a refusal, with the client's nonce substituted.
+
+        ``{attempt}`` in a configured value is replaced by the attempt header the
+        client sent, which is how a test models an issuer that BINDS its promise
+        to the specific refresh. A list value is written as repeated header lines
+        so the ambiguity case (two conflicting assertion values) can be tested
+        against a real HTTP response rather than a dict.
+        """
+        out: dict[str, str | list[str]] = {}
+        for name, value in self.refuse_headers.items():
+            if isinstance(value, list):
+                rendered = [str(item).replace("{attempt}", attempt) for item in value]
+            else:
+                rendered = str(value).replace("{attempt}", attempt)
+            out[name] = rendered
+        return out
+
     @staticmethod
-    def _write(writer: asyncio.StreamWriter, status: int, payload: dict[str, Any]) -> None:
+    def _write(
+        writer: asyncio.StreamWriter,
+        status: int,
+        payload: dict[str, Any],
+        extra_headers: dict[str, str | list[str]] | None = None,
+    ) -> None:
         body = json.dumps(payload).encode("utf-8")
         # The real phrase, not a hardcoded "Bad Request": a 500 written as
         # "500 Bad Request" is a fixture artifact that makes a status-code test
         # look like it is reading a 400.
         reason = http.HTTPStatus(status).phrase
+        extra = ""
+        for name, value in (extra_headers or {}).items():
+            values = value if isinstance(value, list) else [value]
+            extra += "".join(f"{name}: {item}\r\n" for item in values)
         writer.write(
             (
                 f"HTTP/1.1 {status} {reason}\r\n"
                 "Content-Type: application/json\r\n"
                 f"Content-Length: {len(body)}\r\n"
+                f"{extra}"
                 "Connection: close\r\n\r\n"
             ).encode("utf-8")
             + body
