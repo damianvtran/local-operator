@@ -2,6 +2,7 @@
 
 import base64
 import io
+import re
 import zipfile
 from pathlib import Path
 from unittest.mock import Mock
@@ -161,7 +162,7 @@ def test_ambiguous_or_dynamic_source_matrix_fails_closed(matrix: str) -> None:
         generator._workflow_shards(workflow)
 
 
-@pytest.mark.parametrize("count", [5, 6])
+@pytest.mark.parametrize("count", [5, 6, 7])
 def test_literal_source_matrix_is_read_without_evaluating_expressions(count: int) -> None:
     workflow = (
         "jobs:\n  test:\n    strategy:\n      matrix:\n"
@@ -325,6 +326,9 @@ def test_source_api_failures_never_fall_back(
         (5, 5, "default"),
         (6, 6, "default"),
         (6, 5, "default"),
+        (7, 7, "default"),
+        (7, 6, "default"),
+        (7, 7, "push"),
         (5, 5, "no-action"),
         (5, 5, "custom-ref"),
         (5, 5, "custom-source-ref"),
@@ -338,7 +342,11 @@ def test_source_matrix_completeness_through_cli(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The whole CLI must reject a missing sixth shard before writing p75."""
+    """Missing source-declared shards must never become absent observations.
+
+    Keep historical five/six sources readable while adding the seven-shard
+    capacity experiment; the expected set still comes from pinned source.
+    """
     workflow = (
         "jobs:\n  test:\n    strategy:\n      matrix:\n"
         f"        shard: {list(range(declared))}\n    steps:\n      - uses: actions/checkout@v7\n"
@@ -431,7 +439,8 @@ def test_source_matrix_completeness_through_cli(
         assert not out.exists()
         assert all(call.args[0][-1].endswith("/logs") for call in download.call_args_list)
     elif declared != observed:
-        with pytest.raises(ValueError, match="expects \\[0, 1, 2, 3, 4, 5\\]"):
+        expected_shards = re.escape(f"expects {list(range(declared))}")
+        with pytest.raises(ValueError, match=expected_shards):
             generator.main(args)
         assert not out.exists()
         assert all(call.args[0][-1].endswith("/logs") for call in download.call_args_list)

@@ -871,7 +871,7 @@ jobs:
       !cancelled() &&
       needs.changes.outputs.unit != 'false'
     runs-on: ubuntu-latest
-    # Keep six shards within the 20-job concurrency budget. PR #643 job
+    # Keep seven shards within the 20-job concurrency budget. PR #643 job
     # 101250352578 reached 97% before GitHub cancelled it at the 15-minute
     # limit, so the ceiling carries setup and the long tail without dropping
     # tests, coverage, or the independent per-test/e2e watchdogs.
@@ -955,6 +955,10 @@ jobs:
     # Six-shard weight repair: retain that 38-minute cap and every selected
     # test/coverage path. Three complete attempt-bound CI runs supply per-file
     # p75 weights; their LPT test-time sums are NOT wall-time margin evidence.
+    # Seventh-shard experiment: two of three strict-compatible natural six-shard
+    # matrices had <10 minutes of margin at this cap. Add capacity, not a higher
+    # timeout or smaller selected set; runner variance means no wall gain is
+    # promised. Preserve the measured weights and every coverage/watchdog path.
     # See docs/ci-test-durations.md for provenance and post-change limits.
     timeout-minutes: 38
     strategy:
@@ -963,7 +967,7 @@ jobs:
         # BOTH ends of `requires-python` on `main`, the minimum only on pull
         # requests.
         python-version: ${{ github.event_name == 'pull_request' && fromJSON('["3.12"]') || fromJSON('["3.12", "3.13"]') }}
-        shard: [0, 1, 2, 3, 4, 5]
+        shard: [0, 1, 2, 3, 4, 5, 6]
     env:
       # Seconds of no completed test before the controller reports which tests
       # are still in flight, and the per-item bound after which a worker dumps
@@ -1057,13 +1061,13 @@ jobs:
         # 8m46s. Risk was uncorrelated with what the author did.
         #
         # `--dist worksteal` in addopts cannot fix this: it rebalances within
-        # one pytest process, and this split happens across six machines
+        # one pytest process, and this split happens across seven machines
         # before pytest starts. The full reasoning, the determinism argument,
         # and why a file missing from the manifest still runs are in
         # scripts/shard_tests.py.
         run: |
           python scripts/shard_tests.py \
-            --shard ${{ matrix.shard }} --total 6 --out shard_tests.txt
+            --shard ${{ matrix.shard }} --total 7 --out shard_tests.txt
 
       - name: Run test shard with coverage
         id: shard_pytest

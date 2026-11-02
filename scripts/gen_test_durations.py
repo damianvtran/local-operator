@@ -228,8 +228,12 @@ def _workflow_shards(workflow: str, *, require_default_checkout: bool = False) -
         ):
             raise ValueError("source workflow: shard must be a literal integer sequence")
         values = [int(value.value) for value in shards.value]
-        if values not in [list(range(n)) for n in (5, 6)]:
-            raise ValueError("source workflow: expected contiguous literal five/six shard matrix")
+        # Retain historical timing sources as the capacity experiment grows;
+        # only literal source-declared matrices qualify, never observed counts.
+        if values not in [list(range(n)) for n in (5, 6, 7)]:
+            raise ValueError(
+                "source workflow: expected contiguous literal five/six/seven shard matrix"
+            )
         return values
     except yaml.YAMLError as exc:
         raise ValueError(f"source workflow: unreadable YAML: {exc}") from exc

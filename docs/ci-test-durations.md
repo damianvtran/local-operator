@@ -1,10 +1,38 @@
 # CI unit duration weights
 
-The unit matrix has **six** shards and retains its **38-minute** job timeout,
+The unit matrix has **seven** shards and retains its **38-minute** job timeout,
 coverage commands, complete file selection, serial-control receipts and watchdogs.
-Only scheduling weights and the number of partitions change. More shards spend
-additional fleet capacity; six is authorized here, not a claim that any timeout
-margin has been demonstrated.
+This capacity experiment changes only partition count, not the committed weights
+or selected set. More shards spend fleet capacity; seven is not a claim of
+measured wall-time improvement, guaranteed timeout margin or a native-crash fix.
+
+## Seventh-shard experiment: natural six-shard observations
+
+Three strict-compatible natural post-PR3284 attempt-1 matrices completed with
+all configured unit/coverage jobs successful. These observations justify trying
+another partition while retaining the timeout, not extrapolating wall time from
+summed test weights. Job wall and ordinary pytest-step wall are distinct:
+
+| Run | Unit jobs | Max job wall min | Max ordinary step wall min | Margin to 38 min |
+|---|---:|---:|---:|---:|
+| 41324404334 (main) | 12 | 31.283 | 30.417 | 6.717 |
+| 41326832044 (PR3292) | 6 | 27.183 | 26.550 | 10.817 |
+| 41335594592 (PR3277) | 6 | 30.967 | 30.117 | 7.033 |
+
+All three use deployed workflow blob `cafae6f6e88cbb71cf2f91766a40d7c389fb9619`,
+the unchanged duration manifest and default checkout/source binding. Two of three
+leave less than ten minutes of job margin. PR3290/run41327449686 is supplementary
+only: its actual execution merge used six shards, but its branch-head workflow
+and manifest predate PR3284 and fail the strict head/merge compatibility contract.
+It is excluded from this qualifying denominator; premerge run41319197549 is also
+not included. Do not weaken source binding to make additional samples qualify.
+
+The unit Python-version expression gives one version on PRs and two on main
+pushes, so six-to-seven adds one unit job per PR and two per main push. Coverage
+and e2e axes are unchanged. Observe complete natural post-seven matrices before
+claiming wall-time/margin improvement; no artificial workflow replay is needed.
+The historical five/six calibration and projection tables below remain history,
+not forecasts for this seven-shard experiment. The manifest is not regenerated.
 
 ## Reproduce the committed manifest
 
@@ -58,7 +86,7 @@ checkout action. No mutable main/PR merge lookup is used.
 
 Source YAML is safely composed without expression evaluation: duplicate keys,
 aliases, dynamic shard expressions and matrix include/exclude fail closed. Only
-literal contiguous five/six matrices are supported. This contract depends on
+literal contiguous five/six/seven matrices are supported. This contract depends on
 retained job logs and source content; expired/unreadable logs, absent action/step
 metadata, missing/multiple checkout identities, wrong ancestry, incompatible
 head/merge source, or failed API fetches abort without weakening the contract.
@@ -160,8 +188,9 @@ by a guessed concurrency.
 
 The gap cannot be labelled collection overhead from these data: parallel worker
 imbalance, idle time, setup/teardown and collection may all contribute. Historical
-success within 38 minutes is not a six-shard margin forecast. Observe at least
-three complete post-change CI runs before assessing a ten-minute ceiling margin;
-if six shards are insufficient, report evidence for a seventh-shard decision
-rather than raising the timeout or dropping selected tests. No extra full CI
-workflow is dispatched to manufacture those observations.
+success within 38 minutes was not a six-shard margin forecast. The six-shard
+repair required at least three complete natural post-change matrices before a
+seventh-shard decision; that evidence is recorded above. The same discipline
+applies to the seventh-shard experiment: require actual post-change observations,
+never raise the timeout or drop selected tests to manufacture margin. No extra
+full CI workflow is dispatched to manufacture those observations.
