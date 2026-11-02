@@ -104,6 +104,11 @@
     "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
     "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."
   },
+  "relay.shell.usage.unlimited_generic": {
+    "role": "usage sheet display",
+    "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
+    "note": "Amount column of an included (non-paid) usage window that has no limit. Short; unlimited (the paid variant) stays for wallets."
+  },
   "relay.shell.usage.window_five": {
     "role": "cached usage sheet display",
     "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
@@ -147,7 +152,7 @@
   "relay.shell.usage.reset": {
     "role": "cached usage sheet display",
     "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
-    "note": "{value} is the reset timestamp as epoch milliseconds in the phone, or datetime in Python. ICU date medium/time short formats it in the actual selected catalogue locale and the phone time zone, consistently with as_of; not an ISO machine token."
+    "note": "Exact reset time, shown when the countdown is tapped. {when} is pre-formatted by the phone: time only when today, otherwise short date + time (year only when not this year)."
   },
   "relay.shell.usage.command": {
     "role": "cached usage sheet display",
@@ -227,7 +232,7 @@
   "relay.shell.usage.updated": {
     "role": "usage sheet display",
     "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
-    "note": "Status after a refresh; value is the time of the oldest refreshed report. Short time only."
+    "note": "Status line under the sheet title. {when} is a time, already formatted by the phone: time only when today, otherwise short date + time (year only when not this year). It is when this refresh last reached the vendors."
   },
   "relay.shell.usage.refresh_failed": {
     "role": "usage sheet display",
@@ -242,7 +247,12 @@
   "relay.shell.usage.throttled": {
     "role": "usage sheet display",
     "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
-    "note": "Manual refresh is limited to one per 15 seconds. seconds is a live countdown (1-15). Keep the plural forms."
+    "note": "A 15-second cooldown between manual refreshes, NOT a usage limit: do not use the word \"limit\". seconds is a live countdown (1-15). Keep the plural forms."
+  },
+  "relay.shell.usage.refresh_ready": {
+    "role": "usage sheet display",
+    "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
+    "note": "Screen-reader only: announced once when the 15-second refresh cooldown ends (after the Updated sentence). Not a usage limit."
   },
   "relay.shell.usage.retry": {
     "role": "usage sheet display",
@@ -253,6 +263,11 @@
     "role": "usage sheet display",
     "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
     "note": "Label above one account's card when a provider has several logins. index starts at 1. Never shows an email."
+  },
+  "relay.shell.usage.accounts_order": {
+    "role": "usage sheet display",
+    "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
+    "note": "Fine print under a provider with several logins. Explains that \"Account N\" follows the order the logins were added on the computer; no email is ever shown."
   },
   "relay.shell.usage.resets_in": {
     "role": "usage sheet display",
@@ -358,5 +373,15 @@
     "role": "usage sheet display",
     "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
     "note": "Same as row_a11y plus the reset phrase (resets_in or reset_now). Not shown visually."
+  },
+  "relay.shell.usage.row_a11y_bare": {
+    "role": "usage sheet display",
+    "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
+    "note": "Screen-reader sentence for a usage bar with no status word (a paid balance, or an amount not reported): label and amount. Not shown visually."
+  },
+  "relay.shell.usage.row_a11y_bare_reset": {
+    "role": "usage sheet display",
+    "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
+    "note": "Same as row_a11y_bare plus the reset phrase (resets_in or reset_now). Not shown visually."
   }
 }

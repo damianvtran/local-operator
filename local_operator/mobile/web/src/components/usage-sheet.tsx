@@ -6,7 +6,7 @@
  * with `force:false`, which the daemon serves from its 5-minute cache unless
  * the data is stale. The header's refresh button posts `force:true`; the
  * daemon floors that at one per 15 s and answers `throttled` with the wait,
- * which this sheet counts down with the button disabled. A refresh that fails
+ * which this sheet counts down with the button inert. A refresh that fails
  * or times out still answers with cached data: the cards NEVER blank while
  * refreshing or after a failure, and no spinner covers them.
  *
@@ -23,7 +23,7 @@
  * (pure, unit-tested); this file is layout and copy only.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { getUsage, refreshUsage, type PhoneUsageEnvelope, type PhoneUsageLimit, type PhoneUsageTone } from "../api";
+import { getUsage, HttpError, refreshUsage, type PhoneUsageEnvelope, type PhoneUsageLimit, type PhoneUsageTone } from "../api";
 import { Sheet } from "./ui/sheet";
 import { Button } from "./ui/button";
 import { ChromeIcon } from "./ui/chrome-icon";
@@ -77,7 +77,9 @@ function rowLabel(row: UsageRow): string {
 function amountText(row: UsageRow): string {
 	const limit = row.limit;
 	const amount = limit.amount;
-	if (limit.unlimited) return t("relay.shell.usage.unlimited");
+	// "Unlimited paid allowance" names a wallet; an included window that is
+	// unlimited is just unlimited (design round 1, D4).
+	if (limit.unlimited) return row.kind === "paid" ? t("relay.shell.usage.unlimited") : t("relay.shell.usage.unlimited_generic");
 	const measured = amount.remaining ?? amount.used;
 	const unit = measured !== null && Number.isFinite(measured)
 		? amount.unit === "credits" ? t("relay.shell.usage.unit_credits", { count: measured })
@@ -112,13 +114,30 @@ function countdownText(resetsAtMs: number, nowMs: number): string {
 const validTime = (value: number | null | undefined): value is number =>
 	typeof value === "number" && Number.isFinite(new Date(value).getTime());
 
-/** Relative by default; a tap shows the exact time. Local to its row. */
-function ResetToggle({ at, now }: { at: number; now: number }) {
+/** A timestamp as short as it can be without lying: time only today, no year
+ *  within this year. ICU's `{value, date, medium}` always prints the year, and
+ *  the message subset Python shares has no skeletons, so the runtime's own
+ *  `Intl.DateTimeFormat` options pick the parts and the catalogue only places
+ *  the result (`{when}`). `locale` is the locale of the copy on screen. */
+function whenText(at: number, now: number, locale: string): string {
+	const date = new Date(at);
+	const today = new Date(now);
+	const sameYear = date.getFullYear() === today.getFullYear();
+	const sameDay = sameYear && date.getMonth() === today.getMonth() && date.getDate() === today.getDate();
+	const options: Intl.DateTimeFormatOptions = sameDay ? { hour: "numeric", minute: "2-digit" }
+		: { month: "short", day: "numeric", hour: "numeric", minute: "2-digit", ...(sameYear ? {} : { year: "numeric" }) };
+	try { return new Intl.DateTimeFormat(locale, options).format(date); } catch { return new Intl.DateTimeFormat(undefined, options).format(date); }
+}
+
+/** Relative by default; a tap shows the exact time. Local to its row. The
+ *  dotted underline is the affordance (plain dim text read as a label, UX
+ *  round 1, U8); the accessible name IS the shown text, and `aria-pressed`
+ *  carries which form is shown. */
+function ResetToggle({ at, now, locale }: { at: number; now: number; locale: string }) {
 	const [exact, setExact] = useState(false);
-	const full = t("relay.shell.usage.reset", { value: at });
-	return <button type="button" onClick={() => setExact((value) => !value)} aria-label={full}
-		className="-my-3 inline-flex min-h-11 shrink-0 items-center whitespace-nowrap text-ink-dim">
-		{exact ? full : countdownText(at, now)}
+	return <button type="button" onClick={() => setExact((value) => !value)} aria-pressed={exact}
+		className="-my-3 inline-flex min-h-11 shrink-0 items-center whitespace-nowrap text-ink-dim underline decoration-ink-dim decoration-dotted underline-offset-4">
+		{exact ? t("relay.shell.usage.reset", { when: whenText(at, now, locale) }) : countdownText(at, now)}
 	</button>;
 }
 
@@ -139,14 +158,20 @@ function Bar({ row, dim, valueText }: { row: UsageRow; dim: boolean; valueText: 
 	</div>;
 }
 
-function LimitRow({ row, dim, now }: { row: UsageRow; dim: boolean; now: number }) {
+function LimitRow({ row, dim, now, locale }: { row: UsageRow; dim: boolean; now: number; locale: string }) {
 	const label = rowLabel(row);
 	const value = amountText(row);
-	const tone = row.limit.unlimited ? "" : toneWord(row.tone);
+	// Python's tone "unknown" means "no fraction to judge against", not "nothing
+	// reported": a paid wallet with a known balance has no limit to be within
+	// (design D1 / UX U5), and an unknown amount already says "Amount not
+	// reported" in the amount column (D3). Either way the row states it once,
+	// so the tone word is shown only for a measured tone.
+	const tone = row.limit.unlimited || row.tone === "unknown" ? "" : toneWord(row.tone);
 	const reset = validTime(row.limit.resets_at_ms) ? row.limit.resets_at_ms : null;
-	const a11y = reset !== null
-		? t("relay.shell.usage.row_a11y_reset", { label, value, tone, reset: countdownText(reset, now) })
-		: t("relay.shell.usage.row_a11y", { label, value, tone });
+	const resetText = reset !== null ? countdownText(reset, now) : null;
+	const a11y = tone
+		? resetText !== null ? t("relay.shell.usage.row_a11y_reset", { label, value, tone, reset: resetText }) : t("relay.shell.usage.row_a11y", { label, value, tone })
+		: resetText !== null ? t("relay.shell.usage.row_a11y_bare_reset", { label, value, reset: resetText }) : t("relay.shell.usage.row_a11y_bare", { label, value });
 	return <div className={cn("flex min-w-0 flex-col gap-1", row.kind === "family" && "ps-3")}>
 		<div className="flex min-w-0 items-baseline justify-between gap-3">
 			<span className={cn("min-w-0 truncate text-body-sm", row.kind === "family" ? "text-ink-dim" : "text-ink-muted")}>{label}</span>
@@ -155,7 +180,7 @@ function LimitRow({ row, dim, now }: { row: UsageRow; dim: boolean; now: number 
 		<Bar row={row} dim={dim} valueText={a11y} />
 		{(tone || reset !== null) && <div className="flex min-w-0 items-center justify-between gap-3 text-meta">
 			<span className={cn("min-w-0 truncate", row.tone === "exhausted" && !dim ? "text-danger" : "text-ink-dim")}>{tone}</span>
-			{reset !== null && <ResetToggle at={reset} now={now} />}
+			{reset !== null && <ResetToggle at={reset} now={now} locale={locale} />}
 		</div>}
 		{row.kind === "paid" && row.limit.available === false && <p className="text-meta text-danger"><span aria-hidden>✕ </span>{t("relay.shell.usage.blocked")}</p>}
 		{row.kind === "paid" && row.limit.available === null && <p className="text-meta text-ink-dim">{t("relay.shell.usage.eligibility_unknown")}</p>}
@@ -166,7 +191,7 @@ function Note({ glyph, tone, children }: { glyph: string; tone: string; children
 	return <p className={cn("flex gap-1.5 text-meta", tone)}><span aria-hidden>{glyph}</span><span>{children}</span></p>;
 }
 
-function AccountCard({ account, now }: { account: UsageAccount; now: number }) {
+function AccountCard({ account, now, locale }: { account: UsageAccount; now: number; locale: string }) {
 	const binding = account.binding;
 	// Reauth and unavailable rows show last-known numbers, so their fills go
 	// dim: the colour must not claim a current reading it does not have.
@@ -187,7 +212,7 @@ function AccountCard({ account, now }: { account: UsageAccount; now: number }) {
 					</span>
 				</div>}
 		</div>
-		{account.rows.map((row, index) => <LimitRow key={index} row={row} dim={dim} now={now} />)}
+		{account.rows.map((row, index) => <LimitRow key={index} row={row} dim={dim} now={now} locale={locale} />)}
 		{(account.reauth || account.state === "unavailable" || account.continues || account.familyRestricted) && <div className="flex flex-col gap-1">
 			{account.reauth && <Note glyph="↻" tone="text-warning">{t("relay.shell.usage.reauth")}</Note>}
 			{!account.reauth && account.state === "unavailable" && <Note glyph="⚠" tone="text-ink-dim">{t("relay.shell.usage.last_known")}</Note>}
@@ -207,17 +232,31 @@ function Skeleton() {
 	</div>;
 }
 
-function statusLine(phase: RefreshPhase, now: number): { text: string; tone: string } | null {
+type Status = { text: string; tone: string; spoken?: string };
+
+/** The status line under the title. `updated` is the "Updated …" sentence the
+ *  line falls back to whenever nothing transient is happening (UX round 1,
+ *  U7), so freshness never disappears after a throttle. While throttled the
+ *  visible countdown ticks but `spoken` — the only part the live region reads
+ *  — holds the wait at entry, so it is announced once, not every second (U3). */
+function statusLine(phase: RefreshPhase, throttled: boolean, now: number, updated: string | null): Status | null {
 	switch (phase.kind) {
 		case "refreshing": return { text: t("relay.shell.usage.refreshing"), tone: "text-ink-dim" };
-		case "ok": return phase.at !== null && validTime(phase.at) ? { text: t("relay.shell.usage.updated", { value: phase.at }), tone: "text-ink-dim" } : null;
 		case "failed": return { text: t("relay.shell.usage.refresh_failed"), tone: "text-warning" };
 		case "timeout": return { text: t("relay.shell.usage.refresh_timeout"), tone: "text-warning" };
 		case "throttled": {
+			if (!throttled) {
+				// Cooldown over: say so once, and show freshness again.
+				return { text: updated ?? "", tone: "text-ink-dim", spoken: [updated, t("relay.shell.usage.refresh_ready")].filter(Boolean).join(" ") };
+			}
 			const seconds = Math.max(1, Math.ceil((phase.until - now) / 1000));
-			return { text: t("relay.shell.usage.throttled", { seconds }), tone: "text-ink-dim" };
+			return {
+				text: t("relay.shell.usage.throttled", { seconds }),
+				tone: "text-ink-dim",
+				spoken: t("relay.shell.usage.throttled", { seconds: phase.seconds }),
+			};
 		}
-		default: return null;
+		default: return updated === null ? null : { text: updated, tone: "text-ink-dim" };
 	}
 }
 
@@ -228,6 +267,10 @@ export function UsageSheet({ open, onClose }: { open: boolean; onClose: () => vo
 	const [data, setData] = useState<PhoneUsageEnvelope | null>(null);
 	const [error, setError] = useState(false);
 	const [phase, setPhase] = useState<RefreshPhase>({ kind: "idle" });
+	// The last time a refresh in this sheet actually reached vendors. A later
+	// throttled or failed answer carries `refreshed_at: null` (it fetched
+	// nothing), and the status line must not lose the earlier "Updated" (U7).
+	const [freshAt, setFreshAt] = useState<number | null>(null);
 	const [now, setNow] = useState(() => Date.now());
 	// A late answer from a closed/reopened sheet must not paint over a newer one.
 	const generation = useRef(0);
@@ -240,11 +283,16 @@ export function UsageSheet({ open, onClose }: { open: boolean; onClose: () => vo
 			setData(value);
 			setError(false);
 			setNow(Date.now());
-			setPhase(refreshPhase(value.refresh, value.refreshed_at, Date.now()));
-		}).catch(() => {
+			const next = refreshPhase(value.refresh, value.refreshed_at, Date.now());
+			if (next.kind === "ok" && next.at !== null) setFreshAt(next.at);
+			setPhase(next);
+		}).catch((reason: unknown) => {
 			if (generation.current !== mine) return;
-			// Keep whatever is on screen; only the status line reports it.
-			setPhase({ kind: "failed" });
+			// A daemon without the refresh route (404, or 405 from a catch-all
+			// that only knows GET) is not failing: cached data is all it has
+			// (review round 1, R5). Anything else keeps the cards and reports it.
+			if (reason instanceof HttpError && (reason.status === 404 || reason.status === 405)) setPhase({ kind: "unsupported" });
+			else setPhase({ kind: "failed" });
 		});
 	}, []);
 
@@ -266,6 +314,7 @@ export function UsageSheet({ open, onClose }: { open: boolean; onClose: () => vo
 	useEffect(() => {
 		if (!open) { generation.current += 1; return; }
 		setData(null);
+		setFreshAt(null);
 		load();
 	}, [open, load]);
 
@@ -281,22 +330,41 @@ export function UsageSheet({ open, onClose }: { open: boolean; onClose: () => vo
 	const collator = useMemo(() => new Intl.Collator(locale.uiLocale), [locale.uiLocale]);
 	const providers = useMemo(() => data ? buildUsageModel(data.reports, collator) : null, [data, collator]);
 	const refreshing = phase.kind === "refreshing";
+	const unsupported = phase.kind === "unsupported";
+	// The freshness sentence the status line returns to. A refresh's
+	// `refreshed_at` is what THAT refresh fetched; when it fetched nothing (an
+	// unforced refresh served from a fresh cache, or a plain GET) the oldest
+	// report shown is the honest time. `whenText` adds the date when not today.
+	const updatedAt = freshAt ?? data?.refreshed_at ?? data?.as_of ?? data?.cached_at ?? null;
+	const updated = data !== null && validTime(updatedAt)
+		? [t("relay.shell.usage.updated", { when: whenText(updatedAt, now, locale.uiLocale) }), data.may_be_stale ? t("relay.shell.usage.stale") : null].filter(Boolean).join(" ")
+		: null;
 	// "Showing last known usage" is only true when something is shown: with no
 	// data the body's loading/error state speaks, not the status line.
-	const status = data === null && phase.kind !== "refreshing" ? null
-		: statusLine(throttled ? phase : phase.kind === "throttled" ? { kind: "idle" } : phase, now);
-	const asOf = data?.refreshed_at ?? data?.cached_at ?? null;
+	const status = data === null && phase.kind !== "refreshing" ? null : statusLine(phase, throttled, now, updated);
+	const asOf = data?.as_of ?? data?.refreshed_at ?? data?.cached_at ?? null;
+	// INERT, NOT DISABLED (UX round 1, U1): a native `disabled` on the focused
+	// button drops keyboard focus to <body> on every tap. `aria-disabled` keeps
+	// focus on the sheet's main action and the click is ignored instead.
+	const inert = refreshing || throttled || (data === null && !error);
 
-	const action = <Button variant="icon" aria-label={t("relay.shell.usage.refresh")}
-		disabled={refreshing || throttled || (data === null && !error)} aria-busy={refreshing || undefined}
-		onClick={() => error && data === null ? load() : refresh(true)}>
+	const action = unsupported ? null : <Button variant="icon" aria-label={t("relay.shell.usage.refresh")}
+		aria-disabled={inert || undefined} aria-busy={refreshing || undefined}
+		className="aria-disabled:text-ink-disabled"
+		onClick={() => { if (inert) return; if (error && data === null) load(); else refresh(true); }}>
 		{refreshing ? <Spinner className="size-4" /> : <ChromeIcon name="refresh" />}
 	</Button>;
 
-	return <Sheet open={open} onClose={onClose} title={t("relay.shell.usage.title")} headerAction={action}>
-		<p aria-live="polite" className={cn("min-h-5 truncate px-3 text-meta", status?.tone ?? "text-ink-dim")}>
-			{status?.text ?? (data === null && !error ? t("relay.shell.usage.loading") : "")}
-		</p>
+	const loadingText = data === null && !error ? t("relay.shell.usage.loading") : "";
+	// ONE live region. While throttled, the ticking countdown is visual only
+	// (aria-hidden) and the region reads the `spoken` sentence, fixed at entry.
+	const detail = <div aria-live="polite" className={cn("min-h-5 px-3 pb-1 text-meta", status?.tone ?? "text-ink-dim")}>
+		{status?.spoken !== undefined
+			? <><span className="sr-only">{status.spoken}</span><span aria-hidden>{status.text}</span></>
+			: status?.text ?? loadingText}
+	</div>;
+
+	return <Sheet open={open} onClose={onClose} title={t("relay.shell.usage.title")} headerAction={action} headerDetail={detail}>
 		<div className="flex flex-col gap-4 px-3 pt-2 pb-4">
 			{data === null && error ? <div className="flex flex-col items-center gap-3 py-6 text-center">
 				<p role="alert" className="text-body-sm text-danger">{t("relay.shell.usage.unavailable")}</p>
@@ -305,11 +373,13 @@ export function UsageSheet({ open, onClose }: { open: boolean; onClose: () => vo
 				? <p className="text-body-sm text-ink-dim">{t("relay.shell.usage.empty")}</p>
 				: providers.map((provider) => <section key={provider.provider} className="flex flex-col gap-2">
 					<h3 className="min-w-0 truncate text-body-sm font-medium text-ink">{provider.name}</h3>
-					{provider.accounts.map((account) => <AccountCard key={account.number} account={account} now={now} />)}
+					{provider.accounts.map((account) => <AccountCard key={account.number} account={account} now={now} locale={locale.uiLocale} />)}
+					{/* "Account 2" names no login on purpose (no emails cross the
+					    tunnel); this says how to find it on the computer (U6). */}
+					{provider.accounts.some((account) => account.count > 1) && <p className="text-meta text-ink-dim">{t("relay.shell.usage.accounts_order")}</p>}
 				</section>)}
 			{data !== null && validTime(asOf) && <p className="text-meta text-ink-dim">
 				{t("relay.shell.usage.as_of", { value: asOf })}
-				{data.may_be_stale && <> {t("relay.shell.usage.stale")}</>}
 			</p>}
 		</div>
 	</Sheet>;

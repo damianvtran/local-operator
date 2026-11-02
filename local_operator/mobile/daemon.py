@@ -9340,7 +9340,7 @@ def build_app(daemon: MobileDaemon):
     # JOINS it (no second vendor fan-out); the forced floor caps how often a
     # paired phone -- or a stolen pairing cookie -- can skip the cache, the lease
     # and per-account backoff. Lives in this closure so each app has its own.
-    usage_refresh: dict[str, Any] = {"task": None, "last_forced_ms": 0}
+    usage_refresh: dict[str, Any] = {"task": None, "task_forced": False, "last_forced_ms": 0}
 
     async def api_usage_refresh(request: Request) -> Response:
         """``POST /api/usage/refresh`` -- the phone sheet's refresh, body ``{force}``.
@@ -9361,8 +9361,6 @@ def build_app(daemon: MobileDaemon):
         denied = gate(request)
         if denied is not None:
             return denied
-        import time as _time
-
         from local_operator.server.routes.desktop_quota import REFRESH_FLOOR_MS
 
         try:
@@ -9370,23 +9368,37 @@ def build_app(daemon: MobileDaemon):
         except Exception:  # noqa: BLE001 - an empty/garbled body is a plain refresh
             payload = {}
         want_force = isinstance(payload, dict) and payload.get("force") is True
-        now_ms = int(_time.time() * 1000)
+        now_ms = int(time.time() * 1000)
         retry_after_ms: int | None = None
         throttled = False
-        if want_force:
-            elapsed = now_ms - int(usage_refresh["last_forced_ms"])
-            if elapsed < REFRESH_FLOOR_MS:
-                throttled = True
-                retry_after_ms = REFRESH_FLOOR_MS - elapsed
-        forced = False
-        task = usage_refresh["task"]
-        if task is None or task.done():
+        in_flight: asyncio.Task[dict[str, Any]] | None = usage_refresh["task"]
+        joined = in_flight is not None and not in_flight.done()
+        if in_flight is not None and joined:
+            task = in_flight
+            # JOIN the in-flight refresh: no second vendor fan-out, and no
+            # throttle -- the caller gets a refresh that is already running, so
+            # "try again in 15 s" over numbers that are about to land would be
+            # wrong (QA round 1, Q2). ``forced`` reports what the JOINED task
+            # does, so a forced tap that lands on an unforced open-refresh can
+            # tell it was not honoured (review round 1, R3).
+            forced = bool(usage_refresh["task_forced"])
+        else:
+            if want_force:
+                elapsed = now_ms - int(usage_refresh["last_forced_ms"])
+                if elapsed < REFRESH_FLOOR_MS:
+                    throttled = True
+                    retry_after_ms = REFRESH_FLOOR_MS - elapsed
             forced = want_force and not throttled
             if forced:
                 usage_refresh["last_forced_ms"] = now_ms
             task = asyncio.create_task(_refresh_phone_usage(forced))
+            # The shielded task outlives a timed-out request, and ``shield``
+            # drops its own done-callback when the waiter is cancelled, so an
+            # exception raised after the bound would otherwise surface only as
+            # asyncio's GC-time "never retrieved" traceback (review round 1, R1).
+            task.add_done_callback(_log_phone_refresh_failure)
             usage_refresh["task"] = task
-        # else: join the in-flight refresh; it cannot be forced after the fact.
+            usage_refresh["task_forced"] = forced
 
         status = "throttled" if throttled else "ok"
         body: dict[str, Any] | None = None
@@ -9402,9 +9414,19 @@ def build_app(daemon: MobileDaemon):
             except Exception:  # noqa: BLE001
                 return JSONResponse({"error": "Cached usage unavailable"}, status_code=503)
             body["refreshed_at"] = None
+        elif status == "ok" and forced and body.get("source") != "live":
+            # A FORCED refresh exists to reach vendors. The controller isolates
+            # per-account vendor failures (last-good numbers are kept), so the
+            # task "succeeds" even when every vendor refused; the only proof a
+            # vendor answered is a report fetched after the task started, which
+            # ``source`` already derives. Without it the tap fetched nothing new
+            # and the phone must say so rather than "Updated" (QA round 1, Q1).
+            # An UNFORCED refresh served from a fresh cache is still "ok".
+            status = "failed"
         body["refresh"] = {
             "status": status,
             "forced": forced,
+            "joined": joined,
             "retry_after_ms": retry_after_ms,
         }
         return JSONResponse(body)
@@ -10847,6 +10869,10 @@ def _phone_usage_projection(
             )
             # A vendor-declared status wins when it is one the phone can colour;
             # otherwise the shared 0.85 threshold in UsageAmount.status() decides.
+            # "unknown" means NO FRACTION TO JUDGE AGAINST (a paid wallet with a
+            # balance and no limit, or an amount the vendor did not report). It
+            # does not mean "not reported": the amount says which, and the sheet
+            # prints no tone word for it (design round 1, D1/D3).
             tone = (
                 limit.status
                 if limit.status in {"ok", "warning", "exhausted", "unknown"}
@@ -10928,13 +10954,12 @@ async def _refresh_phone_usage(force: bool) -> dict[str, Any]:
     the GET: the GET opens the cache ``immutable=1`` and cannot see the WAL
     frames this refresh just wrote.
     """
-    import time as _time
     from typing import cast
 
     from local_operator.providers.auth_store import AuthStore
     from local_operator.providers.controller import ProviderController
 
-    started_at = int(_time.time() * 1000)
+    started_at = int(time.time() * 1000)
     controller = ProviderController.for_persisted_usage_refresh()
     try:
         reports = await controller.refresh_persisted_usage(force)
@@ -10947,18 +10972,41 @@ async def _refresh_phone_usage(force: bool) -> dict[str, Any]:
             cast(AuthStore, controller.auth_store).close()
     stripped = [ProviderController._without_identity(report) for report, _, _ in ordered]
     fetched = [r.fetched_at for r in stripped if r.fetched_at > 0]
+    # Only a report fetched after this refresh started proves a vendor was
+    # reached. The rest are last-good rows kept for accounts whose probe failed
+    # (or a reauth account's final numbers, which keep their old fetched_at).
+    fresh = [at for at in fetched if at >= started_at]
     return {
         "reports": _phone_usage_projection(
             stripped, [(index, count) for _, index, count in ordered]
         ),
-        # "live" is derived, never claimed: only a report fetched after this
-        # refresh started proves a vendor was actually reached.
-        "source": "live" if any(at >= started_at for at in fetched) else "cached",
+        # "live" is derived, never claimed.
+        "source": "live" if fresh else "cached",
         "may_be_stale": False,
         "cached_at": max(fetched, default=None),
-        # The OLDEST report is the honest "as of" for the sheet as a whole.
-        "refreshed_at": min(fetched, default=None),
+        # The status line's "Updated" time: what THIS refresh fetched, never a
+        # kept last-good row -- a yesterday timestamp read as "Updated 3:40 PM"
+        # looks like today (review round 1, R2). None when nothing was fetched.
+        "refreshed_at": min(fresh, default=None),
+        # The OLDEST report is the honest "as of" for the sheet as a whole: the
+        # footer's fine print. Additive key, refresh answers only.
+        "as_of": min(fetched, default=None),
     }
+
+
+def _log_phone_refresh_failure(task: "asyncio.Task[Any]") -> None:
+    """Retrieve a background phone-refresh exception and log it once, sanitized.
+
+    Only the exception TYPE is logged: the message of a vendor/store error can
+    carry account identities or vendor text, and this path exists precisely
+    because nobody else will look at it (the request may already have answered
+    ``timeout``).
+    """
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.warning("phone usage refresh failed in the background (%s)", type(exc).__name__)
 
 
 def _provider_display_name(provider_id: str) -> str:

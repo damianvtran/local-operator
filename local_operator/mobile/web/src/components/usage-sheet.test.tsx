@@ -1,12 +1,16 @@
 // @vitest-environment happy-dom
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { getUsage, refreshUsage, type PhoneUsageEnvelope, type PhoneUsageLimit, type PhoneUsageReport } from "../api";
+import { getUsage, HttpError, refreshUsage, type PhoneUsageEnvelope, type PhoneUsageLimit, type PhoneUsageReport } from "../api";
 import { UsageSheet } from "./usage-sheet";
 import { messageRuntime } from "../store";
 import { BUNDLED_OWNED } from "../i18n/bundled.gen";
 
-vi.mock("../api", () => ({ getUsage: vi.fn(), refreshUsage: vi.fn() }));
+vi.mock("../api", async () => {
+	// The real HttpError, so the sheet's `instanceof` check sees the same class.
+	const { HttpError } = await vi.importActual<typeof import("../api")>("../api");
+	return { getUsage: vi.fn(), refreshUsage: vi.fn(), HttpError };
+});
 beforeEach(() => {
 	// Default: the on-open refresh never answers, so a test sees the GET paint.
 	vi.mocked(refreshUsage).mockReturnValue(new Promise(() => undefined));
@@ -43,9 +47,13 @@ it("paints the cached GET, then refreshes unforced on open", async () => {
 	expect(await screen.findByText("OpenAI (ChatGPT Plus/Pro)")).toBeTruthy();
 	expect(refreshUsage).toHaveBeenCalledWith(false);
 	expect(screen.getByText("Refreshing…")).toBeTruthy();
-	// The refresh button is busy, and the cached card is still on screen.
+	// The refresh button is busy, and the cached card is still on screen. It is
+	// inert via aria-disabled, never native `disabled`, which would drop focus.
 	const button = screen.getByRole("button", { name: "Refresh usage" });
-	expect(button.hasAttribute("disabled")).toBe(true);
+	expect(button.getAttribute("aria-disabled")).toBe("true");
+	expect(button.hasAttribute("disabled")).toBe(false);
+	fireEvent.click(button);
+	expect(refreshUsage).toHaveBeenCalledTimes(1);
 	expect(screen.getByRole("progressbar")).toBeTruthy();
 });
 
@@ -64,13 +72,16 @@ it("labels accounts only when a provider has several, in login order", async () 
 	]));
 	render(<UsageSheet open onClose={() => undefined} />);
 	const first = await screen.findByText("Account 1");
+	// U6: the numbering is explained once per multi-account provider, never
+	// under a single-account one.
+	expect(screen.getAllByText("Accounts are numbered in the order they were signed in on the computer.")).toHaveLength(1);
 	const second = screen.getByText("Account 2");
 	// Login order, not health order: Account 1 precedes Account 2 in the DOM.
 	expect(first.compareDocumentPosition(second) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 	expect(screen.getAllByText(/^Account \d$/)).toHaveLength(2);
 });
 
-it("every bar carries a tone word and remaining semantics; unknown draws no track", async () => {
+it("measured bars carry a tone word; unknown draws no track and says it once", async () => {
 	vi.mocked(getUsage).mockResolvedValue(envelope([report({ limits: [
 		limit({ tone: "warning", remaining_fraction: 0.1 }),
 		limit({ window: "7d", tone: "unknown", remaining_fraction: null, amount: { used: null, limit: null, remaining: null, used_fraction: null, unit: "percent" } }),
@@ -83,7 +94,25 @@ it("every bar carries a tone word and remaining semantics; unknown draws no trac
 	expect(bars[1].className).toContain("border-dotted");
 	expect(bars[1].className).not.toContain("bg-sunken");
 	expect(screen.getAllByText("Near limit").length).toBeGreaterThan(0);
-	expect(screen.getAllByText("Not reported").length).toBeGreaterThan(0);
+	// "Amount not reported" already says it: no second "Not reported" (D3).
+	expect(screen.getByText("Amount not reported")).toBeTruthy();
+	expect(screen.queryByText("Not reported")).toBeNull();
+	expect(bars[1].getAttribute("aria-valuetext")).toBe("7-day: Amount not reported");
+});
+
+it("a paid balance shows its amount with no tone word; unlimited is worded per kind", async () => {
+	vi.mocked(getUsage).mockResolvedValue(envelope([report({ limits: [
+		limit({ paid_fallback: true, shared: false, window: "unknown", tone: "unknown", remaining_fraction: null, available: true, payable: true,
+			amount: { used: null, limit: null, remaining: 18.4, used_fraction: null, unit: "usd" } }),
+		limit({ window: "1mo", unlimited: true, tone: "unknown", remaining_fraction: null }),
+	] })]));
+	render(<UsageSheet open onClose={() => undefined} />);
+	expect(await screen.findByText("18.4 USD left")).toBeTruthy();
+	// D1/U5: a known balance has no limit to be "within"; it is not "not reported".
+	expect(screen.queryByText("Not reported")).toBeNull();
+	// D4: an included unlimited window is plain "Unlimited", not a paid allowance.
+	expect(screen.getByText("Unlimited")).toBeTruthy();
+	expect(screen.queryByText("Unlimited paid allowance")).toBeNull();
 });
 
 it("a blocked wallet keeps its actual amount and does not promise continuation", async () => {
@@ -161,7 +190,7 @@ it("a failed or timed-out refresh keeps the cached cards and says so", async () 
 	expect(screen.getByText("OpenAI")).toBeTruthy();
 });
 
-it("a throttled forced refresh counts down with the button disabled", async () => {
+it("a throttled forced refresh keeps focus, announces once and falls back to Updated", async () => {
 	vi.useFakeTimers({ shouldAdvanceTime: true });
 	vi.mocked(getUsage).mockResolvedValue(envelope([report()]));
 	vi.mocked(refreshUsage).mockResolvedValueOnce(envelope([report()], {
@@ -169,32 +198,77 @@ it("a throttled forced refresh counts down with the button disabled", async () =
 	}));
 	render(<UsageSheet open onClose={() => undefined} />);
 	const button = await screen.findByRole("button", { name: "Refresh usage" });
-	await vi.waitFor(() => expect(button.hasAttribute("disabled")).toBe(false));
+	await vi.waitFor(() => expect(button.hasAttribute("aria-disabled")).toBe(false));
+	expect(screen.getByText(/^Updated /)).toBeTruthy();
 	vi.mocked(refreshUsage).mockResolvedValueOnce(envelope([report()], {
 		refresh: { status: "throttled", forced: false, retry_after_ms: 3000 },
 	}));
+	button.focus();
 	fireEvent.click(button);
 	expect(refreshUsage).toHaveBeenLastCalledWith(true);
-	expect(await screen.findByText(/Try again in 3 seconds/)).toBeTruthy();
-	expect(button.hasAttribute("disabled")).toBe(true);
-	await act(async () => { vi.advanceTimersByTime(3500); });
-	expect(button.hasAttribute("disabled")).toBe(false);
+	const live = document.querySelector("[aria-live]")!;
+	// U4: a cooldown, not a usage limit.
+	expect(await screen.findByText("Just refreshed — you can refresh again in 3 seconds.", { selector: "[aria-hidden] , [aria-hidden] *" })).toBeTruthy();
+	expect(button.getAttribute("aria-disabled")).toBe("true");
+	// U1: focus stays on the sheet's main action.
+	expect(document.activeElement).toBe(button);
+	// U3: the spoken sentence is fixed at entry while the visible one ticks.
+	const spoken = () => live.querySelector(".sr-only")?.textContent;
+	expect(spoken()).toBe("Just refreshed — you can refresh again in 3 seconds.");
+	await act(async () => { vi.advanceTimersByTime(1100); });
+	expect(live.querySelector("[aria-hidden]")?.textContent).toMatch(/in 2 seconds/);
+	expect(spoken()).toBe("Just refreshed — you can refresh again in 3 seconds.");
+	await act(async () => { vi.advanceTimersByTime(2500); });
+	expect(button.hasAttribute("aria-disabled")).toBe(false);
+	expect(document.activeElement).toBe(button);
+	// U7: after the cooldown the line shows freshness again, never blank, and
+	// says once that refreshing is available.
+	expect(live.querySelector("[aria-hidden]")?.textContent).toMatch(/^Updated /);
+	expect(spoken()).toMatch(/You can refresh again\.$/);
+});
+
+it("a joined refresh is ok, and an older daemon without the route is not a failure", async () => {
+	vi.mocked(getUsage).mockResolvedValue(envelope([report({ provider_name: "OpenAI" })], { cached_at: Date.now() }));
+	vi.mocked(refreshUsage).mockResolvedValue(envelope([report({ provider_name: "OpenAI" })], {
+		refresh: { status: "ok", forced: true, joined: true, retry_after_ms: null }, refreshed_at: Date.now(),
+	}));
+	render(<UsageSheet open onClose={() => undefined} />);
+	expect(await screen.findByText(/^Updated /)).toBeTruthy();
+	cleanup();
+	// R5: 404/405 from POST /api/usage/refresh means "this daemon predates it".
+	vi.mocked(refreshUsage).mockRejectedValue(new HttpError(404, "Not Found"));
+	render(<UsageSheet open onClose={() => undefined} />);
+	expect(await screen.findByText("OpenAI")).toBeTruthy();
+	await vi.waitFor(() => expect(screen.queryByRole("button", { name: "Refresh usage" })).toBeNull());
+	expect(screen.queryByText(/Couldn't refresh/)).toBeNull();
+	expect(screen.getByText(/^Updated /)).toBeTruthy();
 });
 
 it("the reset toggles between relative and exact time", async () => {
 	const at = Date.now() + (14 * 60 + 5) * 60_000 + 30_000;
 	vi.mocked(getUsage).mockResolvedValue(envelope([report({ limits: [limit({ resets_at_ms: at })] })]));
 	render(<UsageSheet open onClose={() => undefined} />);
-	const toggle = await screen.findByRole("button", { name: /^Resets at/ });
+	// U8: the accessible name is the shown text, and aria-pressed says which.
+	const toggle = await screen.findByRole("button", { name: "resets in 14h 6m" });
 	expect(within(toggle).getByText("resets in 14h 6m")).toBeTruthy();
+	expect(toggle.getAttribute("aria-pressed")).toBe("false");
+	expect(toggle.className).toContain("decoration-dotted");
 	fireEvent.click(toggle);
-	expect(toggle.textContent).toMatch(/^Resets at/);
+	expect(toggle.getAttribute("aria-pressed")).toBe("true");
+	expect(toggle.textContent).toMatch(/^Resets at /);
+	expect(toggle.textContent).not.toContain(String(new Date().getFullYear()));
 });
 
 it("stale cached snapshots disclose freshness", async () => {
 	vi.mocked(getUsage).mockResolvedValue(envelope([], { cached_at: 1700000000000, may_be_stale: true }));
+	// An older daemon (no refresh route) leaves the GET's snapshot as the answer.
+	vi.mocked(refreshUsage).mockRejectedValue(new HttpError(404, "Not Found"));
 	render(<UsageSheet open onClose={() => undefined} />);
-	expect(await screen.findByText(/May be out of date/)).toBeTruthy();
-	expect(screen.getByText(/As of/)).toBeTruthy();
+	// U7: staleness rides the status line's freshness, the footer is fine print.
+	expect(await screen.findByText(/^Updated .* May be out of date\.$/)).toBeTruthy();
+	// Not today, so the status line carries the date; the footer keeps the
+	// full stamp without repeating the stale warning.
+	expect(screen.getByText(/^Updated Nov 14, 2023, /)).toBeTruthy();
+	expect(screen.getByText(/^As of .*\.$/).textContent).not.toContain("May be out of date");
 	expect(screen.queryByText(/No provider refresh is requested/)).toBeNull();
 });

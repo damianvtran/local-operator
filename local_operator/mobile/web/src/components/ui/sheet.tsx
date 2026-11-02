@@ -27,6 +27,7 @@ export function Sheet({
 	returnFocusRef,
 	initialFocusRef,
 	headerAction,
+	headerDetail,
 }: {
 	open: boolean;
 	onClose: () => void;
@@ -35,6 +36,12 @@ export function Sheet({
 	    Lives in the header, outside the scroller, so it stays reachable while
 	    the content scrolls. Absent on every other sheet, which render as before. */
 	headerAction?: ReactNode;
+	/** One line under the title row, also outside the scroller: the usage
+	    sheet's refresh status, which must stay visible beside the button that
+	    caused it however far the content is scrolled (UX round 1, U2). A
+	    sticky line inside the scroller would sit under `lo-fade-y`'s top mask.
+	    Absent on every other sheet. */
+	headerDetail?: ReactNode;
 	children: ReactNode;
 	returnFocusRef?: RefObject<HTMLElement | null>;
 	/** Where focus lands when the sheet opens. Defaults to the ✕; the slash
@@ -178,6 +185,7 @@ export function Sheet({
 						</button>
 					</div>
 				) : null}
+				{headerDetail ? <div className="shrink-0">{headerDetail}</div> : null}
 				<div ref={scrollCue} className="lo-scroll lo-fade-y min-h-0 flex-1 overflow-y-auto">
 					{children}
 				</div>

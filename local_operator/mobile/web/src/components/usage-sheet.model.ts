@@ -5,12 +5,14 @@
  *
  * WHY DERIVE AT ALL. The daemon ships `tone`, `remaining_fraction`,
  * `account_index`/`account_count`, `state` and `provider_name` since
- * `POST /api/usage/refresh` landed, but a phone can be paired to an OLDER
- * daemon that omits them. Every derived field here therefore prefers the
- * daemon's value and falls back to the same rule the daemon uses
- * (`UsageAmount.status()`: >=1 exhausted, >=0.85 warning), so an old daemon
- * paints the same sheet instead of an empty one. Python stays the authority
- * whenever it speaks.
+ * `POST /api/usage/refresh` landed. The SPA is served by the daemon it talks
+ * to, but a phone can hold a page loaded before the daemon was updated (or
+ * the reverse, a cached bundle against a daemon rolled back), so a field may
+ * be missing. Every derived field here therefore prefers the daemon's value
+ * and falls back to the same rule the daemon uses (`UsageAmount.status()`:
+ * >=1 exhausted, >=0.85 warning), so an older daemon paints the same sheet
+ * instead of an empty one; one without the refresh route is the sheet's
+ * `unsupported` phase. Python stays the authority whenever it speaks.
  *
  * WHAT IS NOT DERIVED. Paid eligibility (`payable`) and exhaustion of the
  * shared plan stay the daemon's verdicts, exactly as before the redesign; the
@@ -197,16 +199,26 @@ export type RefreshPhase =
 	| { kind: "ok"; at: number | null }
 	| { kind: "failed" }
 	| { kind: "timeout" }
-	| { kind: "throttled"; until: number };
+	/** `seconds` is the wait at ENTRY: the one value announced to assistive
+	    tech, so the live region does not re-speak every countdown tick. */
+	| { kind: "throttled"; until: number; seconds: number }
+	/** The daemon predates `POST /api/usage/refresh` (404/405): cached data is
+	    all there is, which is not a failure, so no banner and no button. */
+	| { kind: "unsupported" };
 
-/** Map a refresh answer to the status line's phase. `nowMs` anchors throttle. */
+/** Map a refresh answer to the status line's phase. `nowMs` anchors throttle.
+ *  A `joined` answer (this request rode a refresh already in flight) is `ok`:
+ *  the caller got fresh numbers, not a refusal. */
 export function refreshPhase(
-	refresh: { status: "ok" | "throttled" | "failed" | "timeout"; retry_after_ms: number | null } | undefined,
+	refresh: { status: "ok" | "throttled" | "failed" | "timeout"; retry_after_ms: number | null; joined?: boolean } | undefined,
 	refreshedAt: number | null | undefined,
 	nowMs: number,
 ): RefreshPhase {
 	if (!refresh) return { kind: "idle" };
-	if (refresh.status === "throttled") return { kind: "throttled", until: nowMs + Math.max(0, refresh.retry_after_ms ?? 0) };
+	if (refresh.status === "throttled") {
+		const wait = Math.max(0, refresh.retry_after_ms ?? 0);
+		return { kind: "throttled", until: nowMs + wait, seconds: Math.max(1, Math.ceil(wait / 1000)) };
+	}
 	if (refresh.status === "failed") return { kind: "failed" };
 	if (refresh.status === "timeout") return { kind: "timeout" };
 	return { kind: "ok", at: refreshedAt ?? null };

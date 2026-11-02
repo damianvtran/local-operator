@@ -107,9 +107,12 @@ describe("countdown and refresh phase", () => {
 
 	it("maps each refresh status, anchoring throttle to now", () => {
 		expect(refreshPhase(undefined, null, 0)).toEqual({ kind: "idle" });
-		expect(refreshPhase({ status: "throttled", retry_after_ms: 4000 }, null, 10)).toEqual({ kind: "throttled", until: 4010 });
+		// `seconds` is fixed at entry: the one value the live region announces.
+		expect(refreshPhase({ status: "throttled", retry_after_ms: 4000 }, null, 10)).toEqual({ kind: "throttled", until: 4010, seconds: 4 });
 		expect(refreshPhase({ status: "failed", retry_after_ms: null }, 5, 0)).toEqual({ kind: "failed" });
 		expect(refreshPhase({ status: "timeout", retry_after_ms: null }, 5, 0)).toEqual({ kind: "timeout" });
 		expect(refreshPhase({ status: "ok", retry_after_ms: null }, 5, 0)).toEqual({ kind: "ok", at: 5 });
+		// A joined answer rode a refresh already in flight: it is ok, not a refusal.
+		expect(refreshPhase({ status: "ok", retry_after_ms: null, joined: true }, 5, 0)).toEqual({ kind: "ok", at: 5 });
 	});
 });

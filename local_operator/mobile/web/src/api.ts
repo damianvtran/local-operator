@@ -191,9 +191,13 @@ export type PhoneUsageEnvelope = {
 	source: "cached" | "live";
 	may_be_stale?: boolean;
 	cached_at?: number | null;
-	/* Present only on the refresh POST's answer. */
+	/* Present only on the refresh POST's answer. `refreshed_at` is the oldest
+	   report THIS refresh fetched (null when it fetched nothing); `as_of` the
+	   oldest report shown at all. `joined` marks a request that rode a refresh
+	   already in flight; `forced` then says whether THAT refresh was forced. */
 	refreshed_at?: number | null;
-	refresh?: { status: PhoneUsageRefreshStatus; forced: boolean; retry_after_ms: number | null };
+	as_of?: number | null;
+	refresh?: { status: PhoneUsageRefreshStatus; forced: boolean; joined?: boolean; retry_after_ms: number | null };
 };
 /** The paired gate and persisted-account admission remain server-owned. */
 export function getUsage(): Promise<PhoneUsageEnvelope> {

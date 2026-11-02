@@ -60,24 +60,41 @@ refresh button.
   rotated by the vendor in `auth.db` — the writes the TUI's background warmer
   already makes.
 - **Floor and single flight.** One refresh runs per daemon; a concurrent POST
-  joins it. A forced refresh inside `desktop_quota.REFRESH_FLOOR_MS` (15 s)
-  runs unforced and answers `refresh.status: "throttled"` with
-  `retry_after_ms`.
+  joins it and answers `ok` with `joined: true` (never `throttled`: it gets
+  the refresh already in flight), `forced` saying whether THAT refresh was
+  forced. A forced refresh inside `desktop_quota.REFRESH_FLOOR_MS` (15 s)
+  that starts a new task runs unforced and answers `refresh.status:
+  "throttled"` with `retry_after_ms`.
 - **Bound.** The route waits up to 8 s, then answers with the cached projection
   and `status: "timeout"`. The task is shielded, never cancelled: cancelling
-  mid OAuth rotation could lose a refresh token the vendor already replaced.
-  A failure answers the cached projection with `status: "failed"`.
-- **Response.** The GET envelope plus `refreshed_at` (the OLDEST report's
-  `fetched_at`), `refresh: {status, forced, retry_after_ms}`, and `source:
+  mid OAuth rotation could lose a refresh token the vendor already replaced; a
+  done-callback logs its late exception once, type only. Accounts of one
+  provider are fetched one after another, so several slow accounts reach the
+  bound sooner than one vendor's HTTP timeout suggests.
+- **Failed.** A raised refresh answers the cached projection with `status:
+  "failed"`. So does a FORCED refresh that fetched nothing new (`source:
+  "cached"`): the controller keeps last-good rows when every vendor refuses,
+  so the task itself succeeds. An unforced refresh served from a fresh cache
+  stays `ok`.
+- **Response.** The GET envelope plus `refreshed_at` (the oldest report THIS
+  refresh fetched, `null` when it fetched none), `as_of` (the oldest report
+  shown), `refresh: {status, forced, joined, retry_after_ms}`, and `source:
   "live"` only when a report was fetched after the refresh started. The POST
   answers from its own results because the GET's `immutable=1` read cannot see
   WAL frames a refresh just wrote.
+- **Older daemons.** A daemon without the route answers 404/405; the sheet
+  treats that as "refresh unsupported" — cached data, no failure line, no
+  refresh button.
 
 Both routes add, without changing earlier keys: per report `provider_name`,
 `account_index`/`account_count` (login order, assigned before identity is
 stripped — no email or hashed id crosses the tunnel), `state`
 (`providers.usage.usage_report_state`, shared with the desktop catalogue) and
 `credential_invalid`; per limit `remaining_fraction` (clamped 0..1) and `tone`.
+`tone: "unknown"` means "no fraction to judge against" — a paid balance with no
+limit, or an amount the vendor did not report — never "nothing was reported":
+the sheet prints no tone word for it, and the amount column says which case it
+is.
 
 Dependency order: paid-health contract PR, strict read-only authority PR, then
 these panels. Source tests mocking that public method are not proof that the

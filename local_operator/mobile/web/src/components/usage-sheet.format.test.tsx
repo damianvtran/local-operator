@@ -145,16 +145,21 @@ it("does not send nonfinite counts to unit plural selection or alter safe branch
 it("formats reset and snapshot dates consistently in the catalogue locale", async () => {
 	select("fr", true);
 	const stamp = Date.UTC(2026, 0, 2, 15, 4);
-	load([{ ...base, resets_at_ms: stamp }], stamp);
-	// TZ=UTC is pinned by `test.env` in vite.config.ts, never inferred from the
-	// host: without that pin these assertions describe the contributor's clock
-	// (2 of 13 fail on a UTC-5 machine, 13/13 on a UTC one).
-	// The exact time is the toggle's accessible name, and its text once tapped.
-	const toggle = await screen.findByRole("button", { name: /Resets at 2 janv\. 2026, 15:04/ });
-	fireEvent.click(toggle);
-	expect(toggle.textContent).toMatch(/Resets at 2 janv\. 2026, 15:04/);
-	expect(screen.getByText(/As of 2 janv\. 2026, 15:04\./)).toBeTruthy();
-	expect(document.body.textContent).not.toContain("2026-01-02T15:04");
+	// "Now" one day later in the same year: the exact reset drops the year
+	// (UX round 1, U8) but keeps the date, and the footer keeps its full form.
+	vi.useFakeTimers({ shouldAdvanceTime: true, now: stamp + 86_400_000 });
+	try {
+		load([{ ...base, resets_at_ms: stamp }], stamp);
+		// TZ=UTC is pinned by `test.env` in vite.config.ts, never inferred from the
+		// host: without that pin these assertions describe the contributor's clock
+		// (2 of 13 fail on a UTC-5 machine, 13/13 on a UTC one).
+		const toggle = await screen.findByRole("button", { pressed: false });
+		fireEvent.click(toggle);
+		expect(toggle.getAttribute("aria-pressed")).toBe("true");
+		expect(toggle.textContent).toBe("Resets at 2 janv., 15:04");
+		expect(screen.getByText(/As of 2 janv\. 2026, 15:04\./)).toBeTruthy();
+		expect(document.body.textContent).not.toContain("2026-01-02T15:04");
+	} finally { vi.useRealTimers(); }
 });
 
 it("uses EN formatting when the backend preference has no complete owned bundle", async () => {
