@@ -1503,6 +1503,10 @@ def _band():
     band._model_name = ""
     band._effort = ""
     band._fast = ""
+    # This __new__ stand-in skips StatusLine.__init__, which initializes the
+    # optional Saver badge to "". Mirror that real constructor state here;
+    # the painter intentionally requires all its fields to be initialized.
+    band._saver = ""
     band._agent_profile = ""
     band._team = ""
     band._cwd = "/tmp"

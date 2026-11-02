@@ -17108,7 +17108,9 @@ def main() -> int:
     configure_cli_logging()
     try:
         parser = build_cli_parser()
-        args = parser.parse_args()
+        from local_operator.exec_startup import fold_saver_argv
+
+        args = parser.parse_args(fold_saver_argv(sys.argv[1:]))
 
         # macOS: replace this process with a branded image so Activity Monitor
         # stops showing a wall of `python3.x`. NEVER RETURNS when it brands;
@@ -17961,6 +17963,12 @@ def main() -> int:
                 loop_goal=args.loop_goal,
                 name=args.name,
                 effort=args.effort,
+                # getattr for the same reason as the additive flags below: a
+                # Namespace without it must read as "no choice", never raise.
+                # Omitting this line is the defect the supervisor_fd comment
+                # below records — the flag parsed, validated, then did nothing
+                # (caught by test_exec_saver_flag_is_journaled_and_resumes).
+                saver=getattr(args, "saver", None),
                 agent_name=args.agent_name,
                 agent_id=getattr(args, "agent_id", None),
                 yolo=args.yolo,

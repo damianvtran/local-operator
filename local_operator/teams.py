@@ -282,6 +282,11 @@ class TeamMember(BaseModel):
         ),
     )
 
+    saver: bool | None = Field(
+        default=None,
+        description="Radient Saver designation for this slot; absent inherits the role/parent.",
+    )
+
     @field_validator("role")
     @classmethod
     def _role_name(cls, value: str) -> str:
@@ -336,14 +341,14 @@ class TeamMember(BaseModel):
         a hidden field.
         """
         data = handler(self)
-        for name in ("tier", "effort"):
+        for name in ("tier", "effort", "saver"):
             if data.get(name) is None:
                 data.pop(name, None)
         return data
 
     def is_default(self) -> bool:
         """Whether this slot carries no override -- the byte-identical case."""
-        return self.tier is None and self.effort is None
+        return self.tier is None and self.effort is None and self.saver is None
 
 
 def find_member(
@@ -392,7 +397,7 @@ def conflicting_overrides(members: Iterable["TeamMember"]) -> str | None:
         if first is None:
             seen[key] = member
             continue
-        if (first.tier, first.effort) != (member.tier, member.effort):
+        if (first.tier, first.effort, first.saver) != (member.tier, member.effort, member.saver):
             return (
                 f"two {member.kind} slots are named {member.role!r} with different "
                 f"overrides ({_override_word(first)} vs {_override_word(member)}); "
@@ -435,7 +440,7 @@ def _override_word(member: "TeamMember") -> str:
     """One slot's overrides, spelled for a refusal message."""
     if member.is_default():
         return "none"
-    return f"tier={member.tier or '-'} effort={member.effort or '-'}"
+    return f"tier={member.tier or '-'} effort={member.effort or '-'} saver={member.saver}"
 
 
 class ModelSuggestion(BaseModel):

@@ -15,6 +15,8 @@ from typing import Any
 
 from local_operator.i18n.keys import cli_exec_help as _eh
 from local_operator.i18n.keys import wire_exec as _wd
+from local_operator.i18n.keys import wire_radient_saver as _rs
+from local_operator.i18n.messages import render
 from local_operator.i18n.text import tr
 
 logger = logging.getLogger(__name__)
@@ -35,6 +37,7 @@ STARTUP_FIELDS = (
     "loop_goal",
     "name",
     "effort",
+    "saver",
     "tools",
     # Not a selector a session applies (`apply_startup` never reads it): this one
     # decides what the run IS to every listing, and it belongs in this tuple for
@@ -188,6 +191,22 @@ def add_startup_arguments(parser: argparse.ArgumentParser, *, help_locale: str =
         "--effort",
         metavar="LEVEL",
         help=_eh.effort().envelope(locale=help_locale)["text"],
+    )
+    parser.add_argument(
+        "--saver",
+        nargs="?",
+        const="on",
+        choices=("on", "off", "inherit"),
+        # The Saver family's own sentence rather than a new `cli.exec_help` key.
+        # A new key in that namespace would have to be translated into every
+        # locale that does not carry it (the coverage gate names each missing
+        # ID), growing the shrink-only allowance by five entries for one line of
+        # `--help` prose. This sentence already says what the flag does and is
+        # audited in all seven locales; argparse prints the three accepted words
+        # beside it, so the choice vocabulary is not lost.
+        # This is argparse prose, not an identity envelope. Render directly so
+        # the deferred-wire policy can verify that only text leaves this seam.
+        help=render(_rs.command_description().code, {}, locale=help_locale),
     )
     parser.add_argument(
         "--workstream",
@@ -456,6 +475,71 @@ def declared_tool_inventory(session: Any, args: Any) -> tuple[str, ...] | None:
         return explicit
     attached = _name_tuple(getattr(session, "attached_profile_tools", None)) or ()
     return attached or None
+
+
+#: The closed vocabulary ``exec --saver`` documents. Module-level because the
+#: argv fold and the parser's ``choices`` must agree on it: two lists would let
+#: a value parse and then fail to fold.
+SAVER_WORDS = ("on", "off", "inherit")
+
+
+def fold_saver_argv(argv: list[str]) -> list[str]:
+    """Make every ``--saver`` occurrence explicit before argparse sees it.
+
+    WHY (review minor). ``--saver`` takes an OPTIONAL value, and argparse's
+    ``nargs="?"`` consumes the next token whenever it is not a flag — so
+    ``lop exec --saver "wat"`` handed "wat" to the flag as its value and the run
+    died with ``invalid choice``, losing the prompt the user meant. Folding
+    removes the ambiguity instead of documenting around it: the flag never
+    reaches argparse without a value.
+
+    The rule is then one sentence: a bare ``--saver`` means ON, a following
+    documented word is its value, and anything else is the prompt.
+
+    It lives beside the parser that DEFINES the flag rather than in ``cli.py``,
+    whose literal ceiling is a shrink-only ratchet — two flag tokens added there
+    broke twelve "ceiling has no slack" tests at once.
+    """
+    folded: list[str] = []
+    index = 0
+    while index < len(argv):
+        token = argv[index]
+        if token == "--saver":
+            following = argv[index + 1] if index + 1 < len(argv) else None
+            if following in SAVER_WORDS:
+                folded.append(f"--saver={following}")  # i18n: ignore flag token, not copy
+                index += 2
+                continue
+            folded.append("--saver=on")  # i18n: ignore flag value, not copy
+            index += 1
+            continue
+        folded.append(token)
+        index += 1
+    return folded
+
+
+async def apply_saver_startup(session: Any, args: Any) -> None:
+    """Apply ``--saver`` through the same writer and journal a slash uses.
+
+    AWAITED BY THE RUNNER, not scheduled (review M2): the old version created a
+    task inside a sync hook, so a failed journal left the session on in memory
+    with no row and no error, and the first turn could reach the resolver before
+    the write landed.
+
+    A REFUSAL IS REPORTED, NOT SWALLOWED (review M4). The writer refuses an
+    enable the gate will not honour — signed out, mode off, empty balance, or a
+    balance that could not be read — and exec has no transcript notice, so the
+    sentence goes to stderr and the run continues with the flag's intent
+    unhonoured, which is what the gate decided.
+    """
+    saver = getattr(args, "saver", None)
+    if saver is None:
+        return
+    from local_operator.saver.command import refusal_text, set_saver_choice
+
+    result = await set_saver_choice(session, None if saver == "inherit" else saver == "on")
+    if not result.written:
+        print(refusal_text(result.decision), file=sys.stderr)
 
 
 def apply_startup(session: Any, args: Any, team: Any) -> None:

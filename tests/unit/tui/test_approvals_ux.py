@@ -829,6 +829,19 @@ def test_the_registry_states_which_commands_offer_values() -> None:
         # offers on/off/status for a user who would rather name the resulting
         # state than flip into it.
         "fast": ArgumentMode.OPTIONAL,
+        # REQUIRED where `/fast` is OPTIONAL: the registry declares `/radient`
+        # as ArgumentShape.SUBCOMMAND over the single closed word `saver`, so
+        # bare `/radient` has nothing to run — the list IS the command, which is
+        # the `/login` line. `/saver` is the other spelling of the same shared
+        # handler (``saver/command.py::saver_slash``), and it is the one that
+        # carries the value vocabulary.
+        "radient": ArgumentMode.REQUIRED,
+        # OPTIONAL like `/fast`, whose shape this borrows: bare `/saver` TOGGLES
+        # the conversation's choice rather than reporting it, so Enter on the row
+        # already does the useful thing and the space is an OFFER of
+        # `on`/`off`/`status`/`inherit` for a user who would rather name the
+        # resulting state than flip into it. NONE would hide those four words.
+        "saver": ArgumentMode.OPTIONAL,
         # OPTIONAL like `/effort`: bare `/theme` answers with the active theme,
         # and the space opens the ramp list with live preview.
         "theme": ArgumentMode.OPTIONAL,
