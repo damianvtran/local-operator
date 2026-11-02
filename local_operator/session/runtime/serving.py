@@ -4450,10 +4450,10 @@ class ServingSessionHandle(SessionHandle):
         not a latent bug. Naming the real type is what lets the type gate agree
         with the guard instead of having to be told to look away.
         """
-        from local_operator.session.goal_judge import owns_the_session
+        from local_operator.session.goal_judge import owns_the_session, quiet_completion_accepted
 
         try:
-            if not owns_the_session(self._session):
+            if quiet_completion_accepted(event) or not owns_the_session(self._session):
                 return
             driver = self._goal_judge_driver()
             if driver is None:
@@ -4474,10 +4474,10 @@ class ServingSessionHandle(SessionHandle):
         notifications always go out first. Ownership is checked here for the judge's reason:
         a follower must never spend or write.
         """
-        from local_operator.session.goal_judge import owns_the_session
+        from local_operator.session.goal_judge import owns_the_session, quiet_completion_accepted
 
         try:
-            if not owns_the_session(self._session):
+            if quiet_completion_accepted(event) or not owns_the_session(self._session):
                 return
             loop_running = self._goal_loop is not None and bool(self._goal_loop.running)
             self._supplements.on_agent_end(event, goal_loop_running=loop_running)

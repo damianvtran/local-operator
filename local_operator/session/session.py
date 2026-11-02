@@ -3614,6 +3614,9 @@ class Session:
         _process_boot_build()
         self._attention: dict[str, Any] = {}
         self._attention_outcome: AgentEndEvent | None = None
+        # Pipeline-local terminal latch. Reset only on admission, not internal
+        # _run_turn continuations sharing the same externally visible owner.
+        self._quiet_accepted_generation: int | None = None
         self._attention_run_token: str | None = None
         #: §14's per-run trigger record: which origins this run's inputs had
         #: ("user" / "wake_prompt" / "monitor_prompt" / "internal") and
@@ -16446,33 +16449,17 @@ class Session:
         return ""
 
     def _run_ended_quiet(self, event: AgentEndEvent) -> bool:
-        """Whether this run ended with a ``no_reply`` call and no answer after it.
+        """One owning outcome for notification and publication consumers.
 
-        THE QUIET-TURN PREDICATE (docs/design/quiet-turns.md §4): true when the
-        run's LAST tool result carries the ``QUIET_TURN_KEY`` marker and no
-        assistant text exists after it — the marker must be the run's last
-        word. Read by exactly two consumers, ``_finalize_attention_notify``
-        (suppress the notify) and ``_publish_attention_outcome`` (publish
-        nothing), and it is a pure function of the end event's messages, so the
-        two cannot disagree.
-
-        A backwards scan, and the order is load-bearing: walking back from the
-        end, the first thing seen is either assistant TEXT (a real answer
-        produced after the call — not quiet, and it does not matter whether the
-        marker is still in the history) or the run's LAST tool result (its
-        marker decides). Earlier narration does NOT block the verdict — text
-        already streamed stays visible and persisted; the explicit quiet signal
-        governs the END — which is why this is not "no assistant text in the
-        run". A run with no tool result at all is not quiet.
+        Permission, finite peer-exchange certificates and persisted child
+        markers are not terminal acceptance. Earlier narration remains visible;
+        only the Session's clean committed end suppresses completion delivery.
+        Error/abort/cutoff always wins, including classification after the loop.
         """
-        for message in reversed(event.messages):
-            if getattr(message, "role", None) == "tool":
-                payload = getattr(message, "provider_payload", None)
-                details = payload.get("details") if isinstance(payload, Mapping) else None
-                return bool(details) and details.get(QUIET_TURN_KEY) is True
-            if getattr(message, "role", None) == "assistant" and getattr(message, "text", ""):
-                return False
-        return False
+        # A child marker proves only the finite exchange. Never reconstruct
+        # terminal acceptance from history, a renderer certificate, or repr.
+        return bool(event.quiet_accepted and not event.error and not event.aborted
+                    and not event.cut_off_cause)
 
     def _quiet_end_callable(self) -> Callable[[], Awaitable[str | None]] | None:
         """The ``no_reply`` tool's quiet-end door, or ``None`` where silence is unavailable.
@@ -17029,6 +17016,10 @@ class Session:
         # still wins — a human waiting on words gets words.
         if self._run_notify_requested and not self._run_notified:
             return "This wake or monitor asked to tell the user; say what they need to know."
+        # Only the live runtime objective is an obligation. Agent personality,
+        # proactive defaults and profile prose do not make peer pings actionable.
+        if self.goal_status in {"", "active"} and self.goal.strip():
+            return "The active runtime goal still requires work; continue or settle that goal."
         return None
 
     async def _silent_end_is_a_failure(self) -> bool:
@@ -17903,6 +17894,8 @@ class Session:
             # publish) does the right thing without being taught a new field. A
             # deliberate stop is left exactly as it was.
             event = self._classify_cut_off(event)
+            if event.error or event.aborted or event.cut_off_cause:
+                event = event.model_copy(update={"quiet_accepted": False})
             # A held item banner decides whether this run's completion banner
             # is redundant, so it settles first (bounded; see the method).
             await self._settle_item_banners()
@@ -18484,6 +18477,7 @@ class Session:
         if callable(begin_message):
             begin_message()
         self._attention_outcome = None
+        self._quiet_accepted_generation = None
         self._attention_run_token = str(uuid.uuid4())
         # This run has not yet said how it ended; a teardown that finds it so
         # must publish the outcome itself (see ``Session.dispose``).
@@ -18559,7 +18553,7 @@ class Session:
                 drain_steering_on_open=drain_steering_on_open,
                 opened_body=opened_body,
             )
-            await self._drain_continuation()
+            await self._settle_quiet_request()
         except ImportError as exc:
             # A lazy import against a HALF-REPLACED install is the one failure
             # whose cause the traceback cannot state: ``lop-update`` replaces
@@ -19078,6 +19072,44 @@ class Session:
             self._body_answered_turn = None
             self._body_turn_opening_tail = None
 
+    async def _settle_quiet_request(self) -> None:
+        """Commit silence only at the HOST boundary, after compaction/obligations.
+
+        The loop's candidate carries actual dispatch evidence but cannot know
+        what persistence/compaction will queue. Retain the logical generation
+        until every required continuation is done. No acceptance survives a
+        failed/aborted continuation, and no drain follows successful commitment.
+        """
+        while True:
+            await self._drain_continuation()
+            held = self._held_end
+            if (held is None or not held.quiet_requested or held.error or held.aborted
+                    or held.cut_off_cause or self._abort_requested or self._disposed):
+                return
+            refusal = await self._quiet_end_refusal()
+            if self._abort_requested or self._disposed:
+                return
+            if refusal:
+                # Do not consume or copy queued input here: the ordinary
+                # steering-on-open path owns it exactly once. The correction is
+                # harness chrome, not a manufactured new person/notification.
+                from local_operator.compaction.cutpoint import RENDERED_INJECTION_KEY
+
+                self._held_end = None
+                correction = Message.user(
+                    "Harness quiet request was not accepted: " + refusal,
+                    provider_payload={RENDERED_INJECTION_KEY: True},
+                )
+                await self._run_turn([correction], drain_steering_on_open=True)
+                continue
+            # _quiet_end_refusal currently has no suspended await internally;
+            # after its awaited permission result, commit synchronously and
+            # return immediately to the pipeline's sole terminal flush. Any
+            # later input remains ordinary next-turn ingress, never drained here.
+            self._quiet_accepted_generation = self._logical_generation or held.generation
+            self._held_end = held.model_copy(update={"quiet_accepted": True})
+            return
+
     async def _flush_held_end(self) -> None:
         """Emit the boundary event the pipeline was holding, if any."""
         held = self._held_end
@@ -19116,6 +19148,11 @@ class Session:
         continuation runs ``_drain_continuation`` opens call this method
         directly and inherit the default — a continuation is not an opening.
         """
+        if self._quiet_accepted_generation is not None:
+            # Fail before touching initial/queued input or issuing inference.
+            # A real new turn must use pipeline admission, which resets the
+            # latch; an internal call cannot relabel itself as a new owner.
+            raise RuntimeError("Accepted quiet owner is terminal; new pipeline admission required.")
         runtime = getattr(self, "bridge_runtime", None)
         if runtime is not None:
             runtime.bridge_input_presented = False
@@ -20159,6 +20196,10 @@ class Session:
         sequential turns inside the same lock hold, capped at
         ``_MAX_CONTINUATIONS`` — the remainder is dropped with a warning
         notice so a thrashing recovery band cannot re-prompt forever."""
+        if self._quiet_accepted_generation is not None:
+            # Do not consume late work into an owner whose terminal boundary
+            # has committed. Ordinary ingress owns the next admission.
+            return
         continuations = 0
         while self._continuation_queue and not self._disposed:
             if self._abort_requested:
@@ -24138,6 +24179,13 @@ class Session:
         # the later agent-end reduction, every frontend briefly paints `after`
         # from compaction_end and then rebounds to `before` at turn settlement.
         self._held_context_tokens = outcome.tokens_after
+        if (self._quiet_accepted_generation is not None
+                or (self._held_end is not None and self._held_end.quiet_requested)):
+            # A settled explicit quiet request supersedes stale length-based
+            # resume bookkeeping, not genuine user/goal continuations. Gate the
+            # producer: leaving this synthetic resume queued would revive it on
+            # the next unrelated input or extend the already accepted owner.
+            return
 
         # (5) Recovery band: only schedule a continuation when the pass
         # actually created headroom (an anti-thrash guard).

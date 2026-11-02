@@ -1072,6 +1072,11 @@ class LoopContext:
     # Sticky until the run boundary even if every lease expires earlier: the raw
     # executor-argument map must not become a subsequent-turn back channel.
     one_turn_secret_run_active: bool = False
+    # Invocation-local dispatch evidence, NEVER reconstructed from eval repr,
+    # persisted details or peer display certificates. Session owns acceptance.
+    quiet_request_roots: set[str] = field(default_factory=set)
+    quiet_request_failed: bool = False
+    quiet_candidate: bool = False
 
 
 @dataclass
@@ -1090,6 +1095,8 @@ class _PlannedCall:
     args: dict[str, Any] = field(default_factory=dict)
     failure: ToolResult | None = None  # resolution/validation/approval failure
     intent: str | None = None
+    quiet_root_id: str = ""
+    quiet_final_root: bool = False
     # None means the tool has not declared independently lockable resources.
     # An empty tuple is a valid declaration of no exclusive resources.
     resources: tuple[str, ...] | None = None
@@ -2277,6 +2284,9 @@ class AgentLoop:
                 # ---- inner loop: model + tools until quiescent -----------
                 first_inner = True
                 while has_more_tool_calls or pending:
+                    context.quiet_request_roots.clear()
+                    context.quiet_request_failed = False
+                    context.quiet_candidate = False
                     # Steering can land between a tool batch and the next
                     # model call; drain it at the top of every continuation
                     # iteration so it reaches the next request. Asides keep
@@ -3734,23 +3744,23 @@ class AgentLoop:
                         yield MessageStartEvent(message=recovery)
                         yield MessageEndEvent(message=recovery)
 
-                    # THE QUIET-TURN END (docs/design/quiet-turns.md §4): a
-                    # ``no_reply`` call is an affirmative way to end the turn,
-                    # so a batch whose LAST result carries the quiet marker ends
-                    # it — with no further model call — exactly like a message
-                    # with no tool calls. LAST result only (review R8): an
-                    # earlier ``no_reply`` in a batch must never shorten the
-                    # turn, because its siblings' results would then never be
-                    # fed back and the model would continue blind. Everything
-                    # after runs as for any end: the boundary hooks, the yield
-                    # injections (an open todo, a late steer or peer message
-                    # still re-enters, so no inbound message is lost) and the
-                    # output-contract gate, which cannot misread silence here
-                    # because the tool is absent from contract sessions (see
-                    # ``Session._quiet_end_callable``).
-                    has_more_tool_calls = bool(assistant.tool_calls) and not _batch_ends_quiet(
-                        tool_results
+                    # Requesting silence nominates the ordinary end boundary;
+                    # it does not bypass yield hooks/input or Session-owned
+                    # continuation/obligation checks. Only the host may accept.
+                    # A candidate nominates a clean host boundary, not silence.
+                    # All outer work must settle; no child dictionary or output
+                    # string can create this trusted dispatch-local receipt.
+                    context.quiet_candidate = bool(
+                        assistant.tool_calls
+                        and assistant.tool_calls[-1].id in context.quiet_request_roots
+                        and not context.quiet_request_failed
+                        and len(tool_results) == len(assistant.tool_calls)
+                        and all(not result.is_error and not (result.details or {}).get(FAULT_KEY)
+                                and not (result.details or {}).get(OUTPUT_LIMIT_KEY)
+                                and not (result.details or {}).get("partial_result")
+                                for result in tool_results)
                     )
+                    has_more_tool_calls = bool(assistant.tool_calls) and not context.quiet_candidate
                     if has_more_tool_calls and config.on_turn_end is not None:
                         # The boundary hook fires only when the loop will
                         # CONTINUE — a terminal boundary is the post-turn
@@ -3927,8 +3937,11 @@ class AgentLoop:
                     OUTPUT_LIMIT_CAUSE if (length_silent_cut_off or length_answer_cut_off) else ""
                 ),
                 generation=generation,
+                quiet_requested=context.quiet_candidate,
             )
         finally:
+            context.quiet_request_roots.clear()
+            context.quiet_candidate = False
             self._clear_one_turn_secrets(context)
             self._unwire_deadline(deadline_task)
             # The fault-only recovery window dies with the run for the same
@@ -5271,6 +5284,9 @@ class AgentLoop:
                 continue
             seen_ids.add(call.id)
             plan.append(await self._plan_call(call, context, config))
+        for index, item in enumerate(plan):
+            item.quiet_root_id = item.call.id
+            item.quiet_final_root = index == len(plan) - 1
         # Announce the batch's never-run verdicts BEFORE anything executes.
         #
         # A call with a `failure` here has been judged and will never start:
@@ -5822,6 +5838,14 @@ class AgentLoop:
         if item.failure is not None or item.tool is None:
             return item.failure or self._synthetic_result(call, "Tool not found.")
         tool = item.tool
+        from local_operator.tools.builtin import execute_no_reply
+
+        real_quiet = tool.execute is execute_no_reply
+        if real_quiet and not item.quiet_final_root:
+            return self._synthetic_result(
+                call, "Quiet was not requested: no_reply must be the final root call; "
+                "finish the remaining work first."
+            )
         forwarding_refusal = self._one_turn_forwarding_refusal(item, context, config)
         if forwarding_refusal is not None:
             return forwarding_refusal
@@ -5980,7 +6004,16 @@ class AgentLoop:
                     nested = ToolCall(
                         id=f"{call.id}:{uuid.uuid4().hex}", name=name, arguments=arguments
                     )
+                    if item.quiet_root_id in context.quiet_request_roots:
+                        # Closing the bridge is sticky even when Python ignores
+                        # this error. Refuse BEFORE resolution/approval/side effects.
+                        context.quiet_request_failed = True
+                        return self._synthetic_result(
+                            nested, "Quiet request already pending; later tool() calls "
+                            "are refused and invalidate this request."
+                        ).model_dump(mode="json")
                     if name == "eval":
+                        context.quiet_request_failed = True
                         # DELIBERATELY not recorded and not fault-marked. This
                         # is a structural refusal of RECURSION, not a judgement
                         # about a tool call: no tool was resolved, nothing was
@@ -5996,7 +6029,10 @@ class AgentLoop:
                             nested, ABORTED_RESULT_TEXT, details={FAULT_KEY: FAULT_ABORTED}
                         ).model_dump(mode="json")
                     planned = await self._plan_call(nested, context, config)
+                    planned.quiet_root_id = item.quiet_root_id
+                    planned.quiet_final_root = item.quiet_final_root
                     if planned.failure is not None or planned.tool is None:
+                        context.quiet_request_failed = True
                         failure = planned.failure or self._synthetic_result(
                             nested, "Tool not found.", details={FAULT_KEY: FAULT_UNKNOWN_TOOL}
                         )
@@ -6096,6 +6132,10 @@ class AgentLoop:
                                 ),
                             }
                         )
+                    if (result.is_error or (result.details or {}).get(FAULT_KEY)
+                            or (result.details or {}).get(OUTPUT_LIMIT_KEY)
+                            or (result.details or {}).get("partial_result")):
+                        context.quiet_request_failed = True
                     result.duration_s = time.monotonic() - started
                     queue.put_nowait(
                         ToolExecutionEndEvent(
@@ -6147,7 +6187,7 @@ class AgentLoop:
             # redacted form before arbitrary post-hooks. The no-lease branch is
             # the original object, so ordinary hook timing and identity are intact.
             result = await self._public_one_turn_tool_result(result, context, config)
-            return await self._apply_post_tool_hooks(
+            result = await self._apply_post_tool_hooks(
                 config,
                 tool.name,
                 item.args,
@@ -6155,6 +6195,9 @@ class AgentLoop:
                 result,
                 secret_active=bool(context.one_turn_secret_leases),
             )
+            if real_quiet and not result.is_error and (result.details or {}).get(QUIET_TURN_KEY) is True:
+                context.quiet_request_roots.add(item.quiet_root_id)
+            return result
         except asyncio.CancelledError:
             # A CANCELLED call's result never reaches ``_append_results``, so the
             # two records written just above would otherwise be retained for the
@@ -7510,25 +7553,6 @@ def _last_assistant_text(messages: Sequence[AgentMessage]) -> str | None:
         if isinstance(message, Message) and message.role == "assistant":
             return message.text
     return None
-
-
-def _batch_ends_quiet(results: Sequence[ToolResult]) -> bool:
-    """Whether the batch's LAST result is the quiet-turn marker.
-
-    THE LAST RESULT ONLY, and that is load-bearing twice over (review R8): a
-    ``no_reply`` earlier in a batch must never shorten the turn — its siblings'
-    results would otherwise never be fed back to the model — so only a batch
-    that ENDS in the quiet result may end the turn here. An empty batch (the
-    length-limit arm pairs its placeholders outside ``results``) never
-    qualifies. Marker-based, never tool-name-based: the marker is what the
-    tool's own result stamps, so a call that was refused (an ``is_error``
-    result without the marker) leaves the turn running for the answer the
-    refusal asked for.
-    """
-    if not results:
-        return False
-    details = results[-1].details
-    return bool(details) and details.get(QUIET_TURN_KEY) is True
 
 
 def validate_tool_arguments(
