@@ -169,8 +169,11 @@ strings match trimmed option label (exact, then case-insensitive), then option
 value; integers are zero-based indexes. Native `<select>` state is changed via
 prototype setters, followed by bubbling `input` and `change` events: no OS popup,
 no foreground activation and no reliance on `Input.*` on the inactive tab.
-Single selects take exactly one option; multiple selects replace the whole set
-(`[]` clears it). Disabled selects/options are refused before changes.
+The extension re-resolves the live control after a bounded reconciliation grace
+and reads selection from that node, never detached pre-render options; a missing
+or detached target is reported unverified.
+Single selects take exactly one option; multiple selects replace the whole
+non-empty set. `options:[]` is refused for both kinds. Disabled selects/options are refused before changes.
 
 The desktop host also handles ARIA combobox/listbox (or `aria-haspopup=listbox`)
 triggers: open, click the matching role=option and verify observable selection.

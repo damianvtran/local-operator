@@ -90,6 +90,7 @@ def test_protocol_and_schema_are_additive():
         ({"selector": "#s"}, "needs options"),
         ({"options": [0]}, "requires a selector"),
         ({"selector": "--help", "options": [0]}, "flag-shaped"),
+        ({"selector": "#s", "options": []}, "options:[] is refused"),
         ({"selector": "#s", "options": [True]}, "booleans"),
         ({"selector": "#s", "options": [1.5]}, "integer indexes"),
         ({"selector": "#s", "options": [-1]}, "non-negative"),
@@ -107,8 +108,8 @@ async def test_bad_arguments_fail_before_discovery(monkeypatch, entrypoint, fiel
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("options", [["English (U.S.)"], [1], ["001", 2], []])
-async def test_wire_retains_strings_indexes_and_explicit_empty_selection(options):
+@pytest.mark.parametrize("options", [["English (U.S.)"], [1], ["001", 2]])
+async def test_wire_retains_strings_and_indexes(options):
     app = App()
     result = await select(app, options)
     assert not result.is_error, result.text

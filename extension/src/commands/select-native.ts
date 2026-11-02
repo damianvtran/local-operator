@@ -26,8 +26,8 @@ export function selectNative(this: Element, requested: Array<string | number>): 
   if (select.disabled || select.matches(":disabled")) {
     return fail("select_disabled", "the select is disabled; nothing was changed");
   }
-  if (!select.multiple && requested.length !== 1) {
-    return fail("invalid_options", "a single select needs exactly one option; nothing was changed");
+  if (requested.length === 0 || (!select.multiple && requested.length !== 1)) {
+    return fail("invalid_options", "options must be non-empty; a single select needs exactly one option; nothing was changed");
   }
   const options = Array.from(select.options);
   const label = (option: HTMLOptionElement) => option.label.trim();
@@ -60,9 +60,34 @@ export function selectNative(this: Element, requested: Array<string | number>): 
     Object.getOwnPropertyDescriptor(win.HTMLSelectElement.prototype, "value")!.set!.call(select, options[chosen[0]!]!.value);
   }
   for (let index = 0; index < options.length; index++) setSelected.call(options[index], chosen.includes(index));
+  // Capture intended values BEFORE handlers can detach or mutate these nodes.
+  // This is apply evidence, never verification: controlled frameworks can replace
+  // the select during input/change, leaving this object perfectly readable but
+  // no longer representing the form. The command re-resolves the live target.
+  const expected = chosen.map((index) => describe(options[index]!, index));
   select.dispatchEvent(new win.Event("input", { bubbles: true }));
   select.dispatchEvent(new win.Event("change", { bubbles: true }));
-  const selected = options.flatMap((option, index) => option.selected ? [describe(option, index)] : []);
-  const verified = selected.length === chosen.length && selected.every((option) => chosen.includes(option.index));
+  return { kind: "native", expected, selected: [], verified: false };
+}
+
+/** Read-only second phase on the freshly resolved LIVE node, not saved options.
+ * Must stay self-contained for Runtime.callFunctionOn, just like selectNative.
+ * A ref that still points at a detached node is explicitly unverified; a CSS/AX
+ * target can instead resolve its replacement and report that node's real state.
+ */
+export function readNativeSelection(
+  this: Element, expected: Array<{ index: number; value: string; label: string }>,
+): Record<string, unknown> {
+  const win = this.ownerDocument.defaultView!;
+  if (!this.isConnected || !(this instanceof win.HTMLSelectElement)) {
+    return { kind: "native", selected: [], verified: false };
+  }
+  const options = Array.from((this as HTMLSelectElement).options);
+  const selected = options.flatMap((option, index) => option.selected ? [{
+    index, value: option.value, label: option.label.trim(),
+  }] : []);
+  const verified = selected.length === expected.length && selected.every((option) =>
+    expected.some((wanted) => wanted.index === option.index && wanted.value === option.value && wanted.label === option.label),
+  );
   return { kind: "native", selected, verified };
 }

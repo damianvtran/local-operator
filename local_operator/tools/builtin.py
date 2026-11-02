@@ -22947,6 +22947,11 @@ def _validate_browser_args(action: str, params: BrowserParams) -> str:
             return (
                 "'select' needs options: labels/values (strings) or zero-based indexes (integers)"
             )
+        if not params.options:
+            return (
+                "'select' options:[] is refused; supply at least one option "
+                "(single selects need exactly one)"
+            )
         return _validate_selector(params.selector, "select")
     if action == "hover":
         return _validate_hover_args(params)

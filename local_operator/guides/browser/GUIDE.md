@@ -425,7 +425,7 @@ Same `browser` tool. Actions:
 - `select selector="#language" options=["English (U.S.)"]`: choose a native
   `<select>` option by trimmed label (exact, then case-insensitive), then value,
   or by zero-based integer index. Multiple selects replace the entire set;
-  `options=[]` clears a multiple select. Single selects need exactly one option.
+  `options:[]` is refused. Single selects need exactly one option.
   No OS popup/window activation; input/change events notify controlled forms.
   Desktop also serves ARIA combobox/listbox triggers; the extension serves native
   selects only (custom controls get a typed desktop-only refusal). A miss lists
