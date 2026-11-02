@@ -25,7 +25,9 @@ def test_invalid_account_is_controlled_422_before_client(tmp_path, monkeypatch, 
     app.dependency_overrides[require_desktop] = lambda: None
     app.dependency_overrides[get_config_manager] = lambda: SimpleNamespace(config_dir=tmp_path)
     with TestClient(app) as client:
-        response = client.get("/v1/desktop/account/profile", params={"expected_account_id": account_id})
+        response = client.get(
+            "/v1/desktop/account/profile", params={"expected_account_id": account_id}
+        )
     assert response.status_code == 422
     assert response.json()["detail"]["code"] == "invalid_request"
     assert calls == []
