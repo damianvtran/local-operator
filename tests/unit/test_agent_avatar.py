@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -573,6 +574,86 @@ def test_a_symlink_swapped_in_for_the_picture_is_not_served(registry, agent, tmp
     with pytest.raises(agent_avatar.AvatarError):
         agent_avatar.read_stored(registry.config_dir, agent.id)
     assert registry.agent_avatar_path(agent.id) is None
+
+
+def _call_bounded(fn, bound: float = 2.0, *, release: Path | None = None):
+    """Run ``fn`` on a daemon thread; ``(finished, value, error)`` within ``bound``.
+
+    A FIFO opened for reading blocks until a writer appears, so a regression here
+    hangs rather than fails; a join timeout turns that into an assertion. The
+    thread is a daemon and ``release`` (the FIFO) is opened for writing afterwards
+    so a stuck ``os.open`` returns and the suite can exit.
+    """
+    import threading
+
+    box: dict[str, Any] = {}
+
+    def run() -> None:
+        try:
+            box["value"] = fn()
+        except BaseException as exc:  # noqa: BLE001 - reported to the asserting test
+            box["error"] = exc
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    thread.join(bound)
+    finished = not thread.is_alive()
+    if not finished and release is not None:
+        try:
+            os.close(os.open(release, os.O_WRONLY | os.O_NONBLOCK))
+        except OSError:
+            pass
+        thread.join(2.0)
+    return finished, box.get("value"), box.get("error")
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs POSIX FIFOs")
+def test_a_fifo_swapped_in_after_the_lstat_does_not_hang_the_reader(registry, agent, monkeypatch):
+    """S-1: the agent can write its own directory, so it can race ``stored_path``.
+
+    The FIFO is planted AFTER ``stored_path``'s ``lstat`` (patched to run the swap
+    once the regular-file check has passed): a plain ``O_RDONLY`` open of a FIFO
+    with no writer blocks forever, never reaching the ``fstat`` regular-file check.
+    """
+    registry.set_agent_avatar(agent.id, _png())
+    agent_dir = registry.agents_dir / agent.id
+    target = agent_dir / "avatar.png"
+    meta = registry.get_agent(agent.id).avatar
+    real_stored_path = agent_avatar.stored_path
+
+    def stored_path_then_swap(directory, block):
+        path = real_stored_path(directory, block)  # lstat sees the regular file
+        target.unlink()
+        os.mkfifo(target)  # ...and only now does the FIFO take its place
+        return path
+
+    monkeypatch.setattr(agent_avatar, "stored_path", stored_path_then_swap)
+    finished, _value, error = _call_bounded(
+        lambda: agent_avatar.read(agent_dir, meta), release=target
+    )
+    assert finished, "agent_avatar.read blocked on a FIFO swapped in after the lstat"
+    assert isinstance(error, agent_avatar.AvatarError)
+    assert error.reason == agent_avatar.NOT_FOUND
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs POSIX FIFOs")
+def test_a_fifo_for_agent_yml_does_not_hang_the_relay_read_or_the_index(registry, agent):
+    """The relay (``read_stored``) and the row index parse ``agent.yml`` themselves."""
+    registry.set_agent_avatar(agent.id, _png())
+    manifest = registry.agents_dir / agent.id / "agent.yml"
+    manifest.unlink()
+    os.mkfifo(manifest)
+    finished, _value, error = _call_bounded(
+        lambda: agent_avatar.read_stored(registry.config_dir, agent.id), release=manifest
+    )
+    assert finished, "read_stored blocked on a FIFO agent.yml"
+    assert isinstance(error, agent_avatar.AvatarError)
+    assert error.reason == agent_avatar.NOT_FOUND
+    finished, value, error = _call_bounded(
+        lambda: agent_avatar._build_index(registry.agents_dir), release=manifest
+    )
+    assert finished and error is None, "the row index blocked on a FIFO agent.yml"
+    assert value == {}
 
 
 def test_bytes_that_no_longer_hash_to_the_recorded_sha_are_not_served(registry, agent):
