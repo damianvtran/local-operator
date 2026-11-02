@@ -9,6 +9,7 @@ absent by our own authorised act. The send path never gains that licence: it cal
 
 from __future__ import annotations
 
+from local_operator import owned_process_group as owned
 from tests.unit.scripts.test_run_bounded_run_record import World
 
 
@@ -111,3 +112,28 @@ def test_the_r2_reproduction_a_leader_removed_without_a_signal_refuses():
     terminal = cap.refresh(deadline=world.clock() + 1.0, terminal=True)
     assert terminal.status == "REFUSED", terminal.reason
     assert "requires a recorded kill" in terminal.reason, terminal.reason
+
+
+def test_a_healthy_run_with_no_kill_still_reports_observed_empty():
+    """Edge 3: the case a kill-derived gate at `_members` would have broken.
+
+    A child that exits ON ITS OWN leaves no kill record; its held corpse plus a
+    complete no-live-member census is the ordinary clean ending and must still be
+    OBSERVED_EMPTY. This is why completeness may not be inferred from `kills`.
+    """
+    world, cap = _live_owned_group()
+    world.exited = True  # the child exits by itself; nothing is signalled
+    cap.census = lambda _pgid, _deadline: ()  # complete: the group holds nobody
+    verdict = cap.refresh(deadline=world.clock() + 1.0)
+    assert verdict.status == "OBSERVED_EMPTY", verdict.reason
+    assert cap.kills == [], cap.kills
+
+
+def test_an_incomplete_census_refuses_at_members_with_a_visibility_reason():
+    """Edge 4: not-complete is UNKNOWN VISIBILITY, never a non-empty group."""
+    world, cap = _live_owned_group()
+    assert cap.signal(9, deadline=world.clock() + 1.0).status == "SIGNALED"
+    cap.census = lambda _pgid, _deadline: owned.CensusResult((), False, False)
+    terminal = cap.refresh(deadline=world.clock() + 1.0, terminal=True)
+    assert terminal.status == "REFUSED", terminal.reason
+    assert "census incomplete" in terminal.reason, terminal.reason

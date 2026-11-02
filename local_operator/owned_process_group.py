@@ -344,14 +344,25 @@ def strict_linux(
 
 
 def strict_census(pgid, deadline):
+    """Members of ``pgid`` as a CensusResult, with completeness stated not inferred.
+
+    `complete` is True only because every refusal route in `strict_darwin` /
+    `strict_linux` raises rather than dropping a row: an unreadable pid, a
+    non-positive row, a saturated retry and a malformed length are all `Unknown`
+    before this point. `leader_seen` records whether the requested number appeared
+    in the namespace AT ALL, which is what separates "we reaped it" from "the
+    enumeration never saw it".
+    """
     try:
         if sys.platform == "darwin":
-            return strict_darwin(pgid, deadline)
-        if sys.platform.startswith("linux"):
-            return strict_linux(pgid, deadline)
+            pids = strict_darwin(pgid, deadline)
+        elif sys.platform.startswith("linux"):
+            pids = strict_linux(pgid, deadline)
+        else:
+            raise Unknown("strict group census unsupported")
+        return CensusResult(tuple(pids), True, pgid in pids)
     except (OSError, ValueError, TypeError) as exc:
         raise Unknown("strict membership probe failed") from exc
-    raise Unknown("strict group census unsupported")
 
 
 def bounded_samples(pids, deadline, clock=time.monotonic):
@@ -459,6 +470,25 @@ class Verdict:
 
 
 _SEAL = object()
+
+
+@dataclass(frozen=True)
+class CensusResult:
+    """What a census SAW and whether it can vouch for the namespace it saw.
+
+    A successful call is not a complete enumeration. `complete` is conservative
+    and total: any dropped row, unreadable pid, saturation or miss makes it False,
+    and an incomplete census is UNKNOWN VISIBILITY -- never emptiness.
+
+    `leader_seen` separates two worlds that used to look identical: a leader pid
+    absent from the namespace because WE reaped it (expected, and consistent with
+    an empty group), versus a leader pid that never appeared in an enumeration
+    claiming to be complete (a contradiction, and a refusal).
+    """
+
+    pids: tuple[int, ...]
+    complete: bool
+    leader_seen: bool
 
 
 class OwnedGroup:
@@ -620,7 +650,19 @@ class OwnedGroup:
     def _members(self, deadline):
         if self.clock() >= deadline:
             raise Unknown("ownership deadline exhausted")
-        members = self.census(self.pgid, deadline)
+        seen = self.census(self.pgid, deadline)
+        if isinstance(seen, CensusResult):
+            if not seen.complete:
+                # INCOMPLETE VISIBILITY IS NOT EMPTINESS. This is the door R3 came
+                # through: a successful call that could not vouch for the namespace
+                # must never become "there is nothing".
+                raise Unknown("census incomplete: the namespace could not be fully surveyed")
+            members = list(seen.pids)
+        else:
+            # LEGACY SEAM: an injected double returns a bare list. Production
+            # censuses always answer `CensusResult`; a list cannot vouch for itself,
+            # so it is treated as complete only because a fake's world is synthetic.
+            members: list[int] = list(seen) if seen else []
         if (
             members is None
             or any(type(p) is not int or p <= 0 for p in members)
