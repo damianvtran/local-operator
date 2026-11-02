@@ -845,7 +845,7 @@ def _capability_message(error: BridgeError, *, host: str) -> str:
     peer = str(error.data.get("extension_version") or "")
     remedy = _CAPABILITY_HOST_REMEDY.get(host, _CAPABILITY_HOST_REMEDY[HOST_EXTENSION])
     if method == "record_size":
-        # A capability on an action that ALREADY EXISTS (RS3), so the
+        # A capability on an action that ALREADY EXISTS, so the
         # "built before this action existed" copy below would be false twice:
         # `record_start` works on that build, at its default size. Kept in this
         # function because it is the one place a capability refusal is worded,
@@ -1007,7 +1007,7 @@ def _record_reason_message(error: BridgeError, reason: str) -> str:
         limit = error.data.get("limit")
         if isinstance(limit, int) and not isinstance(limit, bool):
             # ONLY the global count is a limit. The host raises the same reason
-            # for RS5's size rule (one clip above 1920x1080 at a time), where
+            # for the size rule (one clip above 1920x1080 at a time), where
             # "its maximum of 1 recordings" would be false for a caller that
             # could start a 720p clip beside the 4K one it is really colliding
             # with (review m2).
@@ -1052,7 +1052,7 @@ def _record_reason_message(error: BridgeError, reason: str) -> str:
             if isinstance(cap, int) and cap > 0
             else "larger than the recording size limit"
         )
-        # RS5: when the host names the size it was recording, the refusal says
+        # When the host names the size it was recording, the refusal says
         # WHICH ceiling was hit — at 4K the same 64 MiB is ~150 s, not ~16 min.
         width, height = error.data.get("width"), error.data.get("height")
         at_size = (

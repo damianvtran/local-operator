@@ -507,12 +507,13 @@ does not have to be the visible one: recording reads the same pixels
 - **Choosing a size.** Omit `width`/`height` and the clip is today's 1280x720
   (a CEILING, not a promise: the unsized clip is scaled to fit, so a visible,
   larger tab can come out smaller — e.g. 1144x720).
-  Give BOTH (even, 240-3840, area at most 3840x2160 — so 2160x3840 portrait is
-  fine and 3840x3840 is not) and the host resizes the tab's viewport to exactly
-  that, then records it. One side alone, an odd side, or an area over 4K is
+  Give BOTH (whole pixels, even, 240-3840, area at most 3840x2160 — so 2160x3840
+  portrait is fine and 3840x3840 is not) and the host resizes the tab's viewport
+  to exactly that, then records it. One side alone, a side that is not a whole
+  number (a fraction, a string, a boolean), an odd side, or an area over 4K is
   refused as `record_size` before anything starts (the plan-time check refuses
   it without even asking for approval), with a `why` of
-  `incomplete`/`range`/`odd`/`area`.
+  `incomplete`/`type`/`range`/`odd`/`area`.
 
   Measured on this machine (Electron 45 / Chromium 156, a deliberately
   worst-case page where every frame differs, 10 fps, 6 s clips — the encoder

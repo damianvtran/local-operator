@@ -1197,10 +1197,82 @@ def test_a_bad_size_is_typed_through_the_real_entry(
     assert result.text.endswith("Nothing was started.")
 
 
-def test_a_bad_size_is_refused_before_any_approval(
+@pytest.mark.parametrize("width", [True, 3840.5, "abc"])
+def test_a_malformed_size_is_typed_through_the_real_entry(
+    width: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same fault, typed instead of answered by the generic refusal.
+
+    `_validation_error` names the field but carries no `record_size` reason, so a
+    caller could not tell "nothing started" from any other bad argument.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: True)
+    tool = builtin.build_browser_tool(_ctx(tmp_path))
+    assert tool is not None
+
+    async def _run():
+        return await tool.execute(
+            "call",
+            {"action": "record_start", "width": width, "height": 1080},
+            None,
+            None,
+            _ctx(tmp_path),
+        )
+
+    result = asyncio.run(_run())
+    assert result.is_error
+    details = result.details or {}
+    assert details["reason"] == "record_size"
+    assert (details["param"], details["why"]) == ("width", "type")
+    assert "must be a whole number of pixels" in result.text
+    assert result.text.endswith("Nothing was started.")
+
+
+def test_a_malformed_argument_beside_a_bad_size_keeps_the_plain_refusal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """M2: the plan-time hook refuses without the gate being asked.
+    """Only a fault CONFINED to width/height is the size's to answer.
+
+    A bad `path` is the caller's other mistake, and the generic validation error
+    names it; claiming a size refusal would hide which field to fix.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: True)
+    tool = builtin.build_browser_tool(_ctx(tmp_path))
+    assert tool is not None
+
+    async def _run():
+        return await tool.execute(
+            "call",
+            {"action": "record_start", "width": "abc", "height": 1080, "path": 5},
+            None,
+            None,
+            _ctx(tmp_path),
+        )
+
+    result = asyncio.run(_run())
+    assert result.is_error
+    assert "path" in result.text
+    assert (result.details or {}).get("reason") != "record_size"
+
+
+@pytest.mark.parametrize(
+    "size, needle",
+    [
+        ({"width": 1921, "height": 1080}, "must be even"),
+        # A malformed size is type-checked by the hook, not by the loop's schema
+        # pass: `anyOf: [integer, null]` carries no top-level type, so that pass
+        # leaves width/height alone and these used to reach the gate.
+        ({"width": True, "height": 1080}, "must be a whole number of pixels"),
+        ({"width": 3840.5, "height": 1080}, "must be a whole number of pixels"),
+        ({"width": "abc", "height": 1080}, "must be a whole number of pixels"),
+    ],
+)
+def test_a_bad_size_is_refused_before_any_approval(
+    size: dict[str, Any], needle: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The plan-time hook refuses without the gate being asked.
 
     Driven through the real `AgentLoop` planning seam with the real tool object;
     `request_approval` is the same callback the gate would call, so zero calls
@@ -1227,7 +1299,7 @@ def test_a_bad_size_is_refused_before_any_approval(
             ToolCall(
                 id="c",
                 name="browser",
-                arguments={"action": "record_start", "width": 1921, "height": 1080},
+                arguments={"action": "record_start", **size},
             ),
             LoopContext(system_blocks=[], tools=[tool], tool_context=context),
             LoopConfig(
@@ -1238,8 +1310,9 @@ def test_a_bad_size_is_refused_before_any_approval(
         )
     )
     assert planned.failure is not None
-    assert "must be even" in planned.failure.text
-    assert "Nothing was started." in planned.failure.text
+    assert needle in planned.failure.text
+    assert "'width'" in planned.failure.text
+    assert planned.failure.text.endswith("Nothing was started.")
     assert approvals == []
 
 

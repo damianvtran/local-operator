@@ -442,8 +442,7 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             "size the viewport (both or neither, even, 240-3840, area at most "
             "3840x2160). A clip over 64 MiB is discarded (32 MiB inside a scratchpad): "
             "worst case about 150 s at 4K, 75 s in a scratchpad, so size timeout_s to "
-            "suit. Desktop "
-            "host only.\n"
+            "suit. Desktop host only.\n"
             "- Hosts, setup, approvals, error meanings: ``guide://browser``."
         ),
     ),
