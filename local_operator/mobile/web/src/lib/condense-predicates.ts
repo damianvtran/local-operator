@@ -106,6 +106,7 @@ export function receiptFamilyOf(record: {
 	if (record.kind !== "custom") return null;
 	switch (record.customType) {
 		case "hub_message":
+		case "team_bridge_message":
 			return "incoming";
 		case "job_result":
 			return "job_result";

@@ -213,6 +213,16 @@ def _always() -> bool:
 HEADLESS_JUDGE_SETTLE_S = 120.0
 
 
+def quiet_completion_accepted(event: Any) -> bool:
+    """Shared subscriber fence: accepted completion cannot cause more spend.
+
+    The Session refuses outstanding active goals BEFORE acceptance. This is a
+    defense for delayed/fan-out events, not permission to drop a goal's work or
+    to infer terminality from child markers, notification policy or profile text.
+    """
+    return getattr(event, "quiet_accepted", False) is True
+
+
 def owns_the_session(session: Any) -> bool:
     """Whether the loop that runs this session's turns is on THIS event loop.
 

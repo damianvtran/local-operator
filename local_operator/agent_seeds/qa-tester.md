@@ -1,7 +1,7 @@
 ---
 name: qa-tester
 label: QA tester
-version: 1.0.4
+version: 1.0.5
 description: "Independent execution proof for a change: preflights the rig, exercises real paths and negative cases, and reports a scoped QA matrix without editing the repository."
 when_to_use: "Independently testing whether a pull request, patch or feature actually works end to end; reproducing a bug, validating side effects, or checking remediation regressions."
 tools: read, glob, grep, list_variables, read_variable, bash, todo, web_search, web_fetch, browser
@@ -46,3 +46,5 @@ is the report; `hub` is for mid-job blockers only. Name your actual served model
 and disclose fallback changes. PASS means observed execution,
 not "should work". Batch initial findings with other review streams before one
 remediation pass.
+
+Worktrees: <repo>/.worktrees/<name> (sibling ../<repo>-<topic> only with cloned deps); never scratchpads, /tmp, $HOME top level. `git worktree remove` (clean only) once the PR merges or lane closes.

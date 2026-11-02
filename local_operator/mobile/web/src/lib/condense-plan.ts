@@ -315,12 +315,10 @@ function isInternalEpisodeOrigin(record: CondenseRecord): boolean {
 
 /** Both turn and action folds must retain actual material owners inline. */
 export function ownsMaterialArtifact(record: CondenseRecord): boolean {
-	/*
-	 * Two desktop arms are absent here: a `supplement` row and record-level
-	 * `images` are kinds this wire never carries (relay tool rows have no image
-	 * refs; only user and hub rows do, and those are not material owners). The
-	 * generating-card arm below IS kept - a phone renders those cards too.
-	 */
+	// Existing wire media owns its surface independently of receipt metadata.
+	// In particular, an incoming card's attachment_count cannot absorb a
+	// channel_history screenshot into a closed internal-action disclosure.
+	if ((record.kind === "tool" || record.kind === "custom") && (record.images?.length || record.videos?.length)) return true;
 	// Before output bytes exist, the generating card already owns loading/error
 	// and cancellation UI; keep ALL phases, not only successful picture rows.
 	return record.kind === "tool" && isImageGenTool(record.toolName);

@@ -530,7 +530,10 @@ MEASURED_TOKENS: dict[str, int] = {
     # doc — the argumentless call's description plus the "when NOT to call
     # it" notes. Re-measured via this test's own print, and it is the ONLY
     # entry that moved: every other count above is byte-identical.
-    "no_reply": 109,
+    # PR #3318: 109 -> 121, measured by this test's canonical cl100k_base
+    # ruler. The first wrapper wording measured 148; trimming it saves 27
+    # tokens while keeping call-once/final-eval/stop and host-acceptance rules.
+    "no_reply": 121,
     # NEW (notifications inbox, docs/design/notifications-inbox.md §3.1): the
     # ``notify`` doc — its description plus the five-field schema rendered by
     # this file's own renderer. Re-measured via this test's print; it is the

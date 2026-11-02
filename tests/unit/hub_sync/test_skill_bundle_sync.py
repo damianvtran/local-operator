@@ -626,6 +626,55 @@ def test_the_cli_push_uploads_the_new_archive_then_publishes(
     assert transport.preview_calls == []
 
 
+@pytest.mark.parametrize("json_output", [False, True])
+def test_cli_org_push_explains_legacy_hold_without_dispatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    json_output: bool,
+) -> None:
+    from local_operator import cli
+    from local_operator.hub_sync.outbox import Outbox
+    from tests.unit.hub_sync.test_push import FakeTransport
+
+    root, base, _built, remote = _rig(tmp_path, visibility="org", tenant_id="org-1")
+    ctx = _ctx(root, remote)
+    result = svc.install_skill(
+        ctx, hub_source=base, hub_id=HUB_ID, visibility="org", tenant_id="org-1", alias=NAME
+    )
+    local_id = result["link"]["local_id"]
+    Outbox(root).enqueue(
+        operation_id=f"push-skill-{local_id}",
+        kind="skill",
+        local_id=local_id,
+        direction="push",
+        generation=1,
+    )
+    svc.record_server_capabilities(
+        ctx, {"revision_cas": 1, "skills": 1, "skill_bundles": 1}, source=base
+    )
+    (root / "skills" / NAME / "references" / "guide.md").write_text("v2\n", encoding="utf-8")
+    transport = FakeTransport()
+    monkeypatch.setattr(
+        "local_operator.hub_sync.service.build_clients_sync", lambda _cm: (lambda _t: remote, "ok")
+    )
+    monkeypatch.setattr(
+        "local_operator.hub_sync.service.push_transport", lambda _ctx, _rec: (transport, None)
+    )
+    code = cli.skills_command(
+        __import__("argparse").Namespace(
+            skills_command="push", name=NAME, yes=True, json=json_output
+        ),
+        root,
+    )
+    output = capsys.readouterr().out
+    assert code == 1 and "legacy-reconciliation-required" in output
+    assert "guide://extensions" in output
+    if json_output:
+        assert json.loads(output)["recovery_guide"] == "guide://extensions"
+    assert not transport.preview_calls and not transport.commit_calls and not remote.uploads
+
+
 # -- the one-shot capability observation a fresh machine needs --------------------------
 
 

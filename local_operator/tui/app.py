@@ -49727,11 +49727,14 @@ class OperatorApp(App[None]):
         driver's single decision, so it cannot be applied on one host and
         forgotten on the other.
         """
-        from local_operator.session.goal_judge import owns_the_session
+        from local_operator.session.goal_judge import (
+            owns_the_session,
+            quiet_completion_accepted,
+        )
 
         source = self._interaction
         session: Any = self._session
-        if session is None or not owns_the_session(session):
+        if quiet_completion_accepted(message) or session is None or not owns_the_session(session):
             return
         if source.goal.judge_in_flight:
             return
