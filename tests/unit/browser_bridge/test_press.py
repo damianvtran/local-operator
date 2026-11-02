@@ -200,7 +200,9 @@ async def test_public_tool_routes_press_to_the_held_desktop_tab(
     result = await builtin.execute_browser(
         "t",
         {"action": "press", "key": "Shift+Tab"},
-        context=ToolContext(browser=owned_surface()),
+        None,
+        None,
+        ToolContext(browser=owned_surface()),
     )
     if advertised:
         assert not result.is_error
