@@ -278,11 +278,12 @@ async def test_real_session_direct_eval_peer_send_quiet_cycle_records_live_and_d
             StreamReasoningDelta(delta="peer-cycle-private-reasoning-control"),
         ]
     # Retain a sentinel to expose any extra inference after terminal quiet.
-    # Only the observer-failure control deliberately opens a REAL subsequent
-    # user turn, preserving its original before-final/excluded-final guarantee
-    # (df309f7a), rather than relying on the old inert-nested-quiet behavior.
+    # Successful mixed and observer-failure modes open a REAL subsequent user
+    # turn. Together they pin the original before-final/excluded-final guarantee
+    # (df309f7a), with a nonempty valid group as well as a broken-observer control,
+    # rather than relying on the old inert-nested-quiet behavior.
     quiet_request_count = len(scripts)
-    needs_final = mode == "mixed-observer-failure"
+    needs_final = mode in {"mixed", "mixed-observer-failure"}
     scripts.append(
         [StreamTextDelta(delta="diagnostic final sentinel"), StreamEndEvent(stop_reason="stop")]
     )
@@ -400,6 +401,7 @@ async def test_real_session_direct_eval_peer_send_quiet_cycle_records_live_and_d
                 message_id="peer-" + "a" * 32,
             )
             prefinal_report = None
+            prefinal_history = None
             if is_mixed:
                 await asyncio.wait_for(ended.wait(), timeout=20)
                 if needs_final:
@@ -413,11 +415,12 @@ async def test_real_session_direct_eval_peer_send_quiet_cycle_records_live_and_d
                         await asyncio.wait_for(final_requested.wait(), timeout=20)
                     await pilot.pause()
                     await pilot.pause()
+                    prefinal_history = session.history()
                     prefinal_report, _ = _capture(
                         app,
                         directory,
                         events,
-                        session.history(),
+                        prefinal_history,
                         receipt,
                         stream,
                         worker_origin,
@@ -594,6 +597,42 @@ async def test_real_session_direct_eval_peer_send_quiet_cycle_records_live_and_d
                     expected_actions,
                 )
                 assert prefinal_bars[0]["member_ids"] == physical
+                if needs_final:
+                    # R3-1: the final-exclusion assertion must not pass merely
+                    # because the observer-failure control has NO group. Prove
+                    # a valid successful group existed before the real next-owner
+                    # answer and survives it unchanged, with that answer outside.
+                    assert len(bars) == len(prefinal_bars) == 1
+                    assert len(finals) == 1 and finals[0]["display"] is True
+                    assert all(finals[0]["source_id"] not in bar.group.row_ids for bar in bars)
+                    final_bars = [
+                        row
+                        for row in report["canonical_inventory"]
+                        if row["kind"] == "QuietGroupBlock"
+                    ]
+                    assert len(final_bars) == 1
+                    group_fields = ("source_id", "member_ids", "receipts", "actions")
+                    assert {key: prefinal_bars[0][key] for key in group_fields} == {
+                        key: final_bars[0][key] for key in group_fields
+                    }
+                    from local_operator.harness.peer_cycle_display import (
+                        validate_record as validate_prefinal_record,
+                    )
+
+                    assert prefinal_history is not None
+                    before_records = (prefinal_report["trusted_display"] or {}).get("records", [])
+                    after_records = (report["trusted_display"] or {}).get("records", [])
+                    assert len(before_records) == 1 and before_records == after_records
+                    assert (
+                        validate_prefinal_record(
+                            before_records[0], prefinal_history, session.session_id
+                        )
+                        is not None
+                    )
+                    assert (
+                        validate_prefinal_record(after_records[0], history, session.session_id)
+                        is not None
+                    )
             # Requested acceptance, NOT an assertion that EVAL already works.
             # A RED here has typed live events + raw outer data captured above;
             # it must lead to a separate display-persistence architectural ruling.
