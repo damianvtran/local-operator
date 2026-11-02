@@ -1,0 +1,7 @@
+Design review round 2, PR #3322, head de4b274cbf3. Own vite build, own rig port 8791, browser tool, in-iframe probe.
+edge 320 light (idle): title 12,116 48x22 fs16 | live 0,153 320x21 fs12 lh17.4 "Updated 3:57 PM" | x 264,105 44x44 | refresh 220,105 44x44 | scroller 0,175 | firstH3 12,183
+throttled 320 light: live 0,153 320x39 (2 lines) | refresh aria-disabled=true color rgb(154,148,136) | scroller 0,192 | firstH3 12,200
+ready 320 light (after 12s): live 0,153 320x21 "Updated 3:54 PM May be out of date." (sr-only + " You can refresh again.") | refresh aria-disabled=null rgb(86,81,71) | scroller 0,175
+ready 390 dark: live 0,195 390x21 | x 334,147 44x44 | scroller 0,216
+toggle: underline dotted, decoration colour = text colour (ink-dim), offset 4px, 66-68x44, aria-pressed=false
+fineprint: 12px ink-dim, 296x35 at 320 / 366x35 at 390 (2 lines), 8px under last card (section row-gap)
