@@ -50,8 +50,14 @@ def _cfg() -> Any:
     return MCPHttpServerConfig(url=SERVER_URL, auth=MCPAuthConfig(type="oauth"))
 
 
-def _endpoints_for(token_endpoint: str) -> Any:
-    """Discovered endpoints whose token endpoint is the local fixture."""
+def _endpoints_for(token_endpoint: str, *, assertion_supported: bool = False) -> Any:
+    """Discovered endpoints whose token endpoint is the local fixture.
+
+    ``assertion_supported`` models the issuer's OPT-IN capability, which is
+    published in its metadata document. It defaults to False because that is the
+    safe default the client must apply to any endpoint that has not proved it
+    honours the assertion contract.
+    """
     from mcp.shared.auth import OAuthMetadata
 
     from local_operator.mcp.auth import DiscoveredOAuthEndpoints
@@ -63,7 +69,8 @@ def _endpoints_for(token_endpoint: str) -> Any:
                 "authorization_endpoint": "https://issuer.rotation.test/authorize",
                 "token_endpoint": token_endpoint,
             }
-        )
+        ),
+        rotation_assertion_supported=assertion_supported,
     )
 
 
@@ -1612,3 +1619,209 @@ async def test_the_leaving_gate_keeps_a_teardown_refresh_off_the_wire(
         "the same flow WITHOUT the gate must still post — otherwise this test "
         "would pass for any reason at all"
     )
+
+
+ASSERTION = auth_mod.ROTATION_ASSERTION_HEADER
+ATTEMPT = auth_mod.ROTATION_ATTEMPT_HEADER
+NOT_COMMITTED = auth_mod.ROTATION_NOT_COMMITTED
+
+
+@pytest.mark.asyncio
+async def test_the_bound_assertion_clears_the_marker_and_the_token_is_reused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The one happy path: bound assertion → marker cleared → retry succeeds.
+
+    The negative control is inside the test: ``rotation_count == 0`` after the
+    first call proves the fixture refused WITHOUT consuming the token, so the
+    retry's success cannot come from a rotation that already happened.
+    """
+    store = FakeAuthStore()
+    storage = await _seed_expired_grant(store)
+
+    async with FakeTokenEndpoint(
+        refuse_before_rotation=(503, "temporarily_unavailable"),
+        refuse_headers={ASSERTION: NOT_COMMITTED, ATTEMPT: "{attempt}"},
+    ) as endpoint:
+        _stub_discovery(monkeypatch, endpoint.token_endpoint)
+        endpoints = _endpoints_for(endpoint.token_endpoint, assertion_supported=True)
+
+        first = await auth_mod._refresh_oauth_token_locked(SERVER_URL, storage, endpoints)
+
+        assert first == "failed"
+        assert endpoint.rotation_count == 0, "the refusal must not have consumed the token"
+        assert storage.send_unconfirmed() is False, "a bound assertion clears the marker"
+
+        async with auth_mod._oauth_refresh_lock(SERVER_URL) as lock:
+            second = await auth_mod._refresh_oauth_token_locked(
+                SERVER_URL, storage, endpoints, lock=lock
+            )
+
+        assert second == "refreshed"
+        assert endpoint.rotation_count == 1
+    assert len(endpoint.requests) == 2
+    assert endpoint.reuse_attempts == 0
+
+
+@pytest.mark.asyncio
+async def test_a_standard_code_without_the_assertion_keeps_the_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """503 + ``temporarily_unavailable`` is NOT proof — this is the fail-closed half."""
+    store = FakeAuthStore()
+    storage = await _seed_expired_grant(store)
+
+    async with FakeTokenEndpoint(refuse_before_rotation=(503, "temporarily_unavailable")) as ep:
+        _stub_discovery(monkeypatch, ep.token_endpoint)
+        endpoints = _endpoints_for(ep.token_endpoint, assertion_supported=True)
+
+        first = await auth_mod._refresh_oauth_token_locked(SERVER_URL, storage, endpoints)
+
+        assert first == "failed"
+        assert storage.send_unconfirmed() is True
+
+        async with auth_mod._oauth_refresh_lock(SERVER_URL) as lock:
+            second = await auth_mod._refresh_oauth_token_locked(
+                SERVER_URL, storage, endpoints, lock=lock
+            )
+        assert second == "unacknowledged"
+    assert len(ep.requests) == 1, "an unproven token must not be re-presented"
+
+
+@pytest.mark.asyncio
+async def test_an_assertion_without_the_attempt_echo_keeps_the_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A promise not bound to THIS attempt is not our promise.
+
+    Replayable by anyone who saw one response: without the echo of our nonce the
+    assertion cannot be attributed to this refresh, so it stays ambiguous.
+    """
+    store = FakeAuthStore()
+    storage = await _seed_expired_grant(store)
+
+    async with FakeTokenEndpoint(
+        refuse_before_rotation=(503, "temporarily_unavailable"),
+        refuse_headers={ASSERTION: NOT_COMMITTED},
+    ) as ep:
+        _stub_discovery(monkeypatch, ep.token_endpoint)
+        endpoints = _endpoints_for(ep.token_endpoint, assertion_supported=True)
+
+        await auth_mod._refresh_oauth_token_locked(SERVER_URL, storage, endpoints)
+        assert storage.send_unconfirmed() is True
+
+
+@pytest.mark.asyncio
+async def test_a_mismatched_attempt_echo_keeps_the_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An echo of a DIFFERENT attempt id is a conflicting answer, not a proof."""
+    store = FakeAuthStore()
+    storage = await _seed_expired_grant(store)
+
+    async with FakeTokenEndpoint(
+        refuse_before_rotation=(503, "temporarily_unavailable"),
+        refuse_headers={ASSERTION: NOT_COMMITTED, ATTEMPT: "not-the-attempt-we-sent"},
+    ) as ep:
+        _stub_discovery(monkeypatch, ep.token_endpoint)
+        endpoints = _endpoints_for(ep.token_endpoint, assertion_supported=True)
+
+        await auth_mod._refresh_oauth_token_locked(SERVER_URL, storage, endpoints)
+        assert storage.send_unconfirmed() is True
+
+
+@pytest.mark.asyncio
+async def test_duplicate_assertion_values_keep_the_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two conflicting values are ambiguous — and ambiguity keeps the marker.
+
+    A repeated header is what an intermediary appending rather than replacing
+    produces. It must never be resolved by "first wins".
+    """
+    store = FakeAuthStore()
+    storage = await _seed_expired_grant(store)
+
+    async with FakeTokenEndpoint(
+        refuse_before_rotation=(503, "temporarily_unavailable"),
+        refuse_headers={
+            ASSERTION: [NOT_COMMITTED, "committed"],
+            ATTEMPT: "{attempt}",
+        },
+    ) as ep:
+        _stub_discovery(monkeypatch, ep.token_endpoint)
+        endpoints = _endpoints_for(ep.token_endpoint, assertion_supported=True)
+
+        await auth_mod._refresh_oauth_token_locked(SERVER_URL, storage, endpoints)
+        assert storage.send_unconfirmed() is True
+
+
+@pytest.mark.asyncio
+async def test_a_provider_that_rotates_then_answers_503_keeps_the_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The post-consumption 503: rotation committed, response fails.
+
+    This is why neither the status nor the code may be read as proof. The
+    fixture rotates first (``rotation_count == 1``), so the row holds a spent
+    token — clearing the marker here would make the next connect the
+    reuse-detecting POST that revokes the family.
+    """
+    store = FakeAuthStore()
+    storage = await _seed_expired_grant(store)
+
+    async with FakeTokenEndpoint(
+        commit_then_fail_status=503,
+        commit_then_fail_error="temporarily_unavailable",
+    ) as ep:
+        _stub_discovery(monkeypatch, ep.token_endpoint)
+        endpoints = _endpoints_for(ep.token_endpoint, assertion_supported=True)
+
+        first = await auth_mod._refresh_oauth_token_locked(SERVER_URL, storage, endpoints)
+
+        assert first == "failed"
+        assert ep.rotation_count == 1, "the fixture must have committed the rotation"
+        assert storage.send_unconfirmed() is True
+
+        async with auth_mod._oauth_refresh_lock(SERVER_URL) as lock:
+            second = await auth_mod._refresh_oauth_token_locked(
+                SERVER_URL, storage, endpoints, lock=lock
+            )
+        assert second == "unacknowledged"
+    assert len(ep.requests) == 1
+    assert ep.reuse_attempts == 0
+
+
+@pytest.mark.asyncio
+async def test_an_issuer_without_the_capability_is_ignored_even_with_the_header(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A perfect-looking assertion from an endpoint that never opted in is noise.
+
+    The nonce and URL checks bind a response to an attempt; they cannot establish
+    that the endpoint honours this private contract at all. A third-party IdP, or
+    a proxy in front of one, can emit these header names and echo our nonce —
+    deliberately or by accident. The capability published in the issuer's own
+    metadata is what separates "our issuer promised" from "somebody typed the
+    right words", so without it the marker stays armed.
+    """
+    store = FakeAuthStore()
+    storage = await _seed_expired_grant(store)
+
+    async with FakeTokenEndpoint(
+        refuse_before_rotation=(503, "temporarily_unavailable"),
+        refuse_headers={ASSERTION: NOT_COMMITTED, ATTEMPT: "{attempt}"},
+    ) as ep:
+        _stub_discovery(monkeypatch, ep.token_endpoint)
+        # Deliberately NOT opting in: this is the unrelated-issuer case.
+        endpoints = _endpoints_for(ep.token_endpoint)
+
+        first = await auth_mod._refresh_oauth_token_locked(SERVER_URL, storage, endpoints)
+
+        assert first == "failed"
+        assert endpoints.rotation_assertion_supported is False
+        assert storage.send_unconfirmed() is True, (
+            "an unproven issuer's header must never clear the marker, however "
+            "well-formed it looks"
+        )
+    assert len(ep.requests) == 1
